@@ -180,7 +180,7 @@ defmodule Mix.Tasks.Osa.Setup do
     end
   end
 
-  defp default_model("anthropic"), do: "claude-opus-4-6"
+  defp default_model("anthropic"), do: "anthropic-latest"
   defp default_model("openai"), do: "gpt-4o"
   defp default_model(_), do: "llama3.2:latest"
 

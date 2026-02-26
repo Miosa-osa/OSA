@@ -108,11 +108,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 mix chat
 ```
 
-Default model: `claude-opus-4-6`. Override with:
+Default model: `anthropic-latest`. Override with:
 
 ```bash
 # In config/config.exs or ~/.osa/config.json
-anthropic_model: "claude-sonnet-4-5-20250929"
+anthropic_model: "your-preferred-model"
 ```
 
 ### OpenAI (or OpenAI-Compatible)

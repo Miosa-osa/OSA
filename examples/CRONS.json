@@ -1,0 +1,73 @@
+{
+  "_comment": "OSA Scheduled Jobs — Copy to ~/.osa/CRONS.json to activate",
+  "jobs": [
+    {
+      "id": "morning-briefing",
+      "name": "Morning Briefing",
+      "schedule": "0 8 * * 1-5",
+      "type": "agent",
+      "job": "Generate my morning briefing: weather, calendar summary, top 3 news items, today's priorities",
+      "enabled": false
+    },
+    {
+      "id": "pipeline-check",
+      "name": "Sales Pipeline Monitor",
+      "schedule": "*/30 9-17 * * 1-5",
+      "type": "agent",
+      "job": "Check sales pipeline for stalled deals (>7 days no activity) and overdue follow-ups. Alert me if any found.",
+      "enabled": false
+    },
+    {
+      "id": "inbox-triage",
+      "name": "Email Inbox Triage",
+      "schedule": "0 */2 * * *",
+      "type": "agent",
+      "job": "Check inbox for new emails, classify by urgency, summarize any marked critical",
+      "enabled": false
+    },
+    {
+      "id": "disk-check",
+      "name": "Disk Space Monitor",
+      "schedule": "0 */6 * * *",
+      "type": "command",
+      "command": "df -h / | awk 'NR==2 {if ($5+0 > 90) print \"WARNING: Disk usage at \" $5}'",
+      "enabled": false
+    },
+    {
+      "id": "health-ping",
+      "name": "Service Health Check",
+      "schedule": "*/5 * * * *",
+      "type": "webhook",
+      "url": "http://localhost:8080/health",
+      "method": "GET",
+      "headers": {},
+      "on_failure": "agent",
+      "failure_job": "The health check for localhost:8080 failed. Investigate and report.",
+      "enabled": false
+    },
+    {
+      "id": "weekly-summary",
+      "name": "Weekly Summary",
+      "schedule": "0 17 * * 5",
+      "type": "agent",
+      "job": "Generate a weekly summary: tasks completed, deals closed, key metrics, priorities for next week",
+      "enabled": false
+    },
+    {
+      "id": "backup-data",
+      "name": "Backup OSA Data",
+      "schedule": "0 3 * * *",
+      "type": "command",
+      "command": "tar -czf ~/.osa/backups/osa-$(date +%Y%m%d).tar.gz ~/.osa/sessions ~/.osa/data ~/.osa/MEMORY.md",
+      "enabled": false
+    },
+    {
+      "id": "content-ideas",
+      "name": "Content Ideas Research",
+      "schedule": "0 10 * * 1,3,5",
+      "type": "agent",
+      "job": "Search for 5 trending topics in my industry and save content ideas to ~/.osa/data/content-ideas.md",
+      "enabled": false
+    }
+  ]
+}

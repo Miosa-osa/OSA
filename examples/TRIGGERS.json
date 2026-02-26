@@ -1,0 +1,53 @@
+{
+  "_comment": "OSA Event Triggers — Copy to ~/.osa/TRIGGERS.json to activate",
+  "triggers": [
+    {
+      "id": "new-lead",
+      "name": "New Lead Handler",
+      "event": "webhook:lead_created",
+      "type": "agent",
+      "job": "A new lead just came in: {{payload}}. Research the company, score the lead, and draft a personalized first response.",
+      "enabled": false
+    },
+    {
+      "id": "deploy-notify",
+      "name": "Deployment Notification",
+      "event": "webhook:deploy",
+      "type": "command",
+      "command": "echo 'Deployment triggered at {{timestamp}}: {{payload.version}}' >> ~/.osa/data/deploys.log",
+      "enabled": false
+    },
+    {
+      "id": "error-alert",
+      "name": "Error Alert Analyzer",
+      "event": "webhook:error",
+      "type": "agent",
+      "job": "An error alert was triggered: {{payload}}. Analyze the error, check recent changes, and suggest a fix.",
+      "enabled": false
+    },
+    {
+      "id": "ticket-created",
+      "name": "New Support Ticket",
+      "event": "webhook:ticket_created",
+      "type": "agent",
+      "job": "New support ticket received: {{payload}}. Classify priority (P0-P3), check knowledge base for similar issues, draft initial response.",
+      "enabled": false
+    },
+    {
+      "id": "meeting-reminder",
+      "name": "Meeting Prep Trigger",
+      "event": "webhook:calendar_event",
+      "type": "agent",
+      "job": "Meeting starting in 15 minutes: {{payload.title}} with {{payload.attendees}}. Prepare a quick briefing with attendee context and talking points.",
+      "enabled": false
+    },
+    {
+      "id": "commit-review",
+      "name": "Auto Code Review",
+      "event": "webhook:push",
+      "type": "agent",
+      "job": "New commits pushed to {{payload.repository}}: {{payload.commits}}. Do a quick review of the changes — flag any security issues or obvious bugs.",
+      "enabled": false
+    }
+  ]
+}

@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Memory
+  alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Skills.Registry, as: Skills
   alias OptimalSystemAgent.Machines
@@ -217,6 +218,69 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, body)
+  end
+
+  # ── POST /webhooks/:trigger_id ───────────────────────────────────────
+  #
+  # Inbound webhook receiver. Accepts any JSON payload and forwards it to
+  # the Scheduler as a named trigger event. The Scheduler matches the
+  # trigger_id against enabled triggers in TRIGGERS.json and fires the
+  # corresponding action (agent task or shell command).
+  #
+  # Example:
+  #   curl -X POST http://localhost:8089/api/v1/webhooks/new-lead \
+  #        -H 'Content-Type: application/json' \
+  #        -d '{"company": "Acme", "email": "ceo@acme.com"}'
+
+  post "/webhooks/:trigger_id" do
+    trigger_id = conn.params["trigger_id"]
+    payload = conn.body_params || %{}
+
+    Logger.info("Webhook received for trigger '#{trigger_id}'")
+
+    Scheduler.fire_trigger(trigger_id, payload)
+
+    body = Jason.encode!(%{
+      status: "accepted",
+      trigger_id: trigger_id,
+      message: "Trigger queued for execution"
+    })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(202, body)
+  end
+
+  # ── GET /scheduler/jobs ──────────────────────────────────────────────
+  #
+  # List all cron jobs from CRONS.json with their current state
+  # (failure_count, circuit_open).
+
+  get "/scheduler/jobs" do
+    jobs = Scheduler.list_jobs()
+
+    body = Jason.encode!(%{
+      jobs: jobs,
+      count: length(jobs)
+    })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  # ── POST /scheduler/reload ───────────────────────────────────────────
+  #
+  # Reload CRONS.json and TRIGGERS.json without restarting the scheduler.
+
+  post "/scheduler/reload" do
+    Scheduler.reload_crons()
+
+    body = Jason.encode!(%{status: "reloading", message: "Scheduler reload queued"})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(202, body)
   end
 
   # ── Catch-all ───────────────────────────────────────────────────────

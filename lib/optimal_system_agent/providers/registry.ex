@@ -66,7 +66,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp do_chat(:anthropic, messages, opts) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-5-20250929")
+    model = Application.get_env(:optimal_system_agent, :anthropic_model, "anthropic-latest")
 
     unless api_key do
       {:error, "ANTHROPIC_API_KEY not set"}

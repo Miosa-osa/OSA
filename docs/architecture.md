@@ -242,7 +242,7 @@ Abstraction layer over LLM providers. Currently supports:
 | Provider | Local | API Key Required | Default Model |
 |----------|-------|-----------------|---------------|
 | Ollama | Yes | No | llama3.2:latest |
-| Anthropic | No | Yes | claude-opus-4-6 |
+| Anthropic | No | Yes | anthropic-latest |
 | OpenAI | No | Yes | gpt-4o |
 
 ### Provider Dispatch
