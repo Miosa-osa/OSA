@@ -74,7 +74,7 @@ defmodule Mix.Tasks.Osa.Setup do
   defp configure_provider do
     Mix.shell().info("\n--- LLM Provider ---")
     Mix.shell().info("  1. Ollama (local, free — recommended)")
-    Mix.shell().info("  2. Anthropic (Claude)")
+    Mix.shell().info("  2. Anthropic")
     Mix.shell().info("  3. OpenAI (GPT)")
 
     choice = Mix.shell().prompt("Select provider [1]:") |> String.trim()

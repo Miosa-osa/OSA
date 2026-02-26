@@ -20,4 +20,8 @@ config :optimal_system_agent,
   brave_api_key: System.get_env("BRAVE_API_KEY"),
 
   # Override default provider at runtime
-  default_provider: (System.get_env("OSA_DEFAULT_PROVIDER") || "ollama") |> String.to_atom()
+  default_provider: (System.get_env("OSA_DEFAULT_PROVIDER") || "ollama") |> String.to_atom(),
+
+  # HTTP channel
+  shared_secret: System.get_env("OSA_SHARED_SECRET") || "osa-dev-secret-change-me",
+  require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true"

@@ -1,6 +1,6 @@
 # OptimalSystemAgent
 
-> Your AI agent that actually understands what matters. It reads every message, decides if it's noise or signal, and only spends energy on what counts. Runs on your machine. Your data stays yours.
+> A lightweight, Signal Theory-grounded AI agent that classifies every message before processing it. Unlike other agent frameworks that treat every input equally, OSA decides what matters first — filtering noise, routing signals, and only spending compute on what counts. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.19+-purple.svg)](https://elixir-lang.org)
@@ -10,13 +10,19 @@
 
 ## The Problem
 
-We built OpenClaw — an open-source AI agent framework. 430,000 lines of TypeScript. It worked. But we kept hitting the same wall: **every message got the same treatment**. A "hey" went through the same pipeline as "we need to restructure our entire Q3 revenue model."
+When we started building an AI agent for the MIOSA platform, we looked at what was already out there. OpenClaw had 430,000 lines of TypeScript. NanoClaw stripped that down to ~200 lines. Nanobot got it to 4,000 lines of Python. AutoGen, CrewAI — more options, different languages, same core idea.
 
-That's like giving every phone call to your business the same priority. The spam call gets the same attention as your biggest client. No business runs that way. Why should your AI?
+They all solved real problems. NanoClaw nailed simplicity and security. Nanobot nailed lightweight multi-channel support. But after running them, we kept hitting the same wall: **every message gets the same treatment.** A "hey" goes through the same pipeline as "we need to restructure our entire Q3 revenue model."
 
-## The Solution
+None of them solved the **intelligence problem.** They send every single message — greetings, "ok", emoji reactions, "thanks" — straight to the AI model. Every message costs the same compute. Every message waits in the same queue. There's no triage. No priority. No signal-versus-noise separation.
 
-OSA classifies every incoming message *before* processing it. Five dimensions, scored instantly:
+That's like running a business where every phone call gets the same priority. The spam call gets the same attention as your biggest client. No business runs that way. Why should your AI?
+
+So we built OSA from scratch — different language, different runtime, different architecture. Not a fork, not a wrapper. A fundamentally different approach grounded in [Signal Theory](https://zenodo.org/records/18774174).
+
+## What OSA Does Differently
+
+OSA classifies every incoming message *before* processing it. Five dimensions, scored in under 1 millisecond:
 
 - **What needs to happen** — Build something? Analyze data? Just assist?
 - **What's the intent** — Is someone asking, deciding, committing, or just chatting?
@@ -24,7 +30,7 @@ OSA classifies every incoming message *before* processing it. Five dimensions, s
 - **What format** — A quick message? A document? A system alert?
 - **How important is it** — Noise (0.0) to critical signal (1.0)
 
-Noise gets filtered out *before* it ever hits your AI model. Real signals get routed to the right handler immediately. The result: **40-60% fewer AI calls, faster responses, lower cost.**
+Noise gets filtered *before* it ever hits your AI model. Real signals get routed to the right handler immediately. The result: **40-60% fewer AI calls, faster responses, lower cost.**
 
 This isn't a feature bolted onto an agent. It's the architecture.
 
@@ -38,21 +44,21 @@ curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bas
 
 Sets up everything automatically — Elixir, dependencies, configuration wizard. Takes about 2 minutes.
 
-## What Makes OSA Different
+## Why OSA Over NanoClaw / Nanobot / OpenClaw
 
 ### 1. It Filters Noise Before Spending Money
 
-Every AI call costs money (or compute time). Most agents waste 40-60% of their capacity on messages that don't need AI at all — greetings, "ok", "thanks", emoji reactions.
+Every AI call costs money (or compute time). NanoClaw, Nanobot, and OpenClaw send everything to the model. Every "ok", every "thanks", every emoji reaction — full pipeline, full cost.
 
 OSA has two layers of filtering:
 - **Instant filter (< 1ms):** Pattern matching catches obvious noise — no AI needed
 - **Smart filter (~200ms):** For borderline messages, a fast model decides: signal or noise?
 
-Only real signals reach your main AI model.
+Only real signals reach your main AI model. You save 40-60% on AI costs immediately.
 
-### 2. It Learns How People Communicate
+### 2. It Has Communication Intelligence (Nobody Else Does)
 
-OSA has five built-in intelligence modules that no other agent framework offers:
+NanoClaw has container isolation. Nanobot has channel breadth. OSA has **communication intelligence** — five modules that understand how people communicate:
 
 | Module | What It Does |
 |--------|-------------|
@@ -62,13 +68,21 @@ OSA has five built-in intelligence modules that no other agent framework offers:
 | **Proactive Monitor** | Watches for silence, drift, and engagement drops |
 | **Contact Detector** | Identifies who's talking in under 1 millisecond |
 
-### 3. It Routes Events at Hardware Speed
+No other agent framework — lightweight or otherwise — has anything like this.
 
-Internal event routing uses [goldrush](https://github.com/robertohluna/goldrush) — a library that compiles event-matching rules into actual machine code at runtime. When OSA routes a message internally, it's not doing lookups or matching patterns. The routing is pre-compiled into the runtime itself.
+### 3. It Actually Recovers From Crashes
 
-This is the same technology used in telecom systems that handle millions of events per second.
+NanoClaw runs as a single Node.js process. If it crashes, everything stops. You restart manually. Nanobot is a Python process — same problem.
 
-### 4. It's Modular — Turn Capabilities On and Off
+OSA runs on the BEAM virtual machine (Erlang/OTP) — the same platform that powers WhatsApp and telecom switches with 99.9999% uptime. If any part of OSA crashes, it automatically restarts that component without affecting the rest of the system. Handle 30+ conversations simultaneously on a single instance.
+
+### 4. It Routes Events at Hardware Speed
+
+Internal event routing uses [goldrush](https://github.com/robertohluna/goldrush) — a library that compiles event-matching rules into actual machine code at runtime. When OSA routes a message internally, it's not doing hash lookups or pattern matching. The routing is pre-compiled into the runtime itself.
+
+NanoClaw routes through a Node.js polling loop. Nanobot routes through a Python message bus. OSA routes through compiled Erlang bytecode. The difference matters at scale.
+
+### 5. It's Modular — Turn Capabilities On and Off
 
 Skills are grouped into **machines** you toggle with a config file:
 
@@ -79,17 +93,48 @@ Skills are grouped into **machines** you toggle with a config file:
 | **Productivity** | Calendar management, task tracking |
 | **Research** | Deep web search, summarization, translation |
 
-Need a new capability? Write a skill file, drop it in a folder. It's available immediately — no restart needed.
-
-### 5. It Doesn't Crash — It Recovers
-
-Built on the BEAM virtual machine (Erlang/OTP) — the same platform that powers WhatsApp and telecom switches. If any part of OSA crashes, it automatically restarts without affecting the rest of the system. Handle 30+ conversations simultaneously on a single instance.
+Need a new capability? Write a skill file, drop it in a folder. It's available immediately — no restart needed, no rebuild, no recompilation. Hot code reload.
 
 ### 6. It Runs Locally — Your Data Stays Yours
 
 Default setup uses Ollama for local AI. No data leaves your machine. No API keys needed. Zero cloud dependency.
 
-Want more power? Point it at Anthropic (Claude) or OpenAI (GPT) with one config change.
+Want more power? Point it at Anthropic or OpenAI with one config change.
+
+## OSA vs. Other Frameworks
+
+| | **OSA** | **NanoClaw** | **Nanobot** | **OpenClaw** | **AutoGen** | **CrewAI** |
+|--|---------|-------------|------------|-------------|------------|-----------|
+| **Classifies before processing** | Yes (5-tuple) | No | No | No | No | No |
+| **Filters noise** | Two-tier (1ms + 200ms) | No | No | No | No | No |
+| **Communication intelligence** | 5 modules | No | No | No | No | No |
+| **Conversation depth tracking** | 4-level adaptive | No | No | No | No | No |
+| **Event routing** | Compiled bytecode ([goldrush](https://github.com/robertohluna/goldrush)) | Polling loop | Python bus | None | None | None |
+| **Fault tolerance** | Auto-recovery (OTP) | Single process | Single process | None | None | None |
+| **Concurrent conversations** | 30+ (BEAM processes) | Queue-based | Sequential | Queue-based | Sequential | Sequential |
+| **Hot reload skills** | Yes (no restart) | No (code change) | No (restart) | No | No | No |
+| **Container isolation** | BEAM process isolation | Docker/Apple Container | No | No | No | No |
+| **Runs locally** | Yes (Ollama) | Yes (agent SDK) | Yes (vLLM) | Yes | Requires API | Requires API |
+| **SDK / HTTP API** | Yes (REST + SSE) | IPC only | CLI + gateway | REST | Python | Python |
+| **MCP support** | Yes | Via agent SDK | Yes | Yes | No | No |
+| **Language** | Elixir/OTP | TypeScript | Python | TypeScript | Python | Python |
+| **Codebase** | ~8K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
+
+### What They Do Better (Being Honest)
+
+- **NanoClaw** has true OS-level container isolation via Docker — agents can't escape their sandbox. OSA uses BEAM process isolation which is lighter but less strict.
+- **NanoClaw** has agent swarms — teams of agents that collaborate. OSA doesn't have multi-agent collaboration yet.
+- **Nanobot** supports 10+ chat channels out of the box (Telegram, Discord, WhatsApp, Slack, Signal, Matrix, QQ, DingTalk, Feishu, Email). OSA currently has CLI and HTTP/SDK — more channels are planned.
+- **Nanobot** supports 17 LLM providers including Chinese providers (Qwen, Moonshot, Zhipu, VolcEngine). OSA supports Ollama, Anthropic, and OpenAI.
+- **Both** have simpler setup — NanoClaw uses an agent SDK to guide installation, Nanobot is a pip install.
+
+### What OSA Does That Neither Can
+
+- **Signal classification** — The 5-tuple S=(Mode, Genre, Type, Format, Weight) is architecturally unique. No other framework classifies the nature of a message before deciding how to handle it.
+- **Noise filtering** — 40-60% of messages in a typical conversation are noise. OSA filters them before they hit the AI model. Everyone else processes everything.
+- **Communication intelligence** — Five dedicated modules that learn how people communicate, track conversation depth, detect contacts, and monitor engagement. This doesn't exist anywhere else.
+- **Hardware-speed routing** — goldrush compiles event filters into actual Erlang bytecode modules. This is telecom-grade event processing running inside your agent.
+- **True fault tolerance** — OTP supervision trees restart crashed components automatically. Your agent doesn't go down because one skill had a bug.
 
 ## Quick Start
 
@@ -114,13 +159,15 @@ mix compile
 mix chat          # Start talking to your agent
 ```
 
+The HTTP API starts automatically on port 8089 — connect any SDK client or send requests directly.
+
 ### Configure
 
 ```bash
 # Local AI (default — free)
 export OSA_DEFAULT_PROVIDER=ollama
 
-# Or Anthropic Claude
+# Or Anthropic
 export OSA_DEFAULT_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=sk-...
 
@@ -130,6 +177,33 @@ export OPENAI_API_KEY=sk-...
 ```
 
 Or edit `~/.osa/config.json` directly.
+
+### HTTP API
+
+OSA exposes a REST API on port 8089 for SDK clients and integrations:
+
+```bash
+# Health check
+curl http://localhost:8089/health
+
+# Classify a message (Signal Theory 5-tuple)
+curl -X POST http://localhost:8089/api/v1/classify \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is our Q3 revenue trend?"}'
+
+# Run the full agent loop
+curl -X POST http://localhost:8089/api/v1/orchestrate \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Analyze our sales pipeline", "session_id": "my-session"}'
+
+# List available skills
+curl http://localhost:8089/api/v1/skills
+
+# Stream events (SSE)
+curl http://localhost:8089/api/v1/stream/my-session
+```
+
+JWT authentication is supported for production use — set `OSA_SHARED_SECRET` and `OSA_REQUIRE_AUTH=true`.
 
 ### Auto-Start on Login (macOS)
 
@@ -159,7 +233,7 @@ Weight: Information value — 0.0 (noise) to 1.0 (critical signal)
 ```
 ┌─────────────────────────────────────────────────┐
 │                    Channels                      │
-│  CLI │ Telegram │ Discord │ Slack │ SDK          │
+│  CLI │ HTTP API │ Telegram │ Discord │ SDK       │
 └──────────────┬──────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────┐
@@ -239,21 +313,6 @@ Full Model Context Protocol support. Drop in any MCP server:
   }
 }
 ```
-
-## OSA vs. Other Frameworks
-
-| | OSA | OpenClaw | AutoGen | CrewAI |
-|--|-----|----------|---------|--------|
-| **Classifies before processing** | Yes (5-tuple) | No | No | No |
-| **Filters noise** | Two-tier | None | None | None |
-| **Communication intelligence** | 5 modules | None | None | None |
-| **Event routing** | Compiled bytecode ([goldrush](https://github.com/robertohluna/goldrush)) | None | None | None |
-| **Conversation depth tracking** | 4-level adaptive | No | No | No |
-| **Fault tolerance** | Auto-recovery (OTP) | None | None | None |
-| **Hot reload skills** | Yes | No | No | No |
-| **Runs locally** | Yes (Ollama) | Yes | Requires API | Requires API |
-| **Runtime** | BEAM (concurrent) | Node.js (single-thread) | Python | Python |
-| **Codebase** | ~8K lines | ~430K lines | ~50K lines | ~30K lines |
 
 ## Theoretical Foundation
 

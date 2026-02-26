@@ -47,7 +47,11 @@ config :optimal_system_agent,
   data_dir: Path.expand("~/.osa/data"),
 
   # Sessions directory (JSONL files)
-  sessions_dir: Path.expand("~/.osa/sessions")
+  sessions_dir: Path.expand("~/.osa/sessions"),
+
+  # HTTP channel (SDK API surface)
+  http_port: 8089,
+  require_auth: false
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,

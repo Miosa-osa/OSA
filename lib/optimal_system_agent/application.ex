@@ -47,6 +47,9 @@ defmodule OptimalSystemAgent.Application do
       # Channel adapters
       {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
 
+      # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
+      {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
+
       # Agent processes
       OptimalSystemAgent.Agent.Memory,
       OptimalSystemAgent.Agent.Scheduler,
@@ -59,5 +62,12 @@ defmodule OptimalSystemAgent.Application do
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp http_port do
+    case System.get_env("OSA_HTTP_PORT") do
+      nil -> Application.get_env(:optimal_system_agent, :http_port, 8089)
+      port -> String.to_integer(port)
+    end
   end
 end
