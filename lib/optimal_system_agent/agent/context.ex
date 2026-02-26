@@ -7,10 +7,11 @@ defmodule OptimalSystemAgent.Agent.Context do
     2. Bootstrap files (IDENTITY.md, SOUL.md, USER.md)
     3. Long-term memory (MEMORY.md)
     4. Machine addendums (active machine prompt fragments)
-    5. Active skills documentation
-    6. Communication profile (if contact known)
-    7. Memory bulletin (Cortex periodic synthesis)
-    8. Runtime context (timestamp, channel, session info)
+    5. Connected OS templates (structure, modules, API context)
+    6. Active skills documentation
+    7. Communication profile (if contact known)
+    8. Memory bulletin (Cortex periodic synthesis)
+    9. Runtime context (timestamp, channel, session info)
   """
 
   alias OptimalSystemAgent.Skills.Registry, as: Skills
@@ -24,6 +25,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         bootstrap_files(),
         memory_block(),
         machines_block(),
+        os_templates_block(),
         skills_block(),
         runtime_block(state),
       ]
@@ -75,6 +77,13 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp machines_block do
     addendums = OptimalSystemAgent.Machines.prompt_addendums()
+    if addendums != [] do
+      Enum.join(addendums, "\n\n")
+    end
+  end
+
+  defp os_templates_block do
+    addendums = OptimalSystemAgent.OS.Registry.prompt_addendums()
     if addendums != [] do
       Enum.join(addendums, "\n\n")
     end

@@ -388,6 +388,45 @@ Identifies who is communicating in under 1 millisecond:
 - Name extraction from message content
 - Channel-specific identification (usernames, phone numbers)
 
+## OS Template System
+
+OSA discovers and connects to OS templates (BusinessOS, ContentOS, custom templates) on the filesystem. Connected templates inject context into the agent prompt, giving OSA awareness of the template's structure, modules, and API.
+
+### Three Modules
+
+| Module | Purpose |
+|--------|---------|
+| **OS.Manifest** | Struct and parser for `.osa-manifest.json` files. Also handles heuristic detection when no manifest exists. |
+| **OS.Scanner** | Stateless filesystem scanner. Checks configured paths and known directories for templates. |
+| **OS.Registry** | GenServer managing connected templates. Persists connections to `~/.osa/os/`, provides prompt addendums. |
+
+### Discovery Flow
+
+```
+1. Boot: OS.Registry loads persisted connections from ~/.osa/os/*.json
+2. Scan: OS.Scanner checks configured + default directories
+   ├── Has .osa-manifest.json? → Parse manifest (preferred)
+   └── No manifest? → Heuristic detection (go.mod, package.json, etc.)
+3. Connect: User confirms → persisted to ~/.osa/os/{name}.json
+4. Context: OS.Registry.prompt_addendums() → injected into system prompt
+5. Agent: Knows the template's structure, modules, API, and how to navigate it
+```
+
+### Heuristic Detection
+
+When no `.osa-manifest.json` exists, the scanner infers the template's structure:
+
+| Marker File | Detected Stack |
+|------------|----------------|
+| `go.mod` | Go backend |
+| `svelte.config.js` | Svelte frontend |
+| `next.config.js` | React/Next.js frontend |
+| `mix.exs` | Elixir backend |
+| `package.json` | Node.js |
+| `docker-compose.yml` with `postgres` | PostgreSQL database |
+
+Module detection follows framework conventions — for Go it scans `backend/internal/modules/`, for Svelte it scans `src/routes/`.
+
 ## Bridge.PubSub (3-Tier Fan-Out)
 
 Bridges internal goldrush events to Phoenix.PubSub for external consumption.
@@ -476,6 +515,7 @@ OptimalSystemAgent.Application
 ├── OptimalSystemAgent.Providers.Registry      # LLM providers
 ├── OptimalSystemAgent.Skills.Registry         # Tool registry
 ├── OptimalSystemAgent.Machines                # Machine activation
+├── OptimalSystemAgent.OS.Registry             # OS template discovery + connection
 ├── OptimalSystemAgent.Agent.Memory            # JSONL + MEMORY.md
 ├── OptimalSystemAgent.Agent.Cortex            # Memory synthesis
 ├── OptimalSystemAgent.Agent.Compactor         # Context compaction

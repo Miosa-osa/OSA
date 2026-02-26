@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Application do
     - Providers.Registry (LLM provider routing via :osa_provider_router)
     - Skills.Registry (tool dispatch via :osa_tool_dispatcher)
     - Machines (composable skill set activation from ~/.osa/config.json)
+    - OS.Registry (OS template discovery, connection, context injection)
     - MCP.Supervisor (MCP server/client processes)
     - Channels.Supervisor (platform adapters: CLI, Telegram, etc.)
     - Agent.Memory (persistent JSONL session storage)
@@ -40,6 +41,9 @@ defmodule OptimalSystemAgent.Application do
       # Skills + machines (goldrush-compiled :osa_tool_dispatcher)
       OptimalSystemAgent.Skills.Registry,
       OptimalSystemAgent.Machines,
+
+      # OS template discovery and connection
+      OptimalSystemAgent.OS.Registry,
 
       # MCP integration
       {DynamicSupervisor, name: OptimalSystemAgent.MCP.Supervisor, strategy: :one_for_one},

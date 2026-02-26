@@ -253,12 +253,12 @@ Weight: Information value — 0.0 (noise) to 1.0 (critical signal)
 │  Max 20 iterations │ Bounded reasoning            │
 └──────────────┬──────────────────────────────────┘
                │
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
-┌────────┐ ┌────────┐ ┌────────┐
-│Machines│ │Provider│ │ Memory │
-│(skills)│ │Registry│ │(JSONL) │
-└────────┘ └────────┘ └────────┘
+    ┌──────────┼──────────┼──────────┐
+    ▼          ▼          ▼          ▼
+┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+│Machines│ │Provider│ │ Memory │ │  OS    │
+│(skills)│ │Registry│ │(JSONL) │ │Registry│
+└────────┘ └────────┘ └────────┘ └────────┘
 
 Intelligence Layer (always running):
   CommProfiler │ CommCoach │ ConversationTracker
@@ -378,6 +378,56 @@ The open-source OSA is the full local agent. MIOSA Premium adds:
 - **24/7 Proactive Monitoring:** Fully autonomous operation
 
 [miosa.ai](https://miosa.ai)
+
+## Connecting OS Templates
+
+OSA auto-discovers and integrates with OS templates on your machine. Point it at a template and it learns the structure, modules, and API — then works inside it.
+
+```bash
+# From the CLI, connect a template:
+> connect to ~/Desktop/MIOSA/BusinessOS
+
+# OSA scans the directory, detects the stack (Go + Svelte + PostgreSQL),
+# finds modules (CRM, Projects, Invoicing), and saves the connection.
+# From now on, OSA knows how to navigate and operate within BusinessOS.
+```
+
+**How it works:**
+1. OSA scans for `.osa-manifest.json` at the template root (preferred)
+2. If no manifest, OSA detects the stack heuristically (go.mod, package.json, svelte.config, etc.)
+3. Discovers modules, API endpoints, and context sources automatically
+4. Saves the connection to `~/.osa/os/{name}.json` — persists across restarts
+5. Injects template context into the agent prompt so OSA understands the codebase
+
+**For template authors** — ship a `.osa-manifest.json` to give OSA full awareness:
+
+```json
+{
+  "osa_manifest": 1,
+  "name": "BusinessOS",
+  "version": "1.0.0",
+  "description": "All-in-one business management platform",
+  "stack": { "backend": "go", "frontend": "svelte", "database": "postgresql" },
+  "api": { "base_url": "http://localhost:8080", "auth": "jwt" },
+  "modules": [
+    { "id": "crm", "name": "CRM", "description": "Contact management", "paths": ["backend/internal/modules/crm/"] }
+  ],
+  "context_sources": ["backend/internal/models/", "docs/"],
+  "skills": [
+    { "name": "create_contact", "description": "Create a CRM contact", "endpoint": "POST /api/v1/contacts" }
+  ]
+}
+```
+
+Or generate one automatically:
+
+```bash
+cd ~/path/to/your-template
+osa generate-manifest
+# Creates .osa-manifest.json from detected project structure
+```
+
+Connected templates show up in the agent's context. Multiple templates can be connected simultaneously — OSA tracks each as a separate OS.
 
 ## Ready-Made Skills
 
