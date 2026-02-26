@@ -1,0 +1,14 @@
+/_build/
+/cover/
+/deps/
+/doc/
+/tmp/
+erl_crash.dump
+*.ez
+optimal_system_agent-*.tar
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/priv/static/assets/

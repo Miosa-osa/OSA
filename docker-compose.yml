@@ -1,0 +1,26 @@
+version: "3.8"
+services:
+  osa:
+    build: .
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - OSA_DEFAULT_PROVIDER=ollama
+    env_file:
+      - .env
+    volumes:
+      - osa_data:/root/.osa
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  osa_data:
+  ollama_data:

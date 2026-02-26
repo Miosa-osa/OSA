@@ -1,0 +1,139 @@
+defmodule OptimalSystemAgent.Agent.Loop do
+  @moduledoc """
+  Bounded ReAct agent loop — the core reasoning engine.
+
+  Signal Theory grounded: Every iteration processes one signal through
+  the 5-tuple S=(M,G,T,F,W) classification before acting.
+
+  Flow:
+    1. Receive message from channel/bus
+    2. Classify signal (Mode, Genre, Type, Format, Weight)
+    3. Filter noise (two-tier: deterministic + LLM)
+    4. Build context (identity + memory + skills + runtime)
+    5. Call LLM with available tools
+    6. If tool_calls: execute each, append results, re-prompt
+    7. When no tool_calls: return final response
+    8. Write to memory, notify channel
+  """
+  use GenServer
+  require Logger
+
+  alias OptimalSystemAgent.Agent.Context
+  alias OptimalSystemAgent.Agent.Memory
+  alias OptimalSystemAgent.Signal.Classifier
+  alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Events.Bus
+
+  @max_iterations Application.compile_env(:optimal_system_agent, :max_iterations, 30)
+
+  defstruct [
+    :session_id,
+    :user_id,
+    :channel,
+    messages: [],
+    iteration: 0,
+    status: :idle,
+    tools: []
+  ]
+
+  # --- Client API ---
+
+  def start_link(opts) do
+    session_id = Keyword.fetch!(opts, :session_id)
+    GenServer.start_link(__MODULE__, opts, name: via(session_id))
+  end
+
+  def process_message(session_id, message) do
+    GenServer.call(via(session_id), {:process, message}, :infinity)
+  end
+
+  # --- Server Callbacks ---
+
+  @impl true
+  def init(opts) do
+    state = %__MODULE__{
+      session_id: Keyword.fetch!(opts, :session_id),
+      user_id: Keyword.get(opts, :user_id),
+      channel: Keyword.get(opts, :channel, :cli),
+      tools: Skills.list_tools()
+    }
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call({:process, message}, _from, state) do
+    # 1. Classify the incoming signal
+    signal = Classifier.classify(message, state.channel)
+
+    # 2. Check noise filter
+    if signal.weight < noise_threshold() do
+      Logger.debug("Signal filtered as noise: weight=#{signal.weight}")
+      Bus.emit(:signal_filtered, %{signal: signal, reason: :low_weight})
+      {:reply, {:filtered, signal}, state}
+    else
+      # 3. Persist user message to JSONL session storage
+      Memory.append(state.session_id, %{role: "user", content: message})
+
+      # 4. Process through agent loop
+      state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
+      {response, state} = run_loop(state)
+      state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+
+      # 5. Persist assistant response to JSONL session storage
+      Memory.append(state.session_id, %{role: "assistant", content: response})
+
+      Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+
+      {:reply, {:ok, response}, state}
+    end
+  end
+
+  # --- Agent Loop ---
+
+  defp run_loop(%{iteration: iter} = state) when iter >= @max_iterations do
+    Logger.warning("Agent loop hit max iterations (#{@max_iterations})")
+    {"I've reached my reasoning limit for this request. Here's what I have so far.", state}
+  end
+
+  defp run_loop(state) do
+    # Build context
+    context = Context.build(state)
+
+    # Call LLM
+    case Providers.chat(context.messages, tools: state.tools, temperature: temperature()) do
+      {:ok, %{content: content, tool_calls: []}} ->
+        # No tool calls — final response
+        {content, state}
+
+      {:ok, %{content: content, tool_calls: tool_calls}} when is_list(tool_calls) ->
+        # Execute tool calls
+        state = %{state | iteration: state.iteration + 1}
+
+        # Append assistant message with tool calls
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content, tool_calls: tool_calls}]}
+
+        # Execute each tool and append results
+        state = Enum.reduce(tool_calls, state, fn tool_call, acc ->
+          result = Skills.execute(tool_call.name, tool_call.arguments)
+          tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: to_string(result)}
+          %{acc | messages: acc.messages ++ [tool_msg]}
+        end)
+
+        # Re-prompt
+        run_loop(state)
+
+      {:error, reason} ->
+        Logger.error("LLM call failed: #{inspect(reason)}")
+        {"I encountered an error processing your request. Please try again.", state}
+    end
+  end
+
+  # --- Helpers ---
+
+  defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
+
+  defp noise_threshold, do: Application.get_env(:optimal_system_agent, :noise_filter_threshold, 0.6)
+
+  defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
+end
