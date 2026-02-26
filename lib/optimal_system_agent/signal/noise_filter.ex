@@ -72,7 +72,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
   # --- Tier 2: LLM-based (fallback for uncertain signals) ---
 
-  defp tier_2(message, weight) do
+  defp tier_2(_message, weight) do
     # For now, pass through uncertain signals
     # TODO: Add fast LLM classification when provider is available
     Logger.debug("Tier 2 noise check: passing uncertain signal (weight=#{weight})")

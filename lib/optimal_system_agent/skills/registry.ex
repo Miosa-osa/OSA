@@ -194,17 +194,26 @@ defmodule OptimalSystemAgent.Skills.Registry do
   end
 
   # --- Goldrush Dispatcher Compilation ---
+  #
+  # Compiles a goldrush module (:osa_tool_dispatcher) that validates tool
+  # dispatch events. The compiled module runs at BEAM instruction speed.
+  #
+  # Uses glc:with(query, fun/1) to wrap a wildcard filter with a dispatch handler.
 
   defp compile_dispatcher(behaviour_skills, _markdown_skills) do
-    rules =
-      Enum.map(behaviour_skills, fn {name, _mod} ->
-        {:glc, :eq, :tool_name, name, fn event ->
-          Map.get(event, :handler_fn, fn _ -> :ok end).(event)
-        end}
+    if map_size(behaviour_skills) > 0 do
+      # Build tool name filters from registered skills
+      tool_filters = Enum.map(behaviour_skills, fn {name, _mod} ->
+        :glc.eq(:tool_name, name)
       end)
 
-    if rules != [] do
-      case :glc.compile(:osa_tool_dispatcher, rules) do
+      # Compile: match any registered tool name, dispatch via handler
+      query = :glc.with(:glc.any(tool_filters), fn event ->
+        _ = :gre.fetch(:tool_name, event)
+        :ok
+      end)
+
+      case :glc.compile(:osa_tool_dispatcher, query) do
         {:ok, _} -> :ok
         error -> Logger.warning("Failed to compile :osa_tool_dispatcher: #{inspect(error)}")
       end

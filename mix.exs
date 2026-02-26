@@ -29,7 +29,7 @@ defmodule OptimalSystemAgent.MixProject do
   defp deps do
     [
       # Event routing — compiled Erlang bytecode dispatch (BEAM speed)
-      {:goldrush, "~> 0.2.0"},
+      {:goldrush, "~> 0.1.9"},
 
       # HTTP client for LLM APIs
       {:req, "~> 0.5"},

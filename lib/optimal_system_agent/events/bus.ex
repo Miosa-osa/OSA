@@ -2,18 +2,27 @@ defmodule OptimalSystemAgent.Events.Bus do
   @moduledoc """
   Event bus — goldrush-compiled :osa_event_router for zero-overhead dispatch.
 
-  Uses `glc:compile/3` to compile event-matching predicates into real Erlang
+  Uses `glc:compile/2` to compile event-matching predicates into real Erlang
   bytecode modules. Event routing happens at BEAM instruction speed — no hash
   lookups, no pattern matching at runtime.
 
+  goldrush API (extend/goldrush 0.1.9):
+  - `glc:eq(key, value)` — equality predicate
+  - `glc:any([...])` — OR combinator
+  - `glc:with(query, fun/1)` — wrap query with output handler
+  - `glc:compile(module, query)` — compile to BEAM bytecode module
+  - `glc:handle(module, event)` — process event through compiled module
+  - `gre:make(proplist, [:list])` — create event
+  - `gre:fetch(key, event)` — extract field from event
+
   ## Event Types
-  - user_message: from channels → Agent.Loop
-  - llm_request: from Agent.Loop → Providers.Registry
-  - llm_response: from Providers → Agent.Loop
-  - tool_call: from Agent.Loop → Skills.Registry
-  - tool_result: from Skills → Agent.Loop
-  - agent_response: from Agent.Loop → Channels, Bridge.PubSub
-  - system_event: from Scheduler, internals → Agent.Loop, Memory
+  - user_message: from channels -> Agent.Loop
+  - llm_request: from Agent.Loop -> Providers.Registry
+  - llm_response: from Providers -> Agent.Loop
+  - tool_call: from Agent.Loop -> Skills.Registry
+  - tool_result: from Skills -> Agent.Loop
+  - agent_response: from Agent.Loop -> Channels, Bridge.PubSub
+  - system_event: from Scheduler, internals -> Agent.Loop, Memory
   """
   use GenServer
   require Logger
@@ -26,8 +35,17 @@ defmodule OptimalSystemAgent.Events.Bus do
 
   @doc "Emit an event through the goldrush-compiled router."
   def emit(event_type, payload \\ %{}) when event_type in @event_types do
-    event = Map.merge(payload, %{type: event_type, timestamp: System.monotonic_time()})
-    :gre.emit(:osa_event_router, event)
+    # Create goldrush event from proplist
+    fields = [{:type, event_type}, {:timestamp, System.monotonic_time()} | Map.to_list(payload)]
+    event = :gre.make(fields, [:list])
+
+    # Route through the compiled :osa_event_router module
+    # The compiled module filters by type and dispatches to handlers
+    try do
+      :glc.handle(:osa_event_router, event)
+    rescue
+      UndefinedFunctionError -> :ok
+    end
   end
 
   @doc "Register a handler for a specific event type."
@@ -40,41 +58,62 @@ defmodule OptimalSystemAgent.Events.Bus do
 
   @impl true
   def init(:ok) do
-    # Compile the initial goldrush event router with empty handlers
-    compile_router(%{})
+    :ets.new(:osa_event_handlers, [:named_table, :public, :bag])
+    compile_router()
     Logger.info("Event bus started — :osa_event_router compiled")
-    {:ok, %{handlers: %{}}}
+    {:ok, %{}}
   end
 
   @impl true
   def handle_call({:register, event_type, handler_fn}, _from, state) do
-    handlers = Map.update(state.handlers, event_type, [handler_fn], &[handler_fn | &1])
-    compile_router(handlers)
-    {:reply, :ok, %{state | handlers: handlers}}
+    :ets.insert(:osa_event_handlers, {event_type, handler_fn})
+    # Recompile the goldrush router — hot code reload
+    compile_router()
+    {:reply, :ok, state}
   end
 
   # Compile the goldrush event router module.
-  # This creates a real .beam artifact loaded into the VM.
-  defp compile_router(handlers) do
-    # Build glc filter rules from registered handlers
-    rules = Enum.flat_map(handlers, fn {event_type, fns} ->
-      Enum.map(fns, fn handler_fn ->
-        {:glc, :eq, :type, event_type, handler_fn}
-      end)
+  # Creates a real .beam module loaded into the VM at BEAM instruction speed.
+  #
+  # Architecture:
+  #   1. Type-specific filters (glc:eq per event type)
+  #   2. Combined via glc:any (OR)
+  #   3. Wrapped with glc:with for dispatch handler
+  #   4. Compiled to :osa_event_router via glc:compile
+  defp compile_router do
+    # Build type filter — only known event types pass through
+    type_filters = Enum.map(@event_types, &:glc.eq(:type, &1))
+
+    # Wrap with dispatch handler — glc:with(query, fun/1)
+    # The handler is called when the compiled filter matches
+    query = :glc.with(:glc.any(type_filters), fn event ->
+      dispatch_event(event)
     end)
 
-    # If no handlers, compile a pass-through that does nothing
-    if rules == [] do
-      :ok
-    else
-      case :glc.compile(:osa_event_router, rules) do
-        {:ok, _} -> :ok
-        error -> Logger.warning("Failed to compile :osa_event_router: #{inspect(error)}")
-      end
+    case :glc.compile(:osa_event_router, query) do
+      {:ok, _} -> :ok
+      error -> Logger.warning("Failed to compile :osa_event_router: #{inspect(error)}")
     end
   rescue
     e ->
       Logger.warning("goldrush compile error: #{inspect(e)}")
       :ok
+  end
+
+  # Called by the goldrush compiled module when an event passes all filters.
+  # Looks up registered handlers in ETS and dispatches asynchronously.
+  defp dispatch_event(event) do
+    type = :gre.fetch(:type, event)
+    # Convert gre event to an Elixir map for handler consumption
+    payload = event |> :gre.pairs() |> Map.new()
+
+    try do
+      :ets.lookup(:osa_event_handlers, type)
+      |> Enum.each(fn {_, handler} ->
+        Task.start(fn -> handler.(payload) end)
+      end)
+    rescue
+      _ -> :ok
+    end
   end
 end

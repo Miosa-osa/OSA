@@ -69,7 +69,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # 2. Check noise filter
     if signal.weight < noise_threshold() do
       Logger.debug("Signal filtered as noise: weight=#{signal.weight}")
-      Bus.emit(:signal_filtered, %{signal: signal, reason: :low_weight})
+      Bus.emit(:system_event, %{event: :signal_filtered, signal: signal, reason: :low_weight})
       {:reply, {:filtered, signal}, state}
     else
       # 3. Persist user message to JSONL session storage
@@ -115,8 +115,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         # Execute each tool and append results
         state = Enum.reduce(tool_calls, state, fn tool_call, acc ->
-          result = Skills.execute(tool_call.name, tool_call.arguments)
-          tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: to_string(result)}
+          result_str =
+            case Skills.execute(tool_call.name, tool_call.arguments) do
+              {:ok, content} -> content
+              {:error, reason} -> "Error: #{reason}"
+            end
+
+          tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
           %{acc | messages: acc.messages ++ [tool_msg]}
         end)
 
