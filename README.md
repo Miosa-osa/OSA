@@ -64,7 +64,7 @@ OSA has five built-in intelligence modules that no other agent framework offers:
 
 ### 3. It Routes Events at Hardware Speed
 
-Internal event routing uses [goldrush](https://github.com/extend/goldrush) — a library that compiles event-matching rules into actual machine code at runtime. When OSA routes a message internally, it's not doing lookups or matching patterns. The routing is pre-compiled into the runtime itself.
+Internal event routing uses [goldrush](https://github.com/robertohluna/goldrush) — a library that compiles event-matching rules into actual machine code at runtime. When OSA routes a message internally, it's not doing lookups or matching patterns. The routing is pre-compiled into the runtime itself.
 
 This is the same technology used in telecom systems that handle millions of events per second.
 
@@ -247,7 +247,7 @@ Full Model Context Protocol support. Drop in any MCP server:
 | **Classifies before processing** | Yes (5-tuple) | No | No | No |
 | **Filters noise** | Two-tier | None | None | None |
 | **Communication intelligence** | 5 modules | None | None | None |
-| **Event routing** | Compiled bytecode ([goldrush](https://github.com/extend/goldrush)) | None | None | None |
+| **Event routing** | Compiled bytecode ([goldrush](https://github.com/robertohluna/goldrush)) | None | None | None |
 | **Conversation depth tracking** | 4-level adaptive | No | No | No |
 | **Fault tolerance** | Auto-recovery (OTP) | None | None | None |
 | **Hot reload skills** | Yes | No | No | No |

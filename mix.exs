@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.MixProject do
   defp deps do
     [
       # Event routing — compiled Erlang bytecode dispatch (BEAM speed)
-      {:goldrush, "~> 0.1.9"},
+      # https://github.com/robertohluna/goldrush (fork of extend/goldrush)
+      {:goldrush, github: "robertohluna/goldrush", branch: "main", override: true},
 
       # HTTP client for LLM APIs
       {:req, "~> 0.5"},
