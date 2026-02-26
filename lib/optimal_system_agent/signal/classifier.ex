@@ -51,27 +51,34 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   defp classify_mode(msg) do
     lower = String.downcase(msg)
     cond do
-      matches_any?(lower, ~w(build create generate make scaffold design new)) -> :build
-      matches_any?(lower, ~w(run execute trigger sync send import export)) -> :execute
-      matches_any?(lower, ~w(analyze report dashboard metrics trend compare kpi)) -> :analyze
-      matches_any?(lower, ~w(update upgrade migrate fix health backup restore rollback version)) -> :maintain
+      matches_word?(lower, ~w(build create generate make scaffold design)) or
+        matches_word_strict?(lower, "new") -> :build
+      matches_word?(lower, ~w(run execute trigger sync send import export)) -> :execute
+      matches_word?(lower, ~w(analyze report dashboard metrics trend compare kpi)) -> :analyze
+      matches_word?(lower, ~w(update upgrade migrate fix health backup restore rollback version)) -> :maintain
       true -> :assist
     end
   end
 
   # --- Genre Classification (Speech Act Theory) ---
 
+  @commit_phrases ["i will", "i'll", "let me", "i promise", "i commit"]
+  @express_words ~w(thanks love hate great terrible wow)
+
   defp classify_genre(msg) do
     lower = String.downcase(msg)
     cond do
       # Directives — cause an action
-      matches_any?(lower, ~w(please do run make create send)) or String.ends_with?(lower, "!") -> :direct
-      # Commissives — bind the sender
-      matches_any?(lower, ~w(i will i'll let me i promise i commit)) -> :commit
+      matches_word?(lower, ~w(please run make create send)) or
+        matches_word_strict?(lower, "do") or
+        String.ends_with?(lower, "!") -> :direct
+      # Commissives — bind the sender (multi-word phrases, not individual tokens)
+      matches_phrase?(lower, @commit_phrases) -> :commit
       # Declaratives — change state
-      matches_any?(lower, ~w(approve reject cancel confirm decide set)) -> :decide
+      matches_word?(lower, ~w(approve reject cancel confirm decide)) or
+        matches_word_strict?(lower, "set") -> :decide
       # Expressives — convey internal state
-      matches_any?(lower, ~w(thanks love hate great terrible wow)) -> :express
+      matches_word?(lower, @express_words) -> :express
       # Default: Assertives — convey information
       true -> :inform
     end
@@ -83,10 +90,10 @@ defmodule OptimalSystemAgent.Signal.Classifier do
     lower = String.downcase(msg)
     cond do
       String.contains?(lower, "?") -> "question"
-      matches_any?(lower, ~w(help how what why when where)) -> "question"
-      matches_any?(lower, ~w(error bug broken fail crash)) -> "issue"
-      matches_any?(lower, ~w(remind schedule later tomorrow)) -> "scheduling"
-      matches_any?(lower, ~w(summarize summary brief recap)) -> "summary"
+      matches_word?(lower, ~w(help how what why when where)) -> "question"
+      matches_word?(lower, ~w(error bug broken fail crash)) -> "issue"
+      matches_word?(lower, ~w(remind schedule later tomorrow)) -> "scheduling"
+      matches_word?(lower, ~w(summarize summary brief recap)) -> "summary"
       true -> "general"
     end
   end
@@ -122,8 +129,10 @@ defmodule OptimalSystemAgent.Signal.Classifier do
     base = 0.5
     length_bonus = min(String.length(msg) / 500.0, 0.2)
     question_bonus = if String.contains?(msg, "?"), do: 0.15, else: 0.0
-    urgency_bonus = if matches_any?(String.downcase(msg), ~w(urgent asap critical emergency now immediately)), do: 0.2, else: 0.0
-    noise_penalty = if matches_any?(String.downcase(msg), ~w(hi hello hey thanks ok sure lol haha)), do: -0.3, else: 0.0
+    urgency_bonus = if matches_word?(String.downcase(msg), ~w(urgent asap critical emergency immediately)) or
+                       matches_word_strict?(String.downcase(msg), "now"), do: 0.2, else: 0.0
+    noise_penalty = if matches_word?(String.downcase(msg), ~w(hello thanks lol haha)) or
+                       matches_any_word_strict?(String.downcase(msg), ~w(hi ok hey sure)), do: -0.3, else: 0.0
 
     (base + length_bonus + question_bonus + urgency_bonus + noise_penalty)
     |> max(0.0)
@@ -132,7 +141,32 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   # --- Helpers ---
 
-  defp matches_any?(text, keywords) do
-    Enum.any?(keywords, fn kw -> String.contains?(text, kw) end)
+  # Word-start boundary matching: "crash" matches "crash" and "crashing"
+  # but not "acrash". Allows morphological variants (suffixed forms).
+  defp matches_word?(text, keywords) when is_list(keywords) do
+    Enum.any?(keywords, fn kw ->
+      Regex.match?(~r/\b#{Regex.escape(kw)}/, text)
+    end)
+  end
+
+  # Strict whole-word matching for short keywords prone to false positives
+  # as prefixes of other words: "do" matches "do this" but NOT "document" or "done".
+  defp matches_word_strict?(text, keyword) do
+    Regex.match?(~r/\b#{Regex.escape(keyword)}\b/, text)
+  end
+
+  # Strict whole-word matching for a list of short keywords.
+  defp matches_any_word_strict?(text, keywords) when is_list(keywords) do
+    Enum.any?(keywords, fn kw ->
+      Regex.match?(~r/\b#{Regex.escape(kw)}\b/, text)
+    end)
+  end
+
+  # Phrase matching: checks if the text contains any of the given multi-word phrases.
+  # Each phrase is matched as a contiguous substring with word boundaries.
+  defp matches_phrase?(text, phrases) when is_list(phrases) do
+    Enum.any?(phrases, fn phrase ->
+      Regex.match?(~r/\b#{Regex.escape(phrase)}\b/, text)
+    end)
   end
 end
