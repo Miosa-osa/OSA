@@ -15,6 +15,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Machines
   alias OptimalSystemAgent.Channels.HTTP.Auth
 
+  @known_channels %{
+    "cli" => :cli,
+    "http" => :http,
+    "telegram" => :telegram,
+    "discord" => :discord,
+    "slack" => :slack,
+    "whatsapp" => :whatsapp,
+    "webhook" => :webhook,
+    "filesystem" => :filesystem
+  }
+
   plug :authenticate
   plug :match
 
@@ -82,30 +93,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   get "/stream/:session_id" do
     session_id = conn.params["session_id"]
+    user_id = conn.assigns[:user_id]
 
-    # Subscribe to this session's PubSub events
-    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+    # Validate session ownership before allowing SSE subscription
+    case validate_session_owner(session_id, user_id) do
+      :ok ->
+        # Subscribe to this session's PubSub events
+        Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
 
-    conn =
-      conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      |> put_resp_header("connection", "keep-alive")
-      |> put_resp_header("x-accel-buffering", "no")
-      |> send_chunked(200)
+        conn =
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> put_resp_header("cache-control", "no-cache")
+          |> put_resp_header("connection", "keep-alive")
+          |> put_resp_header("x-accel-buffering", "no")
+          |> send_chunked(200)
 
-    # Send initial connection event
-    {:ok, conn} = chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
+        # Send initial connection event
+        {:ok, conn} = chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
-    # Enter SSE loop — blocks until client disconnects
-    sse_loop(conn, session_id)
+        # Enter SSE loop — blocks until client disconnects
+        sse_loop(conn, session_id)
+
+      {:error, :not_found} ->
+        json_error(conn, 404, "not_found", "Session not found")
+    end
   end
 
   # ── POST /classify ──────────────────────────────────────────────────
 
   post "/classify" do
     with %{"message" => message} <- conn.body_params do
-      channel = (conn.body_params["channel"] || "http") |> String.to_atom()
+      channel = parse_channel(conn.body_params["channel"])
       signal = Classifier.classify(message, channel)
 
       body = Jason.encode!(%{signal: signal_to_map(signal)})
@@ -241,6 +260,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
+  # ── Session Ownership Validation ────────────────────────────────────
+
+  defp validate_session_owner(session_id, _user_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] when is_pid(pid) ->
+        # TODO: Add Loop.get_owner(session_id) for strict per-user ownership validation
+        :ok
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
   # ── SSE Loop ────────────────────────────────────────────────────────
 
   defp sse_loop(conn, session_id) do
@@ -295,6 +327,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       channel: signal.channel,
       timestamp: signal.timestamp |> DateTime.to_iso8601()
     }
+  end
+
+  defp parse_channel(nil), do: :http
+  defp parse_channel(name) when is_binary(name) do
+    Map.get(@known_channels, String.downcase(name), :http)
   end
 
   defp generate_session_id do

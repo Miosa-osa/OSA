@@ -51,9 +51,6 @@ defmodule OptimalSystemAgent.Application do
       # Channel adapters
       {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
 
-      # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
-      {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
-
       # Agent processes
       OptimalSystemAgent.Agent.Memory,
       OptimalSystemAgent.Agent.Scheduler,
@@ -62,6 +59,10 @@ defmodule OptimalSystemAgent.Application do
 
       # Communication intelligence (Signal Theory unique)
       OptimalSystemAgent.Intelligence.Supervisor,
+
+      # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
+      # Started LAST so all agent processes are ready before accepting requests
+      {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
     ]
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]

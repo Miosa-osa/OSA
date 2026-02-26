@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Context
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Signal.Classifier
+  alias OptimalSystemAgent.Signal.NoiseFilter
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
   alias OptimalSystemAgent.Events.Bus
@@ -31,6 +32,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :session_id,
     :user_id,
     :channel,
+    :current_signal,
     messages: [],
     iteration: 0,
     status: :idle,
@@ -63,29 +65,35 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call({:process, message}, _from, state) do
-    # 1. Classify the incoming signal
-    signal = Classifier.classify(message, state.channel)
+    # 1. Filter noise before classifying — two-tier deterministic + LLM check
+    case NoiseFilter.filter(message) do
+      {:noise, reason} ->
+        Logger.debug("Signal filtered as noise: #{reason}")
+        signal = Classifier.classify(message, state.channel)
+        Bus.emit(:system_event, %{event: :signal_filtered, signal: signal, reason: reason})
+        {:reply, {:filtered, signal}, state}
 
-    # 2. Check noise filter
-    if signal.weight < noise_threshold() do
-      Logger.debug("Signal filtered as noise: weight=#{signal.weight}")
-      Bus.emit(:system_event, %{event: :signal_filtered, signal: signal, reason: :low_weight})
-      {:reply, {:filtered, signal}, state}
-    else
-      # 3. Persist user message to JSONL session storage
-      Memory.append(state.session_id, %{role: "user", content: message})
+      {:signal, _weight} ->
+        # 2. Classify the signal fully
+        signal = Classifier.classify(message, state.channel)
 
-      # 4. Process through agent loop
-      state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
-      {response, state} = run_loop(state)
-      state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+        # 3. Persist user message to JSONL session storage
+        Memory.append(state.session_id, %{role: "user", content: message})
 
-      # 5. Persist assistant response to JSONL session storage
-      Memory.append(state.session_id, %{role: "assistant", content: response})
+        # 4. Compact message history if needed, then process through agent loop
+        compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+        state = %{state | messages: compacted, current_signal: signal}
 
-      Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+        state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
+        {response, state} = run_loop(state)
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
 
-      {:reply, {:ok, response}, state}
+        # 5. Persist assistant response to JSONL session storage
+        Memory.append(state.session_id, %{role: "assistant", content: response})
+
+        Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+
+        {:reply, {:ok, response}, state}
     end
   end
 
@@ -97,8 +105,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   defp run_loop(state) do
-    # Build context
-    context = Context.build(state)
+    # Build context (passes current signal for signal-aware system prompt)
+    context = Context.build(state, state.current_signal)
 
     # Call LLM
     case Providers.chat(context.messages, tools: state.tools, temperature: temperature()) do
@@ -137,8 +145,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # --- Helpers ---
 
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
-
-  defp noise_threshold, do: Application.get_env(:optimal_system_agent, :noise_filter_threshold, 0.6)
 
   defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
 end

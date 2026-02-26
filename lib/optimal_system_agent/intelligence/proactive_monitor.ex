@@ -6,9 +6,6 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
   - Engagement drops: reduced message frequency
   - Follow-up needed: commitments made but not fulfilled
 
-  This is the L3+ proactive behavior that differentiates
-  premium from free agents.
-
   Signal Theory — autonomous pattern detection and intervention.
   """
   use GenServer
