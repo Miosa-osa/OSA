@@ -1,0 +1,68 @@
+{
+  "provider": "ollama",
+  "ollama": {
+    "url": "http://localhost:11434",
+    "model": "llama3.2:latest"
+  },
+  "anthropic": {
+    "model": "claude-opus-4-6"
+  },
+  "openai": {
+    "url": "https://api.openai.com/v1",
+    "model": "gpt-4o"
+  },
+  "machines": {
+    "communication": true,
+    "productivity": true,
+    "research": true
+  },
+  "agent": {
+    "max_iterations": 20,
+    "temperature": 0.7,
+    "max_tokens": 4096,
+    "noise_filter_threshold": 0.6
+  },
+  "compaction": {
+    "warn_threshold": 0.80,
+    "aggressive_threshold": 0.85,
+    "emergency_threshold": 0.95
+  },
+  "scheduler": {
+    "heartbeat_interval_minutes": 30,
+    "circuit_breaker_max_failures": 3
+  },
+  "http": {
+    "port": 8089,
+    "require_auth": false
+  },
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "bot_token_env": "TELEGRAM_BOT_TOKEN"
+    },
+    "discord": {
+      "enabled": false,
+      "bot_token_env": "DISCORD_BOT_TOKEN"
+    },
+    "slack": {
+      "enabled": false,
+      "bot_token_env": "SLACK_BOT_TOKEN",
+      "app_token_env": "SLACK_APP_TOKEN"
+    }
+  },
+  "web_search": {
+    "provider": "brave",
+    "api_key_env": "BRAVE_API_KEY",
+    "max_results": 5
+  },
+  "mcp": {
+    "config_path": "~/.osa/mcp.json"
+  },
+  "paths": {
+    "config_dir": "~/.osa",
+    "skills_dir": "~/.osa/skills",
+    "sessions_dir": "~/.osa/sessions",
+    "data_dir": "~/.osa/data",
+    "bootstrap_dir": "~/.osa"
+  }
+}

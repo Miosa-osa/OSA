@@ -379,9 +379,54 @@ The open-source OSA is the full local agent. MIOSA Premium adds:
 
 [miosa.ai](https://miosa.ai)
 
+## Ready-Made Skills
+
+Drop these into `~/.osa/skills/` and they work immediately — no restart, no rebuild:
+
+| Skill | What It Does |
+|-------|-------------|
+| [Email Assistant](examples/skills/email-assistant/) | Triage inbox, flag urgent, draft replies, track follow-ups |
+| [Daily Briefing](examples/skills/daily-briefing/) | Weather, calendar, news, task priorities — every morning automatically |
+| [Sales Pipeline](examples/skills/sales-pipeline/) | Track deals, catch stalled opportunities, forecast revenue |
+| [Content Writer](examples/skills/content-writer/) | Blog posts, social media, email campaigns — research-first drafting |
+| [Meeting Prep](examples/skills/meeting-prep/) | Research attendees, prep talking points, summarize past interactions |
+
+Copy the skill folder into `~/.osa/skills/` and it's live:
+
+```bash
+cp -r examples/skills/email-assistant ~/.osa/skills/
+# Done. Ask your agent: "triage my inbox"
+```
+
+See the [Skills Guide](docs/skills-guide.md) to write your own.
+
+## Real-World Use Cases
+
+| Use Case | Machines | What Happens |
+|----------|----------|-------------|
+| **Personal AI Assistant** | Core | Daily briefings, email triage, task management, file organization |
+| **Business Operations** | Core + Communication | Sales pipeline monitoring, client follow-ups, meeting prep, revenue alerts |
+| **Content Operations** | Core + Research | Blog drafting, social scheduling, engagement analysis, trend research |
+| **Customer Support** | Core + Communication | Ticket triage via signal classification, auto-categorization, response drafting |
+| **Development Workflow** | Core | Code review, bug triage, sprint planning, documentation |
+| **Research Assistant** | Core + Research | Deep web search, source summarization, knowledge management |
+
+Full details with example prompts: [Use Cases Guide](docs/use-cases.md)
+
+## Documentation
+
+| Doc | What It Covers |
+|-----|---------------|
+| [Getting Started](docs/getting-started.md) | Install, first conversation, add skills, configure providers |
+| [Skills Guide](docs/skills-guide.md) | SKILL.md format, Elixir modules, hot reload, best practices |
+| [HTTP API Reference](docs/http-api.md) | Every endpoint, auth, SSE streaming, error codes |
+| [Architecture](docs/architecture.md) | Signal Theory deep dive, event bus, agent loop, supervision tree |
+| [Use Cases](docs/use-cases.md) | 6 real-world use cases with example prompts |
+| [SDK Architecture](docs/SDK-ARCHITECTURE.md) | SDK design, ADRs, API contract, migration path |
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We prefer **skills over code changes.** Write a SKILL.md, share it with the community. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
