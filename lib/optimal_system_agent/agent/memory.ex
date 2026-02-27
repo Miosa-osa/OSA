@@ -989,6 +989,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
       signal_mode: Map.get(entry, :signal_mode, Map.get(entry, "signal_mode")),
       signal_weight: parse_float(Map.get(entry, :signal_weight, Map.get(entry, "signal_weight"))),
       token_count: parse_int(Map.get(entry, :token_count, Map.get(entry, "token_count"))),
+      channel: get_string(entry, :channel),
       metadata: Map.get(entry, :metadata, Map.get(entry, "metadata", %{}))
     }
 
@@ -1027,6 +1028,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
         |> maybe_put("signal_mode", msg.signal_mode)
         |> maybe_put("signal_weight", msg.signal_weight)
         |> maybe_put("token_count", msg.token_count)
+        |> maybe_put("channel", msg.channel)
       end)
 
     if messages == [], do: nil, else: messages
@@ -1122,6 +1124,13 @@ defmodule OptimalSystemAgent.Agent.Memory do
   end
 
   defp parse_float(_), do: nil
+
+  defp get_string(entry, key) do
+    case Map.get(entry, key, Map.get(entry, to_string(key))) do
+      nil -> nil
+      val -> to_string(val)
+    end
+  end
 
   defp parse_int(nil), do: nil
   defp parse_int(i) when is_integer(i), do: i

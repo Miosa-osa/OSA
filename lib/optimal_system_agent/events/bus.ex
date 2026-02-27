@@ -27,7 +27,7 @@ defmodule OptimalSystemAgent.Events.Bus do
   use GenServer
   require Logger
 
-  @event_types ~w(user_message llm_request llm_response tool_call tool_result agent_response system_event)a
+  @event_types ~w(user_message llm_request llm_response tool_call tool_result agent_response system_event channel_connected channel_disconnected channel_error)a
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -39,13 +39,17 @@ defmodule OptimalSystemAgent.Events.Bus do
     fields = [{:type, event_type}, {:timestamp, System.monotonic_time()} | Map.to_list(payload)]
     event = :gre.make(fields, [:list])
 
-    # Route through the compiled :osa_event_router module
-    # The compiled module filters by type and dispatches to handlers
-    try do
-      :glc.handle(:osa_event_router, event)
-    rescue
-      UndefinedFunctionError -> :ok
-    end
+    # Route through the compiled :osa_event_router module.
+    # Dispatch in a spawned process — goldrush's compiled module can call
+    # into gr_param GenServer (5s default timeout), which hangs when its
+    # ETS tables are in a bad state. An event bus must never block the caller.
+    spawn(fn ->
+      try do
+        :glc.handle(:osa_event_router, event)
+      catch
+        _, _ -> :ok
+      end
+    end)
   end
 
   @doc """

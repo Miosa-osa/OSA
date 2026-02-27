@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Store.Message do
     field(:signal_mode, :string)
     field(:signal_weight, :float)
     field(:token_count, :integer)
+    field(:channel, :string)
     field(:metadata, :map, default: %{})
     timestamps()
   end
@@ -29,6 +30,7 @@ defmodule OptimalSystemAgent.Store.Message do
     :signal_mode,
     :signal_weight,
     :token_count,
+    :channel,
     :metadata
   ]
   @valid_roles ["user", "assistant", "tool", "system"]

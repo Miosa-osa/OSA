@@ -24,6 +24,10 @@ defmodule OptimalSystemAgent.Channels.Manager do
   """
   require Logger
 
+  alias OptimalSystemAgent.Events.Bus
+
+  @osa_dir Path.expand("~/.osa")
+
   @channel_modules [
     OptimalSystemAgent.Channels.Telegram,
     OptimalSystemAgent.Channels.Discord,
@@ -174,6 +178,115 @@ defmodule OptimalSystemAgent.Channels.Manager do
     Enum.map(@channel_modules, &safe_channel_name/1)
   end
 
+  @doc """
+  Start a specific channel adapter by name.
+  Returns `{:ok, pid}`, `{:error, :not_configured}`, or `{:error, reason}`.
+  """
+  def start_channel(channel) when is_atom(channel) do
+    case find_module(channel) do
+      nil ->
+        {:error, :unknown_channel}
+
+      module ->
+        case DynamicSupervisor.start_child(
+               OptimalSystemAgent.Channels.Supervisor,
+               {module, []}
+             ) do
+          {:ok, pid} ->
+            Logger.info("Channels.Manager: Started #{channel} (pid=#{inspect(pid)})")
+            Bus.emit(:channel_connected, %{channel: channel, pid: pid})
+            {:ok, pid}
+
+          {:error, {:already_started, pid}} ->
+            {:ok, pid}
+
+          :ignore ->
+            {:error, :not_configured}
+
+          {:error, reason} ->
+            Bus.emit(:channel_error, %{channel: channel, error: reason})
+            {:error, reason}
+        end
+    end
+  end
+
+  @doc """
+  Stop a specific channel adapter by name.
+  Returns `:ok` or `{:error, reason}`.
+  """
+  def stop_channel(channel) when is_atom(channel) do
+    case find_module(channel) do
+      nil ->
+        {:error, :unknown_channel}
+
+      module ->
+        case Process.whereis(module) do
+          nil ->
+            {:error, :not_running}
+
+          pid ->
+            case DynamicSupervisor.terminate_child(
+                   OptimalSystemAgent.Channels.Supervisor,
+                   pid
+                 ) do
+              :ok ->
+                Logger.info("Channels.Manager: Stopped #{channel}")
+                Bus.emit(:channel_disconnected, %{channel: channel})
+                :ok
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+        end
+    end
+  end
+
+  @doc """
+  Get detailed status for a specific channel.
+  Returns a map with name, module, pid, connected, and configured flags.
+  """
+  def channel_status(channel) when is_atom(channel) do
+    case find_module(channel) do
+      nil ->
+        {:error, :unknown_channel}
+
+      module ->
+        pid = Process.whereis(module)
+        connected = pid_connected?(module, pid)
+        configured = channel_configured?(channel)
+
+        {:ok,
+         %{
+           name: channel,
+           module: module,
+           pid: pid,
+           connected: connected,
+           configured: configured
+         }}
+    end
+  end
+
+  @doc """
+  Test that a channel adapter is alive and responding.
+  Returns `{:ok, :connected}` or `{:error, reason}`.
+  """
+  def test_channel(channel) when is_atom(channel) do
+    case find_module(channel) do
+      nil ->
+        {:error, :unknown_channel}
+
+      module ->
+        pid = Process.whereis(module)
+
+        cond do
+          is_nil(pid) -> {:error, :not_running}
+          not Process.alive?(pid) -> {:error, :process_dead}
+          pid_connected?(module, pid) -> {:ok, :connected}
+          true -> {:error, :not_connected}
+        end
+    end
+  end
+
   # ── Private Helpers ──────────────────────────────────────────────────
 
   defp find_module(channel) when is_atom(channel) do
@@ -201,4 +314,33 @@ defmodule OptimalSystemAgent.Channels.Manager do
   end
 
   defp pid_connected?(_module, nil), do: false
+
+  defp channel_configured?(channel) do
+    config_path = Path.join(@osa_dir, "config.json")
+
+    if File.exists?(config_path) do
+      with {:ok, contents} <- File.read(config_path),
+           {:ok, config} <- Jason.decode(contents) do
+        channels = Map.get(config, "channels", %{})
+        Map.has_key?(channels, to_string(channel))
+      else
+        _ -> false
+      end
+    else
+      # Fall back to checking Application env for known config keys
+      case channel do
+        :telegram -> Application.get_env(:optimal_system_agent, :telegram_token) != nil
+        :discord -> Application.get_env(:optimal_system_agent, :discord_token) != nil
+        :slack -> Application.get_env(:optimal_system_agent, :slack_bot_token) != nil
+        :whatsapp -> Application.get_env(:optimal_system_agent, :whatsapp_token) != nil
+        :signal -> Application.get_env(:optimal_system_agent, :signal_phone) != nil
+        :matrix -> Application.get_env(:optimal_system_agent, :matrix_homeserver) != nil
+        :email -> Application.get_env(:optimal_system_agent, :email_smtp_host) != nil
+        :qq -> Application.get_env(:optimal_system_agent, :qq_appid) != nil
+        :dingtalk -> Application.get_env(:optimal_system_agent, :dingtalk_app_key) != nil
+        :feishu -> Application.get_env(:optimal_system_agent, :feishu_app_id) != nil
+        _ -> false
+      end
+    end
+  end
 end

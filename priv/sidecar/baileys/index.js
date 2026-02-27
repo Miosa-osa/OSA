@@ -5,9 +5,20 @@ const {
   makeCacheableSignalKeyStore,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
+const qrcode = require("qrcode-terminal");
 const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
+
+// Render QR code to a string (capture qrcode-terminal output)
+function renderQrText(qrData) {
+  return new Promise((resolve) => {
+    // qrcode-terminal.generate can accept a callback with the string
+    qrcode.generate(qrData, { small: true }, (qrText) => {
+      resolve(qrText || "");
+    });
+  });
+}
 
 const logger = pino({ level: "warn" }, pino.destination(2)); // stderr
 const authDir =
@@ -60,12 +71,14 @@ async function connect(id) {
       if (qr) {
         qrData = qr;
         connectionState = "qr";
-        if (!connectRespondedIds.has(id)) {
-          connectRespondedIds.add(id);
-          respond(id, { status: "qr", qr });
-        } else {
-          notify("qr_update", { qr });
-        }
+        renderQrText(qr).then((qr_text) => {
+          if (!connectRespondedIds.has(id)) {
+            connectRespondedIds.add(id);
+            respond(id, { status: "qr", qr, qr_text });
+          } else {
+            notify("qr_update", { qr, qr_text });
+          }
+        });
       }
 
       if (connection === "open") {

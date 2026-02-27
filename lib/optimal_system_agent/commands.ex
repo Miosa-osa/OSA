@@ -868,18 +868,18 @@ defmodule OptimalSystemAgent.Commands do
 
           channel ->
             case Manager.channel_status(channel) do
-          {:ok, info} ->
-            output =
-              """
-              Channel: #{info.name}
-                module:     #{inspect(info.module)}
-                pid:        #{inspect(info.pid)}
-                connected:  #{info.connected}
-                configured: #{info.configured}
-              """
-              |> String.trim()
+              {:ok, info} ->
+                output =
+                  """
+                  Channel: #{info.name}
+                    module:     #{inspect(info.module)}
+                    pid:        #{inspect(info.pid)}
+                    connected:  #{info.connected}
+                    configured: #{info.configured}
+                  """
+                  |> String.trim()
 
-            {:command, output}
+                {:command, output}
             end
         end
 
