@@ -32,4 +32,16 @@ defmodule OptimalSystemAgent.SDK.Command do
   def execute(input, session_id \\ "sdk") do
     Commands.execute(input, session_id)
   end
+
+  @doc "List all registered commands (built-in + custom)."
+  @spec list() :: [map()]
+  def list do
+    Commands.list_commands()
+  end
+
+  @doc "Register a custom slash command at runtime."
+  @spec register(String.t(), String.t(), String.t()) :: :ok
+  def register(name, description, template) do
+    Commands.register(name, description, template)
+  end
 end

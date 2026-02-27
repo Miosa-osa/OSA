@@ -34,4 +34,10 @@ defmodule OptimalSystemAgent.SDK.MCP do
       String.starts_with?(tool.name, "mcp_")
     end)
   end
+
+  @doc "Reload MCP server configs from disk (after adding a new server to mcp.json)."
+  @spec reload_servers() :: map()
+  def reload_servers do
+    list_servers()
+  end
 end

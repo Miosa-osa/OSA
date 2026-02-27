@@ -43,4 +43,20 @@ defmodule OptimalSystemAgent.SDK.Hook do
   def metrics do
     Hooks.metrics()
   end
+
+  @doc """
+  Run a hook pipeline synchronously.
+
+  Returns `{:ok, payload}` if all hooks pass, or `{:blocked, reason}` if blocked.
+  """
+  @spec run(hook_event(), map()) :: {:ok, map()} | {:blocked, String.t()}
+  def run(event, payload) do
+    Hooks.run(event, payload)
+  end
+
+  @doc "Run a hook pipeline asynchronously (fire-and-forget)."
+  @spec run_async(hook_event(), map()) :: :ok
+  def run_async(event, payload) do
+    Hooks.run_async(event, payload)
+  end
 end

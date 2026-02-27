@@ -64,4 +64,15 @@ defmodule OptimalSystemAgent.SDK.Budget do
     Application.put_env(:optimal_system_agent, :daily_budget_usd, usd)
     :ok
   end
+
+  @doc """
+  Set monthly budget limit in USD.
+
+  Writes to Application env. Takes effect on next Budget GenServer restart.
+  """
+  @spec set_monthly_limit(float()) :: :ok
+  def set_monthly_limit(usd) when is_number(usd) and usd > 0 do
+    Application.put_env(:optimal_system_agent, :monthly_budget_usd, usd)
+    :ok
+  end
 end

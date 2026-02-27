@@ -78,4 +78,22 @@ defmodule OptimalSystemAgent.SDK.Memory do
   def archive(max_age_days \\ 30) do
     Memory.archive(max_age_days)
   end
+
+  @doc "Append a message entry to a session's persistent history."
+  @spec append(String.t(), map()) :: :ok
+  def append(session_id, entry) when is_map(entry) do
+    Memory.append(session_id, entry)
+  end
+
+  @doc "Resume a session from persistent history (tagged tuple, checks existence)."
+  @spec resume_session(String.t()) :: {:ok, [map()]} | {:error, :not_found}
+  def resume_session(session_id) do
+    Memory.resume_session(session_id)
+  end
+
+  @doc "Get per-session stats (token totals, message counts by role)."
+  @spec session_stats(String.t()) :: map()
+  def session_stats(session_id) do
+    Memory.session_stats(session_id)
+  end
 end

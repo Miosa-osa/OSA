@@ -118,6 +118,18 @@ defmodule OSA.SDK do
     to: OptimalSystemAgent.SDK.Hook,
     as: :register
 
+  @doc "List all registered hooks."
+  defdelegate list_hooks(), to: OptimalSystemAgent.SDK.Hook, as: :list
+
+  @doc "Get hook execution metrics."
+  defdelegate hook_metrics(), to: OptimalSystemAgent.SDK.Hook, as: :metrics
+
+  @doc "Run a hook pipeline synchronously."
+  defdelegate run_hook(event, payload), to: OptimalSystemAgent.SDK.Hook, as: :run
+
+  @doc "Run a hook pipeline asynchronously (fire-and-forget)."
+  defdelegate run_hook_async(event, payload), to: OptimalSystemAgent.SDK.Hook, as: :run_async
+
   # ── Session Management ───────────────────────────────────────────
 
   @doc "Create a new agent session."
@@ -136,6 +148,9 @@ defmodule OSA.SDK do
 
   @doc "Get messages for a session."
   defdelegate get_messages(session_id), to: OptimalSystemAgent.SDK.Session, as: :get_messages
+
+  @doc "Check if a session is alive."
+  defdelegate session_alive?(session_id), to: OptimalSystemAgent.SDK.Session, as: :alive?
 
   # ── Memory ───────────────────────────────────────────────────────
 
@@ -157,6 +172,15 @@ defmodule OSA.SDK do
   @doc "Get memory statistics."
   defdelegate memory_stats(), to: OptimalSystemAgent.SDK.Memory, as: :stats
 
+  @doc "Append a message entry to a session's persistent history."
+  defdelegate append_message(session_id, entry), to: OptimalSystemAgent.SDK.Memory, as: :append
+
+  @doc "Resume a session from persistent history (checks existence)."
+  defdelegate resume_memory_session(session_id), to: OptimalSystemAgent.SDK.Memory, as: :resume_session
+
+  @doc "Get per-session stats (token totals, message counts)."
+  defdelegate session_stats(session_id), to: OptimalSystemAgent.SDK.Memory
+
   # ── Budget ───────────────────────────────────────────────────────
 
   @doc "Check if current spending is within budget limits."
@@ -175,6 +199,9 @@ defmodule OSA.SDK do
 
   @doc "Set daily budget limit in USD."
   defdelegate set_daily_limit(usd), to: OptimalSystemAgent.SDK.Budget
+
+  @doc "Set monthly budget limit in USD."
+  defdelegate set_monthly_limit(usd), to: OptimalSystemAgent.SDK.Budget
 
   # ── Signal Theory ────────────────────────────────────────────────
 
@@ -204,12 +231,33 @@ defmodule OSA.SDK do
   @doc "Map complexity score (1-10) to tier."
   defdelegate tier_for_complexity(complexity), to: OptimalSystemAgent.SDK.Tier
 
+  @doc "Get full tier info (budget, temperature, max_iterations, max_agents)."
+  defdelegate tier_info(tier), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Max response tokens for a tier."
+  defdelegate max_response_tokens(tier), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Temperature setting for a tier."
+  defdelegate temperature(tier), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Max concurrent agents for a tier."
+  defdelegate max_agents(tier), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Max loop iterations for a tier."
+  defdelegate max_iterations(tier), to: OptimalSystemAgent.SDK.Tier
+
   # ── Commands ─────────────────────────────────────────────────────
 
   @doc "Execute a slash command programmatically."
   defdelegate execute_command(input, session_id \\ "sdk"),
     to: OptimalSystemAgent.SDK.Command,
     as: :execute
+
+  @doc "List all registered commands."
+  defdelegate list_commands(), to: OptimalSystemAgent.SDK.Command, as: :list
+
+  @doc "Register a custom slash command at runtime."
+  defdelegate register_command(name, description, template), to: OptimalSystemAgent.SDK.Command, as: :register
 
   # ── MCP ──────────────────────────────────────────────────────────
 
@@ -218,6 +266,9 @@ defmodule OSA.SDK do
 
   @doc "List all MCP-provided tools registered in Skills.Registry."
   defdelegate list_mcp_tools(), to: OptimalSystemAgent.SDK.MCP, as: :list_tools
+
+  @doc "Reload MCP server configs from disk."
+  defdelegate reload_mcp_servers(), to: OptimalSystemAgent.SDK.MCP, as: :reload_servers
 
   # ── Convenience ──────────────────────────────────────────────────
 
