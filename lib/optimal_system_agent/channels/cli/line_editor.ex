@@ -58,13 +58,13 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       }
 
       IO.write(prompt)
-      result = input_loop(state)
-      # In raw mode (-onlcr), \n is just LF without CR — cursor stays at column.
-      # Use \r\n to properly move to column 0 on the next line.
-      IO.write("\r\n")
-      result
+      input_loop(state)
     after
       restore_stty(saved)
+      # After restoring cooked mode, move to next line and erase it.
+      # Terminal mode switch (raw→cooked) causes ghost duplicate of the
+      # input line on some terminals. \e[2K clears that ghost.
+      IO.write("\n\e[2K")
     end
   end
 
