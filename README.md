@@ -748,11 +748,19 @@ The open-source OSA is the full agent. MIOSA Premium adds:
 
 | Doc | What It Covers |
 |-----|---------------|
-| [Getting Started](docs/getting-started.md) | Install, first conversation, configure providers |
-| [Skills Guide](docs/skills-guide.md) | SKILL.md format, Elixir modules, hot reload |
-| [HTTP API Reference](docs/http-api.md) | Every endpoint, auth, SSE, error codes |
-| [Architecture](docs/architecture.md) | Signal Theory, event bus, supervision tree |
-| [SDK Architecture](docs/SDK-ARCHITECTURE.md) | SDK design, API contract, migration path |
+| [Getting Started](docs/getting-started/) | Install, configuration, troubleshooting |
+| [Architecture](docs/architecture/) | Signal Theory, memory & learning, SDK design |
+| [Provider Guides](docs/guides/providers/) | Per-provider setup for all 18 LLM providers |
+| [Channel Guides](docs/guides/channels/) | Per-channel setup for all 12+ messaging channels |
+| [Orchestration](docs/guides/orchestration.md) | Agent roles, waves, swarms, PACT framework |
+| [Hook Pipeline](docs/guides/hooks.md) | 7 events, 16+ hooks, custom hook development |
+| [Skills Guide](docs/guides/skills.md) | SKILL.md format, Elixir modules, hot reload |
+| [CLI Reference](docs/reference/cli.md) | 60+ slash commands organized by category |
+| [HTTP API Reference](docs/reference/http-api.md) | Every endpoint, auth, SSE, error codes |
+| [Deployment](docs/operations/deployment.md) | Docker, systemd, Nginx, production checklist |
+| [Competitors](docs/competitors/) | 14 competitors analyzed, feature matrix |
+| [Roadmap](docs/roadmap/) | 5-phase plan, gap analysis, advantages |
+| [Full Docs Index](docs/README.md) | All 75 documentation files |
 
 ## Contributing
 
