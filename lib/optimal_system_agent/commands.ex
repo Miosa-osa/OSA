@@ -228,6 +228,7 @@ defmodule OptimalSystemAgent.Commands do
       # ── Configuration ──
       {"verbose", "Toggle verbose output", &cmd_verbose/2},
       {"think", "Set reasoning depth", &cmd_think/2},
+      {"plan", "Toggle autonomous plan mode", &cmd_plan/2},
       {"config", "Show runtime configuration", &cmd_config/2},
 
       # ── Agents ──
@@ -345,6 +346,7 @@ defmodule OptimalSystemAgent.Commands do
     Configuration:
       /verbose            Toggle verbose output (signal indicators)
       /think <level>      Set reasoning depth (fast/normal/deep)
+      /plan               Toggle autonomous plan mode
       /config             Show runtime configuration
       /reload             Reload soul + prompt files from disk
 
@@ -780,6 +782,21 @@ defmodule OptimalSystemAgent.Commands do
     new_value = !current
     put_setting(session_id, :verbose, new_value)
     {:command, "Verbose mode: #{if new_value, do: "on", else: "off"}"}
+  end
+
+  defp cmd_plan(_arg, session_id) do
+    case GenServer.call(
+           {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}},
+           :toggle_plan_mode
+         ) do
+      {:ok, true} ->
+        {:command, "Plan mode enabled — complex tasks will show plans for approval"}
+
+      {:ok, false} ->
+        {:command, "Plan mode disabled — all tasks execute immediately"}
+    end
+  rescue
+    _ -> {:command, "Plan mode toggle failed — no active session"}
   end
 
   defp cmd_think(arg, session_id) do

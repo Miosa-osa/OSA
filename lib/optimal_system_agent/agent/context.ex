@@ -180,6 +180,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       # AND the Tier 3 bootstrap_files() — all unified under Soul.
       {Soul.system_prompt(signal), 1, "soul"},
       {runtime_block(state), 1, "runtime"},
+      {plan_mode_block(state), 1, "plan_mode"},
 
       # Tier 2 — HIGH
       {skills_block(), 2, "skills"},
@@ -577,6 +578,38 @@ defmodule OptimalSystemAgent.Agent.Context do
   rescue
     _ -> nil
   end
+
+  @doc false
+  defp plan_mode_block(%{plan_mode: true}) do
+    """
+    ## PLAN MODE — ACTIVE
+
+    You are in PLAN MODE. Do NOT execute any actions or call any tools.
+    Instead, produce a structured implementation plan.
+
+    Your plan MUST follow this format:
+
+    ### Goal
+    One sentence: what will be accomplished.
+
+    ### Steps
+    Numbered list of concrete actions you will take.
+    Each step should be specific enough to execute without ambiguity.
+
+    ### Files
+    List of files you expect to create or modify.
+
+    ### Risks
+    Any edge cases, breaking changes, or concerns.
+
+    ### Estimate
+    Rough scope: trivial / small / medium / large
+
+    Be concise. The user will approve, reject, or request changes before you execute.
+    """
+  end
+
+  defp plan_mode_block(_), do: nil
 
   @doc false
   defp runtime_block(state) do

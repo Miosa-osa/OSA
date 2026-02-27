@@ -35,14 +35,20 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
 
   `lines` is a list of:
     - `{:option, label, value}` — selectable item
+    - `{:input, label, prompt}` — selectable item that drops into free-text input
     - `{:header, text}` — non-selectable header text
     - `:separator` — blank line
 
   `default_index` — 0-based index into the selectable options (default: 0).
+
+  Returns:
+    - `{:selected, value}` — when an `:option` item is chosen
+    - `{:input, text}` — when an `:input` item is chosen and text entered
+    - `nil` — on cancel
   """
-  @spec select(list(), non_neg_integer()) :: term() | nil
+  @spec select(list(), non_neg_integer()) :: {:selected, term()} | {:input, String.t()} | nil
   def select(lines, default_index \\ 0) do
-    options = for {:option, _, _} = opt <- lines, do: opt
+    options = for item <- lines, match?({:option, _, _}, item) or match?({:input, _, _}, item), do: item
 
     if options == [] do
       nil
@@ -70,16 +76,53 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
           clear(total)
           nil
 
-        index ->
-          {:option, label, value} = Enum.at(options, index)
+        {:input_selected, index} ->
+          item = Enum.at(options, index)
+          {_, label, prompt} = item
           clear(total)
           IO.puts("  #{@cyan}#{@cursor}#{label}#{@reset}")
-          value
+
+          # Restore terminal for line input
+          IO.write(@show_cursor)
+          restore_stty(saved)
+          close_tty(tty)
+
+          # Read free-text input
+          case IO.gets("  #{prompt} ") do
+            :eof -> nil
+            text ->
+              trimmed = String.trim(text)
+              if trimmed == "", do: nil, else: {:input, trimmed}
+          end
+
+        index ->
+          item = Enum.at(options, index)
+          case item do
+            {:option, label, value} ->
+              clear(total)
+              IO.puts("  #{@cyan}#{@cursor}#{label}#{@reset}")
+              {:selected, value}
+
+            {:input, label, prompt} ->
+              clear(total)
+              IO.puts("  #{@cyan}#{@cursor}#{label}#{@reset}")
+              IO.write(@show_cursor)
+              restore_stty(saved)
+              close_tty(tty)
+
+              case IO.gets("  #{prompt} ") do
+                :eof -> nil
+                text ->
+                  trimmed = String.trim(text)
+                  if trimmed == "", do: nil, else: {:input, trimmed}
+              end
+          end
       end
     after
+      # Safe cleanup — may already be restored for :input paths
       IO.write(@show_cursor)
-      restore_stty(saved)
-      close_tty(tty)
+      try do restore_stty(saved) rescue _ -> :ok end
+      try do close_tty(tty) rescue _ -> :ok end
     end
   end
 
@@ -98,7 +141,10 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
         input_loop(tty, lines, options, new, total)
 
       :enter ->
-        selected
+        case Enum.at(options, selected) do
+          {:input, _, _} -> {:input_selected, selected}
+          _ -> selected
+        end
 
       :ctrl_c ->
         :cancelled
@@ -125,11 +171,20 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
   end
 
   defp build_frame(lines, options, selected) do
-    {:option, _, selected_val} = Enum.at(options, selected)
+    selected_item = Enum.at(options, selected)
+    # Extract a comparable key from the selected item
+    selected_key = item_key(selected_item)
 
     Enum.map(lines, fn
       {:option, label, value} ->
-        if value == selected_val do
+        if {:option, value} == selected_key do
+          "#{@clear_line}  #{@bold}#{@cyan}#{@cursor}#{label}#{@reset}\n"
+        else
+          "#{@clear_line}  #{@blank}#{label}\n"
+        end
+
+      {:input, label, _prompt} ->
+        if {:input, label} == selected_key do
           "#{@clear_line}  #{@bold}#{@cyan}#{@cursor}#{label}#{@reset}\n"
         else
           "#{@clear_line}  #{@blank}#{label}\n"
@@ -142,6 +197,9 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
         "#{@clear_line}\n"
     end)
   end
+
+  defp item_key({:option, _label, value}), do: {:option, value}
+  defp item_key({:input, label, _prompt}), do: {:input, label}
 
   # ── Terminal I/O ──────────────────────────────────────────────
 
@@ -197,7 +255,11 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
   defp select_fallback(options, default_index) do
     options
     |> Enum.with_index(1)
-    |> Enum.each(fn {{:option, label, _}, num} ->
+    |> Enum.each(fn {item, num} ->
+      label = case item do
+        {:option, l, _} -> l
+        {:input, l, _} -> l
+      end
       IO.puts("  #{num}. #{label}")
     end)
 
@@ -206,26 +268,34 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
 
     case IO.gets("  > [#{default_num}]: ") do
       :eof ->
-        {:option, _, value} = Enum.at(options, default_index)
-        value
+        fallback_select_item(Enum.at(options, default_index))
 
       input ->
         trimmed = String.trim(input)
 
         if trimmed == "" do
-          {:option, _, value} = Enum.at(options, default_index)
-          value
+          fallback_select_item(Enum.at(options, default_index))
         else
           case Integer.parse(trimmed) do
             {n, ""} when n >= 1 and n <= max ->
-              {:option, _, value} = Enum.at(options, n - 1)
-              value
+              fallback_select_item(Enum.at(options, n - 1))
 
             _ ->
               IO.puts("  #{@dim}Invalid choice (1-#{max}). Try again.#{@reset}")
               select_fallback(options, default_index)
           end
         end
+    end
+  end
+
+  defp fallback_select_item({:option, _label, value}), do: {:selected, value}
+
+  defp fallback_select_item({:input, _label, prompt}) do
+    case IO.gets("  #{prompt} ") do
+      :eof -> nil
+      text ->
+        trimmed = String.trim(text)
+        if trimmed == "", do: nil, else: {:input, trimmed}
     end
   end
 end

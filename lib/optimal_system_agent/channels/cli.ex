@@ -9,7 +9,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
-  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, Spinner}
+  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, PlanReview, Spinner}
   alias OptimalSystemAgent.Commands
   alias OptimalSystemAgent.Events.Bus
 
@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   @cyan IO.ANSI.cyan()
   @yellow IO.ANSI.yellow()
   @white IO.ANSI.white()
+  @green IO.ANSI.green()
 
   @max_history 100
 
@@ -42,7 +43,8 @@ defmodule OptimalSystemAgent.Channels.CLI do
   end
 
   defp loop(session_id) do
-    prompt = "#{@bold}#{@cyan}> #{@reset}"
+    dir = prompt_dir()
+    prompt = "#{@dim}#{dir}#{@reset} #{@bold}#{@cyan}>#{@reset} "
     history = get_history(session_id)
 
     case LineEditor.readline(prompt, history) do
@@ -267,7 +269,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   # ── Agent Communication ─────────────────────────────────────────────
 
-  defp send_to_agent(input, session_id) do
+  defp send_to_agent(input, session_id, opts \\ []) do
     spinner = Spinner.start()
 
     # Register per-request event handlers that forward to spinner.
@@ -302,7 +304,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
       end
     end)
 
-    result = Loop.process_message(session_id, input)
+    result = Loop.process_message(session_id, input, opts)
 
     # Clean up per-request handlers to prevent accumulation
     Bus.unregister_handler(:tool_call, tool_ref)
@@ -311,15 +313,15 @@ defmodule OptimalSystemAgent.Channels.CLI do
     case result do
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-
-        # Show completion summary
-        show_completion_line(elapsed_ms, tool_count, total_tokens)
-
-        # Check for signal metadata from the Bus event handler
         signal = get_cached_signal(session_id)
-        maybe_show_signal(signal, session_id)
-
+        show_status_line(elapsed_ms, tool_count, total_tokens, signal)
         print_response(response)
+        print_separator()
+
+      {:plan, plan_text, _signal} ->
+        {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
+        show_status_line(elapsed_ms, 0, total_tokens, nil)
+        handle_plan_review(plan_text, input, session_id, 0)
 
       {:error, reason} ->
         Spinner.stop(spinner)
@@ -327,12 +329,109 @@ defmodule OptimalSystemAgent.Channels.CLI do
     end
   end
 
-  defp show_completion_line(elapsed_ms, tool_count, total_tokens) do
-    parts = [format_elapsed(elapsed_ms)]
+  @max_plan_revisions 5
+
+  defp handle_plan_review(_plan_text, _original_input, _session_id, revision)
+       when revision >= @max_plan_revisions do
+    IO.puts("#{@dim}  ✗ Max revisions reached — plan cancelled#{@reset}\n")
+  end
+
+  defp handle_plan_review(plan_text, original_input, session_id, revision) do
+    case PlanReview.review(plan_text) do
+      :approved ->
+        IO.puts("#{@dim}  ▶ Executing plan...#{@reset}\n")
+        execute_msg = "Execute the following approved plan. Do not re-plan — proceed directly with implementation.\n\n#{plan_text}\n\nOriginal request: #{original_input}"
+        send_to_agent(execute_msg, session_id, skip_plan: true)
+
+      :rejected ->
+        IO.puts("#{@dim}  ✗ Plan rejected#{@reset}\n")
+
+      {:edit, feedback} ->
+        IO.puts("#{@dim}  ↻ Revising plan (#{revision + 1}/#{@max_plan_revisions})...#{@reset}\n")
+        revised_msg = "Revise your plan based on this feedback:\n\n#{feedback}\n\nOriginal plan:\n#{plan_text}\n\nOriginal request: #{original_input}"
+        # Call send_to_agent_for_plan to get the revised plan directly, then loop
+        revised_result = send_to_agent_for_plan(revised_msg, session_id)
+
+        case revised_result do
+          {:plan, new_plan_text} ->
+            handle_plan_review(new_plan_text, original_input, session_id, revision + 1)
+
+          :executed ->
+            :ok
+        end
+    end
+  end
+
+  # Like send_to_agent but returns the plan result instead of recursing
+  defp send_to_agent_for_plan(input, session_id) do
+    spinner = Spinner.start()
+
+    tool_ref = Bus.register_handler(:tool_call, fn payload ->
+      if Process.alive?(spinner) do
+        case payload do
+          %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
+          %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
+          %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
+          _ -> :ok
+        end
+      end
+    end)
+
+    llm_ref = Bus.register_handler(:llm_response, fn payload ->
+      if Process.alive?(spinner) do
+        case payload do
+          %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
+          _ -> :ok
+        end
+      end
+    end)
+
+    result = Loop.process_message(session_id, input)
+
+    Bus.unregister_handler(:tool_call, tool_ref)
+    Bus.unregister_handler(:llm_response, llm_ref)
+
+    case result do
+      {:plan, plan_text, _signal} ->
+        {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
+        show_status_line(elapsed_ms, 0, total_tokens, nil)
+        {:plan, plan_text}
+
+      {:ok, response} ->
+        {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
+        signal = get_cached_signal(session_id)
+        show_status_line(elapsed_ms, tool_count, total_tokens, signal)
+        print_response(response)
+        print_separator()
+        :executed
+
+      {:error, reason} ->
+        Spinner.stop(spinner)
+        IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
+        :executed
+    end
+  end
+
+  defp show_status_line(elapsed_ms, tool_count, total_tokens, signal) do
+    parts = ["#{@green}✓#{@dim} " <> format_elapsed(elapsed_ms)]
     parts = if tool_count > 0, do: parts ++ ["#{tool_count} tools"], else: parts
     parts = if total_tokens > 0, do: parts ++ [format_tokens(total_tokens)], else: parts
 
-    IO.puts("#{@dim}  ✓ #{Enum.join(parts, " · ")}#{@reset}")
+    parts =
+      case signal do
+        %{mode: mode, genre: genre, weight: weight} ->
+          parts ++ ["#{mode} · #{genre} · w#{Float.round(weight, 1)}"]
+
+        _ ->
+          parts
+      end
+
+    IO.puts("#{@dim}  #{Enum.join(parts, " · ")}#{@reset}")
+  end
+
+  defp print_separator do
+    width = min(terminal_width() - 4, 72)
+    IO.puts("#{@dim}  #{String.duplicate("─", width)}#{@reset}\n")
   end
 
   defp format_elapsed(ms) when ms < 1_000, do: "<1s"
@@ -346,17 +445,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
   defp format_tokens(0), do: ""
   defp format_tokens(n) when n < 1_000, do: "↓ #{n}"
   defp format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
-
-  # ── Signal Classification Indicator ─────────────────────────────────
-
-  defp maybe_show_signal(nil, _session_id), do: :ok
-
-  defp maybe_show_signal(signal, _session_id) do
-    mode = signal.mode |> to_string()
-    genre = signal.genre |> to_string()
-    weight = Float.round(signal.weight, 1)
-    IO.puts("#{@dim}  #{mode} · #{genre} · w#{weight}#{@reset}")
-  end
 
   # ── History ──────────────────────────────────────────────────────────
 
@@ -403,6 +491,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
     git_hash = git_short_hash()
+    cwd = prompt_dir()
 
     IO.puts("""
     #{@bold}#{@cyan}
@@ -412,10 +501,10 @@ defmodule OptimalSystemAgent.Channels.CLI do
     ██║   ██║╚════██║██╔══██║
     ╚██████╔╝███████║██║  ██║
      ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}
-    #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}#{version} (#{git_hash}) — Signal Theory Architecture#{@reset}
-
-    #{@dim}#{provider} / #{model} | #{skill_count} skills | soul: #{soul_status}#{@reset}
-    #{@dim}/help#{@reset}#{@dim} commands  •  #{@bold}/model#{@reset}#{@dim} switch providers  •  #{@bold}exit#{@reset}#{@dim} quit#{@reset}
+    #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset}
+    #{@dim}#{provider} / #{model} · #{skill_count} skills · soul: #{soul_status}#{@reset}
+    #{@dim}#{cwd}#{@reset}
+    #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
     """)
   end
 
@@ -492,6 +581,21 @@ defmodule OptimalSystemAgent.Channels.CLI do
       end
     end)
     |> Enum.reverse()
+  end
+
+  # ── Directory Display ──────────────────────────────────────────────
+
+  defp prompt_dir do
+    cwd = File.cwd!()
+    home = System.get_env("HOME") || ""
+
+    if home != "" and String.starts_with?(cwd, home) do
+      "~" <> String.trim_leading(cwd, home)
+    else
+      cwd
+    end
+  rescue
+    _ -> "."
   end
 
   # ── Terminal Helpers ────────────────────────────────────────────────

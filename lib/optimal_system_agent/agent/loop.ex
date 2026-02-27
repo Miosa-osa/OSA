@@ -36,7 +36,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     messages: [],
     iteration: 0,
     status: :idle,
-    tools: []
+    tools: [],
+    plan_mode: false,
+    plan_mode_enabled: true
   ]
 
   # --- Client API ---
@@ -46,8 +48,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     GenServer.start_link(__MODULE__, opts, name: via(session_id))
   end
 
-  def process_message(session_id, message) do
-    GenServer.call(via(session_id), {:process, message}, :infinity)
+  def process_message(session_id, message, opts \\ []) do
+    GenServer.call(via(session_id), {:process, message, opts}, :infinity)
   end
 
   # --- Server Callbacks ---
@@ -64,7 +66,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @impl true
-  def handle_call({:process, message}, _from, state) do
+  def handle_call({:process, message}, from, state) do
+    handle_call({:process, message, []}, from, state)
+  end
+
+  @impl true
+  def handle_call({:process, message, opts}, _from, state) do
+    skip_plan = Keyword.get(opts, :skip_plan, false)
+
     # 1. Classify the signal — every user message is a signal, weight determines priority
     signal = Classifier.classify(message, state.channel)
 
@@ -88,15 +97,58 @@ defmodule OptimalSystemAgent.Agent.Loop do
     state = %{state | messages: compacted, current_signal: signal}
 
     state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
-    {response, state} = run_loop(state)
-    state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
 
-    # 5. Persist assistant response to JSONL session storage
-    Memory.append(state.session_id, %{role: "assistant", content: response})
+    # 5. Check if plan mode should trigger
+    if not skip_plan and should_plan?(signal, state) do
+      # Plan mode: single LLM call with plan overlay, no tools
+      state = %{state | plan_mode: true}
+      context = Context.build(state, signal)
 
-    Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+      Bus.emit(:llm_request, %{session_id: state.session_id, iteration: 0})
+      start_time = System.monotonic_time(:millisecond)
 
-    {:reply, {:ok, response}, state}
+      result = Providers.chat(context.messages, tools: [], temperature: 0.3)
+
+      duration_ms = System.monotonic_time(:millisecond) - start_time
+      usage = case result do
+        {:ok, resp} -> Map.get(resp, :usage, %{})
+        _ -> %{}
+      end
+      Bus.emit(:llm_response, %{session_id: state.session_id, duration_ms: duration_ms, usage: usage})
+
+      case result do
+        {:ok, %{content: plan_text}} ->
+          state = %{state | plan_mode: false, status: :idle}
+          {:reply, {:plan, plan_text, signal}, state}
+
+        {:error, reason} ->
+          # Fall through to normal execution on plan failure
+          Logger.warning("Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution")
+          state = %{state | plan_mode: false}
+          {response, state} = run_loop(state)
+          state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+          Memory.append(state.session_id, %{role: "assistant", content: response})
+          Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+          {:reply, {:ok, response}, state}
+      end
+    else
+      # Normal execution path
+      {response, state} = run_loop(state)
+      state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+
+      # 6. Persist assistant response to JSONL session storage
+      Memory.append(state.session_id, %{role: "assistant", content: response})
+
+      Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+
+      {:reply, {:ok, response}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:toggle_plan_mode, _from, state) do
+    new_val = not state.plan_mode_enabled
+    {:reply, {:ok, new_val}, %{state | plan_mode_enabled: new_val}}
   end
 
   # --- Agent Loop ---
@@ -177,6 +229,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
     args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")
   end
   defp tool_call_hint(_), do: ""
+
+  # --- Plan Mode ---
+
+  defp should_plan?(signal, state) do
+    # Plan mode triggers for high-weight action signals only.
+    # The skip_plan: true opt (passed by CLI on approved plan execution)
+    # bypasses this check entirely at the handle_call level.
+    # :analyze excluded — read-only tasks don't benefit from plan approval.
+    state.plan_mode_enabled and
+      not state.plan_mode and
+      signal.mode in [:build, :execute, :maintain] and
+      signal.weight >= 0.75 and
+      signal.type in ["request", "general"]
+  end
 
   # --- Helpers ---
 

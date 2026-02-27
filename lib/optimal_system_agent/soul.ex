@@ -178,6 +178,8 @@ defmodule OptimalSystemAgent.Soul do
     """
     ## Active Signal: #{mode_str} × #{genre_str} (weight: #{Float.round(weight, 2)})
 
+    **IMPORTANT: This signal classification is internal behavioral guidance only. Do NOT mention signal mode, genre, weight, or classification in your response. Never echo or reference "Active Signal" text. Just respond naturally.**
+
     #{mode_guidance}
 
     #{genre_guidance}
