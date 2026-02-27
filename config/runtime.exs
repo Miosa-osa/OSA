@@ -1,5 +1,28 @@
 import Config
 
+# ── Helper functions for env var parsing ─────────────────────────────────
+parse_float = fn
+  nil, default ->
+    default
+
+  str, default ->
+    case Float.parse(str) do
+      {val, _} -> val
+      :error -> default
+    end
+end
+
+parse_int = fn
+  nil, default ->
+    default
+
+  str, default ->
+    case Integer.parse(str) do
+      {val, _} -> val
+      :error -> default
+    end
+end
+
 # ── .env file loading ──────────────────────────────────────────────────
 # Load .env from project root OR ~/.osa/.env (project root takes priority).
 # Only sets vars that aren't already in the environment (explicit env wins).
@@ -12,8 +35,12 @@ for env_path <- [Path.expand(".env"), Path.expand("~/.osa/.env")] do
       line = String.trim(line)
 
       case line do
-        "#" <> _ -> :skip
-        "" -> :skip
+        "#" <> _ ->
+          :skip
+
+        "" ->
+          :skip
+
         _ ->
           case String.split(line, "=", parts: 2) do
             [key, value] ->
@@ -68,4 +95,31 @@ config :optimal_system_agent,
 
   # HTTP channel
   shared_secret: System.get_env("OSA_SHARED_SECRET") || "osa-dev-secret-change-me",
-  require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true"
+  require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true",
+
+  # Budget limits (USD)
+  budget_daily_limit_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
+  budget_monthly_limit_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), 500.0),
+  budget_per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), 5.0),
+
+  # Treasury
+  treasury_enabled: System.get_env("OSA_TREASURY_ENABLED") == "true",
+  treasury_daily_limit_usd: parse_float.(System.get_env("OSA_TREASURY_DAILY_LIMIT"), 250.0),
+  treasury_max_single_usd: parse_float.(System.get_env("OSA_TREASURY_MAX_SINGLE"), 50.0),
+
+  # Fleet management
+  fleet_enabled: System.get_env("OSA_FLEET_ENABLED") == "true",
+
+  # Wallet integration
+  wallet_enabled: System.get_env("OSA_WALLET_ENABLED") == "true",
+  wallet_provider: System.get_env("OSA_WALLET_PROVIDER") || "mock",
+  wallet_address: System.get_env("OSA_WALLET_ADDRESS"),
+  wallet_rpc_url: System.get_env("OSA_WALLET_RPC_URL"),
+
+  # OTA updates
+  update_enabled: System.get_env("OSA_UPDATE_ENABLED") == "true",
+  update_url: System.get_env("OSA_UPDATE_URL"),
+  update_interval: parse_int.(System.get_env("OSA_UPDATE_INTERVAL"), 86_400_000),
+
+  # Quiet hours for heartbeat
+  quiet_hours: System.get_env("OSA_QUIET_HOURS")

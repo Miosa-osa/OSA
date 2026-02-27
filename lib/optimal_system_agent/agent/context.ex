@@ -179,6 +179,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       # This replaces the old hard-coded identity_block() AND signal_block()
       # AND the Tier 3 bootstrap_files() — all unified under Soul.
       {Soul.system_prompt(signal), 1, "soul"},
+      {tool_process_block(), 1, "tool_process"},
       {runtime_block(state), 1, "runtime"},
       {plan_mode_block(state), 1, "plan_mode"},
 
@@ -287,13 +288,18 @@ defmodule OptimalSystemAgent.Agent.Context do
       # Tool calls add tokens for function names and arguments
       tool_call_tokens =
         case Map.get(msg, :tool_calls) do
-          nil -> 0
-          [] -> 0
+          nil ->
+            0
+
+          [] ->
+            0
+
           calls when is_list(calls) ->
             Enum.reduce(calls, 0, fn tc, tc_acc ->
               name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
               arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
-              tc_acc + name_tokens + arg_tokens + 4  # overhead per tool call
+              # overhead per tool call
+              tc_acc + name_tokens + arg_tokens + 4
             end)
         end
 
@@ -389,8 +395,12 @@ defmodule OptimalSystemAgent.Agent.Context do
     full = full_recall()
 
     case full do
-      nil -> nil
-      "" -> nil
+      nil ->
+        nil
+
+      "" ->
+        nil
+
       text ->
         query_words =
           query
@@ -420,7 +430,8 @@ defmodule OptimalSystemAgent.Agent.Context do
             end)
 
           case relevant do
-            [] -> text  # No matches — include everything rather than nothing
+            # No matches — include everything rather than nothing
+            [] -> text
             _ -> Enum.join(relevant, "\n\n")
           end
         end
@@ -467,7 +478,13 @@ defmodule OptimalSystemAgent.Agent.Context do
   @doc false
   defp skills_block do
     skills = Skills.list_skill_docs()
-    tools = try do Skills.list_tools() rescue _ -> [] end
+
+    tools =
+      try do
+        Skills.list_tools()
+      rescue
+        _ -> []
+      end
 
     case skills do
       [] ->
@@ -610,6 +627,69 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   defp plan_mode_block(_), do: nil
+
+  @doc false
+  defp tool_process_block do
+    cwd = File.cwd!()
+
+    """
+    ## How to Use Tools
+
+    You have tools available. Use them proactively to accomplish tasks. Follow this process:
+
+    ### Process
+
+    1. **Read the user's request.** Understand what they need.
+    2. **Decide if tools are needed.** Simple conversation = no tools. Tasks involving files, commands, search, or memory = use tools.
+    3. **Call ONE tool at a time.** Wait for the result before deciding what to do next.
+    4. **Use the result.** Read the tool output, then decide: call another tool, or respond to the user.
+    5. **Respond when done.** Summarize what you did and the results.
+
+    ### When to Use Each Tool
+
+    - **file_read** — When the user mentions a file, asks about code, or you need to understand existing content. Always read before modifying.
+      Example: User says "fix the bug in main.py" → call file_read with path "main.py" first.
+
+    - **file_write** — When you need to create or modify a file. Read the file first if it exists.
+      Example: After reading and understanding a file, write the fixed version.
+
+    - **shell_execute** — When you need to run commands: install packages, run tests, check git status, list files, compile code.
+      Example: User says "run the tests" → call shell_execute with command "mix test" or "npm test".
+      Example: User says "what files are here" → call shell_execute with command "ls -la".
+
+    - **web_search** — When you need current information, documentation, or answers to factual questions.
+      Example: User asks about a library API → search for it.
+
+    - **memory_save** — When the user tells you something important to remember, or you learn a preference.
+      Example: User says "I always use tabs" → save that preference.
+
+    - **orchestrate** — Only for complex multi-part tasks that benefit from parallel sub-agents.
+
+    ### When NOT to Use Tools
+
+    - Greetings and casual conversation ("hey", "thanks", "what's up")
+    - Questions you can answer from your training knowledge
+    - Opinions or recommendations that don't require looking at files
+
+    ### Important Rules
+
+    - **Always read before writing.** Never modify a file you haven't read first.
+    - **One tool call per turn.** Call one tool, get the result, then decide the next step.
+    - **Use absolute paths.** The current working directory is: #{cwd}
+    - **Show your work.** After using tools, tell the user what you found or did.
+    - **Be proactive.** If the user asks to "fix" something, read the file, find the issue, fix it, and verify — don't just suggest changes.
+
+    ### Sequential Workflow Example
+
+    User: "There's a bug in lib/app.ex, the function crashes on empty input"
+
+    Step 1: Call file_read(path: "lib/app.ex") → read the file
+    Step 2: Identify the bug in the code
+    Step 3: Call file_write(path: "lib/app.ex", content: <fixed code>) → write the fix
+    Step 4: Call shell_execute(command: "mix test") → verify the fix works
+    Step 5: Tell the user what was wrong and how you fixed it
+    """
+  end
 
   @doc false
   defp runtime_block(state) do

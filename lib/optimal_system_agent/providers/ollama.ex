@@ -18,7 +18,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   require Logger
 
   # Models known to handle tool calling well (name prefix → min size in GB)
-  @tool_capable_prefixes ~w(qwen3 qwen2.5 llama3.3 llama3.1 gemma3 glm-4 mistral mixtral deepseek command-r)
+  # Include both hyphenated and non-hyphenated variants (glm-4 AND glm4)
+  @tool_capable_prefixes ~w(qwen3 qwen2.5 llama3.3 llama3.1 gemma3 glm-4 glm4 mistral mixtral deepseek command-r)
 
   # Minimum model size (in bytes) to enable tool calling — ~14B params ≈ 8GB on disk
   @tool_min_size 7_000_000_000
@@ -46,7 +47,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           current = Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
           if best.name != current do
-            Logger.info("[Ollama] Auto-selected model: #{best.name} (#{Float.round(best.size / 1.0e9, 1)} GB)")
+            Logger.info(
+              "[Ollama] Auto-selected model: #{best.name} (#{Float.round(best.size / 1.0e9, 1)} GB)"
+            )
+
             Application.put_env(:optimal_system_agent, :ollama_model, best.name)
           end
         end
@@ -85,7 +89,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @impl true
   def chat(messages, opts \\ []) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
     body =
       %{
@@ -125,13 +132,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       models
       |> Enum.filter(fn m ->
         name = String.downcase(m.name)
+
         m.size >= @tool_min_size and
           Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1))
       end)
       |> Enum.sort_by(& &1.size, :desc)
 
     case tool_capable do
-      [best | _] -> best
+      [best | _] ->
+        best
+
       [] ->
         # Fallback: just pick the largest model ≥ 4GB
         models
@@ -148,6 +158,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @spec model_supports_tools?(String.t()) :: boolean()
   def model_supports_tools?(model_name) do
     name = String.downcase(model_name)
+
     Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1)) and
       not String.contains?(name, ":1.") and
       not String.contains?(name, ":3b")
@@ -168,8 +179,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   defp maybe_add_tools(body, model, opts) do
     case Keyword.get(opts, :tools) do
-      nil -> body
-      [] -> body
+      nil ->
+        body
+
+      [] ->
+        body
+
       tools ->
         if model_supports_tools?(model) do
           Map.put(body, :tools, format_tools(tools))
