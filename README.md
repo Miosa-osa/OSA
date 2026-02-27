@@ -1,11 +1,12 @@
 # OptimalSystemAgent
 
-> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 17 LLM providers, 12 chat channels, and unlimited custom skills. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
+> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 18 LLM providers, 12 chat channels, and unlimited custom skills. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.19+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-28+-green.svg)](https://www.erlang.org)
 [![Tests](https://img.shields.io/badge/Tests-440%20passing-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.2.0-orange.svg)](#)
 
 ---
 
@@ -17,7 +18,7 @@ None of them solve the **intelligence problem.** They're message processors, not
 
 OSA is different. It's grounded in [Signal Theory](https://zenodo.org/records/18774174) — every message is classified, weighted, and routed before a single token of AI compute is spent. Noise gets filtered. Signals get prioritized. Complex tasks get decomposed across multiple agents. The system learns and adapts.
 
-**18,700+ lines of Elixir/OTP. 440 tests. Zero cloud dependency.**
+**28,500+ lines of Elixir/OTP. 440 tests. 147 resource files. Zero cloud dependency.**
 
 ## What Makes OSA Different
 
@@ -155,7 +156,97 @@ No other agent framework has anything like this.
 
 Eight specialized agent roles with dedicated prompts. Mailbox-based inter-agent messaging. Dependency-aware wave execution.
 
-### 10. Docker Container Isolation
+### 10. PACT Framework (Planning → Action → Coordination → Testing)
+
+Structured workflow execution with quality gates at every phase:
+
+```
+Phase 1: PLANNING    — Single planner agent decomposes intent into subtasks
+Phase 2: ACTION      — Parallel workers execute subtasks via Task.async_stream
+Phase 3: COORDINATE  — Synthesize results, resolve conflicts, merge outputs
+Phase 4: TESTING     — Quality scoring, validation, rollback on gate failure
+```
+
+Each phase has a configurable quality gate. If a gate fails, the framework rolls back and re-plans. No garbage gets through.
+
+### 11. Swarm Intelligence
+
+Decentralized multi-agent coordination with 5 specialized roles:
+
+| Role | Purpose |
+|------|---------|
+| **Explorer** | Broad research, surface-level analysis |
+| **Specialist** | Deep-dive on specific domains |
+| **Critic** | Challenge assumptions, find holes |
+| **Synthesizer** | Merge findings into coherent output |
+| **Coordinator** | Manage flow, break deadlocks |
+
+Shared memory via an Agent process. Hypothesis voting system (-1 to +1). Convergence threshold (0.8) determines when the swarm has reached consensus.
+
+### 12. Universal Tier System (18 Providers × 3 Tiers)
+
+Every provider maps to three compute tiers — elite, specialist, utility:
+
+```
+anthropic:  claude-opus-4-6      → claude-sonnet-4-6     → claude-haiku-4-5
+openai:     gpt-4o               → gpt-4o-mini           → gpt-3.5-turbo
+google:     gemini-2.5-pro       → gemini-2.0-flash      → gemini-2.0-flash-lite
+groq:       llama-3.3-70b        → llama-3.1-70b         → llama-3.1-8b-instant
+ollama:     [auto-detected by model size — largest→elite, smallest→utility]
+...and 13 more providers
+```
+
+Ollama tiers are detected dynamically at boot — queries `/api/tags`, sorts installed models by file size, assigns to tiers, caches in `:persistent_term`. No manual config needed.
+
+### 13. Hook Middleware Pipeline
+
+16 hooks fire at lifecycle events (pre_tool_use, post_tool_use, pre_response, session_end):
+
+```
+security_check (p10)        — Block dangerous tool calls
+context_optimizer (p12)     — Track tool load, warn on heavy usage
+mcp_cache (p15)             — Cache MCP schemas in persistent_term
+validate_prompt (p20)       — Keyword→context hints for better prompts
+budget_tracker (p25)        — Token budget enforcement
+quality_check (p30)         — Output quality scoring
+episodic_memory (p60)       — Write JSONL episodes to ~/.osa/learning/
+metrics_dashboard (p80)     — JSONL metrics + periodic summary
+hierarchical_compaction (p95) — 4-tier context utilization alerts
+...and 7 more
+```
+
+Priority-ordered execution. Each hook returns `{:ok, payload}`, `{:block, reason}`, or `:skip`. Blocked = pipeline stops.
+
+### 14. Agent Ecosystem (25 Definitions)
+
+Pre-built agent definitions across 4 categories:
+
+```
+priv/agents/
+├── elite/       — dragon (10K+ RPS), oracle (AI/ML), nova (AI-arch), blitz (<100μs), architect
+├── combat/      — parallel, cache, quantum, angel (K8s)
+├── security/    — security-auditor, red-team, blue-team, purple-team, threat-intel
+└── specialists/ — backend-go, frontend-react, frontend-svelte, database, debugger,
+                   test-automator, code-reviewer, explorer, agent-creator, technical-writer,
+                   dependency-analyzer
+```
+
+Each definition is a markdown file with role prompt, capabilities, and constraints. Loaded at runtime via `Roster.load_definition/1`.
+
+### 15. 63 Slash Commands + 29 Skill Definitions
+
+```
+/commit    /build     /test      /lint      /verify     /create-pr
+/fix       /explain   /debug     /review    /refactor   /agents
+/status    /doctor    /analytics /security-scan          /secret-scan
+/prime-backend        /prime-webdev         /prime-svelte
+/mem-search           /mem-save             /mem-recall
+...and 40+ more
+```
+
+Commands are markdown templates in `priv/commands/` — expanded as prompts at invocation. 29 skill definitions in `priv/skills/` with YAML frontmatter for triggers, priority, and metadata.
+
+### 16. Docker Container Isolation (Optional)
 
 ```bash
 mix osa.sandbox.setup   # Build the sandbox image
@@ -167,29 +258,30 @@ mix osa.sandbox.setup   # Build the sandbox image
 - Warm container pool for instant execution
 - Ubuntu 24.04 base with common dev tools
 
-## 17 LLM Providers
+## 18 LLM Providers
 
-| Provider | Type | Notable |
-|----------|------|---------|
-| **Ollama** | Local | Free, private, no API key |
-| **Anthropic** | Cloud | Native Messages API |
-| **OpenAI** | Cloud | GPT-4o, o1, o3 |
-| **Groq** | Cloud | Ultra-fast inference |
-| **Together** | Cloud | Open-source model hosting |
-| **Fireworks** | Cloud | Fast inference |
-| **DeepSeek** | Cloud | Cost-effective |
-| **Perplexity** | Cloud | Search-augmented |
-| **Mistral** | Cloud | European provider |
-| **Replicate** | Cloud | Model marketplace |
-| **Google** | Cloud | Gemini models |
-| **Cohere** | Cloud | Enterprise NLP |
-| **Qwen** | Cloud | Alibaba Cloud |
-| **Moonshot** | Cloud | Kimi models |
-| **Zhipu** | Cloud | GLM models |
-| **VolcEngine** | Cloud | ByteDance |
-| **Baichuan** | Cloud | Chinese LLM |
+| Provider | Type | Elite Tier | Specialist Tier | Utility Tier |
+|----------|------|-----------|----------------|-------------|
+| **Ollama** | Local | Auto-detected | Auto-detected | Auto-detected |
+| **Anthropic** | Cloud | claude-opus-4-6 | claude-sonnet-4-6 | claude-haiku-4-5 |
+| **OpenAI** | Cloud | gpt-4o | gpt-4o-mini | gpt-3.5-turbo |
+| **Google** | Cloud | gemini-2.5-pro | gemini-2.0-flash | gemini-2.0-flash-lite |
+| **Groq** | Cloud | llama-3.3-70b | llama-3.1-70b | llama-3.1-8b-instant |
+| **DeepSeek** | Cloud | deepseek-reasoner | deepseek-chat | deepseek-chat |
+| **Mistral** | Cloud | mistral-large | mistral-medium | mistral-small |
+| **Together** | Cloud | llama-3.3-70b | llama-3.1-8b | llama-3.2-3b |
+| **Fireworks** | Cloud | llama-3.3-70b | llama-3.1-8b | llama-3.2-3b |
+| **Replicate** | Cloud | llama-3.3-70b | llama-3.1-8b | llama-3.2-3b |
+| **OpenRouter** | Cloud | claude-opus-4-6 | claude-sonnet-4-6 | claude-haiku-4-5 |
+| **Perplexity** | Cloud | sonar-pro | sonar | sonar |
+| **Cohere** | Cloud | command-r-plus | command-r | command-r |
+| **Qwen** | Cloud | qwen-max | qwen-plus | qwen-turbo |
+| **Zhipu** | Cloud | glm-4-plus | glm-4 | glm-4-flash |
+| **Moonshot** | Cloud | moonshot-v1-128k | moonshot-v1-32k | moonshot-v1-8k |
+| **VolcEngine** | Cloud | doubao-pro-128k | doubao-pro-32k | doubao-lite-32k |
+| **Baichuan** | Cloud | Baichuan4 | Baichuan3-Turbo | Baichuan3-Turbo-128k |
 
-Shared `OpenAICompat` base for 13 providers. Native implementations for Anthropic and Ollama. Fallback chain: if primary fails, next provider picks up automatically.
+Shared `OpenAICompat` base for 14 providers. Native implementations for Anthropic and Ollama. Fallback chain: if primary fails, next provider picks up automatically. Every provider has 3-tier model mapping — the system automatically routes to the right model for the task complexity.
 
 ```bash
 export OSA_DEFAULT_PROVIDER=groq
@@ -223,15 +315,20 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 | **Signal classification** | LLM-primary 5-tuple | No | No | No | No | No |
 | **Noise filtering** | Two-tier (1ms + 200ms) | No | No | No | No | No |
 | **Task orchestration** | Multi-agent, dependency-aware | No | No | No | Basic | Basic |
+| **PACT framework** | Plan→Action→Coord→Test w/ quality gates | No | No | No | No | No |
+| **Swarm intelligence** | 5 roles, voting, convergence | No | No | No | No | No |
 | **Communication intelligence** | 5 modules | No | No | No | No | No |
 | **Skill discovery** | Search + suggest + create | No | Plugin system | No | No | No |
 | **Context compression** | 3-zone sliding window | No | No | No | No | No |
 | **Token-budgeted context** | 4-tier priority | No | No | No | No | No |
-| **Memory architecture** | 3-store + inverted index | No | Basic | No | No | No |
-| **LLM providers** | 17 | 3-4 | 17 | 3-4 | 3-4 | 3-4 |
+| **Memory architecture** | 3-store + inverted index + episodic | No | Basic | No | No | No |
+| **Hook middleware** | 16 hooks, priority-ordered pipeline | No | No | No | No | No |
+| **Tier-based model routing** | 18 providers × 3 tiers (auto) | No | No | No | No | No |
+| **LLM providers** | 18 | 3-4 | 17 | 3-4 | 3-4 | 3-4 |
 | **Chat channels** | 12 | IPC only | 10+ | REST | Python | Python |
 | **Container isolation** | Docker sandbox | Docker/Apple | No | No | No | No |
-| **Agent swarms** | 4 patterns, 8 roles | Basic | No | No | Multi-agent | Multi-agent |
+| **Agent definitions** | 25 (4 categories) | Basic | No | No | Multi-agent | Multi-agent |
+| **Slash commands** | 63 template-driven | No | No | No | No | No |
 | **Event routing** | Compiled bytecode (goldrush) | Polling | Python bus | None | None | None |
 | **Fault tolerance** | OTP auto-recovery | Single process | Single process | None | None | None |
 | **Concurrent conversations** | 30+ (BEAM processes) | Queue-based | Sequential | Queue-based | Sequential | Sequential |
@@ -240,7 +337,7 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 | **Dynamic skill creation** | Runtime SKILL.md + register | No | No | No | No | No |
 | **Workflow tracking** | Multi-step + LLM decomposition | No | No | No | No | No |
 | **Language** | Elixir/OTP | TypeScript | Python | TypeScript | Python | Python |
-| **Codebase** | ~18.7K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
+| **Codebase** | ~28.5K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
 | **Tests** | 440 | Minimal | Minimal | Basic | Basic | Basic |
 
 ## Quick Start
@@ -272,7 +369,7 @@ mix chat          # Start talking to your agent
 # Local AI (default — free, private)
 export OSA_DEFAULT_PROVIDER=ollama
 
-# Or any of the 17 supported providers:
+# Or any of the 18 supported providers:
 export OSA_DEFAULT_PROVIDER=anthropic    # or openai, groq, deepseek, together, etc.
 export ANTHROPIC_API_KEY=sk-...
 ```
@@ -351,6 +448,12 @@ JWT authentication is supported for production — set `OSA_SHARED_SECRET` and `
 ┌───────────────────────────────────────────────────────────┐
 │                      12 Channels                           │
 │  CLI │ HTTP │ Telegram │ Discord │ Slack │ WhatsApp │ ...  │
+│  [line editor + spinner]                                   │
+└───────────────────────┬───────────────────────────────────┘
+                        │
+┌───────────────────────▼───────────────────────────────────┐
+│     Hook Pipeline (16 hooks, priority-ordered)             │
+│     security_check → context_optimizer → mcp_cache → ...   │
 └───────────────────────┬───────────────────────────────────┘
                         │
 ┌───────────────────────▼───────────────────────────────────┐
@@ -369,27 +472,35 @@ JWT authentication is supported for production — set `OSA_SHARED_SECRET` and `
 ┌───────────────────────▼───────────────────────────────────┐
 │         Events.Bus (:osa_event_router)                     │
 │         goldrush-compiled Erlang bytecode                  │
-└───────┬─────────┬─────────┬─────────┬────────────────────┘
-        │         │         │         │
-   ┌────▼───┐ ┌───▼────┐ ┌──▼──┐ ┌───▼──────────┐
-   │  Agent │ │Orchest-│ │Swarm│ │ Intelligence │
-   │  Loop  │ │ rator  │ │     │ │   (5 mods)   │
-   └───┬────┘ └───┬────┘ └──┬──┘ └──────────────┘
-       │          │         │
-  ┌────▼──────────▼─────────▼──────────────────────┐
-  │             Shared Infrastructure               │
-  │  Context Builder (token-budgeted)               │
-  │  Compactor (3-zone sliding window)              │
-  │  Memory (3-store + inverted index)              │
-  │  Cortex (knowledge synthesis)                   │
-  │  Workflow (multi-step tracking)                 │
-  │  Scheduler (cron + heartbeat)                   │
-  └────────────────────────────────────────────────┘
-       │          │         │          │
-  ┌────▼───┐ ┌───▼────┐ ┌──▼────┐ ┌───▼──────┐
-  │17 LLM  │ │Skills  │ │Memory │ │  OS      │
-  │Providers│ │Registry│ │(JSONL)│ │Templates │
-  └────────┘ └────────┘ └───────┘ └──────────┘
+└───┬──────────┬──────────┬──────────┬─────────────────────┘
+    │          │          │          │
+┌───▼───┐ ┌───▼─────┐ ┌──▼────┐ ┌──▼───────────┐
+│ Agent │ │Orchest- │ │ Swarm │ │Intelligence  │
+│ Loop  │ │rator   │ │ +PACT │ │  (5 mods)    │
+│       │ │         │ │       │ │              │
+│ Tier  │ │ Roster  │ │ Intel │ │ Profiler     │
+│ Route │ │ 25 defs │ │ Votes │ │ Coach        │
+└───┬───┘ └───┬─────┘ └──┬────┘ │ Tracker      │
+    │         │          │      │ Monitor      │
+    │         │          │      │ Detector     │
+    │         │          │      └──────────────┘
+  ┌─▼─────────▼──────────▼─────────────────────────────────┐
+  │             Shared Infrastructure                       │
+  │  Context Builder (token-budgeted, 4-tier priority)     │
+  │  Compactor (3-zone sliding window, importance-weighted) │
+  │  Memory (3-store + inverted index + episodic JSONL)    │
+  │  Cortex (knowledge synthesis)                          │
+  │  Workflow (multi-step tracking)                        │
+  │  Scheduler (cron + heartbeat)                          │
+  │  PromptLoader (priv/prompts/ + ~/.osa/prompts/)        │
+  └────────────────────────────────────────────────────────┘
+       │           │          │          │
+  ┌────▼────┐ ┌───▼─────┐ ┌──▼────┐ ┌───▼──────┐
+  │18 LLM   │ │Skills   │ │Memory │ │  OS      │
+  │Providers│ │Registry │ │(JSONL)│ │Templates │
+  │ 3 tiers │ │29 defs  │ │       │ │          │
+  └─────────┘ │63 cmds  │ └───────┘ └──────────┘
+              └─────────┘
 ```
 
 ### OTP Supervision Tree
@@ -403,21 +514,24 @@ OptimalSystemAgent.Supervisor (one_for_one)
 ├── Events.Bus (goldrush :osa_event_router)
 ├── Bridge.PubSub (event fan-out, 3 tiers)
 ├── Store.Repo (SQLite3)
-├── Providers.Registry (17 providers, :osa_provider_router)
-├── Skills.Registry (7 builtins + SKILL.md + MCP, :osa_tool_dispatcher)
+├── Providers.Registry (18 providers, 3-tier routing, :osa_provider_router)
+├── Skills.Registry (7 builtins + 29 defs + SKILL.md + MCP, :osa_tool_dispatcher)
+├── Agent.Hooks (16 hooks, priority-ordered middleware pipeline)
+├── Agent.Roster (25 agent definitions across 4 categories)
 ├── Machines (composable skill sets)
 ├── OS.Registry (template discovery + connection)
 ├── MCP.Supervisor (DynamicSupervisor)
 ├── Channels.Supervisor (DynamicSupervisor, 12 adapters)
-├── Agent.Memory (3-store architecture)
+├── Agent.Memory (3-store architecture + episodic JSONL)
 ├── Agent.Workflow (multi-step tracking)
 ├── Agent.Orchestrator (multi-agent spawning)
 ├── Agent.Progress (real-time tracking)
 ├── Agent.Scheduler (cron + heartbeat)
 ├── Agent.Compactor (3-zone compression)
 ├── Agent.Cortex (knowledge synthesis)
+├── Agent.Tier (18-provider model routing, dynamic Ollama detection)
 ├── Intelligence.Supervisor (5 communication modules)
-├── Swarm.Supervisor (multi-agent patterns)
+├── Swarm.Supervisor (PACT framework + swarm intelligence + 10 patterns)
 ├── Bandit HTTP (port 8089)
 └── Sandbox.Supervisor (Docker, when enabled)
 ```
@@ -551,7 +665,7 @@ Ship a `.osa-manifest.json` for full integration:
 OSA is grounded in four principles from communication and systems theory:
 
 1. **Shannon (Channel Capacity):** Every channel has finite capacity. Processing noise wastes capacity meant for real signals.
-2. **Ashby (Requisite Variety):** The system must match the variety of its inputs — 17 providers, 12 channels, unlimited skills.
+2. **Ashby (Requisite Variety):** The system must match the variety of its inputs — 18 providers, 12 channels, unlimited skills.
 3. **Beer (Viable System Model):** Five operational modes (Build, Assist, Analyze, Execute, Maintain) mirror the five subsystems every viable organization needs.
 4. **Wiener (Feedback Loops):** Every action produces feedback. The agent learns and adapts — memory, cortex, profiling.
 

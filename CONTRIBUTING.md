@@ -1,33 +1,34 @@
 # Contributing to OptimalSystemAgent
 
-We welcome contributions. The highest-impact way to contribute is by writing skills — not by submitting code PRs. Skills are where the value lives for users. Code PRs are welcome too, but if you are not sure where to start, write a skill.
+We welcome contributions. There are many ways to contribute — skills, hooks, agent definitions, command templates, swarm patterns, bug fixes, and core engine changes. Pick the one that matches your skills and interest.
 
 ---
 
 ## The Contribution Model
 
-OSA follows a skills-first contribution model (similar to NanoClaw's agent-template approach):
+| Contribution Type | Impact | Effort | Review Speed | Elixir Required? |
+|-------------------|--------|--------|--------------|------------------|
+| **SKILL.md skill** | High | Low | Fast | No |
+| **Command template** | Medium | Low | Fast | No |
+| **Agent definition** | Medium | Low | Fast | No |
+| **Swarm pattern** | Medium | Low | Fast | No |
+| **Hook** | High | Medium | Moderate | Yes |
+| **Elixir module skill** | High | Medium | Moderate | Yes |
+| **Bug fix** | High | Varies | Fast | Yes |
+| **Documentation** | Medium | Low | Fast | No |
+| **New channel adapter** | High | High | Slower | Yes |
+| **New LLM provider** | High | Medium | Moderate | Yes |
+| **Core engine change** | Very High | High | Careful review | Yes |
 
-| Contribution Type | Impact | Effort | Review Speed |
-|-------------------|--------|--------|--------------|
-| **SKILL.md skill** | High | Low | Fast |
-| **Elixir module skill** | High | Medium | Moderate |
-| **Bug fix** | High | Varies | Fast |
-| **Documentation** | Medium | Low | Fast |
-| **New channel adapter** | High | High | Slower |
-| **Core engine change** | Very High | High | Careful review |
-
-**Skills are the preferred contribution.** A well-written SKILL.md file that solves a real business problem is more valuable to the community than most code changes. And it requires no Elixir knowledge.
+**No-code contributions are preferred.** A well-written SKILL.md, command template, or agent definition is more valuable to the community than most code changes.
 
 ---
 
-## Contributing a Skill
+## No-Code Contributions
 
-### SKILL.md (No Code Required)
+### Skills (SKILL.md)
 
-1. Fork the repo
-2. Create `examples/skills/your-skill/SKILL.md`
-3. Follow the format:
+Drop a markdown file in `priv/skills/` or `~/.osa/skills/your-skill/SKILL.md`:
 
 ```markdown
 ---
@@ -37,7 +38,10 @@ tools:
   - file_read
   - file_write
   - web_search
-  - memory_save
+triggers:
+  - "analyze data"
+  - "csv"
+priority: 50
 ---
 
 ## Instructions
@@ -49,48 +53,95 @@ tools:
 [3-5 example prompts and expected behaviors]
 ```
 
-4. Test it by copying to `~/.osa/skills/your-skill/` and using it in a conversation
-5. Submit a PR
+**Quality checklist:**
 
-### Skill Quality Checklist
+- [ ] Name is descriptive (`sales-pipeline` not `sp`)
+- [ ] Description is one clear sentence (the LLM reads this to decide when to use the skill)
+- [ ] Instructions are specific and under 500 words
+- [ ] Examples cover 3-5 scenarios (happy path + edge cases)
+- [ ] Tools list only what the skill actually needs
+- [ ] No fabrication instructions
+- [ ] Tested locally
 
-Before submitting a skill:
+### Command Templates
 
-- [ ] **Name is descriptive.** `sales-pipeline` not `sp` or `pipeline`
-- [ ] **Description is one clear sentence.** The LLM reads this to decide when to use the skill.
-- [ ] **Instructions are specific.** Step-by-step workflow, not vague guidance.
-- [ ] **Instructions are under 500 words.** Context window efficiency matters.
-- [ ] **Examples cover 3-5 scenarios.** Common case, edge case, boundary.
-- [ ] **Tools are minimal.** Only list tools the skill actually needs.
-- [ ] **No fabrication instructions.** The skill should never tell the agent to make things up.
-- [ ] **Tested locally.** You ran it and it works.
+Command templates live in `priv/commands/{category}/` and are invoked as slash commands:
 
-### Skill Ideas We Want
+```
+priv/commands/
+├── workflow/     # /commit, /build, /test, /lint, /verify, /create-pr, /fix, /explain
+├── context/      # /prime-backend, /prime-webdev, /prime-svelte, /prime-security
+├── security/     # /security-scan, /secret-scan, /harden
+├── memory/       # /mem-search, /mem-save, /mem-recall, /mem-stats
+└── utility/      # /debug, /review, /refactor, /agents, /status, /doctor, /analytics
+```
 
-If you are looking for ideas, here are skills the community would benefit from:
+Each command is a markdown file. The filename becomes the command name. Content is expanded as a prompt when the user invokes the slash command:
 
-- **Invoice generator** — Create invoices from conversation context
-- **Competitor monitor** — Track competitor websites and social media for changes
-- **Social media scheduler** — Plan and organize social posts across platforms
-- **Hiring pipeline** — Track candidates, schedule interviews, follow up
-- **Project planner** — Break down a project into tasks with estimates
-- **Expense tracker** — Categorize expenses from receipts or bank statements
-- **Networking assistant** — Track professional contacts and follow-up cadence
-- **Learning planner** — Create study plans, track progress, quiz on material
-- **Legal document reviewer** — Flag common issues in contracts (non-legal-advice)
-- **Inventory tracker** — Track inventory levels and alert on low stock
+```markdown
+You are performing a security scan on the current codebase.
+
+## Steps
+
+1. Check for hardcoded secrets (API keys, passwords, tokens)
+2. Review input validation on all endpoints
+3. Check for SQL injection vulnerabilities
+4. Review authentication and authorization logic
+5. Report findings with severity levels
+
+## Output Format
+
+| Severity | File | Line | Issue | Recommendation |
+```
+
+To contribute: add your `.md` file to the appropriate category directory, wire the command name in `lib/optimal_system_agent/commands.ex`, and submit a PR.
+
+### Agent Definitions
+
+Agent definitions live in `priv/agents/{category}/`:
+
+```
+priv/agents/
+├── elite/        # dragon, oracle, nova, blitz, architect
+├── combat/       # parallel, cache, quantum, angel
+├── security/     # security-auditor, red-team, blue-team, purple-team, threat-intel
+└── specialists/  # backend-go, frontend-react, frontend-svelte, database-specialist,
+                  # debugger, test-automator, code-reviewer, explorer, etc.
+```
+
+Each definition is a markdown file with the agent's role prompt, capabilities, constraints, and behavior guidelines. Loaded at runtime via `Roster.load_definition/1`.
+
+### Swarm Patterns
+
+Swarm patterns are defined in `priv/swarms/patterns.json`:
+
+```json
+{
+  "patterns": {
+    "your-pattern": {
+      "name": "Your Pattern",
+      "description": "What this pattern does",
+      "agents": ["researcher", "builder", "reviewer"],
+      "collaboration": "pipeline",
+      "max_rounds": 3
+    }
+  }
+}
+```
+
+Currently shipped patterns: `code-analysis`, `full-stack`, `debug-swarm`, `performance-audit`, `security-audit`, `documentation`, `adaptive-debug`, `adaptive-feature`, `concurrent-migration`, `ai-pipeline`.
 
 ---
 
-## Development Setup
+## Code Contributions
 
-### Prerequisites
+### Development Setup
 
-- Elixir 1.17+ and OTP 27+
+**Prerequisites:**
+
+- Elixir 1.19+ and OTP 28+
 - Ollama (for local testing without API keys)
 - Git
-
-### Setup
 
 ```bash
 # Clone your fork
@@ -104,18 +155,8 @@ mix setup
 mix osa.setup
 
 # Verify everything works
-mix test
-mix chat
-```
-
-### Running Locally
-
-```bash
-# Interactive CLI
-mix chat
-
-# The HTTP API starts automatically on port 8089
-curl http://localhost:8089/health
+mix test     # 440 tests, 0 failures
+mix chat     # Interactive CLI
 ```
 
 ### Project Structure
@@ -123,52 +164,69 @@ curl http://localhost:8089/health
 ```
 lib/
 ├── optimal_system_agent/
-│   ├── agent/           # Core agent loop, context, scheduler, compactor, cortex, memory
-│   ├── bridge/          # PubSub bridge (goldrush -> PubSub, 3-tier fan-out)
-│   ├── channels/        # Platform adapters (CLI, HTTP/API, future: Telegram, Discord)
-│   │   └── http/        # HTTP channel (Bandit + Plug)
-│   │       ├── api.ex   # REST API endpoints
-│   │       └── auth.ex  # JWT HS256 authentication
-│   ├── events/          # Event bus (goldrush-compiled :osa_event_router)
-│   ├── intelligence/    # Communication intelligence (5 modules)
-│   ├── mcp/             # Model Context Protocol client
-│   ├── providers/       # LLM provider abstraction (Ollama, Anthropic, OpenAI)
-│   ├── signal/          # Signal Theory 5-tuple classifier + noise filter
-│   ├── skills/          # Skills.Behaviour + builtins + markdown skill loader
-│   │   └── builtins/    # Built-in tools (file_read, file_write, shell_execute, etc.)
-│   ├── store/           # Ecto + SQLite3
-│   └── machines.ex      # Composable skill set activation
-│
-├── mix/tasks/           # Mix tasks (osa.setup, osa.chat)
+│   ├── agent/              # Core agent subsystems
+│   │   ├── loop.ex         # Main agent loop (message → classify → route → respond)
+│   │   ├── context.ex      # Token-budgeted context assembly (4-tier priority)
+│   │   ├── compactor.ex    # 3-zone sliding window compression
+│   │   ├── cortex.ex       # Knowledge synthesis
+│   │   ├── hooks.ex        # 16-hook middleware pipeline
+│   │   ├── memory.ex       # 3-store memory (session + long-term + episodic)
+│   │   ├── orchestrator.ex # Multi-agent task decomposition
+│   │   ├── progress.ex     # Real-time progress tracking
+│   │   ├── roster.ex       # 25 agent definitions loader
+│   │   ├── scheduler.ex    # Cron + heartbeat
+│   │   ├── tier.ex         # 18-provider × 3-tier model routing
+│   │   └── workflow.ex     # Multi-step workflow tracking
+│   ├── bridge/             # PubSub bridge (goldrush → Phoenix.PubSub, 3-tier fan-out)
+│   ├── channels/           # Platform adapters
+│   │   ├── cli.ex          # Terminal interface
+│   │   ├── cli/
+│   │   │   ├── line_editor.ex  # Readline (arrow keys, history, Ctrl bindings)
+│   │   │   └── spinner.ex      # Animated spinner (elapsed time, tool tracking)
+│   │   └── http/           # HTTP channel (Bandit + Plug, port 8089)
+│   ├── events/             # Event bus (goldrush-compiled :osa_event_router)
+│   ├── intelligence/       # Communication intelligence (5 modules)
+│   ├── mcp/                # Model Context Protocol client
+│   ├── providers/          # 18 LLM provider adapters
+│   ├── signal/             # Signal Theory 5-tuple classifier + noise filter
+│   ├── skills/             # Skills.Behaviour + builtins + markdown loader
+│   ├── store/              # Ecto + SQLite3
+│   ├── swarm/              # Multi-agent coordination
+│   │   ├── pact.ex         # PACT framework (Plan→Action→Coordination→Testing)
+│   │   ├── intelligence.ex # Swarm intelligence (5 roles, voting, convergence)
+│   │   └── patterns.ex     # 10 named swarm patterns
+│   ├── commands.ex         # 63 slash commands
+│   ├── prompt_loader.ex    # Template loader (priv/ + ~/.osa/ overrides)
+│   └── machines.ex         # Composable skill set activation
 
-config/                  # Application configuration
-examples/                # Example skills, HEARTBEAT.md, config.json
-docs/                    # Documentation
-support/                 # macOS LaunchAgent, system support files
-install.sh               # One-click installer
+priv/
+├── agents/         # 25 agent definitions (elite/, combat/, security/, specialists/)
+├── commands/       # 63 command templates (workflow/, context/, security/, memory/, utility/)
+├── prompts/        # Externalized prompt templates
+├── scripts/        # 13 utility scripts
+├── skills/         # 29 skill definitions with YAML frontmatter
+└── swarms/         # patterns.json (10 swarm patterns)
+
+config/             # Application configuration (config.exs, runtime.exs)
+test/               # 440 tests mirroring lib/ structure
+docs/               # Documentation
+examples/           # Example skills, configs
 ```
 
----
-
-## Running Tests
+### Running Tests
 
 ```bash
-# Run all tests
-mix test
-
-# Run tests with coverage
-mix test --cover
-
-# Run a specific test file
-mix test test/signal/classifier_test.exs
-
-# Run tests matching a pattern
-mix test --only tag:signal
+mix test                                    # Run all 440 tests
+mix test --cover                            # With coverage report
+mix test test/signal/classifier_test.exs    # Single file
+mix test --only tag:signal                  # By tag
 ```
+
+**Coverage targets:** 80%+ statements. Signal classifier and noise filter should have near-complete coverage.
 
 ### Writing Tests
 
-Tests go in the `test/` directory, mirroring the `lib/` structure:
+Tests mirror the `lib/` structure in `test/`:
 
 ```elixir
 defmodule OptimalSystemAgent.Signal.ClassifierTest do
@@ -187,31 +245,20 @@ defmodule OptimalSystemAgent.Signal.ClassifierTest do
       signal = Classifier.classify("hey")
       assert signal.weight < 0.4
     end
-
-    test "classifies questions with question mark" do
-      signal = Classifier.classify("What is our revenue?")
-      assert signal.type == "question"
-    end
   end
 end
 ```
 
-### Test Coverage Targets
-
-- Statements: 80%+
-- The signal classifier and noise filter should have near-complete coverage
-- Skills should be tested with both happy path and error cases
-
 ---
 
-## Submitting Code Changes
+## Adding Things
 
 ### Adding a Skill (Elixir Module)
 
 1. Create `lib/optimal_system_agent/skills/builtins/your_skill.ex`
 2. Implement `OptimalSystemAgent.Skills.Behaviour` (4 callbacks: `name`, `description`, `parameters`, `execute`)
-3. Register it in `lib/optimal_system_agent/skills/registry.ex` in `load_builtin_skills/0`
-4. Add a fallback dispatch clause in `dispatch_builtin/2`
+3. Register in `skills/registry.ex` → `load_builtin_skills/0`
+4. Add dispatch clause in `dispatch_builtin/2`
 5. Write tests
 6. Submit PR
 
@@ -238,124 +285,132 @@ defmodule OptimalSystemAgent.Skills.Builtins.YourSkill do
 
   @impl true
   def execute(%{"input" => input}) do
-    # Your implementation
     {:ok, "Result: #{input}"}
   end
 end
 ```
 
+### Adding a Hook
+
+Hooks are registered in `lib/optimal_system_agent/agent/hooks.ex` → `register_builtins/1`:
+
+```elixir
+# In register_builtins/1:
+register_hook(state, %{
+  name: :your_hook,
+  event: :post_tool_use,     # or :pre_tool_use, :pre_response, :session_end
+  priority: 50,              # Lower = runs first (10-95 range)
+  handler: fn payload ->
+    # Return {:ok, payload}, {:block, reason}, or :skip
+    {:ok, payload}
+  end
+})
+```
+
+Current hooks run at priorities 10-95. Pick a priority that makes sense relative to existing hooks. See `hooks.ex` for the full list.
+
+### Adding an LLM Provider
+
+1. Add a `do_chat/3` clause to `providers/registry.ex`
+2. Handle message formatting, tool formatting, response parsing
+3. Add tier mappings to `agent/tier.ex` → `@tier_models`
+4. Add config keys to `config/config.exs` and `config/runtime.exs`
+5. Write tests with mocked HTTP responses
+6. Submit PR
+
 ### Adding a Channel Adapter
 
 1. Create `lib/optimal_system_agent/channels/your_channel.ex`
-2. Implement as a GenServer (see `channels/cli.ex` for reference pattern)
+2. Implement as a GenServer (see `channels/cli.ex` for reference)
 3. Register with `Channels.Supervisor` (DynamicSupervisor)
-4. Process incoming messages through `Signal.Classifier` then `Agent.Loop`
+4. Process messages through `Signal.Classifier` → `Agent.Loop`
 5. Handle outbound messages from the event bus
 6. Add config keys to `config/config.exs` and `config/runtime.exs`
 7. Write tests
 8. Submit PR
 
-### Adding an LLM Provider
-
-1. Add a `do_chat/3` clause to `lib/optimal_system_agent/providers/registry.ex`
-2. Handle message formatting, tool formatting, and response parsing
-3. Add config keys (api_key, model, url) to `config/config.exs` and `config/runtime.exs`
-4. Write tests with mocked HTTP responses
-5. Submit PR
-
-### Adding a Machine
-
-1. Add a `machine_addendum/1` clause to `lib/optimal_system_agent/machines.ex`
-2. Register associated skills in `Skills.Registry`
-3. Add the machine toggle to `~/.osa/config.json` handling in `determine_active_machines/1`
-4. Update `examples/config.json`
-5. Submit PR
-
 ---
 
 ## Code Style
-
-### Formatting
 
 ```bash
 # Always run before committing
 mix format
 ```
 
-OSA uses the default Elixir formatter configuration.
-
-### Naming
+**Naming:**
 
 - Modules: `PascalCase` — `OptimalSystemAgent.Skills.Builtins.WebSearch`
 - Functions: `snake_case` — `classify_mode/1`, `load_builtin_skills/0`
 - Variables: `snake_case` — `session_id`, `tool_calls`
 - Constants: Module attributes — `@max_iterations 20`
 
-### Module Structure
+**Module structure:** `@moduledoc` → public API → callbacks → private functions.
 
-Every module should have:
+**Function guidelines:**
 
-```elixir
-defmodule OptimalSystemAgent.YourModule do
-  @moduledoc """
-  One paragraph explaining what this module does and why it exists.
+- Short and focused (under 20 lines ideal)
+- Pattern matching in function heads over conditionals in bodies
+- Pipe operators for data transformation chains
+- Let OTP supervision handle crashes — don't rescue everything
 
-  Reference architecture decisions or Signal Theory concepts if relevant.
-  """
-
-  # ... implementation
-end
-```
-
-### Function Guidelines
-
-- Functions should be short and focused (under 20 lines ideal)
-- Use pattern matching in function heads over conditional logic in function bodies
-- Use pipe operators for data transformation chains
-- Private helper functions at the bottom of the module
-- Group public API at the top, callbacks next, private functions last
-
-### Error Handling
+**Error handling:**
 
 - Skills return `{:ok, result}` or `{:error, reason}` — always strings
-- Use `Logger.warning/1` for recoverable issues
-- Use `Logger.error/1` for unexpected failures
-- Let OTP supervision handle crashes — do not rescue everything
+- `Logger.warning/1` for recoverable issues
+- `Logger.error/1` for unexpected failures
 
 ---
 
 ## Pull Request Guidelines
 
-1. **Fork the repo and create a feature branch** from `main`
-2. **Keep PRs focused.** One feature or fix per PR. If you need to refactor something as part of a feature, submit the refactor as a separate PR first.
+1. **Fork and create a feature branch** from `main`
+2. **Keep PRs focused** — one feature or fix per PR
 3. **Run `mix test` and `mix format`** before submitting
-4. **Write a clear PR description:**
-   - What does this change do?
-   - Why is it needed?
-   - How was it tested?
+4. **Write a clear PR description** — what, why, how tested
 5. **Link to an issue** if one exists
-6. **Be responsive to review feedback** — we aim to review PRs within a few days
 
 ### PR Title Format
 
 ```
 [type] Short description
 
-Examples:
-[skill] Add invoice-generator skill
-[fix] Handle nil session_id in Loop.process_message
-[feat] Add Groq provider support
-[docs] Add HEARTBEAT.md examples
+[skill]    Add invoice-generator skill
+[hook]     Add rate-limiting hook for tool calls
+[agent]    Add kubernetes-specialist agent definition
+[cmd]      Add /deploy command template
+[fix]      Handle nil session_id in Loop.process_message
+[feat]     Add Groq provider support
+[docs]     Update architecture documentation
 [refactor] Extract tool formatting from Providers.Registry
 ```
 
 ---
 
+## Skill Ideas We Want
+
+If you're looking for ideas:
+
+- **Invoice generator** — Create invoices from conversation context
+- **Competitor monitor** — Track competitor websites for changes
+- **Social media scheduler** — Plan and organize social posts
+- **Hiring pipeline** — Track candidates, schedule interviews
+- **Project planner** — Break down projects into tasks with estimates
+- **Expense tracker** — Categorize expenses from receipts
+- **Learning planner** — Create study plans, track progress
+- **Legal document reviewer** — Flag common issues in contracts
+- **Inventory tracker** — Track levels, alert on low stock
+- **CI/CD analyzer** — Parse pipeline logs, suggest fixes
+- **API documentation generator** — Generate OpenAPI specs from code
+- **Database migration planner** — Plan safe schema migrations
+
+---
+
 ## Community
 
-- **Issues:** Report bugs and request features on GitHub Issues
-- **Discussions:** Use GitHub Discussions for questions and ideas
-- **Skills showcase:** Share your skills in the `examples/skills/` directory via PR
+- **Issues:** Report bugs and request features on [GitHub Issues](https://github.com/Miosa-osa/OSA/issues)
+- **Discussions:** Use [GitHub Discussions](https://github.com/Miosa-osa/OSA/discussions) for questions and ideas
+- **Skills showcase:** Share skills in `priv/skills/` or `examples/skills/` via PR
 
 ---
 
