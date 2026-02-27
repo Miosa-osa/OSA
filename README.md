@@ -6,7 +6,21 @@
 [![Elixir](https://img.shields.io/badge/Elixir-1.19+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-28+-green.svg)](https://www.erlang.org)
 [![Tests](https://img.shields.io/badge/Tests-440%20passing-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/Version-0.2.0-orange.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.1.1-orange.svg)](#)
+
+---
+
+## Why OSA Exists
+
+We were building the AI layer for [MIOSA](https://miosa.ai) — an operating system for running your entire business. The agent needed to handle everything: scheduling meetings, analyzing revenue, drafting content, managing CRM contacts, orchestrating deployments. One AI, dozens of domains, thousands of messages a day.
+
+We built Signal Theory to solve our own problem: most messages are noise, and processing noise at $0.015/1K tokens adds up fast. So we built a classifier that understands intent before spending compute. We built a noise filter that catches 40-60% of messages before they hit the LLM. We built a tier system that routes simple tasks to cheap models and complex ones to powerful models.
+
+Then we saw [OpenClaw](https://github.com/openclaw/openclaw), [NanoClaw](https://github.com/qwibitai/nanoclaw), and [Nanobot](https://github.com/HKUDS/nanobot) — and realized everyone else was still treating every message the same. Full pipeline, full cost, full latency, every time. No signal intelligence. No noise filtering. No cost optimization.
+
+So we open-sourced OSA. The same agent that powers MIOSA, available to everyone. 28,500+ lines of Elixir/OTP. 440 tests. Runs locally on your machine. Your data stays yours.
+
+**If you're looking for an OpenClaw alternative that actually thinks before it acts — this is it.**
 
 ---
 
@@ -345,14 +359,18 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 ### Install
 
 ```bash
-# One-line install (recommended)
-curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
+# Option A: Homebrew (macOS/Linux)
+brew tap miosa-osa/tap
+brew install osagent
 
-# Or manual setup
+# Option B: Install script (no dependencies needed)
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | sh
+
+# Option C: From source (requires Elixir 1.17+)
 git clone https://github.com/Miosa-osa/OSA.git
 cd OSA
 mix deps.get
-mix osa.setup    # Interactive setup wizard
+mix osa.setup
 mix ecto.create && mix ecto.migrate
 mix compile
 ```
@@ -360,7 +378,13 @@ mix compile
 ### Run
 
 ```bash
-mix chat          # Start talking to your agent
+osagent              # Start chatting (binary install)
+osagent setup        # Configure provider + API keys
+osagent version      # Print version
+osagent serve        # Headless HTTP API mode
+
+# Or from source:
+mix chat
 ```
 
 ### Configure
