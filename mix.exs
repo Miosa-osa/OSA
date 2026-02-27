@@ -135,7 +135,14 @@ defmodule OptimalSystemAgent.MixProject do
 
     set -e
 
-    SELF=$(cd "$(dirname "$0")" && pwd)
+    # Resolve symlinks (Homebrew symlinks bin/osagent → libexec/bin/osagent)
+    SCRIPT="$0"
+    while [ -L "$SCRIPT" ]; do
+      DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+      SCRIPT=$(readlink "$SCRIPT")
+      case "$SCRIPT" in /*) ;; *) SCRIPT="$DIR/$SCRIPT" ;; esac
+    done
+    SELF=$(cd "$(dirname "$SCRIPT")" && pwd)
     RELEASE_BIN="$SELF/osagent_release"
 
     case "${1:-chat}" in
