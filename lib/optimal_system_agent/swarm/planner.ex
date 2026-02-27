@@ -28,13 +28,11 @@ defmodule OptimalSystemAgent.Swarm.Planner do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Roster
   alias OptimalSystemAgent.Providers.Registry, as: Providers
 
-  @valid_roles ~w(researcher coder reviewer planner critic writer tester architect)a
   @valid_patterns ~w(parallel pipeline debate review)a
   @valid_strategies ~w(merge vote chain)a
-
-  @max_agents 5
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -43,7 +41,7 @@ defmodule OptimalSystemAgent.Swarm.Planner do
   Returns a plan map on success. On failure returns a safe fallback plan.
   """
   def decompose(task_description, opts \\ []) do
-    max_agents = Keyword.get(opts, :max_agents, @max_agents)
+    max_agents = Keyword.get(opts, :max_agents, Roster.max_agents())
 
     Logger.info(
       "Planner decomposing task (max_agents=#{max_agents}): #{String.slice(task_description, 0, 100)}..."
@@ -77,7 +75,7 @@ defmodule OptimalSystemAgent.Swarm.Planner do
     - "debate": multiple agents propose solutions → critic picks the best (best for design decisions)
     - "review": one agent works, one reviews, iterate (best for code quality)
 
-    Available roles: researcher, coder, reviewer, planner, critic, writer, tester, architect
+    Available roles: #{Roster.valid_roles() |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", ")}
 
     Maximum agents: #{max_agents}. Do not exceed this.
 
@@ -142,12 +140,8 @@ defmodule OptimalSystemAgent.Swarm.Planner do
     end
   end
 
-  defp strip_markdown_fences(content) do
-    content
-    |> String.replace(~r/^```(?:json)?\n?/, "")
-    |> String.replace(~r/\n?```$/, "")
-    |> String.trim()
-  end
+  defp strip_markdown_fences(content),
+    do: OptimalSystemAgent.Utils.Text.strip_markdown_fences(content)
 
   defp extract_json_object(content) do
     case Regex.run(~r/\{[\s\S]*\}/, content) do
@@ -196,7 +190,7 @@ defmodule OptimalSystemAgent.Swarm.Planner do
   defp validate_agents(agents) when is_list(agents) and length(agents) >= 1 do
     validated =
       agents
-      |> Enum.take(@max_agents)
+      |> Enum.take(Roster.max_agents())
       |> Enum.flat_map(fn agent ->
         case validate_agent(agent) do
           {:ok, a} ->
@@ -226,7 +220,7 @@ defmodule OptimalSystemAgent.Swarm.Planner do
         _ -> nil
       end
 
-    if atom in @valid_roles do
+    if atom in Roster.valid_roles() do
       {:ok, %{role: atom, task: task}}
     else
       {:error, "Unknown role: #{role}"}

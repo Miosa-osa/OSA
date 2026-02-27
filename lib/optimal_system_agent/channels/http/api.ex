@@ -345,20 +345,42 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     with %{"task" => task} when is_binary(task) and task != "" <- conn.body_params do
       strategy = conn.body_params["strategy"] || "auto"
       session_id = conn.body_params["session_id"] || generate_session_id()
+      blocking = conn.body_params["blocking"] == true
 
       case TaskOrchestrator.execute(task, session_id, strategy: strategy) do
-        {:ok, task_id, synthesis} ->
-          body =
-            Jason.encode!(%{
-              task_id: task_id,
-              status: "completed",
-              synthesis: synthesis,
-              session_id: session_id
-            })
+        {:ok, task_id} ->
+          if blocking do
+            # Block until complete (backward compat for clients that expect sync response)
+            case await_orchestration_http(task_id, 300_000) do
+              {:ok, synthesis} ->
+                body =
+                  Jason.encode!(%{
+                    task_id: task_id,
+                    status: "completed",
+                    synthesis: synthesis,
+                    session_id: session_id
+                  })
 
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(200, body)
+                conn
+                |> put_resp_content_type("application/json")
+                |> send_resp(200, body)
+
+              {:error, reason} ->
+                json_error(conn, 504, "orchestration_timeout", to_string(reason))
+            end
+          else
+            # Non-blocking: return 202, client polls progress endpoint
+            body =
+              Jason.encode!(%{
+                task_id: task_id,
+                status: "running",
+                session_id: session_id
+              })
+
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(202, body)
+          end
 
         {:error, reason} ->
           json_error(conn, 422, "orchestration_error", inspect(reason))
@@ -746,12 +768,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Telegram ──────────────────────────────────────────────────────────
 
   post "/channels/telegram/webhook" do
-    case Telegram.handle_update(conn.body_params) do
-      :ok ->
-        send_resp(conn, 200, "")
+    secret = Application.get_env(:optimal_system_agent, :telegram_webhook_secret)
 
-      {:error, :not_started} ->
-        json_error(conn, 503, "channel_unavailable", "Telegram adapter not started")
+    case verify_telegram_signature(conn, secret) do
+      :ok ->
+        case Telegram.handle_update(conn.body_params) do
+          :ok ->
+            send_resp(conn, 200, "")
+
+          {:error, :not_started} ->
+            json_error(conn, 503, "channel_unavailable", "Telegram adapter not started")
+        end
+
+      {:error, :no_secret} ->
+        Logger.warning("Telegram webhook rejected: telegram_webhook_secret is not configured")
+        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid signature")
     end
   end
 
@@ -821,8 +855,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   post "/channels/whatsapp/webhook" do
-    WhatsApp.handle_webhook(conn.body_params)
-    send_resp(conn, 200, "")
+    app_secret = Application.get_env(:optimal_system_agent, :whatsapp_app_secret)
+    raw_body = conn.assigns[:raw_body] || Jason.encode!(conn.body_params)
+
+    case verify_whatsapp_signature(conn, raw_body, app_secret) do
+      :ok ->
+        WhatsApp.handle_webhook(conn.body_params)
+        send_resp(conn, 200, "")
+
+      {:error, :no_secret} ->
+        Logger.warning("WhatsApp webhook rejected: whatsapp_app_secret is not configured")
+        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid signature")
+    end
   end
 
   # ── Signal ────────────────────────────────────────────────────────────
@@ -840,6 +887,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Matrix ────────────────────────────────────────────────────────────
   # Matrix uses long-polling /sync internally; this endpoint is a future
   # placeholder for push-mode Matrix homeserver notifications.
+  # TODO: Add signature verification when Matrix push gateway support is implemented.
 
   post "/channels/matrix/webhook" do
     _ = Matrix
@@ -849,12 +897,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Email (inbound parse) ─────────────────────────────────────────────
 
   post "/channels/email/inbound" do
-    case EmailChannel.handle_inbound(conn.body_params) do
-      :ok ->
-        send_resp(conn, 200, "")
+    secret = Application.get_env(:optimal_system_agent, :email_webhook_secret)
 
-      {:error, :not_started} ->
-        json_error(conn, 503, "channel_unavailable", "Email adapter not started")
+    case verify_email_signature(conn, secret) do
+      :ok ->
+        case EmailChannel.handle_inbound(conn.body_params) do
+          :ok ->
+            send_resp(conn, 200, "")
+
+          {:error, :not_started} ->
+            json_error(conn, 503, "channel_unavailable", "Email adapter not started")
+        end
+
+      {:error, :no_secret} ->
+        Logger.warning("Email inbound webhook rejected: email_webhook_secret is not configured")
+        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid signature")
     end
   end
 
@@ -886,12 +946,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── DingTalk ──────────────────────────────────────────────────────────
 
   post "/channels/dingtalk/webhook" do
-    case DingTalk.handle_event(conn.body_params) do
-      :ok ->
-        send_resp(conn, 200, "")
+    secret = Application.get_env(:optimal_system_agent, :dingtalk_secret)
+    timestamp = get_req_header(conn, "timestamp") |> List.first("")
+    sign = conn.params["sign"] || ""
 
-      {:error, :not_started} ->
-        json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started")
+    case verify_dingtalk_signature(timestamp, sign, secret) do
+      :ok ->
+        case DingTalk.handle_event(conn.body_params) do
+          :ok ->
+            send_resp(conn, 200, "")
+
+          {:error, :not_started} ->
+            json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started")
+        end
+
+      {:error, :no_secret} ->
+        Logger.warning("DingTalk webhook rejected: dingtalk_secret is not configured")
+        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid signature")
     end
   end
 
@@ -959,11 +1033,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   # ── Session Ownership Validation ────────────────────────────────────
 
-  defp validate_session_owner(session_id, _user_id) do
+  defp validate_session_owner(session_id, user_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{pid, _}] when is_pid(pid) ->
-        # TODO: Add Loop.get_owner(session_id) for strict per-user ownership validation
-        :ok
+      [{_pid, owner}] ->
+        cond do
+          # Anonymous / dev-mode requests can access any session
+          user_id == "anonymous" -> :ok
+          # Owner match — access granted
+          owner == user_id -> :ok
+          # Registered session but wrong owner — unauthorised
+          true ->
+            Logger.warning(
+              "[API] Session ownership mismatch: session=#{session_id} owner=#{inspect(owner)} requester=#{inspect(user_id)}"
+            )
+
+            {:error, :not_found}
+        end
 
       _ ->
         {:error, :not_found}
@@ -1095,7 +1180,98 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   defp parse_swarm_pattern(_), do: nil
 
+  # Poll orchestrator until task completes or timeout (for blocking HTTP callers)
+  defp await_orchestration_http(task_id, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_orchestration_http(task_id, deadline)
+  end
+
+  defp do_await_orchestration_http(task_id, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      {:error, "Orchestration timed out"}
+    else
+      case TaskOrchestrator.progress(task_id) do
+        {:ok, %{status: :completed, synthesis: synthesis}} when is_binary(synthesis) ->
+          {:ok, synthesis}
+
+        {:ok, %{status: :completed}} ->
+          {:ok, "Orchestration completed."}
+
+        {:ok, %{status: _}} ->
+          Process.sleep(500)
+          do_await_orchestration_http(task_id, deadline)
+
+        {:error, :not_found} ->
+          {:error, "Task not found"}
+      end
+    end
+  end
+
   # Only include in opts list when value is non-nil
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # ── Webhook Signature Verification Helpers ───────────────────────────
+  #
+  # Each helper returns:
+  #   :ok                       — signature valid
+  #   {:error, :no_secret}      — config key is nil; request must be rejected
+  #   {:error, :invalid_signature} — HMAC/header mismatch
+
+  # Telegram: compare x-telegram-bot-api-secret-token header against config secret.
+  defp verify_telegram_signature(_conn, nil), do: {:error, :no_secret}
+
+  defp verify_telegram_signature(conn, expected_secret) do
+    provided = get_req_header(conn, "x-telegram-bot-api-secret-token") |> List.first("")
+
+    if Plug.Crypto.secure_compare(provided, expected_secret) do
+      :ok
+    else
+      {:error, :invalid_signature}
+    end
+  end
+
+  # WhatsApp: verify x-hub-signature-256 header (Meta webhook pattern).
+  # Header format: "sha256=<hex_digest>"
+  defp verify_whatsapp_signature(_conn, _raw_body, nil), do: {:error, :no_secret}
+
+  defp verify_whatsapp_signature(conn, raw_body, app_secret) do
+    header = get_req_header(conn, "x-hub-signature-256") |> List.first("")
+    expected_hex = Base.encode16(:crypto.mac(:hmac, :sha256, app_secret, raw_body), case: :lower)
+    expected = "sha256=" <> expected_hex
+
+    if Plug.Crypto.secure_compare(header, expected) do
+      :ok
+    else
+      {:error, :invalid_signature}
+    end
+  end
+
+  # DingTalk: verify sign query param using HMAC-SHA256 over "<timestamp>\n<secret>".
+  # DingTalk sign = Base64( HMAC-SHA256( "<timestamp>\n<secret>", secret ) )
+  defp verify_dingtalk_signature(_timestamp, _sign, nil), do: {:error, :no_secret}
+
+  defp verify_dingtalk_signature(timestamp, sign, secret) do
+    string_to_sign = "#{timestamp}\n#{secret}"
+    expected = :crypto.mac(:hmac, :sha256, secret, string_to_sign) |> Base.encode64()
+
+    if Plug.Crypto.secure_compare(sign, expected) do
+      :ok
+    else
+      {:error, :invalid_signature}
+    end
+  end
+
+  # Email inbound: compare x-webhook-secret header against config secret.
+  defp verify_email_signature(_conn, nil), do: {:error, :no_secret}
+
+  defp verify_email_signature(conn, expected_secret) do
+    provided = get_req_header(conn, "x-webhook-secret") |> List.first("")
+
+    if Plug.Crypto.secure_compare(provided, expected_secret) do
+      :ok
+    else
+      {:error, :invalid_signature}
+    end
+  end
 end

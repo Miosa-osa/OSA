@@ -68,6 +68,15 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     GenServer.call(__MODULE__, {:run, event, payload}, 10_000)
   end
 
+  @doc """
+  Run hooks asynchronously (fire-and-forget). Use for post-event hooks
+  whose results are not needed by the caller (e.g. post_tool_use).
+  """
+  @spec run_async(hook_event(), map()) :: :ok
+  def run_async(event, payload) do
+    GenServer.cast(__MODULE__, {:run_async, event, payload})
+  end
+
   @doc "List registered hooks."
   @spec list_hooks() :: %{hook_event() => [%{name: String.t(), priority: integer()}]}
   def list_hooks do
@@ -86,6 +95,11 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   def init(_opts) do
     state = %__MODULE__{hooks: %{}, metrics: %{}}
 
+    # ETS table for hot-path counters (replaces persistent_term.put on write-heavy paths)
+    :ets.new(:osa_hooks_counters, [:named_table, :public, :set])
+    :ets.insert(:osa_hooks_counters, {:metrics_calls, 0})
+    :ets.insert(:osa_hooks_counters, {:tools_loaded, 0})
+
     # Register built-in hooks
     state = register_builtins(state)
 
@@ -101,6 +115,16 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     updated = [entry | hooks_for_event] |> Enum.sort_by(& &1.priority)
 
     {:noreply, %{state | hooks: Map.put(state.hooks, event, updated)}}
+  end
+
+  @impl true
+  def handle_cast({:run_async, event, payload}, state) do
+    hooks = Map.get(state.hooks, event, [])
+    started_at = System.monotonic_time(:microsecond)
+    {result, state} = run_chain(hooks, payload, event, state)
+    elapsed_us = System.monotonic_time(:microsecond) - started_at
+    state = update_metrics(state, event, elapsed_us, result)
+    {:noreply, state}
   end
 
   @impl true
@@ -328,27 +352,11 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   # ── Built-in Hook Implementations ────────────────────────────────
 
-  # Block dangerous shell commands
+  # Block dangerous shell commands — delegates to the single source of truth.
   defp security_check(%{tool_name: "shell_execute", arguments: %{"command" => cmd}} = payload) do
-    dangerous_patterns = [
-      ~r/rm\s+-rf\s+\//,
-      ~r/sudo\s+rm/,
-      ~r/DROP\s+TABLE/i,
-      ~r/DROP\s+DATABASE/i,
-      ~r/mkfs\./,
-      ~r/dd\s+if=/,
-      # fork bomb
-      ~r/:()\{.*\|.*&\s*\};:/,
-      ~r/curl.*\|\s*sh/,
-      ~r/wget.*\|\s*sh/,
-      ~r/chmod\s+777/,
-      ~r/>\s*\/dev\/sd/
-    ]
-
-    if Enum.any?(dangerous_patterns, &Regex.match?(&1, cmd)) do
-      {:block, "Blocked dangerous command: #{String.slice(cmd, 0, 50)}"}
-    else
-      {:ok, payload}
+    case OptimalSystemAgent.Security.ShellPolicy.validate(cmd) do
+      :ok -> {:ok, payload}
+      {:error, reason} -> {:block, "Blocked dangerous command: #{reason}"}
     end
   end
 
@@ -543,10 +551,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
       File.mkdir_p!(dir)
       File.write!(daily_path, Jason.encode!(entry) <> "\n", [:append])
 
-      # Every 100 calls, compute summary stats
-      call_count_key = {__MODULE__, :metrics_call_count}
-      count = :persistent_term.get(call_count_key, 0) + 1
-      :persistent_term.put(call_count_key, count)
+      # Every 100 calls, compute summary stats (ETS counter — no global GC pressure)
+      count = :ets.update_counter(:osa_hooks_counters, :metrics_calls, {2, 1})
 
       if rem(count, 100) == 0 do
         write_metrics_summary(dir, daily_path)
@@ -786,9 +792,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   # Context optimizer — suggest lazy loading after 20 tools loaded this session
   defp context_optimizer(payload) do
-    counter_key = {__MODULE__, :tools_loaded_count}
-    count = :persistent_term.get(counter_key, 0) + 1
-    :persistent_term.put(counter_key, count)
+    # ETS counter — no global GC pressure on hot path
+    count = :ets.update_counter(:osa_hooks_counters, :tools_loaded, {2, 1})
 
     if count > 20 do
       hint =

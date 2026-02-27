@@ -133,18 +133,32 @@ defmodule OptimalSystemAgent.Sandbox.Executor do
   end
 
   # Merge config-level Docker options with per-call overrides.
-  # Per-call opts take precedence so callers can relax/tighten for specific needs.
+  # The :image key in call_opts is validated against the allowlist before use;
+  # any disallowed image is rejected and the config default is used instead.
   @spec config_to_docker_opts(Config.t(), keyword()) :: keyword()
   defp config_to_docker_opts(config, call_opts) do
+    requested_image = Keyword.get(call_opts, :image, config.image)
+
+    verified_image =
+      if Config.image_allowed?(config, requested_image) do
+        requested_image
+      else
+        Logger.warning(
+          "[Sandbox.Executor] Rejected disallowed image: #{requested_image}, using #{config.image}"
+        )
+
+        config.image
+      end
+
     config_defaults = [
       timeout: config.timeout,
       network: config.network,
       max_memory: config.max_memory,
       max_cpu: config.max_cpu,
-      image: config.image
+      image: verified_image
     ]
 
-    # call_opts win over config_defaults
-    Keyword.merge(config_defaults, call_opts)
+    # Strip :image from call_opts so the verified value above is used
+    Keyword.merge(config_defaults, Keyword.delete(call_opts, :image))
   end
 end

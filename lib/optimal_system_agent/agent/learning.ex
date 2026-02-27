@@ -545,7 +545,11 @@ defmodule OptimalSystemAgent.Agent.Learning do
       Enum.reduce(solutions, %{}, fn entry, acc ->
         Map.put(acc, entry["key"], %{
           correction: entry["correction"],
-          source: String.to_atom(entry["source"] || "loaded"),
+          source: (try do
+                     String.to_existing_atom(entry["source"] || "loaded")
+                   rescue
+                     ArgumentError -> :loaded
+                   end),
           timestamp: DateTime.utc_now()
         })
       end)

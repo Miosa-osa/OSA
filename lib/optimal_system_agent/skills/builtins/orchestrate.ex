@@ -64,11 +64,11 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
              strategy: strategy,
              cached_tools: tools
            ) do
-        {:ok, _task_id, result} when is_binary(result) ->
-          {:ok, result}
-
-        {:ok, _task_id, nil} ->
-          {:ok, "Orchestration completed but produced no synthesis result."}
+        {:ok, task_id} ->
+          case await_orchestration(task_id, 300_000) do
+            {:ok, synthesis} -> {:ok, synthesis}
+            {:error, :timeout} -> {:error, "Orchestration timed out after 300s (task: #{task_id})"}
+          end
 
         {:error, reason} ->
           {:error, "Orchestration failed: #{inspect(reason)}"}
@@ -81,4 +81,34 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
   end
 
   def execute(_), do: {:error, "Missing required parameter: task"}
+
+  # Poll orchestrator progress until completed or timeout
+  defp await_orchestration(task_id, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    poll_orchestration(task_id, deadline)
+  end
+
+  defp poll_orchestration(task_id, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      {:error, :timeout}
+    else
+      case OptimalSystemAgent.Agent.Orchestrator.progress(task_id) do
+        {:ok, %{status: :completed, synthesis: synthesis}} when is_binary(synthesis) ->
+          {:ok, synthesis}
+
+        {:ok, %{status: :completed}} ->
+          {:ok, "Orchestration completed but produced no synthesis result."}
+
+        {:ok, %{status: :failed, error: error}} ->
+          {:error, "Orchestration failed: #{inspect(error)}"}
+
+        {:ok, %{status: _}} ->
+          Process.sleep(500)
+          poll_orchestration(task_id, deadline)
+
+        {:error, :not_found} ->
+          {:error, :timeout}
+      end
+    end
+  end
 end

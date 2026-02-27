@@ -10,3 +10,6 @@ config :optimal_system_agent, classifier_llm_enabled: false
 
 # Use a different HTTP port in tests to avoid conflicts
 config :optimal_system_agent, http_port: 0
+
+# Stable shared secret for test token generation/verification
+config :optimal_system_agent, shared_secret: "osa-dev-secret-change-me"

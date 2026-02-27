@@ -82,13 +82,8 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
 
   @doc "Count tokens using heuristic (no Go binary needed)."
   @spec count_tokens_heuristic(String.t()) :: non_neg_integer()
-  def count_tokens_heuristic(text) when is_binary(text) do
-    words = text |> String.split(~r/\s+/, trim: true) |> length()
-    punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
-    round(words * 1.3 + punctuation * 0.5)
-  end
-
-  def count_tokens_heuristic(_), do: 0
+  def count_tokens_heuristic(text),
+    do: OptimalSystemAgent.Utils.Tokens.estimate(text)
 
   @doc "Check if the Go tokenizer is available (not in fallback mode)."
   @spec available?() :: boolean()

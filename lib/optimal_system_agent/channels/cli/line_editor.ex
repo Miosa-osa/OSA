@@ -61,18 +61,19 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
             tty: tty
           }
 
-          # Write prompt directly to /dev/tty — bypasses prim_tty
           tty_write(tty, prompt)
-          input_loop(state)
+          result = input_loop(state)
+          # Newline while still in raw mode (OPOST off → literal \r\n).
+          # Must happen BEFORE restore_stty to avoid ONLCR doubling \r.
+          tty_write(tty, "\r\n")
+          result
         after
           restore_stty(saved)
-          # Newline after cooked mode restored
-          tty_write(tty, "\r\n")
         end
 
       :error ->
-        # stty failed — fall back to IO.gets to avoid double-echo
-        close_tty(tty)
+        # stty failed — fall back to IO.gets to avoid double-echo.
+        # Caller (readline/2) handles close_tty.
         fallback_readline(prompt)
     end
   end
@@ -121,7 +122,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         input_loop(state)
 
       :ctrl_t ->
-        toggle_task_display()
+        toggle_task_display(state.tty)
         input_loop(state)
 
       :backspace ->
@@ -328,6 +329,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     _ -> {:error, :port_failed}
   end
 
+  # ERTS guarantees exit_status is always the last message for a port —
+  # no {:data, _} can arrive after {:exit_status, _} per open_port/2 docs.
   defp collect_port_output(port, acc) do
     receive do
       {^port, {:data, data}} ->
@@ -341,7 +344,17 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     after
       2_000 ->
         Port.close(port)
+        flush_port(port)
         {:error, :timeout}
+    end
+  end
+
+  # Drain stale port messages from the mailbox after timeout/close.
+  defp flush_port(port) do
+    receive do
+      {^port, _} -> flush_port(port)
+    after
+      0 -> :ok
     end
   end
 
@@ -457,7 +470,9 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   # --- Task Display Toggle ---
 
-  defp toggle_task_display do
+  # Uses tty_write (raw /dev/tty fd) — NOT IO.write — because this
+  # runs inside input_loop during raw mode.
+  defp toggle_task_display(tty) do
     try do
       sessions =
         try do
@@ -470,14 +485,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         [[sid, current] | _] ->
           new_val = !current
           :ets.insert(:osa_settings, {{sid, :task_display_visible}, new_val})
-
-          if new_val do
-            IO.write("\r\e[2K\e[1A\e[2K")
-            IO.puts("  task panel: on")
-          else
-            IO.write("\r\e[2K\e[1A\e[2K")
-            IO.puts("  task panel: off")
-          end
+          label = if new_val, do: "  task panel: on", else: "  task panel: off"
+          tty_write(tty, "\r\e[2K\e[1A\e[2K#{label}\r\n")
 
         _ ->
           :ok

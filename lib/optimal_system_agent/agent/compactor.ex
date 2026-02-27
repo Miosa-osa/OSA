@@ -181,11 +181,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   @doc false
-  defp estimate_tokens_heuristic(text) do
-    words = text |> String.split(~r/\s+/, trim: true) |> length()
-    punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
-    round(words * 1.3 + punctuation * 0.5)
-  end
+  defp estimate_tokens_heuristic(text),
+    do: OptimalSystemAgent.Utils.Tokens.estimate(text)
 
   # ---------------------------------------------------------------------------
   # GenServer callbacks
@@ -727,10 +724,6 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp pct(ratio), do: "#{Float.round(ratio * 100, 1)}%"
 
-  defp safe_to_string(nil), do: ""
-  defp safe_to_string(val) when is_binary(val), do: val
-  defp safe_to_string(val) when is_atom(val), do: Atom.to_string(val)
-  defp safe_to_string(val) when is_map(val), do: Jason.encode!(val)
-  defp safe_to_string(val) when is_list(val), do: Jason.encode!(val)
-  defp safe_to_string(val), do: inspect(val)
+  defp safe_to_string(val),
+    do: OptimalSystemAgent.Utils.Text.safe_to_string(val)
 end

@@ -220,23 +220,71 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
   # ── Terminal I/O ──────────────────────────────────────────────
 
   defp open_tty do
-    :file.open(~c"/dev/tty", [:read, :raw, :binary])
+    :file.open(~c"/dev/tty", [:read, :write, :raw, :binary])
   end
 
   defp close_tty(tty), do: :file.close(tty)
 
+  # Terminal attribute control via Port.open + spawn_executable.
+  # Same approach as LineEditor — :os.cmd redirects stdin to a pipe,
+  # making stty silently fail on OTP 26+ where prim_tty manages the tty.
+
   defp save_stty do
-    :os.cmd(~c"stty -g 2>/dev/null") |> List.to_string() |> String.trim()
+    case run_stty(["-g"]) do
+      {:ok, settings} -> settings
+      _ -> ""
+    end
   end
 
   defp set_raw_mode do
-    :os.cmd(~c"stty raw -echo 2>/dev/null")
+    run_stty(["raw", "-echo"])
   end
 
-  defp restore_stty(""), do: :os.cmd(~c"stty sane 2>/dev/null")
+  defp restore_stty(""), do: run_stty(["sane"])
+  defp restore_stty(saved), do: run_stty([saved])
 
-  defp restore_stty(saved) do
-    :os.cmd(String.to_charlist("stty #{saved} 2>/dev/null"))
+  defp run_stty(args) do
+    flag = case :os.type() do
+      {:unix, :darwin} -> "-f"
+      {:unix, _} -> "-F"
+      _ -> "-f"
+    end
+
+    exe = case :os.find_executable(~c"stty") do
+      false -> ~c"/bin/stty"
+      path -> path
+    end
+
+    port =
+      Port.open(
+        {:spawn_executable, exe},
+        [:binary, :exit_status, :stderr_to_stdout, args: [flag, "/dev/tty" | args]]
+      )
+
+    collect_port_output(port, "")
+  rescue
+    _ -> {:error, :port_failed}
+  end
+
+  defp collect_port_output(port, acc) do
+    receive do
+      {^port, {:data, data}} -> collect_port_output(port, acc <> data)
+      {^port, {:exit_status, 0}} -> {:ok, String.trim(acc)}
+      {^port, {:exit_status, _}} -> {:error, String.trim(acc)}
+    after
+      2_000 ->
+        Port.close(port)
+        flush_port(port)
+        {:error, :timeout}
+    end
+  end
+
+  defp flush_port(port) do
+    receive do
+      {^port, _} -> flush_port(port)
+    after
+      0 -> :ok
+    end
   end
 
   defp read_key(tty) do

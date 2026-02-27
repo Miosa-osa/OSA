@@ -141,7 +141,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp extract_error_message(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error_message(body), do: inspect(body)
 
-  defp generate_id do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate()
 end

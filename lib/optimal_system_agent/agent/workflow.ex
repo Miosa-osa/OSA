@@ -461,8 +461,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     cleaned =
       content
       |> String.trim()
-      |> String.replace(~r/^```(?:json)?\s*\n?/, "")
-      |> String.replace(~r/\n?```\s*$/, "")
+      |> OptimalSystemAgent.Utils.Text.strip_markdown_fences()
       |> String.trim()
 
     case Jason.decode(cleaned) do
@@ -761,12 +760,8 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     %{workflow | steps: steps}
   end
 
-  defp generate_id do
-    "wf_" <>
-      (:crypto.strong_rand_bytes(8)
-       |> Base.hex_encode32(case: :lower, padding: false)
-       |> String.slice(0, 12))
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate("wf")
 
   defp extract_name(description) do
     # Take first sentence or first 60 chars, whichever is shorter
@@ -779,19 +774,11 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     truncate(first_sentence, 60)
   end
 
-  defp truncate(str, max_len) when is_binary(str) do
-    if String.length(str) > max_len do
-      String.slice(str, 0, max_len) <> "..."
-    else
-      str
-    end
-  end
+  defp truncate(str, max_len),
+    do: OptimalSystemAgent.Utils.Text.truncate(str, max_len)
 
-  defp truncate(_, _), do: ""
-
-  defp now_iso do
-    DateTime.utc_now() |> DateTime.to_iso8601()
-  end
+  defp now_iso,
+    do: OptimalSystemAgent.Utils.Text.now_iso()
 
   defp workflows_dir do
     Path.expand(@workflows_dir)
@@ -816,7 +803,13 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   defp parse_signal_mode("MAINTAIN"), do: :maintain
 
   defp parse_signal_mode(mode) when is_binary(mode) do
-    mode |> String.downcase() |> String.to_atom()
+    downcased = String.downcase(mode)
+
+    try do
+      String.to_existing_atom(downcased)
+    rescue
+      ArgumentError -> :unknown
+    end
   end
 
   defp parse_signal_mode(atom) when is_atom(atom), do: atom

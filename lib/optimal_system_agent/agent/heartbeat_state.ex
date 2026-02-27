@@ -174,7 +174,11 @@ defmodule OptimalSystemAgent.Agent.HeartbeatState do
 
   defp deserialize_checks(checks_map) when is_map(checks_map) do
     Map.new(checks_map, fn {type_str, info} ->
-      {String.to_atom(type_str),
+      {try do
+         String.to_existing_atom(type_str)
+       rescue
+         ArgumentError -> :unknown_check
+       end,
        %{
          last_run: info["last_run"],
          result: info["result"],

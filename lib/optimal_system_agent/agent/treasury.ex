@@ -190,6 +190,37 @@ defmodule OptimalSystemAgent.Agent.Treasury do
     schedule_daily_reset()
     schedule_monthly_reset()
 
+    # Auto-debit: listen for Budget cost events and withdraw from Treasury.
+    # Wrapped in try/catch — Bus may be unavailable during test suite or startup.
+    if Application.get_env(:optimal_system_agent, :treasury_auto_debit, true) do
+      try do
+        Bus.register_handler(:system_event, fn payload ->
+          case payload do
+            %{event: :cost_recorded, cost_usd: amount}
+            when is_number(amount) and amount > 0 ->
+              try do
+                GenServer.call(
+                  __MODULE__,
+                  {:withdraw, amount,
+                   "API cost: #{payload[:provider]}/#{payload[:model]}",
+                   payload[:entry_id]},
+                  1_000
+                )
+              catch
+                :exit, reason ->
+                  Logger.warning("[Treasury] Auto-debit exit: #{inspect(reason)}")
+              end
+
+            _ ->
+              :ok
+          end
+        end)
+      catch
+        :exit, reason ->
+          Logger.warning("[Treasury] Could not register auto-debit handler: #{inspect(reason)}")
+      end
+    end
+
     Logger.info(
       "[Agent.Treasury] Started — daily: $#{daily_limit}, monthly: $#{monthly_limit}, " <>
         "max_single: $#{max_single}, min_reserve: $#{min_reserve}"

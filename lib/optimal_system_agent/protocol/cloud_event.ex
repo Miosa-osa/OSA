@@ -126,7 +126,6 @@ defmodule OptimalSystemAgent.Protocol.CloudEvent do
   end
 
 
-  defp generate_id do
-    "evt_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate("evt")
 end

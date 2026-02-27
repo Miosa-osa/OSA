@@ -116,8 +116,16 @@ defmodule OptimalSystemAgent.Onboarding do
       provider = get_in(config, ["provider", "default"])
       model = get_in(config, ["provider", "model"])
 
-      if is_binary(provider) and provider != "" do
-        provider_atom = String.to_atom(provider)
+      provider_atom =
+        if is_binary(provider) and provider != "" do
+          try do
+            String.to_existing_atom(provider)
+          rescue
+            ArgumentError -> nil
+          end
+        end
+
+      if provider_atom do
         Application.put_env(:optimal_system_agent, :default_provider, provider_atom)
 
         if is_binary(model) and model != "" do
@@ -551,7 +559,19 @@ defmodule OptimalSystemAgent.Onboarding do
   }
 
   defp env_var_to_app_key(env_var) do
-    Map.get(@env_var_overrides, env_var, env_var |> String.downcase() |> String.to_atom())
+    case Map.fetch(@env_var_overrides, env_var) do
+      {:ok, key} ->
+        key
+
+      :error ->
+        downcased = String.downcase(env_var)
+
+        try do
+          String.to_existing_atom(downcased)
+        rescue
+          ArgumentError -> :unknown_config_key
+        end
+    end
   end
 
   defp config_has_provider?(path) do

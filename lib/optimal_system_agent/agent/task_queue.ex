@@ -41,6 +41,14 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   end
 
   @doc """
+  Synchronous enqueue — returns `{:ok, task}` with the created task.
+  Use when the caller needs the task struct immediately (e.g. orchestrator wave dispatch).
+  """
+  def enqueue_sync(task_id, agent_id, payload, opts \\ []) do
+    GenServer.call(__MODULE__, {:enqueue_sync, task_id, agent_id, payload, opts})
+  end
+
+  @doc """
   Atomically lease the oldest pending task for an agent.
   Returns `{:ok, task}` or `:empty`.
   """
@@ -200,6 +208,34 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   def handle_cast(:reap_expired, state) do
     state = do_reap_expired(state)
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:enqueue_sync, task_id, agent_id, payload, opts}, _from, state) do
+    now = DateTime.utc_now()
+    max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
+
+    task = %{
+      task_id: task_id,
+      agent_id: agent_id,
+      payload: payload,
+      status: :pending,
+      leased_until: nil,
+      leased_by: nil,
+      result: nil,
+      error: nil,
+      attempts: 0,
+      max_attempts: max_attempts,
+      created_at: now,
+      completed_at: nil
+    }
+
+    state = %{state | tasks: Map.put(state.tasks, task_id, task)}
+
+    Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
+    Logger.debug("[Agent.TaskQueue] Enqueued (sync) task #{task_id} for agent #{agent_id}")
+
+    {:reply, {:ok, task}, state}
   end
 
   @impl true

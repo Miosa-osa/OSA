@@ -221,6 +221,16 @@ defmodule OptimalSystemAgent.Agent.Budget do
         "daily: $#{Float.round(new_daily, 2)}, monthly: $#{Float.round(new_monthly, 2)}"
     )
 
+    # Bridge to Treasury — emit cost event for auto-debit
+    Bus.emit(:system_event, %{
+      event: :cost_recorded,
+      cost_usd: cost,
+      provider: to_string(provider),
+      model: to_string(model),
+      session_id: session_id,
+      entry_id: entry.id
+    })
+
     {:noreply, state}
   end
 

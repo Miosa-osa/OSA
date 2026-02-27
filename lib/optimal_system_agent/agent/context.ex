@@ -269,11 +269,8 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   @doc false
-  defp estimate_tokens_heuristic(text) do
-    words = text |> String.split(~r/\s+/, trim: true) |> length()
-    punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
-    round(words * 1.3 + punctuation * 0.5)
-  end
+  defp estimate_tokens_heuristic(text),
+    do: OptimalSystemAgent.Utils.Tokens.estimate(text)
 
   @doc """
   Estimates token count for a list of messages.
@@ -308,11 +305,8 @@ defmodule OptimalSystemAgent.Agent.Context do
     end)
   end
 
-  defp safe_to_string(nil), do: ""
-  defp safe_to_string(val) when is_binary(val), do: val
-  defp safe_to_string(val) when is_map(val), do: Jason.encode!(val)
-  defp safe_to_string(val) when is_list(val), do: Jason.encode!(val)
-  defp safe_to_string(val), do: inspect(val)
+  defp safe_to_string(val),
+    do: OptimalSystemAgent.Utils.Text.safe_to_string(val)
 
   # ---------------------------------------------------------------------------
   # Truncation

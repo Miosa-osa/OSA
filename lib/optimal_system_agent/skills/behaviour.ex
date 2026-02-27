@@ -10,36 +10,39 @@ defmodule OptimalSystemAgent.Skills.Behaviour do
 
   ## Example
 
-      defmodule MyApp.Skills.Calculator do
+      defmodule MyApp.Skills.WordCount do
         @behaviour OptimalSystemAgent.Skills.Behaviour
 
         @impl true
-        def name, do: "calculator"
+        def name, do: "word_count"
 
         @impl true
-        def description, do: "Evaluate a math expression"
+        def description, do: "Count words in a text string"
 
         @impl true
         def parameters do
           %{
             "type" => "object",
             "properties" => %{
-              "expression" => %{"type" => "string", "description" => "Math expression to evaluate"}
+              "text" => %{"type" => "string", "description" => "Text to count words in"}
             },
-            "required" => ["expression"]
+            "required" => ["text"]
           }
         end
 
         @impl true
-        def execute(%{"expression" => expr}) do
-          {result, _} = Code.eval_string(expr)
-          {:ok, "\#{result}"}
+        def execute(%{"text" => text}) do
+          count = text |> String.split(~r/\\s+/, trim: true) |> length()
+          {:ok, "\#{count} words"}
         end
       end
 
+  > **Security:** NEVER use `Code.eval_string/1` on user-supplied input in skills.
+  > All arguments arrive from untrusted sources (LLM output or user messages).
+
   Register at runtime — goldrush recompiles the dispatcher automatically:
 
-      OptimalSystemAgent.Skills.Registry.register(MyApp.Skills.Calculator)
+      OptimalSystemAgent.Skills.Registry.register(MyApp.Skills.WordCount)
 
   ## Hot Code Reload
 

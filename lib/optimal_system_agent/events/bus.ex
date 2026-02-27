@@ -40,10 +40,10 @@ defmodule OptimalSystemAgent.Events.Bus do
     event = :gre.make(fields, [:list])
 
     # Route through the compiled :osa_event_router module.
-    # Dispatch in a spawned process — goldrush's compiled module can call
+    # Dispatch via a supervised Task — goldrush's compiled module can call
     # into gr_param GenServer (5s default timeout), which hangs when its
     # ETS tables are in a bad state. An event bus must never block the caller.
-    spawn(fn ->
+    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
       try do
         :glc.handle(:osa_event_router, event)
       catch
@@ -131,8 +131,15 @@ defmodule OptimalSystemAgent.Events.Bus do
     try do
       :ets.lookup(:osa_event_handlers, type)
       |> Enum.each(fn
-        {_, _ref, handler} -> Task.start(fn -> handler.(payload) end)
-        {_, handler} -> Task.start(fn -> handler.(payload) end)
+        {_, _ref, handler} ->
+          Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+            handler.(payload)
+          end)
+
+        {_, handler} ->
+          Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+            handler.(payload)
+          end)
       end)
     rescue
       _ -> :ok

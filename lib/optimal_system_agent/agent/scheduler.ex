@@ -614,18 +614,24 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
     Logger.debug("Cron '#{job["id"]}': sending #{method} #{url}")
 
-    case http_request(method, url, headers, "") do
-      {:ok, _status, _body} ->
-        {:ok, "webhook delivered"}
+    with :ok <- validate_url(url) do
+      case http_request(method, url, headers, "") do
+        {:ok, _status, _body} ->
+          {:ok, "webhook delivered"}
 
+        {:error, reason} ->
+          # on_failure: "agent" falls back to an agent task
+          if job["on_failure"] == "agent" && is_binary(job["failure_job"]) do
+            Logger.info("Cron '#{job["id"]}': webhook failed, running failure_job via agent")
+            execute_task(job["failure_job"], "cron_#{job["id"]}_fallback")
+          else
+            {:error, reason}
+          end
+      end
+    else
       {:error, reason} ->
-        # on_failure: "agent" falls back to an agent task
-        if job["on_failure"] == "agent" && is_binary(job["failure_job"]) do
-          Logger.info("Cron '#{job["id"]}': webhook failed, running failure_job via agent")
-          execute_task(job["failure_job"], "cron_#{job["id"]}_fallback")
-        else
-          {:error, reason}
-        end
+        Logger.warning("Cron '#{job["id"]}': blocked webhook to #{url} — #{reason}")
+        {:error, reason}
     end
   end
 
@@ -701,60 +707,32 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   # Replace {{payload}} with the full payload as JSON,
   # {{timestamp}} with the current ISO 8601 timestamp,
   # and {{payload.key}} with a specific top-level key value.
+  # All substituted values are shell-escaped to prevent injection.
   defp interpolate(template, payload) when is_binary(template) and is_map(payload) do
     timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
     payload_json = Jason.encode!(payload)
 
     template
     |> String.replace("{{timestamp}}", timestamp)
-    |> String.replace("{{payload}}", payload_json)
+    |> String.replace("{{payload}}", shell_escape(payload_json))
     |> then(fn t ->
       Regex.replace(~r/\{\{payload\.(\w+)\}\}/, t, fn _match, key ->
-        value = Map.get(payload, key) || Map.get(payload, String.to_atom(key))
-        if is_nil(value), do: "", else: to_string(value)
+        value = Map.get(payload, key)
+        if is_nil(value), do: "''", else: shell_escape(to_string(value))
       end)
     end)
   end
 
+  defp shell_escape(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
+  end
+
+  defp shell_escape(value), do: shell_escape(to_string(value))
+
   # ── Shell Command Execution ───────────────────────────────────────────
 
-  @blocked_commands MapSet.new(
-                      ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
-       kill killall pkill mount umount iptables systemctl passwd useradd userdel
-       nc ncat)
-                    )
-
-  @blocked_patterns [
-    ~r/\brm\s+(-[a-zA-Z]*\s+)*\//,
-    ~r/\bsudo\b/,
-    ~r/\bdd\b/,
-    ~r/\bmkfs\b/,
-    ~r/>\s*\/etc\//,
-    ~r/>\s*~\/\.ssh\//,
-    ~r/>\s*\/boot\//,
-    ~r/>\s*\/usr\//,
-    ~r/`[^`]*`/,
-    ~r/\$\([^)]*\)/,
-    ~r/\$\{[^}]*\}/,
-    ~r/;\s*(rm|sudo|dd|mkfs|shutdown)/,
-    ~r/\|\s*(rm|sudo|dd|mkfs|shutdown)/,
-    ~r/&&\s*(rm|sudo|dd|mkfs|shutdown)/,
-    ~r/\|\|\s*(rm|sudo|dd|mkfs|shutdown)/,
-    ~r/\/bin\/(rm|dd|mkfs)/,
-    ~r/\/usr\/bin\/(sudo|pkill|killall)/,
-    ~r/\bchmod\s+[0-7]*777\b/,
-    ~r/\bchown\s+root\b/,
-    ~r/\b(cat|less|more|head|tail|strings|xxd)\s+.*\/etc\/(shadow|passwd|sudoers)/,
-    ~r/\b(cat|less|more|head|tail|strings|xxd)\s+.*\.ssh\/(id_rsa|id_ed25519|id_ecdsa|id_dsa)/,
-    ~r/\b(cat|less|more|head|tail|strings|xxd)\s+.*\.env\b/,
-    ~r/\.\.\//,
-    ~r/\bcurl\b.*\s(-o\s|--output\s)/,
-    ~r/\bcurl\b.*\s-[a-zA-Z]*o\s/,
-    ~r/\bwget\b.*\s(-O\s|--output-document\s)/,
-    ~r/\bwget\b.*\s-[a-zA-Z]*O\s/
-  ]
-
-  @max_output_bytes 100_000
+  # Shell security validation and output limits are centralised in ShellPolicy.
+  @max_output_bytes OptimalSystemAgent.Security.ShellPolicy.max_output_bytes()
 
   defp run_shell_command(command) when is_binary(command) do
     command =
@@ -766,7 +744,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     if command == "" do
       {:error, "Blocked: empty command"}
     else
-      case validate_shell_command(command) do
+      case OptimalSystemAgent.Security.ShellPolicy.validate(command) do
         :ok ->
           task =
             Task.async(fn ->
@@ -797,29 +775,25 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     end
   end
 
-  defp validate_shell_command(command) do
-    segments = Regex.split(~r/[|;&]/, command)
 
-    blocked_segment =
-      Enum.find(segments, fn segment ->
-        first = segment |> String.trim() |> String.split() |> List.first() |> to_string()
-        basename = Path.basename(first)
-        MapSet.member?(@blocked_commands, first) or MapSet.member?(@blocked_commands, basename)
-      end)
+  # ── Outbound HTTP (webhook type) ──────────────────────────────────────
+
+  defp validate_url(url) when is_binary(url) do
+    uri = URI.parse(url)
 
     cond do
-      blocked_segment != nil ->
-        {:error, "Command contains blocked command: #{String.trim(blocked_segment)}"}
-
-      Enum.any?(@blocked_patterns, &Regex.match?(&1, command)) ->
-        {:error, "Command contains blocked pattern"}
-
-      true ->
-        :ok
+      uri.scheme not in ["http", "https"] -> {:error, :invalid_scheme}
+      is_nil(uri.host) -> {:error, :no_host}
+      uri.host in ["localhost", "127.0.0.1", "0.0.0.0", "::1"] -> {:error, :loopback}
+      String.starts_with?(uri.host || "", "169.254.") -> {:error, :link_local}
+      String.starts_with?(uri.host || "", "10.") -> {:error, :private}
+      Regex.match?(~r/^172\.(1[6-9]|2\d|3[01])\./, uri.host || "") -> {:error, :private}
+      String.starts_with?(uri.host || "", "192.168.") -> {:error, :private}
+      true -> :ok
     end
   end
 
-  # ── Outbound HTTP (webhook type) ──────────────────────────────────────
+  defp validate_url(_), do: {:error, :invalid_url}
 
   defp http_request(method, url, headers, body) do
     :ok = :inets.start(:httpc, profile: :default)
@@ -837,7 +811,17 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
     opts = [{:timeout, @webhook_timeout_ms}]
 
-    case :httpc.request(String.to_atom(String.downcase(method)), request, opts, []) do
+    method_atom =
+      case String.downcase(method) do
+        "get" -> :get
+        "post" -> :post
+        "put" -> :put
+        "delete" -> :delete
+        "patch" -> :patch
+        _ -> :get
+      end
+
+    case :httpc.request(method_atom, request, opts, []) do
       {:ok, {{_vsn, status, _reason}, _resp_headers, resp_body}} ->
         {:ok, status, to_string(resp_body)}
 
@@ -1206,9 +1190,8 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     end
   end
 
-  defp generate_id do
-    :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false)
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate()
 
   # ── Helpers ─────────────────────────────────────────────────────────
 

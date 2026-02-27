@@ -52,7 +52,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         System.halt(0)
 
       :interrupt ->
-        IO.puts("")
+        # LineEditor already writes \r\n before returning
         loop(session_id)
 
       {:ok, ""} ->

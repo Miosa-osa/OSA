@@ -202,13 +202,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   defp format_tokens(n) when n < 1_000, do: " · ↓ #{n}"
   defp format_tokens(n), do: " · ↓ #{Float.round(n / 1_000, 1)}k"
 
-  defp truncate(str, max) do
-    if String.length(str) > max do
-      String.slice(str, 0, max - 1) <> "…"
-    else
-      str
-    end
-  end
+  defp truncate(str, max),
+    do: OptimalSystemAgent.Utils.Text.truncate(str, max)
 
   defp clear_line do
     width =

@@ -177,7 +177,6 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(body), do: inspect(body)
 
-  defp generate_id do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate()
 end

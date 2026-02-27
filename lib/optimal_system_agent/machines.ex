@@ -82,7 +82,14 @@ defmodule OptimalSystemAgent.Machines do
     enabled =
       machines
       |> Enum.filter(fn {_name, enabled} -> enabled == true end)
-      |> Enum.map(fn {name, _} -> String.to_atom(name) end)
+      |> Enum.map(fn {name, _} ->
+        try do
+          String.to_existing_atom(name)
+        rescue
+          ArgumentError -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
 
     [:core | enabled] |> Enum.uniq()
   end

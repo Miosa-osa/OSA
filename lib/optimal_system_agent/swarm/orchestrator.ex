@@ -154,8 +154,25 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         {:noreply, state}
 
       swarm ->
-        final_result = synthesise(swarm.task, swarm.plan, results)
+        orchestrator = self()
 
+        Task.start(fn ->
+          synthesis = synthesise(swarm.task, swarm.plan, results)
+          GenServer.cast(orchestrator, {:synthesis_complete, swarm_id, results, synthesis})
+        end)
+
+        swarms = Map.put(state.swarms, swarm_id, %{swarm | status: :synthesizing})
+        {:noreply, %{state | swarms: swarms}}
+    end
+  end
+
+  @impl true
+  def handle_cast({:synthesis_complete, swarm_id, results, final_result}, state) do
+    case Map.get(state.swarms, swarm_id) do
+      nil ->
+        {:noreply, state}
+
+      swarm ->
         updated = %{
           swarm
           | status: :completed,
@@ -447,7 +464,6 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
     }
   end
 
-  defp generate_id do
-    "swarm_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate("swarm")
 end

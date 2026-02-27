@@ -303,7 +303,6 @@ defmodule OptimalSystemAgent.SDK do
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp generate_id do
-    :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)
-  end
+  defp generate_id,
+    do: OptimalSystemAgent.Utils.ID.generate()
 end

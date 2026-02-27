@@ -616,7 +616,12 @@ defmodule OptimalSystemAgent.Commands do
   end
 
   defp cmd_model_switch(provider_str, model_override) do
-    provider = String.to_atom(provider_str)
+    provider =
+      try do
+        String.to_existing_atom(provider_str)
+      rescue
+        ArgumentError -> nil
+      end
     registry = OptimalSystemAgent.Providers.Registry
     available = registry.list_providers()
 

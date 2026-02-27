@@ -180,8 +180,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
     json_str =
       content
       |> String.trim()
-      |> String.replace(~r/^```json\s*/, "")
-      |> String.replace(~r/\s*```$/, "")
+      |> OptimalSystemAgent.Utils.Text.strip_markdown_fences()
       |> String.trim()
 
     case Jason.decode(json_str) do

@@ -15,18 +15,21 @@ defmodule OptimalSystemAgent.Application do
     - MCP.Supervisor (MCP server/client processes)
     - Channels.Supervisor (platform adapters: CLI, HTTP, Telegram, Discord, Slack,
         WhatsApp, Signal, Matrix, Email, QQ, DingTalk, Feishu)
-    - Channels.Manager (starts configured adapters after boot)
+    - Channels.Starter (deferred channel startup via handle_continue)
     - Agent.Memory (persistent JSONL session storage)
     - Agent.Workflow (multi-step task tracking + LLM decomposition)
     - Agent.Orchestrator (autonomous task orchestration, multi-agent spawning)
     - Agent.Progress (real-time progress tracking for orchestrated tasks)
-    - Agent.Loop (stateful ReAct agent via :osa_agent_loop)
     - Agent.Scheduler (cron + heartbeat)
     - Agent.Compactor (context compression, 3 thresholds)
     - Agent.Cortex (memory synthesis, periodic knowledge bulletin)
+    - Agent.Treasury (budget tracking — started when treasury_enabled: true)
     - Intelligence.Supervisor (Signal Theory unique modules)
     - Swarm.Supervisor (multi-agent swarm coordination subsystem)
+    - Fleet.Supervisor (registry + sentinels — started when fleet_enabled: true)
     - Sandbox.Supervisor (Docker container isolation — started when sandbox_enabled: true)
+    - Wallet (blockchain integration — started when wallet_enabled: true)
+    - System.Updater (OTA updates — started when update_enabled: true)
   """
   use Application
 
@@ -38,6 +41,9 @@ defmodule OptimalSystemAgent.Application do
       [
         # Process registry for agent sessions
         {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry},
+
+        # Task supervisor for supervised async work (must come before Events.Bus)
+        {Task.Supervisor, name: OptimalSystemAgent.Events.TaskSupervisor, max_children: 100},
 
         # Core infrastructure
         {Phoenix.PubSub, name: OptimalSystemAgent.PubSub},
@@ -78,13 +84,16 @@ defmodule OptimalSystemAgent.Application do
         OptimalSystemAgent.Agent.Scheduler,
         OptimalSystemAgent.Agent.Compactor,
         OptimalSystemAgent.Agent.Cortex,
-        OptimalSystemAgent.Agent.Treasury,
-
-        # Communication intelligence (Signal Theory unique)
-        OptimalSystemAgent.Intelligence.Supervisor,
+      ] ++
+        treasury_children() ++
+        intelligence_children() ++
+        [
 
         # Multi-agent swarm collaboration system
         OptimalSystemAgent.Swarm.Supervisor,
+
+        # Deferred channel startup — starts configured channels in handle_continue
+        OptimalSystemAgent.Channels.Starter,
 
       ] ++
         fleet_children() ++
@@ -98,7 +107,7 @@ defmodule OptimalSystemAgent.Application do
           {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
         ]
 
-    opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
+    opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor]
 
     # Load soul/personality files into persistent_term BEFORE supervision tree
     # starts — agents need identity/soul content from their first LLM call.
@@ -114,12 +123,6 @@ defmodule OptimalSystemAgent.Application do
 
         # Always detect Ollama tiers if Ollama is reachable (for fallback routing)
         Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
-
-        # Start configured channel adapters after the supervision tree is up.
-        Task.start(fn ->
-          Process.sleep(250)
-          OptimalSystemAgent.Channels.Manager.start_configured_channels()
-        end)
 
         {:ok, pid}
 
@@ -219,6 +222,23 @@ defmodule OptimalSystemAgent.Application do
     else
       []
     end
+  end
+
+  # Treasury — opt-in via OSA_TREASURY_ENABLED=true
+  defp treasury_children do
+    if Application.get_env(:optimal_system_agent, :treasury_enabled, false) do
+      Logger.info("[Application] Treasury enabled — starting Agent.Treasury")
+      [OptimalSystemAgent.Agent.Treasury]
+    else
+      []
+    end
+  end
+
+  # Communication intelligence (Signal Theory unique) — always started when present.
+  # ConversationTracker, ContactDetector, ProactiveMonitor are dormant until wired;
+  # starting the supervisor is cheap and keeps them ready for future integration.
+  defp intelligence_children do
+    [OptimalSystemAgent.Intelligence.Supervisor]
   end
 
   defp http_port do

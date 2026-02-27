@@ -60,9 +60,18 @@ for env_path <- [Path.expand(".env"), Path.expand("~/.osa/.env")] do
 end
 
 # Smart provider auto-detection: explicit override > API key presence > ollama fallback
+provider_map = %{
+  "ollama" => :ollama, "anthropic" => :anthropic, "openai" => :openai,
+  "groq" => :groq, "openrouter" => :openrouter, "together" => :together,
+  "fireworks" => :fireworks, "deepseek" => :deepseek, "mistral" => :mistral,
+  "cerebras" => :cerebras, "google" => :google, "cohere" => :cohere,
+  "perplexity" => :perplexity, "xai" => :xai, "sambanova" => :sambanova,
+  "hyperbolic" => :hyperbolic, "lmstudio" => :lmstudio, "llamacpp" => :llamacpp
+}
+
 default_provider =
   cond do
-    env = System.get_env("OSA_DEFAULT_PROVIDER") -> String.to_atom(env)
+    env = System.get_env("OSA_DEFAULT_PROVIDER") -> Map.get(provider_map, env, :ollama)
     System.get_env("ANTHROPIC_API_KEY") -> :anthropic
     System.get_env("OPENAI_API_KEY") -> :openai
     System.get_env("GROQ_API_KEY") -> :groq
@@ -94,7 +103,18 @@ config :optimal_system_agent,
   default_provider: default_provider,
 
   # HTTP channel
-  shared_secret: System.get_env("OSA_SHARED_SECRET") || "osa-dev-secret-change-me",
+  shared_secret:
+    System.get_env("OSA_SHARED_SECRET") ||
+      (cond do
+         System.get_env("OSA_REQUIRE_AUTH") == "true" ->
+           raise "OSA_SHARED_SECRET must be set when OSA_REQUIRE_AUTH=true"
+
+         config_env() == :test ->
+           "osa-dev-secret-change-me"
+
+         true ->
+           "osa-dev-secret-#{:crypto.strong_rand_bytes(16) |> Base.url_encode64()}"
+       end),
   require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true",
 
   # Budget limits (USD)
@@ -104,6 +124,7 @@ config :optimal_system_agent,
 
   # Treasury
   treasury_enabled: System.get_env("OSA_TREASURY_ENABLED") == "true",
+  treasury_auto_debit: System.get_env("OSA_TREASURY_AUTO_DEBIT") != "false",
   treasury_daily_limit_usd: parse_float.(System.get_env("OSA_TREASURY_DAILY_LIMIT"), 250.0),
   treasury_max_single_usd: parse_float.(System.get_env("OSA_TREASURY_MAX_SINGLE"), 50.0),
 

@@ -26,9 +26,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
 
-  @max_concurrent_agents 10
-  @agent_timeout 300_000
-
   defstruct tasks: %{},
             agent_pool: %{},
             skill_cache: %{}
@@ -79,7 +76,12 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       synthesis: nil,
       started_at: nil,
       completed_at: nil,
-      error: nil
+      error: nil,
+      # Non-blocking execution state
+      wave_refs: %{},
+      current_wave: 0,
+      pending_waves: [],
+      cached_tools: []
     ]
   end
 
@@ -100,12 +102,14 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   @doc """
   Execute a complex task with multiple sub-agents.
-  Returns {:ok, task_id, synthesis} when all agents complete.
+  Returns {:ok, task_id} immediately — execution proceeds asynchronously
+  via handle_continue. Poll progress/1 or subscribe to
+  :orchestrator_task_completed events for results.
   """
   @spec execute(String.t(), String.t(), keyword()) ::
-          {:ok, String.t(), String.t()} | {:error, term()}
+          {:ok, String.t()} | {:error, term()}
   def execute(message, session_id, opts \\ []) do
-    GenServer.call(__MODULE__, {:execute, message, session_id, opts}, @agent_timeout + 30_000)
+    GenServer.call(__MODULE__, {:execute, message, session_id, opts}, 60_000)
   end
 
   @doc """
@@ -160,7 +164,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   @impl true
   def init(state) do
     Logger.info(
-      "[Orchestrator] Task orchestration engine started (max_agents=#{@max_concurrent_agents})"
+      "[Orchestrator] Task orchestration engine started (max_agents=#{Roster.max_agents()})"
     )
 
     {:ok, state}
@@ -193,13 +197,12 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       message_preview: String.slice(message, 0, 200)
     })
 
-    # 1. Analyze and decompose
+    # Decompose is sync (needs LLM), but execution is async via handle_continue
     case decompose_task(message) do
       {:ok, sub_tasks} when is_list(sub_tasks) and length(sub_tasks) > 0 ->
-        # Cap at max concurrent agents
-        sub_tasks = Enum.take(sub_tasks, @max_concurrent_agents)
+        sub_tasks = Enum.take(sub_tasks, Roster.max_agents())
 
-        # Estimate task value via Appraiser (best-effort, non-blocking)
+        # Estimate task value via Appraiser (best-effort)
         appraisal =
           try do
             estimates =
@@ -222,7 +225,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           })
         end
 
-        # Enqueue sub-tasks into TaskQueue (best-effort, non-blocking)
+        # Enqueue sub-tasks into TaskQueue (best-effort)
         try do
           Enum.each(sub_tasks, fn st ->
             subtask_id = "#{task_id}_#{st.name}"
@@ -245,7 +248,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           strategy: strategy,
           status: :running,
           sub_tasks: sub_tasks,
-          started_at: DateTime.utc_now()
+          started_at: DateTime.utc_now(),
+          cached_tools: cached_tools
         }
 
         state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
@@ -257,38 +261,9 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           agents: Enum.map(sub_tasks, fn st -> %{name: st.name, role: st.role} end)
         })
 
-        # 2. Execute with dependency awareness
-        {results, state} =
-          execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools)
-
-        # 3. Synthesize results
-        synthesis = synthesize_results(task_id, results, message)
-
-        # 4. Mark task complete
-        task_state = Map.get(state.tasks, task_id)
-
-        task_state = %{
-          task_state
-          | status: :completed,
-            results: results,
-            synthesis: synthesis,
-            completed_at: DateTime.utc_now()
-        }
-
-        state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
-
-        Bus.emit(:system_event, %{
-          event: :orchestrator_task_completed,
-          task_id: task_id,
-          agent_count: length(sub_tasks),
-          result_preview: String.slice(synthesis || "", 0, 200)
-        })
-
-        Logger.info(
-          "[Orchestrator] Task #{task_id} completed — #{length(sub_tasks)} agents, synthesis ready"
-        )
-
-        {:reply, {:ok, task_id, synthesis}, state}
+        # Reply immediately, continue execution asynchronously
+        {:reply, {:ok, task_id}, state,
+         {:continue, {:start_execution, task_id}}}
 
       {:ok, []} ->
         Logger.warning(
@@ -296,7 +271,28 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         )
 
         result = run_simple(message, session_id)
-        {:reply, {:ok, task_id, result}, state}
+
+        task_state = %TaskState{
+          id: task_id,
+          message: message,
+          session_id: session_id,
+          strategy: strategy,
+          status: :completed,
+          synthesis: result,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        }
+
+        state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
+
+        Bus.emit(:system_event, %{
+          event: :orchestrator_task_completed,
+          task_id: task_id,
+          agent_count: 0,
+          result_preview: String.slice(result || "", 0, 200)
+        })
+
+        {:reply, {:ok, task_id}, state}
 
       {:error, reason} ->
         Logger.error("[Orchestrator] Task decomposition failed: #{inspect(reason)}")
@@ -326,7 +322,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           agents:
             task_state.agents
             |> Map.values()
-            |> Enum.sort_by(& &1.started_at)
+            |> Enum.sort_by(& (&1.started_at || DateTime.utc_now()))
             |> Enum.map(fn agent ->
               %{
                 id: agent.id,
@@ -340,7 +336,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
                 completed_at: agent.completed_at
               }
             end),
-          synthesis: task_state.synthesis
+          synthesis: task_state.synthesis,
+          error: task_state.error
         }
 
         {:reply, {:ok, progress}, state}
@@ -503,6 +500,158 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     end
   end
 
+  # ── Handle Continue — Non-blocking wave execution ──────────────────
+
+  @impl true
+  def handle_continue({:start_execution, task_id}, state) do
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        {:noreply, state}
+
+      task_state ->
+        waves = build_execution_waves(task_state.sub_tasks)
+        task_state = %{task_state | pending_waves: waves, current_wave: 0}
+        state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
+        {:noreply, state, {:continue, {:execute_wave, task_id}}}
+    end
+  end
+
+  @impl true
+  def handle_continue({:execute_wave, task_id}, state) do
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        {:noreply, state}
+
+      %{pending_waves: []} ->
+        {:noreply, state, {:continue, {:synthesize, task_id}}}
+
+      %{pending_waves: [wave | rest]} = task_state ->
+        session_id = task_state.session_id
+        cached_tools = task_state.cached_tools
+
+        # Spawn all agents in this wave, collecting refs and agent states
+        spawn_results =
+          Enum.map(wave, fn sub_task ->
+            dep_context = build_dependency_context(sub_task.depends_on, task_state.results)
+            sub_task_with_context = %{sub_task | context: dep_context}
+
+            {agent_id, agent_state, task_ref} =
+              spawn_agent(sub_task_with_context, task_id, session_id, cached_tools)
+
+            subtask_id = "#{task_id}_#{sub_task.name}"
+            {agent_id, agent_state, task_ref, sub_task.name, subtask_id}
+          end)
+
+        # Build wave_refs map: monitor_ref => {agent_name, agent_id, subtask_id}
+        wave_refs =
+          Enum.reduce(spawn_results, %{}, fn {agent_id, _as, task_ref, name, subtask_id}, refs ->
+            Map.put(refs, task_ref.ref, {name, agent_id, subtask_id})
+          end)
+
+        # Register all agents into task state
+        updated_agents =
+          Enum.reduce(spawn_results, task_state.agents, fn {agent_id, agent_state, _, _, _}, agents ->
+            Map.put(agents, agent_id, agent_state)
+          end)
+
+        task_state = %{
+          task_state
+          | pending_waves: rest,
+            current_wave: task_state.current_wave + 1,
+            wave_refs: wave_refs,
+            agents: updated_agents
+        }
+
+        state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_continue({:synthesize, task_id}, state) do
+    case Map.get(state.tasks, task_id) do
+      nil ->
+        {:noreply, state}
+
+      task_state ->
+        synthesis = synthesize_results(task_id, task_state.results, task_state.message)
+
+        task_state = %{
+          task_state
+          | status: :completed,
+            synthesis: synthesis,
+            completed_at: DateTime.utc_now()
+        }
+
+        state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
+
+        Bus.emit(:system_event, %{
+          event: :orchestrator_task_completed,
+          task_id: task_id,
+          agent_count: map_size(task_state.agents),
+          result_preview: String.slice(synthesis || "", 0, 200)
+        })
+
+        Logger.info(
+          "[Orchestrator] Task #{task_id} completed — #{map_size(task_state.agents)} agents, synthesis ready"
+        )
+
+        {:noreply, state}
+    end
+  end
+
+  # ── Handle Info — Task.async completion / crash messages ────────────
+
+  @impl true
+  def handle_info({ref, result}, state) when is_reference(ref) do
+    # Task.async completion — demonitor and flush the :DOWN message
+    Process.demonitor(ref, [:flush])
+
+    case find_task_by_ref(ref, state) do
+      nil ->
+        {:noreply, state}
+
+      {task_id, agent_name, agent_id, subtask_id} ->
+        result_text =
+          case result do
+            {:ok, text} -> text
+            {:error, reason} -> "FAILED: #{reason}"
+            text when is_binary(text) -> text
+          end
+
+        state = record_agent_result(state, task_id, agent_name, agent_id, subtask_id, result_text, result)
+
+        # Check if all agents in current wave are done
+        task_state = Map.get(state.tasks, task_id)
+
+        if map_size(task_state.wave_refs) == 0 do
+          {:noreply, state, {:continue, {:execute_wave, task_id}}}
+        else
+          {:noreply, state}
+        end
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case find_task_by_ref(ref, state) do
+      nil ->
+        {:noreply, state}
+
+      {task_id, agent_name, agent_id, subtask_id} ->
+        result_text = "FAILED: Agent crashed: #{inspect(reason)}"
+        state = record_agent_result(state, task_id, agent_name, agent_id, subtask_id, result_text, {:error, result_text})
+
+        task_state = Map.get(state.tasks, task_id)
+
+        if map_size(task_state.wave_refs) == 0 do
+          {:noreply, state, {:continue, {:execute_wave, task_id}}}
+        else
+          {:noreply, state}
+        end
+    end
+  end
+
   # ── Complexity Analysis ─────────────────────────────────────────────
 
   defp analyze_complexity(message) do
@@ -513,7 +662,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
     Determine:
     1. complexity: "simple" (one agent can handle) or "complex" (needs multiple parallel agents)
-    2. If complex, decompose into parallel sub-tasks (max #{@max_concurrent_agents})
+    2. If complex, decompose into parallel sub-tasks (max #{Roster.max_agents()})
     3. For each sub-task, specify:
        - name: short identifier (snake_case)
        - description: what this agent should do
@@ -568,8 +717,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     cleaned =
       content
       |> String.trim()
-      |> String.replace(~r/^```(?:json)?\s*\n?/, "")
-      |> String.replace(~r/\n?```\s*$/, "")
+      |> OptimalSystemAgent.Utils.Text.strip_markdown_fences()
       |> String.trim()
 
     case Jason.decode(cleaned) do
@@ -646,116 +794,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     end
   end
 
-  # ── Dependency-Aware Execution ──────────────────────────────────────
-
-  defp execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools) do
-    # Group by dependency waves
-    waves = build_execution_waves(sub_tasks)
-
-    {final_results, final_state} =
-      Enum.reduce(waves, {%{}, state}, fn wave, {results_acc, state_acc} ->
-        # Spawn all agents in this wave in parallel
-        agents_and_tasks =
-          Enum.map(wave, fn sub_task ->
-            # Inject results from dependencies into context
-            dep_context = build_dependency_context(sub_task.depends_on, results_acc)
-            sub_task_with_context = %{sub_task | context: dep_context}
-            spawn_agent(sub_task_with_context, task_id, session_id, cached_tools)
-          end)
-
-        # Register agents in state
-        state_acc =
-          Enum.reduce(agents_and_tasks, state_acc, fn {agent_id, agent_state, _task_ref}, st ->
-            task_state = Map.get(st.tasks, task_id)
-            updated_agents = Map.put(task_state.agents, agent_id, agent_state)
-            updated_task = %{task_state | agents: updated_agents}
-            %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
-          end)
-
-        # Await all agents in this wave
-        wave_results =
-          Enum.map(agents_and_tasks, fn {_agent_id, agent_state, task_ref} ->
-            result =
-              try do
-                Task.await(task_ref, @agent_timeout)
-              rescue
-                e ->
-                  Logger.error(
-                    "[Orchestrator] Agent #{agent_state.name} failed: #{Exception.message(e)}"
-                  )
-
-                  {:error, Exception.message(e)}
-              catch
-                :exit, {:timeout, _} ->
-                  Logger.warning("[Orchestrator] Agent #{agent_state.name} timed out")
-                  {:error, "Agent timed out after #{div(@agent_timeout, 1000)}s"}
-              end
-
-            {agent_state.name, result}
-          end)
-
-        # Update agent states with results
-        state_acc =
-          Enum.reduce(wave_results, state_acc, fn {name, result}, st ->
-            task_state = Map.get(st.tasks, task_id)
-
-            agent =
-              task_state.agents
-              |> Map.values()
-              |> Enum.find(&(&1.name == name))
-
-            if agent do
-              {status, result_text, error} =
-                case result do
-                  {:ok, text} -> {:completed, text, nil}
-                  {:error, reason} -> {:failed, nil, reason}
-                  text when is_binary(text) -> {:completed, text, nil}
-                end
-
-              updated_agent = %{
-                agent
-                | status: status,
-                  result: result_text,
-                  error: error,
-                  completed_at: DateTime.utc_now()
-              }
-
-              updated_agents = Map.put(task_state.agents, agent.id, updated_agent)
-              updated_task = %{task_state | agents: updated_agents}
-
-              Bus.emit(:system_event, %{
-                event: :orchestrator_agent_completed,
-                task_id: task_id,
-                agent_id: agent.id,
-                agent_name: name,
-                status: status
-              })
-
-              %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
-            else
-              st
-            end
-          end)
-
-        # Merge wave results into accumulated results
-        new_results =
-          Enum.reduce(wave_results, results_acc, fn {name, result}, acc ->
-            result_text =
-              case result do
-                {:ok, text} -> text
-                {:error, reason} -> "FAILED: #{reason}"
-                text when is_binary(text) -> text
-              end
-
-            Map.put(acc, name, result_text)
-          end)
-
-        {new_results, state_acc}
-      end)
-
-    {final_results, final_state}
-  end
-
   defp build_execution_waves(sub_tasks) do
     # Topological sort: group tasks by dependency level
     # Wave 0: no dependencies
@@ -809,6 +847,74 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     else
       Enum.join(context_parts, "\n\n---\n\n")
     end
+  end
+
+  # ── Non-blocking execution helpers ──────────────────────────────────
+
+  # Find which task owns a given Task.async ref
+  defp find_task_by_ref(ref, state) do
+    Enum.find_value(state.tasks, fn {task_id, task_state} ->
+      case Map.get(task_state.wave_refs, ref) do
+        {agent_name, agent_id, subtask_id} ->
+          {task_id, agent_name, agent_id, subtask_id}
+
+        nil ->
+          nil
+      end
+    end)
+  end
+
+  # Record an agent's result: update agent state, wave_refs, results map, TaskQueue
+  defp record_agent_result(state, task_id, agent_name, agent_id, subtask_id, result_text, raw_result) do
+    task_state = Map.get(state.tasks, task_id)
+
+    # Update agent status
+    {status, agent_result, error} =
+      case raw_result do
+        {:ok, text} -> {:completed, text, nil}
+        {:error, reason} -> {:failed, nil, reason}
+        text when is_binary(text) -> {:completed, text, nil}
+      end
+
+    updated_agent =
+      case Map.get(task_state.agents, agent_id) do
+        nil -> nil
+        agent ->
+          %{agent | status: status, result: agent_result, error: error, completed_at: DateTime.utc_now()}
+      end
+
+    updated_agents =
+      if updated_agent, do: Map.put(task_state.agents, agent_id, updated_agent), else: task_state.agents
+
+    # Remove ref from wave_refs and store result
+    wave_refs = Map.reject(task_state.wave_refs, fn {_ref, {name, _, _}} -> name == agent_name end)
+
+    task_state = %{
+      task_state
+      | agents: updated_agents,
+        wave_refs: wave_refs,
+        results: Map.put(task_state.results, agent_name, result_text)
+    }
+
+    # TaskQueue complete/fail (best-effort)
+    try do
+      case status do
+        :completed -> TaskQueue.complete(subtask_id, result_text)
+        :failed -> TaskQueue.fail(subtask_id, error || result_text)
+      end
+    catch
+      :exit, _ -> :ok
+    end
+
+    Bus.emit(:system_event, %{
+      event: :orchestrator_agent_completed,
+      task_id: task_id,
+      agent_id: agent_id,
+      agent_name: agent_name,
+      status: status
+    })
+
+    %{state | tasks: Map.put(state.tasks, task_id, task_state)}
   end
 
   # ── Sub-Agent Spawning ──────────────────────────────────────────────
@@ -1108,130 +1214,12 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Agent Role Prompts ──────────────────────────────────────────────
 
-  # Agent-Dispatch 9-role system (Signal Theory Architecture)
-  # Roles map to execution waves:
-  #   Wave 1: data, qa, infra, design (foundation)
-  #   Wave 2: backend, services (logic)
-  #   Wave 3: frontend (presentation)
-  #   Wave 4: red_team (adversarial review)
-  #   Wave 5: lead (synthesis + ship decision)
-  @role_prompts %{
-    lead: """
-    You are the LEAD orchestrator. Your job is to:
-    - Synthesize and merge the work of other agents into a cohesive result
-    - Resolve conflicts between agent outputs
-    - Make ship/no-ship decisions based on quality and RED TEAM findings
-    - Produce the final completion report
-    - You do NOT write application code — you merge, validate, and document
-    Tempo: Disciplined and sequential. Validate before proceeding.
-    """,
-    backend: """
-    You are a BACKEND specialist. Your job is to:
-    - Write server-side code: APIs, handlers, services, business logic, routing
-    - Follow existing patterns and conventions in the codebase
-    - Handle error conditions, validation, and edge cases
-    - Produce production-quality code
-    - Do NOT touch frontend, infrastructure, or database schema files
-    Tempo: Steady and focused. Each handler/service fix is a discrete unit.
-    """,
-    frontend: """
-    You are a FRONTEND specialist. Your job is to:
-    - Write client-side code: components, pages, state, styling
-    - Follow the design system and existing component patterns
-    - Ensure accessibility (WCAG 2.1 AA) and responsive design
-    - Handle loading states, errors, and edge cases in the UI
-    - Do NOT touch backend, infrastructure, or database files
-    Tempo: Iterative. Keep changes scoped to individual components/routes.
-    """,
-    data: """
-    You are a DATA layer specialist. Your job is to:
-    - Write database schemas, migrations, models, and repository logic
-    - Optimize queries and ensure data integrity
-    - Handle race conditions and concurrent access patterns
-    - Validate data at the boundary layer
-    - Your work is foundational — everything else depends on correct schema
-    Tempo: Precise and careful. Data mistakes are hardest to undo.
-    """,
-    design: """
-    You are a DESIGN specialist. Your job is to:
-    - Create design specifications, tokens, color palettes, typography scales
-    - Define component blueprints before FRONTEND implements them
-    - Audit accessibility (WCAG 2.1 AA, color contrast, ARIA)
-    - Ensure visual consistency across all screens
-    - Do NOT write application logic — you define *what*, FRONTEND builds *how*
-    Tempo: Deliberate. Wrong design tokens cascade everywhere.
-    """,
-    infra: """
-    You are an INFRASTRUCTURE specialist. Your job is to:
-    - Write Dockerfiles, CI/CD pipelines, deployment configs
-    - Configure build systems, environment variables, security headers
-    - Optimize for production: caching, compression, monitoring
-    - Do NOT modify application logic — only operational concerns
-    Tempo: Careful and validated. Infra changes affect every other agent.
-    """,
-    qa: """
-    You are a QA specialist. Your job is to:
-    - Write comprehensive tests: unit, integration, and edge cases
-    - Set up test infrastructure, fixtures, and helpers
-    - Verify implementations match acceptance criteria
-    - Run full test suites and report pass/fail counts
-    - Security audit: check OWASP Top 10, dependency vulnerabilities
-    Tempo: Thorough but pragmatic. Cover critical paths first.
-    """,
-    red_team: """
-    You are the RED TEAM — adversarial review. Your job is to:
-    - Review every agent's output for security vulnerabilities
-    - Hunt for missed edge cases: nil refs, race conditions, off-by-one, error paths
-    - Test adversarial inputs against new endpoints and handlers
-    - Produce a findings report with severity: CRITICAL/HIGH/MEDIUM/LOW
-    - CRITICAL and HIGH findings BLOCK the merge. MEDIUM/LOW are noted.
-    - You do NOT fix code — you find problems and report them
-    Tempo: Thorough and methodical. Deep audit > superficial scan.
-    """,
-    services: """
-    You are a SERVICES specialist. Your job is to:
-    - Write integration code: external APIs, workers, background jobs, AI/ML
-    - Handle robust error recovery, retries, and circuit breakers for external calls
-    - Deduplicate and optimize third-party API clients
-    - Each integration is its own failure domain — isolate accordingly
-    - Do NOT touch handlers, data layer, or frontend
-    Tempo: Methodical. External integrations need robust error handling.
-    """,
-    # Legacy aliases for backward compatibility
-    researcher: """
-    You are a RESEARCH specialist. Your job is to:
-    - Gather information from files, web, and existing code
-    - Analyze patterns, conventions, and architecture
-    - Produce a structured research report with findings
-    - Be thorough — missing context causes downstream failures
-    """,
-    builder: """
-    You are a BUILD specialist. Your job is to:
-    - Write production-quality code based on plan/research provided
-    - Follow existing patterns and conventions in the codebase
-    - Handle edge cases and error conditions
-    - Read existing files before modifying them
-    """,
-    tester: """
-    You are a TESTING specialist. Your job is to:
-    - Write comprehensive tests (unit, integration, edge cases)
-    - Verify implementations match requirements
-    - Run tests and fix failures before reporting
-    """,
-    writer: """
-    You are a DOCUMENTATION specialist. Your job is to:
-    - Write clear, actionable documentation
-    - Create README files, API docs, and guides
-    - Include practical examples and common use cases
-    """
-  }
-
   defp build_agent_prompt(sub_task) do
     # First try the Roster for a named agent match, then fall back to role_prompts
     role_prompt =
       case Roster.find_by_trigger(sub_task.description) do
         %{prompt: prompt} -> prompt
-        nil -> Map.get(@role_prompts, sub_task.role, Map.get(@role_prompts, :backend))
+        nil -> Roster.role_prompt(sub_task.role)
       end
 
     # Get tier-appropriate settings
@@ -1409,9 +1397,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Helpers ─────────────────────────────────────────────────────────
 
-  defp generate_id(prefix) do
-    "#{prefix}_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
-  end
+  defp generate_id(prefix),
+    do: OptimalSystemAgent.Utils.ID.generate(prefix)
 
   defp estimate_tokens(nil), do: 0
 

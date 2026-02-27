@@ -59,7 +59,7 @@ config :optimal_system_agent,
 
   # HTTP channel (SDK API surface)
   http_port: 8089,
-  require_auth: false,
+  require_auth: true,
 
   # ---------------------------------------------------------------------------
   # Sandbox — Docker container isolation for skill execution
@@ -160,7 +160,15 @@ config :optimal_system_agent,
   # Set OSA_GO_TOKENIZER=true to enable. Requires pre-built Go binary.
   # When disabled or binary missing, falls back to word-count heuristic.
   go_tokenizer_enabled: System.get_env("OSA_GO_TOKENIZER", "false") == "true",
-  go_tokenizer_encoding: "cl100k_base"
+  go_tokenizer_encoding: "cl100k_base",
+
+  # ---------------------------------------------------------------------------
+  # Webhook Signature Secrets — set these to enable inbound signature verification
+  # ---------------------------------------------------------------------------
+  telegram_webhook_secret: nil,
+  whatsapp_app_secret: nil,
+  dingtalk_secret: nil,
+  email_webhook_secret: nil
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
