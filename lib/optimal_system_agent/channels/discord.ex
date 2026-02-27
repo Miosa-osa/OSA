@@ -25,6 +25,7 @@ defmodule OptimalSystemAgent.Channels.Discord do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @api_base "https://discord.com/api/v10"
   @send_timeout 10_000
@@ -167,7 +168,7 @@ defmodule OptimalSystemAgent.Channels.Discord do
 
   defp handle_command(channel_id, user_id, input, state) do
     session_id = "discord_#{user_id}"
-    ensure_loop(session_id, user_id)
+    Session.ensure_loop(session_id, user_id, :discord)
 
     case Loop.process_message(session_id, input) do
       {:ok, response} ->
@@ -250,19 +251,6 @@ defmodule OptimalSystemAgent.Channels.Discord do
     |> String.codepoints()
     |> Enum.chunk_every(max_len)
     |> Enum.map(&Enum.join/1)
-  end
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :discord}
-        )
-    end
   end
 
   defp get_retry_after(headers) do

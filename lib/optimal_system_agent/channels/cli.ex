@@ -767,7 +767,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   defp print_banner do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-    model = get_model_name(provider)
+    model = OptimalSystemAgent.Providers.Registry.get_model_name(provider)
     tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
     soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
@@ -798,23 +798,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
     end
   rescue
     _ -> "dev"
-  end
-
-  defp get_model_name(:anthropic) do
-    Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  end
-
-  defp get_model_name(:ollama) do
-    Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
-  end
-
-  defp get_model_name(:openai) do
-    Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
-  end
-
-  defp get_model_name(provider) do
-    key = :"#{provider}_model"
-    Application.get_env(:optimal_system_agent, key, to_string(provider))
   end
 
   defp print_goodbye do

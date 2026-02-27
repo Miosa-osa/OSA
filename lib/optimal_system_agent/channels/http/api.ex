@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
@@ -141,7 +142,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       start_time = System.monotonic_time(:millisecond)
 
       # Ensure an agent loop exists for this session
-      ensure_loop(session_id, user_id, workspace_id)
+      Session.ensure_loop(session_id, user_id, :http)
 
       # Process through the agent loop (same pipeline as CLI)
       case Loop.process_message(session_id, input) do
@@ -189,32 +190,27 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   get "/stream/:session_id" do
     session_id = conn.params["session_id"]
-    user_id = conn.assigns[:user_id]
 
-    # Validate session ownership before allowing SSE subscription
-    case validate_session_owner(session_id, user_id) do
-      :ok ->
-        # Subscribe to this session's PubSub events
-        Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+    # Subscribe to this session's PubSub events.
+    # The session may not exist yet (TUI connects SSE before the first
+    # orchestrate call creates the session) — that's fine. PubSub will
+    # deliver events as soon as the session starts publishing.
+    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
 
-        conn =
-          conn
-          |> put_resp_content_type("text/event-stream")
-          |> put_resp_header("cache-control", "no-cache")
-          |> put_resp_header("connection", "keep-alive")
-          |> put_resp_header("x-accel-buffering", "no")
-          |> send_chunked(200)
+    conn =
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> put_resp_header("x-accel-buffering", "no")
+      |> send_chunked(200)
 
-        # Send initial connection event
-        {:ok, conn} =
-          chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
+    # Send initial connection event
+    {:ok, conn} =
+      chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
-        # Enter SSE loop — blocks until client disconnects
-        sse_loop(conn, session_id)
-
-      {:error, :not_found} ->
-        json_error(conn, 404, "not_found", "Session not found")
-    end
+    # Enter SSE loop — blocks until client disconnects
+    sse_loop(conn, session_id)
   end
 
   # ── POST /classify ──────────────────────────────────────────────────
@@ -1309,8 +1305,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   # ── Session Ownership Validation ────────────────────────────────────
+  # Used by endpoints that need session-scoped authorization (e.g. task progress).
+  # The SSE stream endpoint intentionally skips this check so the TUI can
+  # subscribe before the first orchestrate call creates the session.
 
-  defp validate_session_owner(session_id, user_id) do
+  @doc false
+  def validate_session_owner(session_id, user_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{_pid, owner}] ->
         cond do
@@ -1385,21 +1385,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   # ── Helpers ─────────────────────────────────────────────────────────
 
-  defp ensure_loop(session_id, user_id, _workspace_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        {:ok, _pid} =
-          DynamicSupervisor.start_child(
-            OptimalSystemAgent.Channels.Supervisor,
-            {Loop, session_id: session_id, user_id: user_id, channel: :http}
-          )
-
-        :ok
-    end
-  end
 
   defp signal_to_map(%Classifier{} = signal) do
     %{

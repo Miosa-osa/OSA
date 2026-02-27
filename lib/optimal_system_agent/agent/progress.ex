@@ -64,32 +64,6 @@ defmodule OptimalSystemAgent.Agent.Progress do
     GenServer.call(__MODULE__, {:format, task_id})
   end
 
-  @doc """
-  Get raw progress data for a task.
-  Returns a map with all agent states and metrics.
-  """
-  @spec get(String.t()) :: {:ok, map()} | {:error, :not_found}
-  def get(task_id) do
-    GenServer.call(__MODULE__, {:get, task_id})
-  end
-
-  @doc """
-  List all tracked tasks with their current status.
-  """
-  @spec list() :: list(map())
-  def list do
-    GenServer.call(__MODULE__, :list)
-  end
-
-  @doc """
-  Subscribe to progress updates for a task.
-  The subscriber PID will receive {:progress_update, task_id, formatted_string} messages.
-  """
-  @spec subscribe(String.t(), pid()) :: :ok
-  def subscribe(task_id, pid \\ self()) do
-    GenServer.call(__MODULE__, {:subscribe, task_id, pid})
-  end
-
   # ── GenServer Callbacks ─────────────────────────────────────────────
 
   @impl true
@@ -111,69 +85,6 @@ defmodule OptimalSystemAgent.Agent.Progress do
         formatted = format_progress(task_progress)
         {:reply, {:ok, formatted}, state}
     end
-  end
-
-  @impl true
-  def handle_call({:get, task_id}, _from, state) do
-    case Map.get(state.tasks, task_id) do
-      nil ->
-        {:reply, {:error, :not_found}, state}
-
-      task_progress ->
-        data = %{
-          task_id: task_id,
-          status: task_progress.status,
-          started_at: task_progress.started_at,
-          completed_at: task_progress.completed_at,
-          agents:
-            task_progress.agents
-            |> Map.values()
-            |> Enum.sort_by(& &1.started_at)
-            |> Enum.map(fn a ->
-              %{
-                id: a.id,
-                name: a.name,
-                role: a.role,
-                status: a.status,
-                tool_uses: a.tool_uses,
-                tokens_used: a.tokens_used,
-                current_action: a.current_action
-              }
-            end)
-        }
-
-        {:reply, {:ok, data}, state}
-    end
-  end
-
-  @impl true
-  def handle_call(:list, _from, state) do
-    tasks =
-      state.tasks
-      |> Map.values()
-      |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
-      |> Enum.map(fn tp ->
-        agent_count = map_size(tp.agents)
-        completed = tp.agents |> Map.values() |> Enum.count(&(&1.status == :completed))
-
-        %{
-          id: tp.id,
-          status: tp.status,
-          agent_count: agent_count,
-          completed_agents: completed,
-          started_at: tp.started_at,
-          completed_at: tp.completed_at
-        }
-      end)
-
-    {:reply, tasks, state}
-  end
-
-  @impl true
-  def handle_call({:subscribe, task_id, pid}, _from, state) do
-    subs = Map.get(state.subscribers, task_id, MapSet.new())
-    state = %{state | subscribers: Map.put(state.subscribers, task_id, MapSet.put(subs, pid))}
-    {:reply, :ok, state}
   end
 
   # Handle orchestrator events relayed from the event bus

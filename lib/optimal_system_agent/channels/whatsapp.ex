@@ -26,6 +26,7 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @api_version "v21.0"
   @graph_base "https://graph.facebook.com"
@@ -195,7 +196,7 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
     # Mark message as read
     mark_read(state.token, state.phone_number_id, from)
 
-    ensure_loop(session_id, from)
+    Session.ensure_loop(session_id, from, :whatsapp)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -269,19 +270,6 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
       headers: [{"authorization", "Bearer #{token}"}],
       receive_timeout: 5_000
     )
-  end
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :whatsapp}
-        )
-    end
   end
 
   defp resolve_mode("web"), do: :web

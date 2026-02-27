@@ -42,13 +42,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
       case validate_command(trimmed) do
         :ok ->
           workspace = Path.expand("~/.osa/workspace")
-          # Prepend a workspace `cd` so relative paths work regardless of
-          # whether we're running in Docker (/workspace) or on the host.
-          full_command = "cd #{workspace} 2>/dev/null || true; #{trimmed}"
+          File.mkdir_p(workspace)
 
           Logger.debug("[ShellExecute] Dispatching command via Sandbox.Executor")
 
-          case Executor.execute(full_command, workspace: workspace) do
+          case Executor.execute(trimmed, workspace: workspace, cwd: workspace) do
             {:ok, output, 0} -> {:ok, maybe_truncate(output)}
             {:ok, output, code} -> {:error, "Exit #{code}:\n#{maybe_truncate(output)}"}
             {:error, reason} -> {:error, reason}

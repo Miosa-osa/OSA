@@ -92,15 +92,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   end
 
   @doc """
-  Analyze a message and decide how to handle it.
-  Returns :simple or {:complex, plan} where plan is a list of sub-tasks.
-  """
-  @spec analyze(String.t(), keyword()) :: :simple | {:complex, list()}
-  def analyze(message, opts \\ []) do
-    GenServer.call(__MODULE__, {:analyze, message, opts}, 60_000)
-  end
-
-  @doc """
   Execute a complex task with multiple sub-agents.
   Returns {:ok, task_id} immediately — execution proceeds asynchronously
   via handle_continue. Poll progress/1 or subscribe to
@@ -148,17 +139,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     GenServer.call(__MODULE__, {:find_matching_skills, task_description})
   end
 
-  @doc """
-  Suggest existing skills or create a new one.
-  First checks for matching skills. If matches with relevance > 0.5 exist,
-  returns them for user confirmation. Otherwise creates the new skill.
-  """
-  @spec suggest_or_create_skill(String.t(), String.t(), String.t(), list()) ::
-          {:existing_matches, list(map())} | {:created, String.t()} | {:error, term()}
-  def suggest_or_create_skill(name, description, instructions, tools \\ []) do
-    GenServer.call(__MODULE__, {:suggest_or_create, name, description, instructions, tools})
-  end
-
   # ── GenServer Callbacks ─────────────────────────────────────────────
 
   @impl true
@@ -168,20 +148,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     )
 
     {:ok, state}
-  end
-
-  @impl true
-  def handle_call({:analyze, message, _opts}, _from, state) do
-    result =
-      try do
-        analyze_complexity(message)
-      rescue
-        e ->
-          Logger.error("[Orchestrator] Complexity analysis failed: #{Exception.message(e)}")
-          :simple
-      end
-
-    {:reply, result, state}
   end
 
   @impl true
@@ -395,70 +361,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   def handle_call({:find_matching_skills, task_description}, _from, state) do
     result = do_find_matching_skills(task_description)
     {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:suggest_or_create, name, description, instructions, tools}, _from, state) do
-    case do_find_matching_skills(description) do
-      {:matches, matches} ->
-        high_relevance = Enum.filter(matches, fn m -> m.relevance > 0.5 end)
-
-        if high_relevance != [] do
-          Logger.info(
-            "[Orchestrator] Found #{length(high_relevance)} existing skill(s) matching '#{name}'"
-          )
-
-          {:reply, {:existing_matches, high_relevance}, state}
-        else
-          # Low relevance matches only — proceed to create
-          result = do_create_skill(name, description, instructions, tools)
-
-          state =
-            case result do
-              {:ok, _} ->
-                %{
-                  state
-                  | skill_cache:
-                      Map.put(state.skill_cache, name, %{
-                        description: description,
-                        created_at: DateTime.utc_now()
-                      })
-                }
-
-              _ ->
-                state
-            end
-
-          case result do
-            {:ok, _} -> {:reply, {:created, name}, state}
-            {:error, reason} -> {:reply, {:error, reason}, state}
-          end
-        end
-
-      :no_matches ->
-        result = do_create_skill(name, description, instructions, tools)
-
-        state =
-          case result do
-            {:ok, _} ->
-              %{
-                state
-                | skill_cache:
-                    Map.put(state.skill_cache, name, %{
-                      description: description,
-                      created_at: DateTime.utc_now()
-                    })
-              }
-
-            _ ->
-              state
-          end
-
-        case result do
-          {:ok, _} -> {:reply, {:created, name}, state}
-          {:error, reason} -> {:reply, {:error, reason}, state}
-        end
-    end
   end
 
   # Handle progress updates from sub-agents via cast

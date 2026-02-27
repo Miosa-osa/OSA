@@ -18,7 +18,8 @@ BACKEND_PID=""
 
 cleanup() {
   if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
-    kill "$BACKEND_PID" 2>/dev/null
+    # Kill the whole process group (BEAM spawns child processes)
+    kill -- -"$BACKEND_PID" 2>/dev/null || kill "$BACKEND_PID" 2>/dev/null
     wait "$BACKEND_PID" 2>/dev/null || true
   fi
 }
@@ -42,8 +43,12 @@ done
 
 # ── Start backend ───────────────────────────────────────────────
 export MIX_ENV="${MIX_ENV:-dev}"
-echo "Starting backend on :${PORT}…"
-(cd "$ROOT" && mix osa.serve) &
+LOG_DIR="$HOME/.osa"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/backend.log"
+
+echo "Starting backend on :${PORT}… (logs: $LOG_FILE)"
+(cd "$ROOT" && mix osa.serve) > "$LOG_FILE" 2>&1 &
 BACKEND_PID=$!
 
 # ── Wait for health ─────────────────────────────────────────────

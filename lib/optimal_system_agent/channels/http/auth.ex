@@ -96,7 +96,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
     if System.system_time(:second) < exp, do: :ok, else: {:error, :expired}
   end
 
-  defp verify_expiration(_), do: :ok
+  defp verify_expiration(_), do: {:error, :missing_expiration}
 
   defp decode_segment(segment) do
     with {:ok, json} <- Base.url_decode64(segment, padding: false),

@@ -218,9 +218,9 @@ func (s *SSEClient) ListenCmd(p *tea.Program) tea.Cmd {
 	}
 }
 
-// reconnectListenCmd is a tea.Cmd that reconnects the SSE stream with backoff.
+// ReconnectListenCmd is a tea.Cmd that reconnects the SSE stream with backoff.
 // Used by the disconnect handler when an unintentional disconnect occurs.
-func (s *SSEClient) reconnectListenCmd(p *tea.Program) tea.Cmd {
+func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 	return func() tea.Msg {
 		attempt := 0
 		maxBackoff := 30 * time.Second

@@ -132,7 +132,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Assembly engine
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp assemble_system_prompt(state, signal, system_budget) do
     blocks = gather_blocks(state, signal)
 
@@ -172,7 +171,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Block gathering — each returns {content, priority_tier, label}
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp gather_blocks(state, signal) do
     [
       # Tier 1 — CRITICAL
@@ -207,7 +205,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Fitting blocks into a budget
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp fit_blocks(_blocks, budget) when budget <= 0, do: {[], 0}
 
   defp fit_blocks(blocks, budget) do
@@ -236,12 +233,10 @@ defmodule OptimalSystemAgent.Agent.Context do
     {parts, used}
   end
 
-  @doc false
   defp extract_parts(blocks) do
     Enum.map(blocks, fn {content, _, _} -> content end)
   end
 
-  @doc false
   defp tokens_for_parts(parts) do
     parts
     |> Enum.map(&estimate_tokens/1)
@@ -271,7 +266,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _, _ -> estimate_tokens_heuristic(text)
   end
 
-  @doc false
   defp estimate_tokens_heuristic(text),
     do: OptimalSystemAgent.Utils.Tokens.estimate(text)
 
@@ -315,7 +309,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Truncation
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp truncate_to_tokens(_text, target_tokens) when target_tokens <= 0, do: ""
 
   defp truncate_to_tokens(text, target_tokens) do
@@ -346,7 +339,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # bootstrap_files/0 removed — IDENTITY.md and SOUL.md are now loaded by
   # Soul module (Tier 1). USER.md is served via Soul.user_block() (Tier 3).
 
-  @doc false
   defp memory_block_relevant(state) do
     # Attempt relevance-based memory retrieval using the latest user message.
     # Falls back to full recall if no user messages or if relevance search unavailable.
@@ -370,7 +362,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp find_latest_user_message(nil), do: nil
   defp find_latest_user_message([]), do: nil
 
@@ -384,7 +375,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end)
   end
 
-  @doc false
   defp recall_relevant(query) do
     # Retrieve full memory, then extract lines relevant to the query.
     # This is a lightweight keyword-overlap relevance filter — not semantic
@@ -435,7 +425,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp full_recall do
     try do
       content = OptimalSystemAgent.Agent.Memory.recall()
@@ -445,7 +434,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp machines_block do
     addendums = OptimalSystemAgent.Machines.prompt_addendums()
 
@@ -457,7 +445,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp os_templates_block do
     addendums = OptimalSystemAgent.OS.Registry.prompt_addendums()
 
@@ -472,7 +459,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   # signal_block/1 removed — signal overlay is now integrated into
   # Soul.system_prompt/1 which includes mode/genre-specific behavior guidance.
 
-  @doc false
   defp tools_block do
     skills = Tools.list_docs()
 
@@ -511,7 +497,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp format_parameters(params) do
     properties = Map.get(params, "properties", %{})
     required = MapSet.new(Map.get(params, "required", []))
@@ -532,7 +517,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp workflow_block(state) do
     # Query the Workflow GenServer for active workflow context.
     # Falls back to nil if the GenServer is not running or has no active workflow.
@@ -547,7 +531,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp intelligence_block(state) do
     parts = []
 
@@ -568,7 +551,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp format_comm_profile(profile) do
     topics = Map.get(profile, :topics, []) |> Enum.join(", ")
 
@@ -582,7 +564,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     """
   end
 
-  @doc false
   defp task_state_block(state) do
     session_id = Map.get(state, :session_id, "default")
 
@@ -629,7 +610,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp task_suffix(%{status: :failed, reason: reason}), do: "  [failed: #{reason}]"
   defp task_suffix(_), do: ""
 
-  @doc false
   defp cortex_block do
     case OptimalSystemAgent.Agent.Cortex.bulletin() do
       nil -> nil
@@ -640,7 +620,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp plan_mode_block(%{plan_mode: true}) do
     """
     ## PLAN MODE — ACTIVE
@@ -672,7 +651,6 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp plan_mode_block(_), do: nil
 
-  @doc false
   defp tool_process_block do
     cwd = File.cwd!()
 
@@ -742,7 +720,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     """
   end
 
-  @doc false
   defp environment_block(_state) do
     cwd = File.cwd!()
     git_info = cached_git_info()
@@ -766,7 +743,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp cached_git_info do
     case Process.get(:osa_git_info_cache) do
       nil ->
@@ -781,7 +757,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp gather_git_info do
     parts = []
 
@@ -807,7 +782,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> ""
   end
 
-  @doc false
   defp get_active_model(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
   defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
   defp get_active_model(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
@@ -816,7 +790,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     Application.get_env(:optimal_system_agent, key, to_string(provider))
   end
 
-  @doc false
   defp runtime_block(state) do
     """
     ## Runtime Context

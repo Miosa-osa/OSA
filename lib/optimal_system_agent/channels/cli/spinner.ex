@@ -15,12 +15,66 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @rotate_interval 4_000
 
   @status_messages [
-    "Thinking…",
-    "Reasoning…",
-    "Processing…",
-    "Analyzing…",
-    "Composing…",
-    "Synthesizing…"
+    # ── OSA / Signal Theory ──
+    "Classifying signals…",
+    "Filtering noise…",
+    "Maximizing S/N ratio…",
+    "Traversing the signal space…",
+    "Resolving the 5-tuple…",
+    "Encoding optimal intent…",
+    "Applying Shannon constraints…",
+    "Walking the path of least resistance…",
+    "Calibrating signal weight…",
+    # ── Elixir / BEAM ──
+    "Spawning processes on the BEAM…",
+    "Pattern matching on your intent…",
+    "Reducing over the possibilities…",
+    "Supervising child processes…",
+    "Hot-reloading a better answer…",
+    "Let it crash… then recover gracefully…",
+    "Piping through the pipeline…",
+    # ── Dev humor ──
+    "Reticulating splines…",
+    "Converting coffee into code…",
+    "Trying to exit Vim…",
+    "Looking for a misplaced semicolon…",
+    "Rewriting in Rust for no particular reason…",
+    "Applying percussive maintenance…",
+    "Resolving dependencies… and existential crises…",
+    "That's not a bug, it's an undocumented feature…",
+    "Compiling brilliance…",
+    "Untangling neural nets…",
+    "Polishing the algorithms…",
+    "Brewing fresh bytes…",
+    "Optimizing for ludicrous speed…",
+    "Calibrating the flux capacitor…",
+    "Constructing additional pylons…",
+    "Herding digital cats…",
+    "Mining for more Dilithium crystals…",
+    "Blowing on the cartridge…",
+    "Checking for syntax errors in the universe…",
+    # ── Pop culture ──
+    "Don't panic…",
+    "Following the white rabbit…",
+    "Engaging the improbability drive…",
+    "Finishing the Kessel Run in less than 12 parsecs…",
+    "So say we all…",
+    "Engage.",
+    "Warp speed engaged…",
+    "Pondering the orb…",
+    "Is this the real life? Is this just fantasy?…",
+    # ── Self-aware ──
+    "Thinking harder than strictly necessary…",
+    "Almost there… probably…",
+    "Letting the thoughts marinate…",
+    "Warming up the AI hamsters…",
+    "Our agents are working as fast as they can…",
+    "Asking the magic conch shell…",
+    "Consulting the digital spirits…",
+    "Buffering… because even AIs need a moment…",
+    # ── Dev jokes ──
+    "Why do programmers prefer dark mode? Light attracts bugs…",
+    "Why did the developer go broke? Used up all their cache…"
   ]
 
   @dim IO.ANSI.faint()
@@ -100,7 +154,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     # Maybe rotate status message
     state =
       if state.phase == :thinking and now - state.last_rotate >= @rotate_interval do
-        next = rem(state.status_index + 1, length(@status_messages))
+        next = :rand.uniform(length(@status_messages)) - 1
+        # Avoid immediate repeat
+        next = if next == state.status_index and length(@status_messages) > 1,
+          do: rem(next + 1, length(@status_messages)), else: next
         %{state | status_index: next, last_rotate: now}
       else
         state

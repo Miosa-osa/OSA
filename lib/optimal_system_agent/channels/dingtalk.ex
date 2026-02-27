@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @webhook_base "https://oapi.dingtalk.com/robot/send"
   @send_timeout 10_000
@@ -129,7 +130,7 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
     if text != "" do
       Logger.debug("DingTalk: Message from #{sender_id}: #{text}")
       session_id = "dingtalk_#{conversation_id}_#{sender_id}"
-      ensure_loop(session_id, sender_id)
+      Session.ensure_loop(session_id, sender_id, :dingtalk)
 
       case Loop.process_message(session_id, text) do
         {:ok, response} ->
@@ -227,16 +228,4 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
     end
   end
 
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :dingtalk}
-        )
-    end
-  end
 end

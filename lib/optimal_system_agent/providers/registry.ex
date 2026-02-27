@@ -336,6 +336,22 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   @doc """
+  Returns the configured model name for the given provider atom.
+
+  Reads the `<provider>_model` application config key, falling back to
+  sensible per-provider defaults.
+  """
+  @spec get_model_name(atom()) :: String.t()
+  def get_model_name(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+  def get_model_name(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
+  def get_model_name(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+
+  def get_model_name(provider) do
+    key = :"#{provider}_model"
+    Application.get_env(:optimal_system_agent, key, to_string(provider))
+  end
+
+  @doc """
   Returns true if the provider has a configured API key (or is Ollama, which needs none).
   """
   @spec provider_configured?(atom()) :: boolean()

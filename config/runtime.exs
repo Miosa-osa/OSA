@@ -94,7 +94,6 @@ config :optimal_system_agent,
   telegram_bot_token: System.get_env("TELEGRAM_BOT_TOKEN"),
   discord_bot_token: System.get_env("DISCORD_BOT_TOKEN"),
   slack_bot_token: System.get_env("SLACK_BOT_TOKEN"),
-  slack_app_token: System.get_env("SLACK_APP_TOKEN"),
 
   # Web search
   brave_api_key: System.get_env("BRAVE_API_KEY"),
@@ -109,24 +108,21 @@ config :optimal_system_agent,
          System.get_env("OSA_REQUIRE_AUTH") == "true" ->
            raise "OSA_SHARED_SECRET must be set when OSA_REQUIRE_AUTH=true"
 
-         config_env() == :test ->
-           "osa-dev-secret-change-me"
-
          true ->
            "osa-dev-secret-#{:crypto.strong_rand_bytes(16) |> Base.url_encode64()}"
        end),
   require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true",
 
-  # Budget limits (USD)
-  budget_daily_limit_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
-  budget_monthly_limit_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), 500.0),
-  budget_per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), 5.0),
+  # Budget limits (USD) — keys must match what Agent.Budget reads
+  daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
+  monthly_budget_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), 500.0),
+  per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), 5.0),
 
-  # Treasury
+  # Treasury — keys must match what Agent.Treasury reads
   treasury_enabled: System.get_env("OSA_TREASURY_ENABLED") == "true",
   treasury_auto_debit: System.get_env("OSA_TREASURY_AUTO_DEBIT") != "false",
-  treasury_daily_limit_usd: parse_float.(System.get_env("OSA_TREASURY_DAILY_LIMIT"), 250.0),
-  treasury_max_single_usd: parse_float.(System.get_env("OSA_TREASURY_MAX_SINGLE"), 50.0),
+  treasury_daily_limit: parse_float.(System.get_env("OSA_TREASURY_DAILY_LIMIT"), 250.0),
+  treasury_max_single: parse_float.(System.get_env("OSA_TREASURY_MAX_SINGLE"), 50.0),
 
   # Fleet management
   fleet_enabled: System.get_env("OSA_FLEET_ENABLED") == "true",

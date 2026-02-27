@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.Security.ShellPolicy do
     mount umount
     iptables
     systemctl
+    env printenv set export declare
     passwd useradd userdel
     nc ncat
   )

@@ -7,13 +7,18 @@ defmodule Mix.Tasks.Osa.Serve do
   Usage: mix osa.serve
   """
   use Mix.Task
+  require Logger
 
   @shortdoc "Start HTTP backend (no CLI)"
 
   @impl true
   def run(_args) do
+    # Suppress boot noise — the Go TUI owns the terminal.
+    # Logger level must be set both before and after app.start because
+    # app.start may re-configure Logger from config files.
     Logger.configure(level: :warning)
     Mix.Task.run("app.start")
+    Logger.configure(level: :warning)
 
     if OptimalSystemAgent.Onboarding.first_run?() do
       OptimalSystemAgent.Onboarding.run()
@@ -28,9 +33,7 @@ defmodule Mix.Tasks.Osa.Serve do
     end
 
     port = Application.get_env(:optimal_system_agent, :http_port, 8089)
-    IO.puts("OSA backend serving on http://localhost:#{port}")
-    IO.puts("Connect with: cd priv/go/tui && ./osa")
-    IO.puts("Or: curl http://localhost:#{port}/health")
+    Logger.info("OSA backend serving on http://localhost:#{port}")
     Process.sleep(:infinity)
   end
 end

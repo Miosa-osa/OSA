@@ -51,7 +51,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch do
 
   defp valid_url?(url) do
     uri = URI.parse(url)
-    uri.scheme in ["http", "https"] and is_binary(uri.host) and uri.host != ""
+    uri.scheme in ["http", "https"] and is_binary(uri.host) and uri.host != "" and
+      not private_host?(uri.host)
+  end
+
+  # Block SSRF to private/loopback/link-local/metadata addresses
+  defp private_host?(host) do
+    host = String.downcase(host)
+
+    cond do
+      host in ["localhost", "0.0.0.0", "[::]", "[::1]"] ->
+        true
+
+      true ->
+        case :inet.parse_address(String.to_charlist(host)) do
+          {:ok, {127, _, _, _}} -> true
+          {:ok, {10, _, _, _}} -> true
+          {:ok, {172, b, _, _}} when b >= 16 and b <= 31 -> true
+          {:ok, {192, 168, _, _}} -> true
+          {:ok, {169, 254, _, _}} -> true
+          {:ok, {0, 0, 0, 0}} -> true
+          {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} -> true
+          _ -> false
+        end
+    end
   end
 
   defp ensure_started do
@@ -62,9 +85,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch do
   end
 
   defp ssl_opts do
-    [verify: :verify_peer, cacerts: :public_key.cacerts_get(), depth: 3]
-  rescue
-    _ -> [verify: :verify_none]
+    cacerts = :public_key.cacerts_get()
+    [verify: :verify_peer, cacerts: cacerts, depth: 3]
   end
 
   defp strip_html(body) when is_binary(body) do

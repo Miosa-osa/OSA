@@ -158,7 +158,7 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.SSEDisconnectedEvent:
 		// Only reconnect if the disconnect was unintentional
 		if m.sessionID != "" && m.sse != nil && !m.sse.IsClosed() && m.program != nil {
-			return m, m.sse.ListenCmd(m.program)
+			return m, m.sse.ReconnectListenCmd(m.program)
 		}
 		return m, nil
 

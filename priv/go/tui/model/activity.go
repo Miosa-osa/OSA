@@ -21,6 +21,9 @@ type ToolCallInfo struct {
 	Done       bool
 }
 
+// phraseRotateInterval controls how often the witty phrase changes.
+const phraseRotateInterval = 4 * time.Second
+
 // ActivityModel renders a spinner, elapsed timer, and tool call feed.
 type ActivityModel struct {
 	sp             spinner.Model
@@ -33,6 +36,9 @@ type ActivityModel struct {
 	expanded       bool
 	thinkingMs     int64 // LLM thinking/reasoning duration
 	iterationCount int   // current iteration (from llm_request)
+	phrase         string
+	phraseIndex    int
+	lastPhraseAt   time.Time
 }
 
 // NewActivity constructs an ActivityModel with a Dot spinner.
@@ -47,6 +53,8 @@ func NewActivity() ActivityModel {
 func (m *ActivityModel) Start() {
 	m.active = true
 	m.startTime = time.Now()
+	m.phrase, m.phraseIndex = pickPhrase(-1)
+	m.lastPhraseAt = m.startTime
 }
 
 // Stop hides the activity display.
@@ -107,7 +115,11 @@ func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 		return m, cmd
 
 	case msg.TickMsg:
-		// Re-render elapsed; no state change needed.
+		// Rotate witty phrase every ~4s.
+		if m.active && time.Since(m.lastPhraseAt) >= phraseRotateInterval {
+			m.phrase, m.phraseIndex = pickPhrase(m.phraseIndex)
+			m.lastPhraseAt = time.Now()
+		}
 		return m, nil
 
 	case msg.LLMRequest:
@@ -159,10 +171,16 @@ func (m ActivityModel) View() string {
 	elapsed := time.Since(m.startTime)
 	tokens := m.inputTokens + m.outputTokens
 
-	// Header: ⏺ Reasoning… (8s · 2 tools · ↓ 4.2k · thought for 3s)
+	// Header: ⏺ Reticulating splines… (8s · 2 tools · ↓ 4.2k · thought for 3s)
+	phrase := m.phrase
+	if phrase == "" {
+		phrase = "Reasoning…"
+	}
 	var hdr strings.Builder
 	hdr.WriteString(style.PrefixActive.Render("⏺"))
-	hdr.WriteString(" Reasoning… (")
+	hdr.WriteString(" ")
+	hdr.WriteString(phrase)
+	hdr.WriteString(" (")
 	hdr.WriteString(formatElapsed(elapsed))
 	hdr.WriteString(" · ")
 	hdr.WriteString(fmt.Sprintf("%d tools", m.totalToolUses))
