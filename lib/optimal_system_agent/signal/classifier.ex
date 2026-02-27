@@ -9,6 +9,10 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   - F (Format): Container format (message, document, notification, etc.)
   - W (Weight): Informational value [0.0, 1.0] — Shannon information content
 
+  Two-tier classification:
+  - Tier 1: Deterministic pattern matching (< 1ms) for high-confidence cases
+  - Tier 2: LLM refinement (~200ms) for ambiguous cases that fall through to defaults
+
   This is what makes OSA architecturally distinct from every other agent framework.
   OpenClaw, AutoGen, CrewAI — none classify signals before processing.
 
@@ -16,7 +20,13 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   Intent Encoding in Communication Systems. https://zenodo.org/records/18774174
   """
 
-  defstruct [:mode, :genre, :type, :format, :weight, :raw, :channel, :timestamp]
+  require Logger
+
+  alias OptimalSystemAgent.Providers.Registry, as: Providers
+
+  defstruct [:mode, :genre, :type, :format, :weight, :raw, :channel, :timestamp, confidence: :high]
+
+  @type confidence :: :high | :low
 
   @type t :: %__MODULE__{
     mode: :execute | :assist | :analyze | :build | :maintain,
@@ -26,24 +36,163 @@ defmodule OptimalSystemAgent.Signal.Classifier do
     weight: float(),
     raw: String.t(),
     channel: atom(),
-    timestamp: DateTime.t()
+    timestamp: DateTime.t(),
+    confidence: confidence()
   }
 
   @doc """
   Classify a raw message into a Signal 5-tuple.
-  Uses deterministic pattern matching first (< 1ms), falls back to LLM only if needed.
+
+  Uses a two-tier approach:
+  - Tier 1: Deterministic pattern matching (< 1ms) — always runs first
+  - Tier 2: LLM refinement (~200ms) — only runs when Tier 1 is low-confidence
+
+  A classification is low-confidence when 2 or more of the three primary
+  dimensions (mode, genre, type) fall through to their defaults.
   """
   def classify(message, channel \\ :cli) do
+    deterministic = classify_deterministic(message, channel)
+
+    if deterministic.confidence == :high or not llm_enabled?() do
+      deterministic
+    else
+      case classify_llm(message, channel, deterministic) do
+        {:ok, refined} -> refined
+        {:error, _} -> deterministic
+      end
+    end
+  end
+
+  # --- Tier 1: Deterministic Classification ---
+
+  defp classify_deterministic(message, channel) do
+    mode = classify_mode(message)
+    genre = classify_genre(message)
+    type = classify_type(message)
+
+    defaults_hit =
+      [
+        mode == :assist,
+        genre == :inform,
+        type == "general"
+      ]
+      |> Enum.count(& &1)
+
+    confidence = if defaults_hit >= 2, do: :low, else: :high
+
     %__MODULE__{
-      mode: classify_mode(message),
-      genre: classify_genre(message),
-      type: classify_type(message),
+      mode: mode,
+      genre: genre,
+      type: type,
       format: classify_format(message, channel),
       weight: calculate_weight(message),
       raw: message,
       channel: channel,
-      timestamp: DateTime.utc_now()
+      timestamp: DateTime.utc_now(),
+      confidence: confidence
     }
+  end
+
+  # --- Tier 2: LLM Classification ---
+
+  defp classify_llm(message, channel, fallback) do
+    prompt = """
+    Classify this message into a signal 5-tuple. Respond ONLY with JSON, no explanation.
+
+    Message: "#{String.slice(message, 0, 500)}"
+    Channel: #{channel}
+
+    Classify into:
+    - mode: One of EXECUTE, ASSIST, ANALYZE, BUILD, MAINTAIN
+      - EXECUTE: Direct action request (run, send, create, deploy)
+      - ASSIST: Help/guidance request (explain, help, how do I)
+      - ANALYZE: Analysis request (report, compare, metrics, trends)
+      - BUILD: Creation request (generate, scaffold, design, write)
+      - MAINTAIN: Maintenance request (fix, update, migrate, backup)
+    - genre: One of DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
+      - DIRECT: Command/instruction
+      - INFORM: Sharing information
+      - COMMIT: Making a promise/commitment
+      - DECIDE: Making/requesting a decision
+      - EXPRESS: Expressing emotion/opinion
+    - type: One of question, request, issue, scheduling, summary, report, general
+    - weight: Float 0.0-1.0 (informational density, higher = more substantive)
+
+    JSON format: {"mode": "ASSIST", "genre": "DIRECT", "type": "request", "weight": 0.75}
+    """
+
+    messages = [%{role: "user", content: prompt}]
+
+    case Providers.chat(messages, temperature: 0.1, max_tokens: 100) do
+      {:ok, %{content: content}} ->
+        parse_llm_classification(content, message, channel, fallback)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp parse_llm_classification(content, message, channel, fallback) do
+    json_str =
+      content
+      |> String.replace(~r/```json\s*/, "")
+      |> String.replace(~r/```\s*/, "")
+      |> String.trim()
+
+    case Jason.decode(json_str) do
+      {:ok, data} ->
+        {:ok,
+         %__MODULE__{
+           mode: parse_mode(data["mode"]) || fallback.mode,
+           genre: parse_genre(data["genre"]) || fallback.genre,
+           type: data["type"] || fallback.type,
+           format: classify_format(message, channel),
+           weight: parse_weight(data["weight"]) || fallback.weight,
+           raw: message,
+           channel: channel,
+           timestamp: DateTime.utc_now(),
+           confidence: :high
+         }}
+
+      {:error, _} ->
+        {:error, :parse_failed}
+    end
+  end
+
+  defp parse_mode(str) when is_binary(str) do
+    case String.downcase(str) do
+      "execute" -> :execute
+      "assist" -> :assist
+      "analyze" -> :analyze
+      "build" -> :build
+      "maintain" -> :maintain
+      _ -> nil
+    end
+  end
+
+  defp parse_mode(_), do: nil
+
+  defp parse_genre(str) when is_binary(str) do
+    case String.downcase(str) do
+      "direct" -> :direct
+      "inform" -> :inform
+      "commit" -> :commit
+      "decide" -> :decide
+      "express" -> :express
+      _ -> nil
+    end
+  end
+
+  defp parse_genre(_), do: nil
+
+  defp parse_weight(val) when is_float(val), do: max(0.0, min(1.0, val))
+  defp parse_weight(val) when is_integer(val), do: max(0.0, min(1.0, val * 1.0))
+  defp parse_weight(_), do: nil
+
+  # --- Config Guard ---
+
+  defp llm_enabled? do
+    Application.get_env(:optimal_system_agent, :classifier_llm_enabled, true)
   end
 
   # --- Mode Classification (Beer's VSM S1-S5) ---

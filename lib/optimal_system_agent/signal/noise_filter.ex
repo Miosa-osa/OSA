@@ -20,6 +20,9 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
   alias OptimalSystemAgent.Signal.Classifier
 
+  @cache_table :osa_noise_cache
+  @cache_ttl 300
+
   @noise_patterns [
     ~r/^(hi|hello|hey|yo|sup)[\s!.]*$/i,
     ~r/^(ok|okay|sure|yep|yeah|yes|no|nah|nope)[\s!.]*$/i,
@@ -37,7 +40,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
     case tier_1(message) do
       {:noise, reason} -> {:noise, reason}
       {:signal, _} -> {:signal, Classifier.calculate_weight(message)}
-      {:uncertain, weight} -> tier_2(message, weight)
+      {:uncertain, weight} -> cached_tier_2(message, weight)
     end
   end
 
@@ -72,10 +75,67 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
   # --- Tier 2: LLM-based (fallback for uncertain signals) ---
 
-  defp tier_2(_message, weight) do
-    # For now, pass through uncertain signals
-    # TODO: Add fast LLM classification when provider is available
-    Logger.debug("Tier 2 noise check: passing uncertain signal (weight=#{weight})")
-    {:signal, weight}
+  defp tier_2(message, weight) do
+    case classify_noise_llm(message) do
+      {:ok, :signal} -> {:signal, weight}
+      {:ok, :noise} -> {:noise, :llm_classified}
+      {:error, _} ->
+        Logger.debug("Tier 2 noise check: LLM unavailable, passing uncertain signal")
+        {:signal, weight}
+    end
+  end
+
+  defp classify_noise_llm(message) do
+    prompt = """
+    Is this message a meaningful signal or just noise? Respond with ONLY "signal" or "noise".
+
+    Noise = greetings, acknowledgments, filler, empty pleasantries, social niceties
+    Signal = questions, requests, information sharing, tasks, decisions, anything with substance
+
+    Message: "#{String.slice(message, 0, 200)}"
+
+    Answer (signal or noise):
+    """
+
+    messages = [%{role: "user", content: prompt}]
+
+    case OptimalSystemAgent.Providers.Registry.chat(messages, temperature: 0.0, max_tokens: 10) do
+      {:ok, %{content: content}} ->
+        case content |> String.trim() |> String.downcase() do
+          "noise" -> {:ok, :noise}
+          "signal" -> {:ok, :signal}
+          s when s in ["noise.", "\"noise\""] -> {:ok, :noise}
+          s when s in ["signal.", "\"signal\""] -> {:ok, :signal}
+          _ -> {:ok, :signal}
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # --- Tier 2 Cache (ETS-backed, 5-minute TTL) ---
+
+  @doc false
+  def init_cache do
+    if :ets.whereis(@cache_table) == :undefined do
+      :ets.new(@cache_table, [:set, :public, :named_table])
+    end
+  end
+
+  defp cached_tier_2(message, weight) do
+    init_cache()
+    key = :crypto.hash(:sha256, message)
+    now = System.system_time(:second)
+
+    case :ets.lookup(@cache_table, key) do
+      [{^key, result, ts}] when now - ts < @cache_ttl ->
+        result
+
+      _ ->
+        result = tier_2(message, weight)
+        :ets.insert(@cache_table, {key, result, now})
+        result
+    end
   end
 end
