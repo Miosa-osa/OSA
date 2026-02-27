@@ -93,12 +93,95 @@ def handle_similarity(params):
     similarity = float(np.dot(vecs[0], vecs[1]))
     return {"similarity": round(similarity, 4)}
 
+def _decorator_name(node):
+    """Extract decorator name from AST node."""
+    import ast
+    if isinstance(node, ast.Name):
+        return node.id
+    elif isinstance(node, ast.Attribute):
+        return f"{_node_name(node.value)}.{node.attr}"
+    elif isinstance(node, ast.Call):
+        return _decorator_name(node.func)
+    return str(node)
+
+def _node_name(node):
+    """Extract name from AST node."""
+    import ast
+    if isinstance(node, ast.Name):
+        return node.id
+    elif isinstance(node, ast.Attribute):
+        return f"{_node_name(node.value)}.{node.attr}"
+    return str(node)
+
+def handle_ast_analyze(params):
+    """Analyze Python source code structure using the ast module."""
+    source = params.get("source", "")
+    if not source:
+        raise ValueError("missing source param")
+
+    import ast
+
+    tree = ast.parse(source)
+
+    functions = []
+    classes = []
+    imports = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef):
+            functions.append({
+                "name": node.name,
+                "lineno": node.lineno,
+                "args": [arg.arg for arg in node.args.args],
+                "decorators": [_decorator_name(d) for d in node.decorator_list],
+                "is_async": isinstance(node, ast.AsyncFunctionDef)
+            })
+        elif isinstance(node, ast.ClassDef):
+            methods = [n.name for n in node.body
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            bases = [_node_name(b) for b in node.bases]
+            classes.append({
+                "name": node.name,
+                "lineno": node.lineno,
+                "methods": methods,
+                "bases": bases
+            })
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append({"module": alias.name, "alias": alias.asname})
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                imports.append({"module": f"{module}.{alias.name}", "alias": alias.asname})
+
+    # Simple complexity: count branches + loops + exception handlers
+    complexity = sum(1 for node in ast.walk(tree)
+                     if isinstance(node, (ast.If, ast.For, ast.While, ast.ExceptHandler,
+                                          ast.With, ast.Assert, ast.BoolOp)))
+
+    return {
+        "functions": functions,
+        "classes": classes,
+        "imports": imports,
+        "complexity": complexity,
+        "total_lines": len(source.splitlines())
+    }
+
+def handle_classify_signal(params):
+    """Classify signal using ML model (stub — returns model_not_loaded until trained)."""
+    text = params.get("text", "")
+    if not text:
+        raise ValueError("missing text param")
+    return {"status": "model_not_loaded", "message": "Signal classification model not yet trained. Accumulate training data first."}
+
 HANDLERS = {
     "ping": handle_ping,
     "embed": handle_embed,
     "search": handle_search,
     "reindex": handle_reindex,
     "similarity": handle_similarity,
+    "ast_analyze": handle_ast_analyze,
+    "classify_signal": handle_classify_signal,
 }
 
 def process_request(line: str) -> str:

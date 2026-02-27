@@ -15,4 +15,13 @@ optimal_system_agent-*.tar
 
 # Compiled sidecar binaries (built locally or via mix osa.setup)
 priv/go/tokenizer/osa-tokenizer
+priv/go/git/osa-git
+priv/go/sysmon/osa-sysmon
 *.beam
+
+# Rust NIF build artifacts
+native/osa_nif/target/
+
+# Python bytecode
+__pycache__/
+*.pyc

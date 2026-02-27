@@ -10,7 +10,9 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Sidecar.Protocol
+  @behaviour OptimalSystemAgent.Sidecar.Behaviour
+
+  alias OptimalSystemAgent.Sidecar.{Protocol, Registry}
 
   @request_timeout 2_000
   @cache_table :osa_token_cache
@@ -21,6 +23,33 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
+
+  # -- Sidecar.Behaviour callbacks --
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def call(method, params, timeout \\ @request_timeout) do
+    GenServer.call(__MODULE__, {:request, method, params}, timeout + 500)
+  catch
+    :exit, _ -> {:error, :timeout}
+  end
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def health_check do
+    if Process.whereis(__MODULE__) == nil do
+      :unavailable
+    else
+      case GenServer.call(__MODULE__, :health, 2_000) do
+        :ready -> :ready
+        :fallback -> :degraded
+        _ -> :unavailable
+      end
+    end
+  catch
+    :exit, _ -> :unavailable
+  end
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def capabilities, do: [:tokenization]
 
   @doc "Count tokens in text. Returns {:ok, count} or {:error, reason}."
   @spec count_tokens(String.t()) :: {:ok, non_neg_integer()} | {:error, atom()}
@@ -78,6 +107,10 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
 
     state = maybe_start_port(state)
 
+    # Register with sidecar registry
+    Registry.register(__MODULE__, capabilities())
+    Registry.update_health(__MODULE__, if(state.mode == :ready, do: :ready, else: :degraded))
+
     if state.mode == :ready do
       Logger.info("[Go.Tokenizer] Started with binary at #{binary_path}")
     else
@@ -105,6 +138,19 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   @impl true
   def handle_call(:available?, _from, state) do
     {:reply, state.mode == :ready, state}
+  end
+
+  def handle_call(:health, _from, state) do
+    {:reply, state.mode, state}
+  end
+
+  # Generic request handler for Sidecar.Behaviour compatibility
+  def handle_call({:request, "count_tokens", %{"text" => text}}, from, state) do
+    handle_call({:count_tokens, text}, from, state)
+  end
+
+  def handle_call({:request, _method, _params}, _from, state) do
+    {:reply, {:error, :unsupported_method}, state}
   end
 
   @impl true

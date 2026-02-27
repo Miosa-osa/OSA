@@ -8,7 +8,9 @@ defmodule OptimalSystemAgent.Python.Sidecar do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Sidecar.Protocol
+  @behaviour OptimalSystemAgent.Sidecar.Behaviour
+
+  alias OptimalSystemAgent.Sidecar.{Protocol, Registry}
 
   @health_interval 60_000
   @request_timeout 30_000
@@ -18,6 +20,31 @@ defmodule OptimalSystemAgent.Python.Sidecar do
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
+
+  # -- Sidecar.Behaviour callbacks --
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def call(method, params, timeout \\ @request_timeout) do
+    request(method, params, timeout)
+  end
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def health_check do
+    if Process.whereis(__MODULE__) == nil do
+      :unavailable
+    else
+      case GenServer.call(__MODULE__, :health, 2_000) do
+        :ready -> :ready
+        :starting -> :starting
+        _ -> :unavailable
+      end
+    end
+  catch
+    :exit, _ -> :unavailable
+  end
+
+  @impl OptimalSystemAgent.Sidecar.Behaviour
+  def capabilities, do: [:embeddings, :semantic_search, :similarity, :ast_analysis]
 
   @doc "Send a JSON-RPC request to the Python sidecar."
   @spec request(String.t(), map(), non_neg_integer()) :: {:ok, any()} | {:error, atom()}
@@ -49,6 +76,10 @@ defmodule OptimalSystemAgent.Python.Sidecar do
     state = start_sidecar(state)
     schedule_health_check()
 
+    # Register with sidecar registry
+    Registry.register(__MODULE__, capabilities())
+    Registry.update_health(__MODULE__, state.mode)
+
     {:ok, state}
   end
 
@@ -74,6 +105,10 @@ defmodule OptimalSystemAgent.Python.Sidecar do
   @impl true
   def handle_call(:available?, _from, state) do
     {:reply, state.mode == :ready, state}
+  end
+
+  def handle_call(:health, _from, state) do
+    {:reply, state.mode, state}
   end
 
   @impl true

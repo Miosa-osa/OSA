@@ -1,0 +1,13 @@
+[package]
+name = "osa_nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "osa_nif"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37"
+tiktoken-rs = "0.5"
+regex = "1"

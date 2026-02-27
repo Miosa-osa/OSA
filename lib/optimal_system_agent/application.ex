@@ -83,7 +83,7 @@ defmodule OptimalSystemAgent.Application do
       # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
       # Started LAST so all agent processes are ready before accepting requests
       {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
-    ] ++ go_children() ++ python_children() ++ sandbox_children()
+    ] ++ sidecar_children() ++ sandbox_children()
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
 
@@ -115,24 +115,44 @@ defmodule OptimalSystemAgent.Application do
     end
   end
 
-  # Go tokenizer starts unconditionally — operates in fallback mode if binary missing.
-  defp go_children do
-    if Application.get_env(:optimal_system_agent, :go_tokenizer_enabled, false) do
-      Logger.info("[Application] Go tokenizer enabled — starting Go.Tokenizer")
-      [OptimalSystemAgent.Go.Tokenizer]
-    else
-      []
-    end
-  end
+  # Unified sidecar startup: Manager first (creates registry + circuit breaker tables),
+  # then individual sidecars based on config flags.
+  defp sidecar_children do
+    manager = [OptimalSystemAgent.Sidecar.Manager]
 
-  # Python sidecar is opt-in — only started when python_sidecar_enabled is true.
-  defp python_children do
-    if Application.get_env(:optimal_system_agent, :python_sidecar_enabled, false) do
-      Logger.info("[Application] Python sidecar enabled — starting Python.Supervisor")
-      [OptimalSystemAgent.Python.Supervisor]
-    else
-      []
-    end
+    go =
+      if Application.get_env(:optimal_system_agent, :go_tokenizer_enabled, false) do
+        Logger.info("[Application] Go tokenizer enabled — starting Go.Tokenizer")
+        [OptimalSystemAgent.Go.Tokenizer]
+      else
+        []
+      end
+
+    python =
+      if Application.get_env(:optimal_system_agent, :python_sidecar_enabled, false) do
+        Logger.info("[Application] Python sidecar enabled — starting Python.Supervisor")
+        [OptimalSystemAgent.Python.Supervisor]
+      else
+        []
+      end
+
+    go_git =
+      if Application.get_env(:optimal_system_agent, :go_git_enabled, false) do
+        Logger.info("[Application] Go git sidecar enabled — starting Go.Git")
+        [OptimalSystemAgent.Go.Git]
+      else
+        []
+      end
+
+    go_sysmon =
+      if Application.get_env(:optimal_system_agent, :go_sysmon_enabled, false) do
+        Logger.info("[Application] Go sysmon sidecar enabled — starting Go.Sysmon")
+        [OptimalSystemAgent.Go.Sysmon]
+      else
+        []
+      end
+
+    manager ++ go ++ python ++ go_git ++ go_sysmon
   end
 
   # Only add Sandbox.Supervisor to the tree when the sandbox is enabled.
