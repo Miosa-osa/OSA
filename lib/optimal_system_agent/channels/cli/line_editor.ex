@@ -19,7 +19,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     history_index: -1,
     saved_input: [],
     prompt: "",
-    tty: nil
+    tty: nil  # single fd for /dev/tty, read+write, bypasses Erlang group leader
   ]
 
   @doc """
@@ -57,14 +57,17 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         tty: tty
       }
 
-      IO.write(prompt)
+      # Write prompt directly to /dev/tty — bypasses Erlang group leader
+      tty_write(tty, prompt)
       input_loop(state)
     after
+      # Move to next line while still in raw mode, via direct tty write.
+      # This ensures the input line stays visible and cursor is on a new line.
+      tty_write(tty, "\n")
+      # Restore terminal to cooked mode.
+      # Because we never used IO.write (Erlang group leader) during raw mode,
+      # user_drv has no buffered content to ghost/replay on mode switch.
       restore_stty(saved)
-      # After restoring cooked mode, move to next line and erase it.
-      # Terminal mode switch (raw→cooked) causes ghost duplicate of the
-      # input line on some terminals. \e[2K clears that ghost.
-      IO.write("\n\e[2K")
     end
   end
 
@@ -252,20 +255,27 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp redraw(state) do
     line = Enum.join(state.buffer)
-    # Clear line and rewrite
-    IO.write("\r\e[2K#{state.prompt}#{line}")
+    # Clear line and rewrite — directly to /dev/tty, not through group leader
+    tty_write(state.tty, "\r\e[2K#{state.prompt}#{line}")
     # Position cursor
     chars_after = length(state.buffer) - state.cursor
-    if chars_after > 0, do: IO.write("\e[#{chars_after}D")
+    if chars_after > 0, do: tty_write(state.tty, "\e[#{chars_after}D")
   end
 
   # --- Terminal I/O ---
 
   defp open_tty do
-    :file.open(~c"/dev/tty", [:read, :raw, :binary])
+    :file.open(~c"/dev/tty", [:read, :write, :raw, :binary])
   end
 
   defp close_tty(tty), do: :file.close(tty)
+
+  # Write directly to /dev/tty fd, bypassing Erlang's group leader (user_drv).
+  # This prevents the ghost duplicate that occurs when user_drv tries to
+  # reconcile its internal state after stty mode switches.
+  defp tty_write(tty, data) do
+    :file.write(tty, data)
+  end
 
   defp save_stty do
     :os.cmd(~c"stty -g 2>/dev/null") |> List.to_string() |> String.trim()

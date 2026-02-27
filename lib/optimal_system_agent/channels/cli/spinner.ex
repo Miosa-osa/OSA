@@ -1,12 +1,13 @@
 defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @moduledoc """
-  Enhanced CLI spinner with elapsed time, rotating status messages,
-  tool call display, and token count.
+  CLI activity feed — shows live tool calls, reasoning iterations,
+  and token usage as the agent works. Like Claude Code's tool display.
 
   Displays like:
-    ⠋ Reasoning… (12s)
-    ⠹ file_search — "api endpoints" (28s · ↓ 4.2k tokens)
-    ⠼ Synthesizing… (45s · 3 tools · ↓ 8.1k tokens)
+    ⠋ Thinking… (2s)
+    ├─ file_read — lib/agent/loop.ex (120ms)
+    ├─ shell_exec — mix test (3.2s)
+    ⠹ Reasoning… (8s · 2 tools · ↓ 4.2k)
   """
 
   @spinner_frames ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -19,12 +20,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     "Processing…",
     "Analyzing…",
     "Composing…",
-    "Deliberating…",
-    "Synthesizing…",
-    "Transmuting…"
+    "Synthesizing…"
   ]
 
   @dim IO.ANSI.faint()
+  @cyan IO.ANSI.cyan()
   @reset IO.ANSI.reset()
 
   defstruct [
@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     active_tool: nil,
     tool_count: 0,
     total_tokens: 0,
+    iteration: 0,
     status_index: 0,
     last_rotate: 0
   ]
@@ -42,8 +43,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @spec start() :: pid()
   def start do
     parent = self()
-    # Use spawn (not spawn_link) so spinner crash doesn't kill the REPL.
-    # stop/1 sets up its own monitor — no need to monitor here.
     spawn(fn -> init_loop(parent) end)
   end
 
@@ -116,9 +115,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         send(caller, {:spinner_stats, elapsed_ms, state.tool_count, state.total_tokens})
 
       {:tool_start, name, args} ->
-        spinner_loop(rest, %{state | phase: :tool_running, active_tool: {name, args}})
+        spinner_loop(rest, %{state |
+          phase: :tool_running,
+          active_tool: {name, args, System.monotonic_time(:millisecond)}
+        })
 
-      {:tool_end, _name, _ms} ->
+      {:tool_end, name, ms} ->
+        # Print completed tool as a permanent line, then continue spinning
+        clear_line()
+        hint = tool_hint(state.active_tool)
+        duration = format_duration(ms)
+        IO.puts("#{@dim}  ├─ #{name}#{hint} #{@cyan}(#{duration})#{@reset}")
+
         spinner_loop(rest, %{state |
           phase: :thinking,
           active_tool: nil,
@@ -127,7 +135,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
 
       {:llm_response, usage} ->
         tokens = Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
-        spinner_loop(rest, %{state | total_tokens: state.total_tokens + tokens})
+        new_iter = state.iteration + 1
+
+        # Show iteration marker when agent loops (tool → re-prompt)
+        if new_iter > 1 do
+          clear_line()
+          IO.puts("#{@dim}  │  iteration #{new_iter}#{@reset}")
+        end
+
+        spinner_loop(rest, %{state |
+          total_tokens: state.total_tokens + tokens,
+          iteration: new_iter
+        })
     after
       @frame_interval ->
         if Process.alive?(state.parent) do
@@ -145,7 +164,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     status =
       case state.phase do
         :tool_running ->
-          {name, args} = state.active_tool
+          {name, args, _start} = state.active_tool
           if args != "", do: "#{name} — #{truncate(args, 50)}", else: "#{name}…"
 
         :thinking ->
@@ -155,6 +174,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     clear_line()
     IO.write("#{@dim}  #{frame} #{status} (#{elapsed}#{tools_str}#{tokens_str})#{@reset}")
   end
+
+  # --- Formatting helpers ---
+
+  defp tool_hint({_name, args, _start}) when is_binary(args) and args != "" do
+    " — #{truncate(args, 45)}"
+  end
+  defp tool_hint(_), do: ""
+
+  defp format_duration(ms) when ms < 1_000, do: "#{ms}ms"
+  defp format_duration(ms), do: "#{Float.round(ms / 1_000, 1)}s"
 
   defp format_elapsed(ms) when ms < 1_000, do: "<1s"
   defp format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
