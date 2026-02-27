@@ -24,6 +24,8 @@ defmodule OptimalSystemAgent.SDK.Session do
   - `:user_id` — user identifier
   - `:channel` — channel atom (default: `:sdk`)
   - `:extra_tools` — additional tool definitions for this session
+  - `:provider` — LLM provider override for this session
+  - `:model` — model name override for this session
   """
   @spec create(keyword()) :: {:ok, String.t()} | {:error, term()}
   def create(opts \\ []) do
@@ -33,7 +35,9 @@ defmodule OptimalSystemAgent.SDK.Session do
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
       channel: Keyword.get(opts, :channel, :sdk),
-      extra_tools: Keyword.get(opts, :extra_tools, [])
+      extra_tools: Keyword.get(opts, :extra_tools, []),
+      provider: Keyword.get(opts, :provider),
+      model: Keyword.get(opts, :model)
     ]
 
     case DynamicSupervisor.start_child(@supervisor, {Loop, loop_opts}) do
@@ -58,9 +62,7 @@ defmodule OptimalSystemAgent.SDK.Session do
     end
   end
 
-  @doc """
-  Close a session and stop its Loop process.
-  """
+  @doc "Close a session and stop its Loop process."
   @spec close(String.t()) :: :ok | {:error, :not_found}
   def close(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
@@ -73,9 +75,7 @@ defmodule OptimalSystemAgent.SDK.Session do
     end
   end
 
-  @doc """
-  Check if a session is alive.
-  """
+  @doc "Check if a session is alive."
   @spec alive?(String.t()) :: boolean()
   def alive?(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
@@ -84,17 +84,13 @@ defmodule OptimalSystemAgent.SDK.Session do
     end
   end
 
-  @doc """
-  List all active session IDs.
-  """
+  @doc "List all active session IDs."
   @spec list() :: [String.t()]
   def list do
     Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
   end
 
-  @doc """
-  Get messages for a session from the persistent memory store.
-  """
+  @doc "Get messages for a session from the persistent memory store."
   @spec get_messages(String.t()) :: [map()]
   def get_messages(session_id) do
     Memory.load_session(session_id)

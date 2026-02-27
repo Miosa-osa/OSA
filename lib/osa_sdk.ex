@@ -72,6 +72,13 @@ defmodule OSA.SDK do
   """
   defdelegate launch_swarm(task, opts \\ []), to: OptimalSystemAgent.SDK
 
+  @doc """
+  Execute an approved plan from a previous query that returned :plan.
+
+  See `OptimalSystemAgent.SDK.execute_plan/3` for full documentation.
+  """
+  defdelegate execute_plan(session_id, message, opts \\ []), to: OptimalSystemAgent.SDK
+
   # ── Tool Registration ────────────────────────────────────────────
 
   @doc """
@@ -130,6 +137,88 @@ defmodule OSA.SDK do
   @doc "Get messages for a session."
   defdelegate get_messages(session_id), to: OptimalSystemAgent.SDK.Session, as: :get_messages
 
+  # ── Memory ───────────────────────────────────────────────────────
+
+  @doc "Recall all persistent memories."
+  defdelegate recall(), to: OptimalSystemAgent.SDK.Memory
+
+  @doc "Recall memories relevant to a query within token budget."
+  defdelegate recall_relevant(message, max_tokens \\ 2000), to: OptimalSystemAgent.SDK.Memory
+
+  @doc "Save an insight to persistent memory."
+  defdelegate remember(content, category \\ "general"), to: OptimalSystemAgent.SDK.Memory
+
+  @doc "Search memories by keyword."
+  defdelegate search_memory(query, opts \\ []), to: OptimalSystemAgent.SDK.Memory, as: :search
+
+  @doc "Load a session's message history."
+  defdelegate load_session(session_id), to: OptimalSystemAgent.SDK.Memory
+
+  @doc "Get memory statistics."
+  defdelegate memory_stats(), to: OptimalSystemAgent.SDK.Memory, as: :stats
+
+  # ── Budget ───────────────────────────────────────────────────────
+
+  @doc "Check if current spending is within budget limits."
+  defdelegate check_budget(), to: OptimalSystemAgent.SDK.Budget, as: :check
+
+  @doc "Get full budget status: limits, spent, remaining, reset times."
+  defdelegate budget_status(), to: OptimalSystemAgent.SDK.Budget, as: :status
+
+  @doc "Record an API cost entry."
+  defdelegate record_cost(provider, model, tokens_in, tokens_out, session_id),
+    to: OptimalSystemAgent.SDK.Budget
+
+  @doc "Calculate USD cost for token counts (pure function)."
+  defdelegate calculate_cost(provider, tokens_in, tokens_out),
+    to: OptimalSystemAgent.SDK.Budget
+
+  @doc "Set daily budget limit in USD."
+  defdelegate set_daily_limit(usd), to: OptimalSystemAgent.SDK.Budget
+
+  # ── Signal Theory ────────────────────────────────────────────────
+
+  @doc "Classify a message into its Signal Theory 5-tuple."
+  defdelegate classify_signal(message, channel \\ :sdk), to: OptimalSystemAgent.SDK.Signal, as: :classify
+
+  @doc "Calculate Shannon weight of a message (0.0-1.0)."
+  defdelegate signal_weight(message), to: OptimalSystemAgent.SDK.Signal, as: :weight
+
+  # ── Tiers & Models ──────────────────────────────────────────────
+
+  @doc "Get model name for a tier on a given provider."
+  defdelegate model_for(tier, provider), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Get model for a named agent (tier-based routing)."
+  defdelegate model_for_agent(agent_name), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Get token budget breakdown for a tier."
+  defdelegate budget_for(tier), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Get all tier configurations."
+  defdelegate all_tiers(), to: OptimalSystemAgent.SDK.Tier, as: :all
+
+  @doc "List all supported LLM providers."
+  defdelegate supported_providers(), to: OptimalSystemAgent.SDK.Tier
+
+  @doc "Map complexity score (1-10) to tier."
+  defdelegate tier_for_complexity(complexity), to: OptimalSystemAgent.SDK.Tier
+
+  # ── Commands ─────────────────────────────────────────────────────
+
+  @doc "Execute a slash command programmatically."
+  defdelegate execute_command(input, session_id \\ "sdk"),
+    to: OptimalSystemAgent.SDK.Command,
+    as: :execute
+
+  # ── MCP ──────────────────────────────────────────────────────────
+
+  @doc "List all configured MCP servers."
+  defdelegate list_mcp_servers(), to: OptimalSystemAgent.SDK.MCP, as: :list_servers
+
+  @doc "List all MCP-provided tools registered in Skills.Registry."
+  defdelegate list_mcp_tools(), to: OptimalSystemAgent.SDK.MCP, as: :list_tools
+
   # ── Convenience ──────────────────────────────────────────────────
 
   @doc "Alias for the Config struct module."
@@ -137,4 +226,7 @@ defmodule OSA.SDK do
 
   @doc "Alias for the Message struct module."
   def message, do: OptimalSystemAgent.SDK.Message
+
+  @doc "Alias for the Permission module."
+  def permission, do: OptimalSystemAgent.SDK.Permission
 end

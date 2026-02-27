@@ -34,6 +34,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :user_id,
     :channel,
     :current_signal,
+    :provider,
+    :model,
     messages: [],
     iteration: 0,
     status: :idle,
@@ -46,7 +48,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def start_link(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
-    GenServer.start_link(__MODULE__, opts, name: via(session_id))
+    user_id = Keyword.get(opts, :user_id)
+    GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id, user_id}})
   end
 
   def process_message(session_id, message, opts \\ []) do
@@ -63,6 +66,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       session_id: Keyword.fetch!(opts, :session_id),
       user_id: Keyword.get(opts, :user_id),
       channel: Keyword.get(opts, :channel, :cli),
+      provider: Keyword.get(opts, :provider),
+      model: Keyword.get(opts, :model),
       tools: Skills.list_tools() ++ extra_tools
     }
 
@@ -77,6 +82,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @impl true
   def handle_call({:process, message, opts}, _from, state) do
     skip_plan = Keyword.get(opts, :skip_plan, false)
+
+    # Apply per-call provider/model overrides (SDK passthrough)
+    state = apply_overrides(state, opts)
 
     # 1. Classify the signal — every user message is a signal, weight determines priority
     signal = Classifier.classify(message, state.channel)
@@ -116,7 +124,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       Bus.emit(:llm_request, %{session_id: state.session_id, iteration: 0})
       start_time = System.monotonic_time(:millisecond)
 
-      result = Providers.chat(context.messages, tools: [], temperature: 0.3)
+      result = llm_chat(state, context.messages, tools: [], temperature: 0.3)
 
       duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -213,8 +221,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Bus.emit(:llm_request, %{session_id: state.session_id, iteration: state.iteration})
     start_time = System.monotonic_time(:millisecond)
 
-    # Call LLM
-    result = Providers.chat(context.messages, tools: state.tools, temperature: temperature())
+    # Call LLM (provider/model threaded from state)
+    result = llm_chat(state, context.messages, tools: state.tools, temperature: temperature())
 
     # Emit timing + usage event after LLM call
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -315,6 +323,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp tool_call_hint(_), do: ""
 
+  # --- Provider/Model Passthrough ---
+
+  # Route LLM calls through Providers.chat with per-session provider/model
+  defp llm_chat(%{provider: provider, model: model}, messages, opts) do
+    opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
+    opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    Providers.chat(messages, opts)
+  end
+
+  # Apply per-call overrides from opts (SDK query passthrough)
+  defp apply_overrides(state, opts) do
+    state
+    |> maybe_override(:provider, Keyword.get(opts, :provider))
+    |> maybe_override(:model, Keyword.get(opts, :model))
+  end
+
+  defp maybe_override(state, _key, nil), do: state
+  defp maybe_override(state, key, value), do: Map.put(state, key, value)
+
   # --- Plan Mode ---
 
   defp should_plan?(signal, state) do
@@ -332,6 +359,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # --- Helpers ---
 
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
+
+  @doc """
+  Returns the owner (user_id) stored in the SessionRegistry for the given session,
+  or `nil` if the session does not exist.
+  """
+  @spec get_owner(String.t()) :: String.t() | nil
+  def get_owner(session_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{_pid, owner}] -> owner
+      _ -> nil
+    end
+  end
 
   defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
 

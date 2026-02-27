@@ -2,24 +2,23 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
   @moduledoc """
   Supervision tree for embedded SDK mode.
 
-  Starts the minimal subset of OSA processes needed for SDK operation:
+  Starts the subset of OSA processes needed for SDK operation:
   Registry, PubSub, Bus, Repo, Providers, Skills, Memory, Budget, Hooks,
-  Learning, Orchestrator, Progress, Swarm, and optionally Bandit.
+  Learning, Orchestrator, Progress, TaskQueue, Compactor, Swarm, and
+  optionally Bandit.
 
-  Excludes: CLI, Channels.Manager, Scheduler, Cortex, Compactor, Fleet,
-  Sandbox, Wallet, Updater, OS.Registry, Machines, Commands.
+  Excludes CLI-only processes: Channels.Manager, Scheduler, Cortex,
+  HeartbeatState, Fleet, Sandbox, Wallet, Updater, OS.Registry, Machines.
 
   ## Usage
 
       config = %OptimalSystemAgent.SDK.Config{
         provider: :anthropic,
-        model: "claude-sonnet-4-6"
+        model: "claude-sonnet-4-6",
+        max_budget_usd: 10.0
       }
 
-      # Add to your supervision tree:
-      children = [
-        {OptimalSystemAgent.SDK.Supervisor, config}
-      ]
+      children = [{OptimalSystemAgent.SDK.Supervisor, config}]
   """
 
   use Supervisor
@@ -35,6 +34,9 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
   def init(%Config{} = config) do
     # Initialize SDK agent ETS table
     OptimalSystemAgent.SDK.Agent.init_table()
+
+    # Wire Application env BEFORE children start (so Budget/Providers pick it up)
+    wire_app_env(config)
 
     # Load soul/personality into persistent_term
     try do
@@ -64,13 +66,16 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
         # Channel supervisor (for session Loop processes)
         {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
 
-        # Agent processes (subset)
+        # Agent processes — full set needed by Loop + Orchestrator
         OptimalSystemAgent.Agent.Memory,
         OptimalSystemAgent.Agent.Budget,
+        OptimalSystemAgent.Agent.TaskQueue,
+        OptimalSystemAgent.Agent.Workflow,
         OptimalSystemAgent.Agent.Orchestrator,
         OptimalSystemAgent.Agent.Progress,
         OptimalSystemAgent.Agent.Hooks,
         OptimalSystemAgent.Agent.Learning,
+        OptimalSystemAgent.Agent.Compactor,
 
         # Intelligence (Signal Theory)
         OptimalSystemAgent.Intelligence.Supervisor,
@@ -79,7 +84,7 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
         OptimalSystemAgent.Swarm.Supervisor
       ] ++ http_children(config)
 
-    # Register SDK tools from config
+    # Register SDK extensions after tree is up
     Task.start(fn ->
       Process.sleep(100)
       register_config_tools(config)
@@ -90,12 +95,36 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  # Optionally start Bandit HTTP server
+  # ── Config Wiring (pre-boot — sets Application env before children start) ──
+
+  defp wire_app_env(%Config{} = config) do
+    # Set default provider (Budget + Providers read this at init)
+    if config.provider do
+      Application.put_env(:optimal_system_agent, :default_provider, config.provider)
+    end
+
+    # Set default model override
+    if config.model do
+      Application.put_env(:optimal_system_agent, :default_model, config.model)
+    end
+
+    # Set budget limit so Agent.Budget picks it up at init
+    if config.max_budget_usd do
+      Application.put_env(:optimal_system_agent, :daily_budget_usd, config.max_budget_usd)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # ── Child Specs ──────────────────────────────────────────────────
+
   defp http_children(%Config{http_port: nil}), do: []
 
   defp http_children(%Config{http_port: port}) when is_integer(port) do
     [{Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: port}]
   end
+
+  # ── Config Registration ──────────────────────────────────────────
 
   defp register_config_tools(%Config{tools: tools}) do
     Enum.each(tools, fn
@@ -109,8 +138,8 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
 
   defp register_config_agents(%Config{agents: agents}) do
     Enum.each(agents, fn
-      %{name: name} = def -> OptimalSystemAgent.SDK.Agent.define(name, def)
-      {name, def} -> OptimalSystemAgent.SDK.Agent.define(name, def)
+      %{name: name} = def_map -> OptimalSystemAgent.SDK.Agent.define(name, def_map)
+      {name, def_map} -> OptimalSystemAgent.SDK.Agent.define(name, def_map)
     end)
   end
 
