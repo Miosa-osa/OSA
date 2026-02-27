@@ -251,13 +251,36 @@ defmodule OptimalSystemAgent.Agent.Loop do
             Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint})
             start_time_tool = System.monotonic_time(:millisecond)
 
+            # Run pre_tool_use hooks (budget guard, security check, etc.)
+            pre_payload = %{
+              tool_name: tool_call.name,
+              arguments: tool_call.arguments,
+              session_id: acc.session_id
+            }
+
             result_str =
-              case Skills.execute(tool_call.name, tool_call.arguments) do
-                {:ok, content} -> content
-                {:error, reason} -> "Error: #{reason}"
+              case run_hooks(:pre_tool_use, pre_payload) do
+                {:blocked, reason} ->
+                  "Blocked: #{reason}"
+
+                _ ->
+                  case Skills.execute(tool_call.name, tool_call.arguments) do
+                    {:ok, content} -> content
+                    {:error, reason} -> "Error: #{reason}"
+                  end
               end
 
             tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
+
+            # Run post_tool_use hooks (cost tracker, telemetry, learning, etc.)
+            post_payload = %{
+              tool_name: tool_call.name,
+              result: result_str,
+              duration_ms: tool_duration_ms,
+              session_id: acc.session_id
+            }
+
+            run_hooks(:post_tool_use, post_payload)
 
             Bus.emit(:tool_call, %{
               name: tool_call.name,
@@ -308,4 +331,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
 
   defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
+
+  # Run hooks with fault isolation — never crash the loop if hooks are down
+  defp run_hooks(event, payload) do
+    try do
+      Hooks.run(event, payload)
+    catch
+      :exit, _ -> {:ok, payload}
+    end
+  end
 end

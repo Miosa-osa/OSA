@@ -100,10 +100,14 @@ defmodule OptimalSystemAgent.Protocol.CloudEvent do
   @doc "Convert CloudEvent to internal Bus event format."
   @spec to_bus_event(t()) :: map()
   def to_bus_event(%__MODULE__{} = event) do
+    stripped = String.replace(event.type, "com.osa.", "")
+
     event_type =
-      event.type
-      |> String.replace("com.osa.", "")
-      |> String.to_atom()
+      try do
+        String.to_existing_atom(stripped)
+      rescue
+        ArgumentError -> stripped
+      end
 
     Map.merge(event.data, %{event: event_type, source: event.source})
   end
@@ -120,6 +124,7 @@ defmodule OptimalSystemAgent.Protocol.CloudEvent do
       error -> error
     end
   end
+
 
   defp generate_id do
     "evt_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))

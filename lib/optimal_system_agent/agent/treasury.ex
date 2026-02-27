@@ -204,7 +204,7 @@ defmodule OptimalSystemAgent.Agent.Treasury do
 
     txn = create_transaction(:credit, amount, description, nil, new_balance)
 
-    state = %{state | balance: new_balance, transactions: [txn | state.transactions]}
+    state = %{state | balance: new_balance, transactions: Enum.take([txn | state.transactions], 10_000)}
 
     Bus.emit(:system_event, %{event: :treasury_deposit, amount: amount, balance: new_balance})
 
@@ -284,7 +284,7 @@ defmodule OptimalSystemAgent.Agent.Treasury do
           | balance: new_balance,
             daily_spent: new_daily,
             monthly_spent: new_monthly,
-            transactions: [txn | state.transactions]
+            transactions: Enum.take([txn | state.transactions], 10_000)
         }
 
         Bus.emit(:system_event, %{
@@ -311,7 +311,7 @@ defmodule OptimalSystemAgent.Agent.Treasury do
 
       txn = create_transaction(:reserve, amount, "Reserve hold", reference_id, state.balance)
 
-      state = %{state | reserved: new_reserved, transactions: [txn | state.transactions]}
+      state = %{state | reserved: new_reserved, transactions: Enum.take([txn | state.transactions], 10_000)}
 
       Bus.emit(:system_event, %{
         event: :treasury_reserve,
@@ -351,7 +351,7 @@ defmodule OptimalSystemAgent.Agent.Treasury do
             state.balance
           )
 
-        state = %{state | reserved: new_reserved, transactions: [txn | state.transactions]}
+        state = %{state | reserved: new_reserved, transactions: Enum.take([txn | state.transactions], 10_000)}
 
         Bus.emit(:system_event, %{
           event: :treasury_release,

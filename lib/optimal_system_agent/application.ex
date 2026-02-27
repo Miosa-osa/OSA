@@ -85,12 +85,17 @@ defmodule OptimalSystemAgent.Application do
         # Multi-agent swarm collaboration system
         OptimalSystemAgent.Swarm.Supervisor,
 
-        # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
-        # Started LAST so all agent processes are ready before accepting requests
-        {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
       ] ++
         fleet_children() ++
-        sidecar_children() ++ sandbox_children() ++ wallet_children() ++ updater_children()
+        sidecar_children() ++
+        sandbox_children() ++
+        wallet_children() ++
+        updater_children() ++
+        [
+          # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
+          # Started LAST so all agent processes are ready before accepting requests
+          {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
+        ]
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
 

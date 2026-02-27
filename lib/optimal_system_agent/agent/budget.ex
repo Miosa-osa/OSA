@@ -167,7 +167,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
       state
       | daily_spent: new_daily,
         monthly_spent: new_monthly,
-        ledger: [entry | state.ledger]
+        ledger: Enum.take([entry | state.ledger], 10_000)
     }
 
     # Emit warnings at 80% thresholds
