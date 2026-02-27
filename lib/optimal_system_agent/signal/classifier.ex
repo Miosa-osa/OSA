@@ -9,12 +9,21 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   - F (Format): Container format (message, document, notification, etc.)
   - W (Weight): Informational value [0.0, 1.0] — Shannon information content
 
-  Two-tier classification:
-  - Tier 1: Deterministic pattern matching (< 1ms) for high-confidence cases
-  - Tier 2: LLM refinement (~200ms) for ambiguous cases that fall through to defaults
+  Architecture:
+  - PRIMARY: LLM classification — understands intent, context, nuance
+  - FALLBACK: Deterministic pattern matching — used only when LLM is unavailable
 
-  This is what makes OSA architecturally distinct from every other agent framework.
-  OpenClaw, AutoGen, CrewAI — none classify signals before processing.
+  The LLM is the primary classifier because understanding intent requires
+  intelligence. "Help me build a rocket" is BUILD mode, not ASSIST — only
+  an LLM understands that. Keyword matching produces false classifications.
+
+  The deterministic path exists for:
+  - Test environments (classifier_llm_enabled: false)
+  - Offline/disconnected mode
+  - LLM provider failures
+
+  Classification results are cached in ETS (SHA256 key, 10-minute TTL)
+  so repeated messages don't hit the LLM every time.
 
   Reference: Luna, R. (2026). Signal Theory: The Architecture of Optimal
   Intent Encoding in Communication Systems. https://zenodo.org/records/18774174
@@ -40,114 +49,135 @@ defmodule OptimalSystemAgent.Signal.Classifier do
     confidence: confidence()
   }
 
+  @cache_table :osa_classifier_cache
+  @cache_ttl 600
+
   @doc """
   Classify a raw message into a Signal 5-tuple.
 
-  Uses a two-tier approach:
-  - Tier 1: Deterministic pattern matching (< 1ms) — always runs first
-  - Tier 2: LLM refinement (~200ms) — only runs when Tier 1 is low-confidence
-
-  A classification is low-confidence when 2 or more of the three primary
-  dimensions (mode, genre, type) fall through to their defaults.
+  When LLM is enabled (production): LLM classifies with full understanding.
+  When LLM is disabled (tests/offline): Deterministic pattern matching.
   """
   def classify(message, channel \\ :cli) do
-    deterministic = classify_deterministic(message, channel)
-
-    if deterministic.confidence == :high or not llm_enabled?() do
-      deterministic
-    else
-      case classify_llm(message, channel, deterministic) do
-        {:ok, refined} -> refined
-        {:error, _} -> deterministic
+    if llm_enabled?() do
+      # LLM-primary: use intelligence to understand intent
+      case cached_classify_llm(message, channel) do
+        {:ok, signal} -> signal
+        {:error, _} ->
+          # Fallback to deterministic ONLY when LLM is unavailable
+          Logger.warning("[Classifier] LLM unavailable, falling back to deterministic classification")
+          classify_deterministic(message, channel)
       end
+    else
+      # Test / offline mode: deterministic classification
+      classify_deterministic(message, channel)
     end
   end
 
-  # --- Tier 1: Deterministic Classification ---
+  # ---------------------------------------------------------------------------
+  # LLM Classification (Primary)
+  # ---------------------------------------------------------------------------
 
-  defp classify_deterministic(message, channel) do
-    mode = classify_mode(message)
-    genre = classify_genre(message)
-    type = classify_type(message)
+  @classification_prompt """
+  You are a Signal Theory classifier. Classify this message into exactly 4 fields.
+  Respond ONLY with a JSON object. No explanation, no markdown, no wrapping.
 
-    defaults_hit =
-      [
-        mode == :assist,
-        genre == :inform,
-        type == "general"
-      ]
-      |> Enum.count(& &1)
+  ## Signal Theory Dimensions
 
-    confidence = if defaults_hit >= 2, do: :low, else: :high
+  **mode** — What operational action does this message require?
+  - EXECUTE: The user wants something done NOW (run, send, deploy, delete, trigger, sync, import, export)
+  - BUILD: The user wants something CREATED (create, generate, write, scaffold, design, develop, implement, make something new)
+  - ANALYZE: The user wants INSIGHT (analyze, report, compare, metrics, trend, dashboard, kpi, review data)
+  - MAINTAIN: The user wants something FIXED or UPDATED (fix, update, migrate, backup, restore, rollback, patch, upgrade, debug)
+  - ASSIST: The user wants HELP or GUIDANCE (explain, how do I, what is, help me understand, teach, clarify)
 
-    %__MODULE__{
-      mode: mode,
-      genre: genre,
-      type: type,
-      format: classify_format(message, channel),
-      weight: calculate_weight(message),
-      raw: message,
-      channel: channel,
-      timestamp: DateTime.utc_now(),
-      confidence: confidence
-    }
-  end
+  Important: Classify by the PRIMARY INTENT, not by individual words.
+  "Help me build a rocket" = BUILD (they want to build something)
+  "Can you run the tests?" = EXECUTE (they want tests run)
+  "What caused the crash?" = ANALYZE (they want analysis)
+  "I need to fix the login" = MAINTAIN (they want a fix)
 
-  # --- Tier 2: LLM Classification ---
+  **genre** — What is the communicative purpose?
+  - DIRECT: A command or instruction — the user is telling you to do something
+  - INFORM: Sharing information — the user is giving you facts or status
+  - COMMIT: Making a promise — "I will", "let me", "I'll handle it"
+  - DECIDE: Making or requesting a decision — approve, reject, confirm, cancel, choose
+  - EXPRESS: Emotional expression — gratitude, frustration, praise, complaint
 
-  defp classify_llm(message, channel, fallback) do
-    prompt = """
-    Classify this message into a signal 5-tuple. Respond ONLY with JSON, no explanation.
+  **type** — Domain category:
+  - question: Asking for information (contains ?, or starts with who/what/when/where/why/how)
+  - request: Asking for an action to be performed
+  - issue: Reporting a problem (error, bug, broken, crash, fail)
+  - scheduling: Time-related (remind, schedule, later, tomorrow, next week)
+  - summary: Asking for condensed information (summarize, recap, brief, overview)
+  - report: Providing status or results
+  - general: None of the above
 
-    Message: "#{String.slice(message, 0, 500)}"
-    Channel: #{channel}
+  **weight** — Informational density (0.0 to 1.0):
+  - 0.0-0.2: Noise (greetings, filler, single words)
+  - 0.3-0.5: Low information (simple acknowledgments, short responses)
+  - 0.5-0.7: Medium (standard questions, simple requests)
+  - 0.7-0.9: High (complex tasks, multi-part requests, technical content)
+  - 0.9-1.0: Critical (urgent issues, emergencies, production problems)
 
-    Classify into:
-    - mode: One of EXECUTE, ASSIST, ANALYZE, BUILD, MAINTAIN
-      - EXECUTE: Direct action request (run, send, create, deploy)
-      - ASSIST: Help/guidance request (explain, help, how do I)
-      - ANALYZE: Analysis request (report, compare, metrics, trends)
-      - BUILD: Creation request (generate, scaffold, design, write)
-      - MAINTAIN: Maintenance request (fix, update, migrate, backup)
-    - genre: One of DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
-      - DIRECT: Command/instruction
-      - INFORM: Sharing information
-      - COMMIT: Making a promise/commitment
-      - DECIDE: Making/requesting a decision
-      - EXPRESS: Expressing emotion/opinion
-    - type: One of question, request, issue, scheduling, summary, report, general
-    - weight: Float 0.0-1.0 (informational density, higher = more substantive)
+  ## Message to classify
 
-    JSON format: {"mode": "ASSIST", "genre": "DIRECT", "type": "request", "weight": 0.75}
-    """
+  Channel: %CHANNEL%
+  Message: "%MESSAGE%"
+
+  Respond with ONLY: {"mode":"...","genre":"...","type":"...","weight":0.0}
+  """
+
+  defp classify_llm(message, channel) do
+    # Truncate to prevent prompt injection via extremely long messages
+    safe_message =
+      message
+      |> String.slice(0, 1000)
+      |> String.replace("\"", "'")
+      |> String.replace("\n", " ")
+
+    prompt =
+      @classification_prompt
+      |> String.replace("%MESSAGE%", safe_message)
+      |> String.replace("%CHANNEL%", to_string(channel))
 
     messages = [%{role: "user", content: prompt}]
 
-    case Providers.chat(messages, temperature: 0.1, max_tokens: 100) do
+    case Providers.chat(messages, temperature: 0.0, max_tokens: 80) do
       {:ok, %{content: content}} ->
-        parse_llm_classification(content, message, channel, fallback)
+        parse_llm_result(content, message, channel)
 
       {:error, _} = err ->
         err
     end
+  rescue
+    e ->
+      Logger.warning("[Classifier] LLM classification error: #{Exception.message(e)}")
+      {:error, :llm_exception}
   end
 
-  defp parse_llm_classification(content, message, channel, fallback) do
+  defp parse_llm_result(content, message, channel) do
     json_str =
       content
-      |> String.replace(~r/```json\s*/, "")
-      |> String.replace(~r/```\s*/, "")
+      |> String.trim()
+      |> String.replace(~r/^```json\s*/, "")
+      |> String.replace(~r/\s*```$/, "")
       |> String.trim()
 
     case Jason.decode(json_str) do
-      {:ok, data} ->
+      {:ok, data} when is_map(data) ->
+        mode = parse_mode(data["mode"])
+        genre = parse_genre(data["genre"])
+        type = parse_type(data["type"])
+        weight = parse_weight(data["weight"])
+
         {:ok,
          %__MODULE__{
-           mode: parse_mode(data["mode"]) || fallback.mode,
-           genre: parse_genre(data["genre"]) || fallback.genre,
-           type: data["type"] || fallback.type,
+           mode: mode || :assist,
+           genre: genre || :inform,
+           type: type || "general",
            format: classify_format(message, channel),
-           weight: parse_weight(data["weight"]) || fallback.weight,
+           weight: weight || calculate_weight(message),
            raw: message,
            channel: channel,
            timestamp: DateTime.utc_now(),
@@ -155,12 +185,75 @@ defmodule OptimalSystemAgent.Signal.Classifier do
          }}
 
       {:error, _} ->
-        {:error, :parse_failed}
+        # Try to extract JSON from prose response
+        case Regex.run(~r/\{[^}]+\}/, json_str) do
+          [json_match] ->
+            case Jason.decode(json_match) do
+              {:ok, data} -> parse_llm_result_from_data(data, message, channel)
+              _ -> {:error, :parse_failed}
+            end
+
+          _ ->
+            {:error, :parse_failed}
+        end
     end
   end
 
+  defp parse_llm_result_from_data(data, message, channel) do
+    {:ok,
+     %__MODULE__{
+       mode: parse_mode(data["mode"]) || :assist,
+       genre: parse_genre(data["genre"]) || :inform,
+       type: parse_type(data["type"]) || "general",
+       format: classify_format(message, channel),
+       weight: parse_weight(data["weight"]) || calculate_weight(message),
+       raw: message,
+       channel: channel,
+       timestamp: DateTime.utc_now(),
+       confidence: :high
+     }}
+  end
+
+  # ---------------------------------------------------------------------------
+  # LLM Cache (ETS-backed, 10-minute TTL)
+  # ---------------------------------------------------------------------------
+
+  defp cached_classify_llm(message, channel) do
+    ensure_cache()
+    key = :crypto.hash(:sha256, "#{channel}:#{message}")
+    now = System.system_time(:second)
+
+    case :ets.lookup(@cache_table, key) do
+      [{^key, {:ok, cached_signal}, ts}] when now - ts < @cache_ttl ->
+        # Return cached result with fresh timestamp
+        {:ok, %{cached_signal | timestamp: DateTime.utc_now()}}
+
+      _ ->
+        result = classify_llm(message, channel)
+
+        case result do
+          {:ok, _} = ok ->
+            :ets.insert(@cache_table, {key, ok, now})
+            ok
+
+          error ->
+            error
+        end
+    end
+  end
+
+  defp ensure_cache do
+    if :ets.whereis(@cache_table) == :undefined do
+      :ets.new(@cache_table, [:set, :public, :named_table])
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # LLM Response Parsers
+  # ---------------------------------------------------------------------------
+
   defp parse_mode(str) when is_binary(str) do
-    case String.downcase(str) do
+    case String.downcase(String.trim(str)) do
       "execute" -> :execute
       "assist" -> :assist
       "analyze" -> :analyze
@@ -173,7 +266,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   defp parse_mode(_), do: nil
 
   defp parse_genre(str) when is_binary(str) do
-    case String.downcase(str) do
+    case String.downcase(String.trim(str)) do
       "direct" -> :direct
       "inform" -> :inform
       "commit" -> :commit
@@ -185,14 +278,43 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   defp parse_genre(_), do: nil
 
+  defp parse_type(str) when is_binary(str) do
+    valid = ~w(question request issue scheduling summary report general)
+    cleaned = String.downcase(String.trim(str))
+    if cleaned in valid, do: cleaned, else: nil
+  end
+
+  defp parse_type(_), do: nil
+
   defp parse_weight(val) when is_float(val), do: max(0.0, min(1.0, val))
   defp parse_weight(val) when is_integer(val), do: max(0.0, min(1.0, val * 1.0))
   defp parse_weight(_), do: nil
 
-  # --- Config Guard ---
+  # ---------------------------------------------------------------------------
+  # Config Guard
+  # ---------------------------------------------------------------------------
 
   defp llm_enabled? do
     Application.get_env(:optimal_system_agent, :classifier_llm_enabled, true)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Deterministic Classification (Fallback)
+  # ---------------------------------------------------------------------------
+
+  @doc false
+  def classify_deterministic(message, channel) do
+    %__MODULE__{
+      mode: classify_mode(message),
+      genre: classify_genre(message),
+      type: classify_type(message),
+      format: classify_format(message, channel),
+      weight: calculate_weight(message),
+      raw: message,
+      channel: channel,
+      timestamp: DateTime.utc_now(),
+      confidence: :low
+    }
   end
 
   # --- Mode Classification (Beer's VSM S1-S5) ---
@@ -217,18 +339,13 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   defp classify_genre(msg) do
     lower = String.downcase(msg)
     cond do
-      # Directives — cause an action
       matches_word?(lower, ~w(please run make create send)) or
         matches_word_strict?(lower, "do") or
         String.ends_with?(lower, "!") -> :direct
-      # Commissives — bind the sender (multi-word phrases, not individual tokens)
       matches_phrase?(lower, @commit_phrases) -> :commit
-      # Declaratives — change state
       matches_word?(lower, ~w(approve reject cancel confirm decide)) or
         matches_word_strict?(lower, "set") -> :decide
-      # Expressives — convey internal state
       matches_word?(lower, @express_words) -> :express
-      # Default: Assertives — convey information
       true -> :inform
     end
   end
@@ -290,29 +407,22 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   # --- Helpers ---
 
-  # Word-start boundary matching: "crash" matches "crash" and "crashing"
-  # but not "acrash". Allows morphological variants (suffixed forms).
   defp matches_word?(text, keywords) when is_list(keywords) do
     Enum.any?(keywords, fn kw ->
       Regex.match?(~r/\b#{Regex.escape(kw)}/, text)
     end)
   end
 
-  # Strict whole-word matching for short keywords prone to false positives
-  # as prefixes of other words: "do" matches "do this" but NOT "document" or "done".
   defp matches_word_strict?(text, keyword) do
     Regex.match?(~r/\b#{Regex.escape(keyword)}\b/, text)
   end
 
-  # Strict whole-word matching for a list of short keywords.
   defp matches_any_word_strict?(text, keywords) when is_list(keywords) do
     Enum.any?(keywords, fn kw ->
       Regex.match?(~r/\b#{Regex.escape(kw)}\b/, text)
     end)
   end
 
-  # Phrase matching: checks if the text contains any of the given multi-word phrases.
-  # Each phrase is matched as a contiguous substring with word boundaries.
   defp matches_phrase?(text, phrases) when is_list(phrases) do
     Enum.any?(phrases, fn phrase ->
       Regex.match?(~r/\b#{Regex.escape(phrase)}\b/, text)
