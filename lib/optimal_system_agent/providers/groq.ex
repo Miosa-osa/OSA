@@ -27,10 +27,10 @@ defmodule OptimalSystemAgent.Providers.Groq do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :groq_api_key)
-    model = Application.get_env(:optimal_system_agent, :groq_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :groq_model, default_model())
     url = Application.get_env(:optimal_system_agent, :groq_url, @default_url)
 
-    case OpenAICompat.chat(url, api_key, model, messages, opts) do
+    case OpenAICompat.chat(url, api_key, model, messages, Keyword.delete(opts, :model)) do
       {:error, "API key not configured"} ->
         {:error, "GROQ_API_KEY not configured"}
 

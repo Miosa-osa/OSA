@@ -1,14 +1,15 @@
 defmodule OptimalSystemAgent.Channels.CLI do
   @moduledoc """
   Interactive CLI REPL — clean, colored, responsive.
-  Supports streaming responses, animated spinner, tool feedback,
+  Supports streaming responses, animated spinner with elapsed time/token count,
+  readline-style line editing with arrow keys and history,
   markdown rendering, and signal classification indicators.
   Start with: mix osa.chat
   """
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
-  alias OptimalSystemAgent.Channels.CLI.Markdown
+  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, Spinner}
   alias OptimalSystemAgent.Commands
   alias OptimalSystemAgent.Events.Bus
 
@@ -19,7 +20,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   @yellow IO.ANSI.yellow()
   @white IO.ANSI.white()
 
-  @spinner_frames ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+  @max_history 100
 
   def start do
     # Clear screen and print banner
@@ -30,9 +31,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
     {:ok, _pid} = Loop.start_link(session_id: session_id, channel: :cli)
 
     # Register event handlers for CLI feedback
-    register_tool_handler()
     register_signal_handler()
     register_orchestrator_handler()
+
+    # Initialize history storage in ETS
+    init_history()
 
     IO.puts("")
     loop(session_id)
@@ -40,34 +43,45 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   defp loop(session_id) do
     prompt = "#{@bold}#{@cyan}> #{@reset}"
+    history = get_history(session_id)
 
-    case IO.gets(prompt) do
+    case LineEditor.readline(prompt, history) do
       :eof ->
         print_goodbye()
+        System.halt(0)
 
-      "exit\n" ->
-        print_goodbye()
-
-      "quit\n" ->
-        print_goodbye()
-
-      "clear\n" ->
-        IO.write(IO.ANSI.clear() <> IO.ANSI.home())
-        print_banner()
+      :interrupt ->
         IO.puts("")
         loop(session_id)
 
-      input ->
+      {:ok, ""} ->
+        loop(session_id)
+
+      {:ok, input} ->
         input = String.trim(input)
 
-        next_session =
-          if input == "" do
-            session_id
-          else
-            process_input(input, session_id)
-          end
+        if input == "" do
+          loop(session_id)
+        else
+          # Bare "exit"/"quit" handled as raw matches for speed;
+          # /exit and /quit flow through Commands.execute → handle_action(:exit)
+          case input do
+            x when x in ["exit", "quit"] ->
+              print_goodbye()
+              System.halt(0)
 
-        loop(next_session)
+            "clear" ->
+              IO.write(IO.ANSI.clear() <> IO.ANSI.home())
+              print_banner()
+              IO.puts("")
+              loop(session_id)
+
+            _ ->
+              add_to_history(session_id, input)
+              next = process_input(input, session_id)
+              loop(next)
+          end
+        end
     end
   end
 
@@ -82,24 +96,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
   end
 
   # ── Event Handlers ──────────────────────────────────────────────────
-
-  defp register_tool_handler do
-    Bus.register_handler(:tool_call, fn payload ->
-      case payload do
-        %{name: name, phase: :start} ->
-          IO.write("#{@dim}  ⚙ #{name}...#{@reset}")
-
-        %{name: name, phase: :end, duration_ms: ms} ->
-          clear_line()
-          IO.puts("#{@dim}  ⚙ #{name} (#{ms}ms)#{@reset}")
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
 
   defp register_signal_handler do
     # Capture the latest signal from agent_response events into an ETS table
@@ -134,7 +130,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
         %{event: :orchestrator_task_started, task_id: task_id} ->
           clear_line()
           IO.puts("#{@bold}#{@cyan}  ▶ Spawning agents...#{@reset}")
-          # Subscribe CLI process to progress updates
           try do
             :ets.insert(:cli_signal_cache, {:active_task, task_id})
           rescue
@@ -214,7 +209,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         session_id
 
       {:action, action, output} ->
-        print_response(output)
+        if output != "", do: print_response(output)
         handle_action(action, session_id)
 
       :unknown ->
@@ -249,6 +244,18 @@ defmodule OptimalSystemAgent.Channels.CLI do
     target_id
   end
 
+  defp handle_action(:exit, _session_id) do
+    print_goodbye()
+    System.halt(0)
+  end
+
+  defp handle_action(:clear, session_id) do
+    IO.write(IO.ANSI.clear() <> IO.ANSI.home())
+    print_banner()
+    IO.puts("")
+    session_id
+  end
+
   defp handle_action(_, session_id), do: session_id
 
   defp stop_session(session_id) do
@@ -261,11 +268,52 @@ defmodule OptimalSystemAgent.Channels.CLI do
   # ── Agent Communication ─────────────────────────────────────────────
 
   defp send_to_agent(input, session_id) do
-    spinner = start_spinner()
+    spinner = Spinner.start()
 
-    case Loop.process_message(session_id, input) do
+    # Register per-request event handlers that forward to spinner.
+    # Capture refs so we can unregister after the request completes.
+    tool_ref = Bus.register_handler(:tool_call, fn payload ->
+      if Process.alive?(spinner) do
+        case payload do
+          %{name: n, phase: :start, args: a} ->
+            Spinner.update(spinner, {:tool_start, n, a || ""})
+
+          %{name: n, phase: :start} ->
+            Spinner.update(spinner, {:tool_start, n, ""})
+
+          %{name: n, phase: :end, duration_ms: ms} ->
+            Spinner.update(spinner, {:tool_end, n, ms})
+
+          _ ->
+            :ok
+        end
+      end
+    end)
+
+    llm_ref = Bus.register_handler(:llm_response, fn payload ->
+      if Process.alive?(spinner) do
+        case payload do
+          %{usage: u} when is_map(u) and map_size(u) > 0 ->
+            Spinner.update(spinner, {:llm_response, u})
+
+          _ ->
+            :ok
+        end
+      end
+    end)
+
+    result = Loop.process_message(session_id, input)
+
+    # Clean up per-request handlers to prevent accumulation
+    Bus.unregister_handler(:tool_call, tool_ref)
+    Bus.unregister_handler(:llm_response, llm_ref)
+
+    case result do
       {:ok, response} ->
-        stop_spinner(spinner)
+        {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
+
+        # Show completion summary
+        show_completion_line(elapsed_ms, tool_count, total_tokens)
 
         # Check for signal metadata from the Bus event handler
         signal = get_cached_signal(session_id)
@@ -274,52 +322,30 @@ defmodule OptimalSystemAgent.Channels.CLI do
         print_response(response)
 
       {:error, reason} ->
-        stop_spinner(spinner)
+        Spinner.stop(spinner)
         IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
     end
   end
 
-  # ── Spinner ─────────────────────────────────────────────────────────
+  defp show_completion_line(elapsed_ms, tool_count, total_tokens) do
+    parts = [format_elapsed(elapsed_ms)]
+    parts = if tool_count > 0, do: parts ++ ["#{tool_count} tools"], else: parts
+    parts = if total_tokens > 0, do: parts ++ [format_tokens(total_tokens)], else: parts
 
-  defp start_spinner do
-    parent = self()
-
-    spawn_link(fn ->
-      spinner_loop(@spinner_frames, parent)
-    end)
+    IO.puts("#{@dim}  ✓ #{Enum.join(parts, " · ")}#{@reset}")
   end
 
-  defp spinner_loop([], parent), do: spinner_loop(@spinner_frames, parent)
-
-  defp spinner_loop([frame | rest], parent) do
-    clear_line()
-    IO.write("#{@dim}  #{frame} thinking...#{@reset}")
-
-    receive do
-      :stop -> :ok
-    after
-      80 ->
-        if Process.alive?(parent) do
-          spinner_loop(rest, parent)
-        end
-    end
+  defp format_elapsed(ms) when ms < 1_000, do: "<1s"
+  defp format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
+  defp format_elapsed(ms) do
+    mins = div(ms, 60_000)
+    secs = div(rem(ms, 60_000), 1_000)
+    "#{mins}m#{secs}s"
   end
 
-  defp stop_spinner(pid) do
-    if Process.alive?(pid) do
-      send(pid, :stop)
-      # Give it a moment to exit cleanly
-      Process.sleep(10)
-
-      # Ensure process is dead (it's spawn_link'd so should die, but be safe)
-      if Process.alive?(pid) do
-        Process.unlink(pid)
-        Process.exit(pid, :kill)
-      end
-    end
-
-    clear_line()
-  end
+  defp format_tokens(0), do: ""
+  defp format_tokens(n) when n < 1_000, do: "↓ #{n}"
+  defp format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
 
   # ── Signal Classification Indicator ─────────────────────────────────
 
@@ -330,6 +356,42 @@ defmodule OptimalSystemAgent.Channels.CLI do
     genre = signal.genre |> to_string()
     weight = Float.round(signal.weight, 1)
     IO.puts("#{@dim}  #{mode} · #{genre} · w#{weight}#{@reset}")
+  end
+
+  # ── History ──────────────────────────────────────────────────────────
+
+  defp init_history do
+    try do
+      :ets.new(:cli_history, [:set, :public, :named_table])
+    rescue
+      ArgumentError -> :cli_history
+    end
+  end
+
+  defp get_history(session_id) do
+    case :ets.lookup(:cli_history, session_id) do
+      [{^session_id, entries}] -> entries
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp add_to_history(session_id, input) do
+    current = get_history(session_id)
+
+    # Skip consecutive duplicates
+    updated =
+      case current do
+        [^input | _] -> current
+        _ -> [input | Enum.take(current, @max_history - 1)]
+      end
+
+    try do
+      :ets.insert(:cli_history, {session_id, updated})
+    rescue
+      _ -> :ok
+    end
   end
 
   # ── Banner ──────────────────────────────────────────────────────────

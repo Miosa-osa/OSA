@@ -28,11 +28,13 @@ defmodule OptimalSystemAgent.Providers.OpenRouter do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :openrouter_api_key)
-    model = Application.get_env(:optimal_system_agent, :openrouter_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :openrouter_model, default_model())
     url = Application.get_env(:optimal_system_agent, :openrouter_url, @default_url)
 
     opts =
-      Keyword.put(opts, :extra_headers, [
+      opts
+      |> Keyword.delete(:model)
+      |> Keyword.put(:extra_headers, [
         {"HTTP-Referer", "https://github.com/Miosa-osa/OSA"},
         {"X-Title", "OSA"}
       ])

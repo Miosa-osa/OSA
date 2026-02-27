@@ -50,10 +50,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
     try do
       case Req.post(url, json: body, headers: headers, receive_timeout: 120_000) do
-        {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]}}} ->
+        {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp}} ->
           content = msg["content"] || ""
           tool_calls = parse_tool_calls(msg)
-          {:ok, %{content: content, tool_calls: tool_calls}}
+          usage = parse_usage(resp)
+          {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error_message(resp_body)
@@ -130,6 +131,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       n -> Map.put(body, :max_tokens, n)
     end
   end
+
+  defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}),
+    do: %{input_tokens: inp, output_tokens: out}
+  defp parse_usage(_), do: %{}
 
   defp extract_error_message(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error_message(%{"error" => msg}) when is_binary(msg), do: msg

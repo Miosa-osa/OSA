@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.Providers.Replicate do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :replicate_api_key)
-    model = Application.get_env(:optimal_system_agent, :replicate_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :replicate_model, default_model())
     base_url = Application.get_env(:optimal_system_agent, :replicate_url, @default_url)
 
     unless api_key do

@@ -21,6 +21,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   use GenServer
   require Logger
 
+  alias OptimalSystemAgent.Agent.Roster
+  alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
@@ -728,6 +730,18 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     # Build specialized system prompt for this agent's role
     system_prompt = build_agent_prompt(sub_task)
 
+    # Determine tier for this agent (from Roster match or role default)
+    agent_tier = resolve_agent_tier(sub_task)
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    tier_opts = %{
+      model: Tier.model_for(agent_tier, provider),
+      temperature: Tier.temperature(agent_tier),
+      max_iterations: Tier.max_iterations(agent_tier),
+      max_response_tokens: Tier.max_response_tokens(agent_tier),
+      tier: agent_tier
+    }
+
     agent_state = %AgentState{
       id: agent_id,
       task_id: task_id,
@@ -744,22 +758,38 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       task_id: task_id,
       agent_id: agent_id,
       agent_name: sub_task.name,
-      role: sub_task.role
+      role: sub_task.role,
+      tier: agent_tier,
+      model: tier_opts.model
     })
 
     # Run the agent asynchronously
     orchestrator_pid = self()
 
     task_ref = Task.async(fn ->
-      run_agent_loop(agent_id, task_id, system_prompt, sub_task, session_id, orchestrator_pid, cached_tools)
+      run_agent_loop(agent_id, task_id, system_prompt, sub_task, session_id, orchestrator_pid, cached_tools, tier_opts)
     end)
 
     {agent_id, agent_state, task_ref}
   end
 
+  # Resolve which tier an agent should run at based on Roster or role defaults.
+  defp resolve_agent_tier(sub_task) do
+    case Roster.find_by_trigger(sub_task.description) do
+      %{tier: tier} -> tier
+      nil ->
+        # Map roles to default tiers
+        case sub_task.role do
+          :lead -> :elite
+          :red_team -> :specialist
+          _ -> :specialist
+        end
+    end
+  end
+
   # ── Agent Loop (runs inside Task.async) ─────────────────────────────
 
-  defp run_agent_loop(agent_id, task_id, system_prompt, sub_task, _session_id, orchestrator_pid, cached_tools) do
+  defp run_agent_loop(agent_id, task_id, system_prompt, sub_task, _session_id, orchestrator_pid, cached_tools, tier_opts) do
     # Build the conversation for this sub-agent
     user_message =
       if sub_task.context do
@@ -799,13 +829,14 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         tools
       end
 
-    # Run the agent's ReAct loop (simplified — no full Loop GenServer needed)
-    run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, 0, 0, 0)
+    # Run the agent's ReAct loop with tier-aware model and temperature
+    max_iters = tier_opts.max_iterations
+    run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, 0, 0, 0, tier_opts, max_iters)
   end
 
-  defp run_sub_agent_iterations(agent_id, task_id, messages, _tools, orchestrator_pid, iteration, tool_uses, tokens_used)
-       when iteration >= 20 do
-    Logger.warning("[Orchestrator] Sub-agent #{agent_id} hit max iterations")
+  defp run_sub_agent_iterations(agent_id, task_id, messages, _tools, orchestrator_pid, iteration, tool_uses, tokens_used, _tier_opts, max_iters)
+       when iteration >= max_iters do
+    Logger.warning("[Orchestrator] Sub-agent #{agent_id} hit max iterations (#{max_iters})")
 
     # Report final progress
     GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
@@ -823,16 +854,24 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     {:ok, (last_assistant && last_assistant.content) || "Agent reached iteration limit without producing a result."}
   end
 
-  defp run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, iteration, tool_uses, tokens_used) do
+  defp run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, iteration, tool_uses, tokens_used, tier_opts, max_iters) do
     # Emit progress update
     GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
       tool_uses: tool_uses,
       tokens_used: tokens_used,
-      current_action: "Thinking... (iteration #{iteration + 1})"
+      current_action: "Thinking... (iteration #{iteration + 1}/#{max_iters})"
     }})
 
+    # Tier-aware LLM options: model + temperature from the agent's tier
+    llm_opts = [
+      tools: tools,
+      temperature: tier_opts.temperature,
+      model: tier_opts.model,
+      max_tokens: tier_opts.max_response_tokens
+    ]
+
     try do
-      case Providers.chat(messages, tools: tools, temperature: 0.5) do
+      case Providers.chat(messages, llm_opts) do
         {:ok, %{content: content, tool_calls: []}} ->
           # No tool calls — final response
           estimated_tokens = tokens_used + estimate_tokens(content)
@@ -874,10 +913,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
               {msgs ++ [tool_msg], tu, et + estimate_tokens(result_str)}
             end)
 
-          # Re-prompt
+          # Re-prompt with same tier opts
           run_sub_agent_iterations(
             agent_id, task_id, messages, tools, orchestrator_pid,
-            iteration + 1, new_tool_uses_final, estimated_tokens_final
+            iteration + 1, new_tool_uses_final, estimated_tokens_final, tier_opts, max_iters
           )
 
         {:ok, %{content: content}} when is_binary(content) and content != "" ->
@@ -1016,7 +1055,21 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   }
 
   defp build_agent_prompt(sub_task) do
-    role_prompt = Map.get(@role_prompts, sub_task.role, Map.get(@role_prompts, :builder))
+    # First try the Roster for a named agent match, then fall back to role_prompts
+    role_prompt =
+      case Roster.find_by_trigger(sub_task.description) do
+        %{prompt: prompt} -> prompt
+        nil -> Map.get(@role_prompts, sub_task.role, Map.get(@role_prompts, :backend))
+      end
+
+    # Get tier-appropriate settings
+    agent_tier =
+      case Roster.find_by_trigger(sub_task.description) do
+        %{tier: tier} -> tier
+        nil -> :specialist
+      end
+
+    max_iters = Tier.max_iterations(agent_tier)
 
     """
     #{role_prompt}
@@ -1027,11 +1080,17 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     ## Available Tools
     #{Enum.join(sub_task.tools_needed || [], ", ")}
 
+    ## Execution Parameters
+    - Tier: #{agent_tier}
+    - Max iterations: #{max_iters}
+    - Token budget: #{Tier.total_budget(agent_tier)}
+
     ## Rules
     - Focus ONLY on your assigned task
     - Be thorough but efficient
     - Report your results clearly when done
     - If you encounter a blocker, state it clearly and do what you can
+    - Match existing codebase patterns and conventions
     """
   end
 

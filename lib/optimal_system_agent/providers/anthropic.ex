@@ -27,26 +27,26 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
     base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
 
     unless api_key do
       {:error, "ANTHROPIC_API_KEY not configured"}
     else
-      do_chat(base_url, api_key, model, messages, opts)
+      do_chat(base_url, api_key, model, messages, Keyword.delete(opts, :model))
     end
   end
 
   @impl true
   def chat_stream(messages, callback, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
     base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
 
     unless api_key do
       {:error, "ANTHROPIC_API_KEY not configured"}
     else
-      do_chat_stream(base_url, api_key, model, messages, callback, opts)
+      do_chat_stream(base_url, api_key, model, messages, callback, Keyword.delete(opts, :model))
     end
   end
 
@@ -79,7 +79,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls}}
+          usage = extract_usage(resp)
+          {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -333,6 +334,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   defp extract_tool_calls(_), do: []
+
+  defp extract_usage(%{"usage" => %{"input_tokens" => inp, "output_tokens" => out}}),
+    do: %{input_tokens: inp, output_tokens: out}
+  defp extract_usage(_), do: %{}
 
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg

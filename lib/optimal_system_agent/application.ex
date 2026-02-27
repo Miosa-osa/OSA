@@ -68,6 +68,8 @@ defmodule OptimalSystemAgent.Application do
       OptimalSystemAgent.Agent.Workflow,
       OptimalSystemAgent.Agent.Orchestrator,
       OptimalSystemAgent.Agent.Progress,
+      OptimalSystemAgent.Agent.Hooks,
+      OptimalSystemAgent.Agent.Learning,
       OptimalSystemAgent.Agent.Scheduler,
       OptimalSystemAgent.Agent.Compactor,
       OptimalSystemAgent.Agent.Cortex,
@@ -92,10 +94,13 @@ defmodule OptimalSystemAgent.Application do
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
-        # Auto-detect best Ollama model if using local provider (fast, ~100ms)
+        # Auto-detect best Ollama model and tier assignments (fast, ~100ms)
         if Application.get_env(:optimal_system_agent, :default_provider) == :ollama do
           OptimalSystemAgent.Providers.Ollama.auto_detect_model()
         end
+
+        # Always detect Ollama tiers if Ollama is reachable (for fallback routing)
+        Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
 
         # Start configured channel adapters after the supervision tree is up.
         Task.start(fn ->

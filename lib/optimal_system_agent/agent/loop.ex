@@ -115,8 +115,22 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Build context (passes current signal for signal-aware system prompt)
     context = Context.build(state, state.current_signal)
 
+    # Emit timing event before LLM call
+    Bus.emit(:llm_request, %{session_id: state.session_id, iteration: state.iteration})
+    start_time = System.monotonic_time(:millisecond)
+
     # Call LLM
-    case Providers.chat(context.messages, tools: state.tools, temperature: temperature()) do
+    result = Providers.chat(context.messages, tools: state.tools, temperature: temperature())
+
+    # Emit timing + usage event after LLM call
+    duration_ms = System.monotonic_time(:millisecond) - start_time
+    usage = case result do
+      {:ok, resp} -> Map.get(resp, :usage, %{})
+      _ -> %{}
+    end
+    Bus.emit(:llm_response, %{session_id: state.session_id, duration_ms: duration_ms, usage: usage})
+
+    case result do
       {:ok, %{content: content, tool_calls: []}} ->
         # No tool calls — final response
         {content, state}
@@ -130,8 +144,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         # Execute each tool and append results (with timing feedback)
         state = Enum.reduce(tool_calls, state, fn tool_call, acc ->
-          Bus.emit(:tool_call, %{name: tool_call.name, phase: :start})
-          start_time = System.monotonic_time(:millisecond)
+          arg_hint = tool_call_hint(tool_call.arguments)
+          Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint})
+          start_time_tool = System.monotonic_time(:millisecond)
 
           result_str =
             case Skills.execute(tool_call.name, tool_call.arguments) do
@@ -139,8 +154,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
               {:error, reason} -> "Error: #{reason}"
             end
 
-          duration_ms = System.monotonic_time(:millisecond) - start_time
-          Bus.emit(:tool_call, %{name: tool_call.name, phase: :end, duration_ms: duration_ms})
+          tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
+          Bus.emit(:tool_call, %{name: tool_call.name, phase: :end, duration_ms: tool_duration_ms, args: arg_hint})
 
           tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
           %{acc | messages: acc.messages ++ [tool_msg]}
@@ -154,6 +169,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
         {"I encountered an error processing your request. Please try again.", state}
     end
   end
+
+  defp tool_call_hint(%{"command" => cmd}), do: String.slice(cmd, 0, 60)
+  defp tool_call_hint(%{"path" => p}), do: p
+  defp tool_call_hint(%{"query" => q}), do: String.slice(q, 0, 60)
+  defp tool_call_hint(args) when is_map(args) and map_size(args) > 0 do
+    args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")
+  end
+  defp tool_call_hint(_), do: ""
 
   # --- Helpers ---
 

@@ -48,9 +48,19 @@ defmodule OptimalSystemAgent.Events.Bus do
     end
   end
 
-  @doc "Register a handler for a specific event type."
+  @doc """
+  Register a handler for a specific event type.
+  Returns a reference that can be passed to `unregister_handler/2`.
+  """
   def register_handler(event_type, handler_fn) when is_function(handler_fn, 1) do
-    GenServer.call(__MODULE__, {:register, event_type, handler_fn})
+    ref = make_ref()
+    GenServer.call(__MODULE__, {:register, event_type, ref, handler_fn})
+    ref
+  end
+
+  @doc "Remove a previously registered handler by its ref."
+  def unregister_handler(event_type, ref) do
+    GenServer.call(__MODULE__, {:unregister, event_type, ref})
   end
 
   @doc "List all registered event types."
@@ -65,10 +75,16 @@ defmodule OptimalSystemAgent.Events.Bus do
   end
 
   @impl true
-  def handle_call({:register, event_type, handler_fn}, _from, state) do
-    :ets.insert(:osa_event_handlers, {event_type, handler_fn})
+  def handle_call({:register, event_type, ref, handler_fn}, _from, state) do
+    :ets.insert(:osa_event_handlers, {event_type, ref, handler_fn})
     # Recompile the goldrush router — hot code reload
     compile_router()
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:unregister, event_type, ref}, _from, state) do
+    # Match and delete the specific handler by ref
+    :ets.match_delete(:osa_event_handlers, {event_type, ref, :_})
     {:reply, :ok, state}
   end
 
@@ -109,8 +125,9 @@ defmodule OptimalSystemAgent.Events.Bus do
 
     try do
       :ets.lookup(:osa_event_handlers, type)
-      |> Enum.each(fn {_, handler} ->
-        Task.start(fn -> handler.(payload) end)
+      |> Enum.each(fn
+        {_, _ref, handler} -> Task.start(fn -> handler.(payload) end)
+        {_, handler} -> Task.start(fn -> handler.(payload) end)
       end)
     rescue
       _ -> :ok

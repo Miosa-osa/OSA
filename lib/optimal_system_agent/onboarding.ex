@@ -127,7 +127,7 @@ defmodule OptimalSystemAgent.Onboarding do
       for {env_var, value} <- Map.get(config, "api_keys", %{}),
           is_binary(value) and value != "" do
         System.put_env(env_var, value)
-        key_atom = env_var |> String.downcase() |> String.to_atom()
+        key_atom = env_var_to_app_key(env_var)
         Application.put_env(:optimal_system_agent, key_atom, value)
       end
 
@@ -516,6 +516,19 @@ defmodule OptimalSystemAgent.Onboarding do
         trimmed = String.trim(input)
         if trimmed == "" and default != nil, do: default, else: trimmed
     end
+  end
+
+  # Maps env var names to the Application env key atoms that provider modules
+  # and Registry.provider_configured?/1 actually read.
+  # Most follow the pattern ENV_VAR → :lowercased_env_var, but three don't:
+  @env_var_overrides %{
+    "CO_API_KEY" => :cohere_api_key,
+    "REPLICATE_API_TOKEN" => :replicate_api_key,
+    "DASHSCOPE_API_KEY" => :qwen_api_key
+  }
+
+  defp env_var_to_app_key(env_var) do
+    Map.get(@env_var_overrides, env_var, env_var |> String.downcase() |> String.to_atom())
   end
 
   defp config_has_provider?(path) do

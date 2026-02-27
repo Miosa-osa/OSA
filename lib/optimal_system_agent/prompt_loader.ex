@@ -52,7 +52,10 @@ defmodule OptimalSystemAgent.PromptLoader do
         if content, do: count + 1, else: count
       end)
 
-    Logger.info("[PromptLoader] Loaded #{loaded}/#{length(@known_keys)} prompts")
+    # Also load command prompt templates from priv/commands/
+    cmd_count = load_command_prompts()
+
+    Logger.info("[PromptLoader] Loaded #{loaded}/#{length(@known_keys)} prompts, #{cmd_count} command templates")
     :ok
   end
 
@@ -66,6 +69,101 @@ defmodule OptimalSystemAgent.PromptLoader do
   @spec get(atom(), term()) :: String.t() | term()
   def get(key, default) when is_atom(key) do
     :persistent_term.get({__MODULE__, key}, nil) || default
+  end
+
+  @doc "Get a command prompt template by category and name."
+  @spec get_command(String.t(), String.t()) :: String.t() | nil
+  def get_command(category, name) do
+    :persistent_term.get({__MODULE__, :cmd, category, name}, nil)
+  end
+
+  @doc "List all loaded command prompt templates."
+  @spec list_command_prompts() :: [{String.t(), String.t()}]
+  def list_command_prompts do
+    try do
+      :persistent_term.get({__MODULE__, :cmd_index}, [])
+    rescue
+      ArgumentError -> []
+    end
+  end
+
+  # ── Command Prompt Loader ─────────────────────────────────────
+
+  defp load_command_prompts do
+    priv_dir =
+      case :code.priv_dir(:optimal_system_agent) do
+        {:error, _} -> nil
+        dir -> to_string(dir)
+      end
+
+    user_dir = Path.expand("~/.osa/commands")
+    bundled_dir = if priv_dir, do: Path.join(priv_dir, "commands"), else: nil
+
+    # Scan both directories for category/name.md files
+    entries =
+      scan_command_dir(user_dir) ++ scan_command_dir(bundled_dir)
+
+    # Deduplicate (user overrides bundled)
+    unique =
+      entries
+      |> Enum.uniq_by(fn {cat, name, _content} -> {cat, name} end)
+
+    # Store each command prompt
+    Enum.each(unique, fn {category, name, content} ->
+      :persistent_term.put({__MODULE__, :cmd, category, name}, content)
+    end)
+
+    # Store an index for listing
+    index = Enum.map(unique, fn {cat, name, _} -> {cat, name} end)
+    :persistent_term.put({__MODULE__, :cmd_index}, index)
+
+    length(unique)
+  end
+
+  defp scan_command_dir(nil), do: []
+
+  defp scan_command_dir(dir) do
+    if File.dir?(dir) do
+      case File.ls(dir) do
+        {:ok, entries} ->
+          Enum.flat_map(entries, fn entry ->
+            full_path = Path.join(dir, entry)
+
+            cond do
+              File.dir?(full_path) ->
+                # Category directory — scan .md files inside
+                case File.ls(full_path) do
+                  {:ok, files} ->
+                    files
+                    |> Enum.filter(&String.ends_with?(&1, ".md"))
+                    |> Enum.flat_map(fn file ->
+                      case read_file(Path.join(full_path, file)) do
+                        nil -> []
+                        content -> [{entry, Path.basename(file, ".md"), content}]
+                      end
+                    end)
+
+                  _ ->
+                    []
+                end
+
+              String.ends_with?(entry, ".md") ->
+                case read_file(full_path) do
+                  nil -> []
+                  content -> [{"root", Path.basename(entry, ".md"), content}]
+                end
+
+              true ->
+                []
+            end
+          end)
+
+        _ ->
+          []
+      end
+    else
+      []
+    end
   end
 
   # ── Helpers ────────────────────────────────────────────────────

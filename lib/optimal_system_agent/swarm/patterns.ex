@@ -1,27 +1,144 @@
 defmodule OptimalSystemAgent.Swarm.Patterns do
   @moduledoc """
-  Predefined swarm execution patterns.
+  Predefined swarm execution patterns and named pattern configurations.
+
+  ## Execution Patterns
 
   Each pattern receives a list of `{agent_spec, pid}` tuples (from the plan)
   and executes them according to the coordination strategy. All patterns return
   a list of result maps that the Orchestrator synthesises into a final output.
-
-  ## Patterns
 
   - `parallel/3`     — All agents work independently; results merged by position
   - `pipeline/3`     — Agent A output flows into Agent B's task context, then C
   - `debate/3`       — All agents propose; last agent (critic) evaluates all proposals
   - `review_loop/4`  — Coder works, reviewer checks, iterate up to max_iterations
 
+  ## Named Pattern Configurations
+
+  Loaded from `priv/swarms/patterns.json`, these define agent rosters and
+  execution modes for common swarm use cases:
+
+  - `get_pattern/1`  — Get agents and config for a named pattern
+  - `list_patterns/0` — List all available named patterns
+
+  Available patterns: code-analysis, full-stack, debug-swarm, performance-audit,
+  security-audit, documentation, adaptive-debug, adaptive-feature,
+  concurrent-migration, ai-pipeline
+
   ## Result shape
 
-  Each pattern returns `[%{role, task, result, status}]` — a list of per-agent
-  results ordered by the agents list. The Orchestrator uses this to build the
-  synthesis prompt.
+  Each execution pattern returns `[%{role, task, result, status}]` — a list of
+  per-agent results ordered by the agents list. The Orchestrator uses this to
+  build the synthesis prompt.
   """
   require Logger
 
   alias OptimalSystemAgent.Swarm.Worker
+
+  # ── Named Pattern Configs (loaded from JSON) ──────────────────────
+
+  @patterns_file "priv/swarms/patterns.json"
+  @external_resource @patterns_file
+
+  @pattern_configs (
+    case File.read(@patterns_file) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, %{"patterns" => patterns, "defaults" => defaults}} ->
+            %{patterns: patterns, defaults: defaults}
+
+          {:ok, %{"patterns" => patterns}} ->
+            %{patterns: patterns, defaults: %{}}
+
+          _ ->
+            Logger.warning("Failed to parse #{@patterns_file}")
+            %{patterns: %{}, defaults: %{}}
+        end
+
+      {:error, _} ->
+        %{patterns: %{}, defaults: %{}}
+    end
+  )
+
+  @doc """
+  Get a named pattern configuration by name.
+
+  Returns `{:ok, pattern_config}` or `{:error, :not_found}`.
+
+  ## Example
+
+      {:ok, config} = Patterns.get_pattern("code-analysis")
+      # => {:ok, %{
+      #   "description" => "Comprehensive code analysis",
+      #   "agents" => ["@security-auditor", "@code-reviewer", "@test-automator"],
+      #   "mode" => "parallel",
+      #   "finalizer" => "@code-reviewer"
+      # }}
+  """
+  @spec get_pattern(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def get_pattern(name) when is_binary(name) do
+    case Map.get(@pattern_configs.patterns, name) do
+      nil -> {:error, :not_found}
+      config -> {:ok, Map.merge(config, %{"name" => name})}
+    end
+  end
+
+  def get_pattern(name) when is_atom(name) do
+    get_pattern(Atom.to_string(name))
+  end
+
+  @doc """
+  List all available named pattern configurations.
+
+  Returns a list of `{name, description}` tuples.
+
+  ## Example
+
+      Patterns.list_patterns()
+      # => [
+      #   {"code-analysis", "Comprehensive code analysis"},
+      #   {"full-stack", "Full-stack feature implementation"},
+      #   ...
+      # ]
+  """
+  @spec list_patterns() :: [{String.t(), String.t()}]
+  def list_patterns do
+    @pattern_configs.patterns
+    |> Enum.map(fn {name, config} ->
+      {name, Map.get(config, "description", "(no description)")}
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  @doc """
+  Get the default configuration values for all patterns.
+
+  Returns defaults like timeout, max_parallel, etc.
+  """
+  @spec defaults() :: map()
+  def defaults do
+    @pattern_configs.defaults
+  end
+
+  @doc """
+  Get the agents list for a named pattern, with '@' prefix stripped.
+
+  Returns `{:ok, [String.t()]}` or `{:error, :not_found}`.
+  """
+  @spec agents_for_pattern(String.t()) :: {:ok, [String.t()]} | {:error, :not_found}
+  def agents_for_pattern(name) do
+    case get_pattern(name) do
+      {:ok, config} ->
+        agents =
+          (config["agents"] || [])
+          |> Enum.map(&String.trim_leading(&1, "@"))
+
+        {:ok, agents}
+
+      error ->
+        error
+    end
+  end
 
   # ── Parallel ─────────────────────────────────────────────────────────
 

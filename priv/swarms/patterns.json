@@ -1,0 +1,200 @@
+{
+  "version": "2.0.0",
+  "patterns": {
+    "code-analysis": {
+      "description": "Comprehensive code analysis",
+      "agents": [
+        "@security-auditor",
+        "@code-reviewer",
+        "@test-automator"
+      ],
+      "mode": "parallel",
+      "finalizer": "@code-reviewer"
+    },
+    "full-stack": {
+      "description": "Full-stack feature implementation",
+      "agents": [
+        "@frontend-react",
+        "@backend-go",
+        "@database-specialist"
+      ],
+      "mode": "parallel",
+      "finalizer": "@test-automator"
+    },
+    "debug-swarm": {
+      "description": "Multi-agent debugging",
+      "agents": [
+        "@debugger",
+        "@explorer",
+        "@code-reviewer"
+      ],
+      "mode": "parallel",
+      "finalizer": "@debugger"
+    },
+    "performance-audit": {
+      "description": "Performance analysis and optimization",
+      "agents": [
+        "@performance-optimizer",
+        "@database-specialist",
+        "@backend-go"
+      ],
+      "mode": "parallel",
+      "finalizer": "@performance-optimizer"
+    },
+    "security-audit": {
+      "description": "Security review",
+      "agents": [
+        "@security-auditor",
+        "@code-reviewer",
+        "@dependency-analyzer"
+      ],
+      "mode": "parallel",
+      "finalizer": "@security-auditor"
+    },
+    "documentation": {
+      "description": "Comprehensive documentation",
+      "agents": [
+        "@technical-writer",
+        "@doc-writer",
+        "@api-designer"
+      ],
+      "mode": "sequential",
+      "finalizer": "@technical-writer"
+    },
+    "adaptive-debug": {
+      "description": "Adapts based on bug complexity",
+      "mode": "adaptive",
+      "initial": [
+        "@debugger"
+      ],
+      "escalation": {
+        "triggers": {
+          "complexity": "complex",
+          "time_minutes": 10,
+          "iterations": 5
+        },
+        "add_agents": [
+          "@code-reviewer",
+          "@security-auditor"
+        ],
+        "notify_user": true
+      },
+      "finalizer": "@debugger"
+    },
+    "adaptive-feature": {
+      "description": "Adapts to feature complexity",
+      "mode": "adaptive",
+      "initial": [
+        "@architect"
+      ],
+      "phases": [
+        {
+          "name": "planning",
+          "agents": [
+            "@architect"
+          ],
+          "output": "implementation_plan"
+        },
+        {
+          "name": "implementation",
+          "agents": [
+            "@{domain}-specialist"
+          ],
+          "parallel": true,
+          "depends_on": "planning"
+        },
+        {
+          "name": "testing",
+          "agents": [
+            "@test-automator"
+          ],
+          "depends_on": "implementation"
+        },
+        {
+          "name": "review",
+          "agents": [
+            "@code-reviewer"
+          ],
+          "depends_on": "testing"
+        }
+      ],
+      "escalation": {
+        "triggers": {
+          "security_concern": true
+        },
+        "add_agents": [
+          "@security-auditor"
+        ]
+      }
+    },
+    "concurrent-migration": {
+      "description": "Parallel migration with verification",
+      "mode": "checkpoint",
+      "phases": [
+        {
+          "name": "analysis",
+          "agents": [
+            "@migrator",
+            "@codebase-analyzer"
+          ],
+          "parallel": true,
+          "checkpoint": true
+        },
+        {
+          "name": "migrate",
+          "agents": [
+            "@migrator"
+          ],
+          "checkpoint": true,
+          "rollback_on_fail": true
+        },
+        {
+          "name": "verify",
+          "agents": [
+            "@test-automator",
+            "@code-reviewer"
+          ],
+          "parallel": true
+        }
+      ],
+      "finalizer": "@migrator"
+    },
+    "ai-pipeline": {
+      "description": "AI/ML development pipeline",
+      "mode": "sequential",
+      "phases": [
+        {
+          "name": "design",
+          "agents": [
+            "@nova"
+          ]
+        },
+        {
+          "name": "implement",
+          "agents": [
+            "@oracle"
+          ]
+        },
+        {
+          "name": "optimize",
+          "agents": [
+            "@blitz"
+          ],
+          "condition": "performance_critical"
+        },
+        {
+          "name": "deploy",
+          "agents": [
+            "@angel"
+          ]
+        }
+      ]
+    }
+  },
+  "defaults": {
+    "timeout_minutes": 30,
+    "max_parallel": 4,
+    "checkpoint_on_phase": true,
+    "notify_on_escalation": true
+  }
+}

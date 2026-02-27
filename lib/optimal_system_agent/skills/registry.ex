@@ -85,6 +85,213 @@ defmodule OptimalSystemAgent.Skills.Registry do
     GenServer.call(__MODULE__, {:execute, tool_name, arguments}, 60_000)
   end
 
+  @doc """
+  Load all skill definitions from priv/skills/.
+
+  Walks the priv/skills/ directory tree, finds all .md files, and parses
+  YAML frontmatter metadata (skill name, triggers, priority, category).
+  Returns a list of skill definition maps. Returns an empty list if the
+  priv/skills/ directory does not exist.
+
+  Each returned map contains:
+    - `:name` - skill identifier (from frontmatter or derived from filename)
+    - `:description` - short description of the skill
+    - `:category` - category derived from parent directory (e.g., "core", "reasoning")
+    - `:triggers` - list of trigger keywords/patterns
+    - `:priority` - integer priority (lower = higher priority, default 5)
+    - `:instructions` - full markdown body (the prompt content)
+    - `:source_path` - relative path within priv/skills/
+    - `:metadata` - any additional frontmatter fields as a map
+  """
+  @spec load_skill_definitions() :: [map()]
+  def load_skill_definitions do
+    skills_path = resolve_priv_skills_path()
+
+    if skills_path && File.dir?(skills_path) do
+      skills_path
+      |> find_md_files()
+      |> Enum.map(fn path -> parse_skill_definition(path, skills_path) end)
+      |> Enum.reject(&is_nil/1)
+    else
+      []
+    end
+  end
+
+  # Resolve the priv/skills/ directory path. Returns nil if priv dir cannot be found.
+  defp resolve_priv_skills_path do
+    case :code.priv_dir(:optimal_system_agent) do
+      {:error, _} ->
+        # Fallback: try to find priv relative to the project root
+        app_dir = Application.app_dir(:optimal_system_agent)
+
+        if app_dir do
+          Path.join(app_dir, "priv/skills")
+        else
+          # Last resort: relative path for development
+          Path.join([File.cwd!(), "priv", "skills"])
+        end
+
+      priv_dir ->
+        Path.join(to_string(priv_dir), "skills")
+    end
+  rescue
+    _ ->
+      # During compilation or when app is not started, use relative path
+      Path.join([File.cwd!(), "priv", "skills"])
+  end
+
+  # Recursively find all .md files under the given directory.
+  defp find_md_files(dir) do
+    Path.wildcard(Path.join(dir, "**/*.md"))
+  end
+
+  # Parse a single skill definition file into a structured map.
+  defp parse_skill_definition(path, base_path) do
+    content = File.read!(path)
+    relative_path = Path.relative_to(path, base_path)
+
+    # Derive category from directory structure
+    # e.g., "core/brainstorming.md" -> "core"
+    #        "lats/SKILL.md" -> "lats"
+    category = derive_category(relative_path)
+
+    case String.split(content, "---", parts: 3) do
+      ["", frontmatter, body] ->
+        case YamlElixir.read_from_string(frontmatter) do
+          {:ok, meta} ->
+            build_skill_def(meta, body, relative_path, category)
+
+          _ ->
+            # YAML parse failed; treat entire content as instructions
+            build_skill_def_from_content(content, relative_path, category)
+        end
+
+      _ ->
+        # No frontmatter; treat entire content as instructions
+        build_skill_def_from_content(content, relative_path, category)
+    end
+  rescue
+    e ->
+      Logger.warning("Failed to parse skill definition at #{path}: #{inspect(e)}")
+      nil
+  end
+
+  # Build a skill definition map from parsed YAML frontmatter and body.
+  defp build_skill_def(meta, body, relative_path, category) do
+    # Normalize the skill name from various frontmatter key conventions
+    name =
+      meta["name"] ||
+        meta["skill_name"] ||
+        meta["skill"] ||
+        derive_name_from_path(relative_path)
+
+    # Normalize triggers from various frontmatter key conventions
+    triggers = normalize_triggers(meta)
+
+    # Extract priority (default 5). Handles integer, numeric string, or named levels.
+    priority =
+      case meta["priority"] do
+        p when is_integer(p) -> p
+        p when is_binary(p) -> parse_priority(p)
+        _ -> 5
+      end
+
+    # Collect additional metadata (everything not in our standard keys)
+    standard_keys = ~w(name skill_name skill description trigger triggers trigger_keywords priority tools)
+    metadata = Map.drop(meta, standard_keys)
+
+    %{
+      name: to_string(name),
+      description: to_string(meta["description"] || ""),
+      category: category,
+      triggers: triggers,
+      priority: priority,
+      instructions: String.trim(body),
+      source_path: relative_path,
+      metadata: metadata
+    }
+  end
+
+  # Build a skill definition from raw content (no frontmatter).
+  defp build_skill_def_from_content(content, relative_path, category) do
+    %{
+      name: derive_name_from_path(relative_path),
+      description: content |> String.slice(0, 100) |> String.trim(),
+      category: category,
+      triggers: [],
+      priority: 5,
+      instructions: content,
+      source_path: relative_path,
+      metadata: %{}
+    }
+  end
+
+  # Parse a priority value from a string. Supports numeric strings and named levels.
+  defp parse_priority(str) do
+    case Integer.parse(str) do
+      {n, ""} -> n
+      _ ->
+        case String.downcase(String.trim(str)) do
+          "critical" -> 0
+          "high" -> 1
+          "medium" -> 3
+          "low" -> 7
+          _ -> 5
+        end
+    end
+  end
+
+  # Normalize triggers from the various frontmatter key conventions used across skill files.
+  # Handles: "trigger" (string or pipe-delimited), "triggers" (list or ["*"]),
+  # "trigger_keywords" (list of phrases).
+  defp normalize_triggers(meta) do
+    cond do
+      is_list(meta["triggers"]) ->
+        List.flatten(meta["triggers"]) |> Enum.map(&to_string/1)
+
+      is_list(meta["trigger_keywords"]) ->
+        List.flatten(meta["trigger_keywords"]) |> Enum.map(&to_string/1)
+
+      is_binary(meta["trigger"]) ->
+        # May be pipe-delimited (e.g., "security|vulnerability|CVE") or a single keyword
+        meta["trigger"]
+        |> String.split(~r/[|,]/, trim: true)
+        |> Enum.map(&String.trim/1)
+
+      true ->
+        []
+    end
+  end
+
+  # Derive category from the relative path.
+  # "core/brainstorming.md" -> "core"
+  # "lats/SKILL.md" -> "standalone"
+  # "reasoning/extended-thinking.md" -> "reasoning"
+  @known_skill_categories ~w(core automation reasoning)
+  defp derive_category(relative_path) do
+    parts = Path.split(relative_path)
+
+    case parts do
+      [dir, _file] when dir in @known_skill_categories -> dir
+      [_dir, "SKILL.md"] -> "standalone"
+      _ -> "standalone"
+    end
+  end
+
+  # Derive a skill name from the file path.
+  # "core/brainstorming.md" -> "brainstorming"
+  # "lats/SKILL.md" -> "lats"
+  defp derive_name_from_path(relative_path) do
+    filename = Path.basename(relative_path, ".md")
+
+    if filename == "SKILL" do
+      # Use the parent directory name
+      relative_path |> Path.dirname() |> Path.basename()
+    else
+      filename
+    end
+  end
+
   @impl true
   def init(:ok) do
     # Load built-in skills

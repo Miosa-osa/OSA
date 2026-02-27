@@ -27,7 +27,7 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :cohere_api_key)
-    model = Application.get_env(:optimal_system_agent, :cohere_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :cohere_model, default_model())
     base_url = Application.get_env(:optimal_system_agent, :cohere_url, @default_url)
 
     unless api_key do

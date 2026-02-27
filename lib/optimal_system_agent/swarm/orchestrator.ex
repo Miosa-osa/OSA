@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
   alias OptimalSystemAgent.Events.Bus
 
   @max_swarms 10
-  @max_agents 5
+  @max_agents 10
   @default_timeout_ms 300_000  # 5 minutes
 
   defstruct [

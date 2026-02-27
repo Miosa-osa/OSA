@@ -20,9 +20,12 @@ defmodule Mix.Tasks.Osa.Chat do
 
     if OptimalSystemAgent.Onboarding.first_run?() do
       OptimalSystemAgent.Onboarding.run()
-      OptimalSystemAgent.Onboarding.apply_config()
       OptimalSystemAgent.Soul.reload()
     end
+
+    # Always apply config.json — overrides runtime.exs env var auto-detection
+    # so the user's explicit provider choice in config.json is respected.
+    OptimalSystemAgent.Onboarding.apply_config()
 
     OptimalSystemAgent.Channels.CLI.start()
   end

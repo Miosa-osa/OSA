@@ -79,6 +79,9 @@ defmodule OptimalSystemAgent.Commands do
     cmd = String.downcase(cmd)
     arg = List.first(args) || ""
 
+    # Store command name so handlers can identify which command was invoked
+    Process.put(:osa_current_cmd, cmd)
+
     case lookup(cmd) do
       {:builtin, handler} ->
         handler.(arg, session_id)
@@ -227,10 +230,68 @@ defmodule OptimalSystemAgent.Commands do
       {"think", "Set reasoning depth", &cmd_think/2},
       {"config", "Show runtime configuration", &cmd_config/2},
 
+      # ── Agents ──
+      {"agents", "List all agents in the roster", &cmd_agents/2},
+      {"tiers", "Show model tier configuration", &cmd_tiers/2},
+      {"swarms", "List swarm presets", &cmd_swarms/2},
+      {"hooks", "Show hook pipeline status", &cmd_hooks/2},
+      {"learning", "Learning engine metrics", &cmd_learning/2},
+
       # ── System ──
       {"reload", "Reload soul/skill files", &cmd_reload/2},
       {"doctor", "System diagnostics", &cmd_doctor/2},
       {"create-command", "Create a new command", &cmd_create/2},
+
+      # ── Workflow ──
+      {"commit", "Generate a proper git commit", &cmd_workflow/2},
+      {"build", "Build project with auto-detection", &cmd_workflow/2},
+      {"test", "Run tests with auto-detection", &cmd_workflow/2},
+      {"lint", "Run linting with auto-fix", &cmd_workflow/2},
+      {"verify", "Run completion checklist", &cmd_workflow/2},
+      {"create-pr", "Create a pull request", &cmd_workflow/2},
+      {"fix", "Apply fixes from review", &cmd_workflow/2},
+      {"explain", "Explain code or concepts", &cmd_workflow/2},
+
+      # ── Context Priming ──
+      {"prime", "Show loaded context", &cmd_prime/2},
+      {"prime-backend", "Load Go backend context", &cmd_prime/2},
+      {"prime-webdev", "Load React/Next.js context", &cmd_prime/2},
+      {"prime-svelte", "Load Svelte/SvelteKit context", &cmd_prime/2},
+      {"prime-security", "Load security audit context", &cmd_prime/2},
+      {"prime-devops", "Load DevOps/infra context", &cmd_prime/2},
+      {"prime-testing", "Load testing/QA context", &cmd_prime/2},
+      {"prime-osa", "Load OSA terminal context", &cmd_prime/2},
+      {"prime-miosa", "Load MIOSA platform context", &cmd_prime/2},
+
+      # ── Security ──
+      {"security-scan", "Run security scan", &cmd_security/2},
+      {"secret-scan", "Detect hardcoded secrets", &cmd_security/2},
+      {"harden", "Security hardening recommendations", &cmd_security/2},
+
+      # ── Memory ──
+      {"mem-search", "Search episodic memory", &cmd_memory_cmd/2},
+      {"mem-save", "Save to persistent memory", &cmd_memory_cmd/2},
+      {"mem-recall", "Recall memory by topic", &cmd_memory_cmd/2},
+      {"mem-list", "List memory entries", &cmd_memory_cmd/2},
+      {"mem-stats", "Memory statistics", &cmd_memory_cmd/2},
+      {"mem-delete", "Delete memory entry", &cmd_memory_cmd/2},
+      {"mem-context", "Save conversation context", &cmd_memory_cmd/2},
+      {"mem-export", "Export memory to file", &cmd_memory_cmd/2},
+
+      # ── Analytics ──
+      {"analytics", "Usage analytics and metrics", &cmd_utility/2},
+      {"debug", "Start systematic debugging", &cmd_utility/2},
+      {"search", "Search codebase and docs", &cmd_utility/2},
+      {"review", "Code review on recent changes", &cmd_utility/2},
+      {"pr-review", "Review a pull request", &cmd_utility/2},
+      {"refactor", "Safe code refactoring", &cmd_utility/2},
+      {"banner", "Show OSA banner", &cmd_utility/2},
+      {"init", "Initialize project", &cmd_utility/2},
+
+      # ── Exit ──
+      {"exit", "Exit the CLI", &cmd_exit/2},
+      {"quit", "Exit the CLI", &cmd_exit/2},
+      {"clear", "Clear the screen", &cmd_clear/2},
     ]
   end
 
@@ -287,14 +348,22 @@ defmodule OptimalSystemAgent.Commands do
       /config             Show runtime configuration
       /reload             Reload soul + prompt files from disk
 
+    Agents:
+      /agents             List all agents in the roster
+      /agents <name>      Show agent details
+      /tiers              Show model tier configuration
+      /swarms             List swarm presets
+      /hooks              Hook pipeline status
+      /learning           Learning engine metrics
+
     Commands:
       /create-command     Create a custom slash command
     #{custom_section}
     Examples:
+      /agents backend-go              Show the Go backend agent details
       /models                         List Ollama models on your machine
       /model ollama qwen3:32b         Switch to a specific local model
       /model anthropic                Switch to Anthropic Claude
-      /model ollama-url http://...    Point to Ollama cloud instance
       /create-command standup | Daily standup | Summarize my recent activity
     """
     |> String.trim_trailing()
@@ -432,6 +501,7 @@ defmodule OptimalSystemAgent.Commands do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
     model = active_model_for(provider)
     registry = OptimalSystemAgent.Providers.Registry
+    tier_mod = OptimalSystemAgent.Agent.Tier
 
     configured =
       registry.list_providers()
@@ -439,14 +509,30 @@ defmodule OptimalSystemAgent.Commands do
       |> Enum.map(&to_string/1)
       |> Enum.join(", ")
 
+    # Tier → model routing for current provider
+    tier_lines =
+      [:elite, :specialist, :utility]
+      |> Enum.map(fn tier ->
+        tier_model = tier_mod.model_for(tier, provider)
+        budget = tier_mod.total_budget(tier)
+        temp = tier_mod.temperature(tier)
+        iters = tier_mod.max_iterations(tier)
+        "  #{String.pad_trailing(to_string(tier), 12)} #{String.pad_trailing(tier_model, 32)} #{budget}t  T=#{temp}  max=#{iters}"
+      end)
+      |> Enum.join("\n")
+
     output =
       """
       Active: #{provider} / #{model}
+
+      Tier routing (#{provider}):
+      #{tier_lines}
 
       Configured providers: #{configured}
 
       Switch:  /model <provider> [model]
       List:    /model list
+      Tiers:   /tiers
       Ollama:  /model ollama-url <url>
       """
       |> String.trim()
@@ -780,6 +866,299 @@ defmodule OptimalSystemAgent.Commands do
 
     {:command, header <> body}
   end
+
+  # ── Agent Ecosystem Commands ──────────────────────────────────
+
+  defp cmd_agents(arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Roster
+
+    if arg != "" and String.trim(arg) != "" do
+      # Show detail for a specific agent
+      case Roster.get(String.trim(arg)) do
+        nil ->
+          {:command, "Unknown agent: #{arg}\nUse /agents to list all."}
+
+        agent ->
+          output = """
+          #{agent.name} (#{agent.tier})
+            Role: #{agent.role}
+            #{agent.description}
+
+            Skills: #{Enum.join(agent.skills, ", ")}
+            Triggers: #{Enum.join(agent.triggers, ", ")}
+            Territory: #{Enum.join(agent.territory, ", ")}
+            Escalates to: #{agent.escalate_to || "none"}
+          """
+          {:command, String.trim(output)}
+      end
+    else
+      agents = Roster.all()
+
+      elite = agents |> Map.values() |> Enum.filter(& &1.tier == :elite) |> Enum.sort_by(& &1.name)
+      specialist = agents |> Map.values() |> Enum.filter(& &1.tier == :specialist) |> Enum.sort_by(& &1.name)
+      utility = agents |> Map.values() |> Enum.filter(& &1.tier == :utility) |> Enum.sort_by(& &1.name)
+
+      format_tier = fn tier_agents ->
+        Enum.map_join(tier_agents, "\n", fn a ->
+          "  #{String.pad_trailing(a.name, 22)} #{a.description}"
+        end)
+      end
+
+      output = """
+      Agent Roster (#{map_size(agents)} agents)
+
+      ELITE (opus):
+      #{format_tier.(elite)}
+
+      SPECIALIST (sonnet):
+      #{format_tier.(specialist)}
+
+      UTILITY (haiku):
+      #{format_tier.(utility)}
+
+      Use /agents <name> for details.
+      """
+
+      {:command, String.trim(output)}
+    end
+  end
+
+  defp cmd_tiers(_arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Tier
+
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    output = """
+    Model Tiers (provider: #{provider})
+
+    Elite (opus-class):
+      Model: #{Tier.model_for(:elite, provider)}
+      Budget: #{Tier.total_budget(:elite)} tokens
+      Max agents: #{Tier.max_agents(:elite)}
+      Max iterations: #{Tier.max_iterations(:elite)}
+
+    Specialist (sonnet-class):
+      Model: #{Tier.model_for(:specialist, provider)}
+      Budget: #{Tier.total_budget(:specialist)} tokens
+      Max agents: #{Tier.max_agents(:specialist)}
+      Max iterations: #{Tier.max_iterations(:specialist)}
+
+    Utility (haiku-class):
+      Model: #{Tier.model_for(:utility, provider)}
+      Budget: #{Tier.total_budget(:utility)} tokens
+      Max agents: #{Tier.max_agents(:utility)}
+      Max iterations: #{Tier.max_iterations(:utility)}
+    """
+
+    {:command, String.trim(output)}
+  end
+
+  defp cmd_swarms(_arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Roster
+
+    presets = Roster.swarm_presets()
+
+    lines = Enum.map_join(presets, "\n", fn {name, preset} ->
+      agents_str = Enum.join(preset.agents, ", ")
+      "  #{String.pad_trailing(name, 20)} #{preset.pattern} — #{agents_str}"
+    end)
+
+    output = """
+    Swarm Presets (#{map_size(presets)})
+
+    #{lines}
+
+    Use: /swarm <preset> to launch a swarm (coming soon)
+    """
+
+    {:command, String.trim(output)}
+  end
+
+  defp cmd_hooks(_arg, _session_id) do
+    try do
+      hooks = OptimalSystemAgent.Agent.Hooks.list_hooks()
+      metrics = OptimalSystemAgent.Agent.Hooks.metrics()
+
+      hook_lines = Enum.map_join(hooks, "\n", fn {event, entries} ->
+        entry_strs = Enum.map_join(entries, ", ", fn e -> "#{e.name}(p#{e.priority})" end)
+        "  #{String.pad_trailing(to_string(event), 18)} #{entry_strs}"
+      end)
+
+      metrics_lines = Enum.map_join(metrics, "\n", fn {event, m} ->
+        "  #{String.pad_trailing(to_string(event), 18)} #{m.calls} calls, avg #{m[:avg_us] || 0}μs, #{m.blocks} blocks"
+      end)
+
+      output = """
+      Hook Pipeline
+
+      Registered:
+      #{hook_lines}
+
+      Metrics:
+      #{if metrics_lines == "", do: "  (no data yet)", else: metrics_lines}
+      """
+
+      {:command, String.trim(output)}
+    rescue
+      _ -> {:command, "Hook pipeline not initialized yet."}
+    end
+  end
+
+  defp cmd_learning(_arg, _session_id) do
+    try do
+      metrics = OptimalSystemAgent.Agent.Learning.metrics()
+      patterns = OptimalSystemAgent.Agent.Learning.patterns()
+
+      top_patterns =
+        patterns
+        |> Enum.sort_by(fn {_k, v} -> v.count end, :desc)
+        |> Enum.take(10)
+        |> Enum.map_join("\n", fn {key, info} ->
+          "  #{String.pad_trailing(key, 30)} #{info.count}x"
+        end)
+
+      output = """
+      Learning Engine (SICA)
+
+      Metrics:
+        Total interactions: #{metrics.total_interactions}
+        Patterns captured:  #{metrics.patterns_captured}
+        Skills generated:   #{metrics.skills_generated}
+        Errors recovered:   #{metrics.errors_recovered}
+        Consolidations:     #{metrics.consolidations}
+
+      Top Patterns:
+      #{if top_patterns == "", do: "  (none yet — interact more)", else: top_patterns}
+      """
+
+      {:command, String.trim(output)}
+    rescue
+      _ -> {:command, "Learning engine not initialized yet."}
+    end
+  end
+
+  # ── Workflow Commands (prompt expansion from priv/commands/workflow/) ──
+
+  defp cmd_workflow(arg, _session_id) do
+    # The command name is extracted from the original input by execute/2
+    # We need to figure out which workflow command was invoked
+    # The handler is called with arg and session_id — but we need the cmd name
+    # It's available via the call path in execute/2
+    # Workaround: store the last command name in process dictionary during execute
+    cmd_name = Process.get(:osa_current_cmd, "unknown")
+
+    case OptimalSystemAgent.PromptLoader.get_command("workflow", cmd_name) do
+      nil ->
+        {:command, "Workflow command '#{cmd_name}' template not found."}
+
+      template ->
+        expanded = if arg != "" and String.trim(arg) != "" do
+          template <> "\n\nAdditional context: " <> arg
+        else
+          template
+        end
+
+        {:prompt, expanded}
+    end
+  end
+
+  # ── Context Priming (prompt expansion from priv/commands/context/) ──
+
+  defp cmd_prime(arg, _session_id) do
+    cmd_name = Process.get(:osa_current_cmd, "prime")
+
+    case OptimalSystemAgent.PromptLoader.get_command("context", cmd_name) do
+      nil ->
+        # /prime with no match shows what's loaded
+        loaded = OptimalSystemAgent.PromptLoader.list_command_prompts()
+        context_cmds = loaded |> Enum.filter(fn {cat, _} -> cat == "context" end)
+
+        if context_cmds == [] do
+          {:command, "No context prompts loaded. Check priv/commands/context/"}
+        else
+          lines = Enum.map_join(context_cmds, "\n", fn {_, name} -> "  /#{name}" end)
+          {:command, "Available context priming:\n#{lines}"}
+        end
+
+      template ->
+        expanded = if arg != "" and String.trim(arg) != "" do
+          template <> "\n\nFocus on: " <> arg
+        else
+          template
+        end
+
+        {:prompt, expanded}
+    end
+  end
+
+  # ── Security Commands (prompt expansion from priv/commands/security/) ──
+
+  defp cmd_security(arg, _session_id) do
+    cmd_name = Process.get(:osa_current_cmd, "security-scan")
+
+    case OptimalSystemAgent.PromptLoader.get_command("security", cmd_name) do
+      nil ->
+        {:command, "Security command '#{cmd_name}' template not found."}
+
+      template ->
+        expanded = if arg != "" and String.trim(arg) != "" do
+          template <> "\n\nTarget: " <> arg
+        else
+          template
+        end
+
+        {:prompt, expanded}
+    end
+  end
+
+  # ── Memory Commands (prompt expansion from priv/commands/memory/) ──
+
+  defp cmd_memory_cmd(arg, _session_id) do
+    cmd_name = Process.get(:osa_current_cmd, "mem-search")
+
+    case OptimalSystemAgent.PromptLoader.get_command("memory", cmd_name) do
+      nil ->
+        {:command, "Memory command '#{cmd_name}' template not found."}
+
+      template ->
+        expanded = if arg != "" and String.trim(arg) != "" do
+          template <> "\n\nQuery: " <> arg
+        else
+          template
+        end
+
+        {:prompt, expanded}
+    end
+  end
+
+  # ── Utility Commands (prompt expansion from priv/commands/utility/) ──
+
+  defp cmd_utility(arg, _session_id) do
+    cmd_name = Process.get(:osa_current_cmd, "unknown")
+
+    case OptimalSystemAgent.PromptLoader.get_command("utility", cmd_name) do
+      nil ->
+        {:command, "Utility command '#{cmd_name}' template not found."}
+
+      template ->
+        expanded = if arg != "" and String.trim(arg) != "" do
+          template <> "\n\nContext: " <> arg
+        else
+          template
+        end
+
+        {:prompt, expanded}
+    end
+  end
+
+  defp cmd_exit(_arg, _session_id) do
+    {:action, :exit, "goodbye"}
+  end
+
+  defp cmd_clear(_arg, _session_id) do
+    {:action, :clear, ""}
+  end
+
 
   defp cmd_create(arg, _session_id) do
     result =

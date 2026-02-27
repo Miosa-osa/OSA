@@ -85,7 +85,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @impl true
   def chat(messages, opts \\ []) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-    model = Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
     body =
       %{

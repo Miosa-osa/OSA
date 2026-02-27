@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.Swarm.Worker do
   use GenServer, restart: :temporary
   require Logger
 
+  alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Swarm.Mailbox
 
@@ -92,6 +93,53 @@ defmodule OptimalSystemAgent.Swarm.Worker do
     Consider trade-offs explicitly: consistency vs availability, simplicity vs
     flexibility, build vs buy. Produce ADRs or diagrams-as-code where helpful.
     Think in bounded contexts and clear API boundaries.
+    """,
+    # Extended roles from Agent-Dispatch / OSA Roster
+    lead: """
+    You are the LEAD orchestrator within a multi-agent swarm.
+    Synthesize and merge the work of other agents. Resolve conflicts between
+    outputs. Make ship/no-ship decisions based on quality. Produce the final report.
+    """,
+    backend: """
+    You are a BACKEND specialist within a multi-agent swarm.
+    Write server-side code: APIs, handlers, services, business logic.
+    Follow existing patterns. Handle all error paths. Production quality only.
+    """,
+    frontend: """
+    You are a FRONTEND specialist within a multi-agent swarm.
+    Write client-side code: components, pages, state management, styling.
+    Follow design system patterns. Ensure accessibility (WCAG 2.1 AA).
+    """,
+    data: """
+    You are a DATA specialist within a multi-agent swarm.
+    Handle database schemas, migrations, queries, and data integrity.
+    Optimize queries. Handle race conditions. Your work is foundational.
+    """,
+    design: """
+    You are a DESIGN specialist within a multi-agent swarm.
+    Create design specifications, tokens, color palettes, typography scales.
+    Audit accessibility. Ensure visual consistency. You define what, not how.
+    """,
+    infra: """
+    You are an INFRASTRUCTURE specialist within a multi-agent swarm.
+    Write Dockerfiles, CI/CD pipelines, deployment configs. Optimize for production.
+    Do not modify application logic — only operational concerns.
+    """,
+    qa: """
+    You are a QA specialist within a multi-agent swarm.
+    Write comprehensive tests. Verify implementations match acceptance criteria.
+    Run test suites and report results. Security audit when relevant.
+    """,
+    red_team: """
+    You are the RED TEAM within a multi-agent swarm.
+    Review all output for security vulnerabilities and missed edge cases.
+    Produce findings report with severity: CRITICAL/HIGH/MEDIUM/LOW.
+    You do NOT fix code — you find problems.
+    """,
+    services: """
+    You are a SERVICES specialist within a multi-agent swarm.
+    Write integration code: external APIs, workers, background jobs.
+    Handle robust error recovery, retries, and circuit breakers.
     """
   }
 
@@ -148,10 +196,16 @@ defmodule OptimalSystemAgent.Swarm.Worker do
       %{role: "user", content: task_description}
     ]
 
-    Logger.debug("Worker #{state.id} (#{state.role}) calling LLM for task: #{String.slice(task_description, 0, 80)}...")
+    # Tier-aware model routing: map role to tier, then to model
+    tier = role_to_tier(state.role)
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    model = Tier.model_for(tier, provider)
+    temperature = Tier.temperature(tier)
+
+    Logger.debug("Worker #{state.id} (#{state.role}) calling LLM [#{tier}/#{model}] for task: #{String.slice(task_description, 0, 80)}...")
 
     result =
-      case Providers.chat(messages, temperature: 0.7) do
+      case Providers.chat(messages, temperature: temperature, model: model) do
         {:ok, %{content: content}} when is_binary(content) and content != "" ->
           # Post result to swarm mailbox so peers can read it
           Mailbox.post(state.swarm_id, state.id, content)
@@ -185,6 +239,27 @@ defmodule OptimalSystemAgent.Swarm.Worker do
   end
 
   # ── Private Helpers ──────────────────────────────────────────────────
+
+  # Map swarm worker roles to tiers for model selection.
+  # Lead/architect = elite, most roles = specialist, simple roles = utility.
+  defp role_to_tier(:lead), do: :elite
+  defp role_to_tier(:architect), do: :elite
+  defp role_to_tier(:researcher), do: :specialist
+  defp role_to_tier(:coder), do: :specialist
+  defp role_to_tier(:reviewer), do: :specialist
+  defp role_to_tier(:planner), do: :specialist
+  defp role_to_tier(:backend), do: :specialist
+  defp role_to_tier(:frontend), do: :specialist
+  defp role_to_tier(:data), do: :specialist
+  defp role_to_tier(:services), do: :specialist
+  defp role_to_tier(:red_team), do: :specialist
+  defp role_to_tier(:qa), do: :specialist
+  defp role_to_tier(:infra), do: :specialist
+  defp role_to_tier(:design), do: :utility
+  defp role_to_tier(:critic), do: :specialist
+  defp role_to_tier(:writer), do: :utility
+  defp role_to_tier(:tester), do: :specialist
+  defp role_to_tier(_), do: :specialist
 
   defp build_system_prompt(role, swarm_id) do
     role_prompt = Map.get(@role_prompts, role, @default_role_prompt)
