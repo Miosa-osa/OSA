@@ -776,22 +776,22 @@ defmodule OptimalSystemAgent.Agent.Roster do
 
   # ── Public API ────────────────────────────────────────────────────
 
-  @doc "Get all agent definitions."
+  @doc "Get all agent definitions (compiled + SDK-defined)."
   @spec all() :: %{String.t() => agent_def()}
-  def all, do: @agents
+  def all, do: Map.merge(@agents, sdk_agents())
 
-  @doc "Get agent by name."
+  @doc "Get agent by name (checks compiled first, then SDK)."
   @spec get(String.t()) :: agent_def() | nil
-  def get(name), do: Map.get(@agents, name)
+  def get(name), do: Map.get(@agents, name) || Map.get(sdk_agents(), name)
 
   @doc "List all agent names."
   @spec list_names() :: [String.t()]
-  def list_names, do: Map.keys(@agents)
+  def list_names, do: all() |> Map.keys()
 
   @doc "List agents by tier."
   @spec by_tier(tier()) :: [agent_def()]
   def by_tier(tier) do
-    @agents
+    all()
     |> Map.values()
     |> Enum.filter(&(&1.tier == tier))
   end
@@ -799,7 +799,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
   @doc "List agents by role (maps to orchestrator roles)."
   @spec by_role(atom()) :: [agent_def()]
   def by_role(role) do
-    @agents
+    all()
     |> Map.values()
     |> Enum.filter(&(&1.role == role))
   end
@@ -812,7 +812,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
   def find_by_trigger(input) do
     input_lower = String.downcase(input)
 
-    @agents
+    all()
     |> Map.values()
     |> Enum.filter(fn agent ->
       Enum.any?(agent.triggers, fn trigger ->
@@ -867,7 +867,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
     input_lower = String.downcase(task_description)
     words = String.split(input_lower, ~r/\s+/)
 
-    @agents
+    all()
     |> Enum.map(fn {name, agent} ->
       # Score based on trigger matches
       trigger_score =
@@ -1004,6 +1004,15 @@ defmodule OptimalSystemAgent.Agent.Roster do
 
       {subdir, names}
     end)
+  end
+
+  # ── SDK Agent Merge ───────────────────────────────────────────────
+
+  defp sdk_agents do
+    OptimalSystemAgent.SDK.Agent.all()
+  rescue
+    # Module not loaded or ETS table doesn't exist (standalone mode)
+    _ -> %{}
   end
 
   # ── Helpers ────────────────────────────────────────────────────────

@@ -57,11 +57,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def init(opts) do
+    extra_tools = Keyword.get(opts, :extra_tools, [])
+
     state = %__MODULE__{
       session_id: Keyword.fetch!(opts, :session_id),
       user_id: Keyword.get(opts, :user_id),
       channel: Keyword.get(opts, :channel, :cli),
-      tools: Skills.list_tools()
+      tools: Skills.list_tools() ++ extra_tools
     }
 
     {:ok, state}
@@ -92,7 +94,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
 
     # 3. Persist user message to JSONL session storage
-    Memory.append(state.session_id, %{role: "user", content: message})
+    Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
 
     # 4. Compact message history if needed, then process through agent loop
     compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
@@ -132,6 +134,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
       case result do
         {:ok, %{content: plan_text}} ->
+          Memory.append(state.session_id, %{role: "assistant", content: plan_text, channel: state.channel})
           state = %{state | plan_mode: false, status: :idle}
           {:reply, {:plan, plan_text, signal}, state}
 
@@ -150,7 +153,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
               status: :idle
           }
 
-          Memory.append(state.session_id, %{role: "assistant", content: response})
+          Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
 
           Bus.emit(:agent_response, %{
             session_id: state.session_id,
@@ -171,7 +174,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       }
 
       # 6. Persist assistant response to JSONL session storage
-      Memory.append(state.session_id, %{role: "assistant", content: response})
+      Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
 
       Bus.emit(:agent_response, %{
         session_id: state.session_id,
@@ -280,7 +283,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
               session_id: acc.session_id
             }
 
-            run_hooks(:post_tool_use, post_payload)
+            run_hooks_async(:post_tool_use, post_payload)
 
             Bus.emit(:tool_call, %{
               name: tool_call.name,
@@ -338,6 +341,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
       Hooks.run(event, payload)
     catch
       :exit, _ -> {:ok, payload}
+    end
+  end
+
+  # Async hooks — fire-and-forget for post-event hooks (post_tool_use).
+  # Pre-tool hooks stay sync so security_check/spend_guard can block.
+  defp run_hooks_async(event, payload) do
+    try do
+      Hooks.run_async(event, payload)
+    catch
+      :exit, _ -> :ok
     end
   end
 end
