@@ -254,6 +254,7 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
            %{task | tokens_used: task.tokens_used + count}
          end) do
       {:ok, updated_state, _task} ->
+        persist(session_id, updated_state.sessions[session_id])
         {:noreply, updated_state}
 
       :not_found ->

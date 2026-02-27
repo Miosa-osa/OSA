@@ -90,6 +90,46 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplayTest do
     end
   end
 
+  # ── render_inline/1 ────────────────────────────────────────────
+
+  describe "render_inline/1" do
+    test "returns empty string for empty list" do
+      assert TaskDisplay.render_inline([]) == ""
+    end
+
+    test "shows connector on first line" do
+      tasks = [task(title: "First task", status: :completed)]
+      result = TaskDisplay.render_inline(tasks)
+      stripped = strip_ansi(result)
+      assert stripped =~ "⎿"
+      assert stripped =~ "✔"
+      assert stripped =~ "First task"
+    end
+
+    test "indents subsequent lines without connector" do
+      tasks = [
+        task(title: "Done item here", status: :completed),
+        task(title: "Active item now", status: :in_progress),
+        task(title: "Pending item", status: :pending)
+      ]
+
+      result = TaskDisplay.render_inline(tasks)
+      lines = String.split(result, "\n")
+      assert length(lines) == 3
+      first = strip_ansi(Enum.at(lines, 0))
+      second = strip_ansi(Enum.at(lines, 1))
+      assert first =~ "⎿"
+      refute second =~ "⎿"
+    end
+
+    test "shows tokens on inline items" do
+      tasks = [task(title: "Token task here", status: :in_progress, tokens_used: 1500)]
+      result = TaskDisplay.render_inline(tasks)
+      stripped = strip_ansi(result)
+      assert stripped =~ "1.5k ↓"
+    end
+  end
+
   # ── render_compact/1 ───────────────────────────────────────────
 
   describe "render_compact/1" do

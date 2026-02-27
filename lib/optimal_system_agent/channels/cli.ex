@@ -194,7 +194,8 @@ defmodule OptimalSystemAgent.Channels.CLI do
                :task_tracker_task_added,
                :task_tracker_task_started,
                :task_tracker_task_completed,
-               :task_tracker_task_failed
+               :task_tracker_task_failed,
+               :task_tracker_tasks_cleared
              ] ->
           visible = Commands.get_setting(sid, :task_display_visible, true)
 

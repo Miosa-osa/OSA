@@ -134,8 +134,6 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   defp title_color(:in_progress), do: @cyan
   defp title_color(_), do: ""
 
-  defp truncate(str, max_len) when byte_size(str) <= max_len, do: str
-
   defp truncate(str, max_len) do
     if String.length(str) <= max_len do
       str

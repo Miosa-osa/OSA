@@ -1941,7 +1941,7 @@ defmodule OptimalSystemAgent.Commands do
         if tasks == [], do: {:command, "No tasks."}, else: {:command, TaskDisplay.render_inline(tasks)}
 
       String.starts_with?(trimmed, "add ") ->
-        title = trimmed |> String.trim_leading("add ") |> String.trim() |> String.trim("\"")
+        title = trimmed |> String.replace_prefix("add ", "") |> String.trim() |> String.trim("\"")
 
         if title == "" do
           {:command, "Usage: /tasks add \"title\""}

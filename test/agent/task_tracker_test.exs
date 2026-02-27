@@ -204,13 +204,13 @@ defmodule OptimalSystemAgent.Agent.TaskTrackerTest do
       sid = session_id()
       {:ok, id} = TaskTracker.add_task(sid, "Token task", name)
       TaskTracker.record_tokens(sid, id, 500, name)
-      # cast is async, give it a moment
-      Process.sleep(20)
+      # Sync flush: a call after the cast ensures mailbox is drained
+      _ = TaskTracker.get_tasks(sid, name)
       [task] = TaskTracker.get_tasks(sid, name)
       assert task.tokens_used == 500
 
       TaskTracker.record_tokens(sid, id, 300, name)
-      Process.sleep(20)
+      _ = TaskTracker.get_tasks(sid, name)
       [task] = TaskTracker.get_tasks(sid, name)
       assert task.tokens_used == 800
     end
