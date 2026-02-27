@@ -1,6 +1,6 @@
-# OptimalSystemAgent
+# OSA — the Optimal System Agent
 
-> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 18 LLM providers, 12+ chat channels, and unlimited custom skills. Built on Elixir/OTP for fault tolerance and massive concurrency. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
+> One AI that maximizes signal, eliminates noise, and finds the optimal path — across code, work, and life. Elixir/OTP. Runs locally. Open-source [OpenClaw](https://github.com/openclaw/openclaw) alternative.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
