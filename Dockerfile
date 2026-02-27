@@ -1,6 +1,6 @@
 FROM elixir:1.17-alpine AS builder
 
-RUN apk add --no-cache build-base git
+RUN apk add --no-cache build-base git go
 
 WORKDIR /app
 
@@ -11,9 +11,14 @@ RUN MIX_ENV=prod mix deps.compile
 
 COPY config config
 COPY lib lib
+COPY priv priv
+COPY rel rel
+
+# Build Go tokenizer
+RUN cd priv/go/tokenizer && CGO_ENABLED=0 go build -o osa-tokenizer .
 
 RUN MIX_ENV=prod mix compile
-RUN MIX_ENV=prod mix release
+RUN MIX_ENV=prod mix release osagent
 
 FROM alpine:3.19 AS runner
 
@@ -21,8 +26,8 @@ RUN apk add --no-cache libstdc++ openssl ncurses-libs
 
 WORKDIR /app
 
-COPY --from=builder /app/_build/prod/rel/optimal_system_agent ./
+COPY --from=builder /app/_build/prod/rel/osagent ./
 
 ENV MIX_ENV=prod
 
-CMD ["bin/optimal_system_agent", "start"]
+CMD ["bin/osagent", "serve"]

@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  OTP_VERSION: "27.2"
+  ELIXIR_VERSION: "1.17.3"
+  GO_VERSION: "1.22"
+  MIX_ENV: prod
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            goarch: arm64
+            goos: darwin
+          - os: darwin
+            arch: amd64
+            runner: macos-13
+            goarch: amd64
+            goos: darwin
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            goarch: amd64
+            goos: linux
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            goarch: arm64
+            goos: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build Go tokenizer
+        working-directory: priv/go/tokenizer
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o osa-tokenizer .
+
+      - name: Install Elixir deps
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get --only prod
+
+      - name: Compile
+        run: mix compile
+
+      - name: Build release
+        run: mix release osagent
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package tarball
+        run: |
+          cd _build/prod/rel/osagent
+          tar -czf ../../../../osagent-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz .
+
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: osagent-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz

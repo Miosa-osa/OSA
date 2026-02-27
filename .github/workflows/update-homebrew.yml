@@ -1,0 +1,110 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    name: Update osagent formula
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for release assets
+        run: sleep 30
+
+      - name: Download release assets and compute checksums
+        id: checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+          for target in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
+            file="osagent-${VERSION}-${target}.tar.gz"
+            curl -fsSL -o "${file}" "${BASE_URL}/${file}"
+            sha=$(sha256sum "${file}" | cut -d' ' -f1)
+            key=$(echo "${target}" | tr '-' '_')
+            echo "sha_${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: Miosa-osa/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_DARWIN_ARM64: ${{ steps.checksums.outputs.sha_darwin_arm64 }}
+          SHA_DARWIN_AMD64: ${{ steps.checksums.outputs.sha_darwin_amd64 }}
+          SHA_LINUX_AMD64: ${{ steps.checksums.outputs.sha_linux_amd64 }}
+          SHA_LINUX_ARM64: ${{ steps.checksums.outputs.sha_linux_arm64 }}
+          REPO: ${{ github.repository }}
+        run: |
+          BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+          cat > homebrew-tap/Formula/osagent.rb << FORMULA
+          class Osagent < Formula
+            desc "Signal Theory-optimized AI agent - your OS, supercharged"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE_URL}/osagent-${VERSION}-darwin-arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              end
+              on_intel do
+                url "${BASE_URL}/osagent-${VERSION}-darwin-amd64.tar.gz"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${BASE_URL}/osagent-${VERSION}-linux-arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+              on_intel do
+                url "${BASE_URL}/osagent-${VERSION}-linux-amd64.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
+              end
+            end
+
+            def install
+              libexec.install Dir["*"]
+              bin.install_symlink libexec/"bin/osagent"
+            end
+
+            test do
+              assert_match "osagent v", shell_output("#{bin}/osagent version")
+            end
+          end
+          FORMULA
+
+          # Fix indentation (heredoc adds leading spaces)
+          sed -i 's/^          //' homebrew-tap/Formula/osagent.rb
+
+      - name: Commit and push
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/osagent.rb
+          git commit -m "Update osagent to v${VERSION}"
+          git push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
