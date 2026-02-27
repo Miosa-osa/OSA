@@ -1,0 +1,62 @@
+#!/bin/bash
+# =============================================================================
+# OSA - Launch OSA Agent with banner replacement
+# Overwrites Claude's default banner with OSA branding
+# =============================================================================
+
+CLAUDE_BIN="/opt/homebrew/Caskroom/claude-code/2.1.19/claude"
+
+# Colors
+CYAN='\033[38;5;51m'
+DCYAN='\033[38;5;44m'
+PURPLE='\033[38;5;93m'
+WHITE='\033[38;5;255m'
+GRAY='\033[38;5;240m'
+DGRAY='\033[38;5;236m'
+BOLD='\033[1m'
+R='\033[0m'
+
+# Animated characters
+BRAILLE="⠋⠙⠹⠸⠼⠴⠦⠧"
+STARS="✦✧★☆"
+DOTS="⣾⣽⣻⢿⡿⣟⣯⣷"
+FRAME=$(($(date +%s) % 8))
+
+show_osa_banner() {
+    local spinner="${BRAILLE:$FRAME:1}"
+    local star="${STARS:$FRAME:1}"
+    local dot="${DOTS:$FRAME:1}"
+
+    # Move cursor to home and overwrite first 4 lines
+    printf '\033[H'
+    printf " ${PURPLE}░${DGRAY}═══════════════════════════════════════════════════════════${PURPLE}░${R}   \n"
+    printf " ${CYAN}${BOLD}◈${R}${PURPLE}${spinner}${R} ${CYAN}${BOLD}OSA${R} ${WHITE}Agent${R}  ${DGRAY}│${R}  ${GRAY}Operating System Agent${R}              \n"
+    printf " ${CYAN}${star}${R}  ${DGRAY}%-50s${R}\n" "${PWD/#$HOME/~}"
+    printf " ${PURPLE}${dot}${R}  ${DGRAY}Your OS, Supercharged${R}                                     \n"
+    printf " ${PURPLE}░${DGRAY}═══════════════════════════════════════════════════════════${PURPLE}░${R}   \n"
+}
+
+# Function to continuously overwrite banner
+overwrite_banner() {
+    # Wait for Claude to start and show its banner
+    sleep 0.3
+
+    # Overwrite banner multiple times to ensure it sticks
+    for i in 1 2 3; do
+        show_osa_banner
+        sleep 0.1
+    done
+}
+
+# Start banner overwriter in background
+overwrite_banner &
+OVERWRITE_PID=$!
+
+# Launch Claude Code
+"$CLAUDE_BIN" --dangerously-skip-permissions "$@"
+EXIT_CODE=$?
+
+# Clean up background process
+kill $OVERWRITE_PID 2>/dev/null
+
+exit $EXIT_CODE

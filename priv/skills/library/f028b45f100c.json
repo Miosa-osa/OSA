@@ -1,0 +1,19 @@
+{
+  "id": "f028b45f100c",
+  "name": "weighted-memory-retrieval",
+  "description": "Retrieve memories using weighted multi-criteria scoring: recency 0.3, importance 0.4, relevance 0.3",
+  "code": "score = 0.3*recency + 0.4*importance + 0.3*relevance",
+  "language": "python",
+  "tags": [
+    "memory",
+    "retrieval",
+    "scoring",
+    "weighted"
+  ],
+  "usage_count": 0,
+  "success_rate": 1.0,
+  "complexity": "moderate",
+  "created_at": "2026-01-26T08:30:15.138033",
+  "last_used": "2026-01-26T08:30:15.138033",
+  "metadata": {}
+}

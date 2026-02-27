@@ -3,7 +3,7 @@
 # OSA AGENT ACTIVATION - Psychedelic Edition
 # =============================================================================
 # OSA (Orchestrated System Architecture) Agent
-# Run: source ~/.claude/scripts/activate-osa.sh
+# Run: source ~/.osa/scripts/activate-osa.sh
 # =============================================================================
 
 # Psychedelic Synthwave Palette
@@ -89,5 +89,5 @@ echo ""
 echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"
 echo ""
 echo -e "  ${DIM}Apply terminal changes:${R} source ~/.zshrc"
-echo -e "  ${DIM}Run animated banner:${R} ~/.claude/scripts/osa-animated-banner.sh"
+echo -e "  ${DIM}Run animated banner:${R} ~/.osa/scripts/osa-animated-banner.sh"
 echo ""

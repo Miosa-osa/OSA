@@ -1,0 +1,83 @@
+{
+  "skills": {
+    "4143556f0805": {
+      "name": "async-parallel-dispatch",
+      "tags": [
+        "parallel",
+        "agents",
+        "dispatch",
+        "async"
+      ],
+      "language": "typescript",
+      "complexity": "moderate"
+    },
+    "f028b45f100c": {
+      "name": "weighted-memory-retrieval",
+      "tags": [
+        "memory",
+        "retrieval",
+        "scoring",
+        "weighted"
+      ],
+      "language": "python",
+      "complexity": "moderate"
+    },
+    "88afce027d6f": {
+      "name": "simplemem-compression",
+      "tags": [
+        "compression",
+        "memory",
+        "tokens",
+        "simplemem"
+      ],
+      "language": "python",
+      "complexity": "moderate"
+    }
+  },
+  "tags": {
+    "parallel": [
+      "4143556f0805"
+    ],
+    "agents": [
+      "4143556f0805"
+    ],
+    "dispatch": [
+      "4143556f0805"
+    ],
+    "async": [
+      "4143556f0805"
+    ],
+    "memory": [
+      "f028b45f100c",
+      "88afce027d6f"
+    ],
+    "retrieval": [
+      "f028b45f100c"
+    ],
+    "scoring": [
+      "f028b45f100c"
+    ],
+    "weighted": [
+      "f028b45f100c"
+    ],
+    "compression": [
+      "88afce027d6f"
+    ],
+    "tokens": [
+      "88afce027d6f"
+    ],
+    "simplemem": [
+      "88afce027d6f"
+    ]
+  },
+  "stats": {
+    "total": 3,
+    "by_language": {
+      "typescript": 1,
+      "python": 2
+    },
+    "by_complexity": {
+      "moderate": 3
+    }
+  }
+}

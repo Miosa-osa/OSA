@@ -32,7 +32,7 @@ metrics   failures  options    by      beneficial
 ### 1. Observe
 - Capture all tool executions via `learning-capture.py` hook
 - Record decisions, outcomes, durations
-- Store episodic traces in `~/.claude/learning/episodes/`
+- Store episodic traces in `~/.osa/learning/episodes/`
 
 ### 2. Reflect
 - Analyze failures with VIGIL pattern (`error-recovery.py` hook)
@@ -42,7 +42,7 @@ metrics   failures  options    by      beneficial
 ### 3. Propose
 - When patterns repeat 5+ times, propose skill generation
 - Run `scripts/generate-skill.py` to create new skills
-- Store in `~/.claude/skills/generated/`
+- Store in `~/.osa/skills/generated/`
 
 ### 4. Test
 - Validate new patterns against success criteria
@@ -76,13 +76,13 @@ After task completion, classify:
 ### Tier 2: Episodic Memory
 - Full interaction traces with timestamps
 - TTL: 30 days
-- Storage: `~/.claude/learning/episodes/`
+- Storage: `~/.osa/learning/episodes/`
 - Purpose: Experience replay, pattern extraction
 
 ### Tier 3: Semantic Memory
 - Consolidated facts and patterns
 - TTL: Permanent
-- Storage: `~/.claude/learning/semantic/`
+- Storage: `~/.osa/learning/semantic/`
 - Purpose: Long-term knowledge
 
 ## Consolidation Process (Mem0 Pattern)
@@ -90,7 +90,7 @@ After task completion, classify:
 Run periodically (after 5 interactions or end of session):
 
 ```bash
-python3 ~/.claude/skills/learning-engine/scripts/consolidate-memory.py
+python3 ~/.osa/skills/learning-engine/scripts/consolidate-memory.py
 ```
 
 Operations:
@@ -104,10 +104,10 @@ Operations:
 When patterns repeat 5+ times:
 
 ```bash
-python3 ~/.claude/skills/learning-engine/scripts/generate-skill.py
+python3 ~/.osa/skills/learning-engine/scripts/generate-skill.py
 ```
 
-Generated skills stored in `~/.claude/skills/generated/` with:
+Generated skills stored in `~/.osa/skills/generated/` with:
 - SKILL.md definition
 - Metadata (confidence, domain, pattern type)
 - Auto-incremented instance count
@@ -137,14 +137,14 @@ Error taxonomy with recovery strategies:
 - Confidence below threshold (0.7)
 
 When a gap is detected:
-1. Log to `~/.claude/learning/gaps/`
+1. Log to `~/.osa/learning/gaps/`
 2. Suggest agent creation
 3. Track for pattern emergence
 
 ## Storage Structure
 
 ```
-~/.claude/learning/
+~/.osa/learning/
 ├── episodes/           # Episodic memory (by date)
 │   └── YYYY-MM-DD-episodes.jsonl
 ├── semantic/           # Semantic memory (consolidated)
@@ -214,19 +214,19 @@ When a gap is detected:
 
 ```bash
 # Run memory consolidation
-python3 ~/.claude/skills/learning-engine/scripts/consolidate-memory.py
+python3 ~/.osa/skills/learning-engine/scripts/consolidate-memory.py
 
 # Generate skills from patterns
-python3 ~/.claude/skills/learning-engine/scripts/generate-skill.py
+python3 ~/.osa/skills/learning-engine/scripts/generate-skill.py
 
 # View learning metrics
-cat ~/.claude/learning/metrics/index.json | jq .
+cat ~/.osa/learning/metrics/index.json | jq .
 
 # View recent episodes
-tail -20 ~/.claude/learning/episodes/$(date +%Y-%m-%d)-episodes.jsonl | jq .
+tail -20 ~/.osa/learning/episodes/$(date +%Y-%m-%d)-episodes.jsonl | jq .
 
 # View error log
-tail -20 ~/.claude/learning/errors/error-log.jsonl | jq .
+tail -20 ~/.osa/learning/errors/error-log.jsonl | jq .
 ```
 
 ## Performance Targets

@@ -1,0 +1,865 @@
+{
+  "version": "4.0",
+  "description": "Self-Learning Agent Ecosystem with Agent-Specific Skills, Memory, and MCP Tools",
+  "lastUpdated": "2026-01-26T04:00:00Z",
+  "researchBasis": [
+    "ReCreate: Experience-Driven Agent Creation (arXiv:2601.11100)",
+    "VIGIL: Reflective Runtime for Self-Healing Agents (arXiv:2512.07094)",
+    "ReAcTree: Hierarchical Agent Trees (arXiv:2511.02424)",
+    "Synapse: Spreading Activation Memory (arXiv:2601.02744)",
+    "A2A Protocol: Agent-to-Agent Communication",
+    "SICA: Self-Improving Coding Agent (arXiv:2504.15228)"
+  ],
+  "selfLearning": {
+    "enabled": true,
+    "pattern": "SICA",
+    "loop": {
+      "observe": "Capture all tool executions, decisions, outcomes",
+      "reflect": "Analyze failures with LLM reflection",
+      "propose": "Generate improvement hypotheses",
+      "test": "Validate against baseline",
+      "integrate": "Accept if improvement > 0"
+    },
+    "triggers": {
+      "afterTaskCompletion": true,
+      "onError": true,
+      "onUserCorrection": true,
+      "periodicConsolidation": "5 interactions"
+    }
+  },
+  "agents": {
+    "backend-go": {
+      "id": "backend-go",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "systematic-debugging",
+        "test-driven-development",
+        "code-review"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "go-patterns",
+          "go-solutions",
+          "go-errors"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureSuccessfulPatterns": true,
+        "captureErrorResolutions": true,
+        "extractCodeSnippets": true
+      },
+      "utterances": [
+        "write Go code",
+        "golang function",
+        "Go handler",
+        "Go service",
+        "slog logging",
+        "context propagation",
+        "error handling Go"
+      ],
+      "escalateTo": "dragon"
+    },
+    "frontend-react": {
+      "id": "frontend-react",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "component-design",
+        "state-management",
+        "accessibility-audit"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "playwright",
+        "context7"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "react-patterns",
+          "react-solutions",
+          "ui-decisions"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureComponentPatterns": true,
+        "captureHookUsage": true,
+        "extractJSXSnippets": true
+      },
+      "utterances": [
+        "React component",
+        "Next.js",
+        "useState",
+        "useEffect",
+        "Server Component",
+        "Client Component",
+        "shadcn"
+      ]
+    },
+    "frontend-svelte": {
+      "id": "frontend-svelte",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "svelte-runes",
+        "form-actions",
+        "store-management"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "playwright",
+        "context7"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "svelte-patterns",
+          "svelte-solutions",
+          "svelte-runes"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureRunePatterns": true,
+        "captureStorePatterns": true,
+        "extractSvelteSnippets": true
+      },
+      "utterances": [
+        "Svelte component",
+        "SvelteKit",
+        "$state",
+        "$derived",
+        "$effect",
+        "runes",
+        "form actions",
+        "+page.server.ts"
+      ]
+    },
+    "database-specialist": {
+      "id": "database-specialist",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "query-optimization",
+        "schema-design",
+        "migration-planning"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "sql-patterns",
+          "query-solutions",
+          "schema-decisions"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureQueryPatterns": true,
+        "captureOptimizations": true,
+        "extractSQLSnippets": true
+      },
+      "utterances": [
+        "SQL query",
+        "PostgreSQL",
+        "database schema",
+        "migration",
+        "index",
+        "EXPLAIN ANALYZE",
+        "JOIN",
+        "transaction"
+      ]
+    },
+    "security-auditor": {
+      "id": "security-auditor",
+      "tier": "specialist",
+      "model": "opus",
+      "skills": [
+        "owasp-audit",
+        "threat-modeling",
+        "security-review"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "security-patterns",
+          "vulnerability-solutions",
+          "audit-decisions"
+        ],
+        "consolidationStrategy": "immediate"
+      },
+      "learningConfig": {
+        "captureVulnerabilityPatterns": true,
+        "captureRemediations": true,
+        "flagHighRisk": true
+      },
+      "utterances": [
+        "security vulnerability",
+        "OWASP",
+        "XSS",
+        "SQL injection",
+        "authentication",
+        "authorization",
+        "CSRF",
+        "security audit"
+      ],
+      "priority": "high"
+    },
+    "debugger": {
+      "id": "debugger",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "systematic-debugging",
+        "root-cause-analysis",
+        "reproduction"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "sequential-thinking"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "bug-patterns",
+          "debug-solutions",
+          "error-traces"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureErrorPatterns": true,
+        "captureResolutionSteps": true,
+        "buildErrorTaxonomy": true
+      },
+      "utterances": [
+        "bug",
+        "error",
+        "broken",
+        "fails",
+        "crash",
+        "not working",
+        "exception",
+        "stack trace",
+        "debug"
+      ],
+      "selfHealing": {
+        "enabled": true,
+        "pattern": "VIGIL",
+        "reflectionDepth": 3
+      }
+    },
+    "test-automator": {
+      "id": "test-automator",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "test-driven-development",
+        "coverage-analysis",
+        "mocking"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "playwright",
+        "jupyter"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "test-patterns",
+          "mock-solutions",
+          "coverage-strategies"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureTestPatterns": true,
+        "captureMockStrategies": true,
+        "extractTestSnippets": true
+      },
+      "utterances": [
+        "write test",
+        "unit test",
+        "integration test",
+        "test coverage",
+        "mock",
+        "Jest",
+        "Vitest",
+        "Playwright"
+      ]
+    },
+    "code-reviewer": {
+      "id": "code-reviewer",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "code-review",
+        "code-review-checklist",
+        "refactoring"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github",
+        "greptile"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "review-patterns",
+          "quality-decisions",
+          "refactor-solutions"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureReviewPatterns": true,
+        "captureQualityIssues": true,
+        "buildStyleGuide": true
+      },
+      "utterances": [
+        "review",
+        "PR review",
+        "code quality",
+        "best practices",
+        "feedback",
+        "suggestions",
+        "improvements"
+      ]
+    },
+    "architect": {
+      "id": "architect",
+      "tier": "orchestration",
+      "model": "opus",
+      "skills": [
+        "architecture-decision",
+        "system-design",
+        "trade-off-analysis"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github",
+        "sequential-thinking",
+        "memory"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "architecture-decisions",
+          "design-patterns",
+          "adr-history"
+        ],
+        "consolidationStrategy": "immediate"
+      },
+      "learningConfig": {
+        "captureADRs": true,
+        "captureTradeoffs": true,
+        "buildArchitectureKnowledge": true
+      },
+      "utterances": [
+        "architecture",
+        "system design",
+        "ADR",
+        "trade-offs",
+        "scalability",
+        "design decision",
+        "patterns"
+      ]
+    },
+    "master-orchestrator": {
+      "id": "master-orchestrator",
+      "tier": "orchestration",
+      "model": "opus",
+      "skills": [
+        "parallel-agent-dispatch",
+        "task-decomposition",
+        "swarm-coordination"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github",
+        "sequential-thinking",
+        "memory",
+        "claude-flow"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "orchestration-patterns",
+          "decomposition-strategies",
+          "coordination-history"
+        ],
+        "consolidationStrategy": "immediate"
+      },
+      "learningConfig": {
+        "captureDecompositionPatterns": true,
+        "captureCoordinationStrategies": true,
+        "optimizeRouting": true
+      },
+      "utterances": [
+        "complex task",
+        "multi-agent",
+        "orchestrate",
+        "coordinate",
+        "unclear",
+        "cross-domain"
+      ],
+      "hierarchicalControl": {
+        "enabled": true,
+        "pattern": "ReAcTree",
+        "maxFanOut": 4,
+        "checkpointOnPhase": true
+      }
+    },
+    "explorer": {
+      "id": "explorer",
+      "tier": "utility",
+      "model": "haiku",
+      "skills": [
+        "codebase-navigation",
+        "file-search",
+        "structure-analysis"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "serena"
+      ],
+      "memory": {
+        "type": "working",
+        "ttl": "session"
+      },
+      "learningConfig": {
+        "captureNavigationPatterns": true
+      },
+      "utterances": [
+        "find file",
+        "where is",
+        "codebase structure",
+        "search for",
+        "locate",
+        "understand code"
+      ]
+    },
+    "devops-engineer": {
+      "id": "devops-engineer",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "ci-cd-setup",
+        "docker-optimization",
+        "infrastructure-as-code"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "devops-patterns",
+          "deployment-solutions",
+          "infrastructure-decisions"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "capturePipelinePatterns": true,
+        "captureDeploymentStrategies": true,
+        "extractDockerSnippets": true
+      },
+      "utterances": [
+        "Docker",
+        "CI/CD",
+        "deploy",
+        "GitHub Actions",
+        "container",
+        "pipeline",
+        "infrastructure"
+      ],
+      "escalateTo": "angel"
+    },
+    "performance-optimizer": {
+      "id": "performance-optimizer",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "profiling",
+        "bottleneck-analysis",
+        "optimization"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "performance-patterns",
+          "optimization-solutions",
+          "profiling-history"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureOptimizationPatterns": true,
+        "captureProfilingResults": true,
+        "buildPerformanceBaseline": true
+      },
+      "utterances": [
+        "slow",
+        "performance",
+        "optimize",
+        "speed",
+        "latency",
+        "throughput",
+        "bottleneck",
+        "profiling"
+      ]
+    },
+    "go-concurrency": {
+      "id": "go-concurrency",
+      "tier": "specialist",
+      "model": "sonnet",
+      "skills": [
+        "goroutine-patterns",
+        "channel-design",
+        "race-detection"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "concurrency-patterns",
+          "channel-solutions",
+          "race-fixes"
+        ],
+        "consolidationStrategy": "after-task"
+      },
+      "learningConfig": {
+        "captureConcurrencyPatterns": true,
+        "captureRaceConditionFixes": true,
+        "extractGoroutineSnippets": true
+      },
+      "utterances": [
+        "goroutine",
+        "channel",
+        "mutex",
+        "waitgroup",
+        "sync.Once",
+        "atomic",
+        "race condition",
+        "deadlock"
+      ],
+      "escalateTo": "parallel"
+    }
+  },
+  "eliteAgents": {
+    "dragon": {
+      "id": "dragon",
+      "tier": "elite",
+      "model": "opus",
+      "description": "Ultra-high-performance Go specialist",
+      "performanceTargets": {
+        "rps": "10K+",
+        "p99Latency": "<100ms"
+      },
+      "skills": [
+        "ultra-optimization",
+        "zero-allocation",
+        "hot-path-analysis"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github",
+        "sequential-thinking"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "elite-go-patterns",
+          "performance-breakthroughs"
+        ],
+        "consolidationStrategy": "immediate"
+      }
+    },
+    "oracle": {
+      "id": "oracle",
+      "tier": "elite",
+      "model": "opus",
+      "description": "AI/ML specialist for model optimization",
+      "skills": [
+        "fine-tuning",
+        "model-optimization",
+        "ml-architecture"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "jupyter",
+        "context7"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "ml-patterns",
+          "optimization-solutions"
+        ],
+        "consolidationStrategy": "immediate"
+      }
+    },
+    "nova": {
+      "id": "nova",
+      "tier": "elite",
+      "model": "opus",
+      "description": "AI platform architecture specialist",
+      "skills": [
+        "platform-design",
+        "model-serving",
+        "inference-optimization"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github",
+        "sequential-thinking"
+      ],
+      "memory": {
+        "type": "episodic-semantic",
+        "collections": [
+          "platform-patterns",
+          "architecture-decisions"
+        ],
+        "consolidationStrategy": "immediate"
+      }
+    }
+  },
+  "combatAgents": {
+    "angel": {
+      "id": "angel",
+      "tier": "combat",
+      "model": "sonnet",
+      "description": "DevOps combat specialist",
+      "skills": [
+        "emergency-deployment",
+        "incident-response",
+        "infrastructure-recovery"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git",
+        "github"
+      ],
+      "selfHealing": {
+        "enabled": true,
+        "pattern": "VIGIL"
+      }
+    },
+    "parallel": {
+      "id": "parallel",
+      "tier": "combat",
+      "model": "sonnet",
+      "description": "Go concurrency combat specialist",
+      "skills": [
+        "100x-parallelism",
+        "channel-orchestration",
+        "goroutine-pools"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ]
+    },
+    "quantum": {
+      "id": "quantum",
+      "tier": "combat",
+      "model": "sonnet",
+      "description": "Real-time systems specialist",
+      "skills": [
+        "websocket-optimization",
+        "sse-streaming",
+        "event-processing"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ]
+    },
+    "cache": {
+      "id": "cache",
+      "tier": "combat",
+      "model": "sonnet",
+      "description": "Caching strategy specialist",
+      "skills": [
+        "redis-optimization",
+        "cache-invalidation",
+        "distributed-cache"
+      ],
+      "mcpServers": [
+        "filesystem",
+        "git"
+      ]
+    }
+  },
+  "memoryArchitecture": {
+    "description": "Three-tier memory system based on Synapse research",
+    "tiers": {
+      "working": {
+        "type": "redis",
+        "ttl": "15 minutes",
+        "maxTokens": 25000,
+        "purpose": "Current conversation context"
+      },
+      "episodic": {
+        "type": "postgresql+pgvector",
+        "ttl": "30 days",
+        "purpose": "Full interaction traces with embeddings"
+      },
+      "semantic": {
+        "type": "knowledge-graph",
+        "ttl": "permanent",
+        "purpose": "Consolidated facts and patterns"
+      }
+    },
+    "consolidation": {
+      "strategy": "Mem0",
+      "operations": [
+        "ADD",
+        "UPDATE",
+        "DELETE",
+        "NOOP"
+      ],
+      "trigger": "after-task or periodic-5-interactions",
+      "deduplication": "embedding-similarity-0.85"
+    },
+    "retrieval": {
+      "strategy": "spreading-activation",
+      "similarityThreshold": 0.75,
+      "temporalDecay": true,
+      "maxResults": 10
+    }
+  },
+  "skillLibrary": {
+    "coreSkills": [
+      "systematic-debugging",
+      "test-driven-development",
+      "code-review",
+      "architecture-decision",
+      "brainstorming",
+      "verification-before-completion",
+      "memory-query-first",
+      "parallel-agent-dispatch"
+    ],
+    "agentSpecificSkills": {
+      "backend-go": [
+        "handler-service-repository",
+        "slog-logging",
+        "context-propagation"
+      ],
+      "frontend-react": [
+        "server-components",
+        "client-components",
+        "hooks-patterns"
+      ],
+      "frontend-svelte": [
+        "svelte-runes",
+        "form-actions",
+        "store-management"
+      ],
+      "database-specialist": [
+        "query-optimization",
+        "index-design",
+        "migration-planning"
+      ],
+      "security-auditor": [
+        "owasp-audit",
+        "threat-modeling",
+        "penetration-testing"
+      ],
+      "debugger": [
+        "binary-search-debug",
+        "git-bisect",
+        "hypothesis-testing"
+      ],
+      "architect": [
+        "adr-creation",
+        "trade-off-analysis",
+        "system-design"
+      ]
+    },
+    "dynamicSkillGeneration": {
+      "enabled": true,
+      "trigger": "repeated-pattern-5x",
+      "storage": "~/.claude/skills/generated/",
+      "validation": "test-suite-required"
+    }
+  },
+  "outputStyles": {
+    "default": {
+      "format": "markdown",
+      "codeBlocks": true,
+      "progressive": true,
+      "verbosity": "concise"
+    },
+    "learning": {
+      "format": "markdown",
+      "showReasoning": true,
+      "todoMarkers": true,
+      "verbosity": "detailed"
+    },
+    "structured": {
+      "format": "json",
+      "schema": "agent-response-schema",
+      "validation": "strict"
+    }
+  },
+  "hookIntegration": {
+    "learningCapture": {
+      "event": "PostToolUse",
+      "script": "~/.claude/hooks/learning-capture.py",
+      "captures": [
+        "tool_name",
+        "input",
+        "output",
+        "duration",
+        "success"
+      ]
+    },
+    "errorRecovery": {
+      "event": "PostToolUse",
+      "script": "~/.claude/hooks/error-recovery.py",
+      "pattern": "VIGIL",
+      "reflectionDepth": 3
+    },
+    "qualityGate": {
+      "event": "Stop",
+      "script": "~/.claude/hooks/quality-gate.py",
+      "threshold": 0.75
+    }
+  }
+}

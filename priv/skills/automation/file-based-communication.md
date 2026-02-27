@@ -189,7 +189,7 @@ Examples:
 ### Orchestrator Script
 ```bash
 #!/bin/bash
-# File: ~/.claude/scripts/multi-agent-workflow.sh
+# File: ~/.osa/scripts/multi-agent-workflow.sh
 
 WORK_DIR="$HOME/work"
 mkdir -p "$WORK_DIR"
@@ -261,7 +261,7 @@ and create final summary
 ### After Workflow Completion
 ```bash
 # Archive completed work
-ARCHIVE_DIR="$HOME/.claude/archives/$(date +%Y-%m-%d)"
+ARCHIVE_DIR="$HOME/.osa/archives/$(date +%Y-%m-%d)"
 mkdir -p "$ARCHIVE_DIR"
 mv ~/work/*.md "$ARCHIVE_DIR/"
 
@@ -271,13 +271,13 @@ rm ~/work/*.md
 
 ### Automated Cleanup Hook
 ```bash
-# File: ~/.claude/hooks/post-workflow-cleanup.sh
+# File: ~/.osa/hooks/post-workflow-cleanup.sh
 
 # Archive work files older than 7 days
-find ~/work -name "*.md" -mtime +7 -exec mv {} ~/.claude/archives/ \;
+find ~/work -name "*.md" -mtime +7 -exec mv {} ~/.osa/archives/ \;
 
 # Delete archived files older than 30 days
-find ~/.claude/archives -name "*.md" -mtime +30 -delete
+find ~/.osa/archives -name "*.md" -mtime +30 -delete
 ```
 
 ### Selective Cleanup
@@ -432,9 +432,9 @@ and ~/work/notifications-frontend.md
 
 ## References
 
-- OSA Agent memory system: `~/.claude/docs/memory.md`
-- Multi-agent orchestration: `~/.claude/docs/agents.md`
-- Token optimization strategies: `~/.claude/docs/optimization.md`
+- OSA Agent memory system: `~/.osa/docs/memory.md`
+- Multi-agent orchestration: `~/.osa/docs/agents.md`
+- Token optimization strategies: `~/.osa/docs/optimization.md`
 
 ## Related Skills
 

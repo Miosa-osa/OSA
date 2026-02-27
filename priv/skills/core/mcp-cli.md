@@ -143,7 +143,7 @@ Load helper functions and environment:
 
 ```bash
 # In ~/.bashrc or ~/.zshrc
-source ~/.claude/scripts/mcp-cli-init.sh
+source ~/.osa/scripts/mcp-cli-init.sh
 ```
 
 ### Helper Functions
@@ -228,7 +228,7 @@ mcp_timeout 10 filesystem search_files '{"pattern": "*.ts", "path": "."}'
 ```bash
 MCP_DAEMON_TIMEOUT=30000   # Daemon timeout (ms)
 MCP_CONCURRENCY=10         # Max concurrent connections
-MCP_CONFIG_PATH=~/.claude/mcp.json
+MCP_CONFIG_PATH=~/.osa/mcp.json
 MCP_DEBUG=false            # Enable verbose logging
 MCP_CACHE_DIR=~/.cache/mcp-cli
 MCP_CACHE_TTL=300          # Cache TTL (seconds)

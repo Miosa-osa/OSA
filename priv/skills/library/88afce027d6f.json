@@ -1,0 +1,19 @@
+{
+  "id": "88afce027d6f",
+  "name": "simplemem-compression",
+  "description": "30x token compression using entropy-aware filtering and semantic deduplication",
+  "code": "info_score = 0.4*novelty + 0.3*vocab_richness + 0.3*entity_density; if info_score >= 0.35: keep(line)",
+  "language": "python",
+  "tags": [
+    "compression",
+    "memory",
+    "tokens",
+    "simplemem"
+  ],
+  "usage_count": 0,
+  "success_rate": 1.0,
+  "complexity": "moderate",
+  "created_at": "2026-01-26T08:30:15.923305",
+  "last_used": "2026-01-26T08:30:15.923305",
+  "metadata": {}
+}

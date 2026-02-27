@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mcp-helpers.sh - Helper functions for common mcp-cli patterns
-# Usage: source ~/.claude/scripts/mcp-helpers.sh
+# Usage: source ~/.osa/scripts/mcp-helpers.sh
 
 # ============================================================================
 # CORE HELPERS

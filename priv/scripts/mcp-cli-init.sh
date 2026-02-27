@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mcp-cli-init.sh - Initialize mcp-cli environment with optimal settings
-# Usage: source ~/.claude/scripts/mcp-cli-init.sh
+# Usage: source ~/.osa/scripts/mcp-cli-init.sh
 
 # ============================================================================
 # ENVIRONMENT VARIABLES
@@ -17,7 +17,7 @@ export MCP_DAEMON_TIMEOUT="${MCP_DAEMON_TIMEOUT:-30000}"
 export MCP_CONCURRENCY="${MCP_CONCURRENCY:-10}"
 
 # MCP config file path
-# Default: ~/.claude/mcp.json
+# Default: ~/.osa/mcp.json
 export MCP_CONFIG_PATH="${MCP_CONFIG_PATH:-$HOME/.config/mcp/mcp_servers.json}"
 
 # Enable debug mode (verbose logging)
@@ -68,8 +68,8 @@ alias mcpgrep='mcp-cli info greptile'             # Greptile
 # HELPER FUNCTIONS (sourced from mcp-helpers.sh if available)
 # ============================================================================
 
-if [[ -f "$HOME/.claude/scripts/mcp-helpers.sh" ]]; then
-    source "$HOME/.claude/scripts/mcp-helpers.sh"
+if [[ -f "$HOME/.osa/scripts/mcp-helpers.sh" ]]; then
+    source "$HOME/.osa/scripts/mcp-helpers.sh"
 fi
 
 # ============================================================================

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install Security CLI Tools for OSA Agent
-# Run: chmod +x ~/.claude/scripts/install-security-tools.sh && ~/.claude/scripts/install-security-tools.sh
+# Run: chmod +x ~/.osa/scripts/install-security-tools.sh && ~/.osa/scripts/install-security-tools.sh
 
 set -e
 
@@ -180,16 +180,16 @@ echo "                    NEXT STEPS"
 echo "───────────────────────────────────────────────────────────"
 echo ""
 echo "1. Setup pre-commit hooks in your project:"
-echo "   cp ~/.claude/pre-commit-config.yaml ./.pre-commit-config.yaml"
+echo "   cp ~/.osa/pre-commit-config.yaml ./.pre-commit-config.yaml"
 echo "   pre-commit install"
 echo ""
 echo "2. Configure Gitleaks baseline:"
-echo "   cp ~/.claude/gitleaks.toml ./.gitleaks.toml"
+echo "   cp ~/.osa/gitleaks.toml ./.gitleaks.toml"
 echo "   gitleaks detect --report-path .gitleaks-baseline.json"
 echo ""
 echo "3. Run security scan:"
 echo "   /security-scan"
 echo ""
 echo "4. Configure CI/CD security pipeline"
-echo "   See: ~/.claude/docs/security-cicd.md"
+echo "   See: ~/.osa/docs/security-cicd.md"
 echo ""

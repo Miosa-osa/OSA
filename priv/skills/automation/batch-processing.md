@@ -444,4 +444,4 @@ Track these metrics to optimize batching:
 **Status:** Active
 **Last Updated:** 2026-01-28
 **Related Skills:** skeleton-of-thought, systematic-debugging, TDD
-**See Also:** ~/.claude/docs/swarms.md, ~/.claude/docs/orchestration.md
+**See Also:** ~/.osa/docs/swarms.md, ~/.osa/docs/orchestration.md

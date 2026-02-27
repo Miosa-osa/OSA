@@ -2,7 +2,7 @@
 # =============================================================================
 # ACTIVATE EPIC MODE - Full Claude Code Ecosystem Enhancement
 # =============================================================================
-# Run: source ~/.claude/scripts/activate-epic-mode.sh
+# Run: source ~/.osa/scripts/activate-epic-mode.sh
 # =============================================================================
 
 echo ""

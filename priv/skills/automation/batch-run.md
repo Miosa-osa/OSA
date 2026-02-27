@@ -92,7 +92,7 @@ Execute complex multi-agent tasks using intelligent batching to optimize token u
 ## Output Files
 
 ```
-~/.claude/work/batches/
+~/.osa/work/batches/
 ├── batch1-results.md    # First batch output
 ├── batch2-results.md    # Second batch output
 ├── SYNTHESIS.md         # Final combined output
@@ -118,11 +118,11 @@ Works with:
 
 ```bash
 # View batch metrics
-python3 ~/.claude/hooks/batch-metrics.py --stats
+python3 ~/.osa/hooks/batch-metrics.py --stats
 
 # Check batch results
-ls ~/.claude/work/batches/
+ls ~/.osa/work/batches/
 
 # Read synthesis
-cat ~/.claude/work/batches/SYNTHESIS.md
+cat ~/.osa/work/batches/SYNTHESIS.md
 ```
