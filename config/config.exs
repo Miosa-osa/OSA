@@ -103,6 +103,6 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 
 config :logger,
-  level: :info
+  level: :warning
 
 import_config "#{config_env()}.exs"

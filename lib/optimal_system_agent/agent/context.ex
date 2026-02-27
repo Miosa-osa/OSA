@@ -271,7 +271,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   def estimate_tokens_messages(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_tokens(to_string(Map.get(msg, :content) || ""))
+      content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
 
       # Tool calls add tokens for function names and arguments
       tool_call_tokens =
@@ -280,8 +280,8 @@ defmodule OptimalSystemAgent.Agent.Context do
           [] -> 0
           calls when is_list(calls) ->
             Enum.reduce(calls, 0, fn tc, tc_acc ->
-              name_tokens = estimate_tokens(to_string(Map.get(tc, :name, "")))
-              arg_tokens = estimate_tokens(to_string(Map.get(tc, :arguments, "")))
+              name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
+              arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
               tc_acc + name_tokens + arg_tokens + 4  # overhead per tool call
             end)
         end
@@ -290,6 +290,12 @@ defmodule OptimalSystemAgent.Agent.Context do
       acc + content_tokens + tool_call_tokens + 4
     end)
   end
+
+  defp safe_to_string(nil), do: ""
+  defp safe_to_string(val) when is_binary(val), do: val
+  defp safe_to_string(val) when is_map(val), do: Jason.encode!(val)
+  defp safe_to_string(val) when is_list(val), do: Jason.encode!(val)
+  defp safe_to_string(val), do: inspect(val)
 
   # ---------------------------------------------------------------------------
   # Truncation
@@ -417,7 +423,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     |> Enum.reverse()
     |> Enum.find_value(fn msg ->
       if to_string(Map.get(msg, :role)) == "user" do
-        to_string(Map.get(msg, :content, ""))
+        safe_to_string(Map.get(msg, :content, ""))
       end
     end)
   end
