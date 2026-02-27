@@ -135,6 +135,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
       execution: 75_000,
       reasoning: 40_000,
       buffer: 5_000,
+      thinking: 10_000,
       total: 250_000
     },
     specialist: %{
@@ -145,6 +146,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
       execution: 60_000,
       reasoning: 30_000,
       buffer: 5_000,
+      thinking: 5_000,
       total: 200_000
     },
     utility: %{
@@ -155,6 +157,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
       execution: 30_000,
       reasoning: 12_000,
       buffer: 5_000,
+      thinking: 2_000,
       total: 100_000
     }
   }
@@ -344,18 +347,48 @@ defmodule OptimalSystemAgent.Agent.Tier do
     end
   end
 
+  @doc """
+  Set a manual tier override. Takes priority over size-based auto-assignment.
+  Call detect_ollama_tiers() after to apply.
+  """
+  @spec set_tier_override(tier(), String.t()) :: :ok
+  def set_tier_override(tier, model) when tier in [:elite, :specialist, :utility] do
+    overrides = get_tier_overrides()
+    :persistent_term.put(:osa_tier_overrides, Map.put(overrides, tier, model))
+    :ok
+  end
+
+  @doc "Clear a manual tier override."
+  @spec clear_tier_override(tier()) :: :ok
+  def clear_tier_override(tier) when tier in [:elite, :specialist, :utility] do
+    overrides = get_tier_overrides()
+    :persistent_term.put(:osa_tier_overrides, Map.delete(overrides, tier))
+    :ok
+  end
+
+  @doc "Get all manual tier overrides."
+  @spec get_tier_overrides() :: map()
+  def get_tier_overrides do
+    try do
+      :persistent_term.get(:osa_tier_overrides)
+    rescue
+      ArgumentError -> %{}
+    end
+  end
+
   # Assign tiers from a size-sorted (descending) list of models.
+  # User overrides take priority, then size-based assignment fills the rest.
   # With 1 model: all tiers use it.
   # With 2 models: elite=largest, specialist+utility=smallest.
   # With 3+: elite=largest, specialist=middle, utility=smallest.
   defp assign_ollama_tiers([]), do: %{}
 
   defp assign_ollama_tiers([only]) do
-    %{elite: only.name, specialist: only.name, utility: only.name}
+    apply_overrides(%{elite: only.name, specialist: only.name, utility: only.name})
   end
 
   defp assign_ollama_tiers([large, small]) do
-    %{elite: large.name, specialist: small.name, utility: small.name}
+    apply_overrides(%{elite: large.name, specialist: small.name, utility: small.name})
   end
 
   defp assign_ollama_tiers([large | rest]) do
@@ -363,7 +396,13 @@ defmodule OptimalSystemAgent.Agent.Tier do
     mid = Enum.at(rest, mid_idx)
     small = List.last(rest)
 
-    %{elite: large.name, specialist: mid.name, utility: small.name}
+    apply_overrides(%{elite: large.name, specialist: mid.name, utility: small.name})
+  end
+
+  # Merge user overrides on top of size-based assignments
+  defp apply_overrides(mapping) do
+    overrides = get_tier_overrides()
+    Map.merge(mapping, overrides)
   end
 
   # Safe wrapper that doesn't crash if Ollama module isn't loaded or unreachable

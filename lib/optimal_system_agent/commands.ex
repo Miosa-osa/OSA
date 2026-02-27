@@ -241,6 +241,7 @@ defmodule OptimalSystemAgent.Commands do
       # ── Agents ──
       {"agents", "List all agents in the roster", &cmd_agents/2},
       {"tiers", "Show model tier configuration", &cmd_tiers/2},
+      {"tier", "Set a tier model override", &cmd_tier_set/2},
       {"swarms", "List swarm presets", &cmd_swarms/2},
       {"hooks", "Show hook pipeline status", &cmd_hooks/2},
       {"learning", "Learning engine metrics", &cmd_learning/2},
@@ -1575,6 +1576,57 @@ defmodule OptimalSystemAgent.Commands do
     """
 
     {:command, String.trim(output)}
+  end
+
+  defp cmd_tier_set(arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Tier
+
+    parts = arg |> String.trim() |> String.split(~r/\s+/, parts: 2)
+
+    case parts do
+      [tier_str, model] when tier_str in ["elite", "specialist", "utility"] ->
+        tier = String.to_existing_atom(tier_str)
+        Tier.set_tier_override(tier, model)
+
+        # Re-run detection to apply the override
+        result = format_tier_refresh()
+        {:command, "Set #{tier_str} → #{model}\n#{result}"}
+
+      ["clear", tier_str] when tier_str in ["elite", "specialist", "utility"] ->
+        tier = String.to_existing_atom(tier_str)
+        Tier.clear_tier_override(tier)
+
+        result = format_tier_refresh()
+        {:command, "Cleared #{tier_str} override.\n#{result}"}
+
+      ["clear"] ->
+        for tier <- [:elite, :specialist, :utility], do: Tier.clear_tier_override(tier)
+
+        result = format_tier_refresh()
+        {:command, "All tier overrides cleared.\n#{result}"}
+
+      _ ->
+        overrides = Tier.get_tier_overrides()
+
+        override_lines =
+          if map_size(overrides) > 0 do
+            lines = Enum.map_join(overrides, "\n", fn {t, m} -> "  #{t}: #{m}" end)
+            "\nActive overrides:\n#{lines}"
+          else
+            "\nNo overrides — using auto-detection (size-based)."
+          end
+
+        {:command,
+         """
+         Usage:
+           /tier elite <model>       Set elite tier model
+           /tier specialist <model>  Set specialist tier model
+           /tier utility <model>     Set utility tier model
+           /tier clear [tier]        Remove override(s)
+         #{override_lines}
+         """
+         |> String.trim()}
+    end
   end
 
   defp cmd_swarms(_arg, _session_id) do
