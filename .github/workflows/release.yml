@@ -15,10 +15,29 @@ env:
   MIX_ENV: prod
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "osagent v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+          draft: false
+
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    needs: create-release
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: darwin
@@ -86,7 +105,10 @@ jobs:
           cd _build/prod/rel/osagent
           tar -czf ../../../../osagent-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz .
 
-      - name: Upload release artifact
-        uses: softprops/action-gh-release@v2
-        with:
-          files: osagent-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v${{ steps.version.outputs.version }}" \
+            "osagent-${{ steps.version.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" \
+            --clobber
