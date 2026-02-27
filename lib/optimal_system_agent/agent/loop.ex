@@ -65,36 +65,38 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call({:process, message}, _from, state) do
-    # 1. Filter noise before classifying — two-tier deterministic + LLM check
+    # 1. Classify the signal — every user message is a signal, weight determines priority
+    signal = Classifier.classify(message, state.channel)
+
+    # 2. Check noise filter — but ALWAYS process, just log the classification
+    #    Every message a user sends is a signal. The weight determines what kind.
+    #    Noise filtering is informational, not a gate.
     case NoiseFilter.filter(message) do
       {:noise, reason} ->
-        Logger.debug("Signal filtered as noise: #{reason}")
-        signal = Classifier.classify(message, state.channel)
-        Bus.emit(:system_event, %{event: :signal_filtered, signal: signal, reason: reason})
-        {:reply, {:filtered, signal}, state}
+        Logger.debug("Signal classified as low-weight (#{reason}), weight=#{signal.weight}")
+        Bus.emit(:system_event, %{event: :signal_low_weight, signal: signal, reason: reason})
 
       {:signal, _weight} ->
-        # 2. Classify the signal fully
-        signal = Classifier.classify(message, state.channel)
-
-        # 3. Persist user message to JSONL session storage
-        Memory.append(state.session_id, %{role: "user", content: message})
-
-        # 4. Compact message history if needed, then process through agent loop
-        compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
-        state = %{state | messages: compacted, current_signal: signal}
-
-        state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
-        {response, state} = run_loop(state)
-        state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
-
-        # 5. Persist assistant response to JSONL session storage
-        Memory.append(state.session_id, %{role: "assistant", content: response})
-
-        Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
-
-        {:reply, {:ok, response}, state}
+        :ok
     end
+
+    # 3. Persist user message to JSONL session storage
+    Memory.append(state.session_id, %{role: "user", content: message})
+
+    # 4. Compact message history if needed, then process through agent loop
+    compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+    state = %{state | messages: compacted, current_signal: signal}
+
+    state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
+    {response, state} = run_loop(state)
+    state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+
+    # 5. Persist assistant response to JSONL session storage
+    Memory.append(state.session_id, %{role: "assistant", content: response})
+
+    Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+
+    {:reply, {:ok, response}, state}
   end
 
   # --- Agent Loop ---

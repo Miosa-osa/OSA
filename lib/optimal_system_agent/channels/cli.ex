@@ -37,7 +37,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
         unless input == "" do
           case Loop.process_message(session_id, input) do
             {:ok, response} -> IO.puts("\nosa> #{response}\n")
-            {:filtered, _signal} -> IO.puts("\n[filtered as noise]\n")
             {:error, reason} -> IO.puts("\n[error: #{reason}]\n")
           end
         end

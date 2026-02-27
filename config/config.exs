@@ -6,10 +6,10 @@ config :optimal_system_agent,
 
   # Ollama settings (local LLM — no API key needed)
   ollama_url: "http://localhost:11434",
-  ollama_model: "llama3.2:latest",
+  ollama_model: "qwen3:8b",
 
   # Anthropic settings (set ANTHROPIC_API_KEY env var)
-  anthropic_model: "claude-opus-4-6",
+  anthropic_model: "anthropic-latest",
 
   # OpenAI-compatible settings (set OPENAI_API_KEY env var)
   openai_url: "https://api.openai.com/v1",
