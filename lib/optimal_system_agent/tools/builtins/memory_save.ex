@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.MemorySave do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.MemorySave do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @impl true
   def name, do: "memory_save"

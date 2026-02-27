@@ -425,7 +425,7 @@ defmodule OptimalSystemAgent.Commands do
 
   defp cmd_status(_arg, _session_id) do
     providers = OptimalSystemAgent.Providers.Registry.list_providers()
-    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+    skills = OptimalSystemAgent.Tools.Registry.list_tools_direct()
     memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
     soul_loaded = if OptimalSystemAgent.Soul.identity(), do: "yes", else: "defaults"
 
@@ -433,7 +433,7 @@ defmodule OptimalSystemAgent.Commands do
       """
       System Status:
         providers:  #{length(providers)} loaded
-        skills:     #{length(skills)} available
+        tools:      #{length(skills)} available
         sessions:   #{memory_stats[:session_count] || 0} stored
         memory:     #{memory_stats[:long_term_size] || 0} bytes
         soul:       #{soul_loaded}
@@ -445,13 +445,13 @@ defmodule OptimalSystemAgent.Commands do
   end
 
   defp cmd_skills(_arg, _session_id) do
-    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+    skills = OptimalSystemAgent.Tools.Registry.list_tools_direct()
 
     output =
       if skills == [] do
-        "No skills loaded."
+        "No tools loaded."
       else
-        header = "Available skills (#{length(skills)}):\n"
+        header = "Available tools (#{length(skills)}):\n"
 
         body =
           Enum.map_join(skills, "\n", fn skill ->
@@ -734,7 +734,7 @@ defmodule OptimalSystemAgent.Commands do
 
   defp cmd_ollama_models do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-    current_model = Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
+    current_model = Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
 
     case OptimalSystemAgent.Providers.Ollama.list_models(url) do
       {:ok, models} ->
@@ -1451,7 +1451,7 @@ defmodule OptimalSystemAgent.Commands do
       check_soul(),
       check_providers(),
       check_ollama(),
-      check_skills(),
+      check_tools(),
       check_memory(),
       check_cortex(),
       check_scheduler(),
@@ -2185,13 +2185,13 @@ defmodule OptimalSystemAgent.Commands do
     _ -> {:fail, "Ollama", "health check failed"}
   end
 
-  defp check_skills do
-    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+  defp check_tools do
+    skills = OptimalSystemAgent.Tools.Registry.list_tools_direct()
 
     cond do
-      length(skills) >= 5 -> {:ok, "Skills", "#{length(skills)} available"}
-      length(skills) > 0 -> {:warn, "Skills", "#{length(skills)} available (low)"}
-      true -> {:fail, "Skills", "no skills loaded"}
+      length(skills) >= 5 -> {:ok, "Tools", "#{length(skills)} available"}
+      length(skills) > 0 -> {:warn, "Tools", "#{length(skills)} available (low)"}
+      true -> {:fail, "Tools", "no tools loaded"}
     end
   end
 

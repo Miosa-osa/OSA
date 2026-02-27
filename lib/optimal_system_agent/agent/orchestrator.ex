@@ -24,7 +24,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   alias OptimalSystemAgent.Agent.{Appraiser, Roster, Tier, TaskQueue}
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.Registry, as: Providers
-  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Tools.Registry, as: Tools
 
   defstruct tasks: %{},
             agent_pool: %{},
@@ -123,7 +123,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   @doc """
   Dynamically create a new skill for a specific task.
-  Writes a SKILL.md file and registers it with the Skills.Registry.
+  Writes a SKILL.md file and registers it with the Tools.Registry.
   """
   @spec create_skill(String.t(), String.t(), String.t(), list()) ::
           {:ok, String.t()} | {:error, term()}
@@ -1036,13 +1036,13 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     ]
 
     # Use cached tools or read from persistent_term (lock-free).
-    # NEVER call Skills.list_tools() here — it goes through the GenServer
-    # which is blocked by the Skills.Registry.execute call that started us.
+    # NEVER call Tools.list_tools() here — it goes through the GenServer
+    # which is blocked by the Tools.Registry.execute call that started us.
     tools =
       if cached_tools != [] do
         cached_tools
       else
-        Skills.list_tools_direct()
+        Tools.list_tools_direct()
       end
 
     # Filter tools to only what this agent needs (if specified)
@@ -1181,10 +1181,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
                  }}
               )
 
-              # Use execute_direct to bypass GenServer — Skills.Registry is blocked
+              # Use execute_direct to bypass GenServer — Tools.Registry is blocked
               # by the parent execute("orchestrate") call that spawned us.
               result_str =
-                case Skills.execute_direct(tool_call.name, tool_call.arguments) do
+                case Tools.execute_direct(tool_call.name, tool_call.arguments) do
                   {:ok, output} -> output
                   {:error, reason} -> "Error: #{reason}"
                 end
@@ -1391,7 +1391,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   # ── Skill Discovery ───────────────────────────────────────────────
 
   defp do_find_matching_skills(task_description) do
-    search_results = Skills.search_skills(task_description)
+    search_results = Tools.search_skills(task_description)
 
     if search_results == [] do
       :no_matches

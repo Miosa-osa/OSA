@@ -24,7 +24,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Signal.NoiseFilter
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Providers.Registry, as: Providers
-  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
 
   defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
@@ -69,7 +69,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       provider: Keyword.get(opts, :provider),
       model: Keyword.get(opts, :model),
       messages: Keyword.get(opts, :messages, []),
-      tools: Skills.list_tools() ++ extra_tools
+      tools: Tools.list_tools() ++ extra_tools
     }
 
     {:ok, state}
@@ -227,8 +227,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Bus.emit(:llm_request, %{session_id: state.session_id, iteration: state.iteration})
     start_time = System.monotonic_time(:millisecond)
 
-    # Call LLM (provider/model threaded from state)
-    result = llm_chat(state, context.messages, tools: state.tools, temperature: temperature())
+    # Call LLM (provider/model threaded from state, with optional thinking)
+    thinking_opts = thinking_config(state)
+    llm_opts = [tools: state.tools, temperature: temperature()]
+    llm_opts = if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+    result = llm_chat(state, context.messages, llm_opts)
 
     # Emit timing + usage event after LLM call
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -250,16 +253,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
         # No tool calls — final response
         {content, state}
 
-      {:ok, %{content: content, tool_calls: tool_calls}} when is_list(tool_calls) ->
+      {:ok, %{content: content, tool_calls: tool_calls} = resp} when is_list(tool_calls) ->
         # Execute tool calls
         state = %{state | iteration: state.iteration + 1}
 
-        # Append assistant message with tool calls
-        state = %{
-          state
-          | messages:
-              state.messages ++ [%{role: "assistant", content: content, tool_calls: tool_calls}]
-        }
+        # Append assistant message with tool calls (+ thinking blocks for preservation)
+        assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
+        assistant_msg =
+          case Map.get(resp, :thinking_blocks) do
+            blocks when is_list(blocks) and blocks != [] -> Map.put(assistant_msg, :thinking_blocks, blocks)
+            _ -> assistant_msg
+          end
+
+        state = %{state | messages: state.messages ++ [assistant_msg]}
 
         # Execute each tool and append results (with timing feedback)
         state =
@@ -281,7 +287,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
                   "Blocked: #{reason}"
 
                 _ ->
-                  case Skills.execute(tool_call.name, tool_call.arguments) do
+                  case Tools.execute(tool_call.name, tool_call.arguments) do
                     {:ok, content} -> content
                     {:error, reason} -> "Error: #{reason}"
                   end
@@ -400,6 +406,29 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
+
+  # Resolve thinking config based on provider, model, and config
+  defp thinking_config(%{provider: provider} = state) do
+    enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
+
+    if enabled and provider in [:anthropic, nil] and is_anthropic_provider?() do
+      model = state.model || Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+
+      if String.contains?(to_string(model), "opus") do
+        %{type: "adaptive"}
+      else
+        budget = Application.get_env(:optimal_system_agent, :thinking_budget_tokens, 5_000)
+        %{type: "enabled", budget_tokens: budget}
+      end
+    else
+      nil
+    end
+  end
+
+  defp is_anthropic_provider? do
+    default = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    default == :anthropic
+  end
 
   # Emit context window pressure event so the CLI can display utilization
   defp emit_context_pressure(state) do

@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileGrepTest do
+defmodule OptimalSystemAgent.Tools.Builtins.FileGrepTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.FileGrep
+  alias OptimalSystemAgent.Tools.Builtins.FileGrep
 
   # ── Regex pattern match ──────────────────────────────────────────
 
@@ -102,7 +102,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileGrepTest do
 
   # ── Metadata ─────────────────────────────────────────────────────
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns file_grep" do
       assert FileGrep.name() == "file_grep"
     end

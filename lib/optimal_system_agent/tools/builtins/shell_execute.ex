@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.ShellExecute do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   require Logger
 

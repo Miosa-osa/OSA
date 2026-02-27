@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileWrite do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @default_allowed_write_paths ["~", "/tmp"]
 

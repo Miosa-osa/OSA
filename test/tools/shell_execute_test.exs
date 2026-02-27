@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.ShellExecuteTest do
+defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.ShellExecute
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute
 
   # ---------------------------------------------------------------------------
   # Helpers
@@ -347,7 +347,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.ShellExecuteTest do
   # Metadata
   # ---------------------------------------------------------------------------
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns shell_execute" do
       assert ShellExecute.name() == "shell_execute"
     end

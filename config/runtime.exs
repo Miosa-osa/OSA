@@ -142,5 +142,9 @@ config :optimal_system_agent,
   update_url: System.get_env("OSA_UPDATE_URL"),
   update_interval: parse_int.(System.get_env("OSA_UPDATE_INTERVAL"), 86_400_000),
 
+  # Extended thinking
+  thinking_enabled: System.get_env("OSA_THINKING_ENABLED") == "true",
+  thinking_budget_tokens: parse_int.(System.get_env("OSA_THINKING_BUDGET"), 5_000),
+
   # Quiet hours for heartbeat
   quiet_hours: System.get_env("OSA_QUIET_HOURS")

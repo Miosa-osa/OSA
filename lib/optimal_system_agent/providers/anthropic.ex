@@ -62,6 +62,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
+    thinking = Keyword.get(opts, :thinking)
 
     body =
       %{
@@ -71,12 +72,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       }
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
+      |> maybe_add_thinking(thinking)
 
-    headers = [
-      {"x-api-key", api_key},
-      {"anthropic-version", @api_version},
-      {"content-type", "application/json"}
-    ]
+    headers = build_headers(api_key, thinking)
 
     try do
       case Req.post("#{base_url}/messages",
@@ -88,7 +86,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
           usage = extract_usage(resp)
-          {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
+          thinking_blocks = extract_thinking(resp)
+
+          result = %{content: content, tool_calls: tool_calls, usage: usage}
+          result = if thinking_blocks != [], do: Map.put(result, :thinking_blocks, thinking_blocks), else: result
+          {:ok, result}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -112,6 +114,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
+    thinking = Keyword.get(opts, :thinking)
 
     body =
       %{
@@ -122,12 +125,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       }
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
+      |> maybe_add_thinking(thinking)
 
-    headers = [
-      {"x-api-key", api_key},
-      {"anthropic-version", @api_version},
-      {"content-type", "application/json"}
-    ]
+    headers = build_headers(api_key, thinking)
 
     try do
       case Req.post("#{base_url}/messages",
@@ -141,7 +141,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             content: "",
             tool_calls: [],
             current_tool: nil,
-            buffer: ""
+            buffer: "",
+            thinking: [],
+            current_thinking: nil
           })
 
         {:error, reason} ->
@@ -171,10 +173,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         collect_stream(resp, callback, acc)
 
       {^ref, :done} ->
-        # Finalize any in-progress tool call
+        # Finalize any in-progress tool call or thinking block
         acc = finalize_current_tool(acc)
+        acc = finalize_current_thinking(acc)
 
         result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
+        result = if acc.thinking != [], do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)), else: result
         callback.({:done, result})
         :ok
 
@@ -225,6 +229,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       %{"type" => "text"} ->
         acc
 
+      %{"type" => "thinking"} ->
+        acc = finalize_current_thinking(acc)
+        callback.({:thinking_start, %{}})
+        %{acc | current_thinking: %{text: ""}}
+
       %{"type" => "tool_use", "id" => id, "name" => name} ->
         acc = finalize_current_tool(acc)
         callback.({:tool_use_start, %{id: id, name: name}})
@@ -240,6 +249,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       %{"type" => "text_delta", "text" => text} ->
         callback.({:text_delta, text})
         %{acc | content: acc.content <> text}
+
+      %{"type" => "thinking_delta", "thinking" => text} ->
+        callback.({:thinking_delta, text})
+
+        if acc.current_thinking do
+          %{acc | current_thinking: %{acc.current_thinking | text: acc.current_thinking.text <> text}}
+        else
+          acc
+        end
+
+      %{"type" => "signature_delta"} ->
+        # Signature deltas are not needed for display — skip
+        acc
 
       %{"type" => "input_json_delta", "partial_json" => json_chunk} ->
         callback.({:tool_use_delta, json_chunk})
@@ -261,7 +283,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   defp process_stream_event(%{"type" => "content_block_stop"}, _callback, acc) do
-    finalize_current_tool(acc)
+    acc
+    |> finalize_current_tool()
+    |> finalize_current_thinking()
   end
 
   defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
@@ -283,6 +307,16 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
   end
 
+  defp finalize_current_thinking(%{current_thinking: nil} = acc), do: acc
+
+  defp finalize_current_thinking(%{current_thinking: thinking} = acc) do
+    block = %{type: "thinking", thinking: thinking.text, signature: nil}
+    %{acc | thinking: [block | acc.thinking], current_thinking: nil}
+  end
+
+  # Handle accumulators without thinking fields (e.g., fallback sync path)
+  defp finalize_current_thinking(acc), do: acc
+
   defp fallback_to_sync(base_url, api_key, model, messages, callback, opts) do
     Logger.warning("Falling back to synchronous Anthropic chat")
 
@@ -299,8 +333,21 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   # --- Private ---
 
-  defp format_messages(messages) do
+  @doc false
+  def format_messages(messages) do
     Enum.map(messages, fn
+      %{role: role, content: content, thinking_blocks: blocks} when is_list(blocks) and blocks != [] ->
+        # When assistant message has thinking blocks, include them as content blocks
+        # (required by Anthropic API for tool use turns with thinking)
+        thinking_content =
+          Enum.map(blocks, fn block ->
+            base = %{"type" => "thinking", "thinking" => block.thinking || block[:thinking]}
+            if block[:signature] || block.signature, do: Map.put(base, "signature", block.signature || block[:signature]), else: base
+          end)
+
+        text_content = [%{"type" => "text", "text" => to_string(content)}]
+        %{"role" => to_string(role), "content" => thinking_content ++ text_content}
+
       %{role: role, content: content} ->
         %{"role" => to_string(role), "content" => to_string(content)}
 
@@ -315,6 +362,41 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp maybe_add_system(body, ""), do: body
   defp maybe_add_system(body, nil), do: body
   defp maybe_add_system(body, system_text), do: Map.put(body, :system, system_text)
+
+  @doc """
+  Add extended thinking configuration to request body.
+  No-ops when thinking is nil.
+  """
+  def maybe_add_thinking(body, nil), do: body
+
+  def maybe_add_thinking(body, %{type: "adaptive"}) do
+    Map.put(body, :thinking, %{type: "adaptive"})
+  end
+
+  def maybe_add_thinking(body, %{type: "enabled", budget_tokens: budget}) do
+    # Anthropic requires minimum 1024 budget tokens
+    budget = max(budget, 1024)
+    Map.put(body, :thinking, %{type: "enabled", budget_tokens: budget})
+  end
+
+  def maybe_add_thinking(body, _), do: body
+
+  @doc """
+  Build request headers, adding interleaved-thinking beta when thinking is enabled.
+  """
+  def build_headers(api_key, thinking) do
+    base = [
+      {"x-api-key", api_key},
+      {"anthropic-version", @api_version},
+      {"content-type", "application/json"}
+    ]
+
+    if thinking do
+      [{"anthropic-beta", "interleaved-thinking-2025-05-14"} | base]
+    else
+      base
+    end
+  end
 
   defp maybe_add_tools(body, opts) do
     case Keyword.get(opts, :tools) do
@@ -356,10 +438,32 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp extract_tool_calls(_), do: []
 
-  defp extract_usage(%{"usage" => %{"input_tokens" => inp, "output_tokens" => out}}),
-    do: %{input_tokens: inp, output_tokens: out}
+  @doc "Extract thinking blocks from Anthropic response."
+  def extract_thinking(%{"content" => blocks}) when is_list(blocks) do
+    blocks
+    |> Enum.filter(&(&1["type"] == "thinking"))
+    |> Enum.map(fn block ->
+      %{
+        type: "thinking",
+        thinking: block["thinking"],
+        signature: block["signature"]
+      }
+    end)
+  end
 
-  defp extract_usage(_), do: %{}
+  def extract_thinking(_), do: []
+
+  @doc "Extract usage including cache tokens."
+  def extract_usage(%{"usage" => usage}) when is_map(usage) do
+    %{
+      input_tokens: usage["input_tokens"] || 0,
+      output_tokens: usage["output_tokens"] || 0,
+      cache_creation_input_tokens: usage["cache_creation_input_tokens"] || 0,
+      cache_read_input_tokens: usage["cache_read_input_tokens"] || 0
+    }
+  end
+
+  def extract_usage(_), do: %{}
 
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg

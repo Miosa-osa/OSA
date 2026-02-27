@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Fleet.Registry do
 
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Fleet.Sentinel
+  alias OptimalSystemAgent.Protocol.OSCP
 
   defstruct agents: %{},
             stats: %{total: 0, online: 0, unreachable: 0}
@@ -89,11 +90,12 @@ defmodule OptimalSystemAgent.Fleet.Registry do
           Logger.info("[Fleet.Registry] Registered agent #{agent_id}")
 
           try do
-            Bus.emit(:system_event, %{
-              event: :fleet_agent_registered,
-              agent_id: agent_id,
-              capabilities: capabilities
-            })
+            oscp_event = OSCP.signal(
+              "urn:osa:fleet:registry",
+              "agent.registered",
+              %{agent_id: agent_id, capabilities: capabilities}
+            )
+            Bus.emit(:system_event, OSCP.to_bus_event(oscp_event))
           rescue
             _ -> :ok
           end
@@ -120,11 +122,8 @@ defmodule OptimalSystemAgent.Fleet.Registry do
         new_state = %{state | agents: new_agents} |> update_stats()
 
         try do
-          Bus.emit(:system_event, %{
-            event: :fleet_agent_heartbeat,
-            agent_id: agent_id,
-            metrics: metrics
-          })
+          oscp_event = OSCP.heartbeat(agent_id, metrics)
+          Bus.emit(:system_event, OSCP.to_bus_event(oscp_event))
         rescue
           _ -> :ok
         end

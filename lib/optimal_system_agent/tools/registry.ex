@@ -1,9 +1,9 @@
-defmodule OptimalSystemAgent.Skills.Registry do
+defmodule OptimalSystemAgent.Tools.Registry do
   @moduledoc """
-  Skill discovery, registration, and dispatch.
+  Tool and skill registry — manages callable tools (Elixir modules) and discovers SKILL.md skill files.
 
-  Skills can be registered in three ways:
-  1. Built-in skills (always available, implement Skills.Behaviour)
+  Tools/skills can be registered in three ways:
+  1. Built-in tools (implement Tools.Behaviour)
   2. SKILL.md files from ~/.osa/skills/ (markdown-defined, parsed at boot)
   3. MCP server tools (auto-discovered from ~/.osa/mcp.json)
 
@@ -11,21 +11,21 @@ defmodule OptimalSystemAgent.Skills.Registry do
   that dispatches tool calls at BEAM instruction speed.
 
   ## Hot Code Reload
-  When a new skill is registered via `register/1`, the goldrush tool dispatcher
-  is recompiled automatically. New skills become available immediately.
+  When a new tool is registered via `register/1`, the goldrush tool dispatcher
+  is recompiled automatically. New tools become available immediately.
   """
   use GenServer
   require Logger
 
   defp skills_dir, do: Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills")
 
-  defstruct skills: %{}, markdown_skills: %{}, tools: []
+  defstruct builtin_tools: %{}, skills: %{}, tools: []
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
 
-  @doc "Register a skill module implementing Skills.Behaviour."
+  @doc "Register a tool module implementing Tools.Behaviour."
   def register(skill_module) do
     GenServer.call(__MODULE__, {:register_module, skill_module})
   end
@@ -48,33 +48,26 @@ defmodule OptimalSystemAgent.Skills.Registry do
   @doc """
   Execute a tool by name without going through the GenServer.
 
-  Uses :persistent_term for skill lookup. Safe to call from inside
+  Uses :persistent_term for tool lookup. Safe to call from inside
   GenServer callbacks or from sub-agent Tasks spawned during orchestration.
-  This prevents deadlock when Skills.Registry.execute calls orchestrate,
-  which spawns sub-agents that call back into Skills.
+  This prevents deadlock when Tools.Registry.execute calls orchestrate,
+  which spawns sub-agents that call back into Tools.
   """
   def execute_direct(tool_name, arguments) do
-    skills = :persistent_term.get({__MODULE__, :skills}, %{})
-    markdown_skills = :persistent_term.get({__MODULE__, :markdown_skills}, %{})
+    builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
-    cond do
-      mod = Map.get(skills, tool_name) ->
-        mod.execute(arguments)
-
-      _skill = Map.get(markdown_skills, tool_name) ->
-        dispatch_builtin(tool_name, arguments)
-
-      true ->
-        {:error, "Unknown tool: #{tool_name}"}
+    case Map.get(builtin_tools, tool_name) do
+      nil -> {:error, "Unknown tool: #{tool_name}"}
+      mod -> mod.execute(arguments)
     end
   end
 
-  @doc "List skill documentation (for context injection)."
+  @doc "List tool documentation (for context injection)."
   def list_skill_docs do
     GenServer.call(__MODULE__, :list_skill_docs)
   end
 
-  @doc "Search existing skills by keyword matching against names and descriptions."
+  @doc "Search existing tools and skills by keyword matching against names and descriptions."
   @spec search_skills(String.t()) :: list({String.t(), String.t(), float()})
   def search_skills(query) do
     GenServer.call(__MODULE__, {:search_skills, query})
@@ -298,44 +291,37 @@ defmodule OptimalSystemAgent.Skills.Registry do
 
   @impl true
   def init(:ok) do
-    # Load built-in skills
-    builtin = load_builtin_skills()
-
-    # Load markdown SKILL.md files
-    markdown = load_skill_files()
-
-    # Build unified tool list
-    tools = build_tool_list(builtin, markdown)
-
-    # Compile goldrush tool dispatcher
-    compile_dispatcher(builtin, markdown)
+    builtin_tools = load_builtin_tools()
+    skills = load_skills()
+    tools = build_tool_list(builtin_tools, skills)
+    compile_dispatcher(builtin_tools, skills)
 
     # Store in :persistent_term for lock-free reads (avoids GenServer deadlock
     # when orchestrator sub-agents need tools/execution during a handle_call)
-    :persistent_term.put({__MODULE__, :skills}, builtin)
-    :persistent_term.put({__MODULE__, :markdown_skills}, markdown)
+    :persistent_term.put({__MODULE__, :builtin_tools}, builtin_tools)
+    :persistent_term.put({__MODULE__, :skills}, skills)
     :persistent_term.put({__MODULE__, :tools}, tools)
 
     Logger.info(
-      "Skills registry: #{map_size(builtin)} built-in, #{map_size(markdown)} markdown, #{length(tools)} total tools"
+      "Tools registry: #{map_size(builtin_tools)} tools, #{map_size(skills)} skills, #{length(tools)} LLM tools"
     )
 
-    {:ok, %__MODULE__{skills: builtin, markdown_skills: markdown, tools: tools}}
+    {:ok, %__MODULE__{builtin_tools: builtin_tools, skills: skills, tools: tools}}
   end
 
   @impl true
   def handle_call({:register_module, skill_module}, _from, state) do
     name = skill_module.name()
-    skills = Map.put(state.skills, name, skill_module)
-    tools = build_tool_list(skills, state.markdown_skills)
-    compile_dispatcher(skills, state.markdown_skills)
+    builtin_tools = Map.put(state.builtin_tools, name, skill_module)
+    tools = build_tool_list(builtin_tools, state.skills)
+    compile_dispatcher(builtin_tools, state.skills)
 
     # Update persistent_term for lock-free reads
-    :persistent_term.put({__MODULE__, :skills}, skills)
+    :persistent_term.put({__MODULE__, :builtin_tools}, builtin_tools)
     :persistent_term.put({__MODULE__, :tools}, tools)
 
-    Logger.info("Registered skill: #{name} (hot reload)")
-    {:reply, :ok, %{state | skills: skills, tools: tools}}
+    Logger.info("Registered tool: #{name} (hot reload)")
+    {:reply, :ok, %{state | builtin_tools: builtin_tools, tools: tools}}
   end
 
   def handle_call(:list_tools, _from, state) do
@@ -343,58 +329,51 @@ defmodule OptimalSystemAgent.Skills.Registry do
   end
 
   def handle_call(:list_skill_docs, _from, state) do
-    module_docs = Enum.map(state.skills, fn {name, mod} -> {name, mod.description()} end)
-    md_docs = Enum.map(state.markdown_skills, fn {name, skill} -> {name, skill.description} end)
-    {:reply, module_docs ++ md_docs, state}
+    tool_docs = Enum.map(state.builtin_tools, fn {name, mod} -> {name, mod.description()} end)
+    skill_docs = Enum.map(state.skills, fn {name, skill} -> {name, skill.description} end)
+    {:reply, tool_docs ++ skill_docs, state}
   end
 
   def handle_call({:search_skills, query}, _from, state) do
-    results = do_search_skills(query, state.skills, state.markdown_skills)
+    results = do_search_skills(query, state.builtin_tools, state.skills)
     {:reply, results, state}
   end
 
   def handle_call({:execute, tool_name, arguments}, _from, state) do
     result =
-      cond do
-        # Check behaviour-based skills first
-        mod = Map.get(state.skills, tool_name) ->
-          mod.execute(arguments)
-
-        # Check markdown skills (dispatch to built-in handler)
-        _skill = Map.get(state.markdown_skills, tool_name) ->
-          dispatch_builtin(tool_name, arguments)
-
-        true ->
-          {:error, "Unknown tool: #{tool_name}"}
+      case Map.get(state.builtin_tools, tool_name) do
+        nil -> {:error, "Unknown tool: #{tool_name}"}
+        mod -> mod.execute(arguments)
       end
 
     {:reply, result, state}
   end
 
-  # --- Built-in Skills ---
+  # --- Built-in Tools ---
 
-  defp load_builtin_skills do
+  defp load_builtin_tools do
     %{
-      "file_read" => OptimalSystemAgent.Skills.Builtins.FileRead,
-      "file_write" => OptimalSystemAgent.Skills.Builtins.FileWrite,
-      "shell_execute" => OptimalSystemAgent.Skills.Builtins.ShellExecute,
-      "web_search" => OptimalSystemAgent.Skills.Builtins.WebSearch,
-      "memory_save" => OptimalSystemAgent.Skills.Builtins.MemorySave,
-      "orchestrate" => OptimalSystemAgent.Skills.Builtins.Orchestrate,
-      "create_skill" => OptimalSystemAgent.Skills.Builtins.CreateSkill,
-      "budget_status" => OptimalSystemAgent.Skills.Builtins.BudgetStatus,
-      "wallet_ops" => OptimalSystemAgent.Skills.Builtins.WalletOps,
-      "file_edit" => OptimalSystemAgent.Skills.Builtins.FileEdit,
-      "file_glob" => OptimalSystemAgent.Skills.Builtins.FileGlob,
-      "file_grep" => OptimalSystemAgent.Skills.Builtins.FileGrep,
-      "dir_list" => OptimalSystemAgent.Skills.Builtins.DirList,
-      "web_fetch" => OptimalSystemAgent.Skills.Builtins.WebFetch
+      "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead,
+      "file_write" => OptimalSystemAgent.Tools.Builtins.FileWrite,
+      "shell_execute" => OptimalSystemAgent.Tools.Builtins.ShellExecute,
+      "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch,
+      "memory_save" => OptimalSystemAgent.Tools.Builtins.MemorySave,
+      "orchestrate" => OptimalSystemAgent.Tools.Builtins.Orchestrate,
+      "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
+      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,
+      "wallet_ops" => OptimalSystemAgent.Tools.Builtins.WalletOps,
+      "file_edit" => OptimalSystemAgent.Tools.Builtins.FileEdit,
+      "file_glob" => OptimalSystemAgent.Tools.Builtins.FileGlob,
+      "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep,
+      "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList,
+      "web_fetch" => OptimalSystemAgent.Tools.Builtins.WebFetch,
+      "task_write" => OptimalSystemAgent.Tools.Builtins.TaskWrite
     }
   end
 
   # --- SKILL.md Loading ---
 
-  defp load_skill_files do
+  defp load_skills do
     dir = Path.expand(skills_dir())
 
     if File.dir?(dir) do
@@ -422,15 +401,16 @@ defmodule OptimalSystemAgent.Skills.Registry do
     content = File.read!(path)
 
     case String.split(content, "---", parts: 3) do
-      ["", frontmatter, body] ->
+      ["", frontmatter, _body] ->
         case YamlElixir.read_from_string(frontmatter) do
           {:ok, meta} ->
             {:ok,
              %{
                name: meta["name"] || Path.basename(Path.dirname(path)),
                description: meta["description"] || "",
-               instructions: String.trim(body),
-               tools: meta["tools"] || []
+               triggers: meta["triggers"] || [],
+               tools: meta["tools"] || [],
+               path: path
              }}
 
           _ ->
@@ -442,34 +422,23 @@ defmodule OptimalSystemAgent.Skills.Registry do
          %{
            name: Path.basename(Path.dirname(path)),
            description: String.slice(content, 0, 100),
-           instructions: content,
-           tools: []
+           triggers: [],
+           tools: [],
+           path: path
          }}
     end
   end
 
   # --- Tool List Building ---
 
-  defp build_tool_list(behaviour_skills, markdown_skills) do
-    behaviour_tools =
-      Enum.map(behaviour_skills, fn {_name, mod} ->
-        %{
-          name: mod.name(),
-          description: mod.description(),
-          parameters: mod.parameters()
-        }
-      end)
-
-    markdown_tools =
-      Enum.map(markdown_skills, fn {name, skill} ->
-        %{
-          name: name,
-          description: skill.description,
-          parameters: %{"type" => "object", "properties" => %{}, "required" => []}
-        }
-      end)
-
-    behaviour_tools ++ markdown_tools
+  defp build_tool_list(builtin_tools, _skills) do
+    Enum.map(builtin_tools, fn {_name, mod} ->
+      %{
+        name: mod.name(),
+        description: mod.description(),
+        parameters: mod.parameters()
+      }
+    end)
   end
 
   # --- Goldrush Dispatcher Compilation ---
@@ -479,11 +448,11 @@ defmodule OptimalSystemAgent.Skills.Registry do
   #
   # Uses glc:with(query, fun/1) to wrap a wildcard filter with a dispatch handler.
 
-  defp compile_dispatcher(behaviour_skills, _markdown_skills) do
-    if map_size(behaviour_skills) > 0 do
-      # Build tool name filters from registered skills
+  defp compile_dispatcher(builtin_tools, _skills) do
+    if map_size(builtin_tools) > 0 do
+      # Build tool name filters from registered tools
       tool_filters =
-        Enum.map(behaviour_skills, fn {name, _mod} ->
+        Enum.map(builtin_tools, fn {name, _mod} ->
           :glc.eq(:tool_name, name)
         end)
 
@@ -505,75 +474,78 @@ defmodule OptimalSystemAgent.Skills.Registry do
 
   # --- Fallback Dispatch ---
 
-  defp dispatch_builtin("file_read", args),
-    do: OptimalSystemAgent.Skills.Builtins.FileRead.execute(args)
+  defp dispatch_tool("file_read", args),
+    do: OptimalSystemAgent.Tools.Builtins.FileRead.execute(args)
 
-  defp dispatch_builtin("file_write", args),
-    do: OptimalSystemAgent.Skills.Builtins.FileWrite.execute(args)
+  defp dispatch_tool("file_write", args),
+    do: OptimalSystemAgent.Tools.Builtins.FileWrite.execute(args)
 
-  defp dispatch_builtin("shell_execute", args),
-    do: OptimalSystemAgent.Skills.Builtins.ShellExecute.execute(args)
+  defp dispatch_tool("shell_execute", args),
+    do: OptimalSystemAgent.Tools.Builtins.ShellExecute.execute(args)
 
-  defp dispatch_builtin("web_search", args),
-    do: OptimalSystemAgent.Skills.Builtins.WebSearch.execute(args)
+  defp dispatch_tool("web_search", args),
+    do: OptimalSystemAgent.Tools.Builtins.WebSearch.execute(args)
 
-  defp dispatch_builtin("memory_save", args),
-    do: OptimalSystemAgent.Skills.Builtins.MemorySave.execute(args)
+  defp dispatch_tool("memory_save", args),
+    do: OptimalSystemAgent.Tools.Builtins.MemorySave.execute(args)
 
-  defp dispatch_builtin("orchestrate", args),
-    do: OptimalSystemAgent.Skills.Builtins.Orchestrate.execute(args)
+  defp dispatch_tool("orchestrate", args),
+    do: OptimalSystemAgent.Tools.Builtins.Orchestrate.execute(args)
 
-  defp dispatch_builtin("create_skill", args),
-    do: OptimalSystemAgent.Skills.Builtins.CreateSkill.execute(args)
+  defp dispatch_tool("create_skill", args),
+    do: OptimalSystemAgent.Tools.Builtins.CreateSkill.execute(args)
 
-  defp dispatch_builtin("budget_status", args),
-    do: OptimalSystemAgent.Skills.Builtins.BudgetStatus.execute(args)
+  defp dispatch_tool("budget_status", args),
+    do: OptimalSystemAgent.Tools.Builtins.BudgetStatus.execute(args)
 
-  defp dispatch_builtin("wallet_ops", args),
-    do: OptimalSystemAgent.Skills.Builtins.WalletOps.execute(args)
+  defp dispatch_tool("wallet_ops", args),
+    do: OptimalSystemAgent.Tools.Builtins.WalletOps.execute(args)
 
-  defp dispatch_builtin("file_edit", args),
-    do: OptimalSystemAgent.Skills.Builtins.FileEdit.execute(args)
+  defp dispatch_tool("file_edit", args),
+    do: OptimalSystemAgent.Tools.Builtins.FileEdit.execute(args)
 
-  defp dispatch_builtin("file_glob", args),
-    do: OptimalSystemAgent.Skills.Builtins.FileGlob.execute(args)
+  defp dispatch_tool("file_glob", args),
+    do: OptimalSystemAgent.Tools.Builtins.FileGlob.execute(args)
 
-  defp dispatch_builtin("file_grep", args),
-    do: OptimalSystemAgent.Skills.Builtins.FileGrep.execute(args)
+  defp dispatch_tool("file_grep", args),
+    do: OptimalSystemAgent.Tools.Builtins.FileGrep.execute(args)
 
-  defp dispatch_builtin("dir_list", args),
-    do: OptimalSystemAgent.Skills.Builtins.DirList.execute(args)
+  defp dispatch_tool("dir_list", args),
+    do: OptimalSystemAgent.Tools.Builtins.DirList.execute(args)
 
-  defp dispatch_builtin("web_fetch", args),
-    do: OptimalSystemAgent.Skills.Builtins.WebFetch.execute(args)
+  defp dispatch_tool("web_fetch", args),
+    do: OptimalSystemAgent.Tools.Builtins.WebFetch.execute(args)
 
-  defp dispatch_builtin(name, _args), do: {:error, "No built-in handler for: #{name}"}
+  defp dispatch_tool("task_write", args),
+    do: OptimalSystemAgent.Tools.Builtins.TaskWrite.execute(args)
+
+  defp dispatch_tool(name, _args), do: {:error, "No built-in handler for: #{name}"}
 
   # --- Skill Search ---
 
-  defp do_search_skills(query, behaviour_skills, markdown_skills) do
+  defp do_search_skills(query, builtin_tools, skills) do
     keywords = extract_keywords(query)
 
     if keywords == [] do
       []
     else
-      # Score behaviour-based skills
-      behaviour_results =
-        Enum.map(behaviour_skills, fn {name, mod} ->
+      # Score builtin tools
+      builtin_results =
+        Enum.map(builtin_tools, fn {name, mod} ->
           desc = mod.description()
           score = compute_relevance(keywords, name, desc)
           {name, desc, score}
         end)
 
-      # Score markdown-based skills
-      markdown_results =
-        Enum.map(markdown_skills, fn {name, skill} ->
+      # Score SKILL.md-based skills
+      skill_results =
+        Enum.map(skills, fn {name, skill} ->
           desc = skill.description
           score = compute_relevance(keywords, name, desc)
           {name, desc, score}
         end)
 
-      (behaviour_results ++ markdown_results)
+      (builtin_results ++ skill_results)
       |> Enum.filter(fn {_name, _desc, score} -> score > 0.0 end)
       |> Enum.sort_by(fn {_name, _desc, score} -> score end, :desc)
     end

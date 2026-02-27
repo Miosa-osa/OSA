@@ -2,8 +2,8 @@ defmodule OptimalSystemAgent.SDK.Tool do
   @moduledoc """
   Define custom tools via closures for the SDK.
 
-  Generates a dynamic module implementing `Skills.Behaviour` and registers it
-  with `Skills.Registry`. The handler closure is stored in `:persistent_term`
+  Generates a dynamic module implementing `Tools.Behaviour` and registers it
+  with `Tools.Registry`. The handler closure is stored in `:persistent_term`
   for lock-free execution.
 
   ## Example
@@ -24,14 +24,14 @@ defmodule OptimalSystemAgent.SDK.Tool do
       )
   """
 
-  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Tools.Registry, as: Tools
 
   @doc """
   Define and register a custom tool.
 
-  Creates a dynamic module implementing `Skills.Behaviour` backed by the
+  Creates a dynamic module implementing `Tools.Behaviour` backed by the
   given closure. The module is compiled into the BEAM VM and registered
-  with the Skills.Registry (which triggers goldrush recompilation).
+  with the Tools.Registry (which triggers goldrush recompilation).
 
   Returns `:ok` on success, `{:error, reason}` on failure.
   """
@@ -48,7 +48,7 @@ defmodule OptimalSystemAgent.SDK.Tool do
     # Define the module dynamically
     contents =
       quote do
-        @behaviour OptimalSystemAgent.Skills.Behaviour
+        @behaviour OptimalSystemAgent.Tools.Behaviour
 
         @impl true
         def name, do: unquote(name)
@@ -69,8 +69,8 @@ defmodule OptimalSystemAgent.SDK.Tool do
     # Compile the module
     case Module.create(module_name, contents, Macro.Env.location(__ENV__)) do
       {:module, mod, _binary, _} ->
-        # Register with Skills.Registry
-        Skills.register(mod)
+        # Register with Tools.Registry
+        Tools.register(mod)
 
       error ->
         {:error, {:module_creation_failed, error}}
@@ -83,7 +83,7 @@ defmodule OptimalSystemAgent.SDK.Tool do
   Undefine a previously defined SDK tool.
 
   Removes the handler from `:persistent_term`. The tool will still exist in
-  the Skills.Registry until the next recompilation, but calls will fail
+  the Tools.Registry until the next recompilation, but calls will fail
   with a missing handler error.
   """
   @spec undefine(String.t()) :: :ok

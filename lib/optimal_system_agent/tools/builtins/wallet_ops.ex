@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.WalletOps do
-  @moduledoc "Wallet operations skill — check balance, send payments, view history."
+defmodule OptimalSystemAgent.Tools.Builtins.WalletOps do
+  @moduledoc "Wallet operations tool — check balance, send payments, view history."
 
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   alias OptimalSystemAgent.Integrations.Wallet
 

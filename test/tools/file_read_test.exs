@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileReadTest do
+defmodule OptimalSystemAgent.Tools.Builtins.FileReadTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.FileRead
+  alias OptimalSystemAgent.Tools.Builtins.FileRead
 
   # ---------------------------------------------------------------------------
   # Blocked sensitive paths
@@ -71,7 +71,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileReadTest do
   # Metadata
   # ---------------------------------------------------------------------------
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns file_read" do
       assert FileRead.name() == "file_read"
     end

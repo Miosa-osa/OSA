@@ -768,7 +768,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   defp print_banner do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
     model = get_model_name(provider)
-    skill_count = length(OptimalSystemAgent.Skills.Registry.list_tools_direct())
+    tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
     soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
     git_hash = git_short_hash()
@@ -784,7 +784,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     ╚██████╔╝███████║██║  ██║
      ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}
     #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset}
-    #{@dim}#{provider} / #{model} · #{skill_count} skills · soul: #{soul_status}#{@reset}
+    #{@dim}#{provider} / #{model} · #{tool_count} tools · soul: #{soul_status}#{@reset}
     #{@dim}#{cwd}#{@reset}
     #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
     #{@dim}#{String.duplicate("─", width)}#{@reset}

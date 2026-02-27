@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.WebFetch do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.WebFetch do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @max_body_bytes 15_000
   @timeout_ms 15_000

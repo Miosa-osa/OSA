@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileEditTest do
+defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.FileEdit
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit
 
   # ── Unique replacement (happy path) ──────────────────────────────
 
@@ -132,7 +132,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileEditTest do
 
   # ── Metadata ─────────────────────────────────────────────────────
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns file_edit" do
       assert FileEdit.name() == "file_edit"
     end

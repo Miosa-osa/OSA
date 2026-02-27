@@ -39,10 +39,11 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   require Logger
 
-  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Intelligence.CommProfiler
   alias OptimalSystemAgent.Agent.Workflow
+  alias OptimalSystemAgent.Agent.TaskTracker
   alias OptimalSystemAgent.Soul
 
   @response_reserve 4_096
@@ -185,9 +186,10 @@ defmodule OptimalSystemAgent.Agent.Context do
       {environment_block(state), 1, "environment"},
 
       # Tier 2 — HIGH
-      {skills_block(), 2, "skills"},
+      {tools_block(), 2, "tools"},
       {memory_block_relevant(state), 2, "memory"},
       {workflow_block(state), 2, "workflow"},
+      {task_state_block(state), 2, "task_state"},
 
       # Tier 3 — MEDIUM
       {Soul.user_block(), 3, "user_profile"},
@@ -471,12 +473,12 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Soul.system_prompt/1 which includes mode/genre-specific behavior guidance.
 
   @doc false
-  defp skills_block do
-    skills = Skills.list_skill_docs()
+  defp tools_block do
+    skills = Tools.list_skill_docs()
 
     tools =
       try do
-        Skills.list_tools()
+        Tools.list_tools()
       rescue
         _ -> []
       end
@@ -503,7 +505,7 @@ defmodule OptimalSystemAgent.Agent.Context do
             end
           end)
 
-        "## Available Skills\n#{Enum.join(docs, "\n")}"
+        "## Available Tools\n#{Enum.join(docs, "\n")}"
     end
   rescue
     _ -> nil
@@ -579,6 +581,53 @@ defmodule OptimalSystemAgent.Agent.Context do
     Adapt your tone and detail level to match this user's communication style.
     """
   end
+
+  @doc false
+  defp task_state_block(state) do
+    session_id = Map.get(state, :session_id, "default")
+
+    tasks =
+      try do
+        TaskTracker.get_tasks(session_id)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    case tasks do
+      [] ->
+        nil
+
+      tasks ->
+        completed = Enum.count(tasks, &(&1.status == :completed))
+        total = length(tasks)
+
+        lines =
+          Enum.map(tasks, fn task ->
+            icon = task_icon(task.status)
+            suffix = task_suffix(task)
+            "#{icon} #{task.id}: #{task.title}#{suffix}"
+          end)
+
+        """
+        ## Active Tasks (#{completed}/#{total} completed)
+        #{Enum.join(lines, "\n")}
+
+        Stay focused on these tasks. Update status as you progress.
+        """
+    end
+  end
+
+  defp task_icon(:completed), do: "✔"
+  defp task_icon(:in_progress), do: "◼"
+  defp task_icon(:failed), do: "✘"
+  defp task_icon(_), do: "◻"
+
+  defp task_suffix(%{status: :in_progress}), do: "  [in_progress]"
+  defp task_suffix(%{status: :failed, reason: nil}), do: "  [failed]"
+  defp task_suffix(%{status: :failed, reason: reason}), do: "  [failed: #{reason}]"
+  defp task_suffix(_), do: ""
 
   @doc false
   defp cortex_block do
@@ -745,7 +794,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @doc false
   defp get_active_model(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "llama3")
+  defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
   defp get_active_model(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
   defp get_active_model(provider) do
     key = :"#{provider}_model"

@@ -1,16 +1,16 @@
-defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
+defmodule OptimalSystemAgent.Tools.Builtins.CreateSkill do
   @moduledoc """
   Dynamic skill creation — writes a SKILL.md file and registers it immediately.
 
-  Use this skill when the agent needs a capability that doesn't exist yet.
-  The skill creates a markdown-defined skill file at ~/.osa/skills/<name>/SKILL.md
-  with YAML frontmatter and instruction body. The Skills.Registry picks it up
+  Use this tool when the agent needs a capability that doesn't exist yet.
+  The tool creates a markdown-defined skill file at ~/.osa/skills/<name>/SKILL.md
+  with YAML frontmatter and instruction body. The Tools.Registry picks it up
   on next reload.
 
   This enables OSA to grow its own capabilities at runtime, teaching itself
   new skills as the situation demands.
   """
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   require Logger
 

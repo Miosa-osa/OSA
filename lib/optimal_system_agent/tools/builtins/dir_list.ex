@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.DirList do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.DirList do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @default_allowed_paths ["~", "/tmp"]
   @sensitive_paths [".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_dsa",

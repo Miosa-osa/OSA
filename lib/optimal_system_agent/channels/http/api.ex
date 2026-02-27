@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
-  alias OptimalSystemAgent.Skills.Registry, as: Skills
+  alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Machines
   alias OptimalSystemAgent.Channels.HTTP.Auth
   alias OptimalSystemAgent.Events.Bus
@@ -190,11 +190,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── GET /skills ─────────────────────────────────────────────────────
 
   get "/skills" do
-    tools = Skills.list_tools()
+    tools = Tools.list_tools()
 
     body =
       Jason.encode!(%{
-        skills: tools,
+        tools: tools,
         count: length(tools)
       })
 
@@ -209,7 +209,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     skill_name = conn.params["name"]
     arguments = conn.body_params["arguments"] || %{}
 
-    case Skills.execute(skill_name, arguments) do
+    case Tools.execute(skill_name, arguments) do
       {:ok, result} ->
         body =
           Jason.encode!(%{
@@ -223,7 +223,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         |> send_resp(200, body)
 
       {:error, reason} ->
-        json_error(conn, 422, "skill_error", to_string(reason))
+        json_error(conn, 422, "tool_error", to_string(reason))
     end
   end
 

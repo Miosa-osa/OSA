@@ -27,6 +27,14 @@ defmodule Mix.Tasks.Osa.Chat do
     # so the user's explicit provider choice in config.json is respected.
     OptimalSystemAgent.Onboarding.apply_config()
 
+    # Re-run Ollama auto-detect AFTER apply_config, because config.json may
+    # contain the onboarding default "llama3.2:latest" which overwrites
+    # the auto-detected best model from Application.start/2.
+    if Application.get_env(:optimal_system_agent, :default_provider) == :ollama do
+      OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+      OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+    end
+
     OptimalSystemAgent.Channels.CLI.start()
   end
 end

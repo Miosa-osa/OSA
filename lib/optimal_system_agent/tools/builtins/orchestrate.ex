@@ -1,19 +1,19 @@
-defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
+defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
   @moduledoc """
-  Orchestration skill — spawns multiple sub-agents to work on a complex task in parallel.
+  Orchestration tool — spawns multiple sub-agents to work on a complex task in parallel.
 
-  Use this skill when a task benefits from decomposition: building entire applications,
+  Use this tool when a task benefits from decomposition: building entire applications,
   large refactors, multi-file changes, or any work that naturally splits into
   research/build/test/review phases.
 
-  The skill delegates to the Agent.Orchestrator which handles:
+  The tool delegates to the Agent.Orchestrator which handles:
   - Complexity analysis (decides if multi-agent is needed)
   - Sub-task decomposition via LLM
   - Dependency-aware parallel execution
   - Real-time progress tracking
   - Result synthesis
   """
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   require Logger
 
@@ -51,9 +51,9 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
     strategy = params["strategy"] || "auto"
     session_id = params["session_id"] || "orchestrated_#{System.unique_integer([:positive])}"
 
-    # Read tools via persistent_term — we're inside Skills.Registry.handle_call,
+    # Read tools via persistent_term — we're inside Tools.Registry.handle_call,
     # so calling list_tools() would deadlock. list_tools_direct() is lock-free.
-    tools = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+    tools = OptimalSystemAgent.Tools.Registry.list_tools_direct()
 
     Logger.info(
       "[Orchestrate Skill] Launching orchestration for task: #{String.slice(task, 0, 100)}"

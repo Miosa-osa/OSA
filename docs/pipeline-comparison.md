@@ -14,7 +14,7 @@
 | **Primary Channel** | CLI terminal | Multi-channel gateway | WhatsApp | CLI (+ 10 channels) |
 | **LLM SDK** | Anthropic native | @mariozechner/pi-coding-agent | Claude Agent SDK | Custom provider abstraction |
 | **Providers** | Anthropic only (+Bedrock/Vertex) | 14+ (Anthropic, OpenAI, Google, Groq...) | Anthropic only | 18 (Anthropic, OpenAI, Ollama, etc.) |
-| **Tool Count** | 18 built-in + MCP | 25+ native + plugins | SDK built-in + 7 MCP | 12 built-in skills + MCP |
+| **Tool Count** | 18 built-in + MCP | 25+ native + plugins | SDK built-in + 7 MCP | 13 built-in skills + MCP |
 | **System Prompt** | ~57K words, 110+ fragments | Dynamic sections (identity, skills, memory, tools) | `claude_code` preset + CLAUDE.md append | IDENTITY.md + SOUL.md + Signal overlay |
 | **Compaction** | ~95% utilization auto-trigger | 40% chunk ratio, LLM summarization | Delegated to SDK | Token-budget tiers, LLM summarization |
 | **Permissions** | 5 modes (default/acceptEdits/plan/dontAsk/bypass) | Tool profiles + policy pipeline | bypassPermissions (containerized) | Hook-based security_check |
@@ -95,7 +95,7 @@
 | **Orchestration** | Task (subagents), Skill, AskUserQuestion | sessions_spawn, sessions_send, subagents | Task, Team*, SendMessage | orchestrate (swarm patterns) |
 | **Messaging** | N/A (CLI only) | message (cross-channel), sessions_send | send_message (WhatsApp MCP) | N/A (per-channel built-in) |
 | **Scheduling** | N/A | cron tool | schedule_task, pause/resume/cancel MCP | scheduler (agent/scheduler.ex) |
-| **Planning** | TodoWrite (JSON task lists), exit_plan_mode | N/A (no explicit planning tool) | TodoWrite (SDK) | Plan mode (LLM-generated, user-reviewed) |
+| **Planning** | TodoWrite (JSON task lists), exit_plan_mode | N/A (no explicit planning tool) | TodoWrite (SDK) | Plan mode + **task_write** skill (7 actions: add/start/complete/fail/list/clear + task state injected into system prompt for drift prevention) |
 | **Directory listing** | LS | Inherited from pi-coding-agent | LS (SDK) | **dir_list** |
 | **Images** | Read (images), WebFetch | image (analyze/generate), canvas | N/A | N/A |
 
@@ -104,7 +104,7 @@
 2. ~~**No directory listing tool**~~ **CLOSED** — `dir_list` skill using `File.ls/1` with types/sizes.
 3. ~~**No glob/pattern search**~~ **CLOSED** — `file_glob` skill using `Path.wildcard/2`.
 4. ~~**No grep/content search**~~ **CLOSED** — `file_grep` skill using ripgrep with pure-Elixir fallback.
-5. **No TodoWrite equivalent** — Claude Code uses structured JSON task lists with IDs and status. OSA has plan mode but no persistent task tracker tool.
+5. ~~**No TodoWrite equivalent**~~ **CLOSED** — `task_write` skill with 7 actions (add, add_multiple, start, complete, fail, list, clear) wrapping TaskTracker. Task state injected into system prompt via `task_state_block/1` for drift prevention.
 6. **No image/vision support** — Claude Code reads images via Read tool.
 7. ~~**No web fetch**~~ **CLOSED** — `web_fetch` skill using `:httpc` with HTML stripping.
 8. **No notebook support** — Claude Code has NotebookRead/NotebookEdit.
@@ -121,13 +121,13 @@
 |--------|-------------|----------|----------|-----|
 | **API format** | Anthropic Messages API | Multi-provider (Anthropic, OpenAI, Google...) | Anthropic Agent SDK | Multi-provider (18 providers) |
 | **Streaming** | Token-by-token via content_block_delta | Token-by-token streaming | SDK stream | Provider-dependent |
-| **Thinking/Reasoning** | Extended thinking with budget tokens | Model-specific thinking support | N/A | N/A |
+| **Thinking/Reasoning** | Extended thinking with budget tokens | Model-specific thinking support | N/A | **Extended thinking** (adaptive for Opus, budget-based for others; 10K/5K/2K per tier) |
 | **Temperature** | Not exposed (model default) | Configurable | N/A | `temperature()` config function |
 | **Max iterations** | While tool_calls present (no hard limit visible) | Retry loop with failover | SDK-managed | 30 (configurable) |
 | **Error handling** | Context overflow → compact & retry; auth → failover | Context overflow → compact; auth → failover profile | SDK-managed | **Context overflow → compact & retry (3 attempts)**; `{:error, reason}` → error message |
 
 **OSA Gaps (updated 2026-02-28)**:
-1. **No extended thinking support** — Claude Code and OpenClaw support budget-based thinking for complex reasoning.
+1. ~~**No extended thinking support**~~ **CLOSED** — `anthropic.ex:maybe_add_thinking/2` + `loop.ex:thinking_config/1`. Adaptive for Opus, budget-based for others. Per-tier budgets: elite=10K, specialist=5K, utility=2K. Interleaved-thinking beta header. Thinking block preservation across tool use turns.
 2. ~~**No automatic retry on context overflow**~~ **CLOSED** — `loop.ex` now detects context overflow errors, compacts via `maybe_compact/1`, and retries up to 3 times.
 3. **No provider failover** — OpenClaw fails over to alternate auth profiles. OSA doesn't.
 
@@ -142,11 +142,11 @@
 | **Post-tool hooks** | PostToolUse event → shell commands | N/A (handled by framework) | N/A | `Hooks.run_async(:post_tool_use)` fire-and-forget |
 | **Tool result injection** | Appended as tool_result message | Appended to conversation | SDK manages | Appended as `%{role: "tool"}` |
 | **Real-time steering** | h2A queue — user can interrupt and redirect mid-task | N/A | IPC messages piped mid-query via MessageStream | **Ctrl+C cancel** via `cancel_active_request/1` (non-blocking CLI) |
-| **TodoWrite reminders** | Injected after tool uses to prevent drift | N/A | N/A | N/A |
+| **TodoWrite reminders** | Injected after tool uses to prevent drift | N/A | N/A | **task_state_block** injected into system prompt (active tasks visible to LLM) |
 
 **OSA Gaps (updated 2026-02-28)**:
 1. ~~**No real-time steering**~~ **PARTIALLY CLOSED** — Ctrl+C cancels active requests via non-blocking async CLI. Does not yet support mid-task message injection (redirect).
-2. **No objective drift prevention** — Claude Code injects TodoWrite state as reminders. OSA has nothing equivalent.
+2. ~~**No objective drift prevention**~~ **CLOSED** — `task_state_block/1` in `context.ex` injects active task list into Tier 2 of the system prompt. LLM sees pending/in-progress tasks on every turn.
 
 ---
 
@@ -271,17 +271,17 @@ Weight: 0.92 → Full attention and thoroughness
 | ~~Context overflow auto-retry~~ | **CLOSED** | `loop.ex` — 3 compaction attempts before failing |
 | ~~Non-blocking CLI~~ | **CLOSED** | `cli.ex` — async send_to_agent, ETS tracking, event-driven response |
 
-### TIER 3: NICE TO HAVE — 7 OPEN
+### TIER 3: NICE TO HAVE — 4 OPEN, 3 CLOSED
 
-| Gap | Impact | What to do |
-|-----|--------|-----------|
-| **No TodoWrite equivalent** | No structured task tracking for multi-step work. | Implement `task_write` skill with JSON task lists. |
-| **No extended thinking** | Can't use Anthropic's thinking mode for complex reasoning. | Add `thinking` parameter support to Anthropic provider. |
-| **No prompt caching (Anthropic)** | Higher latency and cost with cloud models. | Add `cache_control` blocks to system prompt assembly. |
-| **No `/compact` and `/context` commands** | User can't inspect or manage context usage. | Add commands. |
-| **No diff display for file edits** | User can't see what changed. | Render colorized diffs after file_edit. |
-| **No image/vision support** | Can't analyze images. | Add image support to file_read. |
-| **No objective drift prevention** | Agent loses focus during long tool chains. | Inject task list state as system reminder after tool uses. |
+| Gap | Status | Evidence |
+|-----|--------|----------|
+| ~~TodoWrite equivalent~~ | **CLOSED** | `task_write.ex` — 7 actions wrapping TaskTracker + `task_state_block/1` in system prompt |
+| ~~Extended thinking~~ | **CLOSED** | `anthropic.ex:maybe_add_thinking/2` + `loop.ex:thinking_config/1` — adaptive/budget-based, per-tier budgets (10K/5K/2K) |
+| ~~Objective drift prevention~~ | **CLOSED** | `context.ex:task_state_block/1` — active tasks injected into Tier 2 system prompt |
+| **No prompt caching (Anthropic)** | OPEN | Add `cache_control` blocks to system prompt assembly. |
+| **No `/compact` and `/context` commands** | OPEN | User can't inspect or manage context usage. |
+| **No diff display for file edits** | OPEN | Render colorized diffs after file_edit. |
+| **No image/vision support** | OPEN | Add image support to file_read. |
 
 ---
 
@@ -290,12 +290,12 @@ Weight: 0.92 → Full attention and thoroughness
 | Feature | Requires | Claude Code | OpenClaw | NanoClaw | OSA |
 |---------|----------|-------------|----------|----------|-----|
 | Tool use | Model supports `tool_use` | Anthropic only | Multi-provider | Anthropic only | **18 providers, gated by model size** |
-| Extended thinking | Anthropic `thinking` param | Yes | Yes (model-specific) | No | **No** |
+| Extended thinking | Anthropic `thinking` param | Yes | Yes (model-specific) | No | **Yes** (adaptive for Opus, budget-based others; 10K/5K/2K per tier) |
 | Vision | Model supports images | Via Read tool | Via image tool | No | **No** |
 | Streaming | Provider supports SSE | Yes | Yes | Via SDK | Provider-dependent |
 | Prompt caching | Anthropic cache_control | Yes (auto) | N/A | N/A | **No** |
 
-**OSA's model advantage**: Works with Ollama local models. Tool gating prevents small model hallucinations. But missing extended thinking and prompt caching means higher latency and cost with cloud models.
+**OSA's model advantage**: Works with Ollama local models. Tool gating prevents small model hallucinations. Extended thinking now supported with per-tier budgets. Still missing prompt caching for Anthropic provider.
 
 ---
 
@@ -353,16 +353,17 @@ User → WhatsApp message              User → LineEditor.readline
 11. ~~Add anti-over-engineering rules~~ **DONE** — `context.ex`
 12. ~~Add context overflow auto-retry~~ **DONE** — `loop.ex`
 
-### Next up (Tier 3)
-13. Add `task_write` (TodoWrite equivalent)
-14. Add extended thinking support
+### ~~Tier 3 batch 1~~ — DONE
+13. ~~Add `task_write`~~ **DONE** — `task_write.ex` + `task_state_block/1` drift prevention
+14. ~~Add extended thinking~~ **DONE** — `anthropic.ex` + `loop.ex` + `tier.ex` budgets
+
+### Next up (Tier 3 remaining)
 15. Add prompt caching for Anthropic provider
 16. Add `/compact` and `/context` commands
 17. Add diff display for file edits
 18. Add image/vision support
-19. Add objective drift prevention
 
 ---
 
 *Generated by 4 parallel research agents analyzing Claude Code, OpenClaw, NanoClaw, and OSA codebases.*
-*Updated 2026-02-28: 13 of 18 gaps closed (Tier 1: 5/5, Tier 2: 8/8, Tier 3: 0/7).*
+*Updated 2026-02-28: 16 of 18 gaps closed (Tier 1: 5/5, Tier 2: 8/8, Tier 3: 3/7). Remaining: prompt caching, /compact & /context commands, diff display, image/vision.*

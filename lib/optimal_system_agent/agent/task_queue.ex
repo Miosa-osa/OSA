@@ -1,10 +1,18 @@
 defmodule OptimalSystemAgent.Agent.TaskQueue do
   @moduledoc """
-  Persistent task queue with atomic leasing.
+  Persistent task queue with atomic leasing and SQLite write-through.
 
   Tasks are enqueued by agent_id and leased atomically — only one consumer
   gets a given task. Expired leases are automatically reaped back to :pending.
   Failed tasks retry up to max_attempts (default 3) before being marked :failed.
+
+  ## Durability
+
+  All mutations hit the DB (`Store.Repo`) first, then update the in-memory
+  cache. On init, pending + leased tasks are loaded from DB for crash recovery.
+  Completed/failed tasks are NOT held in memory — use `list_history/1` to query.
+
+  If the DB is unavailable, the queue degrades to in-memory only (with a warning).
 
   Events emitted on :system_event:
   - :task_enqueued — when a new task is added
@@ -15,7 +23,11 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   use GenServer
   require Logger
 
+  import Ecto.Query
+
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Store.Repo
+  alias OptimalSystemAgent.Store.Task, as: TaskSchema
 
   @reap_interval 60_000
   @default_lease_ms 300_000
@@ -24,7 +36,8 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
   # ── State ────────────────────────────────────────────────────────────
 
   defstruct tasks: %{},
-            leased: %{}
+            leased: %{},
+            db_available: false
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -81,13 +94,50 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     GenServer.call(__MODULE__, {:get_task, task_id})
   end
 
+  @doc """
+  Query completed/failed tasks from the database (not in memory).
+  Options: :agent_id, :status, :since (DateTime), :limit (default 50).
+  """
+  @spec list_history(keyword()) :: [map()]
+  def list_history(opts \\ []) do
+    if db_available?() do
+      do_list_history(opts)
+    else
+      []
+    end
+  end
+
   # ── GenServer Callbacks ─────────────────────────────────────────────
 
   @impl true
   def init(_opts) do
     schedule_reap()
-    Logger.info("[Agent.TaskQueue] Started — reap interval #{div(@reap_interval, 1000)}s")
-    {:ok, %__MODULE__{}}
+
+    # Only the singleton instance (__MODULE__) loads from DB.
+    # Test instances (registered under other names) run pure in-memory.
+    singleton? =
+      case Process.info(self(), :registered_name) do
+        {:registered_name, __MODULE__} -> true
+        _ -> false
+      end
+
+    db_ok = singleton? and db_available?()
+    state = %__MODULE__{db_available: db_ok}
+
+    state =
+      if db_ok do
+        load_from_db(state)
+      else
+        if singleton? do
+          Logger.warning("[Agent.TaskQueue] DB unavailable — running in-memory only")
+        end
+
+        state
+      end
+
+    count = map_size(state.tasks)
+    Logger.info("[Agent.TaskQueue] Started — #{count} task(s) recovered, reap interval #{div(@reap_interval, 1000)}s")
+    {:ok, state}
   end
 
   @impl true
@@ -110,7 +160,7 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       completed_at: nil
     }
 
-    state = %{state | tasks: Map.put(state.tasks, task_id, task)}
+    state = persist_and_cache(state, task)
 
     Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
     Logger.debug("[Agent.TaskQueue] Enqueued task #{task_id} for agent #{agent_id}")
@@ -136,6 +186,8 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             leased_until: nil,
             leased_by: nil
         }
+
+        state = persist_update(state, updated)
 
         state = %{
           state
@@ -181,6 +233,8 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
                 leased_by: nil
             }
           end
+
+        state = persist_update(state, updated)
 
         state = %{
           state
@@ -230,7 +284,7 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       completed_at: nil
     }
 
-    state = %{state | tasks: Map.put(state.tasks, task_id, task)}
+    state = persist_and_cache(state, task)
 
     Bus.emit(:system_event, %{event: :task_enqueued, task_id: task_id, agent_id: agent_id})
     Logger.debug("[Agent.TaskQueue] Enqueued (sync) task #{task_id} for agent #{agent_id}")
@@ -258,6 +312,8 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
         leased_until = DateTime.add(now, lease_duration_ms, :millisecond)
 
         updated = %{task | status: :leased, leased_until: leased_until, leased_by: agent_id}
+
+        state = persist_update(state, updated)
 
         lease_info = %{
           task_id: task.task_id,
@@ -307,7 +363,110 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     {:noreply, state}
   end
 
-  # ── Private ─────────────────────────────────────────────────────────
+  # ── Private: DB Persistence ──────────────────────────────────────────
+
+  defp db_available? do
+    try do
+      Repo.__adapter__()
+      Process.whereis(Repo) != nil
+    rescue
+      _ -> false
+    end
+  end
+
+  defp load_from_db(state) do
+    try do
+      records =
+        TaskSchema
+        |> where([t], t.status in ["pending", "leased"])
+        |> order_by([t], asc: t.inserted_at)
+        |> Repo.all()
+
+      {tasks, leased} =
+        Enum.reduce(records, {%{}, %{}}, fn record, {tasks_acc, leased_acc} ->
+          task = TaskSchema.to_map(record)
+          tasks_acc = Map.put(tasks_acc, task.task_id, task)
+
+          leased_acc =
+            if task.status == :leased do
+              Map.put(leased_acc, task.task_id, %{
+                task_id: task.task_id,
+                agent_id: task.agent_id,
+                leased_at: task.created_at,
+                leased_until: task.leased_until
+              })
+            else
+              leased_acc
+            end
+
+          {tasks_acc, leased_acc}
+        end)
+
+      %{state | tasks: tasks, leased: leased}
+    rescue
+      e ->
+        Logger.warning("[Agent.TaskQueue] Failed to load from DB: #{inspect(e)}")
+        %{state | db_available: false}
+    end
+  end
+
+  defp persist_and_cache(state, task) do
+    if state.db_available do
+      try do
+        attrs = TaskSchema.from_map(task)
+
+        case Repo.insert(TaskSchema.changeset(attrs), on_conflict: :nothing) do
+          {:ok, _record} ->
+            %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+
+          {:error, changeset} ->
+            Logger.warning("[Agent.TaskQueue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}")
+            %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+        end
+      rescue
+        e ->
+          Logger.warning("[Agent.TaskQueue] DB insert error for #{task.task_id}: #{inspect(e)}")
+          %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+      end
+    else
+      %{state | tasks: Map.put(state.tasks, task.task_id, task)}
+    end
+  end
+
+  defp persist_update(state, task) do
+    if state.db_available do
+      try do
+        attrs = TaskSchema.from_map(task)
+
+        TaskSchema
+        |> where([t], t.task_id == ^task.task_id)
+        |> Repo.update_all(
+          set: [
+            status: attrs.status,
+            leased_until: attrs.leased_until,
+            leased_by: attrs.leased_by,
+            result: attrs.result,
+            error: attrs.error,
+            attempts: attrs.attempts,
+            completed_at: attrs.completed_at,
+            updated_at: DateTime.utc_now()
+          ]
+        )
+
+        state
+      rescue
+        e ->
+          Logger.warning("[Agent.TaskQueue] DB update failed for #{task.task_id}: #{inspect(e)}")
+          state
+      catch
+        :exit, reason ->
+          Logger.warning("[Agent.TaskQueue] DB update exit for #{task.task_id}: #{inspect(reason)}")
+          state
+      end
+    else
+      state
+    end
+  end
 
   defp do_reap_expired(state) do
     now = DateTime.utc_now()
@@ -321,6 +480,20 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
 
     if expired_ids != [] do
       Logger.info("[Agent.TaskQueue] Reaping #{length(expired_ids)} expired lease(s)")
+
+      # Bulk reap in DB
+      if state.db_available do
+        try do
+          TaskSchema
+          |> where([t], t.task_id in ^expired_ids)
+          |> Repo.update_all(
+            set: [status: "pending", leased_until: nil, leased_by: nil, updated_at: now]
+          )
+        rescue
+          e ->
+            Logger.warning("[Agent.TaskQueue] DB reap failed: #{inspect(e)}")
+        end
+      end
     end
 
     updated_tasks =
@@ -342,6 +515,50 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
 
     %{state | tasks: updated_tasks, leased: updated_leased}
   end
+
+  # ── Private: History Query ──────────────────────────────────────────
+
+  defp do_list_history(opts) do
+    limit = Keyword.get(opts, :limit, 50)
+    agent_id = Keyword.get(opts, :agent_id)
+    status = Keyword.get(opts, :status)
+    since = Keyword.get(opts, :since)
+
+    query =
+      TaskSchema
+      |> where([t], t.status in ["completed", "failed"])
+      |> order_by([t], desc: t.updated_at)
+      |> limit(^limit)
+
+    query = if agent_id, do: where(query, [t], t.agent_id == ^agent_id), else: query
+
+    query =
+      if status do
+        status_str = TaskSchema.status_to_string(status)
+        where(query, [t], t.status == ^status_str)
+      else
+        query
+      end
+
+    query =
+      if since do
+        where(query, [t], t.updated_at >= ^since)
+      else
+        query
+      end
+
+    try do
+      query
+      |> Repo.all()
+      |> Enum.map(&TaskSchema.to_map/1)
+    rescue
+      e ->
+        Logger.warning("[Agent.TaskQueue] History query failed: #{inspect(e)}")
+        []
+    end
+  end
+
+  # ── Private: Filters ────────────────────────────────────────────────
 
   defp maybe_filter_status(tasks, nil), do: tasks
   defp maybe_filter_status(tasks, status), do: Enum.filter(tasks, &(&1.status == status))

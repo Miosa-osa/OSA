@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.BudgetStatus do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.BudgetStatus do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   alias OptimalSystemAgent.Agent.Budget
 

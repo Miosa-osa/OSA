@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileWriteTest do
+defmodule OptimalSystemAgent.Tools.Builtins.FileWriteTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.FileWrite
+  alias OptimalSystemAgent.Tools.Builtins.FileWrite
 
   # ---------------------------------------------------------------------------
   # Blocked system paths
@@ -102,7 +102,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileWriteTest do
   # Metadata
   # ---------------------------------------------------------------------------
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns file_write" do
       assert FileWrite.name() == "file_write"
     end

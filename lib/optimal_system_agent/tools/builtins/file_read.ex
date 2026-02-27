@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileRead do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @default_allowed_paths ["~", "/tmp"]
 

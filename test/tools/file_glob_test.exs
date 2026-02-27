@@ -1,7 +1,7 @@
-defmodule OptimalSystemAgent.Skills.Builtins.FileGlobTest do
+defmodule OptimalSystemAgent.Tools.Builtins.FileGlobTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Skills.Builtins.FileGlob
+  alias OptimalSystemAgent.Tools.Builtins.FileGlob
 
   # ── Pattern matching ─────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileGlobTest do
 
   # ── Metadata ─────────────────────────────────────────────────────
 
-  describe "skill metadata" do
+  describe "tool metadata" do
     test "name returns file_glob" do
       assert FileGlob.name() == "file_glob"
     end

@@ -1,8 +1,8 @@
-defmodule OptimalSystemAgent.Skills.Behaviour do
+defmodule OptimalSystemAgent.Tools.Behaviour do
   @moduledoc """
-  Behaviour for implementing agent skills.
+  Behaviour for implementing agent tools.
 
-  Every skill implements four callbacks:
+  Every tool implements four callbacks:
   - `name/0` — unique tool name (string)
   - `description/0` — human-readable description for the LLM
   - `parameters/0` — JSON Schema for tool arguments
@@ -10,8 +10,8 @@ defmodule OptimalSystemAgent.Skills.Behaviour do
 
   ## Example
 
-      defmodule MyApp.Skills.WordCount do
-        @behaviour OptimalSystemAgent.Skills.Behaviour
+      defmodule MyApp.Tools.WordCount do
+        @behaviour OptimalSystemAgent.Tools.Behaviour
 
         @impl true
         def name, do: "word_count"
@@ -32,22 +32,22 @@ defmodule OptimalSystemAgent.Skills.Behaviour do
 
         @impl true
         def execute(%{"text" => text}) do
-          count = text |> String.split(~r/\\s+/, trim: true) |> length()
+          count = text |> String.split(~r/\s+/, trim: true) |> length()
           {:ok, "\#{count} words"}
         end
       end
 
-  > **Security:** NEVER use `Code.eval_string/1` on user-supplied input in skills.
+  > **Security:** NEVER use `Code.eval_string/1` on user-supplied input in tools.
   > All arguments arrive from untrusted sources (LLM output or user messages).
 
   Register at runtime — goldrush recompiles the dispatcher automatically:
 
-      OptimalSystemAgent.Skills.Registry.register(MyApp.Skills.WordCount)
+      OptimalSystemAgent.Tools.Registry.register(MyApp.Tools.WordCount)
 
   ## Hot Code Reload
 
   Because goldrush recompiles the tool dispatcher module on every `register/1`
-  call, new skills become available immediately without restarting the BEAM VM.
+  call, new tools become available immediately without restarting the BEAM VM.
   """
 
   @callback name() :: String.t()

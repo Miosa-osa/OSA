@@ -1,5 +1,5 @@
-defmodule OptimalSystemAgent.Skills.Builtins.WebSearch do
-  @behaviour OptimalSystemAgent.Skills.Behaviour
+defmodule OptimalSystemAgent.Tools.Builtins.WebSearch do
+  @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @impl true
   def name, do: "web_search"
