@@ -1,0 +1,12 @@
+{
+  "name": "osa-whatsapp-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WhatsApp Web sidecar for OSA using Baileys",
+  "main": "index.js",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^9.6.0"
+  }
+}

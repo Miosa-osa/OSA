@@ -32,11 +32,9 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
   # Memory file size threshold (bytes) before we emit a health alert
   @memory_size_threshold 10 * 1024 * 1024
 
-  defstruct [
-    alerts: [],
-    last_scan: nil,
-    scan_count: 0
-  ]
+  defstruct alerts: [],
+            last_scan: nil,
+            scan_count: 0
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -89,11 +87,13 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
       (alerts ++ state.alerts)
       |> Enum.take(@max_alerts)
 
-    {:noreply, %{state |
-      alerts:     new_alerts,
-      last_scan:  DateTime.utc_now(),
-      scan_count: state.scan_count + 1
-    }}
+    {:noreply,
+     %{
+       state
+       | alerts: new_alerts,
+         last_scan: DateTime.utc_now(),
+         scan_count: state.scan_count + 1
+     }}
   end
 
   @impl true
@@ -115,9 +115,9 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
   @impl true
   def handle_call(:stats, _from, state) do
     result = %{
-      scan_count:  state.scan_count,
+      scan_count: state.scan_count,
       alert_count: length(state.alerts),
-      last_scan:   state.last_scan
+      last_scan: state.last_scan
     }
 
     {:reply, result, state}
@@ -136,11 +136,13 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
       (alerts ++ state.alerts)
       |> Enum.take(@max_alerts)
 
-    {:noreply, %{state |
-      alerts:     new_alerts,
-      last_scan:  DateTime.utc_now(),
-      scan_count: state.scan_count + 1
-    }}
+    {:noreply,
+     %{
+       state
+       | alerts: new_alerts,
+         last_scan: DateTime.utc_now(),
+         scan_count: state.scan_count + 1
+     }}
   end
 
   # ---------------------------------------------------------------------------
@@ -174,9 +176,8 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
   # ---------------------------------------------------------------------------
 
   defp scan_stale_sessions do
-    sessions_dir = Path.expand(
-      Application.get_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions")
-    )
+    sessions_dir =
+      Path.expand(Application.get_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions"))
 
     if File.exists?(sessions_dir) do
       now = DateTime.utc_now()
@@ -197,13 +198,16 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
           if seconds_inactive > @stale_session_seconds do
             topic = extract_last_topic(path)
 
-            [%{
-              type:        :stale_session,
-              severity:    :info,
-              message:     "Session #{session_id} has been inactive for #{hours_inactive} hours. Last topic: #{topic}",
-              detected_at: now,
-              metadata:    %{session_id: session_id, hours_inactive: hours_inactive, topic: topic}
-            }]
+            [
+              %{
+                type: :stale_session,
+                severity: :info,
+                message:
+                  "Session #{session_id} has been inactive for #{hours_inactive} hours. Last topic: #{topic}",
+                detected_at: now,
+                metadata: %{session_id: session_id, hours_inactive: hours_inactive, topic: topic}
+              }
+            ]
           else
             []
           end
@@ -226,6 +230,7 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
         case Jason.decode(last_line) do
           {:ok, %{"content" => content}} when is_binary(content) ->
             content |> String.slice(0, 80) |> String.trim()
+
           _ ->
             "unknown"
         end
@@ -255,18 +260,19 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
       trimmed_b = String.trim(line_b)
 
       if String.ends_with?(trimmed_a, "?") and
-         trimmed_b == "" and
-         String.length(trimmed_a) > 10 do
-
+           trimmed_b == "" and
+           String.length(trimmed_a) > 10 do
         preview = String.slice(trimmed_a, 0, 100)
 
-        [%{
-          type:        :unanswered_question,
-          severity:    :warning,
-          message:     "Question may be unanswered: #{preview}",
-          detected_at: now,
-          metadata:    %{question_preview: preview}
-        }]
+        [
+          %{
+            type: :unanswered_question,
+            severity: :warning,
+            message: "Question may be unanswered: #{preview}",
+            detected_at: now,
+            metadata: %{question_preview: preview}
+          }
+        ]
       else
         []
       end
@@ -292,25 +298,28 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
       end
 
     Enum.flat_map(jobs, fn job ->
-      failures     = job["failure_count"] || 0
+      failures = job["failure_count"] || 0
       circuit_open = job["circuit_open"] || false
 
       if failures > 0 do
-        severity   = if circuit_open, do: :critical, else: :warning
+        severity = if circuit_open, do: :critical, else: :warning
         status_str = if circuit_open, do: "OPEN (task disabled)", else: "closed"
 
-        [%{
-          type:        :failed_task,
-          severity:    severity,
-          message:     "Task '#{job["name"] || job["id"]}' has failed #{failures} time(s). Circuit breaker #{status_str}",
-          detected_at: now,
-          metadata:    %{
-            job_id:        job["id"],
-            job_name:      job["name"],
-            failure_count: failures,
-            circuit_open:  circuit_open
+        [
+          %{
+            type: :failed_task,
+            severity: severity,
+            message:
+              "Task '#{job["name"] || job["id"]}' has failed #{failures} time(s). Circuit breaker #{status_str}",
+            detected_at: now,
+            metadata: %{
+              job_id: job["id"],
+              job_name: job["name"],
+              failure_count: failures,
+              circuit_open: circuit_open
+            }
           }
-        }]
+        ]
       else
         []
       end
@@ -333,13 +342,16 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
         {:ok, %{size: size}} when size > @memory_size_threshold ->
           size_mb = Float.round(size / (1024 * 1024), 1)
 
-          [%{
-            type:        :system_health,
-            severity:    :warning,
-            message:     "Memory file exceeds 10MB (#{size_mb}MB) — consider archiving old sessions",
-            detected_at: now,
-            metadata:    %{file: memory_file, size_bytes: size, size_mb: size_mb}
-          }]
+          [
+            %{
+              type: :system_health,
+              severity: :warning,
+              message:
+                "Memory file exceeds 10MB (#{size_mb}MB) — consider archiving old sessions",
+              detected_at: now,
+              metadata: %{file: memory_file, size_bytes: size, size_mb: size_mb}
+            }
+          ]
 
         _ ->
           []
@@ -368,22 +380,26 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
 
             case Integer.parse(pct_str) do
               {pct, ""} when pct >= 90 ->
-                [%{
-                  type:        :system_health,
-                  severity:    :critical,
-                  message:     "Disk is #{pct}% full — OSA storage may fail soon",
-                  detected_at: now,
-                  metadata:    %{use_percent: pct}
-                }]
+                [
+                  %{
+                    type: :system_health,
+                    severity: :critical,
+                    message: "Disk is #{pct}% full — OSA storage may fail soon",
+                    detected_at: now,
+                    metadata: %{use_percent: pct}
+                  }
+                ]
 
               {pct, ""} when pct >= 80 ->
-                [%{
-                  type:        :system_health,
-                  severity:    :warning,
-                  message:     "Disk is #{pct}% full — consider freeing space",
-                  detected_at: now,
-                  metadata:    %{use_percent: pct}
-                }]
+                [
+                  %{
+                    type: :system_health,
+                    severity: :warning,
+                    message: "Disk is #{pct}% full — consider freeing space",
+                    detected_at: now,
+                    metadata: %{use_percent: pct}
+                  }
+                ]
 
               _ ->
                 []
@@ -424,17 +440,18 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
       trimmed = String.trim(line)
 
       if String.length(trimmed) > 5 and
-         Enum.any?(@reminder_patterns, &Regex.match?(&1, trimmed)) do
-
+           Enum.any?(@reminder_patterns, &Regex.match?(&1, trimmed)) do
         preview = String.slice(trimmed, 0, 100)
 
-        [%{
-          type:        :follow_up,
-          severity:    :info,
-          message:     "Potential follow-up needed: #{preview}",
-          detected_at: now,
-          metadata:    %{preview: preview}
-        }]
+        [
+          %{
+            type: :follow_up,
+            severity: :info,
+            message: "Potential follow-up needed: #{preview}",
+            detected_at: now,
+            metadata: %{preview: preview}
+          }
+        ]
       else
         []
       end

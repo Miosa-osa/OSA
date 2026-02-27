@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Signal.NoiseFilter
+  alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
   alias OptimalSystemAgent.Events.Bus
@@ -62,6 +63,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       channel: Keyword.get(opts, :channel, :cli),
       tools: Skills.list_tools()
     }
+
     {:ok, state}
   end
 
@@ -96,7 +98,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
     state = %{state | messages: compacted, current_signal: signal}
 
-    state = %{state | messages: state.messages ++ [%{role: "user", content: message}], iteration: 0, status: :thinking}
+    state = %{
+      state
+      | messages: state.messages ++ [%{role: "user", content: message}],
+        iteration: 0,
+        status: :thinking
+    }
 
     # 5. Check if plan mode should trigger
     if not skip_plan and should_plan?(signal, state) do
@@ -110,11 +117,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
       result = Providers.chat(context.messages, tools: [], temperature: 0.3)
 
       duration_ms = System.monotonic_time(:millisecond) - start_time
-      usage = case result do
-        {:ok, resp} -> Map.get(resp, :usage, %{})
-        _ -> %{}
-      end
-      Bus.emit(:llm_response, %{session_id: state.session_id, duration_ms: duration_ms, usage: usage})
+
+      usage =
+        case result do
+          {:ok, resp} -> Map.get(resp, :usage, %{})
+          _ -> %{}
+        end
+
+      Bus.emit(:llm_response, %{
+        session_id: state.session_id,
+        duration_ms: duration_ms,
+        usage: usage
+      })
 
       case result do
         {:ok, %{content: plan_text}} ->
@@ -123,23 +137,47 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         {:error, reason} ->
           # Fall through to normal execution on plan failure
-          Logger.warning("Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution")
+          Logger.warning(
+            "Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution"
+          )
+
           state = %{state | plan_mode: false}
           {response, state} = run_loop(state)
-          state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+
+          state = %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: response}],
+              status: :idle
+          }
+
           Memory.append(state.session_id, %{role: "assistant", content: response})
-          Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+
+          Bus.emit(:agent_response, %{
+            session_id: state.session_id,
+            response: response,
+            signal: signal
+          })
+
           {:reply, {:ok, response}, state}
       end
     else
       # Normal execution path
       {response, state} = run_loop(state)
-      state = %{state | messages: state.messages ++ [%{role: "assistant", content: response}], status: :idle}
+
+      state = %{
+        state
+        | messages: state.messages ++ [%{role: "assistant", content: response}],
+          status: :idle
+      }
 
       # 6. Persist assistant response to JSONL session storage
       Memory.append(state.session_id, %{role: "assistant", content: response})
 
-      Bus.emit(:agent_response, %{session_id: state.session_id, response: response, signal: signal})
+      Bus.emit(:agent_response, %{
+        session_id: state.session_id,
+        response: response,
+        signal: signal
+      })
 
       {:reply, {:ok, response}, state}
     end
@@ -155,6 +193,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp run_loop(%{iteration: iter} = state) do
     max_iter = max_iterations()
+
     if iter >= max_iter do
       Logger.warning("Agent loop hit max iterations (#{max_iter})")
       {"I've reached my reasoning limit for this request. Here's what I have so far.", state}
@@ -176,11 +215,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     # Emit timing + usage event after LLM call
     duration_ms = System.monotonic_time(:millisecond) - start_time
-    usage = case result do
-      {:ok, resp} -> Map.get(resp, :usage, %{})
-      _ -> %{}
-    end
-    Bus.emit(:llm_response, %{session_id: state.session_id, duration_ms: duration_ms, usage: usage})
+
+    usage =
+      case result do
+        {:ok, resp} -> Map.get(resp, :usage, %{})
+        _ -> %{}
+      end
+
+    Bus.emit(:llm_response, %{
+      session_id: state.session_id,
+      duration_ms: duration_ms,
+      usage: usage
+    })
 
     case result do
       {:ok, %{content: content, tool_calls: []}} ->
@@ -192,26 +238,37 @@ defmodule OptimalSystemAgent.Agent.Loop do
         state = %{state | iteration: state.iteration + 1}
 
         # Append assistant message with tool calls
-        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content, tool_calls: tool_calls}]}
+        state = %{
+          state
+          | messages:
+              state.messages ++ [%{role: "assistant", content: content, tool_calls: tool_calls}]
+        }
 
         # Execute each tool and append results (with timing feedback)
-        state = Enum.reduce(tool_calls, state, fn tool_call, acc ->
-          arg_hint = tool_call_hint(tool_call.arguments)
-          Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint})
-          start_time_tool = System.monotonic_time(:millisecond)
+        state =
+          Enum.reduce(tool_calls, state, fn tool_call, acc ->
+            arg_hint = tool_call_hint(tool_call.arguments)
+            Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint})
+            start_time_tool = System.monotonic_time(:millisecond)
 
-          result_str =
-            case Skills.execute(tool_call.name, tool_call.arguments) do
-              {:ok, content} -> content
-              {:error, reason} -> "Error: #{reason}"
-            end
+            result_str =
+              case Skills.execute(tool_call.name, tool_call.arguments) do
+                {:ok, content} -> content
+                {:error, reason} -> "Error: #{reason}"
+              end
 
-          tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
-          Bus.emit(:tool_call, %{name: tool_call.name, phase: :end, duration_ms: tool_duration_ms, args: arg_hint})
+            tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
 
-          tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
-          %{acc | messages: acc.messages ++ [tool_msg]}
-        end)
+            Bus.emit(:tool_call, %{
+              name: tool_call.name,
+              phase: :end,
+              duration_ms: tool_duration_ms,
+              args: arg_hint
+            })
+
+            tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
+            %{acc | messages: acc.messages ++ [tool_msg]}
+          end)
 
         # Re-prompt
         run_loop(state)
@@ -225,9 +282,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp tool_call_hint(%{"command" => cmd}), do: String.slice(cmd, 0, 60)
   defp tool_call_hint(%{"path" => p}), do: p
   defp tool_call_hint(%{"query" => q}), do: String.slice(q, 0, 60)
+
   defp tool_call_hint(args) when is_map(args) and map_size(args) > 0 do
     args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")
   end
+
   defp tool_call_hint(_), do: ""
 
   # --- Plan Mode ---

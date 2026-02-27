@@ -48,7 +48,8 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
   """
   @spec select(list(), non_neg_integer()) :: {:selected, term()} | {:input, String.t()} | nil
   def select(lines, default_index \\ 0) do
-    options = for item <- lines, match?({:option, _, _}, item) or match?({:input, _, _}, item), do: item
+    options =
+      for item <- lines, match?({:option, _, _}, item) or match?({:input, _, _}, item), do: item
 
     if options == [] do
       nil
@@ -89,7 +90,9 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
 
           # Read free-text input
           case IO.gets("  #{prompt} ") do
-            :eof -> nil
+            :eof ->
+              nil
+
             text ->
               trimmed = String.trim(text)
               if trimmed == "", do: nil, else: {:input, trimmed}
@@ -97,6 +100,7 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
 
         index ->
           item = Enum.at(options, index)
+
           case item do
             {:option, label, value} ->
               clear(total)
@@ -111,7 +115,9 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
               close_tty(tty)
 
               case IO.gets("  #{prompt} ") do
-                :eof -> nil
+                :eof ->
+                  nil
+
                 text ->
                   trimmed = String.trim(text)
                   if trimmed == "", do: nil, else: {:input, trimmed}
@@ -121,8 +127,18 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
     after
       # Safe cleanup — may already be restored for :input paths
       IO.write(@show_cursor)
-      try do restore_stty(saved) rescue _ -> :ok end
-      try do close_tty(tty) rescue _ -> :ok end
+
+      try do
+        restore_stty(saved)
+      rescue
+        _ -> :ok
+      end
+
+      try do
+        close_tty(tty)
+      rescue
+        _ -> :ok
+      end
     end
   end
 
@@ -256,10 +272,12 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
     options
     |> Enum.with_index(1)
     |> Enum.each(fn {item, num} ->
-      label = case item do
-        {:option, l, _} -> l
-        {:input, l, _} -> l
-      end
+      label =
+        case item do
+          {:option, l, _} -> l
+          {:input, l, _} -> l
+        end
+
       IO.puts("  #{num}. #{label}")
     end)
 
@@ -292,7 +310,9 @@ defmodule OptimalSystemAgent.Onboarding.Selector do
 
   defp fallback_select_item({:input, _label, prompt}) do
     case IO.gets("  #{prompt} ") do
-      :eof -> nil
+      :eof ->
+        nil
+
       text ->
         trimmed = String.trim(text)
         if trimmed == "", do: nil, else: {:input, trimmed}

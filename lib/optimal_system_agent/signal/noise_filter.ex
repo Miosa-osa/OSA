@@ -30,7 +30,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
     ~r/^(thanks|thank you|ty|thx|cheers)[\s!.]*$/i,
     ~r/^(lol|haha|hehe|lmao|rofl|😂|👍|🙏|❤️)[\s!.]*$/i,
     ~r/^(good morning|good night|gm|gn)[\s!.]*$/i,
-    ~r/^[\s]*$/,
+    ~r/^[\s]*$/
   ]
 
   @doc """
@@ -62,6 +62,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
       true ->
         weight = Classifier.calculate_weight(message)
+
         if weight < 0.3 do
           {:noise, :low_weight}
         else
@@ -78,8 +79,12 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
   defp tier_2(message, weight) do
     case classify_noise_llm(message) do
-      {:ok, :signal} -> {:signal, weight}
-      {:ok, :noise} -> {:noise, :llm_classified}
+      {:ok, :signal} ->
+        {:signal, weight}
+
+      {:ok, :noise} ->
+        {:noise, :llm_classified}
+
       {:error, _} ->
         Logger.debug("Tier 2 noise check: LLM unavailable, passing uncertain signal")
         {:signal, weight}
@@ -150,11 +155,13 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
         _ ->
           result = tier_2(message, weight)
+
           try do
             :ets.insert(@cache_table, {key, result, now})
           rescue
             ArgumentError -> :ok
           end
+
           result
       end
     rescue

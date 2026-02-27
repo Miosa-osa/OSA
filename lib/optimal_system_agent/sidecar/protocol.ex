@@ -38,7 +38,8 @@ defmodule OptimalSystemAgent.Sidecar.Protocol do
     - `{:error, id, error_map}` — error response with code + message
     - `{:error, :invalid, reason}` — malformed line
   """
-  @spec decode_response(binary()) :: {:ok, String.t(), map()} | {:error, String.t(), map()} | {:error, :invalid, String.t()}
+  @spec decode_response(binary()) ::
+          {:ok, String.t(), map()} | {:error, String.t(), map()} | {:error, :invalid, String.t()}
   def decode_response(line) do
     line = String.trim(line)
 

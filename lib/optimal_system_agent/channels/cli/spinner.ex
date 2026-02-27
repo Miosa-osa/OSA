@@ -115,9 +115,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         send(caller, {:spinner_stats, elapsed_ms, state.tool_count, state.total_tokens})
 
       {:tool_start, name, args} ->
-        spinner_loop(rest, %{state |
-          phase: :tool_running,
-          active_tool: {name, args, System.monotonic_time(:millisecond)}
+        spinner_loop(rest, %{
+          state
+          | phase: :tool_running,
+            active_tool: {name, args, System.monotonic_time(:millisecond)}
         })
 
       {:tool_end, name, ms} ->
@@ -127,10 +128,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         duration = format_duration(ms)
         IO.puts("#{@dim}  ├─ #{name}#{hint} #{@cyan}(#{duration})#{@reset}")
 
-        spinner_loop(rest, %{state |
-          phase: :thinking,
-          active_tool: nil,
-          tool_count: state.tool_count + 1
+        spinner_loop(rest, %{
+          state
+          | phase: :thinking,
+            active_tool: nil,
+            tool_count: state.tool_count + 1
         })
 
       {:llm_response, usage} ->
@@ -143,9 +145,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
           IO.puts("#{@dim}  │  iteration #{new_iter}#{@reset}")
         end
 
-        spinner_loop(rest, %{state |
-          total_tokens: state.total_tokens + tokens,
-          iteration: new_iter
+        spinner_loop(rest, %{
+          state
+          | total_tokens: state.total_tokens + tokens,
+            iteration: new_iter
         })
     after
       @frame_interval ->
@@ -180,6 +183,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   defp tool_hint({_name, args, _start}) when is_binary(args) and args != "" do
     " — #{truncate(args, 45)}"
   end
+
   defp tool_hint(_), do: ""
 
   defp format_duration(ms) when ms < 1_000, do: "#{ms}ms"
@@ -187,6 +191,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
 
   defp format_elapsed(ms) when ms < 1_000, do: "<1s"
   defp format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
+
   defp format_elapsed(ms) do
     mins = div(ms, 60_000)
     secs = div(rem(ms, 60_000), 1_000)

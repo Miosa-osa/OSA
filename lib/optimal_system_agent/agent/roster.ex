@@ -19,16 +19,16 @@ defmodule OptimalSystemAgent.Agent.Roster do
 
   @type tier :: :elite | :specialist | :utility
   @type agent_def :: %{
-    name: String.t(),
-    tier: tier(),
-    role: atom(),
-    description: String.t(),
-    skills: [String.t()],
-    triggers: [String.t()],
-    territory: [String.t()],
-    escalate_to: String.t() | nil,
-    prompt: String.t()
-  }
+          name: String.t(),
+          tier: tier(),
+          role: atom(),
+          description: String.t(),
+          skills: [String.t()],
+          triggers: [String.t()],
+          territory: [String.t()],
+          escalate_to: String.t() | nil,
+          prompt: String.t()
+        }
 
   # ── Agent Definitions ──────────────────────────────────────────────
 
@@ -39,8 +39,16 @@ defmodule OptimalSystemAgent.Agent.Roster do
       name: "master-orchestrator",
       tier: :elite,
       role: :lead,
-      description: "Central coordinator for complex multi-step workflows requiring multiple agents.",
-      skills: ["orchestrate", "file_read", "file_write", "shell_execute", "web_search", "memory_save"],
+      description:
+        "Central coordinator for complex multi-step workflows requiring multiple agents.",
+      skills: [
+        "orchestrate",
+        "file_read",
+        "file_write",
+        "shell_execute",
+        "web_search",
+        "memory_save"
+      ],
       triggers: ["orchestrate", "coordinate", "multi-step", "complex project", "parallel tasks"],
       territory: ["*"],
       escalate_to: nil,
@@ -75,7 +83,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Synthesize results, don't just concatenate
       """
     },
-
     "architect" => %{
       name: "architect",
       tier: :elite,
@@ -109,14 +116,19 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Every decision has a clear "why"
       """
     },
-
     "dragon" => %{
       name: "dragon",
       tier: :elite,
       role: :backend,
       description: "High-performance Go specialist. 10K+ RPS, sub-100ms latency.",
       skills: ["file_read", "file_write", "shell_execute"],
-      triggers: ["10k rps", "high performance", "go optimization", "worker pool", "zero allocation"],
+      triggers: [
+        "10k rps",
+        "high performance",
+        "go optimization",
+        "worker pool",
+        "zero allocation"
+      ],
       territory: ["*.go", "go.mod", "go.sum"],
       escalate_to: nil,
       prompt: """
@@ -141,7 +153,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - No premature optimization — only optimize measured bottlenecks
       """
     },
-
     "nova" => %{
       name: "nova",
       tier: :elite,
@@ -197,7 +208,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - No global state — dependency inject everything
       """
     },
-
     "frontend-react" => %{
       name: "frontend-react",
       tier: :specialist,
@@ -224,7 +234,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Handle loading, error, and empty states
       """
     },
-
     "frontend-svelte" => %{
       name: "frontend-svelte",
       tier: :specialist,
@@ -249,14 +258,21 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Handle progressive enhancement
       """
     },
-
     "database" => %{
       name: "database",
       tier: :specialist,
       role: :data,
       description: "PostgreSQL schema design, query optimization, migrations.",
       skills: ["file_read", "file_write", "shell_execute"],
-      triggers: ["database", "SQL", "schema", "migration", "index", "query optimization", "PostgreSQL"],
+      triggers: [
+        "database",
+        "SQL",
+        "schema",
+        "migration",
+        "index",
+        "query optimization",
+        "PostgreSQL"
+      ],
       territory: ["*.sql", "migrations/*", "schema/*", "prisma/*"],
       escalate_to: nil,
       prompt: """
@@ -276,7 +292,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Use parameterized queries — never string interpolation
       """
     },
-
     "security-auditor" => %{
       name: "security-auditor",
       tier: :specialist,
@@ -310,7 +325,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       CRITICAL and HIGH findings BLOCK deployment.
       """
     },
-
     "red-team" => %{
       name: "red-team",
       tier: :specialist,
@@ -339,12 +353,12 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Finding ID | Severity | Description | Impact | Remediation
       """
     },
-
     "debugger" => %{
       name: "debugger",
       tier: :specialist,
       role: :qa,
-      description: "Systematic debugging: REPRODUCE → ISOLATE → HYPOTHESIZE → TEST → FIX → VERIFY → PREVENT",
+      description:
+        "Systematic debugging: REPRODUCE → ISOLATE → HYPOTHESIZE → TEST → FIX → VERIFY → PREVENT",
       skills: ["file_read", "file_write", "shell_execute"],
       triggers: ["bug", "error", "not working", "failing", "broken", "crash", "debug"],
       territory: ["*"],
@@ -368,7 +382,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Always add a regression test
       """
     },
-
     "test-automator" => %{
       name: "test-automator",
       tier: :specialist,
@@ -402,7 +415,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - No implementation without corresponding test
       """
     },
-
     "code-reviewer" => %{
       name: "code-reviewer",
       tier: :specialist,
@@ -429,7 +441,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Positive: what was done well
       """
     },
-
     "performance-optimizer" => %{
       name: "performance-optimizer",
       tier: :specialist,
@@ -457,14 +468,21 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Memory: pool allocations, reduce copies, stream large data
       """
     },
-
     "devops" => %{
       name: "devops",
       tier: :specialist,
       role: :infra,
       description: "Docker, CI/CD, deployment, infrastructure-as-code.",
       skills: ["file_read", "file_write", "shell_execute"],
-      triggers: ["docker", "CI/CD", "deploy", "pipeline", "Dockerfile", "GitHub Actions", "terraform"],
+      triggers: [
+        "docker",
+        "CI/CD",
+        "deploy",
+        "pipeline",
+        "Dockerfile",
+        "GitHub Actions",
+        "terraform"
+      ],
       territory: ["Dockerfile*", ".github/*", "docker-compose*", "*.tf", "*.yaml"],
       escalate_to: nil,
       prompt: """
@@ -483,7 +501,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Health checks on every service
       """
     },
-
     "api-designer" => %{
       name: "api-designer",
       tier: :specialist,
@@ -511,7 +528,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Idempotency for write operations
       """
     },
-
     "refactorer" => %{
       name: "refactorer",
       tier: :specialist,
@@ -543,7 +559,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       - Small, incremental changes
       """
     },
-
     "explorer" => %{
       name: "explorer",
       tier: :specialist,
@@ -586,7 +601,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Be fast and precise. No explanations needed — just fix it.
       """
     },
-
     "doc-writer" => %{
       name: "doc-writer",
       tier: :utility,
@@ -602,7 +616,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Match the project's existing doc style. Be concise.
       """
     },
-
     "dependency-analyzer" => %{
       name: "dependency-analyzer",
       tier: :utility,
@@ -618,7 +631,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Report findings with severity and recommended actions.
       """
     },
-
     "typescript-expert" => %{
       name: "typescript-expert",
       tier: :specialist,
@@ -634,7 +646,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Strict mode always. No `any`. Use `unknown` with type guards.
       """
     },
-
     "tailwind-expert" => %{
       name: "tailwind-expert",
       tier: :utility,
@@ -650,7 +661,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Use Tailwind v4 conventions. Minimize custom CSS.
       """
     },
-
     "go-concurrency" => %{
       name: "go-concurrency",
       tier: :specialist,
@@ -666,7 +676,6 @@ defmodule OptimalSystemAgent.Agent.Roster do
       Always run with -race flag. Prefer channels over mutexes when possible.
       """
     },
-
     "orm-expert" => %{
       name: "orm-expert",
       tier: :specialist,
@@ -784,7 +793,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
   def by_tier(tier) do
     @agents
     |> Map.values()
-    |> Enum.filter(& &1.tier == tier)
+    |> Enum.filter(&(&1.tier == tier))
   end
 
   @doc "List agents by role (maps to orchestrator roles)."
@@ -792,7 +801,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
   def by_role(role) do
     @agents
     |> Map.values()
-    |> Enum.filter(& &1.role == role)
+    |> Enum.filter(&(&1.role == role))
   end
 
   @doc """
@@ -827,7 +836,7 @@ defmodule OptimalSystemAgent.Agent.Roster do
 
     agent_name =
       Map.get(@file_dispatch, base) ||
-      Map.get(@file_dispatch, ext)
+        Map.get(@file_dispatch, ext)
 
     if agent_name, do: get(agent_name)
   end
@@ -872,11 +881,12 @@ defmodule OptimalSystemAgent.Agent.Roster do
       desc_score = length(words -- (words -- desc_words))
 
       # Tier bonus (elite gets slight preference for complex tasks)
-      tier_bonus = case agent.tier do
-        :elite -> 0.5
-        :specialist -> 0.3
-        :utility -> 0.1
-      end
+      tier_bonus =
+        case agent.tier do
+          :elite -> 0.5
+          :specialist -> 0.3
+          :utility -> 0.1
+        end
 
       total = trigger_score * 2 + desc_score + tier_bonus
       {name, total}

@@ -17,7 +17,8 @@ defmodule OptimalSystemAgent.Providers.Behaviour do
 
   @type message :: %{role: String.t(), content: String.t()}
   @type tool_call :: %{id: String.t(), name: String.t(), arguments: map()}
-  @type chat_result :: {:ok, %{content: String.t(), tool_calls: list(tool_call())}} | {:error, String.t()}
+  @type chat_result ::
+          {:ok, %{content: String.t(), tool_calls: list(tool_call())}} | {:error, String.t()}
 
   @doc "Send a chat completion request. Returns canonical response."
   @callback chat(messages :: list(message()), opts :: keyword()) :: chat_result()

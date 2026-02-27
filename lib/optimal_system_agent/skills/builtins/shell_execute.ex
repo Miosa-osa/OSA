@@ -6,10 +6,10 @@ defmodule OptimalSystemAgent.Skills.Builtins.ShellExecute do
   alias OptimalSystemAgent.Sandbox.Executor
 
   @blocked_commands MapSet.new(
-    ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
+                      ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
        kill killall pkill mount umount iptables systemctl passwd useradd userdel
        nc ncat)
-  )
+                    )
 
   @blocked_patterns [
     # Privilege escalation

@@ -84,7 +84,17 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
     # Ensure the workspace directory exists on the host before mounting
     File.mkdir_p!(workspace)
 
-    docker_args = build_docker_args(container_name, network, memory, cpus, workspace, extra_env, image, command)
+    docker_args =
+      build_docker_args(
+        container_name,
+        network,
+        memory,
+        cpus,
+        workspace,
+        extra_env,
+        image,
+        command
+      )
 
     Logger.debug(
       "[Sandbox.Docker] Spawning container name=#{container_name} image=#{image} network=#{network} memory=#{memory} cpus=#{cpus}"
@@ -136,31 +146,50 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
           String.t(),
           String.t()
         ) :: [String.t()]
-  defp build_docker_args(container_name, network, memory, cpus, workspace, extra_env, image, command) do
+  defp build_docker_args(
+         container_name,
+         network,
+         memory,
+         cpus,
+         workspace,
+         extra_env,
+         image,
+         command
+       ) do
     base = [
       "run",
       # Auto-remove after exit — no lingering containers
       "--rm",
-      "--name", container_name,
+      "--name",
+      container_name,
       # Network isolation
-      "--network", network,
+      "--network",
+      network,
       # Resource limits
-      "--memory", memory,
-      "--cpus", cpus,
+      "--memory",
+      memory,
+      "--cpus",
+      cpus,
       # Security: read-only root FS
       "--read-only",
       # Small tmpfs so programs that need /tmp don't break
-      "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=64m",
       # Security: block privilege escalation
-      "--security-opt", "no-new-privileges:true",
+      "--security-opt",
+      "no-new-privileges:true",
       # Drop all Linux capabilities
-      "--cap-drop", "ALL",
+      "--cap-drop",
+      "ALL",
       # Mount workspace as read-write — the only writable persistent path
-      "-v", "#{workspace}:/workspace:rw",
+      "-v",
+      "#{workspace}:/workspace:rw",
       # Start in /workspace
-      "-w", "/workspace",
+      "-w",
+      "/workspace",
       # Non-root user (UID 1000 matches the 'osa' user baked into the image)
-      "-u", "1000:1000",
+      "-u",
+      "1000:1000"
     ]
 
     env_flags =

@@ -55,7 +55,10 @@ defmodule OptimalSystemAgent.PromptLoader do
     # Also load command prompt templates from priv/commands/
     cmd_count = load_command_prompts()
 
-    Logger.info("[PromptLoader] Loaded #{loaded}/#{length(@known_keys)} prompts, #{cmd_count} command templates")
+    Logger.info(
+      "[PromptLoader] Loaded #{loaded}/#{length(@known_keys)} prompts, #{cmd_count} command templates"
+    )
+
     :ok
   end
 

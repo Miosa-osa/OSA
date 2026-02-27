@@ -50,14 +50,17 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileWrite do
           {:error, "Cannot create directory: #{:file.format_error(reason)}"}
       end
     else
-      {:error,
-       "Access denied: #{path} is outside allowed paths or targets a protected location"}
+      {:error, "Access denied: #{path} is outside allowed paths or targets a protected location"}
     end
   end
 
   defp allowed_write_paths do
     configured =
-      Application.get_env(:optimal_system_agent, :allowed_write_paths, @default_allowed_write_paths)
+      Application.get_env(
+        :optimal_system_agent,
+        :allowed_write_paths,
+        @default_allowed_write_paths
+      )
 
     Enum.map(configured, fn p ->
       expanded = Path.expand(p)
@@ -105,7 +108,9 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileWrite do
       if blocked do
         false
       else
-        check_path = if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+        check_path =
+          if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+
         Enum.any?(allowed_write_paths(), fn allowed ->
           String.starts_with?(check_path, allowed)
         end)

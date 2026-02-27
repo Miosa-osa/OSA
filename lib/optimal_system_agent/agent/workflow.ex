@@ -18,37 +18,37 @@ defmodule OptimalSystemAgent.Agent.Workflow do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
 
-  @workflows_dir Application.compile_env(:optimal_system_agent, :workflows_dir, "~/.osa/workflows")
+  @workflows_dir Application.compile_env(
+                   :optimal_system_agent,
+                   :workflows_dir,
+                   "~/.osa/workflows"
+                 )
 
   # ── Structs ──────────────────────────────────────────────────────────
 
-  defstruct [
-    id: nil,
-    name: nil,
-    description: nil,
-    status: :active,
-    steps: [],
-    current_step: 0,
-    context: %{},
-    created_at: nil,
-    updated_at: nil,
-    session_id: nil
-  ]
+  defstruct id: nil,
+            name: nil,
+            description: nil,
+            status: :active,
+            steps: [],
+            current_step: 0,
+            context: %{},
+            created_at: nil,
+            updated_at: nil,
+            session_id: nil
 
   defmodule Step do
     @moduledoc "A single step within a workflow."
-    defstruct [
-      id: nil,
-      name: nil,
-      description: nil,
-      status: :pending,
-      signal_mode: nil,
-      tools_needed: [],
-      acceptance_criteria: nil,
-      result: nil,
-      started_at: nil,
-      completed_at: nil
-    ]
+    defstruct id: nil,
+              name: nil,
+              description: nil,
+              status: :pending,
+              signal_mode: nil,
+              tools_needed: [],
+              acceptance_criteria: nil,
+              result: nil,
+              started_at: nil,
+              completed_at: nil
   end
 
   # ── Client API ───────────────────────────────────────────────────────
@@ -185,7 +185,9 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         state = put_workflow(state, workflow)
         persist_workflow(state.dir, workflow)
 
-        Logger.info("Workflow created: #{workflow.id} (#{workflow.name}) — #{length(steps)} steps")
+        Logger.info(
+          "Workflow created: #{workflow.id} (#{workflow.name}) — #{length(steps)} steps"
+        )
 
         {:reply, {:ok, serialize_workflow(workflow)}, state}
 
@@ -234,7 +236,9 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         state = put_workflow(state, workflow)
         persist_workflow(state.dir, workflow)
 
-        Logger.info("Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})")
+        Logger.info(
+          "Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})"
+        )
 
         {:reply, {:ok, serialize_workflow(workflow)}, state}
     end
@@ -255,7 +259,12 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         # Accumulate result into context
         current = Enum.at(workflow.steps, workflow.current_step)
         context_key = current.name |> String.downcase() |> String.replace(~r/\s+/, "_")
-        workflow = %{workflow | context: Map.put(workflow.context, context_key, result), updated_at: now_iso()}
+
+        workflow = %{
+          workflow
+          | context: Map.put(workflow.context, context_key, result),
+            updated_at: now_iso()
+        }
 
         state = put_workflow(state, workflow)
         persist_workflow(state.dir, workflow)
@@ -274,9 +283,10 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         {:reply, {:error, {:invalid_status, status}}, state}
 
       workflow ->
-        steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-          %{step | status: :skipped, result: reason, completed_at: now_iso()}
-        end)
+        steps =
+          List.update_at(workflow.steps, workflow.current_step, fn step ->
+            %{step | status: :skipped, result: reason, completed_at: now_iso()}
+          end)
 
         next_index = workflow.current_step + 1
 
@@ -371,6 +381,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
       |> Enum.sort_by(& &1.created_at, :desc)
       |> Enum.map(fn w ->
         completed = Enum.count(w.steps, &(&1.status == :completed))
+
         %{
           id: w.id,
           name: w.name,
@@ -477,7 +488,10 @@ defmodule OptimalSystemAgent.Agent.Workflow do
         {:error, "LLM returned invalid steps format (expected non-empty array)"}
 
       {:error, reason} ->
-        Logger.warning("Failed to parse LLM step response: #{inspect(reason)}\nRaw: #{String.slice(cleaned, 0, 200)}")
+        Logger.warning(
+          "Failed to parse LLM step response: #{inspect(reason)}\nRaw: #{String.slice(cleaned, 0, 200)}"
+        )
+
         {:error, "Failed to parse LLM decomposition response as JSON"}
     end
   end
@@ -568,7 +582,10 @@ defmodule OptimalSystemAgent.Agent.Workflow do
       steps ->
         Enum.map_join(steps, "\n", fn step ->
           status_icon = if step.status == :completed, do: "[done]", else: "[skipped]"
-          result_text = if step.result, do: " - #{truncate(to_string(step.result), 120)}", else: ""
+
+          result_text =
+            if step.result, do: " - #{truncate(to_string(step.result), 120)}", else: ""
+
           "- #{status_icon} #{step.name}#{result_text}"
         end)
     end
@@ -727,23 +744,28 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   end
 
   defp mark_current_step_in_progress(workflow) do
-    steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-      %{step | status: :in_progress, started_at: now_iso()}
-    end)
+    steps =
+      List.update_at(workflow.steps, workflow.current_step, fn step ->
+        %{step | status: :in_progress, started_at: now_iso()}
+      end)
 
     %{workflow | steps: steps}
   end
 
   defp complete_current_step(workflow, result) do
-    steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-      %{step | status: :completed, result: result, completed_at: now_iso()}
-    end)
+    steps =
+      List.update_at(workflow.steps, workflow.current_step, fn step ->
+        %{step | status: :completed, result: result, completed_at: now_iso()}
+      end)
 
     %{workflow | steps: steps}
   end
 
   defp generate_id do
-    "wf_" <> (:crypto.strong_rand_bytes(8) |> Base.hex_encode32(case: :lower, padding: false) |> String.slice(0, 12))
+    "wf_" <>
+      (:crypto.strong_rand_bytes(8)
+       |> Base.hex_encode32(case: :lower, padding: false)
+       |> String.slice(0, 12))
   end
 
   defp extract_name(description) do
@@ -792,9 +814,11 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   defp parse_signal_mode("ANALYZE"), do: :analyze
   defp parse_signal_mode("ASSIST"), do: :assist
   defp parse_signal_mode("MAINTAIN"), do: :maintain
+
   defp parse_signal_mode(mode) when is_binary(mode) do
     mode |> String.downcase() |> String.to_atom()
   end
+
   defp parse_signal_mode(atom) when is_atom(atom), do: atom
   defp parse_signal_mode(_), do: nil
 end

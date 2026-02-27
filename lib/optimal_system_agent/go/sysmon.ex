@@ -41,9 +41,9 @@ defmodule OptimalSystemAgent.Go.Sysmon do
       :unavailable
     else
       case GenServer.call(__MODULE__, :health, 2_000) do
-        :ready    -> :ready
+        :ready -> :ready
         :fallback -> :degraded
-        _         -> :unavailable
+        _ -> :unavailable
       end
     end
   catch
@@ -103,7 +103,8 @@ defmodule OptimalSystemAgent.Go.Sysmon do
       port: nil,
       mode: :fallback,
       binary_path: binary_path,
-      pending: %{}  # id => {from, timer_ref}
+      # id => {from, timer_ref}
+      pending: %{}
     }
 
     state = maybe_start_port(state)
@@ -212,10 +213,12 @@ defmodule OptimalSystemAgent.Go.Sysmon do
   defp maybe_start_port(%{binary_path: path} = state) do
     if File.exists?(path) do
       try do
-        port = Port.open(
-          {:spawn_executable, path},
-          [:binary, :use_stdio, :exit_status, {:line, 1_048_576}]
-        )
+        port =
+          Port.open(
+            {:spawn_executable, path},
+            [:binary, :use_stdio, :exit_status, {:line, 1_048_576}]
+          )
+
         %{state | port: port, mode: :ready}
       rescue
         e ->
@@ -236,9 +239,9 @@ defmodule OptimalSystemAgent.Go.Sysmon do
     installed_path = Path.expand("~/.osa/bin/osa-sysmon")
 
     cond do
-      File.exists?(priv_path)      -> priv_path
+      File.exists?(priv_path) -> priv_path
       File.exists?(installed_path) -> installed_path
-      true                         -> nil
+      true -> nil
     end
   end
 

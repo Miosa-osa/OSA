@@ -69,7 +69,8 @@ defmodule OptimalSystemAgent.Python.Sidecar do
     state = %{
       port: nil,
       mode: :starting,
-      pending: %{},  # id => {from, timer_ref}
+      # id => {from, timer_ref}
+      pending: %{},
       python_path: Application.get_env(:optimal_system_agent, :python_path, "python3")
     }
 
@@ -144,6 +145,7 @@ defmodule OptimalSystemAgent.Python.Sidecar do
       {{from, _timer_ref}, pending} ->
         GenServer.reply(from, {:error, :timeout})
         {:noreply, %{state | pending: pending}}
+
       {nil, _} ->
         {:noreply, state}
     end
@@ -152,6 +154,7 @@ defmodule OptimalSystemAgent.Python.Sidecar do
   def handle_info(:health_check, %{mode: :ready} = state) do
     # Send a ping to verify the sidecar is responsive
     {_id, encoded} = Protocol.encode_request("ping")
+
     try do
       Port.command(state.port, encoded)
     catch
@@ -171,9 +174,11 @@ defmodule OptimalSystemAgent.Python.Sidecar do
 
   def handle_info(:restart_sidecar, state) do
     state = start_sidecar(%{state | port: nil})
+
     if state.mode != :unavailable do
       Logger.info("[Python.Sidecar] Restarted successfully")
     end
+
     {:noreply, state}
   end
 
@@ -186,8 +191,10 @@ defmodule OptimalSystemAgent.Python.Sidecar do
     catch
       _, _ -> :ok
     end
+
     :ok
   end
+
   def terminate(_reason, _state), do: :ok
 
   # -- Private --
@@ -197,14 +204,17 @@ defmodule OptimalSystemAgent.Python.Sidecar do
 
     if File.exists?(script_path) do
       try do
-        port = Port.open(
-          {:spawn_executable, state.python_path},
-          [
-            :binary, :use_stdio, :exit_status,
-            {:line, 1_048_576},
-            {:args, [script_path]}
-          ]
-        )
+        port =
+          Port.open(
+            {:spawn_executable, state.python_path},
+            [
+              :binary,
+              :use_stdio,
+              :exit_status,
+              {:line, 1_048_576},
+              {:args, [script_path]}
+            ]
+          )
 
         # Send initial ping to verify the sidecar is alive
         {_id, encoded} = Protocol.encode_request("ping")
@@ -237,6 +247,7 @@ defmodule OptimalSystemAgent.Python.Sidecar do
         Process.cancel_timer(timer_ref)
         GenServer.reply(from, result)
         {:noreply, %{state | pending: pending}}
+
       {nil, _} ->
         {:noreply, state}
     end
@@ -247,6 +258,7 @@ defmodule OptimalSystemAgent.Python.Sidecar do
       Process.cancel_timer(timer_ref)
       GenServer.reply(from, {:error, reason})
     end)
+
     %{state | pending: %{}}
   end
 end

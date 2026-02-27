@@ -19,10 +19,8 @@ defmodule OptimalSystemAgent.Agent.Progress do
 
   alias OptimalSystemAgent.Events.Bus
 
-  defstruct [
-    tasks: %{},
-    subscribers: %{}
-  ]
+  defstruct tasks: %{},
+            subscribers: %{}
 
   defmodule AgentProgress do
     @moduledoc "Progress state for a single agent within a task."
@@ -127,7 +125,8 @@ defmodule OptimalSystemAgent.Agent.Progress do
           status: task_progress.status,
           started_at: task_progress.started_at,
           completed_at: task_progress.completed_at,
-          agents: task_progress.agents
+          agents:
+            task_progress.agents
             |> Map.values()
             |> Enum.sort_by(& &1.started_at)
             |> Enum.map(fn a ->
@@ -155,7 +154,7 @@ defmodule OptimalSystemAgent.Agent.Progress do
       |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
       |> Enum.map(fn tp ->
         agent_count = map_size(tp.agents)
-        completed = tp.agents |> Map.values() |> Enum.count(& &1.status == :completed)
+        completed = tp.agents |> Map.values() |> Enum.count(&(&1.status == :completed))
 
         %{
           id: tp.id,
@@ -196,15 +195,15 @@ defmodule OptimalSystemAgent.Agent.Progress do
       event = payload[:event]
 
       if event in [
-        :orchestrator_task_started,
-        :orchestrator_agents_spawning,
-        :orchestrator_agent_started,
-        :orchestrator_agent_progress,
-        :orchestrator_agent_completed,
-        :orchestrator_task_completed,
-        :orchestrator_task_failed,
-        :orchestrator_synthesizing
-      ] do
+           :orchestrator_task_started,
+           :orchestrator_agents_spawning,
+           :orchestrator_agent_started,
+           :orchestrator_agent_progress,
+           :orchestrator_agent_completed,
+           :orchestrator_task_completed,
+           :orchestrator_task_failed,
+           :orchestrator_synthesizing
+         ] do
         send(progress_pid, {:orchestrator_event, payload})
       end
     end)
@@ -220,7 +219,10 @@ defmodule OptimalSystemAgent.Agent.Progress do
     %{state | tasks: Map.put(state.tasks, task_id, task_progress)}
   end
 
-  defp handle_orchestrator_event(%{event: :orchestrator_agent_started, task_id: task_id, agent_id: agent_id} = event, state) do
+  defp handle_orchestrator_event(
+         %{event: :orchestrator_agent_started, task_id: task_id, agent_id: agent_id} = event,
+         state
+       ) do
     case Map.get(state.tasks, task_id) do
       nil ->
         state
@@ -234,9 +236,10 @@ defmodule OptimalSystemAgent.Agent.Progress do
           started_at: DateTime.utc_now()
         }
 
-        updated = %{task_progress |
-          agents: Map.put(task_progress.agents, agent_id, agent),
-          last_update: DateTime.utc_now()
+        updated = %{
+          task_progress
+          | agents: Map.put(task_progress.agents, agent_id, agent),
+            last_update: DateTime.utc_now()
         }
 
         state = %{state | tasks: Map.put(state.tasks, task_id, updated)}
@@ -245,7 +248,10 @@ defmodule OptimalSystemAgent.Agent.Progress do
     end
   end
 
-  defp handle_orchestrator_event(%{event: :orchestrator_agent_progress, task_id: task_id, agent_id: agent_id} = event, state) do
+  defp handle_orchestrator_event(
+         %{event: :orchestrator_agent_progress, task_id: task_id, agent_id: agent_id} = event,
+         state
+       ) do
     case Map.get(state.tasks, task_id) do
       nil ->
         state
@@ -256,15 +262,17 @@ defmodule OptimalSystemAgent.Agent.Progress do
             state
 
           agent ->
-            updated_agent = %{agent |
-              tool_uses: event[:tool_uses] || agent.tool_uses,
-              tokens_used: event[:tokens_used] || agent.tokens_used,
-              current_action: event[:current_action] || agent.current_action
+            updated_agent = %{
+              agent
+              | tool_uses: event[:tool_uses] || agent.tool_uses,
+                tokens_used: event[:tokens_used] || agent.tokens_used,
+                current_action: event[:current_action] || agent.current_action
             }
 
-            updated = %{task_progress |
-              agents: Map.put(task_progress.agents, agent_id, updated_agent),
-              last_update: DateTime.utc_now()
+            updated = %{
+              task_progress
+              | agents: Map.put(task_progress.agents, agent_id, updated_agent),
+                last_update: DateTime.utc_now()
             }
 
             state = %{state | tasks: Map.put(state.tasks, task_id, updated)}
@@ -274,7 +282,10 @@ defmodule OptimalSystemAgent.Agent.Progress do
     end
   end
 
-  defp handle_orchestrator_event(%{event: :orchestrator_agent_completed, task_id: task_id, agent_id: agent_id} = event, state) do
+  defp handle_orchestrator_event(
+         %{event: :orchestrator_agent_completed, task_id: task_id, agent_id: agent_id} = event,
+         state
+       ) do
     case Map.get(state.tasks, task_id) do
       nil ->
         state
@@ -285,14 +296,16 @@ defmodule OptimalSystemAgent.Agent.Progress do
             state
 
           agent ->
-            updated_agent = %{agent |
-              status: event[:status] || :completed,
-              completed_at: DateTime.utc_now()
+            updated_agent = %{
+              agent
+              | status: event[:status] || :completed,
+                completed_at: DateTime.utc_now()
             }
 
-            updated = %{task_progress |
-              agents: Map.put(task_progress.agents, agent_id, updated_agent),
-              last_update: DateTime.utc_now()
+            updated = %{
+              task_progress
+              | agents: Map.put(task_progress.agents, agent_id, updated_agent),
+                last_update: DateTime.utc_now()
             }
 
             state = %{state | tasks: Map.put(state.tasks, task_id, updated)}
@@ -352,8 +365,8 @@ defmodule OptimalSystemAgent.Agent.Progress do
     if total == 0 do
       "Preparing agents..."
     else
-      completed = Enum.count(agents, & &1.status == :completed)
-      failed = Enum.count(agents, & &1.status == :failed)
+      completed = Enum.count(agents, &(&1.status == :completed))
+      failed = Enum.count(agents, &(&1.status == :failed))
 
       header =
         cond do
@@ -364,7 +377,7 @@ defmodule OptimalSystemAgent.Agent.Progress do
             "Failed (#{failed}/#{total} agents failed)"
 
           true ->
-            running = Enum.count(agents, & &1.status == :running)
+            running = Enum.count(agents, &(&1.status == :running))
             "Running #{running} agent#{plural(running)}..."
         end
 
@@ -387,12 +400,16 @@ defmodule OptimalSystemAgent.Agent.Progress do
   defp format_tokens(tokens) when is_number(tokens) and tokens >= 1000 do
     "#{Float.round(tokens / 1000, 1)}k"
   end
+
   defp format_tokens(tokens) when is_number(tokens), do: "#{tokens}"
   defp format_tokens(_), do: "0"
 
   defp agent_status_text(%AgentProgress{status: :completed}), do: "Done"
   defp agent_status_text(%AgentProgress{status: :failed}), do: "Failed"
-  defp agent_status_text(%AgentProgress{current_action: action}) when is_binary(action) and action != "", do: action
+
+  defp agent_status_text(%AgentProgress{current_action: action})
+       when is_binary(action) and action != "", do: action
+
   defp agent_status_text(%AgentProgress{status: :running}), do: "Working..."
   defp agent_status_text(_), do: "Pending"
 

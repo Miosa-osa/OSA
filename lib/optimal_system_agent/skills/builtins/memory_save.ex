@@ -13,7 +13,10 @@ defmodule OptimalSystemAgent.Skills.Builtins.MemorySave do
       "type" => "object",
       "properties" => %{
         "content" => %{"type" => "string", "description" => "Information to remember"},
-        "category" => %{"type" => "string", "description" => "Category (e.g., 'preference', 'fact', 'decision')"}
+        "category" => %{
+          "type" => "string",
+          "description" => "Category (e.g., 'preference', 'fact', 'decision')"
+        }
       },
       "required" => ["content"]
     }

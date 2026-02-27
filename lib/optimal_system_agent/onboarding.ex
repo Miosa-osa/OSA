@@ -11,7 +11,7 @@ defmodule OptimalSystemAgent.Onboarding do
     - `mix osa.setup` — manually via run_setup_mode/0 (no app.start needed)
   """
 
-  alias OptimalSystemAgent.Onboarding.Selector
+  alias OptimalSystemAgent.Onboarding.{Channels, Selector}
 
   @osa_dir Path.expand("~/.osa")
 
@@ -33,7 +33,8 @@ defmodule OptimalSystemAgent.Onboarding do
     {7, "deepseek", "DeepSeek", "deepseek-chat", "DEEPSEEK_API_KEY"},
     {8, "mistral", "Mistral", "mistral-large-latest", "MISTRAL_API_KEY"},
     {9, "together", "Together AI", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "TOGETHER_API_KEY"},
-    {10, "fireworks", "Fireworks", "accounts/fireworks/models/llama-v3p3-70b-instruct", "FIREWORKS_API_KEY"},
+    {10, "fireworks", "Fireworks", "accounts/fireworks/models/llama-v3p3-70b-instruct",
+     "FIREWORKS_API_KEY"},
     {11, "perplexity", "Perplexity", "sonar-pro", "PERPLEXITY_API_KEY"},
     {12, "cohere", "Cohere", "command-r-plus", "CO_API_KEY"},
     {13, "replicate", "Replicate", "meta/llama-3.3-70b-instruct", "REPLICATE_API_TOKEN"},
@@ -60,6 +61,7 @@ defmodule OptimalSystemAgent.Onboarding do
     agent_name = step_agent_name()
     {user_name, user_context} = step_user_profile()
     {provider, model, api_key, env_var} = step_provider()
+    channels = step_channels()
 
     state = %{
       agent_name: agent_name,
@@ -68,7 +70,8 @@ defmodule OptimalSystemAgent.Onboarding do
       provider: provider,
       model: model,
       api_key: api_key,
-      env_var: env_var
+      env_var: env_var,
+      channels: channels
     }
 
     step_confirm_and_write(state)
@@ -213,6 +216,11 @@ defmodule OptimalSystemAgent.Onboarding do
     {:option, "#{pad_name}#{@dim}#{model}#{@reset}", {key, model, env}}
   end
 
+  defp step_channels do
+    IO.puts("\n  #{@bold}Step 4#{@reset} #{@dim}— Channels#{@reset}\n")
+    Channels.run()
+  end
+
   defp step_confirm_and_write(state) do
     user_desc =
       case {state.user_name, state.user_context} do
@@ -222,12 +230,15 @@ defmodule OptimalSystemAgent.Onboarding do
         {name, ctx} -> "#{name} — #{ctx}"
       end
 
+    channels_desc = format_channels(state.channels)
+
     IO.puts("""
 
       #{@bold}Ready to write:#{@reset}
         Agent   : #{@cyan}#{state.agent_name}#{@reset}
         User    : #{user_desc}
         Provider: #{@cyan}#{state.provider}#{@reset} (#{state.model})
+        Channels: #{channels_desc}
         Location: #{@dim}~/.osa/#{@reset}
     """)
 
@@ -505,13 +516,25 @@ defmodule OptimalSystemAgent.Onboarding do
     """
   end
 
+  # ── Formatting Helpers ──────────────────────────────────────────
+
+  defp format_channels([]), do: "#{@dim}(none)#{@reset}"
+
+  defp format_channels(channels) do
+    channels
+    |> Enum.map(&to_string/1)
+    |> Enum.join(", ")
+  end
+
   # ── I/O Helpers ─────────────────────────────────────────────────
 
   defp prompt(text, default) do
     suffix = if default != nil and default != "", do: " [#{default}]", else: ""
 
     case IO.gets("  #{text}#{suffix}: ") do
-      :eof -> default || ""
+      :eof ->
+        default || ""
+
       input ->
         trimmed = String.trim(input)
         if trimmed == "" and default != nil, do: default, else: trimmed

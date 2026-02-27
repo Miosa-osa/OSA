@@ -116,7 +116,10 @@ defmodule OptimalSystemAgent.Sidecar.Manager do
         Telemetry.health(name, health)
       rescue
         e ->
-          Logger.warning("[Sidecar.Manager] Health check failed for #{inspect(name)}: #{Exception.message(e)}")
+          Logger.warning(
+            "[Sidecar.Manager] Health check failed for #{inspect(name)}: #{Exception.message(e)}"
+          )
+
           Registry.update_health(name, :unavailable)
           Telemetry.health(name, :unavailable)
       end

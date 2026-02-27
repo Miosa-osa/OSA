@@ -147,7 +147,8 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
 
     Positive votes indicate agreement, negative indicate disagreement.
     """
-    @spec vote_hypothesis(pid() | atom(), String.t(), non_neg_integer(), float()) :: :ok | {:error, :out_of_range}
+    @spec vote_hypothesis(pid() | atom(), String.t(), non_neg_integer(), float()) ::
+            :ok | {:error, :out_of_range}
     def vote_hypothesis(memory, agent_id, hypothesis_idx, vote)
         when is_float(vote) and vote >= -1.0 and vote <= 1.0 do
       Agent.update(memory, fn state ->
@@ -288,7 +289,13 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
     swarm_id = generate_id()
 
     Logger.info("[Intelligence] Starting exploration swarm: #{String.slice(task, 0, 80)}")
-    Bus.emit(:system_event, %{event: :swarm_intelligence_started, swarm_id: swarm_id, type: :exploration, task: String.slice(task, 0, 200)})
+
+    Bus.emit(:system_event, %{
+      event: :swarm_intelligence_started,
+      swarm_id: swarm_id,
+      type: :exploration,
+      task: String.slice(task, 0, 200)
+    })
 
     {:ok, memory} = SharedMemory.start_link()
 
@@ -298,7 +305,11 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
         %{id: "explorer_#{i}", role: :explorer, capabilities: ["search", "discover", "report"]}
       end) ++
         [
-          %{id: "synthesizer_1", role: :synthesizer, capabilities: ["merge", "deduplicate", "summarize"]},
+          %{
+            id: "synthesizer_1",
+            role: :synthesizer,
+            capabilities: ["merge", "deduplicate", "summarize"]
+          },
           %{id: "critic_1", role: :critic, capabilities: ["validate", "critique", "score"]}
         ]
 
@@ -335,7 +346,10 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
       rounds: length(rounds)
     })
 
-    Logger.info("[Intelligence] Exploration complete: #{length(rounds)} rounds, converged=#{converged}")
+    Logger.info(
+      "[Intelligence] Exploration complete: #{length(rounds)} rounds, converged=#{converged}"
+    )
+
     {:ok, result}
   end
 
@@ -361,17 +375,31 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
     swarm_id = generate_id()
 
     Logger.info("[Intelligence] Starting specialist swarm: #{String.slice(task, 0, 80)}")
-    Bus.emit(:system_event, %{event: :swarm_intelligence_started, swarm_id: swarm_id, type: :specialist, task: String.slice(task, 0, 200)})
+
+    Bus.emit(:system_event, %{
+      event: :swarm_intelligence_started,
+      swarm_id: swarm_id,
+      type: :specialist,
+      task: String.slice(task, 0, 200)
+    })
 
     {:ok, memory} = SharedMemory.start_link()
 
     # Define agent roster
     agents =
       Enum.map(domains, fn domain ->
-        %{id: "specialist_#{domain}", role: :specialist, capabilities: [domain, "deep_analysis", "expert_opinion"]}
+        %{
+          id: "specialist_#{domain}",
+          role: :specialist,
+          capabilities: [domain, "deep_analysis", "expert_opinion"]
+        }
       end) ++
         [
-          %{id: "coordinator_1", role: :coordinator, capabilities: ["delegate", "route", "handoff"]},
+          %{
+            id: "coordinator_1",
+            role: :coordinator,
+            capabilities: ["delegate", "route", "handoff"]
+          },
           %{id: "synthesizer_1", role: :synthesizer, capabilities: ["merge", "summarize"]}
         ]
 
@@ -395,11 +423,28 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
         case call_llm(prompt) do
           {:ok, output} ->
             SharedMemory.add_finding(memory, agent.id, output)
-            SharedMemory.add_hypothesis(memory, agent.id, "#{List.first(agent.capabilities)}: #{String.slice(output, 0, 200)}", 0.7)
-            %{agent_id: agent.id, domain: List.first(agent.capabilities), output: output, status: :ok}
+
+            SharedMemory.add_hypothesis(
+              memory,
+              agent.id,
+              "#{List.first(agent.capabilities)}: #{String.slice(output, 0, 200)}",
+              0.7
+            )
+
+            %{
+              agent_id: agent.id,
+              domain: List.first(agent.capabilities),
+              output: output,
+              status: :ok
+            }
 
           {:error, reason} ->
-            %{agent_id: agent.id, domain: List.first(agent.capabilities), output: inspect(reason), status: :failed}
+            %{
+              agent_id: agent.id,
+              domain: List.first(agent.capabilities),
+              output: inspect(reason),
+              status: :failed
+            }
         end
       end)
 
@@ -434,7 +479,10 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
       type: :specialist
     })
 
-    Logger.info("[Intelligence] Specialist swarm complete: #{length(specialist_results)} specialists, #{length(rounds)} rounds")
+    Logger.info(
+      "[Intelligence] Specialist swarm complete: #{length(specialist_results)} specialists, #{length(rounds)} rounds"
+    )
+
     {:ok, result}
   end
 
@@ -442,7 +490,11 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
 
   defp run_rounds(task, agents, memory, max_rounds, threshold, swarm_id) do
     Enum.reduce_while(1..max_rounds, {[], false}, fn round_num, {rounds_acc, _converged} ->
-      Bus.emit(:system_event, %{event: :swarm_intelligence_round, swarm_id: swarm_id, round: round_num})
+      Bus.emit(:system_event, %{
+        event: :swarm_intelligence_round,
+        swarm_id: swarm_id,
+        round: round_num
+      })
 
       round_result = execute_round(task, agents, memory, round_num)
 
@@ -453,7 +505,12 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
       updated_rounds = rounds_acc ++ [Map.put(round_result, :round, round_num)]
 
       if converged do
-        Bus.emit(:system_event, %{event: :swarm_intelligence_converged, swarm_id: swarm_id, round: round_num})
+        Bus.emit(:system_event, %{
+          event: :swarm_intelligence_converged,
+          swarm_id: swarm_id,
+          round: round_num
+        })
+
         Logger.info("[Intelligence] Converged at round #{round_num}")
         {:halt, {updated_rounds, true}}
       else
@@ -605,8 +662,11 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
     """
 
     case call_llm(prompt) do
-      {:ok, output} -> output
-      {:error, _} -> "Exploration complete with #{length(state.findings)} findings. #{consensus_text}"
+      {:ok, output} ->
+        output
+
+      {:error, _} ->
+        "Exploration complete with #{length(state.findings)} findings. #{consensus_text}"
     end
   end
 
@@ -648,7 +708,10 @@ defmodule OptimalSystemAgent.Swarm.Intelligence do
 
   defp call_llm(prompt) do
     messages = [
-      %{role: "system", content: "You are a focused, concise agent in a multi-agent swarm. Be specific and brief."},
+      %{
+        role: "system",
+        content: "You are a focused, concise agent in a multi-agent swarm. Be specific and brief."
+      },
       %{role: "user", content: prompt}
     ]
 

@@ -1611,7 +1611,7 @@ defmodule OptimalSystemAgent.Commands do
   end
 
   defp cmd_exit(_arg, _session_id) do
-    {:action, :exit, "goodbye"}
+    {:action, :exit, ""}
   end
 
   defp cmd_clear(_arg, _session_id) do

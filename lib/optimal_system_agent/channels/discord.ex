@@ -88,7 +88,14 @@ defmodule OptimalSystemAgent.Channels.Discord do
 
       _ ->
         Logger.info("Discord: Adapter started (application_id=#{app_id})")
-        {:ok, %__MODULE__{token: token, application_id: app_id, public_key: public_key, connected: true}}
+
+        {:ok,
+         %__MODULE__{
+           token: token,
+           application_id: app_id,
+           public_key: public_key,
+           connected: true
+         }}
     end
   end
 
@@ -123,7 +130,10 @@ defmodule OptimalSystemAgent.Channels.Discord do
   end
 
   # Application command (slash command)
-  defp route_interaction(%{"type" => 2, "data" => data, "channel_id" => channel_id} = interaction, state) do
+  defp route_interaction(
+         %{"type" => 2, "data" => data, "channel_id" => channel_id} = interaction,
+         state
+       ) do
     user = get_in(interaction, ["member", "user"]) || interaction["user"] || %{}
     user_id = user["id"] || "unknown"
     username = user["username"] || "unknown"
@@ -137,7 +147,10 @@ defmodule OptimalSystemAgent.Channels.Discord do
   end
 
   # Message component interaction (button click, select menu)
-  defp route_interaction(%{"type" => 3, "data" => data, "channel_id" => channel_id} = interaction, state) do
+  defp route_interaction(
+         %{"type" => 3, "data" => data, "channel_id" => channel_id} = interaction,
+         state
+       ) do
     user = get_in(interaction, ["member", "user"]) || interaction["user"] || %{}
     user_id = user["id"] || "unknown"
     custom_id = data["custom_id"] || ""
@@ -253,7 +266,8 @@ defmodule OptimalSystemAgent.Channels.Discord do
   end
 
   defp get_retry_after(headers) do
-    case List.keyfind(headers, "retry-after", 0) || List.keyfind(headers, "x-ratelimit-reset-after", 0) do
+    case List.keyfind(headers, "retry-after", 0) ||
+           List.keyfind(headers, "x-ratelimit-reset-after", 0) do
       {_, value} ->
         case Float.parse(value) do
           {f, _} -> ceil(f)

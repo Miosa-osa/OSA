@@ -23,7 +23,7 @@ defmodule OptimalSystemAgent.Intelligence.Supervisor do
       OptimalSystemAgent.Intelligence.CommCoach,
       OptimalSystemAgent.Intelligence.ConversationTracker,
       OptimalSystemAgent.Intelligence.ContactDetector,
-      OptimalSystemAgent.Intelligence.ProactiveMonitor,
+      OptimalSystemAgent.Intelligence.ProactiveMonitor
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

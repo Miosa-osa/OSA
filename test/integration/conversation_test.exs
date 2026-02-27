@@ -105,18 +105,28 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
     end
 
     test "substantive messages pass through" do
-      assert {:signal, w1} = NoiseFilter.filter("Create a new user authentication system with JWT tokens")
+      assert {:signal, w1} =
+               NoiseFilter.filter("Create a new user authentication system with JWT tokens")
+
       assert w1 >= 0.5
 
-      assert {:signal, w2} = NoiseFilter.filter("What is the best approach for handling file uploads in Elixir?")
+      assert {:signal, w2} =
+               NoiseFilter.filter(
+                 "What is the best approach for handling file uploads in Elixir?"
+               )
+
       assert w2 >= 0.5
 
-      assert {:signal, w3} = NoiseFilter.filter("The production database is running out of disk space")
+      assert {:signal, w3} =
+               NoiseFilter.filter("The production database is running out of disk space")
+
       assert w3 >= 0.5
     end
 
     test "urgent messages get high weight" do
-      assert {:signal, weight} = NoiseFilter.filter("URGENT: Production is down, all services returning 500 errors")
+      assert {:signal, weight} =
+               NoiseFilter.filter("URGENT: Production is down, all services returning 500 errors")
+
       assert weight >= 0.7
     end
 
@@ -131,6 +141,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
     test "noise filter always returns a tagged two-tuple" do
       for msg <- ["", "hi", "hello", "build me an API", "urgent fix needed"] do
         result = NoiseFilter.filter(msg)
+
         assert match?({tag, _} when tag in [:noise, :signal], result),
                "Expected tagged tuple for #{inspect(msg)}, got #{inspect(result)}"
       end
@@ -164,7 +175,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
       # Identity block always present (via Soul module)
       assert String.contains?(system_msg.content, "Optimal System Agent") or
-             String.contains?(system_msg.content, "OSA")
+               String.contains?(system_msg.content, "OSA")
 
       # Signal classification block is injected for BUILD mode
       assert String.contains?(system_msg.content, "BUILD")
@@ -304,7 +315,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("This is message number #{i} with some content. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       result = Compactor.maybe_compact(messages)
@@ -327,7 +338,11 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
     test "estimate_tokens returns more tokens for longer strings" do
       short = Compactor.estimate_tokens("hi")
-      long = Compactor.estimate_tokens("This is a much longer message with many words and substantial content that should have significantly more tokens than a short greeting")
+
+      long =
+        Compactor.estimate_tokens(
+          "This is a much longer message with many words and substantial content that should have significantly more tokens than a short greeting"
+        )
 
       assert long > short
     end
@@ -425,7 +440,9 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
     end
 
     test "context_block returns nil when no active workflow exists for session" do
-      result = Workflow.context_block("nonexistent-session-xyz-#{System.unique_integer([:positive])}")
+      result =
+        Workflow.context_block("nonexistent-session-xyz-#{System.unique_integer([:positive])}")
+
       assert result == nil
     end
 
@@ -570,7 +587,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
       # Question bonus is 0.15 plus a tiny length bonus for the extra char
       diff = with_question - base
-      assert_in_delta diff, 0.15 + (1 / 500.0), 0.001
+      assert_in_delta diff, 0.15 + 1 / 500.0, 0.001
     end
 
     test "weight is always between 0.0 and 1.0" do
@@ -584,6 +601,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
       Enum.each(messages, fn msg ->
         w = Classifier.calculate_weight(msg)
+
         assert w >= 0.0 and w <= 1.0,
                "Weight #{w} out of range for message: #{String.slice(msg, 0, 40)}"
       end)

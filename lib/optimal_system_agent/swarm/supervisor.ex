@@ -25,8 +25,7 @@ defmodule OptimalSystemAgent.Swarm.Supervisor do
       # Must start before Orchestrator so the ETS table is available
       OptimalSystemAgent.Swarm.Mailbox,
       OptimalSystemAgent.Swarm.Orchestrator,
-      {DynamicSupervisor,
-       name: OptimalSystemAgent.Swarm.AgentPool, strategy: :one_for_one}
+      {DynamicSupervisor, name: OptimalSystemAgent.Swarm.AgentPool, strategy: :one_for_one}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

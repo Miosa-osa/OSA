@@ -134,6 +134,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp parse_usage(%{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}}),
     do: %{input_tokens: inp, output_tokens: out}
+
   defp parse_usage(_), do: %{}
 
   defp extract_error_message(%{"error" => %{"message" => msg}}), do: msg

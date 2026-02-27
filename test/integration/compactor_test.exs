@@ -92,7 +92,12 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
 
     test "each message adds 4 tokens of per-message overhead" do
       single = Compactor.estimate_tokens([%{role: "user", content: ""}])
-      double = Compactor.estimate_tokens([%{role: "user", content: ""}, %{role: "assistant", content: ""}])
+
+      double =
+        Compactor.estimate_tokens([
+          %{role: "user", content: ""},
+          %{role: "assistant", content: ""}
+        ])
 
       # Double should be exactly 4 more than single (second message overhead only)
       assert double == single + 4
@@ -160,7 +165,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("This is message number #{i} with content. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       util = Compactor.utilization(messages)
@@ -207,7 +212,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("This is message number #{i} with some content. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       result = Compactor.maybe_compact(messages)
@@ -220,7 +225,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("This is message number #{i} with some content. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       result = Compactor.maybe_compact(messages)
@@ -231,13 +236,14 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("Message #{i} repeated content for bulk. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       result = Compactor.maybe_compact(messages)
 
       Enum.each(result, fn msg ->
         assert is_map(msg), "Expected map, got #{inspect(msg)}"
+
         assert Map.has_key?(msg, :role) or Map.has_key?(msg, "role"),
                "Expected :role key in #{inspect(msg)}"
       end)
@@ -318,7 +324,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       messages =
         for i <- 1..200 do
           content = String.duplicate("This is message number #{i} with some content. ", 50)
-          %{role: (if rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
+          %{role: if(rem(i, 2) == 0, do: "assistant", else: "user"), content: content}
         end
 
       Compactor.maybe_compact(messages)
@@ -327,6 +333,7 @@ defmodule OptimalSystemAgent.Integration.CompactorTest do
       Process.sleep(300)
 
       updated_stats = Compactor.stats()
+
       assert updated_stats.compaction_count > initial_count,
              "Expected compaction_count to increment from #{initial_count}, got #{updated_stats.compaction_count}"
     end

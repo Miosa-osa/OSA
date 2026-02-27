@@ -307,7 +307,7 @@ defmodule OptimalSystemAgent.OS.Manifest do
       {"Cargo.toml", "backend", "rust"},
       {"requirements.txt", "backend", "python"},
       {"pyproject.toml", "backend", "python"},
-      {"package.json", "frontend", "node"},
+      {"package.json", "frontend", "node"}
     ]
 
     base =
@@ -333,7 +333,7 @@ defmodule OptimalSystemAgent.OS.Manifest do
         Map.put(stack, "frontend", "svelte")
 
       File.exists?(Path.join(dir, "next.config.js")) or
-          File.exists?(Path.join(dir, "next.config.ts")) or
+        File.exists?(Path.join(dir, "next.config.ts")) or
           File.exists?(Path.join(dir, "next.config.mjs")) ->
         Map.put(stack, "frontend", "react-next")
 
@@ -407,7 +407,7 @@ defmodule OptimalSystemAgent.OS.Manifest do
       [
         Path.join([dir, "backend", "internal", "modules"]),
         Path.join([dir, "internal", "modules"]),
-        Path.join([dir, "pkg", "modules"]),
+        Path.join([dir, "pkg", "modules"])
       ]
       |> Enum.find(&File.dir?/1)
 
@@ -434,7 +434,7 @@ defmodule OptimalSystemAgent.OS.Manifest do
     routes_dir =
       [
         Path.join([dir, "frontend", "src", "routes"]),
-        Path.join([dir, "src", "routes"]),
+        Path.join([dir, "src", "routes"])
       ]
       |> Enum.find(&File.dir?/1)
 
@@ -492,7 +492,7 @@ defmodule OptimalSystemAgent.OS.Manifest do
         {"lib", stack["backend"] == "elixir"},
         {"src", stack["frontend"] in ["react-next", "vite"]},
         {"docs", true},
-        {"README.md", true},
+        {"README.md", true}
       ]
 
     candidates

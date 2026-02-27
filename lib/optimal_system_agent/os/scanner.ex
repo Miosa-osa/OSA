@@ -31,18 +31,35 @@ defmodule OptimalSystemAgent.OS.Scanner do
     "~/Developer",
     "~/Code",
     "~/dev",
-    "~/src",
+    "~/src"
   ]
 
   @manifest_filename ".osa-manifest.json"
 
   # Skip directories that are never templates
   @skip_dirs MapSet.new([
-    "node_modules", "_build", "deps", ".git", ".svn", ".hg",
-    "vendor", "target", "__pycache__", ".next", ".svelte-kit",
-    "dist", "build", ".cache", "tmp", ".tmp", "coverage",
-    "venv", ".venv", ".env", "env",
-  ])
+               "node_modules",
+               "_build",
+               "deps",
+               ".git",
+               ".svn",
+               ".hg",
+               "vendor",
+               "target",
+               "__pycache__",
+               ".next",
+               ".svelte-kit",
+               "dist",
+               "build",
+               ".cache",
+               "tmp",
+               ".tmp",
+               "coverage",
+               "venv",
+               ".venv",
+               ".env",
+               "env"
+             ])
 
   # --- Public API ---
 
@@ -103,11 +120,19 @@ defmodule OptimalSystemAgent.OS.Scanner do
       case Manifest.from_heuristics(dir) do
         {:ok, manifest} ->
           out_path = manifest_path(dir)
-          json = manifest |> Manifest.to_map() |> Map.drop(["detected_at"]) |> Jason.encode!(pretty: true)
+
+          json =
+            manifest
+            |> Manifest.to_map()
+            |> Map.drop(["detected_at"])
+            |> Jason.encode!(pretty: true)
 
           case File.write(out_path, json) do
-            :ok -> {:ok, out_path}
-            {:error, reason} -> {:error, "Failed to write manifest: #{:file.format_error(reason)}"}
+            :ok ->
+              {:ok, out_path}
+
+            {:error, reason} ->
+              {:error, "Failed to write manifest: #{:file.format_error(reason)}"}
           end
 
         {:error, reason} ->
@@ -182,9 +207,16 @@ defmodule OptimalSystemAgent.OS.Scanner do
   defp manifest_path(dir), do: Path.join(dir, @manifest_filename)
 
   @project_markers [
-    "go.mod", "mix.exs", "Cargo.toml", "package.json",
-    "pyproject.toml", "requirements.txt", "pom.xml",
-    "build.gradle", "CMakeLists.txt", "Makefile",
+    "go.mod",
+    "mix.exs",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "pom.xml",
+    "build.gradle",
+    "CMakeLists.txt",
+    "Makefile"
   ]
 
   defp is_project?(dir) do

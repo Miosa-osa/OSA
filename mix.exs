@@ -63,7 +63,7 @@ defmodule OptimalSystemAgent.MixProject do
       {:telemetry_poller, "~> 1.0"},
 
       # Rust NIFs (optional — skipped when OSA_SKIP_NIF=true)
-      {:rustler, "~> 0.37", optional: true},
+      {:rustler, "~> 0.37", optional: true}
     ]
   end
 
@@ -72,7 +72,7 @@ defmodule OptimalSystemAgent.MixProject do
       setup: ["deps.get", "ecto.setup", "compile"],
       chat: ["run --no-halt -e 'OptimalSystemAgent.Channels.CLI.start()'"],
       "ecto.setup": ["ecto.create", "ecto.migrate"],
-      "ecto.reset": ["ecto.drop", "ecto.setup"],
+      "ecto.reset": ["ecto.drop", "ecto.setup"]
     ]
   end
 
@@ -91,7 +91,16 @@ defmodule OptimalSystemAgent.MixProject do
   # The binary must be compiled before `mix release` (CI does this in a prior step).
   defp copy_go_tokenizer(release) do
     src = Path.join(["priv", "go", "tokenizer", "osa-tokenizer"])
-    dst_dir = Path.join([release.path, "lib", "optimal_system_agent-#{@version}", "priv", "go", "tokenizer"])
+
+    dst_dir =
+      Path.join([
+        release.path,
+        "lib",
+        "optimal_system_agent-#{@version}",
+        "priv",
+        "go",
+        "tokenizer"
+      ])
 
     if File.exists?(src) do
       File.mkdir_p!(dst_dir)

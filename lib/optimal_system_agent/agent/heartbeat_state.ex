@@ -93,11 +93,13 @@ defmodule OptimalSystemAgent.Agent.HeartbeatState do
     end
   end
 
+  @impl true
   def handle_call(:in_quiet_hours?, _from, state) do
     result = check_quiet_hours(state.quiet_hours, DateTime.utc_now())
     {:reply, result, state}
   end
 
+  @impl true
   def handle_call({:set_quiet_hours, ranges}, _from, state) do
     new_state = %{state | quiet_hours: ranges}
     persist_to_file(new_state)

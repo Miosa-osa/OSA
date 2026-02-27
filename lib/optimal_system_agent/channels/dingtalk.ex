@@ -177,7 +177,7 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
       {:ok, %{status: 200, body: %{"errcode" => 0}}} ->
         :ok
 
-      {:ok, %{status: 200, body: %{"errcode" => 130101}}} ->
+      {:ok, %{status: 200, body: %{"errcode" => 130_101}}} ->
         Logger.warning("DingTalk: Rate limited")
         {:error, :rate_limited}
 

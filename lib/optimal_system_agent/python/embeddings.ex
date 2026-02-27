@@ -65,10 +65,13 @@ defmodule OptimalSystemAgent.Python.Embeddings do
   """
   @spec reindex([map()]) :: {:ok, non_neg_integer()} | {:error, atom()}
   def reindex(entries) when is_list(entries) do
-    serialized = Enum.map(entries, fn entry ->
-      %{"id" => to_string(entry[:id] || entry["id"] || ""),
-        "content" => to_string(entry[:content] || entry["content"] || "")}
-    end)
+    serialized =
+      Enum.map(entries, fn entry ->
+        %{
+          "id" => to_string(entry[:id] || entry["id"] || ""),
+          "content" => to_string(entry[:content] || entry["content"] || "")
+        }
+      end)
 
     case Sidecar.request("reindex", %{"entries" => serialized}, 60_000) do
       {:ok, %{"indexed" => count}} when is_integer(count) ->

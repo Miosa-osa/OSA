@@ -60,8 +60,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
   defp tier1_threshold, do: Application.get_env(:optimal_system_agent, :compaction_warn, 0.80)
-  defp tier2_threshold, do: Application.get_env(:optimal_system_agent, :compaction_aggressive, 0.85)
-  defp tier3_threshold, do: Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
+
+  defp tier2_threshold,
+    do: Application.get_env(:optimal_system_agent, :compaction_aggressive, 0.85)
+
+  defp tier3_threshold,
+    do: Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
 
   # Zone boundaries (counted from the end of the non-system message list)
   @hot_zone_size 10
@@ -139,15 +143,21 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       tool_call_tokens =
         case Map.get(msg, :tool_calls) do
-          nil -> 0
-          [] -> 0
+          nil ->
+            0
+
+          [] ->
+            0
+
           calls when is_list(calls) ->
             Enum.reduce(calls, 0, fn tc, tc_acc ->
               name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
               arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
               tc_acc + name_tokens + arg_tokens + 4
             end)
-          _ -> 0
+
+          _ ->
+            0
         end
 
       # Per-message overhead (role label, delimiters)
@@ -471,8 +481,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp strip_tool_args_from_msg(msg) do
     case Map.get(msg, :tool_calls) do
-      nil -> msg
-      [] -> msg
+      nil ->
+        msg
+
+      [] ->
+        msg
+
       calls when is_list(calls) ->
         stripped_calls =
           Enum.map(calls, fn tc ->
@@ -671,12 +685,18 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       tool_info =
         case Map.get(msg, :tool_calls) do
-          nil -> ""
-          [] -> ""
+          nil ->
+            ""
+
+          [] ->
+            ""
+
           calls when is_list(calls) ->
             names = Enum.map(calls, &safe_to_string(Map.get(&1, :name, "?"))) |> Enum.join(", ")
             " [tools: #{names}]"
-          _ -> ""
+
+          _ ->
+            ""
         end
 
       "#{role}#{tool_info}: #{content}"

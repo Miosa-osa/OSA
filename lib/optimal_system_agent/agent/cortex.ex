@@ -51,14 +51,12 @@ defmodule OptimalSystemAgent.Agent.Cortex do
   Do NOT include the raw data — synthesize it into actionable intelligence.
   """
 
-  defstruct [
-    bulletin: nil,
-    active_topics: [],
-    session_summaries: %{},
-    last_refresh: nil,
-    refresh_interval: @default_refresh_interval,
-    timer_ref: nil
-  ]
+  defstruct bulletin: nil,
+            active_topics: [],
+            session_summaries: %{},
+            last_refresh: nil,
+            refresh_interval: @default_refresh_interval,
+            timer_ref: nil
 
   # ────────────────────────────────────────────────────────────────────
   # Public API
@@ -119,7 +117,11 @@ defmodule OptimalSystemAgent.Agent.Cortex do
   @impl true
   def init(_opts) do
     interval =
-      Application.get_env(:optimal_system_agent, :cortex_refresh_interval, @default_refresh_interval)
+      Application.get_env(
+        :optimal_system_agent,
+        :cortex_refresh_interval,
+        @default_refresh_interval
+      )
 
     # Create ETS table for topic tracking
     ensure_topic_table()
@@ -206,43 +208,58 @@ defmodule OptimalSystemAgent.Agent.Cortex do
       if memory_content == "" and recent_sessions == [] do
         Logger.debug("Cortex: no material for synthesis, skipping")
 
-        %{state |
-          last_refresh: DateTime.utc_now(),
-          active_topics: active_topics,
-          session_summaries: session_summaries
+        %{
+          state
+          | last_refresh: DateTime.utc_now(),
+            active_topics: active_topics,
+            session_summaries: session_summaries
         }
       else
         # Build targeted synthesis prompt
-        messages = build_synthesis_messages(memory_content, recent_sessions, active_topics, session_summaries)
+        messages =
+          build_synthesis_messages(
+            memory_content,
+            recent_sessions,
+            active_topics,
+            session_summaries
+          )
 
         case Providers.chat(messages, max_tokens: 500, temperature: 0.2) do
           {:ok, %{content: content}} when is_binary(content) and content != "" ->
             bulletin = String.trim(content)
-            Logger.info("Cortex: bulletin refreshed (#{byte_size(bulletin)} bytes), #{length(active_topics)} active topics")
 
-            %{state |
-              bulletin: bulletin,
-              active_topics: active_topics,
-              session_summaries: session_summaries,
-              last_refresh: DateTime.utc_now()
+            Logger.info(
+              "Cortex: bulletin refreshed (#{byte_size(bulletin)} bytes), #{length(active_topics)} active topics"
+            )
+
+            %{
+              state
+              | bulletin: bulletin,
+                active_topics: active_topics,
+                session_summaries: session_summaries,
+                last_refresh: DateTime.utc_now()
             }
 
           {:ok, %{content: _}} ->
             Logger.warning("Cortex: LLM returned empty content, keeping previous bulletin")
 
-            %{state |
-              active_topics: active_topics,
-              session_summaries: session_summaries,
-              last_refresh: DateTime.utc_now()
+            %{
+              state
+              | active_topics: active_topics,
+                session_summaries: session_summaries,
+                last_refresh: DateTime.utc_now()
             }
 
           {:error, reason} ->
-            Logger.warning("Cortex: synthesis failed — #{inspect(reason)}, keeping previous bulletin")
+            Logger.warning(
+              "Cortex: synthesis failed — #{inspect(reason)}, keeping previous bulletin"
+            )
 
-            %{state |
-              active_topics: active_topics,
-              session_summaries: session_summaries,
-              last_refresh: DateTime.utc_now()
+            %{
+              state
+              | active_topics: active_topics,
+                session_summaries: session_summaries,
+                last_refresh: DateTime.utc_now()
             }
         end
       end
@@ -411,7 +428,11 @@ defmodule OptimalSystemAgent.Agent.Cortex do
   defp trim_content(content, max_chars) when is_binary(content) do
     if byte_size(content) > max_chars do
       # Take the last max_chars worth of content (most recent entries are at the end)
-      binary_part(content, max(byte_size(content) - max_chars, 0), min(max_chars, byte_size(content)))
+      binary_part(
+        content,
+        max(byte_size(content) - max_chars, 0),
+        min(max_chars, byte_size(content))
+      )
     else
       content
     end

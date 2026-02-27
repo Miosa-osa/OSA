@@ -23,7 +23,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
   @impl true
   def description do
     "Spawn multiple sub-agents to work on a complex task in parallel. " <>
-    "Use this for tasks that benefit from decomposition (building apps, large refactors, multi-file changes)."
+      "Use this for tasks that benefit from decomposition (building apps, large refactors, multi-file changes)."
   end
 
   @impl true
@@ -37,7 +37,8 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
         },
         "strategy" => %{
           "type" => "string",
-          "description" => "Execution strategy: parallel (all at once), pipeline (sequential with dependency passing), or auto (let the orchestrator decide)",
+          "description" =>
+            "Execution strategy: parallel (all at once), pipeline (sequential with dependency passing), or auto (let the orchestrator decide)",
           "enum" => ["parallel", "pipeline", "auto"]
         }
       },
@@ -54,10 +55,15 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
     # so calling list_tools() would deadlock. list_tools_direct() is lock-free.
     tools = OptimalSystemAgent.Skills.Registry.list_tools_direct()
 
-    Logger.info("[Orchestrate Skill] Launching orchestration for task: #{String.slice(task, 0, 100)}")
+    Logger.info(
+      "[Orchestrate Skill] Launching orchestration for task: #{String.slice(task, 0, 100)}"
+    )
 
     try do
-      case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id, strategy: strategy, cached_tools: tools) do
+      case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id,
+             strategy: strategy,
+             cached_tools: tools
+           ) do
         {:ok, _task_id, result} when is_binary(result) ->
           {:ok, result}
 

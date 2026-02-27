@@ -188,7 +188,11 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   defp process_sync_response(_body, _state), do: :ok
 
   defp process_event(
-         %{"type" => "m.room.message", "sender" => sender, "content" => %{"msgtype" => "m.text", "body" => text}} = event,
+         %{
+           "type" => "m.room.message",
+           "sender" => sender,
+           "content" => %{"msgtype" => "m.text", "body" => text}
+         } = event,
          room_id,
          state
        ) do
@@ -222,7 +226,9 @@ defmodule OptimalSystemAgent.Channels.Matrix do
 
   defp do_send_message(state, room_id, message, _opts) do
     txn_id = state.txn_id + 1
-    url = "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
+
+    url =
+      "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
 
     body = %{msgtype: "m.text", body: message}
 

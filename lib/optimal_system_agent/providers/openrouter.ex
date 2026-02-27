@@ -28,7 +28,11 @@ defmodule OptimalSystemAgent.Providers.OpenRouter do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :openrouter_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :openrouter_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :openrouter_model, default_model())
+
     url = Application.get_env(:optimal_system_agent, :openrouter_url, @default_url)
 
     opts =

@@ -450,7 +450,7 @@ defmodule OptimalSystemAgent.Signal.ClassifierTest do
       # base 0.5 + length_bonus(3/500=0.006) + question_bonus 0.15 = 0.656
       weight = Classifier.calculate_weight("up?")
 
-      assert_in_delta weight, 0.5 + (3 / 500.0) + 0.15, 0.001
+      assert_in_delta weight, 0.5 + 3 / 500.0 + 0.15, 0.001
     end
 
     test "question bonus adds exactly 0.15 compared to same message without question mark" do
@@ -459,7 +459,7 @@ defmodule OptimalSystemAgent.Signal.ClassifierTest do
 
       # The only difference is the '?' character: +1 char length bonus + 0.15 question bonus
       # We check the question bonus portion dominates (within float tolerance)
-      assert_in_delta weight_with_q - weight_no_q, 0.15 + (1 / 500.0), 0.001
+      assert_in_delta weight_with_q - weight_no_q, 0.15 + 1 / 500.0, 0.001
     end
 
     test "urgency bonus adds 0.2 for 'urgent'" do
@@ -499,42 +499,42 @@ defmodule OptimalSystemAgent.Signal.ClassifierTest do
       # "hi" = 2 chars, base 0.5 + 2/500=0.004 - 0.3 = 0.204
       weight = Classifier.calculate_weight("hi")
 
-      assert_in_delta weight, 0.5 + (2 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 2 / 500.0 - 0.3, 0.001
     end
 
     test "noise penalty subtracts 0.3 for 'hello'" do
       # "hello" = 5 chars, base 0.5 + 5/500=0.01 - 0.3 = 0.21
       weight = Classifier.calculate_weight("hello")
 
-      assert_in_delta weight, 0.5 + (5 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 5 / 500.0 - 0.3, 0.001
     end
 
     test "noise penalty subtracts 0.3 for 'hey'" do
       # "hey" = 3 chars, base 0.5 + 3/500=0.006 - 0.3 = 0.206
       weight = Classifier.calculate_weight("hey")
 
-      assert_in_delta weight, 0.5 + (3 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 3 / 500.0 - 0.3, 0.001
     end
 
     test "noise penalty subtracts 0.3 for 'thanks'" do
       # "thanks" = 6 chars, base 0.5 + 6/500=0.012 - 0.3 = 0.212
       weight = Classifier.calculate_weight("thanks")
 
-      assert_in_delta weight, 0.5 + (6 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 6 / 500.0 - 0.3, 0.001
     end
 
     test "noise penalty subtracts 0.3 for 'ok'" do
       # "ok" = 2 chars, base 0.5 + 2/500=0.004 - 0.3 = 0.204
       weight = Classifier.calculate_weight("ok")
 
-      assert_in_delta weight, 0.5 + (2 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 2 / 500.0 - 0.3, 0.001
     end
 
     test "noise penalty subtracts 0.3 for 'lol'" do
       # "lol" = 3 chars, base 0.5 + 3/500=0.006 - 0.3 = 0.206
       weight = Classifier.calculate_weight("lol")
 
-      assert_in_delta weight, 0.5 + (3 / 500.0) - 0.3, 0.001
+      assert_in_delta weight, 0.5 + 3 / 500.0 - 0.3, 0.001
     end
 
     test "length bonus is proportional: 500 chars yields max 0.2 bonus" do

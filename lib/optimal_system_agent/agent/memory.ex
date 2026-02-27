@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
   """
   use GenServer
   require Logger
+  alias OptimalSystemAgent.Store.{Repo, Message}
 
   @sessions_dir Application.compile_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions")
   @osa_dir Application.compile_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
@@ -165,6 +166,18 @@ defmodule OptimalSystemAgent.Agent.Memory do
     GenServer.call(__MODULE__, {:resume_session, session_id})
   end
 
+  @doc "Search messages across all sessions."
+  @spec search_messages(String.t(), keyword()) :: [map()]
+  def search_messages(query, opts \\ []) do
+    GenServer.call(__MODULE__, {:search_messages, query, opts})
+  end
+
+  @doc "Get statistics for a specific session."
+  @spec session_stats(String.t()) :: map()
+  def session_stats(session_id) do
+    GenServer.call(__MODULE__, {:session_stats, session_id})
+  end
+
   # ────────────────────────────────────────────────────────────────────
   # GenServer Callbacks
   # ────────────────────────────────────────────────────────────────────
@@ -188,12 +201,16 @@ defmodule OptimalSystemAgent.Agent.Memory do
 
   @impl true
   def handle_cast({:append, session_id, entry}, state) do
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    # JSONL write (backward compat)
     path = session_path(state.sessions_dir, session_id)
-
-    line =
-      Jason.encode!(Map.put(entry, :timestamp, DateTime.utc_now() |> DateTime.to_iso8601()))
-
+    line = Jason.encode!(Map.put(entry, :timestamp, timestamp))
     File.write!(path, line <> "\n", [:append, :utf8])
+
+    # SQLite write (new)
+    persist_to_sqlite(session_id, entry, timestamp)
+
     {:noreply, state}
   end
 
@@ -215,24 +232,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
 
   @impl true
   def handle_call({:load, session_id}, _from, state) do
-    path = session_path(state.sessions_dir, session_id)
-
-    messages =
-      if File.exists?(path) do
-        path
-        |> File.read!()
-        |> String.split("\n", trim: true)
-        |> Enum.map(fn line ->
-          case Jason.decode(line) do
-            {:ok, msg} -> msg
-            _ -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-      else
-        []
-      end
-
+    messages = load_from_sqlite(session_id) || load_from_jsonl(state.sessions_dir, session_id)
     {:reply, messages, state}
   end
 
@@ -301,6 +301,18 @@ defmodule OptimalSystemAgent.Agent.Memory do
     end
   end
 
+  @impl true
+  def handle_call({:search_messages, query, opts}, _from, state) do
+    result = do_search_messages(query, opts)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:session_stats, session_id}, _from, state) do
+    result = do_session_stats(session_id)
+    {:reply, result, state}
+  end
+
   # ────────────────────────────────────────────────────────────────────
   # Intelligent Retrieval
   # ────────────────────────────────────────────────────────────────────
@@ -326,7 +338,9 @@ defmodule OptimalSystemAgent.Agent.Memory do
               |> Enum.map(fn %{"id" => id, "score" => score} ->
                 case :ets.lookup(@entry_table, id) do
                   [{^id, entry}] ->
-                    header = "## [#{entry[:category] || "general"}] #{entry[:timestamp] || "unknown"}"
+                    header =
+                      "## [#{entry[:category] || "general"}] #{entry[:timestamp] || "unknown"}"
+
                     "#{header} (relevance: #{score})\n#{entry[:content] || ""}\n"
 
                   [] ->
@@ -500,7 +514,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
       if keywords != [] do
         Enum.map(filtered, fn entry ->
           entry_keywords = extract_keywords(entry[:content] || "")
-          overlap = length(keywords -- keywords -- entry_keywords)
+          overlap = length(keywords -- (keywords -- entry_keywords))
           score = compute_relevance_score(entry, overlap, length(keywords))
           {score, entry}
         end)
@@ -960,4 +974,164 @@ defmodule OptimalSystemAgent.Agent.Memory do
   defp memory_file_path do
     Path.expand(Path.join(@osa_dir, "MEMORY.md"))
   end
+
+  # ────────────────────────────────────────────────────────────────────
+  # SQLite Persistence
+  # ────────────────────────────────────────────────────────────────────
+
+  defp persist_to_sqlite(session_id, entry, _timestamp) do
+    attrs = %{
+      session_id: session_id,
+      role: to_string(Map.get(entry, :role, Map.get(entry, "role", "user"))),
+      content: to_string(Map.get(entry, :content, Map.get(entry, "content", ""))),
+      tool_calls: Map.get(entry, :tool_calls, Map.get(entry, "tool_calls")),
+      tool_call_id: Map.get(entry, :tool_call_id, Map.get(entry, "tool_call_id")),
+      signal_mode: Map.get(entry, :signal_mode, Map.get(entry, "signal_mode")),
+      signal_weight: parse_float(Map.get(entry, :signal_weight, Map.get(entry, "signal_weight"))),
+      token_count: parse_int(Map.get(entry, :token_count, Map.get(entry, "token_count"))),
+      metadata: Map.get(entry, :metadata, Map.get(entry, "metadata", %{}))
+    }
+
+    case Message.changeset(attrs) |> Repo.insert() do
+      {:ok, _msg} ->
+        :ok
+
+      {:error, changeset} ->
+        Logger.warning("Failed to persist message to SQLite: #{inspect(changeset.errors)}")
+    end
+  rescue
+    e ->
+      Logger.warning("SQLite write error: #{Exception.message(e)}")
+  end
+
+  defp load_from_sqlite(session_id) do
+    import Ecto.Query
+
+    messages =
+      from(m in Message,
+        where: m.session_id == ^session_id,
+        order_by: [asc: m.inserted_at]
+      )
+      |> Repo.all()
+      |> Enum.map(fn msg ->
+        # Return string-keyed maps for backward compat with JSONL format
+        base = %{
+          "role" => msg.role,
+          "content" => msg.content,
+          "timestamp" => NaiveDateTime.to_iso8601(msg.inserted_at)
+        }
+
+        base
+        |> maybe_put("tool_calls", msg.tool_calls)
+        |> maybe_put("tool_call_id", msg.tool_call_id)
+        |> maybe_put("signal_mode", msg.signal_mode)
+        |> maybe_put("signal_weight", msg.signal_weight)
+        |> maybe_put("token_count", msg.token_count)
+      end)
+
+    if messages == [], do: nil, else: messages
+  rescue
+    _ -> nil
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, val), do: Map.put(map, key, val)
+
+  defp load_from_jsonl(sessions_dir, session_id) do
+    path = session_path(sessions_dir, session_id)
+
+    if File.exists?(path) do
+      path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(fn line ->
+        case Jason.decode(line) do
+          {:ok, msg} -> msg
+          _ -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+    else
+      []
+    end
+  end
+
+  defp do_search_messages(query, opts) do
+    import Ecto.Query
+
+    limit = Keyword.get(opts, :limit, 20)
+    pattern = "%#{query}%"
+
+    from(m in Message,
+      where: like(m.content, ^pattern),
+      order_by: [desc: m.inserted_at],
+      limit: ^limit,
+      select: %{
+        id: m.id,
+        session_id: m.session_id,
+        role: m.role,
+        content: m.content,
+        inserted_at: m.inserted_at
+      }
+    )
+    |> Repo.all()
+  rescue
+    e ->
+      Logger.warning("Message search error: #{Exception.message(e)}")
+      []
+  end
+
+  defp do_session_stats(session_id) do
+    import Ecto.Query
+
+    stats =
+      from(m in Message,
+        where: m.session_id == ^session_id,
+        select: %{
+          count: count(m.id),
+          total_tokens: sum(m.token_count),
+          first_at: min(m.inserted_at),
+          last_at: max(m.inserted_at)
+        }
+      )
+      |> Repo.one()
+
+    role_counts =
+      from(m in Message,
+        where: m.session_id == ^session_id,
+        group_by: m.role,
+        select: {m.role, count(m.id)}
+      )
+      |> Repo.all()
+      |> Map.new()
+
+    Map.put(stats || %{}, :roles, role_counts)
+  rescue
+    _ -> %{count: 0, total_tokens: 0, roles: %{}}
+  end
+
+  defp parse_float(nil), do: nil
+  defp parse_float(f) when is_float(f), do: f
+  defp parse_float(i) when is_integer(i), do: i / 1.0
+
+  defp parse_float(s) when is_binary(s) do
+    case Float.parse(s) do
+      {f, _} -> f
+      :error -> nil
+    end
+  end
+
+  defp parse_float(_), do: nil
+
+  defp parse_int(nil), do: nil
+  defp parse_int(i) when is_integer(i), do: i
+
+  defp parse_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {i, _} -> i
+      :error -> nil
+    end
+  end
+
+  defp parse_int(_), do: nil
 end

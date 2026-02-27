@@ -102,13 +102,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
 
   defp verify_signature(signature, timestamp, nonce, body) do
     secret = Application.get_env(:optimal_system_agent, :shared_secret, "")
-    payload = timestamp <> "\n" <> nonce <> "\n" <> body
-    expected = :crypto.mac(:hmac, :sha256, secret, payload) |> Base.encode16(case: :lower)
 
-    if Plug.Crypto.secure_compare(expected, signature) do
-      :ok
+    if secret == "" or is_nil(secret) do
+      {:error, "HMAC secret not configured — set OSA_SHARED_SECRET"}
     else
-      {:error, "Invalid signature"}
+      payload = timestamp <> "\n" <> nonce <> "\n" <> body
+      expected = :crypto.mac(:hmac, :sha256, secret, payload) |> Base.encode16(case: :lower)
+
+      if Plug.Crypto.secure_compare(expected, signature) do
+        :ok
+      else
+        {:error, "Invalid signature"}
+      end
     end
   end
 
@@ -141,11 +146,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
   end
 
   defp schedule_reap do
-    # Use a simple process for reaping since this is a Plug, not a GenServer
-    spawn(fn ->
-      Process.sleep(@reap_interval)
-      reap_expired()
-      schedule_reap()
-    end)
+    # Use :timer.apply_interval for crash-safe periodic reaping
+    # (unlike a raw spawn chain, this survives if reap_expired raises)
+    :timer.apply_interval(@reap_interval, __MODULE__, :do_reap, [])
   end
+
+  @doc false
+  def do_reap, do: reap_expired()
 end

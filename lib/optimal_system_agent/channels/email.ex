@@ -149,7 +149,9 @@ defmodule OptimalSystemAgent.Channels.Email do
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
-        reply_subject = if String.starts_with?(subject, "Re: "), do: subject, else: "Re: #{subject}"
+        reply_subject =
+          if String.starts_with?(subject, "Re: "), do: subject, else: "Re: #{subject}"
+
         do_send_email(state, from_email, response, subject: reply_subject)
 
       {:filtered, signal} ->

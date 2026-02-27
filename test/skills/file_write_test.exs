@@ -14,7 +14,9 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileWriteTest do
     end
 
     test "writing to /usr/ is blocked" do
-      assert {:error, msg} = FileWrite.execute(%{"path" => "/usr/local/bin/evil", "content" => "x"})
+      assert {:error, msg} =
+               FileWrite.execute(%{"path" => "/usr/local/bin/evil", "content" => "x"})
+
       assert msg =~ "Access denied"
     end
 
@@ -60,7 +62,9 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileWriteTest do
     end
 
     test "writing to ~/.config/something is blocked" do
-      assert {:error, msg} = FileWrite.execute(%{"path" => "~/.config/evil.json", "content" => "x"})
+      assert {:error, msg} =
+               FileWrite.execute(%{"path" => "~/.config/evil.json", "content" => "x"})
+
       assert msg =~ "Access denied"
     end
   end

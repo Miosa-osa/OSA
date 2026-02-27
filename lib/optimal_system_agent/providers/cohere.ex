@@ -27,7 +27,11 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :cohere_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :cohere_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :cohere_model, default_model())
+
     base_url = Application.get_env(:optimal_system_agent, :cohere_url, @default_url)
 
     unless api_key do
@@ -133,7 +137,10 @@ defmodule OptimalSystemAgent.Providers.Cohere do
   end
 
   defp extract_content(%{"message" => %{"content" => [%{"text" => text} | _]}}), do: text
-  defp extract_content(%{"message" => %{"content" => content}}) when is_binary(content), do: content
+
+  defp extract_content(%{"message" => %{"content" => content}}) when is_binary(content),
+    do: content
+
   defp extract_content(%{"text" => text}), do: text
 
   defp extract_content(%{"message" => %{"tool_calls" => _calls}}), do: ""

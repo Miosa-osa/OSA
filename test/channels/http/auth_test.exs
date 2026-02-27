@@ -82,6 +82,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
 
     test "does not override 'iat' when already present in claims" do
       custom_iat = 1_700_000_000
+
       [_, payload_b64 | _] =
         Auth.generate_token(%{"user_id" => "u1", "iat" => custom_iat}) |> String.split(".")
 
@@ -93,6 +94,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
 
     test "does not override 'exp' when already present in claims" do
       custom_exp = 9_999_999_999
+
       [_, payload_b64 | _] =
         Auth.generate_token(%{"user_id" => "u1", "exp" => custom_exp}) |> String.split(".")
 
@@ -204,7 +206,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
       token = Auth.generate_token(%{"user_id" => "u1"})
       [_header, payload, sig] = String.split(token, ".")
 
-      evil_header = Base.url_encode64(Jason.encode!(%{"alg" => "none", "typ" => "JWT"}), padding: false)
+      evil_header =
+        Base.url_encode64(Jason.encode!(%{"alg" => "none", "typ" => "JWT"}), padding: false)
+
       tampered = "#{evil_header}.#{payload}.#{sig}"
 
       assert {:error, :invalid_token} = Auth.verify_token(tampered)

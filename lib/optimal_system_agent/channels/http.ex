@@ -25,20 +25,21 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
   alias OptimalSystemAgent.Machines
 
-  plug Plug.Logger, log: :debug
-  plug :match
-  plug :dispatch
+  plug(Plug.Logger, log: :debug)
+  plug(:match)
+  plug(:dispatch)
 
   # ── Health (no auth) ────────────────────────────────────────────────
 
   get "/health" do
-    body = Jason.encode!(%{
-      status: "ok",
-      version: Application.spec(:optimal_system_agent, :vsn) |> to_string(),
-      uptime_seconds: System.monotonic_time(:second),
-      machines: Machines.active(),
-      provider: Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-    })
+    body =
+      Jason.encode!(%{
+        status: "ok",
+        version: Application.spec(:optimal_system_agent, :vsn) |> to_string(),
+        uptime_seconds: System.monotonic_time(:second),
+        machines: Machines.active(),
+        provider: Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -47,7 +48,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
   # ── All /api routes require JWT ─────────────────────────────────────
 
-  forward "/api/v1", to: OptimalSystemAgent.Channels.HTTP.API
+  forward("/api/v1", to: OptimalSystemAgent.Channels.HTTP.API)
 
   # ── Catch-all ───────────────────────────────────────────────────────
 

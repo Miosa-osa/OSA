@@ -130,6 +130,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         %{event: :orchestrator_task_started, task_id: task_id} ->
           clear_line()
           IO.puts("#{@bold}#{@cyan}  ▶ Spawning agents...#{@reset}")
+
           try do
             :ets.insert(:cli_signal_cache, {:active_task, task_id})
           rescue
@@ -138,14 +139,17 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
         %{event: :orchestrator_agents_spawning, agent_count: count} ->
           clear_line()
-          IO.puts("#{@cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{@reset}")
+
+          IO.puts(
+            "#{@cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{@reset}"
+          )
 
         %{event: :orchestrator_agent_started, agent_name: name, role: role} ->
           role_str = if role, do: " (#{role})", else: ""
           IO.puts("#{@dim}  ├─ #{name}#{role_str} started#{@reset}")
 
         %{event: :orchestrator_agent_progress, agent_name: name, current_action: action}
-          when is_binary(action) and action != "" ->
+        when is_binary(action) and action != "" ->
           clear_line()
           IO.write("#{@dim}  │  #{name}: #{String.slice(action, 0, 60)}#{@reset}")
 
@@ -217,11 +221,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
         suggestion = suggest_command(cmd_name)
 
         IO.puts("#{@yellow}  error: unknown command '/#{cmd_name}'#{@reset}")
+
         if suggestion do
           IO.puts("#{@dim}  (Did you mean /#{suggestion}?)#{@reset}\n")
         else
           IO.puts("#{@dim}  Type /help to see available commands#{@reset}\n")
         end
+
         session_id
     end
   end
@@ -272,35 +278,37 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
     # Register per-request event handlers that forward to spinner.
     # Capture refs so we can unregister after the request completes.
-    tool_ref = Bus.register_handler(:tool_call, fn payload ->
-      if Process.alive?(spinner) do
-        case payload do
-          %{name: n, phase: :start, args: a} ->
-            Spinner.update(spinner, {:tool_start, n, a || ""})
+    tool_ref =
+      Bus.register_handler(:tool_call, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{name: n, phase: :start, args: a} ->
+              Spinner.update(spinner, {:tool_start, n, a || ""})
 
-          %{name: n, phase: :start} ->
-            Spinner.update(spinner, {:tool_start, n, ""})
+            %{name: n, phase: :start} ->
+              Spinner.update(spinner, {:tool_start, n, ""})
 
-          %{name: n, phase: :end, duration_ms: ms} ->
-            Spinner.update(spinner, {:tool_end, n, ms})
+            %{name: n, phase: :end, duration_ms: ms} ->
+              Spinner.update(spinner, {:tool_end, n, ms})
 
-          _ ->
-            :ok
+            _ ->
+              :ok
+          end
         end
-      end
-    end)
+      end)
 
-    llm_ref = Bus.register_handler(:llm_response, fn payload ->
-      if Process.alive?(spinner) do
-        case payload do
-          %{usage: u} when is_map(u) and map_size(u) > 0 ->
-            Spinner.update(spinner, {:llm_response, u})
+    llm_ref =
+      Bus.register_handler(:llm_response, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{usage: u} when is_map(u) and map_size(u) > 0 ->
+              Spinner.update(spinner, {:llm_response, u})
 
-          _ ->
-            :ok
+            _ ->
+              :ok
+          end
         end
-      end
-    end)
+      end)
 
     result = Loop.process_message(session_id, input, opts)
 
@@ -338,7 +346,10 @@ defmodule OptimalSystemAgent.Channels.CLI do
     case PlanReview.review(plan_text) do
       :approved ->
         IO.puts("#{@dim}  ▶ Executing plan...#{@reset}\n")
-        execute_msg = "Execute the following approved plan. Do not re-plan — proceed directly with implementation.\n\n#{plan_text}\n\nOriginal request: #{original_input}"
+
+        execute_msg =
+          "Execute the following approved plan. Do not re-plan — proceed directly with implementation.\n\n#{plan_text}\n\nOriginal request: #{original_input}"
+
         send_to_agent(execute_msg, session_id, skip_plan: true)
 
       :rejected ->
@@ -346,7 +357,10 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
       {:edit, feedback} ->
         IO.puts("#{@dim}  ↻ Revising plan (#{revision + 1}/#{@max_plan_revisions})...#{@reset}\n")
-        revised_msg = "Revise your plan based on this feedback:\n\n#{feedback}\n\nOriginal plan:\n#{plan_text}\n\nOriginal request: #{original_input}"
+
+        revised_msg =
+          "Revise your plan based on this feedback:\n\n#{feedback}\n\nOriginal plan:\n#{plan_text}\n\nOriginal request: #{original_input}"
+
         # Call send_to_agent_for_plan to get the revised plan directly, then loop
         revised_result = send_to_agent_for_plan(revised_msg, session_id)
 
@@ -364,25 +378,37 @@ defmodule OptimalSystemAgent.Channels.CLI do
   defp send_to_agent_for_plan(input, session_id) do
     spinner = Spinner.start()
 
-    tool_ref = Bus.register_handler(:tool_call, fn payload ->
-      if Process.alive?(spinner) do
-        case payload do
-          %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
-          %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
-          %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
-          _ -> :ok
-        end
-      end
-    end)
+    tool_ref =
+      Bus.register_handler(:tool_call, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{name: n, phase: :start, args: a} ->
+              Spinner.update(spinner, {:tool_start, n, a || ""})
 
-    llm_ref = Bus.register_handler(:llm_response, fn payload ->
-      if Process.alive?(spinner) do
-        case payload do
-          %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
-          _ -> :ok
+            %{name: n, phase: :start} ->
+              Spinner.update(spinner, {:tool_start, n, ""})
+
+            %{name: n, phase: :end, duration_ms: ms} ->
+              Spinner.update(spinner, {:tool_end, n, ms})
+
+            _ ->
+              :ok
+          end
         end
-      end
-    end)
+      end)
+
+    llm_ref =
+      Bus.register_handler(:llm_response, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{usage: u} when is_map(u) and map_size(u) > 0 ->
+              Spinner.update(spinner, {:llm_response, u})
+
+            _ ->
+              :ok
+          end
+        end
+      end)
 
     result = Loop.process_message(session_id, input)
 
@@ -434,6 +460,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   defp format_elapsed(ms) when ms < 1_000, do: "<1s"
   defp format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
+
   defp format_elapsed(ms) do
     mins = div(ms, 60_000)
     secs = div(rem(ms, 60_000), 1_000)
@@ -546,9 +573,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
     lines = wrap_text(rendered, terminal_width() - 4)
 
     IO.puts("")
+
     Enum.each(lines, fn line ->
       IO.puts("#{@white}  #{line}#{@reset}")
     end)
+
     IO.puts("")
   end
 
@@ -598,6 +627,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
     # Show abbreviated path: ~/…/ProjectName for deep paths
     parts = Path.split(shortened)
+
     case length(parts) do
       n when n > 3 -> "~/…/" <> List.last(parts)
       _ -> shortened

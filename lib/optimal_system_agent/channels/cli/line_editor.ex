@@ -12,15 +12,14 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   - Fallback to IO.gets when /dev/tty unavailable
   """
 
-  defstruct [
-    buffer: [],
-    cursor: 0,
-    history: [],
-    history_index: -1,
-    saved_input: [],
-    prompt: "",
-    tty: nil  # single fd for /dev/tty, read+write, bypasses Erlang group leader
-  ]
+  defstruct buffer: [],
+            cursor: 0,
+            history: [],
+            history_index: -1,
+            saved_input: [],
+            prompt: "",
+            # single fd for /dev/tty, read+write, bypasses Erlang group leader
+            tty: nil
 
   @doc """
   Read a line of input with readline-style editing.
@@ -59,15 +58,30 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
       # Write prompt directly to /dev/tty — bypasses Erlang group leader
       tty_write(tty, prompt)
-      input_loop(state)
-    after
-      # Move to next line while still in raw mode, via direct tty write.
-      # This ensures the input line stays visible and cursor is on a new line.
-      tty_write(tty, "\n")
-      # Restore terminal to cooked mode.
-      # Because we never used IO.write (Erlang group leader) during raw mode,
-      # user_drv has no buffered content to ghost/replay on mode switch.
+      result = input_loop(state)
+
+      # Erase the raw-mode line BEFORE restoring stty.  This prevents
+      # the ghost/duplicate that appears when the terminal mode switches
+      # from raw→cooked — the switch can re-echo whatever was on the line,
+      # but now the line is empty so the ghost is invisible.
+      tty_write(tty, "\r\e[2K")
       restore_stty(saved)
+
+      # Re-display prompt+input through standard IO (single consistent
+      # output path, no /dev/tty vs group-leader conflict) then newline.
+      line_text =
+        case result do
+          {:ok, text} -> text
+          _ -> ""
+        end
+
+      IO.write("#{prompt}#{line_text}\n")
+      result
+    rescue
+      e ->
+        restore_stty(saved)
+        IO.write("\n")
+        reraise e, __STACKTRACE__
     end
   end
 
@@ -172,19 +186,18 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp insert_char(state, ch) do
     {before, after_cursor} = Enum.split(state.buffer, state.cursor)
-    %{state |
-      buffer: before ++ [ch] ++ after_cursor,
-      cursor: state.cursor + 1,
-      history_index: -1
-    }
+    %{state | buffer: before ++ [ch] ++ after_cursor, cursor: state.cursor + 1, history_index: -1}
   end
 
   defp delete_backward(%{cursor: 0} = state), do: state
+
   defp delete_backward(state) do
     {before, after_cursor} = Enum.split(state.buffer, state.cursor)
-    %{state |
-      buffer: Enum.take(before, length(before) - 1) ++ after_cursor,
-      cursor: state.cursor - 1
+
+    %{
+      state
+      | buffer: Enum.take(before, length(before) - 1) ++ after_cursor,
+        cursor: state.cursor - 1
     }
   end
 
@@ -198,10 +211,17 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   defp delete_word_back(%{cursor: 0} = state), do: state
+
   defp delete_word_back(state) do
     {before, after_cursor} = Enum.split(state.buffer, state.cursor)
     # Drop trailing spaces, then drop non-spaces
-    trimmed = before |> Enum.reverse() |> Enum.drop_while(&(&1 == " ")) |> Enum.drop_while(&(&1 != " ")) |> Enum.reverse()
+    trimmed =
+      before
+      |> Enum.reverse()
+      |> Enum.drop_while(&(&1 == " "))
+      |> Enum.drop_while(&(&1 != " "))
+      |> Enum.reverse()
+
     new_cursor = length(trimmed)
     %{state | buffer: trimmed ++ after_cursor, cursor: new_cursor}
   end
@@ -219,14 +239,12 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   defp history_forward(%{history_index: -1} = state), do: state
+
   defp history_forward(%{history_index: 0} = state) do
     # Return to saved input
-    %{state |
-      buffer: state.saved_input,
-      cursor: length(state.saved_input),
-      history_index: -1
-    }
+    %{state | buffer: state.saved_input, cursor: length(state.saved_input), history_index: -1}
   end
+
   defp history_forward(state) do
     load_history(state, state.history_index - 1)
   end
@@ -243,12 +261,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     entry = Enum.at(state.history, idx, "")
     chars = String.graphemes(entry)
 
-    %{state |
-      buffer: chars,
-      cursor: length(chars),
-      history_index: idx,
-      saved_input: saved
-    }
+    %{state | buffer: chars, cursor: length(chars), history_index: idx, saved_input: saved}
   end
 
   # --- Rendering ---
@@ -286,6 +299,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   defp restore_stty(""), do: :os.cmd(~c"stty sane 2>/dev/null")
+
   defp restore_stty(saved) do
     :os.cmd(String.to_charlist("stty #{saved} 2>/dev/null"))
   end
@@ -317,18 +331,21 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       _ -> :unknown
     end
   end
+
   defp maybe_utf8(tty, <<lead>>) when lead >= 0xE0 and lead < 0xF0 do
     case :file.read(tty, 2) do
       {:ok, cont} -> {:char, <<lead>> <> cont}
       _ -> :unknown
     end
   end
+
   defp maybe_utf8(tty, <<lead>>) when lead >= 0xF0 do
     case :file.read(tty, 3) do
       {:ok, cont} -> {:char, <<lead>> <> cont}
       _ -> :unknown
     end
   end
+
   defp maybe_utf8(_, _), do: :unknown
 
   defp read_escape(tty) do
@@ -342,31 +359,47 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   # CSI sequences: ESC [ ...
   defp read_csi(tty) do
     case :file.read(tty, 1) do
-      {:ok, <<"A">>} -> :up
-      {:ok, <<"B">>} -> :down
-      {:ok, <<"C">>} -> :right
-      {:ok, <<"D">>} -> :left
-      {:ok, <<"H">>} -> :home
-      {:ok, <<"F">>} -> :end_key
+      {:ok, <<"A">>} ->
+        :up
+
+      {:ok, <<"B">>} ->
+        :down
+
+      {:ok, <<"C">>} ->
+        :right
+
+      {:ok, <<"D">>} ->
+        :left
+
+      {:ok, <<"H">>} ->
+        :home
+
+      {:ok, <<"F">>} ->
+        :end_key
+
       {:ok, <<"3">>} ->
         # Delete key: ESC [ 3 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :delete
           _ -> :unknown
         end
+
       {:ok, <<"1">>} ->
         # Home: ESC [ 1 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :home
           _ -> :unknown
         end
+
       {:ok, <<"4">>} ->
         # End: ESC [ 4 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :end_key
           _ -> :unknown
         end
-      _ -> :unknown
+
+      _ ->
+        :unknown
     end
   end
 

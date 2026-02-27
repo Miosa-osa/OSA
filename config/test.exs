@@ -2,8 +2,7 @@ import Config
 
 config :logger, level: :warning
 
-config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
-  pool: Ecto.Adapters.SQL.Sandbox
+config :optimal_system_agent, OptimalSystemAgent.Store.Repo, pool: Ecto.Adapters.SQL.Sandbox
 
 # Disable LLM-tier classification in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.

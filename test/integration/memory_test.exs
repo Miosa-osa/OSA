@@ -131,7 +131,9 @@ defmodule OptimalSystemAgent.Integration.MemoryTest do
     end
 
     test "returns {:error, :not_found} for a session that does not exist" do
-      result = Memory.resume_session("totally-nonexistent-session-#{System.unique_integer([:positive])}")
+      result =
+        Memory.resume_session("totally-nonexistent-session-#{System.unique_integer([:positive])}")
+
       assert {:error, :not_found} = result
     end
   end

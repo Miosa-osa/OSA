@@ -104,7 +104,12 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     start_time = System.monotonic_time(:millisecond)
 
     Logger.info("[PACT] Starting workflow for: #{String.slice(task, 0, 100)}")
-    Bus.emit(:system_event, %{event: :pact_workflow_started, swarm_id: swarm_id, task: String.slice(task, 0, 200)})
+
+    Bus.emit(:system_event, %{
+      event: :pact_workflow_started,
+      swarm_id: swarm_id,
+      task: String.slice(task, 0, 200)
+    })
 
     Mailbox.create(swarm_id)
 
@@ -113,9 +118,11 @@ defmodule OptimalSystemAgent.Swarm.PACT do
            :ok <- check_gate(:planning, planning, opts),
            {:ok, action} <- run_phase(:action, task, swarm_id, opts, [planning]),
            :ok <- check_gate(:action, action, opts),
-           {:ok, coordination} <- run_phase(:coordination, task, swarm_id, opts, [planning, action]),
+           {:ok, coordination} <-
+             run_phase(:coordination, task, swarm_id, opts, [planning, action]),
            :ok <- check_gate(:coordination, coordination, opts),
-           {:ok, testing} <- run_phase(:testing, task, swarm_id, opts, [planning, action, coordination]),
+           {:ok, testing} <-
+             run_phase(:testing, task, swarm_id, opts, [planning, action, coordination]),
            :ok <- check_gate(:testing, testing, opts) do
         phases = [planning, action, coordination, testing]
         total_ms = System.monotonic_time(:millisecond) - start_time
@@ -172,7 +179,13 @@ defmodule OptimalSystemAgent.Swarm.PACT do
             phase: phase,
             status: :failed,
             output: reason,
-            gate: %{name: "#{phase}", criteria: [], passed: false, score: 0.0, timestamp: DateTime.utc_now()},
+            gate: %{
+              name: "#{phase}",
+              criteria: [],
+              passed: false,
+              score: 0.0,
+              timestamp: DateTime.utc_now()
+            },
             duration_ms: 0
           }
 
@@ -225,15 +238,22 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     case dispatch_single_agent(swarm_id, opts[:planning_role], prompt, opts[:timeout_ms]) do
       {:ok, output} ->
         duration = System.monotonic_time(:millisecond) - phase_start
-        Bus.emit(:system_event, %{event: :pact_phase_completed, phase: :planning, swarm_id: swarm_id, duration_ms: duration})
 
-        {:ok, %{
+        Bus.emit(:system_event, %{
+          event: :pact_phase_completed,
           phase: :planning,
-          status: :ok,
-          output: output,
-          gate: nil,
+          swarm_id: swarm_id,
           duration_ms: duration
-        }}
+        })
+
+        {:ok,
+         %{
+           phase: :planning,
+           status: :ok,
+           output: output,
+           gate: nil,
+           duration_ms: duration
+         }}
 
       {:error, reason} ->
         {:error, :planning, reason, []}
@@ -264,8 +284,11 @@ defmodule OptimalSystemAgent.Swarm.PACT do
         max_concurrency: opts[:max_action_agents]
       )
       |> Enum.map(fn
-        {:ok, result} -> result
-        {:exit, reason} -> %{role: :unknown, result: "Task exited: #{inspect(reason)}", status: :failed}
+        {:ok, result} ->
+          result
+
+        {:exit, reason} ->
+          %{role: :unknown, result: "Task exited: #{inspect(reason)}", status: :failed}
       end)
 
     duration = System.monotonic_time(:millisecond) - phase_start
@@ -285,18 +308,24 @@ defmodule OptimalSystemAgent.Swarm.PACT do
       |> Enum.map(fn r -> "## Agent (#{r.role}) [#{r.status}]\n#{r.result}" end)
       |> Enum.join("\n\n---\n\n")
 
-    {:ok, %{
-      phase: :action,
-      status: if(successful > 0, do: :ok, else: :failed),
-      output: combined_output,
-      gate: nil,
-      duration_ms: duration
-    }}
+    {:ok,
+     %{
+       phase: :action,
+       status: if(successful > 0, do: :ok, else: :failed),
+       output: combined_output,
+       gate: nil,
+       duration_ms: duration
+     }}
   end
 
   defp run_phase(:coordination, task, swarm_id, opts, completed) do
     phase_start = System.monotonic_time(:millisecond)
-    Bus.emit(:system_event, %{event: :pact_phase_started, phase: :coordination, swarm_id: swarm_id})
+
+    Bus.emit(:system_event, %{
+      event: :pact_phase_started,
+      phase: :coordination,
+      swarm_id: swarm_id
+    })
 
     action_output = get_phase_output(completed, :action)
 
@@ -323,15 +352,22 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     case dispatch_single_agent(swarm_id, opts[:coordination_role], prompt, opts[:timeout_ms]) do
       {:ok, output} ->
         duration = System.monotonic_time(:millisecond) - phase_start
-        Bus.emit(:system_event, %{event: :pact_phase_completed, phase: :coordination, swarm_id: swarm_id, duration_ms: duration})
 
-        {:ok, %{
+        Bus.emit(:system_event, %{
+          event: :pact_phase_completed,
           phase: :coordination,
-          status: :ok,
-          output: output,
-          gate: nil,
+          swarm_id: swarm_id,
           duration_ms: duration
-        }}
+        })
+
+        {:ok,
+         %{
+           phase: :coordination,
+           status: :ok,
+           output: output,
+           gate: nil,
+           duration_ms: duration
+         }}
 
       {:error, reason} ->
         {:error, :coordination, reason, completed}
@@ -368,15 +404,22 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     case dispatch_single_agent(swarm_id, opts[:testing_role], prompt, opts[:timeout_ms]) do
       {:ok, output} ->
         duration = System.monotonic_time(:millisecond) - phase_start
-        Bus.emit(:system_event, %{event: :pact_phase_completed, phase: :testing, swarm_id: swarm_id, duration_ms: duration})
 
-        {:ok, %{
+        Bus.emit(:system_event, %{
+          event: :pact_phase_completed,
           phase: :testing,
-          status: :ok,
-          output: output,
-          gate: nil,
+          swarm_id: swarm_id,
           duration_ms: duration
-        }}
+        })
+
+        {:ok,
+         %{
+           phase: :testing,
+           status: :ok,
+           output: output,
+           gate: nil,
+           duration_ms: duration
+         }}
 
       {:error, reason} ->
         {:error, :testing, reason, completed}
@@ -400,11 +443,23 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     updated_result = %{phase_result | gate: gate}
 
     if gate.passed do
-      Bus.emit(:system_event, %{event: :pact_gate_passed, phase: phase, score: score, threshold: threshold})
+      Bus.emit(:system_event, %{
+        event: :pact_gate_passed,
+        phase: phase,
+        score: score,
+        threshold: threshold
+      })
+
       Logger.info("[PACT] Gate passed: #{phase} (score: #{score}, threshold: #{threshold})")
       :ok
     else
-      Bus.emit(:system_event, %{event: :pact_gate_failed, phase: phase, score: score, threshold: threshold})
+      Bus.emit(:system_event, %{
+        event: :pact_gate_failed,
+        phase: phase,
+        score: score,
+        threshold: threshold
+      })
+
       Logger.warning("[PACT] Gate FAILED: #{phase} (score: #{score}, threshold: #{threshold})")
       {:gate_failed, phase, updated_result, []}
     end
@@ -423,11 +478,13 @@ defmodule OptimalSystemAgent.Swarm.PACT do
 
     # Bonus for structured content
     has_subtasks = String.contains?(output, ["subtask", "task", "step", "1.", "- "])
-    has_roles = String.contains?(output, ["researcher", "coder", "reviewer", "architect", "tester"])
+
+    has_roles =
+      String.contains?(output, ["researcher", "coder", "reviewer", "architect", "tester"])
 
     base +
-      (if has_subtasks, do: 0.2, else: 0.0) +
-      (if has_roles, do: 0.2, else: 0.0)
+      if(has_subtasks, do: 0.2, else: 0.0) +
+      if has_roles, do: 0.2, else: 0.0
   end
 
   defp score_phase_output(:action, output) when is_binary(output) do
@@ -502,7 +559,8 @@ defmodule OptimalSystemAgent.Swarm.PACT do
 
   # Extract subtasks from the planning output.
   # Tries to parse structured output; falls back to splitting the task.
-  defp extract_subtasks(planning_output, original_task, max_agents) when is_binary(planning_output) do
+  defp extract_subtasks(planning_output, original_task, max_agents)
+       when is_binary(planning_output) do
     # Try to identify roles mentioned in the planning output
     role_map = %{
       "researcher" => :researcher,
@@ -560,24 +618,26 @@ defmodule OptimalSystemAgent.Swarm.PACT do
     else
       # Fallback: create a research + implementation pair
       [
-        {:researcher, """
-        ## Task to Research
-        #{original_task}
+        {:researcher,
+         """
+         ## Task to Research
+         #{original_task}
 
-        ## Planning Context
-        #{planning_output}
+         ## Planning Context
+         #{planning_output}
 
-        Research the best approaches, patterns, and considerations for this task.
-        """},
-        {:coder, """
-        ## Task to Implement
-        #{original_task}
+         Research the best approaches, patterns, and considerations for this task.
+         """},
+        {:coder,
+         """
+         ## Task to Implement
+         #{original_task}
 
-        ## Planning Context
-        #{planning_output}
+         ## Planning Context
+         #{planning_output}
 
-        Implement the solution based on the plan above.
-        """}
+         Implement the solution based on the plan above.
+         """}
       ]
       |> Enum.take(max_agents)
     end
@@ -590,7 +650,9 @@ defmodule OptimalSystemAgent.Swarm.PACT do
   # ── Rollback ───────────────────────────────────────────────────────
 
   defp rollback(completed_phases, swarm_id) do
-    Logger.info("[PACT] Rolling back #{length(completed_phases)} completed phase(s) for swarm #{swarm_id}")
+    Logger.info(
+      "[PACT] Rolling back #{length(completed_phases)} completed phase(s) for swarm #{swarm_id}"
+    )
 
     Bus.emit(:system_event, %{
       event: :pact_rollback,

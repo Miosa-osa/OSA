@@ -171,19 +171,31 @@ defmodule Mix.Tasks.Osa.Sandbox.Setup do
     workspace = Path.expand("~/.osa/workspace")
 
     smoke_args = [
-      "run", "--rm",
-      "--network", "none",
-      "--memory", "128m",
-      "--cpus", "0.5",
+      "run",
+      "--rm",
+      "--network",
+      "none",
+      "--memory",
+      "128m",
+      "--cpus",
+      "0.5",
       "--read-only",
-      "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-      "--security-opt", "no-new-privileges:true",
-      "--cap-drop", "ALL",
-      "-v", "#{workspace}:/workspace:rw",
-      "-w", "/workspace",
-      "-u", "1000:1000",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=16m",
+      "--security-opt",
+      "no-new-privileges:true",
+      "--cap-drop",
+      "ALL",
+      "-v",
+      "#{workspace}:/workspace:rw",
+      "-w",
+      "/workspace",
+      "-u",
+      "1000:1000",
       image,
-      "sh", "-c", "echo 'OSA sandbox OK' && whoami && id"
+      "sh",
+      "-c",
+      "echo 'OSA sandbox OK' && whoami && id"
     ]
 
     case docker_args(smoke_args) do

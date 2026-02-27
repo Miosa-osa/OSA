@@ -35,7 +35,8 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
 
   defp render_plan_box(plan_text) do
     width = box_width()
-    inner = width - 4  # 2 for border + 2 for padding
+    # 2 for border + 2 for padding
+    inner = width - 4
 
     # Render markdown then word-wrap
     rendered = Markdown.render(plan_text)
@@ -43,7 +44,10 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
 
     # Top border
     IO.puts("")
-    IO.puts("  #{@dim}┌─ #{@reset}#{@bold}#{@cyan}Plan#{@reset} #{@dim}#{String.duplicate("─", max(width - 10, 1))}┐#{@reset}")
+
+    IO.puts(
+      "  #{@dim}┌─ #{@reset}#{@bold}#{@cyan}Plan#{@reset} #{@dim}#{String.duplicate("─", max(width - 10, 1))}┐#{@reset}"
+    )
 
     # Empty line after top border
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width - 2)}#{@dim}│#{@reset}")
@@ -53,7 +57,10 @@ defmodule OptimalSystemAgent.Channels.CLI.PlanReview do
       # Strip ANSI for length calculation, pad with spaces
       visible_len = visible_length(line)
       padding = max(inner - visible_len, 0)
-      IO.puts("  #{@dim}│#{@reset} #{@white}#{line}#{@reset}#{String.duplicate(" ", padding)} #{@dim}│#{@reset}")
+
+      IO.puts(
+        "  #{@dim}│#{@reset} #{@white}#{line}#{@reset}#{String.duplicate(" ", padding)} #{@dim}│#{@reset}"
+      )
     end)
 
     # Empty line before bottom border

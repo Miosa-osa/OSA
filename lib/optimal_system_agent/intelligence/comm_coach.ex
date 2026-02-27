@@ -22,10 +22,8 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
 
   alias OptimalSystemAgent.Intelligence.CommProfiler
 
-  defstruct [
-    scores: [],
-    total_scored: 0
-  ]
+  defstruct scores: [],
+            total_scored: 0
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -55,11 +53,11 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
     profile = get_user_profile(user_id)
 
     scores = %{
-      length:        score_length(message, profile),
-      formality:     score_formality(message, profile),
-      clarity:       score_clarity(message),
+      length: score_length(message, profile),
+      formality: score_formality(message, profile),
+      clarity: score_clarity(message),
       actionability: score_actionability(message),
-      empathy:       score_empathy(message)
+      empathy: score_empathy(message)
     }
 
     avg = scores |> Map.values() |> Enum.sum() |> Kernel./(5)
@@ -71,21 +69,24 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
       cond do
         avg >= 0.7 -> :good
         avg >= 0.4 -> :needs_work
-        true       -> :poor
+        true -> :poor
       end
 
     result = %{
-      score:       Float.round(avg, 2),
+      score: Float.round(avg, 2),
       suggestions: suggestions,
-      verdict:     verdict,
-      details:     scores
+      verdict: verdict,
+      details: scores
     }
 
-    Logger.debug("[CommCoach] scored message length=#{String.length(message)} avg=#{avg} verdict=#{verdict}")
+    Logger.debug(
+      "[CommCoach] scored message length=#{String.length(message)} avg=#{avg} verdict=#{verdict}"
+    )
 
-    new_state = %{state |
-      total_scored: state.total_scored + 1,
-      scores: [avg | Enum.take(state.scores, 99)]
+    new_state = %{
+      state
+      | total_scored: state.total_scored + 1,
+        scores: [avg | Enum.take(state.scores, 99)]
     }
 
     {:reply, {:ok, result}, new_state}
@@ -101,7 +102,7 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
 
     result = %{
       total_scored: state.total_scored,
-      avg_score:    avg_score,
+      avg_score: avg_score,
       common_issues: common_issues(state.scores)
     }
 
@@ -113,6 +114,7 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
   # ---------------------------------------------------------------------------
 
   defp get_user_profile(nil), do: nil
+
   defp get_user_profile(user_id) do
     case CommProfiler.get_profile(user_id) do
       {:ok, profile} -> profile
@@ -152,8 +154,8 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
   # Infer expected length from message content signals (mode heuristics)
   defp infer_mode_length_score(message, len) do
     has_code_block? = String.contains?(message, "```")
-    has_steps?      = Regex.match?(~r/^\d+\./m, message)
-    has_analysis?   = Regex.match?(~r/\b(analysis|because|therefore|however|thus)\b/i, message)
+    has_steps? = Regex.match?(~r/^\d+\./m, message)
+    has_analysis? = Regex.match?(~r/\b(analysis|because|therefore|however|thus)\b/i, message)
 
     cond do
       # EXECUTE / BUILD mode — expect short, direct response
@@ -171,11 +173,11 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
       # Neutral — score based on absolute length bands
       true ->
         cond do
-          len < 10    -> 0.4
-          len < 20    -> 0.6
+          len < 10 -> 0.4
+          len < 20 -> 0.6
           len < 2_000 -> 1.0
           len < 4_000 -> 0.8
-          true        -> 0.5
+          true -> 0.5
         end
     end
   end
@@ -236,11 +238,11 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
     lower = String.downcase(message)
     words = max(1, length(String.split(lower, ~r/\W+/, trim: true)))
 
-    formal_count   = Enum.count(@formal_markers, &String.contains?(lower, &1))
+    formal_count = Enum.count(@formal_markers, &String.contains?(lower, &1))
     informal_count = Enum.count(@informal_markers, &String.contains?(lower, &1))
 
     # Normalise by word count so short messages aren't overly penalised
-    formal_density   = min(formal_count   / words * 10, 0.5)
+    formal_density = min(formal_count / words * 10, 0.5)
     informal_density = min(informal_count / words * 10, 0.5)
 
     clamped = 0.5 + formal_density - informal_density
@@ -280,9 +282,9 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
       end
 
     # Structured output bonus — bullets, headers (# prefix), or numbered list
-    has_bullets?  = Regex.match?(~r/^\s*[-*]\s+/m, message)
-    has_headers?  = Regex.match?(~r/^#+\s+\S/m, message)
-    has_numbers?  = Regex.match?(~r/^\d+\.\s+/m, message)
+    has_bullets? = Regex.match?(~r/^\s*[-*]\s+/m, message)
+    has_headers? = Regex.match?(~r/^#+\s+\S/m, message)
+    has_numbers? = Regex.match?(~r/^\d+\.\s+/m, message)
     structure_bonus = if has_bullets? or has_headers? or has_numbers?, do: 0.1, else: 0.0
 
     score = 1.0 - long_sentence_penalty - jargon_penalty - wall_penalty + structure_bonus
@@ -316,12 +318,13 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
   defp score_actionability(message) do
     lower = String.downcase(message)
 
-    has_action_verb? = Enum.any?(@action_verbs, fn verb ->
-      Regex.match?(~r/\b#{Regex.escape(verb)}\b/, lower)
-    end)
+    has_action_verb? =
+      Enum.any?(@action_verbs, fn verb ->
+        Regex.match?(~r/\b#{Regex.escape(verb)}\b/, lower)
+      end)
 
     has_numbered_steps? = Regex.match?(~r/^\d+\./m, message)
-    has_code_block?     = String.contains?(message, "```")
+    has_code_block? = String.contains?(message, "```")
 
     vague_count =
       Enum.count(@vague_phrases, fn phrase -> String.contains?(lower, phrase) end)
@@ -329,9 +332,9 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
     base =
       cond do
         has_numbered_steps? -> 0.9
-        has_code_block?     -> 0.85
-        has_action_verb?    -> 0.75
-        true                -> 0.5
+        has_code_block? -> 0.85
+        has_action_verb? -> 0.75
+        true -> 0.5
       end
 
     vague_penalty = vague_count * 0.15
@@ -378,9 +381,9 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
     base =
       cond do
         empathy_phrase_count > 0 -> 0.9
-        empathy_word_count > 1   -> 0.75
-        empathy_word_count == 1  -> 0.65
-        true                     -> 0.6
+        empathy_word_count > 1 -> 0.75
+        empathy_word_count == 1 -> 0.65
+        true -> 0.6
       end
 
     dismissive_penalty = dismissive_count * 0.1
@@ -410,9 +413,11 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
         case profile do
           %{avg_length: avg} when is_number(avg) and avg > 0 ->
             "Consider adjusting your response length — the user typically sends messages around #{round(avg)} characters"
+
           _ ->
             "Consider shortening your response for clarity"
         end
+
       [hint | suggestions]
     else
       suggestions
@@ -425,11 +430,14 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
         case profile do
           %{formality: f} when is_float(f) and f < 0.4 ->
             "Your response is more formal than the user's style — consider a more casual tone"
+
           %{formality: f} when is_float(f) and f > 0.7 ->
             "Your response is more casual than the user's style — consider a more formal tone"
+
           _ ->
             "Consider adjusting the tone to better match the user's communication style"
         end
+
       [hint | suggestions]
     else
       suggestions
@@ -466,8 +474,9 @@ defmodule OptimalSystemAgent.Intelligence.CommCoach do
 
   # Returns a summary of scoring issues based on aggregate score history.
   defp common_issues([]), do: []
+
   defp common_issues(scores) do
-    poor_count       = Enum.count(scores, &(&1 < 0.4))
+    poor_count = Enum.count(scores, &(&1 < 0.4))
     needs_work_count = Enum.count(scores, &(&1 >= 0.4 and &1 < 0.7))
 
     []

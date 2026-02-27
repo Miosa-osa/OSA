@@ -102,9 +102,10 @@ defmodule OptimalSystemAgent.Events.Bus do
 
     # Wrap with dispatch handler — glc:with(query, fun/1)
     # The handler is called when the compiled filter matches
-    query = :glc.with(:glc.any(type_filters), fn event ->
-      dispatch_event(event)
-    end)
+    query =
+      :glc.with(:glc.any(type_filters), fn event ->
+        dispatch_event(event)
+      end)
 
     case :glc.compile(:osa_event_router, query) do
       {:ok, _} -> :ok

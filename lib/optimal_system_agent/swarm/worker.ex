@@ -32,7 +32,8 @@ defmodule OptimalSystemAgent.Swarm.Worker do
     :id,
     :swarm_id,
     :role,
-    status: :idle,       # :idle | :working | :done | :failed
+    # :idle | :working | :done | :failed
+    status: :idle,
     messages: [],
     result: nil,
     started_at: nil
@@ -202,7 +203,9 @@ defmodule OptimalSystemAgent.Swarm.Worker do
     model = Tier.model_for(tier, provider)
     temperature = Tier.temperature(tier)
 
-    Logger.debug("Worker #{state.id} (#{state.role}) calling LLM [#{tier}/#{model}] for task: #{String.slice(task_description, 0, 80)}...")
+    Logger.debug(
+      "Worker #{state.id} (#{state.role}) calling LLM [#{tier}/#{model}] for task: #{String.slice(task_description, 0, 80)}..."
+    )
 
     result =
       case Providers.chat(messages, temperature: temperature, model: model) do

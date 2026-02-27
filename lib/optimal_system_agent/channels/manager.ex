@@ -67,7 +67,10 @@ defmodule OptimalSystemAgent.Channels.Manager do
               :ignore
 
             {:error, reason} ->
-              Logger.warning("Channels.Manager: Failed to start #{inspect(module)}: #{inspect(reason)}")
+              Logger.warning(
+                "Channels.Manager: Failed to start #{inspect(module)}: #{inspect(reason)}"
+              )
+
               {:error, reason}
           end
 
@@ -80,7 +83,10 @@ defmodule OptimalSystemAgent.Channels.Manager do
         _ -> false
       end)
 
-    Logger.info("Channels.Manager: #{active_count}/#{length(@channel_modules)} channel adapters started")
+    Logger.info(
+      "Channels.Manager: #{active_count}/#{length(@channel_modules)} channel adapters started"
+    )
+
     results
   end
 
@@ -141,7 +147,10 @@ defmodule OptimalSystemAgent.Channels.Manager do
               module.send_message(chat_id, message, opts)
             rescue
               e ->
-                Logger.warning("Channels.Manager: send_to_channel error for #{channel}: #{inspect(e)}")
+                Logger.warning(
+                  "Channels.Manager: send_to_channel error for #{channel}: #{inspect(e)}"
+                )
+
                 {:error, e}
             end
         end

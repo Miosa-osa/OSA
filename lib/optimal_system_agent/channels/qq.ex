@@ -32,7 +32,14 @@ defmodule OptimalSystemAgent.Channels.QQ do
   @api_base "https://api.sgroup.qq.com"
   @send_timeout 15_000
 
-  defstruct [:app_id, :app_secret, :token, :access_token, :access_token_expires_at, connected: false]
+  defstruct [
+    :app_id,
+    :app_secret,
+    :token,
+    :access_token,
+    :access_token_expires_at,
+    connected: false
+  ]
 
   # ── Behaviour Callbacks ──────────────────────────────────────────────
 
@@ -65,8 +72,11 @@ defmodule OptimalSystemAgent.Channels.QQ do
   @doc "Handle inbound webhook event from QQ (called by HTTP API)."
   def handle_event(body, signature, timestamp, nonce) do
     case Process.whereis(__MODULE__) do
-      nil -> {:error, :not_started}
-      _pid -> GenServer.call(__MODULE__, {:event, body, signature, timestamp, nonce}, @send_timeout)
+      nil ->
+        {:error, :not_started}
+
+      _pid ->
+        GenServer.call(__MODULE__, {:event, body, signature, timestamp, nonce}, @send_timeout)
     end
   end
 
@@ -156,7 +166,10 @@ defmodule OptimalSystemAgent.Channels.QQ do
 
   defp route_event(_event, _state), do: :ok
 
-  defp handle_message(%{"content" => content, "channel_id" => channel_id, "author" => %{"id" => user_id}} = msg, state) do
+  defp handle_message(
+         %{"content" => content, "channel_id" => channel_id, "author" => %{"id" => user_id}} = msg,
+         state
+       ) do
     # Strip @bot mention from content
     text = Regex.replace(~r/<@\d+>/, content, "") |> String.trim()
 
@@ -309,7 +322,8 @@ defmodule OptimalSystemAgent.Channels.QQ do
   end
 
   defp get_retry_after(headers) do
-    case List.keyfind(headers, "retry-after", 0) || List.keyfind(headers, "x-ratelimit-reset-after", 0) do
+    case List.keyfind(headers, "retry-after", 0) ||
+           List.keyfind(headers, "x-ratelimit-reset-after", 0) do
       {_, value} ->
         case Integer.parse(value) do
           {n, _} -> n

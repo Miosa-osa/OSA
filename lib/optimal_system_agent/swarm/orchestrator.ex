@@ -33,12 +33,11 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
 
   @max_swarms 10
   @max_agents 10
-  @default_timeout_ms 300_000  # 5 minutes
+  # 5 minutes
+  @default_timeout_ms 300_000
 
-  defstruct [
-    swarms: %{},
-    active_count: 0
-  ]
+  defstruct swarms: %{},
+            active_count: 0
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -123,7 +122,12 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
 
         updated = %{swarm | status: :cancelled, completed_at: DateTime.utc_now()}
         new_count = max(0, state.active_count - 1)
-        state = %{state | swarms: Map.put(state.swarms, swarm_id, updated), active_count: new_count}
+
+        state = %{
+          state
+          | swarms: Map.put(state.swarms, swarm_id, updated),
+            active_count: new_count
+        }
 
         Bus.emit(:system_event, %{event: :swarm_cancelled, swarm_id: swarm_id})
         Logger.info("Swarm #{swarm_id} cancelled")
@@ -152,15 +156,21 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
       swarm ->
         final_result = synthesise(swarm.task, swarm.plan, results)
 
-        updated = %{swarm |
-          status: :completed,
-          result: final_result,
-          agent_results: results,
-          completed_at: DateTime.utc_now()
+        updated = %{
+          swarm
+          | status: :completed,
+            result: final_result,
+            agent_results: results,
+            completed_at: DateTime.utc_now()
         }
 
         new_count = max(0, state.active_count - 1)
-        state = %{state | swarms: Map.put(state.swarms, swarm_id, updated), active_count: new_count}
+
+        state = %{
+          state
+          | swarms: Map.put(state.swarms, swarm_id, updated),
+            active_count: new_count
+        }
 
         Mailbox.clear(swarm_id)
 
@@ -184,17 +194,28 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         {:noreply, state}
 
       swarm ->
-        updated = %{swarm |
-          status: :failed,
-          error: inspect(reason),
-          completed_at: DateTime.utc_now()
+        updated = %{
+          swarm
+          | status: :failed,
+            error: inspect(reason),
+            completed_at: DateTime.utc_now()
         }
 
         new_count = max(0, state.active_count - 1)
-        state = %{state | swarms: Map.put(state.swarms, swarm_id, updated), active_count: new_count}
+
+        state = %{
+          state
+          | swarms: Map.put(state.swarms, swarm_id, updated),
+            active_count: new_count
+        }
 
         Mailbox.clear(swarm_id)
-        Bus.emit(:system_event, %{event: :swarm_failed, swarm_id: swarm_id, reason: inspect(reason)})
+
+        Bus.emit(:system_event, %{
+          event: :swarm_failed,
+          swarm_id: swarm_id,
+          reason: inspect(reason)
+        })
 
         Logger.error("Swarm #{swarm_id} failed: #{inspect(reason)}")
         {:noreply, state}
@@ -211,7 +232,12 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
 
         updated = %{swarm | status: :timeout, completed_at: DateTime.utc_now()}
         new_count = max(0, state.active_count - 1)
-        state = %{state | swarms: Map.put(state.swarms, swarm_id, updated), active_count: new_count}
+
+        state = %{
+          state
+          | swarms: Map.put(state.swarms, swarm_id, updated),
+            active_count: new_count
+        }
 
         Bus.emit(:system_event, %{event: :swarm_timeout, swarm_id: swarm_id})
         {:noreply, state}
@@ -312,9 +338,10 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         timeout_ms: timeout_ms
       }
 
-      new_state = %{state |
-        swarms: Map.put(state.swarms, swarm_id, swarm_state),
-        active_count: state.active_count + 1
+      new_state = %{
+        state
+        | swarms: Map.put(state.swarms, swarm_id, swarm_state),
+          active_count: state.active_count + 1
       }
 
       Bus.emit(:system_event, %{
@@ -371,7 +398,11 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
       """
 
       messages = [
-        %{role: "system", content: "You are an expert synthesiser. Combine multi-agent outputs into a single best answer."},
+        %{
+          role: "system",
+          content:
+            "You are an expert synthesiser. Combine multi-agent outputs into a single best answer."
+        },
         %{role: "user", content: synthesis_prompt}
       ]
 
@@ -382,6 +413,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         _ ->
           # Fallback: join all results
           Logger.warning("Synthesis LLM call failed — falling back to joined results")
+
           Enum.map_join(successful, "\n\n---\n\n", fn %{role: role, result: text} ->
             "## #{role}\n#{text}"
           end)
@@ -406,7 +438,8 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
       task: swarm.task,
       pattern: swarm[:plan] && swarm.plan.pattern,
       agent_count: length(swarm[:workers] || []),
-      agents: swarm[:plan] && Enum.map(swarm.plan.agents, fn a -> %{role: a.role, task: a.task} end),
+      agents:
+        swarm[:plan] && Enum.map(swarm.plan.agents, fn a -> %{role: a.role, task: a.task} end),
       result: swarm[:result],
       error: swarm[:error],
       started_at: swarm.started_at,

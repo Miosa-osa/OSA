@@ -170,9 +170,14 @@ defmodule OptimalSystemAgent.Soul do
 
     weight_guidance =
       cond do
-        weight < 0.3 -> "This is a lightweight signal. Keep your response brief and natural."
-        weight > 0.8 -> "This is a high-density signal. Give it your full attention and thoroughness."
-        true -> ""
+        weight < 0.3 ->
+          "This is a lightweight signal. Keep your response brief and natural."
+
+        weight > 0.8 ->
+          "This is a high-density signal. Give it your full attention and thoroughness."
+
+        true ->
+          ""
       end
 
     """
@@ -192,16 +197,19 @@ defmodule OptimalSystemAgent.Soul do
   defp signal_overlay(_), do: ""
 
   @mode_behavior_defaults %{
-    execute: "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble.",
+    execute:
+      "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble.",
     build: "**Mode: BUILD** — Create with quality. Show your work. Structure the output.",
     analyze: "**Mode: ANALYZE** — Be thorough and data-driven. Show reasoning. Use structure.",
-    maintain: "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact.",
+    maintain:
+      "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact.",
     assist: "**Mode: ASSIST** — Guide and explain. Match the user's depth. Be genuinely helpful."
   }
 
   @genre_behavior_defaults %{
     direct: "**Genre: DIRECT** — The user is commanding. Respond with action, not explanation.",
-    inform: "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later.",
+    inform:
+      "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later.",
     commit: "**Genre: COMMIT** — The user is committing to something. Confirm and track it.",
     decide: "**Genre: DECIDE** — The user needs a decision. Validate, recommend, then execute.",
     express: "**Genre: EXPRESS** — The user is expressing emotion. Lead with empathy, then help."

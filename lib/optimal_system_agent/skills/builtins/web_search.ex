@@ -29,9 +29,12 @@ defmodule OptimalSystemAgent.Skills.Builtins.WebSearch do
            ) do
         {:ok, %{status: 200, body: body}} ->
           results = get_in(body, ["web", "results"]) || []
-          formatted = Enum.map_join(results, "\n\n", fn r ->
-            "**#{r["title"]}**\n#{r["url"]}\n#{r["description"]}"
-          end)
+
+          formatted =
+            Enum.map_join(results, "\n\n", fn r ->
+              "**#{r["title"]}**\n#{r["url"]}\n#{r["description"]}"
+            end)
+
           {:ok, formatted}
 
         {:ok, %{status: status}} ->

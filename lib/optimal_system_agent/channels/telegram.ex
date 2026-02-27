@@ -157,7 +157,10 @@ defmodule OptimalSystemAgent.Channels.Telegram do
 
   defp process_update(%{"callback_query" => %{"data" => data, "from" => %{"id" => user_id}} = cq}) do
     chat_id = get_in(cq, ["message", "chat", "id"]) || user_id
-    process_update(%{"message" => %{"text" => data, "chat" => %{"id" => chat_id}, "from" => cq["from"]}})
+
+    process_update(%{
+      "message" => %{"text" => data, "chat" => %{"id" => chat_id}, "from" => cq["from"]}
+    })
   end
 
   defp process_update(update) do
@@ -174,9 +177,11 @@ defmodule OptimalSystemAgent.Channels.Telegram do
           body
 
         buttons when is_list(buttons) ->
-          inline_keyboard = Enum.map(buttons, fn btn ->
-            [%{text: btn.text, callback_data: btn.data}]
-          end)
+          inline_keyboard =
+            Enum.map(buttons, fn btn ->
+              [%{text: btn.text, callback_data: btn.data}]
+            end)
+
           Map.put(body, :reply_markup, %{inline_keyboard: inline_keyboard})
       end
 

@@ -84,7 +84,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
       nil ->
         secret = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
         :persistent_term.put(@dev_secret_key, secret)
-        Logger.warning("HTTP Auth: No shared secret configured. Generated ephemeral secret for this session. Set OSA_SHARED_SECRET env var for production.")
+
+        Logger.warning(
+          "HTTP Auth: No shared secret configured. Generated ephemeral secret for this session. Set OSA_SHARED_SECRET env var for production."
+        )
+
         secret
 
       secret ->

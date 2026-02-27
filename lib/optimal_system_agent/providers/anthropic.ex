@@ -27,7 +27,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+
     base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
 
     unless api_key do
@@ -40,7 +44,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @impl true
   def chat_stream(messages, callback, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+
     base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
 
     unless api_key do
@@ -129,7 +137,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
              into: :self
            ) do
         {:ok, resp} ->
-          collect_stream(resp, callback, %{content: "", tool_calls: [], current_tool: nil, buffer: ""})
+          collect_stream(resp, callback, %{
+            content: "",
+            tool_calls: [],
+            current_tool: nil,
+            buffer: ""
+          })
 
         {:error, reason} ->
           Logger.error("Anthropic stream connection failed: #{inspect(reason)}")
@@ -203,7 +216,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     {events, remainder}
   end
 
-  defp process_stream_event(%{"type" => "content_block_start", "content_block" => block}, callback, acc) do
+  defp process_stream_event(
+         %{"type" => "content_block_start", "content_block" => block},
+         callback,
+         acc
+       ) do
     case block do
       %{"type" => "text"} ->
         acc
@@ -228,7 +245,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         callback.({:tool_use_delta, json_chunk})
 
         if acc.current_tool do
-          updated_tool = %{acc.current_tool | input_json: acc.current_tool.input_json <> json_chunk}
+          updated_tool = %{
+            acc.current_tool
+            | input_json: acc.current_tool.input_json <> json_chunk
+          }
+
           %{acc | current_tool: updated_tool}
         else
           acc
@@ -337,6 +358,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp extract_usage(%{"usage" => %{"input_tokens" => inp, "output_tokens" => out}}),
     do: %{input_tokens: inp, output_tokens: out}
+
   defp extract_usage(_), do: %{}
 
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg

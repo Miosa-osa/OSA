@@ -45,11 +45,16 @@ defmodule OptimalSystemAgent.Swarm.Planner do
   def decompose(task_description, opts \\ []) do
     max_agents = Keyword.get(opts, :max_agents, @max_agents)
 
-    Logger.info("Planner decomposing task (max_agents=#{max_agents}): #{String.slice(task_description, 0, 100)}...")
+    Logger.info(
+      "Planner decomposing task (max_agents=#{max_agents}): #{String.slice(task_description, 0, 100)}..."
+    )
 
     case call_llm(task_description, max_agents) do
       {:ok, plan} ->
-        Logger.info("Planner produced plan: pattern=#{plan.pattern} agents=#{length(plan.agents)}")
+        Logger.info(
+          "Planner produced plan: pattern=#{plan.pattern} agents=#{length(plan.agents)}"
+        )
+
         plan
 
       {:error, reason} ->
@@ -96,7 +101,10 @@ defmodule OptimalSystemAgent.Swarm.Planner do
 
     messages = [
       %{role: "system", content: system_prompt},
-      %{role: "user", content: "Decompose this task into a multi-agent plan:\n\n#{task_description}"}
+      %{
+        role: "user",
+        content: "Decompose this task into a multi-agent plan:\n\n#{task_description}"
+      }
     ]
 
     case Providers.chat(messages, temperature: 0.3) do
@@ -125,8 +133,11 @@ defmodule OptimalSystemAgent.Swarm.Planner do
       {:error, _} ->
         # Attempt to extract JSON object from within prose
         case extract_json_object(content) do
-          {:ok, raw} -> build_plan(raw)
-          :error -> {:error, "Could not parse JSON from LLM output: #{String.slice(content, 0, 200)}"}
+          {:ok, raw} ->
+            build_plan(raw)
+
+          :error ->
+            {:error, "Could not parse JSON from LLM output: #{String.slice(content, 0, 200)}"}
         end
     end
   end
@@ -145,7 +156,9 @@ defmodule OptimalSystemAgent.Swarm.Planner do
           {:ok, parsed} -> {:ok, parsed}
           {:error, _} -> :error
         end
-      nil -> :error
+
+      nil ->
+        :error
     end
   end
 
@@ -153,7 +166,6 @@ defmodule OptimalSystemAgent.Swarm.Planner do
     with {:ok, pattern} <- validate_pattern(raw["pattern"]),
          {:ok, agents} <- validate_agents(raw["agents"]),
          {:ok, strategy} <- validate_strategy(raw["synthesis_strategy"], pattern) do
-
       plan = %{
         pattern: pattern,
         agents: agents,
@@ -169,6 +181,7 @@ defmodule OptimalSystemAgent.Swarm.Planner do
 
   defp validate_pattern(p) when is_binary(p) do
     atom = String.to_existing_atom(p)
+
     if atom in @valid_patterns do
       {:ok, atom}
     else
@@ -186,7 +199,9 @@ defmodule OptimalSystemAgent.Swarm.Planner do
       |> Enum.take(@max_agents)
       |> Enum.flat_map(fn agent ->
         case validate_agent(agent) do
-          {:ok, a} -> [a]
+          {:ok, a} ->
+            [a]
+
           {:error, reason} ->
             Logger.warning("Planner: skipping invalid agent spec (#{reason}): #{inspect(agent)}")
             []

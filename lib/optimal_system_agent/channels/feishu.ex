@@ -156,7 +156,12 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   def handle_info(:refresh_token, state) do
     new_state = do_refresh_token(state)
     # Schedule next refresh
-    ttl = max((new_state.token_expires_at || 0) - System.system_time(:second) - @token_refresh_slack, 60)
+    ttl =
+      max(
+        (new_state.token_expires_at || 0) - System.system_time(:second) - @token_refresh_slack,
+        60
+      )
+
     Process.send_after(self(), :refresh_token, ttl * 1_000)
     {:noreply, new_state}
   end
@@ -270,7 +275,8 @@ defmodule OptimalSystemAgent.Channels.Feishu do
            json: %{app_id: state.app_id, app_secret: state.app_secret},
            receive_timeout: 10_000
          ) do
-      {:ok, %{status: 200, body: %{"code" => 0, "tenant_access_token" => token, "expire" => expire}}} ->
+      {:ok,
+       %{status: 200, body: %{"code" => 0, "tenant_access_token" => token, "expire" => expire}}} ->
         Logger.debug("Feishu: Access token refreshed (expires in #{expire}s)")
         expires_at = System.system_time(:second) + expire
         %{state | tenant_access_token: token, token_expires_at: expires_at}

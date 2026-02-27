@@ -32,7 +32,14 @@ defmodule OptimalSystemAgent.Intelligence.CommProfiler do
 
   @impl true
   def handle_cast({:record, user_id, message}, state) do
-    profile = Map.get(state.profiles, user_id, %{formality: 0.5, avg_length: 0, topics: [], message_count: 0})
+    profile =
+      Map.get(state.profiles, user_id, %{
+        formality: 0.5,
+        avg_length: 0,
+        topics: [],
+        message_count: 0
+      })
+
     updated = update_profile(profile, message)
     {:noreply, %{state | profiles: Map.put(state.profiles, user_id, updated)}}
   end
@@ -43,11 +50,7 @@ defmodule OptimalSystemAgent.Intelligence.CommProfiler do
     avg_len = (profile.avg_length * profile.message_count + len) / count
     formality = estimate_formality(message, profile.formality, count)
 
-    %{profile |
-      formality: formality,
-      avg_length: round(avg_len),
-      message_count: count
-    }
+    %{profile | formality: formality, avg_length: round(avg_len), message_count: count}
   end
 
   defp estimate_formality(message, prev_formality, count) do

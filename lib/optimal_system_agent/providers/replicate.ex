@@ -32,7 +32,11 @@ defmodule OptimalSystemAgent.Providers.Replicate do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :replicate_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :replicate_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :replicate_model, default_model())
+
     base_url = Application.get_env(:optimal_system_agent, :replicate_url, @default_url)
 
     unless api_key do
@@ -116,9 +120,14 @@ defmodule OptimalSystemAgent.Providers.Replicate do
   defp build_prompt(messages) do
     formatted =
       Enum.map(messages, fn
-        %{role: role, content: content} -> %{"role" => to_string(role), "content" => to_string(content)}
-        %{"role" => _} = msg -> msg
-        msg when is_map(msg) -> msg
+        %{role: role, content: content} ->
+          %{"role" => to_string(role), "content" => to_string(content)}
+
+        %{"role" => _} = msg ->
+          msg
+
+        msg when is_map(msg) ->
+          msg
       end)
 
     system_text =

@@ -309,6 +309,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
   defp auto_model(provider) do
     key = :"#{provider}_model"
+
     Application.get_env(:optimal_system_agent, key) ||
       Application.get_env(:optimal_system_agent, :default_model, "claude-sonnet-4-6")
   end

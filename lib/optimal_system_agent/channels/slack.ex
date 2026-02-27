@@ -144,7 +144,10 @@ defmodule OptimalSystemAgent.Channels.Slack do
     :ok
   end
 
-  defp dispatch_event(%{"type" => "message", "text" => text, "channel" => channel, "user" => user_id}, state) do
+  defp dispatch_event(
+         %{"type" => "message", "text" => text, "channel" => channel, "user" => user_id},
+         state
+       ) do
     session_id = "slack_#{user_id}_#{channel}"
     Logger.debug("Slack: Message from #{user_id} in #{channel}: #{text}")
 
@@ -152,7 +155,7 @@ defmodule OptimalSystemAgent.Channels.Slack do
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
-        do_send_message(state.token, channel, response, [thread_ts: nil])
+        do_send_message(state.token, channel, response, thread_ts: nil)
 
       {:filtered, signal} ->
         Logger.debug("Slack: Signal filtered (weight=#{signal.weight})")

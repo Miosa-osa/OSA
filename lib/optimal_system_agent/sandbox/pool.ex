@@ -90,7 +90,10 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
         {:reply, result, final_state}
 
       :overflow ->
-        Logger.debug("[Sandbox.Pool] All #{@pool_size} containers busy — overflow to fresh container")
+        Logger.debug(
+          "[Sandbox.Pool] All #{@pool_size} containers busy — overflow to fresh container"
+        )
+
         result = Docker.execute(command, opts)
         {:reply, result, state}
     end
@@ -115,9 +118,7 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
         Enum.map(1..@pool_size, fn _ -> start_pool_container() end)
         |> Enum.filter(&(not is_nil(&1)))
       else
-        Logger.warning(
-          "[Sandbox.Pool] Docker not available — pool will use overflow-only mode"
-        )
+        Logger.warning("[Sandbox.Pool] Docker not available — pool will use overflow-only mode")
         []
       end
 
@@ -132,9 +133,7 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
         if container_alive?(container.id) do
           container
         else
-          Logger.warning(
-            "[Sandbox.Pool] Container #{container.id} is gone — replacing"
-          )
+          Logger.warning("[Sandbox.Pool] Container #{container.id} is gone — replacing")
           start_pool_container()
         end
       end)
@@ -146,9 +145,11 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
     topped_up =
       if missing > 0 and Docker.available?() do
         Logger.info("[Sandbox.Pool] Topping up pool — starting #{missing} replacement containers")
+
         replacements =
           Enum.map(1..missing, fn _ -> start_pool_container() end)
           |> Enum.filter(&(not is_nil(&1)))
+
         healthy_containers ++ replacements
       else
         healthy_containers
@@ -170,20 +171,32 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
     File.mkdir_p!(workspace)
 
     args = [
-      "run", "-d",
-      "--name", id,
-      "--network", "none",
-      "--memory", "256m",
-      "--cpus", "0.5",
+      "run",
+      "-d",
+      "--name",
+      id,
+      "--network",
+      "none",
+      "--memory",
+      "256m",
+      "--cpus",
+      "0.5",
       "--read-only",
-      "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-      "--security-opt", "no-new-privileges:true",
-      "--cap-drop", "ALL",
-      "-v", "#{workspace}:/workspace:rw",
-      "-w", "/workspace",
-      "-u", "1000:1000",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=64m",
+      "--security-opt",
+      "no-new-privileges:true",
+      "--cap-drop",
+      "ALL",
+      "-v",
+      "#{workspace}:/workspace:rw",
+      "-w",
+      "/workspace",
+      "-u",
+      "1000:1000",
       @container_image,
-      "sleep", "infinity"
+      "sleep",
+      "infinity"
     ]
 
     try do
@@ -196,6 +209,7 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
           Logger.warning(
             "[Sandbox.Pool] Failed to start container #{id} exit=#{code}: #{String.trim(err)}"
           )
+
           nil
       end
     rescue
@@ -300,12 +314,14 @@ defmodule OptimalSystemAgent.Sandbox.Pool do
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, {output, 0}} -> {:ok, output, 0}
-      {:ok, {output, code}} -> {:ok, output, code}
+      {:ok, {output, 0}} ->
+        {:ok, output, 0}
+
+      {:ok, {output, code}} ->
+        {:ok, output, code}
+
       nil ->
-        Logger.warning(
-          "[Sandbox.Pool] Exec in #{container.id} timed out after #{timeout}ms"
-        )
+        Logger.warning("[Sandbox.Pool] Exec in #{container.id} timed out after #{timeout}ms")
         {:error, "Command timed out after #{timeout}ms"}
     end
   end

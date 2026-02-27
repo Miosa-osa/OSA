@@ -278,7 +278,9 @@ defmodule OptimalSystemAgent.Signal.NoiseFilterTest do
     end
 
     test "long description is a signal" do
-      assert signal?("I need you to review the refactored authentication module and flag any security concerns")
+      assert signal?(
+               "I need you to review the refactored authentication module and flag any security concerns"
+             )
     end
 
     test "code-related request is a signal" do

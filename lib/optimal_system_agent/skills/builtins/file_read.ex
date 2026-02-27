@@ -71,7 +71,9 @@ defmodule OptimalSystemAgent.Skills.Builtins.FileRead do
     else
       # Normalize path with trailing slash to prevent prefix collisions
       # e.g. /tmp-evil/ must NOT match allowed path /tmp/
-      check_path = if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+      check_path =
+        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+
       Enum.any?(allowed_paths(), fn allowed ->
         String.starts_with?(check_path, allowed)
       end)

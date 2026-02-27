@@ -30,25 +30,30 @@ defmodule OptimalSystemAgent.Agent.Learning do
 
   @consolidation_interval 5
   @full_consolidation_interval 50
-  @working_memory_ttl 900_000  # 15 minutes in ms
+  # 15 minutes in ms
+  @working_memory_ttl 900_000
   @max_episodes 1000
-  @pattern_threshold 3  # occurrences before a pattern is saved
-  @skill_generation_threshold 5  # occurrences before auto-generating a skill
+  # occurrences before a pattern is saved
+  @pattern_threshold 3
+  # occurrences before auto-generating a skill
+  @skill_generation_threshold 5
 
-  defstruct [
-    interaction_count: 0,
-    working_memory: %{},    # ETS table ref
-    episodes: [],            # recent episodes (capped)
-    patterns: %{},           # detected patterns {key => count}
-    solutions: %{},          # known solutions {error_type => fix}
-    metrics: %{
-      total_interactions: 0,
-      patterns_captured: 0,
-      skills_generated: 0,
-      errors_recovered: 0,
-      consolidations: 0
-    }
-  ]
+  defstruct interaction_count: 0,
+            # ETS table ref
+            working_memory: %{},
+            # recent episodes (capped)
+            episodes: [],
+            # detected patterns {key => count}
+            patterns: %{},
+            # known solutions {error_type => fix}
+            solutions: %{},
+            metrics: %{
+              total_interactions: 0,
+              patterns_captured: 0,
+              skills_generated: 0,
+              errors_recovered: 0,
+              consolidations: 0
+            }
 
   # ── Client API ────────────────────────────────────────────────────
 
@@ -116,7 +121,10 @@ defmodule OptimalSystemAgent.Agent.Learning do
     # Load persisted patterns and solutions
     state = load_persisted(state)
 
-    Logger.info("[Learning] SICA engine started (patterns: #{map_size(state.patterns)}, solutions: #{map_size(state.solutions)})")
+    Logger.info(
+      "[Learning] SICA engine started (patterns: #{map_size(state.patterns)}, solutions: #{map_size(state.solutions)})"
+    )
+
     {:ok, state}
   end
 
@@ -141,10 +149,11 @@ defmodule OptimalSystemAgent.Agent.Learning do
     # Add to episode list (capped)
     episodes = [episode | state.episodes] |> Enum.take(@max_episodes)
 
-    state = %{state |
-      interaction_count: state.interaction_count + 1,
-      episodes: episodes,
-      metrics: %{state.metrics | total_interactions: state.metrics.total_interactions + 1}
+    state = %{
+      state
+      | interaction_count: state.interaction_count + 1,
+        episodes: episodes,
+        metrics: %{state.metrics | total_interactions: state.metrics.total_interactions + 1}
     }
 
     # REFLECT: Check if it's time to consolidate
@@ -167,19 +176,24 @@ defmodule OptimalSystemAgent.Agent.Learning do
 
   @impl true
   def handle_cast({:correction, what_was_wrong, what_is_right}, state) do
-    Logger.info("[Learning] User correction captured: #{String.slice(what_was_wrong, 0, 50)} → #{String.slice(what_is_right, 0, 50)}")
+    Logger.info(
+      "[Learning] User correction captured: #{String.slice(what_was_wrong, 0, 50)} → #{String.slice(what_is_right, 0, 50)}"
+    )
 
     # Immediately save to solutions
     key = normalize_key(what_was_wrong)
-    solutions = Map.put(state.solutions, key, %{
-      correction: what_is_right,
-      timestamp: DateTime.utc_now(),
-      source: :user_correction
-    })
 
-    state = %{state |
-      solutions: solutions,
-      metrics: %{state.metrics | patterns_captured: state.metrics.patterns_captured + 1}
+    solutions =
+      Map.put(state.solutions, key, %{
+        correction: what_is_right,
+        timestamp: DateTime.utc_now(),
+        source: :user_correction
+      })
+
+    state = %{
+      state
+      | solutions: solutions,
+        metrics: %{state.metrics | patterns_captured: state.metrics.patterns_captured + 1}
     }
 
     # Persist immediately
@@ -217,7 +231,10 @@ defmodule OptimalSystemAgent.Agent.Learning do
         Logger.debug("[Learning] New error type: #{error_type}")
 
       solution ->
-        Logger.info("[Learning] Known solution for #{error_type}: #{inspect(solution.correction)}")
+        Logger.info(
+          "[Learning] Known solution for #{error_type}: #{inspect(solution.correction)}"
+        )
+
         Bus.emit(:system_event, %{
           event: :learning_recovery_available,
           error_type: error_type,
@@ -225,9 +242,10 @@ defmodule OptimalSystemAgent.Agent.Learning do
         })
     end
 
-    state = %{state |
-      episodes: episodes,
-      metrics: %{state.metrics | errors_recovered: state.metrics.errors_recovered + 1}
+    state = %{
+      state
+      | episodes: episodes,
+        metrics: %{state.metrics | errors_recovered: state.metrics.errors_recovered + 1}
     }
 
     {:noreply, state}
@@ -263,10 +281,14 @@ defmodule OptimalSystemAgent.Agent.Learning do
     now = System.monotonic_time(:millisecond)
     cutoff = now - @working_memory_ttl
 
-    :ets.foldl(fn {key, _ep, ts}, acc ->
-      if ts < cutoff, do: :ets.delete(state.working_memory, key)
-      acc
-    end, :ok, state.working_memory)
+    :ets.foldl(
+      fn {key, _ep, ts}, acc ->
+        if ts < cutoff, do: :ets.delete(state.working_memory, key)
+        acc
+      end,
+      :ok,
+      state.working_memory
+    )
 
     Process.send_after(self(), :cleanup_working_memory, @working_memory_ttl)
     {:noreply, state}
@@ -283,20 +305,27 @@ defmodule OptimalSystemAgent.Agent.Learning do
     # Extract tool usage patterns
     tool_patterns =
       recent
-      |> Enum.filter(& &1.type == :tool_use)
+      |> Enum.filter(&(&1.type == :tool_use))
       |> Enum.group_by(& &1.tool_name)
       |> Enum.map(fn {tool, uses} ->
-        avg_duration = uses |> Enum.map(& (&1.duration_ms || 0)) |> then(fn ds ->
-          if ds == [], do: 0, else: div(Enum.sum(ds), length(ds))
-        end)
+        avg_duration =
+          uses
+          |> Enum.map(&(&1.duration_ms || 0))
+          |> then(fn ds ->
+            if ds == [], do: 0, else: div(Enum.sum(ds), length(ds))
+          end)
+
         success_rate = Enum.count(uses, & &1.success) / max(length(uses), 1)
-        {"tool:#{tool}", %{count: length(uses), avg_duration: avg_duration, success_rate: success_rate}}
+
+        {"tool:#{tool}",
+         %{count: length(uses), avg_duration: avg_duration, success_rate: success_rate}}
       end)
 
     # Merge into patterns
     patterns =
       Enum.reduce(tool_patterns, state.patterns, fn {key, info}, acc ->
         existing = Map.get(acc, key, %{count: 0})
+
         Map.put(acc, key, %{
           count: existing.count + info.count,
           avg_duration: info.avg_duration,
@@ -308,19 +337,22 @@ defmodule OptimalSystemAgent.Agent.Learning do
     # Check for skill generation candidates
     state = check_skill_generation(patterns, state)
 
-    %{state |
-      patterns: patterns,
-      metrics: %{state.metrics | consolidations: state.metrics.consolidations + 1}
+    %{
+      state
+      | patterns: patterns,
+        metrics: %{state.metrics | consolidations: state.metrics.consolidations + 1}
     }
   end
 
   # ── REFLECT: Full Consolidation ─────────────────────────────────
 
   defp full_consolidation(state) do
-    Logger.info("[Learning] Full consolidation (#{length(state.episodes)} episodes, #{map_size(state.patterns)} patterns)")
+    Logger.info(
+      "[Learning] Full consolidation (#{length(state.episodes)} episodes, #{map_size(state.patterns)} patterns)"
+    )
 
     # 1. Consolidate error patterns into solutions
-    error_episodes = Enum.filter(state.episodes, & &1.type == :error)
+    error_episodes = Enum.filter(state.episodes, &(&1.type == :error))
     error_groups = Enum.group_by(error_episodes, & &1.error_type)
 
     solutions =
@@ -341,18 +373,21 @@ defmodule OptimalSystemAgent.Agent.Learning do
     patterns =
       state.patterns
       |> Enum.filter(fn {_key, info} ->
-        info.count >= 2 or DateTime.diff(DateTime.utc_now(), info[:last_seen] || DateTime.utc_now(), :hour) < 24
+        info.count >= 2 or
+          DateTime.diff(DateTime.utc_now(), info[:last_seen] || DateTime.utc_now(), :hour) < 24
       end)
       |> Map.new()
 
     # 3. Persist
-    state = %{state |
-      patterns: patterns,
-      solutions: solutions,
-      metrics: %{state.metrics |
-        consolidations: state.metrics.consolidations + 1,
-        patterns_captured: map_size(patterns)
-      }
+    state = %{
+      state
+      | patterns: patterns,
+        solutions: solutions,
+        metrics: %{
+          state.metrics
+          | consolidations: state.metrics.consolidations + 1,
+            patterns_captured: map_size(patterns)
+        }
     }
 
     persist_patterns(state)
@@ -385,7 +420,13 @@ defmodule OptimalSystemAgent.Agent.Learning do
         candidates: Enum.map(candidates, fn {key, _} -> key end)
       })
 
-      %{state | metrics: %{state.metrics | skills_generated: state.metrics.skills_generated + length(candidates)}}
+      %{
+        state
+        | metrics: %{
+            state.metrics
+            | skills_generated: state.metrics.skills_generated + length(candidates)
+          }
+      }
     else
       state
     end
@@ -461,9 +502,14 @@ defmodule OptimalSystemAgent.Agent.Learning do
   defp persist_patterns(state) do
     path = Path.join(learning_dir(), "patterns.json")
 
-    data = Enum.map(state.patterns, fn {key, info} ->
-      %{key: key, count: info.count, last_seen: to_string(info[:last_seen] || DateTime.utc_now())}
-    end)
+    data =
+      Enum.map(state.patterns, fn {key, info} ->
+        %{
+          key: key,
+          count: info.count,
+          last_seen: to_string(info[:last_seen] || DateTime.utc_now())
+        }
+      end)
 
     File.write!(path, Jason.encode!(data, pretty: true))
   rescue
@@ -473,9 +519,10 @@ defmodule OptimalSystemAgent.Agent.Learning do
   defp persist_solutions(state) do
     path = Path.join(learning_dir(), "solutions.json")
 
-    data = Enum.map(state.solutions, fn {key, info} ->
-      %{key: key, correction: info.correction, source: to_string(info.source)}
-    end)
+    data =
+      Enum.map(state.solutions, fn {key, info} ->
+        %{key: key, correction: info.correction, source: to_string(info.source)}
+      end)
 
     File.write!(path, Jason.encode!(data, pretty: true))
   rescue

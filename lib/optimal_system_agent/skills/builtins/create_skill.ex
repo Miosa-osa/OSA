@@ -20,7 +20,7 @@ defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
   @impl true
   def description do
     "Dynamically create a new skill for the agent. " <>
-    "Use when you need a capability that doesn't exist yet — writes a SKILL.md file and registers it immediately."
+      "Use when you need a capability that doesn't exist yet — writes a SKILL.md file and registers it immediately."
   end
 
   @impl true
@@ -43,11 +43,13 @@ defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
         "tools" => %{
           "type" => "array",
           "items" => %{"type" => "string"},
-          "description" => "Tools this skill needs (shell_execute, file_read, file_write, web_search, memory_save)"
+          "description" =>
+            "Tools this skill needs (shell_execute, file_read, file_write, web_search, memory_save)"
         },
         "force" => %{
           "type" => "boolean",
-          "description" => "Bypass skill discovery and force creation of a new skill even if similar ones exist (default: false)"
+          "description" =>
+            "Bypass skill discovery and force creation of a new skill even if similar ones exist (default: false)"
         }
       },
       "required" => ["name", "description", "instructions"]
@@ -61,7 +63,8 @@ defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
 
     # Validate name format
     unless Regex.match?(~r/^[a-z][a-z0-9_-]*$/, name) do
-      {:error, "Skill name must be kebab-case (lowercase letters, numbers, hyphens, underscores). Got: #{name}"}
+      {:error,
+       "Skill name must be kebab-case (lowercase letters, numbers, hyphens, underscores). Got: #{name}"}
     else
       # Unless force=true, check for existing matching skills first
       if not force do
@@ -76,8 +79,8 @@ defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
                 end)
 
               {:ok,
-                "Found existing skills that may match:\n#{match_list}\n\n" <>
-                "Use one of these existing skills, or call create_skill again with \"force\": true to create '#{name}' anyway."}
+               "Found existing skills that may match:\n#{match_list}\n\n" <>
+                 "Use one of these existing skills, or call create_skill again with \"force\": true to create '#{name}' anyway."}
             else
               do_create(name, desc, instructions, tools)
             end
@@ -102,7 +105,8 @@ defmodule OptimalSystemAgent.Skills.Builtins.CreateSkill do
     try do
       case OptimalSystemAgent.Agent.Orchestrator.create_skill(name, desc, instructions, tools) do
         {:ok, _} ->
-          {:ok, "Skill '#{name}' created and registered successfully at ~/.osa/skills/#{name}/SKILL.md. It is now available for use."}
+          {:ok,
+           "Skill '#{name}' created and registered successfully at ~/.osa/skills/#{name}/SKILL.md. It is now available for use."}
 
         {:error, reason} ->
           {:error, "Failed to create skill: #{inspect(reason)}"}

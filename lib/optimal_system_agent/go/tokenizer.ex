@@ -16,7 +16,8 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
 
   @request_timeout 2_000
   @cache_table :osa_token_cache
-  @cache_ttl_ms 300_000  # 5 minutes
+  # 5 minutes
+  @cache_ttl_ms 300_000
 
   # -- Client API --
 
@@ -59,14 +60,19 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
       {:ok, count_tokens_heuristic(text)}
     else
       cache_key = :erlang.phash2(text)
+
       case lookup_cache(cache_key) do
-        {:ok, count} -> {:ok, count}
+        {:ok, count} ->
+          {:ok, count}
+
         :miss ->
           case GenServer.call(__MODULE__, {:count_tokens, text}, @request_timeout + 500) do
             {:ok, count} = result ->
               put_cache(cache_key, count)
               result
-            error -> error
+
+            error ->
+              error
           end
       end
     end
@@ -81,6 +87,7 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
     punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
     round(words * 1.3 + punctuation * 0.5)
   end
+
   def count_tokens_heuristic(_), do: 0
 
   @doc "Check if the Go tokenizer is available (not in fallback mode)."
@@ -102,7 +109,8 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
       port: nil,
       mode: :fallback,
       binary_path: binary_path,
-      pending: %{}  # id => {from, timer_ref}
+      # id => {from, timer_ref}
+      pending: %{}
     }
 
     state = maybe_start_port(state)
@@ -188,8 +196,10 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   def handle_info({:request_timeout, id}, state) do
     case Map.pop(state.pending, id) do
       {{from, _timer_ref}, pending} ->
-        GenServer.reply(from, {:ok, 0})  # fallback to 0 on timeout
+        # fallback to 0 on timeout
+        GenServer.reply(from, {:ok, 0})
         {:noreply, %{state | pending: pending}}
+
       {nil, _} ->
         {:noreply, state}
     end
@@ -197,9 +207,11 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
 
   def handle_info(:restart_port, state) do
     state = maybe_start_port(%{state | port: nil})
+
     if state.mode == :ready do
       Logger.info("[Go.Tokenizer] Port restarted successfully")
     end
+
     {:noreply, state}
   end
 
@@ -212,8 +224,10 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
     catch
       _, _ -> :ok
     end
+
     :ok
   end
+
   def terminate(_reason, _state), do: :ok
 
   # -- Private --
@@ -223,10 +237,12 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   defp maybe_start_port(%{binary_path: path} = state) do
     if File.exists?(path) do
       try do
-        port = Port.open(
-          {:spawn_executable, path},
-          [:binary, :use_stdio, :exit_status, {:line, 1_048_576}]
-        )
+        port =
+          Port.open(
+            {:spawn_executable, path},
+            [:binary, :use_stdio, :exit_status, {:line, 1_048_576}]
+          )
+
         %{state | port: port, mode: :ready}
       rescue
         e ->
@@ -240,7 +256,14 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
 
   defp find_binary do
     # Check in-tree first, then installed location
-    priv_path = Path.join([:code.priv_dir(:optimal_system_agent) |> to_string(), "go", "tokenizer", "osa-tokenizer"])
+    priv_path =
+      Path.join([
+        :code.priv_dir(:optimal_system_agent) |> to_string(),
+        "go",
+        "tokenizer",
+        "osa-tokenizer"
+      ])
+
     installed_path = Path.expand("~/.osa/bin/osa-tokenizer")
 
     cond do
@@ -256,6 +279,7 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
         Process.cancel_timer(timer_ref)
         GenServer.reply(from, result)
         {:noreply, %{state | pending: pending}}
+
       {nil, _} ->
         {:noreply, state}
     end
@@ -266,6 +290,7 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
       Process.cancel_timer(timer_ref)
       GenServer.reply(from, {:error, reason})
     end)
+
     %{state | pending: %{}}
   end
 
@@ -275,7 +300,9 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
     case :ets.info(@cache_table) do
       :undefined ->
         :ets.new(@cache_table, [:named_table, :set, :public, read_concurrency: true])
-      _ -> :ok
+
+      _ ->
+        :ok
     end
   end
 
@@ -288,7 +315,9 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
           :ets.delete(@cache_table, key)
           :miss
         end
-      [] -> :miss
+
+      [] ->
+        :miss
     end
   rescue
     _ -> :miss

@@ -215,7 +215,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @impl true
   def init(:ok) do
     providers = @providers
-    Logger.info("Provider registry initialized with #{map_size(providers)} providers (default: #{default_provider()})")
+
+    Logger.info(
+      "Provider registry initialized with #{map_size(providers)} providers (default: #{default_provider()})"
+    )
+
     Logger.info("Providers: #{Map.keys(providers) |> Enum.join(", ")}")
     {:ok, %{extra_providers: %{}}}
   end
@@ -259,7 +263,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
           Logger.error("Provider #{provider} failed, no fallback configured: #{reason}")
           err
         else
-          Logger.warning("Provider #{provider} failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}")
+          Logger.warning(
+            "Provider #{provider} failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}"
+          )
+
           chat_with_fallback(messages, remaining_chain, opts)
         end
     end
@@ -283,6 +290,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   def provider_configured?(provider) do
     key = :"#{provider}_api_key"
+
     case Application.get_env(:optimal_system_agent, key) do
       nil -> false
       "" -> false

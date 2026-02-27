@@ -52,8 +52,10 @@ defmodule OptimalSystemAgent.Machines do
   end
 
   def handle_call(:prompt_addendums, _from, state) do
-    addendums = Enum.map(state.active_machines, &machine_addendum/1)
-    |> Enum.reject(&is_nil/1)
+    addendums =
+      Enum.map(state.active_machines, &machine_addendum/1)
+      |> Enum.reject(&is_nil/1)
+
     {:reply, addendums, state}
   end
 

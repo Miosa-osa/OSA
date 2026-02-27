@@ -40,25 +40,23 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   @patterns_file "priv/swarms/patterns.json"
   @external_resource @patterns_file
 
-  @pattern_configs (
-    case File.read(@patterns_file) do
-      {:ok, content} ->
-        case Jason.decode(content) do
-          {:ok, %{"patterns" => patterns, "defaults" => defaults}} ->
-            %{patterns: patterns, defaults: defaults}
+  @pattern_configs (case File.read(@patterns_file) do
+                      {:ok, content} ->
+                        case Jason.decode(content) do
+                          {:ok, %{"patterns" => patterns, "defaults" => defaults}} ->
+                            %{patterns: patterns, defaults: defaults}
 
-          {:ok, %{"patterns" => patterns}} ->
-            %{patterns: patterns, defaults: %{}}
+                          {:ok, %{"patterns" => patterns}} ->
+                            %{patterns: patterns, defaults: %{}}
 
-          _ ->
-            Logger.warning("Failed to parse #{@patterns_file}")
-            %{patterns: %{}, defaults: %{}}
-        end
+                          _ ->
+                            Logger.warning("Failed to parse #{@patterns_file}")
+                            %{patterns: %{}, defaults: %{}}
+                        end
 
-      {:error, _} ->
-        %{patterns: %{}, defaults: %{}}
-    end
-  )
+                      {:error, _} ->
+                        %{patterns: %{}, defaults: %{}}
+                    end)
 
   @doc """
   Get a named pattern configuration by name.
@@ -168,7 +166,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
       ordered: true
     )
     |> Enum.map(fn
-      {:ok, result} -> result
+      {:ok, result} ->
+        result
+
       {:exit, reason} ->
         Logger.error("Parallel agent task exited: #{inspect(reason)}")
         %{role: :unknown, task: "unknown", result: nil, status: :failed}
@@ -228,7 +228,10 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   Falls back to parallel execution when fewer than 2 agents are provided.
   """
   def debate(workers, agent_specs, swarm_id) when length(workers) < 2 do
-    Logger.warning("Debate pattern needs at least 2 agents, got #{length(workers)}. Running as parallel.")
+    Logger.warning(
+      "Debate pattern needs at least 2 agents, got #{length(workers)}. Running as parallel."
+    )
+
     parallel(workers, agent_specs, swarm_id)
   end
 
@@ -324,20 +327,35 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   def review_loop(workers, agent_specs, _swarm_id, max_iterations) do
     Logger.debug("Swarm pattern: review_loop (max_iterations=#{max_iterations})")
 
-    [{_worker_spec, worker_pid}, {_reviewer_spec, reviewer_pid} | _] = Enum.zip(workers, agent_specs)
+    [{_worker_spec, worker_pid}, {_reviewer_spec, reviewer_pid} | _] =
+      Enum.zip(workers, agent_specs)
+
     [worker_agent, reviewer_agent | _] = agent_specs
 
     do_review_loop(
-      worker_pid, worker_agent,
-      reviewer_pid, reviewer_agent,
-      max_iterations, 1,
-      nil, []
+      worker_pid,
+      worker_agent,
+      reviewer_pid,
+      reviewer_agent,
+      max_iterations,
+      1,
+      nil,
+      []
     )
   end
 
   # ── Review Loop — Private Recursion ──────────────────────────────────
 
-  defp do_review_loop(_worker_pid, worker_agent, _reviewer_pid, reviewer_agent, max, iter, _prev_review, acc)
+  defp do_review_loop(
+         _worker_pid,
+         worker_agent,
+         _reviewer_pid,
+         reviewer_agent,
+         max,
+         iter,
+         _prev_review,
+         acc
+       )
        when iter > max do
     Logger.info("Review loop exhausted #{max} iterations without approval")
 
@@ -346,14 +364,24 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     final = %{
       role: reviewer_agent.role,
       task: reviewer_agent.task,
-      result: "Max iterations reached. Final worker output:\n#{last_worker && last_worker.result}",
+      result:
+        "Max iterations reached. Final worker output:\n#{last_worker && last_worker.result}",
       status: :done
     }
 
     acc ++ [final]
   end
 
-  defp do_review_loop(worker_pid, worker_agent, reviewer_pid, reviewer_agent, max, iter, prev_review, acc) do
+  defp do_review_loop(
+         worker_pid,
+         worker_agent,
+         reviewer_pid,
+         reviewer_agent,
+         max,
+         iter,
+         prev_review,
+         acc
+       ) do
     Logger.debug("Review loop iteration #{iter}/#{max}")
 
     worker_task =
@@ -419,9 +447,12 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
               next_acc
             else
               do_review_loop(
-                worker_pid, worker_agent,
-                reviewer_pid, reviewer_agent,
-                max, iter + 1,
+                worker_pid,
+                worker_agent,
+                reviewer_pid,
+                reviewer_agent,
+                max,
+                iter + 1,
                 review_text,
                 next_acc
               )

@@ -28,7 +28,11 @@ defmodule OptimalSystemAgent.Providers.DeepSeek do
   @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :deepseek_api_key)
-    model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :deepseek_model, default_model())
+
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :deepseek_model, default_model())
+
     url = Application.get_env(:optimal_system_agent, :deepseek_url, @default_url)
 
     case OpenAICompat.chat(url, api_key, model, messages, Keyword.delete(opts, :model)) do

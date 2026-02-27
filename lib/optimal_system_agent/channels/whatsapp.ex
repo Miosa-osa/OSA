@@ -45,9 +45,17 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
 
   @impl OptimalSystemAgent.Channels.Behaviour
   def send_message(phone_number, message, opts \\ []) do
-    case Process.whereis(__MODULE__) do
-      nil -> {:error, :not_started}
-      _pid -> GenServer.call(__MODULE__, {:send, phone_number, message, opts}, @send_timeout)
+    mode = Application.get_env(:optimal_system_agent, :whatsapp_mode, "auto")
+
+    case resolve_mode(mode) do
+      :web ->
+        OptimalSystemAgent.WhatsAppWeb.send_message(phone_number, message)
+
+      :api ->
+        case Process.whereis(__MODULE__) do
+          nil -> {:error, :not_started}
+          _pid -> GenServer.call(__MODULE__, {:send, phone_number, message, opts}, @send_timeout)
+        end
     end
   end
 
@@ -92,7 +100,9 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
   def init(_opts) do
     token = Application.get_env(:optimal_system_agent, :whatsapp_token)
     phone_number_id = Application.get_env(:optimal_system_agent, :whatsapp_phone_number_id)
-    verify_token = Application.get_env(:optimal_system_agent, :whatsapp_verify_token, "osa_whatsapp_verify")
+
+    verify_token =
+      Application.get_env(:optimal_system_agent, :whatsapp_verify_token, "osa_whatsapp_verify")
 
     case token do
       nil ->
@@ -173,7 +183,11 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
 
   defp process_change(_value, _state), do: :ok
 
-  defp process_message(%{"from" => from, "type" => "text", "text" => %{"body" => text}}, contacts, state) do
+  defp process_message(
+         %{"from" => from, "type" => "text", "text" => %{"body" => text}},
+         contacts,
+         state
+       ) do
     session_id = "whatsapp_#{from}"
     name = Map.get(contacts, from, from)
     Logger.debug("WhatsApp: Message from #{name} (#{from}): #{text}")
@@ -192,7 +206,14 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
 
       {:error, reason} ->
         Logger.warning("WhatsApp: Agent error for #{from}: #{inspect(reason)}")
-        do_send_message(state.token, state.phone_number_id, from, "Sorry, I encountered an error.", [])
+
+        do_send_message(
+          state.token,
+          state.phone_number_id,
+          from,
+          "Sorry, I encountered an error.",
+          []
+        )
     end
   end
 
@@ -261,6 +282,13 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
           {Loop, session_id: session_id, user_id: to_string(user_id), channel: :whatsapp}
         )
     end
+  end
+
+  defp resolve_mode("web"), do: :web
+  defp resolve_mode("api"), do: :api
+
+  defp resolve_mode(_auto) do
+    if OptimalSystemAgent.WhatsAppWeb.available?(), do: :web, else: :api
   end
 
   defp get_retry_after(headers) do
