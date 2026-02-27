@@ -1,0 +1,108 @@
+{
+  "name": "Build a Full-Stack Application",
+  "description": "Build a complete full-stack application with frontend, backend API, database, and deployment pipeline",
+  "steps": [
+    {
+      "name": "Requirements & User Stories",
+      "description": "Gather detailed requirements. Define user stories, acceptance criteria, and scope boundaries. Identify the target audience, key features, and MVP scope.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_write",
+        "web_search"
+      ],
+      "acceptance_criteria": "Requirements document with user stories, feature list, and clear MVP definition"
+    },
+    {
+      "name": "Architecture & Tech Stack",
+      "description": "Choose the technology stack (frontend framework, backend language, database, hosting). Design the system architecture: component diagram, data flow, API contracts between frontend and backend.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "web_search"
+      ],
+      "acceptance_criteria": "Architecture document with tech stack decisions, component diagram, and API contract definitions"
+    },
+    {
+      "name": "Database Design & Setup",
+      "description": "Design the database schema with tables, relationships, indexes, and constraints. Create migration files and seed data for development.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Database schema created, migrations run cleanly, seed data populates correctly"
+    },
+    {
+      "name": "Backend API Implementation",
+      "description": "Build the backend API: routes, controllers, services, data access layer, authentication, input validation, and error handling. Follow REST or GraphQL conventions.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute",
+        "file_read"
+      ],
+      "acceptance_criteria": "All API endpoints working, authentication in place, proper error responses for all edge cases"
+    },
+    {
+      "name": "Frontend Scaffolding & Routing",
+      "description": "Set up the frontend project with chosen framework. Configure routing, layout components, state management, and API client integration.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Frontend app runs, routing works, API client configured to talk to backend"
+    },
+    {
+      "name": "Frontend UI Implementation",
+      "description": "Build all UI pages and components: forms, lists, detail views, navigation, loading states, and error states. Implement responsive design.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "All pages built, forms submit correctly, data displays properly, responsive on mobile and desktop"
+    },
+    {
+      "name": "Frontend-Backend Integration",
+      "description": "Connect all frontend components to backend API endpoints. Implement authentication flow (login/logout/register), data fetching, and real-time updates if needed.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Full data flow working end-to-end, auth flow complete, all CRUD operations functional through the UI"
+    },
+    {
+      "name": "Testing Suite",
+      "description": "Write backend unit/integration tests, frontend component tests, and end-to-end tests for critical user flows. Set up test infrastructure and CI test running.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Backend tests >80% coverage, frontend key components tested, E2E tests for login and main user flow pass"
+    },
+    {
+      "name": "Polish & Error Handling",
+      "description": "Add loading indicators, error boundaries, toast notifications, form validation messages, empty states, and 404 pages. Ensure graceful degradation.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "No unhandled errors visible to user, all edge states have proper UI, loading states everywhere"
+    },
+    {
+      "name": "Deployment & DevOps",
+      "description": "Create Docker configuration, CI/CD pipeline, environment variable management, production database setup, and monitoring. Deploy to staging environment.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Application deployed to staging, CI/CD pipeline green, monitoring configured, README updated with deploy instructions"
+    }
+  ]
+}

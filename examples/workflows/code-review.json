@@ -1,0 +1,53 @@
+{
+  "name": "Code Review",
+  "description": "Systematic code review workflow: understand changes, check correctness, audit security, review performance, and provide actionable feedback",
+  "steps": [
+    {
+      "name": "Understand the Changes",
+      "description": "Read the PR description, related issue/ticket, and the full diff. Understand what problem is being solved, why this approach was chosen, and what the expected behavior changes are.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Clear understanding of the change purpose, scope, and expected behavior documented"
+    },
+    {
+      "name": "Check Correctness",
+      "description": "Review the logic for bugs, edge cases, and error handling. Verify that the code does what the PR claims. Check boundary conditions, null handling, and data validation.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read"
+      ],
+      "acceptance_criteria": "Logic verified, edge cases identified, any bugs or missing error handling documented"
+    },
+    {
+      "name": "Security Audit",
+      "description": "Check for security issues: injection vulnerabilities, authentication/authorization gaps, hardcoded secrets, CORS misconfiguration, input sanitization, and unsafe deserialization.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read",
+        "web_search"
+      ],
+      "acceptance_criteria": "No security vulnerabilities found, or all identified issues documented with severity ratings"
+    },
+    {
+      "name": "Performance Review",
+      "description": "Check for performance issues: N+1 queries, missing indexes, unnecessary allocations, blocking operations on hot paths, missing caching opportunities, and algorithmic complexity.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read"
+      ],
+      "acceptance_criteria": "No performance regressions identified, or all concerns documented with suggested improvements"
+    },
+    {
+      "name": "Provide Feedback",
+      "description": "Compile all findings into structured review feedback. Categorize issues as CRITICAL (must fix), MAJOR (should fix), MINOR (nice to have), and SUGGESTION (optional improvement). Include positive observations.",
+      "signal_mode": "ASSIST",
+      "tools_needed": [
+        "file_write"
+      ],
+      "acceptance_criteria": "Review feedback delivered with clear categorization, actionable suggestions, and positive notes"
+    }
+  ]
+}

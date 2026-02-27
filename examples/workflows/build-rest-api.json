@@ -1,0 +1,94 @@
+{
+  "name": "Build a REST API",
+  "description": "Build a complete REST API from requirements to deployment",
+  "steps": [
+    {
+      "name": "Requirements Gathering",
+      "description": "Understand what endpoints, data models, and business logic are needed. Interview the user to clarify scope, authentication needs, and integration points.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read",
+        "web_search"
+      ],
+      "acceptance_criteria": "Clear list of endpoints, data models, and authentication requirements documented"
+    },
+    {
+      "name": "Architecture Design",
+      "description": "Design the API architecture: routing structure, middleware stack, database schema, error handling strategy, and response format conventions.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write"
+      ],
+      "acceptance_criteria": "Architecture document with endpoint specifications, database schema, and middleware design"
+    },
+    {
+      "name": "Project Setup",
+      "description": "Initialize the project, install dependencies, configure the development environment, and create the base project structure with health check endpoint.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "shell_execute",
+        "file_write"
+      ],
+      "acceptance_criteria": "Project compiles/runs with basic health check endpoint responding to GET /health"
+    },
+    {
+      "name": "Data Models",
+      "description": "Implement database models, migrations, seed data, and the data access layer. Set up connection pooling and query helpers.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "All models created, migrations run successfully, seed data loads correctly"
+    },
+    {
+      "name": "API Endpoints",
+      "description": "Implement all CRUD endpoints with proper request validation, error handling, pagination, and response formatting.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "All endpoints respond correctly to valid and invalid requests with proper HTTP status codes"
+    },
+    {
+      "name": "Authentication",
+      "description": "Implement authentication and authorization (JWT, API keys, or session-based). Add middleware for protected routes, token refresh, and role-based access control.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "Protected endpoints require valid authentication, unauthorized requests return 401/403"
+    },
+    {
+      "name": "Testing",
+      "description": "Write unit tests for business logic, integration tests for API endpoints, and edge case tests for error handling. Set up test fixtures and helpers.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "All tests pass, coverage above 80%, both happy path and error cases covered"
+    },
+    {
+      "name": "Documentation",
+      "description": "Generate API documentation (OpenAPI/Swagger spec), write README with setup instructions, and add inline code documentation.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write"
+      ],
+      "acceptance_criteria": "OpenAPI spec generated, README with setup/run/test instructions, key functions documented"
+    },
+    {
+      "name": "Deployment Setup",
+      "description": "Create Dockerfile, docker-compose for local development, CI/CD pipeline configuration, environment variable management, and production deployment guide.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "Docker image builds successfully, CI pipeline defined, deployment configuration ready"
+    }
+  ]
+}

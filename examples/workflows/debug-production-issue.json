@@ -1,0 +1,79 @@
+{
+  "name": "Debug a Production Issue",
+  "description": "Systematic debugging workflow: reproduce, isolate, hypothesize, test, fix, verify, prevent",
+  "steps": [
+    {
+      "name": "Reproduce the Issue",
+      "description": "Get exact steps to reproduce the bug. Check error logs, user reports, and monitoring dashboards. Confirm the issue is consistent and find the minimum reproduction case.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "shell_execute",
+        "file_read",
+        "web_search"
+      ],
+      "acceptance_criteria": "Bug reproduced locally or in staging with clear steps, error message/stack trace captured"
+    },
+    {
+      "name": "Isolate the Scope",
+      "description": "Narrow down which component, service, or code path is affected. Check recent changes (git log, git diff), deployment history, and dependency updates. Identify the blast radius.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "shell_execute",
+        "file_read"
+      ],
+      "acceptance_criteria": "Affected component identified, recent relevant changes listed, blast radius understood"
+    },
+    {
+      "name": "Form Hypotheses",
+      "description": "Based on the evidence, form 2-3 theories ranked by likelihood. For each hypothesis, plan how to test it. Consider: data issues, race conditions, configuration drift, dependency bugs.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read",
+        "web_search"
+      ],
+      "acceptance_criteria": "2-3 ranked hypotheses with test plans documented"
+    },
+    {
+      "name": "Test Hypotheses",
+      "description": "Test the most likely hypothesis first. Add targeted logging, use debugger, or write a minimal test case. Use binary search (git bisect) if the root cause is unclear.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "shell_execute",
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "Root cause identified and confirmed with evidence (log output, test failure, or debugger trace)"
+    },
+    {
+      "name": "Implement Fix",
+      "description": "Fix the root cause, not the symptoms. Keep the fix minimal and focused. Do not refactor while fixing. Write the smallest possible change that resolves the issue.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "file_read"
+      ],
+      "acceptance_criteria": "Fix implemented, code change is minimal and targeted, no unrelated changes"
+    },
+    {
+      "name": "Verify Fix",
+      "description": "Confirm the bug is fixed by running the reproduction steps. Check for regressions in related functionality. Test edge cases around the fix. Run the full test suite.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "shell_execute",
+        "file_read"
+      ],
+      "acceptance_criteria": "Original bug no longer reproduces, no regressions detected, all existing tests pass"
+    },
+    {
+      "name": "Prevent Recurrence",
+      "description": "Add a regression test that would have caught this bug. Update monitoring or alerting if needed. Document the root cause and fix in a post-mortem. Consider if similar bugs could exist elsewhere.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "shell_execute",
+        "memory_save"
+      ],
+      "acceptance_criteria": "Regression test written and passing, monitoring updated if applicable, post-mortem documented"
+    }
+  ]
+}

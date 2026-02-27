@@ -1,0 +1,76 @@
+{
+  "name": "Content Marketing Campaign",
+  "description": "Plan and execute a content marketing campaign from research through promotion and analysis",
+  "steps": [
+    {
+      "name": "Audience Research",
+      "description": "Research the target audience: demographics, pain points, content preferences, and where they spend time online. Analyze competitor content and identify gaps.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "web_search",
+        "file_write"
+      ],
+      "acceptance_criteria": "Audience persona documented, competitor analysis complete, content gap opportunities identified"
+    },
+    {
+      "name": "Content Strategy & Outline",
+      "description": "Define the campaign theme, key messages, content formats (blog, social, email, video), and distribution channels. Create a content calendar with topics and deadlines.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write"
+      ],
+      "acceptance_criteria": "Content strategy document with themes, formats, channels, and a 4-week content calendar"
+    },
+    {
+      "name": "Draft Content",
+      "description": "Write the first drafts of all content pieces. Focus on value delivery, storytelling, and clear calls to action. Include SEO keywords naturally where applicable.",
+      "signal_mode": "BUILD",
+      "tools_needed": [
+        "file_write",
+        "web_search"
+      ],
+      "acceptance_criteria": "All content pieces drafted, key messages conveyed, SEO keywords included, CTAs present"
+    },
+    {
+      "name": "Edit & Refine",
+      "description": "Review all drafts for clarity, tone consistency, grammar, and factual accuracy. Optimize headlines, subheadings, and meta descriptions. Add visual suggestions.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "file_read",
+        "file_write"
+      ],
+      "acceptance_criteria": "All content polished, tone consistent across pieces, headlines optimized, no grammatical errors"
+    },
+    {
+      "name": "Publish & Schedule",
+      "description": "Format content for each platform. Schedule posts according to the content calendar. Set up tracking links and UTM parameters for attribution.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "file_write",
+        "shell_execute"
+      ],
+      "acceptance_criteria": "All content published or scheduled, tracking links configured, calendar events created"
+    },
+    {
+      "name": "Promote & Distribute",
+      "description": "Execute the promotion plan: social media sharing, email newsletter, community posting, outreach to influencers or partners, and paid promotion if budgeted.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": [
+        "web_search",
+        "file_write"
+      ],
+      "acceptance_criteria": "Content shared across all planned channels, outreach emails sent, paid campaigns launched if applicable"
+    },
+    {
+      "name": "Analyze & Report",
+      "description": "After 1-2 weeks, collect performance metrics: views, engagement, shares, conversions, and SEO rankings. Compare against goals. Document learnings for the next campaign.",
+      "signal_mode": "ANALYZE",
+      "tools_needed": [
+        "web_search",
+        "file_write",
+        "memory_save"
+      ],
+      "acceptance_criteria": "Performance report with metrics, comparison to goals, and actionable insights for next campaign"
+    }
+  ]
+}

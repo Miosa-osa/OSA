@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Application do
         WhatsApp, Signal, Matrix, Email, QQ, DingTalk, Feishu)
     - Channels.Manager (starts configured adapters after boot)
     - Agent.Memory (persistent JSONL session storage)
+    - Agent.Workflow (multi-step task tracking + LLM decomposition)
     - Agent.Loop (stateful ReAct agent via :osa_agent_loop)
     - Agent.Scheduler (cron + heartbeat)
     - Agent.Compactor (context compression, 3 thresholds)
@@ -59,6 +60,7 @@ defmodule OptimalSystemAgent.Application do
 
       # Agent processes
       OptimalSystemAgent.Agent.Memory,
+      OptimalSystemAgent.Agent.Workflow,
       OptimalSystemAgent.Agent.Scheduler,
       OptimalSystemAgent.Agent.Compactor,
       OptimalSystemAgent.Agent.Cortex,
