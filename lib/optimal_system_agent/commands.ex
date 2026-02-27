@@ -221,6 +221,10 @@ defmodule OptimalSystemAgent.Commands do
       {"resume", "Resume a previous session", &cmd_resume/2},
       {"history", "Browse conversation history", &cmd_history/2},
 
+      # ── Channels ──
+      {"channels", "Manage channel adapters", &cmd_channels/2},
+      {"whatsapp", "WhatsApp Web shortcut", &cmd_whatsapp/2},
+
       # ── Context & Performance ──
       {"compact", "Context compaction stats", &cmd_compact/2},
       {"usage", "Token usage breakdown", &cmd_usage/2},
@@ -289,6 +293,9 @@ defmodule OptimalSystemAgent.Commands do
       {"triggers", "Manage event triggers", &cmd_triggers/2},
       {"heartbeat", "Heartbeat tasks", &cmd_heartbeat/2},
 
+      # ── Task Tracker ──
+      {"tasks", "Show/manage tracked tasks", &cmd_tasks/2},
+
       # ── Analytics ──
       {"analytics", "Usage analytics and metrics", &cmd_utility/2},
       {"debug", "Start systematic debugging", &cmd_utility/2},
@@ -353,6 +360,17 @@ defmodule OptimalSystemAgent.Commands do
         /history            Browse conversation history
         /history <id>       View messages in a session
         /history search <q> Search all messages
+
+      Channels:
+        /channels                  List all channel adapters
+        /channels connect <name>   Start a channel adapter
+        /channels disconnect <n>   Stop a channel adapter
+        /channels status <name>    Detailed channel status
+        /channels test <name>      Verify channel responding
+        /whatsapp                  WhatsApp Web status
+        /whatsapp connect          Connect via QR code
+        /whatsapp disconnect       Logout + stop
+        /whatsapp test             Verify connection
 
       Context:
         /compact            Context compaction stats
@@ -797,29 +815,263 @@ defmodule OptimalSystemAgent.Commands do
     end
   end
 
-  # ── History ──────────────────────────────────────────────────
+  # ── Channels ─────────────────────────────────────────────────
 
-  defp cmd_history(arg, _session_id) do
-    trimmed = String.trim(arg)
+  defp cmd_channels(arg, _session_id) do
+    alias OptimalSystemAgent.Channels.Manager
+    parts = String.split(String.trim(arg), ~r/\s+/, parts: 2)
 
-    cond do
-      trimmed == "" ->
-        cmd_history_list()
+    case parts do
+      [""] ->
+        cmd_channels_overview()
 
-      String.starts_with?(trimmed, "search ") ->
-        query = String.trim_leading(trimmed, "search ") |> String.trim()
-        cmd_history_search(query)
+      ["connect", name] ->
+        case resolve_channel_name(name) do
+          nil ->
+            {:command, "Unknown channel: #{name}\n\nAvailable: #{Enum.join(Manager.known_channels(), ", ")}"}
 
-      true ->
-        cmd_history_session(trimmed)
+          channel ->
+            case Manager.start_channel(channel) do
+              {:ok, pid} ->
+                {:command, "Channel #{name} started (pid=#{inspect(pid)})"}
+
+              {:error, :not_configured} ->
+                {:command, "Channel #{name} is not configured. Run /setup to configure it."}
+
+              {:error, reason} ->
+                {:command, "Failed to start #{name}: #{inspect(reason)}"}
+            end
+        end
+
+      ["disconnect", name] ->
+        case resolve_channel_name(name) do
+          nil ->
+            {:command, "Unknown channel: #{name}\n\nAvailable: #{Enum.join(Manager.known_channels(), ", ")}"}
+
+          channel ->
+            case Manager.stop_channel(channel) do
+              :ok ->
+                {:command, "Channel #{name} disconnected."}
+
+              {:error, :not_running} ->
+                {:command, "Channel #{name} is not running."}
+
+              {:error, reason} ->
+                {:command, "Failed to stop #{name}: #{inspect(reason)}"}
+            end
+        end
+
+      ["status", name] ->
+        case resolve_channel_name(name) do
+          nil ->
+            {:command, "Unknown channel: #{name}"}
+
+          channel ->
+            case Manager.channel_status(channel) do
+          {:ok, info} ->
+            output =
+              """
+              Channel: #{info.name}
+                module:     #{inspect(info.module)}
+                pid:        #{inspect(info.pid)}
+                connected:  #{info.connected}
+                configured: #{info.configured}
+              """
+              |> String.trim()
+
+            {:command, output}
+            end
+        end
+
+      ["test", name] ->
+        case resolve_channel_name(name) do
+          nil ->
+            {:command, "Unknown channel: #{name}"}
+
+          channel ->
+            case Manager.test_channel(channel) do
+              {:ok, :connected} ->
+                {:command, "Channel #{name}: connected and responding."}
+
+              {:error, :not_running} ->
+                {:command, "Channel #{name}: not running. Use /channels connect #{name}"}
+
+              {:error, :not_connected} ->
+                {:command, "Channel #{name}: process alive but not connected."}
+
+              {:error, :process_dead} ->
+                {:command, "Channel #{name}: process is dead."}
+            end
+        end
+
+      _ ->
+        {:command,
+         "Usage:\n  /channels                    List all channels\n  /channels connect <name>     Start a channel\n  /channels disconnect <name>  Stop a channel\n  /channels status <name>      Detailed status\n  /channels test <name>        Verify responding"}
     end
   end
 
-  defp cmd_history_list do
+  defp cmd_channels_overview do
+    alias OptimalSystemAgent.Channels.Manager
+    channels = Manager.list_channels()
+    active = Enum.count(channels, & &1.connected)
+
+    lines =
+      Enum.map_join(channels, "\n", fn ch ->
+        status = if ch.connected, do: "active", else: "inactive"
+        pid_str = if ch.pid, do: inspect(ch.pid), else: "-"
+
+        "  #{String.pad_trailing(to_string(ch.name), 12)} #{String.pad_trailing(status, 10)} #{pid_str}"
+      end)
+
+    {:command,
+     "Channels (#{active}/#{length(channels)} active):\n  #{String.pad_trailing("NAME", 12)} #{String.pad_trailing("STATUS", 10)} PID\n#{lines}"}
+  end
+
+  # Safely resolve a user-typed channel name string to a known atom.
+  # Returns nil if the channel name doesn't match any known channel.
+  defp resolve_channel_name(name) when is_binary(name) do
+    alias OptimalSystemAgent.Channels.Manager
+    Enum.find(Manager.known_channels(), fn ch -> to_string(ch) == name end)
+  end
+
+  # ── WhatsApp ────────────────────────────────────────────────
+
+  defp cmd_whatsapp(arg, _session_id) do
+    parts = String.split(String.trim(arg), ~r/\s+/, parts: 2)
+
+    case parts do
+      [""] -> cmd_whatsapp_status()
+      ["connect"] -> cmd_whatsapp_connect()
+      ["disconnect"] -> cmd_whatsapp_disconnect()
+      ["test"] -> cmd_whatsapp_test()
+
+      _ ->
+        {:command,
+         "Usage:\n  /whatsapp             Status\n  /whatsapp connect     Connect via QR code\n  /whatsapp disconnect  Logout + stop\n  /whatsapp test        Verify connection"}
+    end
+  end
+
+  defp cmd_whatsapp_status do
+    mode = Application.get_env(:optimal_system_agent, :whatsapp_mode, "auto")
+    api_configured = Application.get_env(:optimal_system_agent, :whatsapp_token) != nil
+    web_available = OptimalSystemAgent.WhatsAppWeb.available?()
+
+    web_state =
+      if web_available do
+        case OptimalSystemAgent.WhatsAppWeb.connection_status() do
+          {:ok, %{"connection" => conn, "jid" => jid}} ->
+            "#{conn}#{if jid, do: " (#{jid})", else: ""}"
+
+          _ ->
+            "unknown"
+        end
+      else
+        "sidecar not available"
+      end
+
+    output =
+      """
+      WhatsApp Status:
+        mode:          #{mode}
+        API (Cloud):   #{if api_configured, do: "configured", else: "not configured"}
+        Web (Baileys): #{web_state}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  defp cmd_whatsapp_connect do
+    if not OptimalSystemAgent.WhatsAppWeb.available?() do
+      {:command,
+       "WhatsApp Web sidecar is not available.\nEnsure Node.js is installed and run: cd priv/sidecar/baileys && npm install"}
+    else
+      case OptimalSystemAgent.WhatsAppWeb.connect() do
+        {:ok, %{"status" => "qr", "qr_text" => qr_text}}
+        when is_binary(qr_text) and qr_text != "" ->
+          {:command, "Scan this QR code with WhatsApp:\n\n#{qr_text}\n\nWaiting for scan..."}
+
+        {:ok, %{"status" => "qr", "qr" => _qr}} ->
+          {:command, "QR code generated but text rendering failed. Check sidecar logs."}
+
+        {:ok, %{"status" => "connected", "jid" => jid}} ->
+          {:command, "Already connected as #{jid}"}
+
+        {:ok, %{"status" => "logged_out"}} ->
+          {:command, "Session was logged out. Try /whatsapp connect again."}
+
+        {:error, reason} ->
+          {:command, "Failed to connect: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp cmd_whatsapp_disconnect do
+    if not OptimalSystemAgent.WhatsAppWeb.available?() do
+      {:command, "WhatsApp Web sidecar is not running."}
+    else
+      case OptimalSystemAgent.WhatsAppWeb.logout() do
+        {:ok, _} -> {:command, "WhatsApp Web disconnected and session cleared."}
+        {:error, reason} -> {:command, "Disconnect failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp cmd_whatsapp_test do
+    api_ok =
+      case OptimalSystemAgent.Channels.WhatsApp.connected?() do
+        true -> "connected"
+        false -> "not connected"
+      end
+
+    web_ok =
+      if OptimalSystemAgent.WhatsAppWeb.available?() do
+        case OptimalSystemAgent.WhatsAppWeb.health_check() do
+          :ready -> "connected"
+          :degraded -> "degraded (awaiting QR scan)"
+          _ -> "not available"
+        end
+      else
+        "sidecar not running"
+      end
+
+    {:command, "WhatsApp Test:\n  API (Cloud):   #{api_ok}\n  Web (Baileys): #{web_ok}"}
+  end
+
+  # ── History ──────────────────────────────────────────────────
+
+  defp cmd_history(arg, _session_id) do
+    {channel_filter, trimmed} = extract_channel_flag(String.trim(arg))
+
+    cond do
+      trimmed == "" ->
+        cmd_history_list(channel_filter)
+
+      String.starts_with?(trimmed, "search ") ->
+        query = String.trim_leading(trimmed, "search ") |> String.trim()
+        cmd_history_search(query, channel_filter)
+
+      true ->
+        cmd_history_session(trimmed, channel_filter)
+    end
+  end
+
+  defp extract_channel_flag(arg) do
+    case Regex.run(~r/--channel\s+(\S+)/, arg) do
+      [match, channel] ->
+        rest = String.replace(arg, match, "") |> String.trim()
+        {channel, rest}
+
+      nil ->
+        {nil, arg}
+    end
+  end
+
+  defp cmd_history_list(channel_filter) do
     import Ecto.Query
     alias OptimalSystemAgent.Store.{Repo, Message}
 
-    sessions =
+    base_query =
       from(m in Message,
         group_by: m.session_id,
         order_by: [desc: max(m.inserted_at)],
@@ -830,11 +1082,21 @@ defmodule OptimalSystemAgent.Commands do
           last_at: max(m.inserted_at)
         }
       )
-      |> Repo.all()
+
+    query =
+      if channel_filter do
+        from(m in base_query, where: m.channel == ^channel_filter)
+      else
+        base_query
+      end
+
+    sessions = Repo.all(query)
+
+    filter_label = if channel_filter, do: " (channel: #{channel_filter})", else: ""
 
     if sessions == [] do
       {:command,
-       "No message history found. Messages will be stored after your next conversation."}
+       "No message history found#{filter_label}. Messages will be stored after your next conversation."}
     else
       lines =
         Enum.map_join(sessions, "\n", fn s ->
@@ -844,7 +1106,7 @@ defmodule OptimalSystemAgent.Commands do
         end)
 
       {:command,
-       "Recent sessions:\n#{lines}\n\n  /history <session_id>    Browse messages\n  /history search <query>  Search all messages"}
+       "Recent sessions#{filter_label}:\n#{lines}\n\n  /history <session_id>    Browse messages\n  /history search <query>  Search all messages\n  /history --channel <ch>  Filter by channel"}
     end
   rescue
     _ ->
@@ -858,52 +1120,112 @@ defmodule OptimalSystemAgent.Commands do
       {:command, "Recent sessions (from files):\n#{lines}"}
   end
 
-  defp cmd_history_session(session_id) do
+  defp cmd_history_session(session_id, channel_filter) do
     import Ecto.Query
     alias OptimalSystemAgent.Store.{Repo, Message}
 
-    messages =
+    base_query =
       from(m in Message,
         where: m.session_id == ^session_id,
         order_by: [asc: m.inserted_at],
         limit: 50,
-        select: %{role: m.role, content: m.content, inserted_at: m.inserted_at}
+        select: %{role: m.role, content: m.content, channel: m.channel, inserted_at: m.inserted_at}
       )
-      |> Repo.all()
+
+    query =
+      if channel_filter do
+        from(m in base_query, where: m.channel == ^channel_filter)
+      else
+        base_query
+      end
+
+    messages = Repo.all(query)
+
+    filter_label = if channel_filter, do: " [#{channel_filter}]", else: ""
 
     if messages == [] do
-      {:command, "No messages found for session: #{session_id}"}
+      {:command, "No messages found for session: #{session_id}#{filter_label}"}
     else
       lines =
         Enum.map_join(messages, "\n", fn m ->
           time = if m.inserted_at, do: NaiveDateTime.to_string(m.inserted_at), else: ""
           role = String.pad_trailing(m.role, 10)
-          content = String.slice(m.content || "", 0, 120)
-          "  #{time}  #{role}  #{content}"
+          ch = if m.channel, do: String.pad_trailing(m.channel, 10), else: String.pad_trailing("", 10)
+          content = String.slice(m.content || "", 0, 100)
+          "  #{time}  #{role}  #{ch}  #{content}"
         end)
 
-      {:command, "Session #{session_id} (#{length(messages)} messages):\n#{lines}"}
+      {:command, "Session #{session_id}#{filter_label} (#{length(messages)} messages):\n#{lines}"}
     end
   rescue
     _ -> {:command, "Error loading session: #{session_id}"}
   end
 
-  defp cmd_history_search(query) do
-    results = OptimalSystemAgent.Agent.Memory.search_messages(query, limit: 20)
+  defp cmd_history_search(query, channel_filter) do
+    import Ecto.Query
+    alias OptimalSystemAgent.Store.{Repo, Message}
+
+    limit = 20
+    pattern = "%#{query}%"
+
+    base_query =
+      from(m in Message,
+        where: like(m.content, ^pattern),
+        order_by: [desc: m.inserted_at],
+        limit: ^limit,
+        select: %{
+          id: m.id,
+          session_id: m.session_id,
+          role: m.role,
+          content: m.content,
+          channel: m.channel,
+          inserted_at: m.inserted_at
+        }
+      )
+
+    q =
+      if channel_filter do
+        from(m in base_query, where: m.channel == ^channel_filter)
+      else
+        base_query
+      end
+
+    results = Repo.all(q)
+
+    filter_label = if channel_filter, do: " [#{channel_filter}]", else: ""
 
     if results == [] do
-      {:command, "No messages matching: #{query}"}
+      {:command, "No messages matching: #{query}#{filter_label}"}
     else
       lines =
         Enum.map_join(results, "\n", fn m ->
           time = if m.inserted_at, do: NaiveDateTime.to_string(m.inserted_at), else: ""
           sid = String.slice(m.session_id, 0, 12)
+          ch = if m[:channel], do: " [#{m[:channel]}]", else: ""
           content = String.slice(m.content || "", 0, 100)
-          "  #{sid}  #{time}  #{content}"
+          "  #{sid}  #{time}#{ch}  #{content}"
         end)
 
-      {:command, "Search results for \"#{query}\" (#{length(results)}):\n#{lines}"}
+      {:command, "Search results for \"#{query}\"#{filter_label} (#{length(results)}):\n#{lines}"}
     end
+  rescue
+    _ ->
+      # Fall back to Memory module search (no channel filter)
+      results = OptimalSystemAgent.Agent.Memory.search_messages(query, limit: 20)
+
+      if results == [] do
+        {:command, "No messages matching: #{query}"}
+      else
+        lines =
+          Enum.map_join(results, "\n", fn m ->
+            time = if m.inserted_at, do: NaiveDateTime.to_string(m.inserted_at), else: ""
+            sid = String.slice(m.session_id, 0, 12)
+            content = String.slice(m.content || "", 0, 100)
+            "  #{sid}  #{time}  #{content}"
+          end)
+
+        {:command, "Search results for \"#{query}\" (#{length(results)}):\n#{lines}"}
+      end
   end
 
   # ── Context & Performance ─────────────────────────────────────
@@ -1587,6 +1909,53 @@ defmodule OptimalSystemAgent.Commands do
     hours = div(seconds, 3600)
     mins = div(rem(seconds, 3600), 60)
     "in #{hours}h #{mins}m"
+  end
+
+  # ── Task Tracker ──────────────────────────────────────────────
+
+  defp cmd_tasks(arg, session_id) do
+    alias OptimalSystemAgent.Agent.TaskTracker
+    alias OptimalSystemAgent.Channels.CLI.TaskDisplay
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        tasks = TaskTracker.get_tasks(session_id)
+
+        if tasks == [] do
+          {:command, "No tracked tasks. Use /tasks add \"title\" or let OSA auto-detect."}
+        else
+          {:command, TaskDisplay.render(tasks)}
+        end
+
+      trimmed == "clear" ->
+        TaskTracker.clear_tasks(session_id)
+        {:command, "Tasks cleared."}
+
+      trimmed == "compact" ->
+        tasks = TaskTracker.get_tasks(session_id)
+        if tasks == [], do: {:command, "No tasks."}, else: {:command, TaskDisplay.render_compact(tasks)}
+
+      trimmed == "inline" ->
+        tasks = TaskTracker.get_tasks(session_id)
+        if tasks == [], do: {:command, "No tasks."}, else: {:command, TaskDisplay.render_inline(tasks)}
+
+      String.starts_with?(trimmed, "add ") ->
+        title = trimmed |> String.trim_leading("add ") |> String.trim() |> String.trim("\"")
+
+        if title == "" do
+          {:command, "Usage: /tasks add \"title\""}
+        else
+          {:ok, id} = TaskTracker.add_task(session_id, title)
+          {:command, "Added task #{id}: #{title}"}
+        end
+
+      true ->
+        {:command,
+         "Unknown subcommand: #{trimmed}\n\nUsage:\n  /tasks           — show task panel\n  /tasks add \"t\"   — add a task\n  /tasks clear     — clear all tasks\n  /tasks compact   — single-line view\n  /tasks inline    — Claude Code-style view"}
+    end
+  rescue
+    _ -> {:command, "Task tracker not available."}
   end
 
   # ── Utility Commands (prompt expansion from priv/commands/utility/) ──

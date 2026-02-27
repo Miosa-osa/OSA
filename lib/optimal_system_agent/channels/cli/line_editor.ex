@@ -10,6 +10,11 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   - Ctrl+C — cancel (return :interrupt)
   - Ctrl+D on empty line — EOF (return :eof)
   - Fallback to IO.gets when /dev/tty unavailable
+
+  All terminal I/O during readline goes through a raw /dev/tty fd,
+  completely bypassing the Erlang IO system (group_leader → user_drv →
+  prim_tty).  This is critical on OTP 26+ where prim_tty does software
+  echo and terminal state tracking that conflicts with our own readline.
   """
 
   defstruct buffer: [],
@@ -18,7 +23,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
             history_index: -1,
             saved_input: [],
             prompt: "",
-            # single fd for /dev/tty, read+write, bypasses Erlang group leader
+            # fd for /dev/tty — used for BOTH raw byte reads AND writes
             tty: nil
 
   @doc """
@@ -47,41 +52,28 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   defp interactive_readline(prompt, history, tty) do
     saved = save_stty()
 
-    try do
-      set_raw_mode()
+    case set_raw_mode() do
+      :ok ->
+        try do
+          state = %__MODULE__{
+            prompt: prompt,
+            history: history,
+            tty: tty
+          }
 
-      state = %__MODULE__{
-        prompt: prompt,
-        history: history,
-        tty: tty
-      }
-
-      # Write prompt directly to /dev/tty — bypasses Erlang group leader
-      tty_write(tty, prompt)
-      result = input_loop(state)
-
-      # Erase the raw-mode line BEFORE restoring stty.  This prevents
-      # the ghost/duplicate that appears when the terminal mode switches
-      # from raw→cooked — the switch can re-echo whatever was on the line,
-      # but now the line is empty so the ghost is invisible.
-      tty_write(tty, "\r\e[2K")
-      restore_stty(saved)
-
-      # Re-display prompt+input through standard IO (single consistent
-      # output path, no /dev/tty vs group-leader conflict) then newline.
-      line_text =
-        case result do
-          {:ok, text} -> text
-          _ -> ""
+          # Write prompt directly to /dev/tty — bypasses prim_tty
+          tty_write(tty, prompt)
+          input_loop(state)
+        after
+          restore_stty(saved)
+          # Newline after cooked mode restored
+          tty_write(tty, "\r\n")
         end
 
-      IO.write("#{prompt}#{line_text}\n")
-      result
-    rescue
-      e ->
-        restore_stty(saved)
-        IO.write("\n")
-        reraise e, __STACKTRACE__
+      :error ->
+        # stty failed — fall back to IO.gets to avoid double-echo
+        close_tty(tty)
+        fallback_readline(prompt)
     end
   end
 
@@ -97,7 +89,6 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         :eof
 
       {:ctrl_d, _} ->
-        # Delete char under cursor (forward delete)
         state = delete_forward(state)
         redraw(state)
         input_loop(state)
@@ -113,23 +104,24 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         input_loop(state)
 
       :ctrl_u ->
-        # Kill line before cursor
         {_, after_cursor} = Enum.split(state.buffer, state.cursor)
         state = %{state | buffer: after_cursor, cursor: 0}
         redraw(state)
         input_loop(state)
 
       :ctrl_k ->
-        # Kill line after cursor
         {before_cursor, _} = Enum.split(state.buffer, state.cursor)
         state = %{state | buffer: before_cursor}
         redraw(state)
         input_loop(state)
 
       :ctrl_w ->
-        # Delete word backwards
         state = delete_word_back(state)
         redraw(state)
+        input_loop(state)
+
+      :ctrl_t ->
+        toggle_task_display()
         input_loop(state)
 
       :backspace ->
@@ -214,7 +206,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp delete_word_back(state) do
     {before, after_cursor} = Enum.split(state.buffer, state.cursor)
-    # Drop trailing spaces, then drop non-spaces
+
     trimmed =
       before
       |> Enum.reverse()
@@ -241,7 +233,6 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   defp history_forward(%{history_index: -1} = state), do: state
 
   defp history_forward(%{history_index: 0} = state) do
-    # Return to saved input
     %{state | buffer: state.saved_input, cursor: length(state.saved_input), history_index: -1}
   end
 
@@ -250,7 +241,6 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   defp load_history(state, idx) do
-    # Save current input when first entering history
     saved =
       if state.history_index == -1 do
         state.buffer
@@ -265,43 +255,109 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   end
 
   # --- Rendering ---
+  # All writes go through tty_write (direct /dev/tty fd), NOT IO.write.
+  # This bypasses Erlang's group_leader → user_drv → prim_tty pipeline,
+  # which in OTP 26+ does software echo and line-state tracking that
+  # would duplicate our own rendering.
 
   defp redraw(state) do
     line = Enum.join(state.buffer)
-    # Clear line and rewrite — directly to /dev/tty, not through group leader
     tty_write(state.tty, "\r\e[2K#{state.prompt}#{line}")
-    # Position cursor
+
     chars_after = length(state.buffer) - state.cursor
     if chars_after > 0, do: tty_write(state.tty, "\e[#{chars_after}D")
   end
 
   # --- Terminal I/O ---
 
+  # Open /dev/tty for both reading AND writing.
+  # We bypass the Erlang IO system entirely during readline.
   defp open_tty do
     :file.open(~c"/dev/tty", [:read, :write, :raw, :binary])
   end
 
   defp close_tty(tty), do: :file.close(tty)
 
-  # Write directly to /dev/tty fd, bypassing Erlang's group leader (user_drv).
-  # This prevents the ghost duplicate that occurs when user_drv tries to
-  # reconcile its internal state after stty mode switches.
+  # Write directly to /dev/tty fd — bypasses prim_tty completely.
   defp tty_write(tty, data) do
     :file.write(tty, data)
   end
 
+  # Terminal attribute control via Port.open + spawn_executable.
+  #
+  # Why not :os.cmd?  :os.cmd redirects subprocess stdin to a pipe,
+  # so `stty` can't find the terminal even with `< /dev/tty` — the
+  # redirect happens inside a subshell whose fd setup is unreliable.
+  #
+  # Port.open({:spawn_executable, path}, args: [...]) runs the binary
+  # directly (no shell).  The -f flag (macOS) / -F flag (Linux) tells
+  # stty to operate on /dev/tty explicitly, sidestepping stdin entirely.
+
   defp save_stty do
-    :os.cmd(~c"stty -g 2>/dev/null") |> List.to_string() |> String.trim()
+    case run_stty(["-g"]) do
+      {:ok, settings} -> settings
+      _ -> ""
+    end
   end
 
   defp set_raw_mode do
-    :os.cmd(~c"stty raw -echo 2>/dev/null")
+    case run_stty(["raw", "-echo"]) do
+      {:ok, _} -> :ok
+      _ -> :error
+    end
   end
 
-  defp restore_stty(""), do: :os.cmd(~c"stty sane 2>/dev/null")
+  defp restore_stty(""), do: run_stty(["sane"])
 
   defp restore_stty(saved) do
-    :os.cmd(String.to_charlist("stty #{saved} 2>/dev/null"))
+    run_stty([saved])
+  end
+
+  defp run_stty(args) do
+    flag = stty_device_flag()
+    exe = stty_executable()
+
+    port =
+      Port.open(
+        {:spawn_executable, exe},
+        [:binary, :exit_status, :stderr_to_stdout, args: [flag, "/dev/tty" | args]]
+      )
+
+    collect_port_output(port, "")
+  rescue
+    _ -> {:error, :port_failed}
+  end
+
+  defp collect_port_output(port, acc) do
+    receive do
+      {^port, {:data, data}} ->
+        collect_port_output(port, acc <> data)
+
+      {^port, {:exit_status, 0}} ->
+        {:ok, String.trim(acc)}
+
+      {^port, {:exit_status, _code}} ->
+        {:error, String.trim(acc)}
+    after
+      2_000 ->
+        Port.close(port)
+        {:error, :timeout}
+    end
+  end
+
+  defp stty_executable do
+    case :os.find_executable(~c"stty") do
+      false -> ~c"/bin/stty"
+      path -> path
+    end
+  end
+
+  defp stty_device_flag do
+    case :os.type() do
+      {:unix, :darwin} -> "-f"
+      {:unix, _} -> "-F"
+      _ -> "-f"
+    end
   end
 
   defp read_key(tty) do
@@ -318,6 +374,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       {:ok, <<11>>} -> :ctrl_k
       {:ok, <<21>>} -> :ctrl_u
       {:ok, <<23>>} -> :ctrl_w
+      {:ok, <<20>>} -> :ctrl_t
       {:ok, <<ch>>} when ch >= 32 -> {:char, <<ch::utf8>>}
       {:ok, bytes} -> maybe_utf8(tty, bytes)
       _ -> :unknown
@@ -359,40 +416,26 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   # CSI sequences: ESC [ ...
   defp read_csi(tty) do
     case :file.read(tty, 1) do
-      {:ok, <<"A">>} ->
-        :up
-
-      {:ok, <<"B">>} ->
-        :down
-
-      {:ok, <<"C">>} ->
-        :right
-
-      {:ok, <<"D">>} ->
-        :left
-
-      {:ok, <<"H">>} ->
-        :home
-
-      {:ok, <<"F">>} ->
-        :end_key
+      {:ok, <<"A">>} -> :up
+      {:ok, <<"B">>} -> :down
+      {:ok, <<"C">>} -> :right
+      {:ok, <<"D">>} -> :left
+      {:ok, <<"H">>} -> :home
+      {:ok, <<"F">>} -> :end_key
 
       {:ok, <<"3">>} ->
-        # Delete key: ESC [ 3 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :delete
           _ -> :unknown
         end
 
       {:ok, <<"1">>} ->
-        # Home: ESC [ 1 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :home
           _ -> :unknown
         end
 
       {:ok, <<"4">>} ->
-        # End: ESC [ 4 ~
         case :file.read(tty, 1) do
           {:ok, <<"~">>} -> :end_key
           _ -> :unknown
@@ -409,6 +452,38 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       {:ok, <<"H">>} -> :home
       {:ok, <<"F">>} -> :end_key
       _ -> :unknown
+    end
+  end
+
+  # --- Task Display Toggle ---
+
+  defp toggle_task_display do
+    try do
+      sessions =
+        try do
+          :ets.match(:osa_settings, {{:"$1", :task_display_visible}, :"$2"})
+        rescue
+          _ -> []
+        end
+
+      case sessions do
+        [[sid, current] | _] ->
+          new_val = !current
+          :ets.insert(:osa_settings, {{sid, :task_display_visible}, new_val})
+
+          if new_val do
+            IO.write("\r\e[2K\e[1A\e[2K")
+            IO.puts("  task panel: on")
+          else
+            IO.write("\r\e[2K\e[1A\e[2K")
+            IO.puts("  task panel: off")
+          end
+
+        _ ->
+          :ok
+      end
+    rescue
+      _ -> :ok
     end
   end
 

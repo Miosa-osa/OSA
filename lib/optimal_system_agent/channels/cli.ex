@@ -8,8 +8,8 @@ defmodule OptimalSystemAgent.Channels.CLI do
   """
   require Logger
 
-  alias OptimalSystemAgent.Agent.Loop
-  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, PlanReview, Spinner}
+  alias OptimalSystemAgent.Agent.{Loop, TaskTracker}
+  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, PlanReview, Spinner, TaskDisplay}
   alias OptimalSystemAgent.Commands
   alias OptimalSystemAgent.Events.Bus
 
@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     # Register event handlers for CLI feedback
     register_signal_handler()
     register_orchestrator_handler()
+    register_task_tracker_handler()
 
     # Initialize history storage in ETS
     init_history()
@@ -176,6 +177,40 @@ defmodule OptimalSystemAgent.Channels.CLI do
         %{event: :swarm_completed, swarm_id: id} ->
           clear_line()
           IO.puts("#{@cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... completed#{@reset}")
+
+        _ ->
+          :ok
+      end
+    end)
+  rescue
+    _ -> :ok
+  end
+
+  defp register_task_tracker_handler do
+    Bus.register_handler(:system_event, fn payload ->
+      case payload do
+        %{event: event, session_id: sid}
+        when event in [
+               :task_tracker_task_added,
+               :task_tracker_task_started,
+               :task_tracker_task_completed,
+               :task_tracker_task_failed
+             ] ->
+          visible = Commands.get_setting(sid, :task_display_visible, true)
+
+          if visible do
+            try do
+              tasks = TaskTracker.get_tasks(sid)
+
+              if tasks != [] do
+                output = TaskDisplay.render_inline(tasks)
+                clear_line()
+                IO.puts(output)
+              end
+            rescue
+              _ -> :ok
+            end
+          end
 
         _ ->
           :ok

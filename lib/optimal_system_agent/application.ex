@@ -72,6 +72,7 @@ defmodule OptimalSystemAgent.Application do
         OptimalSystemAgent.Agent.TaskQueue,
         OptimalSystemAgent.Agent.Orchestrator,
         OptimalSystemAgent.Agent.Progress,
+        OptimalSystemAgent.Agent.TaskTracker,
         OptimalSystemAgent.Agent.Hooks,
         OptimalSystemAgent.Agent.Learning,
         OptimalSystemAgent.Agent.Scheduler,
