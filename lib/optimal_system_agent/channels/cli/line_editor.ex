@@ -59,7 +59,9 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
       IO.write(prompt)
       result = input_loop(state)
-      IO.write("\n")
+      # In raw mode (-onlcr), \n is just LF without CR — cursor stays at column.
+      # Use \r\n to properly move to column 0 on the next line.
+      IO.write("\r\n")
       result
     after
       restore_stty(saved)

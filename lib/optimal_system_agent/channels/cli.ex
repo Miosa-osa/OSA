@@ -38,13 +38,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
     # Initialize history storage in ETS
     init_history()
 
-    IO.puts("")
     loop(session_id)
   end
 
   defp loop(session_id) do
-    dir = prompt_dir()
-    prompt = "#{@dim}#{dir}#{@reset} #{@bold}#{@cyan}>#{@reset} "
+    prompt = "#{@bold}#{@cyan}❯#{@reset} "
     history = get_history(session_id)
 
     case LineEditor.readline(prompt, history) do
@@ -430,8 +428,8 @@ defmodule OptimalSystemAgent.Channels.CLI do
   end
 
   defp print_separator do
-    width = min(terminal_width() - 4, 72)
-    IO.puts("#{@dim}  #{String.duplicate("─", width)}#{@reset}\n")
+    width = terminal_width()
+    IO.puts("\n#{@dim}#{String.duplicate("─", width)}#{@reset}")
   end
 
   defp format_elapsed(ms) when ms < 1_000, do: "<1s"
@@ -492,6 +490,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
     git_hash = git_short_hash()
     cwd = prompt_dir()
+    width = terminal_width()
 
     IO.puts("""
     #{@bold}#{@cyan}
@@ -505,6 +504,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     #{@dim}#{provider} / #{model} · #{skill_count} skills · soul: #{soul_status}#{@reset}
     #{@dim}#{cwd}#{@reset}
     #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
+    #{@dim}#{String.duplicate("─", width)}#{@reset}
     """)
   end
 
@@ -589,10 +589,18 @@ defmodule OptimalSystemAgent.Channels.CLI do
     cwd = File.cwd!()
     home = System.get_env("HOME") || ""
 
-    if home != "" and String.starts_with?(cwd, home) do
-      "~" <> String.trim_leading(cwd, home)
-    else
-      cwd
+    shortened =
+      if home != "" and String.starts_with?(cwd, home) do
+        "~" <> String.trim_leading(cwd, home)
+      else
+        cwd
+      end
+
+    # Show abbreviated path: ~/…/ProjectName for deep paths
+    parts = Path.split(shortened)
+    case length(parts) do
+      n when n > 3 -> "~/…/" <> List.last(parts)
+      _ -> shortened
     end
   rescue
     _ -> "."
