@@ -10,37 +10,84 @@
 
 | Doc | Description |
 |-----|-------------|
-| [Getting Started](getting-started.md) | Installation, first run, provider setup |
-| [Configuration Reference](configuration.md) | All config options, env vars, feature flags |
-| [CLI Command Reference](cli-reference.md) | 60+ slash commands with descriptions |
-| [Troubleshooting](troubleshooting.md) | Common issues and solutions |
+| [Overview](getting-started/) | Installation, prerequisites, quick start |
+| [Configuration](getting-started/configuration.md) | All config options, env vars, feature flags |
+| [Troubleshooting](getting-started/troubleshooting.md) | Common issues and solutions |
 
-## Core Concepts
-
-| Doc | Description |
-|-----|-------------|
-| [Architecture](architecture.md) | OTP supervision tree, module map, system design |
-| [Signal Theory](signal-theory.md) | 5-tuple classification, noise filtering, communication intelligence |
-| [Memory & Learning](memory-and-learning.md) | 3-store memory, SICA learning engine, Cortex synthesis |
-| [Agent Orchestration](orchestration.md) | 9 roles, 5 waves, 10 swarm patterns, tier routing |
-
-## Integration Guides
+## Architecture
 
 | Doc | Description |
 |-----|-------------|
-| [Provider Setup](providers.md) | 18 LLM providers — API keys, models, tier mapping |
-| [Channel Setup](channels.md) | 12+ channels — Telegram, Discord, Slack, WhatsApp, etc. |
-| [Hook Pipeline](hooks.md) | 7 events, 16+ hooks, custom hook development |
-| [Skills Guide](skills-guide.md) | Creating built-in and SKILL.md custom skills |
-| [HTTP API](http-api.md) | REST endpoints, authentication, SDK surface |
+| [Overview](architecture/) | OTP supervision tree, module map, system design |
+| [Signal Theory](architecture/signal-theory.md) | 5-tuple classification, noise filtering, communication intelligence |
+| [Memory & Learning](architecture/memory-and-learning.md) | 3-store memory, SICA learning engine, Cortex synthesis |
+| [SDK Architecture](architecture/sdk.md) | SDK contracts, agent lifecycle, session management |
+
+## Guides
+
+| Doc | Description |
+|-----|-------------|
+| [Providers](guides/providers/) | 18 LLM providers — per-provider setup guides |
+| [Channels](guides/channels/) | 12+ channels — per-channel setup guides |
+| [Orchestration](guides/orchestration.md) | 9 roles, 5 waves, 10 swarm patterns, tier routing |
+| [Hook Pipeline](guides/hooks.md) | 7 events, 16+ hooks, custom hook development |
+| [Skills](guides/skills.md) | Creating built-in and SKILL.md custom skills |
+
+### Provider Guides
+
+| Provider | Guide |
+|----------|-------|
+| Anthropic (Claude) | [anthropic.md](guides/providers/anthropic.md) |
+| OpenAI | [openai.md](guides/providers/openai.md) |
+| Google (Gemini) | [google.md](guides/providers/google.md) |
+| Groq (LPU) | [groq.md](guides/providers/groq.md) |
+| DeepSeek | [deepseek.md](guides/providers/deepseek.md) |
+| Fireworks | [fireworks.md](guides/providers/fireworks.md) |
+| Together AI | [together.md](guides/providers/together.md) |
+| OpenRouter | [openrouter.md](guides/providers/openrouter.md) |
+| Perplexity | [perplexity.md](guides/providers/perplexity.md) |
+| Mistral | [mistral.md](guides/providers/mistral.md) |
+| Cohere | [cohere.md](guides/providers/cohere.md) |
+| Replicate | [replicate.md](guides/providers/replicate.md) |
+| Ollama (Local) | [ollama.md](guides/providers/ollama.md) |
+| Chinese (Qwen, Zhipu, Moonshot, VolcEngine, Baichuan) | [chinese.md](guides/providers/chinese.md) |
+
+### Channel Guides
+
+| Channel | Guide |
+|---------|-------|
+| CLI | [cli.md](guides/channels/cli.md) |
+| HTTP API | [http.md](guides/channels/http.md) |
+| Telegram | [telegram.md](guides/channels/telegram.md) |
+| Discord | [discord.md](guides/channels/discord.md) |
+| Slack | [slack.md](guides/channels/slack.md) |
+| WhatsApp | [whatsapp.md](guides/channels/whatsapp.md) |
+| Signal | [signal.md](guides/channels/signal.md) |
+| Matrix | [matrix.md](guides/channels/matrix.md) |
+| Email | [email.md](guides/channels/email.md) |
+| DingTalk | [dingtalk.md](guides/channels/dingtalk.md) |
+| Feishu | [feishu.md](guides/channels/feishu.md) |
+| QQ | [qq.md](guides/channels/qq.md) |
+
+## Reference
+
+| Doc | Description |
+|-----|-------------|
+| [CLI Commands](reference/cli.md) | 60+ slash commands organized by category |
+| [HTTP API](reference/http-api.md) | REST endpoints, authentication, request/response formats |
+
+## Concepts
+
+| Doc | Description |
+|-----|-------------|
+| [Use Cases](concepts/use-cases.md) | Real-world usage patterns and workflows |
 
 ## Operations
 
 | Doc | Description |
 |-----|-------------|
-| [Deployment Guide](deployment.md) | Docker, systemd, Nginx, production checklist |
-| [SDK Architecture](SDK-ARCHITECTURE.md) | SDK contracts, agent lifecycle, session management |
-| [Use Cases](use-cases.md) | Real-world usage examples |
+| [Deployment](operations/deployment.md) | Docker, systemd, Nginx, production checklist |
+| [Debugging Journal](operations/debugging-journal.md) | Historical debugging notes and resolutions |
 
 ## Competitive Intelligence
 
@@ -48,6 +95,7 @@
 |-----|-------------|
 | [Competitors Overview](competitors/README.md) | 14 competitors analyzed, positioning map |
 | [Feature Matrix](competitors/feature-matrix.md) | Side-by-side comparison across all competitors |
+| [OSA vs OpenClaw](competitors/osa-vs-openclaw-hitlist.md) | Head-to-head deep dive |
 | [OpenClaw](competitors/openclaw.md) | 195K stars, messaging-first — our #1 comp |
 | [Aider](competitors/aider.md) | SOTA CLI coding agent |
 | [Cursor](competitors/cursor.md) | Best AI IDE, 8 parallel agents |
@@ -74,6 +122,83 @@
 
 ---
 
+## Directory Structure
+
+```
+docs/
+├── README.md                      ← You are here
+├── getting-started/               ← Install, config, troubleshooting
+│   ├── README.md
+│   ├── configuration.md
+│   └── troubleshooting.md
+├── architecture/                  ← System design & internals
+│   ├── README.md
+│   ├── signal-theory.md
+│   ├── memory-and-learning.md
+│   └── sdk.md
+├── guides/                        ← How-to guides
+│   ├── README.md
+│   ├── providers/                 ← Per-provider setup (14 files)
+│   │   ├── README.md
+│   │   ├── anthropic.md
+│   │   ├── openai.md
+│   │   ├── google.md
+│   │   ├── groq.md
+│   │   ├── deepseek.md
+│   │   ├── fireworks.md
+│   │   ├── together.md
+│   │   ├── openrouter.md
+│   │   ├── perplexity.md
+│   │   ├── mistral.md
+│   │   ├── cohere.md
+│   │   ├── replicate.md
+│   │   ├── ollama.md
+│   │   └── chinese.md
+│   ├── channels/                  ← Per-channel setup (12 files)
+│   │   ├── README.md
+│   │   ├── cli.md
+│   │   ├── http.md
+│   │   ├── telegram.md
+│   │   ├── discord.md
+│   │   ├── slack.md
+│   │   ├── whatsapp.md
+│   │   ├── signal.md
+│   │   ├── matrix.md
+│   │   ├── email.md
+│   │   ├── dingtalk.md
+│   │   ├── feishu.md
+│   │   └── qq.md
+│   ├── orchestration.md
+│   ├── hooks.md
+│   └── skills.md
+├── reference/                     ← API & CLI reference
+│   ├── README.md
+│   ├── cli.md
+│   └── http-api.md
+├── concepts/                      ← High-level concepts
+│   ├── README.md
+│   └── use-cases.md
+├── operations/                    ← Deployment & ops
+│   ├── README.md
+│   ├── deployment.md
+│   └── debugging-journal.md
+├── competitors/                   ← Competitive intelligence (17 files)
+│   ├── README.md
+│   ├── feature-matrix.md
+│   ├── osa-vs-openclaw-hitlist.md
+│   ├── openclaw.md
+│   ├── aider.md
+│   ├── cursor.md
+│   └── ... (11 more)
+├── roadmap/                       ← 5-phase plan (8 files)
+│   ├── README.md
+│   ├── gap-analysis.md
+│   ├── our-advantages.md
+│   └── phase-1..5-*.md
+└── changelog/
+    └── CHANGELOG.md
+```
+
 ## System Stats
 
 | Metric | Value |
@@ -87,9 +212,7 @@
 | Markdown skills | 30+ |
 | Agent roles | 9 |
 | Swarm presets | 10 |
-| Swarm patterns | 4 |
 | Slash commands | 60+ |
 | Hook events | 7 |
 | Built-in hooks | 16+ |
-| Prompt files | 7 core + 70+ command prompts |
-| Agent prompts | 22+ |
+| Doc files | 60+ |
