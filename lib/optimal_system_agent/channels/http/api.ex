@@ -5,6 +5,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   Every route goes through JWT verification first. In dev mode (require_auth: false),
   unauthenticated requests are allowed with an "anonymous" user_id.
 
+  Orchestration endpoints:
+    POST   /api/v1/orchestrate/complex          — Launch multi-agent orchestrated task
+    GET    /api/v1/orchestrate/:task_id/progress — Real-time progress for orchestrated task
+    GET    /api/v1/orchestrate/tasks             — List all orchestrated tasks
+    POST   /api/v1/skills/create                 — Dynamically create a new skill
+
   Swarm endpoints:
     POST   /api/v1/swarm/launch  — Launch a new multi-agent swarm
     GET    /api/v1/swarm         — List all swarms
@@ -22,6 +28,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Machines
   alias OptimalSystemAgent.Channels.HTTP.Auth
   alias OptimalSystemAgent.Swarm.Orchestrator, as: Swarm
+  alias OptimalSystemAgent.Agent.Orchestrator, as: TaskOrchestrator
+  alias OptimalSystemAgent.Agent.Progress
   alias OptimalSystemAgent.Channels.Telegram
   alias OptimalSystemAgent.Channels.Discord
   alias OptimalSystemAgent.Channels.Slack
@@ -304,6 +312,138 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(202, body)
+  end
+
+  # ── POST /orchestrate/complex ────────────────────────────────────────
+  #
+  # Launch an orchestrated multi-agent task. The orchestrator analyzes
+  # complexity, decomposes into sub-tasks, spawns parallel sub-agents,
+  # and synthesizes results.
+  #
+  # Request body:
+  #   { "task": "Build a full REST API with tests and docs",
+  #     "strategy": "auto" }  // optional: "parallel", "pipeline", "auto"
+  #
+  # Response:
+  #   { "task_id": "task_abc123", "status": "completed",
+  #     "synthesis": "...", "agent_count": 3 }
+
+  post "/orchestrate/complex" do
+    with %{"task" => task} when is_binary(task) and task != "" <- conn.body_params do
+      strategy = conn.body_params["strategy"] || "auto"
+      session_id = conn.body_params["session_id"] || generate_session_id()
+
+      case TaskOrchestrator.execute(task, session_id, strategy: strategy) do
+        {:ok, task_id, synthesis} ->
+          body = Jason.encode!(%{
+            task_id: task_id,
+            status: "completed",
+            synthesis: synthesis,
+            session_id: session_id
+          })
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, body)
+
+        {:error, reason} ->
+          json_error(conn, 422, "orchestration_error", inspect(reason))
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required field: task")
+    end
+  end
+
+  # ── GET /orchestrate/:task_id/progress ──────────────────────────────
+  #
+  # Get real-time progress for a running orchestrated task.
+  #
+  # Response:
+  #   { "task_id": "...", "status": "running",
+  #     "agents": [{ "name": "research", "tool_uses": 12, "tokens_used": 45200, ... }],
+  #     "formatted": "Running 3 agents...\n   ..." }
+
+  get "/orchestrate/:task_id/progress" do
+    task_id = conn.params["task_id"]
+
+    case TaskOrchestrator.progress(task_id) do
+      {:ok, progress_data} ->
+        formatted =
+          case Progress.format(task_id) do
+            {:ok, text} -> text
+            _ -> nil
+          end
+
+        body = Jason.encode!(Map.put(progress_data, :formatted, formatted))
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, body)
+
+      {:error, :not_found} ->
+        json_error(conn, 404, "not_found", "Task #{task_id} not found")
+    end
+  end
+
+  # ── GET /orchestrate/tasks ──────────────────────────────────────────
+  #
+  # List all orchestrated tasks (running and recently completed).
+  #
+  # Response:
+  #   { "tasks": [...], "count": 5, "active_count": 1 }
+
+  get "/orchestrate/tasks" do
+    tasks = TaskOrchestrator.list_tasks()
+    active_count = Enum.count(tasks, & &1.status == :running)
+
+    body = Jason.encode!(%{
+      tasks: tasks,
+      count: length(tasks),
+      active_count: active_count
+    })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  # ── POST /skills/create ─────────────────────────────────────────────
+  #
+  # Dynamically create a new skill at runtime.
+  #
+  # Request body:
+  #   { "name": "data-analyzer",
+  #     "description": "Analyze CSV data files",
+  #     "instructions": "Read the CSV file and...",
+  #     "tools": ["file_read", "shell_execute"] }
+  #
+  # Response:
+  #   { "status": "created", "name": "data-analyzer",
+  #     "message": "Skill created and registered." }
+
+  post "/skills/create" do
+    with %{"name" => name, "description" => desc, "instructions" => instructions}
+         when is_binary(name) and is_binary(desc) and is_binary(instructions) <- conn.body_params do
+      tools = conn.body_params["tools"] || []
+
+      case TaskOrchestrator.create_skill(name, desc, instructions, tools) do
+        {:ok, _} ->
+          body = Jason.encode!(%{
+            status: "created",
+            name: name,
+            message: "Skill '#{name}' created and registered at ~/.osa/skills/#{name}/SKILL.md"
+          })
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(201, body)
+
+        {:error, reason} ->
+          json_error(conn, 422, "skill_creation_error", inspect(reason))
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required fields: name, description, instructions")
+    end
   end
 
   # ── POST /swarm/launch ───────────────────────────────────────────────

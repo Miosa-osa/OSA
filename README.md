@@ -1,140 +1,247 @@
 # OptimalSystemAgent
 
-> A lightweight, Signal Theory-grounded AI agent that classifies every message before processing it. Unlike other agent frameworks that treat every input equally, OSA decides what matters first — filtering noise, routing signals, and only spending compute on what counts. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
+> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 17 LLM providers, 12 chat channels, and unlimited custom skills. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.19+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-28+-green.svg)](https://www.erlang.org)
+[![Tests](https://img.shields.io/badge/Tests-440%20passing-brightgreen.svg)](#)
 
 ---
 
 ## The Problem
 
-When we started building an AI agent for the MIOSA platform, we looked at what was already out there. OpenClaw had 430,000 lines of TypeScript. NanoClaw stripped that down to ~200 lines. Nanobot got it to 4,000 lines of Python. AutoGen, CrewAI — more options, different languages, same core idea.
+Every agent framework today treats every message the same. A "hey" goes through the same pipeline as "our production database is down." Every greeting, every "ok", every emoji reaction — full pipeline, full cost, full latency.
 
-They all solved real problems. NanoClaw nailed simplicity and security. Nanobot nailed lightweight multi-channel support. But after running them, we kept hitting the same wall: **every message gets the same treatment.** A "hey" goes through the same pipeline as "we need to restructure our entire Q3 revenue model."
+None of them solve the **intelligence problem.** They're message processors, not intelligent systems.
 
-None of them solved the **intelligence problem.** They send every single message — greetings, "ok", emoji reactions, "thanks" — straight to the AI model. Every message costs the same compute. Every message waits in the same queue. There's no triage. No priority. No signal-versus-noise separation.
+OSA is different. It's grounded in [Signal Theory](https://zenodo.org/records/18774174) — every message is classified, weighted, and routed before a single token of AI compute is spent. Noise gets filtered. Signals get prioritized. Complex tasks get decomposed across multiple agents. The system learns and adapts.
 
-That's like running a business where every phone call gets the same priority. The spam call gets the same attention as your biggest client. No business runs that way. Why should your AI?
+**18,700+ lines of Elixir/OTP. 440 tests. Zero cloud dependency.**
 
-So we built OSA from scratch — different language, different runtime, different architecture. Not a fork, not a wrapper. A fundamentally different approach grounded in [Signal Theory](https://zenodo.org/records/18774174).
+## What Makes OSA Different
 
-## What OSA Does Differently
+### 1. LLM-Primary Signal Classification
 
-OSA classifies every incoming message *before* processing it. Five dimensions, scored in under 1 millisecond:
+Every message is classified into a 5-tuple before processing — and the classifier is an LLM, not regex:
 
-- **What needs to happen** — Build something? Analyze data? Just assist?
-- **What's the intent** — Is someone asking, deciding, committing, or just chatting?
-- **What domain** — A question? A bug report? A scheduling request?
-- **What format** — A quick message? A document? A system alert?
-- **How important is it** — Noise (0.0) to critical signal (1.0)
+```
+S = (Mode, Genre, Type, Format, Weight)
 
-Noise gets filtered *before* it ever hits your AI model. Real signals get routed to the right handler immediately. The result: **40-60% fewer AI calls, faster responses, lower cost.**
-
-This isn't a feature bolted onto an agent. It's the architecture.
-
-**Research:** [Signal Theory: The Architecture of Optimal Intent Encoding in Communication Systems](https://zenodo.org/records/18774174) (Luna, 2026)
-
-## One-Line Install (macOS)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
+Mode:   What action    — BUILD, EXECUTE, ANALYZE, MAINTAIN, ASSIST
+Genre:  Purpose        — DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
+Type:   Domain         — question, request, issue, scheduling, summary, report
+Format: Container      — message, command, document, notification
+Weight: Information    — 0.0 (noise) → 1.0 (critical signal)
 ```
 
-Sets up everything automatically — Elixir, dependencies, configuration wizard. Takes about 2 minutes.
+The LLM understands intent. "Help me build a rocket" → BUILD mode (not ASSIST, which is what keyword matching would give you). "Can you run the tests?" → EXECUTE. The deterministic fallback only activates when the LLM is unavailable.
 
-## Why OSA Over NanoClaw / Nanobot / OpenClaw
+Results are cached in ETS (SHA256 key, 10-minute TTL) — repeated messages never hit the LLM twice.
 
-### 1. It Filters Noise Before Spending Money
+### 2. Two-Tier Noise Filtering
 
-Every AI call costs money (or compute time). NanoClaw, Nanobot, and OpenClaw send everything to the model. Every "ok", every "thanks", every emoji reaction — full pipeline, full cost.
+```
+Tier 1 (< 1ms):  Deterministic — regex patterns, length thresholds, duplicate detection
+Tier 2 (~200ms): LLM-based — only for uncertain signals (weight 0.3-0.6)
+```
 
-OSA has two layers of filtering:
-- **Instant filter (< 1ms):** Pattern matching catches obvious noise — no AI needed
-- **Smart filter (~200ms):** For borderline messages, a fast model decides: signal or noise?
+40-60% of messages in a typical conversation are noise. OSA filters them before they reach your main AI model. Everyone else processes everything.
 
-Only real signals reach your main AI model. You save 40-60% on AI costs immediately.
+### 3. Autonomous Task Orchestration
 
-### 2. It Has Communication Intelligence (Nobody Else Does)
+Complex tasks get decomposed into parallel sub-agents automatically:
 
-NanoClaw has container isolation. Nanobot has channel breadth. OSA has **communication intelligence** — five modules that understand how people communicate:
+```
+User: "Build me a REST API with auth, tests, and docs"
+
+OSA Orchestrator:
+  ├── Research agent — 12 tool uses — 45.2k tokens — analyzing codebase
+  ├── Builder agent  — 28 tool uses — 89.1k tokens — writing implementation
+  ├── Tester agent   — 8 tool uses  — 23.4k tokens — writing tests
+  └── Writer agent   — 5 tool uses  — 12.8k tokens — writing documentation
+
+Synthesis: 4 agents completed — files created, tests passing, docs written.
+```
+
+The orchestrator:
+- Analyzes complexity via LLM (simple → single agent, complex → multi-agent)
+- Decomposes into dependency-aware waves (topological sort)
+- Spawns sub-agents with role-specific prompts (researcher, builder, tester, reviewer, writer)
+- Tracks real-time progress (tool uses, tokens, current action) via event bus
+- Synthesizes all results into a unified response
+
+### 4. Intelligent Skill Discovery & Creation
+
+Before creating a new skill, OSA searches existing ones:
+
+```
+User: "Create a skill for analyzing CSV data"
+
+OSA: Found existing skills that may match:
+  - file_read (relevance: 0.72) — Read file contents from the filesystem
+  - shell_execute (relevance: 0.45) — Execute shell commands
+
+  Use one of these, or should I create a new skill?
+
+User: "Create a new one"
+→ OSA writes ~/.osa/skills/csv-analyzer/SKILL.md and hot-registers it immediately.
+```
+
+Skills can be:
+- **Built-in modules** — Elixir code implementing `Skills.Behaviour`
+- **SKILL.md files** — Markdown-defined, drop in `~/.osa/skills/`, available instantly
+- **MCP server tools** — Auto-discovered from `~/.osa/mcp.json`
+- **Dynamically created** — The agent creates its own skills at runtime
+
+### 5. Token-Budgeted Context Assembly
+
+Context isn't dumped — it's assembled with a token budget:
+
+```
+CRITICAL (unlimited): System identity, active tools
+HIGH     (40%):       Recent conversation turns, current task state
+MEDIUM   (30%):       Relevant memories (keyword-searched, not full dump)
+LOW      (remaining): Workflow context, environmental info
+```
+
+Smart token estimation: `words × 1.3 + punctuation × 0.5`. Relevance-scored memory retrieval: keyword overlap 50% + recency decay 30% + importance 20%.
+
+### 6. Progressive Context Compression
+
+Three-zone sliding window with importance-weighted retention:
+
+```
+HOT  (last 10 msgs):  Never touched — full fidelity
+WARM (msgs 11-30):    Progressive compression — merge same-role, summarize groups
+COLD (msgs 31+):      Key facts only — importance-weighted retention
+```
+
+5-step compression pipeline: strip tool args → merge same-role → summarize groups of 5 → compress cold → emergency truncate. Tool calls get +0.5 importance, acknowledgments get -0.5.
+
+### 7. Three-Store Memory Architecture
+
+```
+Session Memory:  JSONL per session — full conversation history
+Long-Term:       MEMORY.md — persistent knowledge base
+Episodic Index:  ETS inverted index — keyword → session mapping
+```
+
+`recall_relevant/2` extracts keywords (150+ stop words filtered), searches the inverted index, scores by relevance, and returns the most relevant memories for injection into context.
+
+### 8. Communication Intelligence
+
+Five modules that understand how people communicate:
 
 | Module | What It Does |
 |--------|-------------|
-| **Communication Profiler** | Learns each contact's communication style over time |
-| **Communication Coach** | Scores your outbound message quality before you send |
-| **Conversation Tracker** | Tracks depth — from casual chat to deep strategic discussion |
-| **Proactive Monitor** | Watches for silence, drift, and engagement drops |
+| **Communication Profiler** | Learns each contact's style — response time, formality, topic preferences |
+| **Communication Coach** | Scores outbound message quality before sending — clarity, tone, completeness |
+| **Conversation Tracker** | Tracks depth from casual chat to deep strategic discussion (4 levels) |
+| **Proactive Monitor** | Watches for silence, drift, and engagement drops — triggers alerts |
 | **Contact Detector** | Identifies who's talking in under 1 millisecond |
 
-No other agent framework — lightweight or otherwise — has anything like this.
+No other agent framework has anything like this.
 
-### 3. It Actually Recovers From Crashes
+### 9. Multi-Agent Swarm Collaboration
 
-NanoClaw runs as a single Node.js process. If it crashes, everything stops. You restart manually. Nanobot is a Python process — same problem.
+```elixir
+# Four collaboration patterns
+:parallel     # All agents work simultaneously
+:pipeline     # Agent output feeds into next agent
+:debate       # Agents argue, consensus emerges
+:review_loop  # Build → review → fix → re-review
+```
 
-OSA runs on the BEAM virtual machine (Erlang/OTP) — the same platform that powers WhatsApp and telecom switches with 99.9999% uptime. If any part of OSA crashes, it automatically restarts that component without affecting the rest of the system. Handle 30+ conversations simultaneously on a single instance.
+Eight specialized agent roles with dedicated prompts. Mailbox-based inter-agent messaging. Dependency-aware wave execution.
 
-### 4. It Routes Events at Hardware Speed
+### 10. Docker Container Isolation
 
-Internal event routing uses [goldrush](https://github.com/robertohluna/goldrush) — a library that compiles event-matching rules into actual machine code at runtime. When OSA routes a message internally, it's not doing hash lookups or pattern matching. The routing is pre-compiled into the runtime itself.
+```bash
+mix osa.sandbox.setup   # Build the sandbox image
+```
 
-NanoClaw routes through a Node.js polling loop. Nanobot routes through a Python message bus. OSA routes through compiled Erlang bytecode. The difference matters at scale.
+- Read-only root filesystem
+- `CAP_DROP ALL` — zero Linux capabilities
+- Network isolation
+- Warm container pool for instant execution
+- Ubuntu 24.04 base with common dev tools
 
-### 5. It's Modular — Turn Capabilities On and Off
+## 17 LLM Providers
 
-Skills are grouped into **machines** you toggle with a config file:
+| Provider | Type | Notable |
+|----------|------|---------|
+| **Ollama** | Local | Free, private, no API key |
+| **Anthropic** | Cloud | Native Messages API |
+| **OpenAI** | Cloud | GPT-4o, o1, o3 |
+| **Groq** | Cloud | Ultra-fast inference |
+| **Together** | Cloud | Open-source model hosting |
+| **Fireworks** | Cloud | Fast inference |
+| **DeepSeek** | Cloud | Cost-effective |
+| **Perplexity** | Cloud | Search-augmented |
+| **Mistral** | Cloud | European provider |
+| **Replicate** | Cloud | Model marketplace |
+| **Google** | Cloud | Gemini models |
+| **Cohere** | Cloud | Enterprise NLP |
+| **Qwen** | Cloud | Alibaba Cloud |
+| **Moonshot** | Cloud | Kimi models |
+| **Zhipu** | Cloud | GLM models |
+| **VolcEngine** | Cloud | ByteDance |
+| **Baichuan** | Cloud | Chinese LLM |
 
-| Machine | What You Get |
-|---------|-------------|
-| **Core** (always on) | File operations, shell commands, web search |
-| **Communication** | Send via Telegram, Discord, Slack |
-| **Productivity** | Calendar management, task tracking |
-| **Research** | Deep web search, summarization, translation |
+Shared `OpenAICompat` base for 13 providers. Native implementations for Anthropic and Ollama. Fallback chain: if primary fails, next provider picks up automatically.
 
-Need a new capability? Write a skill file, drop it in a folder. It's available immediately — no restart needed, no rebuild, no recompilation. Hot code reload.
+```bash
+export OSA_DEFAULT_PROVIDER=groq
+export GROQ_API_KEY=gsk_...
+# Done. OSA now uses Groq for all inference.
+```
 
-### 6. It Runs Locally — Your Data Stays Yours
+## 12 Chat Channels
 
-Default setup uses Ollama for local AI. No data leaves your machine. No API keys needed. Zero cloud dependency.
+| Channel | Features |
+|---------|----------|
+| **CLI** | Built-in terminal interface |
+| **HTTP/REST** | SDK API surface on port 8089 |
+| **Telegram** | Webhook + polling, group support |
+| **Discord** | Bot gateway, slash commands |
+| **Slack** | Events API, slash commands, blocks |
+| **WhatsApp** | Business API, webhook verification |
+| **Signal** | Signal CLI bridge, group support |
+| **Matrix** | Federation-ready, E2EE support |
+| **Email** | IMAP polling + SMTP sending |
+| **QQ** | OneBot protocol |
+| **DingTalk** | Robot webhook, outgoing messages |
+| **Feishu/Lark** | Event subscriptions, card messages |
 
-Want more power? Point it at Anthropic or OpenAI with one config change.
+Each channel adapter handles webhook signature verification, rate limiting, and message format translation. The manager starts configured channels automatically at boot.
 
-## OSA vs. Other Frameworks
+## OSA vs. Everyone Else
 
 | | **OSA** | **NanoClaw** | **Nanobot** | **OpenClaw** | **AutoGen** | **CrewAI** |
 |--|---------|-------------|------------|-------------|------------|-----------|
-| **Classifies before processing** | Yes (5-tuple) | No | No | No | No | No |
-| **Filters noise** | Two-tier (1ms + 200ms) | No | No | No | No | No |
+| **Signal classification** | LLM-primary 5-tuple | No | No | No | No | No |
+| **Noise filtering** | Two-tier (1ms + 200ms) | No | No | No | No | No |
+| **Task orchestration** | Multi-agent, dependency-aware | No | No | No | Basic | Basic |
 | **Communication intelligence** | 5 modules | No | No | No | No | No |
-| **Conversation depth tracking** | 4-level adaptive | No | No | No | No | No |
-| **Event routing** | Compiled bytecode ([goldrush](https://github.com/robertohluna/goldrush)) | Polling loop | Python bus | None | None | None |
-| **Fault tolerance** | Auto-recovery (OTP) | Single process | Single process | None | None | None |
+| **Skill discovery** | Search + suggest + create | No | Plugin system | No | No | No |
+| **Context compression** | 3-zone sliding window | No | No | No | No | No |
+| **Token-budgeted context** | 4-tier priority | No | No | No | No | No |
+| **Memory architecture** | 3-store + inverted index | No | Basic | No | No | No |
+| **LLM providers** | 17 | 3-4 | 17 | 3-4 | 3-4 | 3-4 |
+| **Chat channels** | 12 | IPC only | 10+ | REST | Python | Python |
+| **Container isolation** | Docker sandbox | Docker/Apple | No | No | No | No |
+| **Agent swarms** | 4 patterns, 8 roles | Basic | No | No | Multi-agent | Multi-agent |
+| **Event routing** | Compiled bytecode (goldrush) | Polling | Python bus | None | None | None |
+| **Fault tolerance** | OTP auto-recovery | Single process | Single process | None | None | None |
 | **Concurrent conversations** | 30+ (BEAM processes) | Queue-based | Sequential | Queue-based | Sequential | Sequential |
-| **Hot reload skills** | Yes (no restart) | No (code change) | No (restart) | No | No | No |
-| **Container isolation** | BEAM process isolation | Docker/Apple Container | No | No | No | No |
-| **Runs locally** | Yes (Ollama) | Yes (agent SDK) | Yes (vLLM) | Yes | Requires API | Requires API |
-| **SDK / HTTP API** | Yes (REST + SSE) | IPC only | CLI + gateway | REST | Python | Python |
-| **MCP support** | Yes | Via agent SDK | Yes | Yes | No | No |
+| **Hot reload skills** | Yes (no restart) | No | No | No | No | No |
+| **MCP support** | Yes | Via SDK | Yes | Yes | No | No |
+| **Dynamic skill creation** | Runtime SKILL.md + register | No | No | No | No | No |
+| **Workflow tracking** | Multi-step + LLM decomposition | No | No | No | No | No |
 | **Language** | Elixir/OTP | TypeScript | Python | TypeScript | Python | Python |
-| **Codebase** | ~8K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
-
-### What They Do Better (Being Honest)
-
-- **NanoClaw** has true OS-level container isolation via Docker — agents can't escape their sandbox. OSA uses BEAM process isolation which is lighter but less strict.
-- **NanoClaw** has agent swarms — teams of agents that collaborate. OSA doesn't have multi-agent collaboration yet.
-- **Nanobot** supports 10+ chat channels out of the box (Telegram, Discord, WhatsApp, Slack, Signal, Matrix, QQ, DingTalk, Feishu, Email). OSA currently has CLI and HTTP/SDK — more channels are planned.
-- **Nanobot** supports 17 LLM providers including Chinese providers (Qwen, Moonshot, Zhipu, VolcEngine). OSA supports Ollama, Anthropic, and OpenAI.
-- **Both** have simpler setup — NanoClaw uses an agent SDK to guide installation, Nanobot is a pip install.
-
-### What OSA Does That Neither Can
-
-- **Signal classification** — The 5-tuple S=(Mode, Genre, Type, Format, Weight) is architecturally unique. No other framework classifies the nature of a message before deciding how to handle it.
-- **Noise filtering** — 40-60% of messages in a typical conversation are noise. OSA filters them before they hit the AI model. Everyone else processes everything.
-- **Communication intelligence** — Five dedicated modules that learn how people communicate, track conversation depth, detect contacts, and monitor engagement. This doesn't exist anywhere else.
-- **Hardware-speed routing** — goldrush compiles event filters into actual Erlang bytecode modules. This is telecom-grade event processing running inside your agent.
-- **True fault tolerance** — OTP supervision trees restart crashed components automatically. Your agent doesn't go down because one skill had a bug.
+| **Codebase** | ~18.7K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
+| **Tests** | 440 | Minimal | Minimal | Basic | Basic | Basic |
 
 ## Quick Start
 
@@ -159,26 +266,36 @@ mix compile
 mix chat          # Start talking to your agent
 ```
 
-The HTTP API starts automatically on port 8089 — connect any SDK client or send requests directly.
-
 ### Configure
 
 ```bash
-# Local AI (default — free)
+# Local AI (default — free, private)
 export OSA_DEFAULT_PROVIDER=ollama
 
-# Or Anthropic
-export OSA_DEFAULT_PROVIDER=anthropic
+# Or any of the 17 supported providers:
+export OSA_DEFAULT_PROVIDER=anthropic    # or openai, groq, deepseek, together, etc.
 export ANTHROPIC_API_KEY=sk-...
-
-# Or OpenAI
-export OSA_DEFAULT_PROVIDER=openai
-export OPENAI_API_KEY=sk-...
 ```
 
 Or edit `~/.osa/config.json` directly.
 
-### HTTP API
+### Chat Channels
+
+```bash
+# Enable Telegram
+export TELEGRAM_BOT_TOKEN=...
+
+# Enable Discord
+export DISCORD_BOT_TOKEN=...
+
+# Enable Slack
+export SLACK_BOT_TOKEN=...
+export SLACK_SIGNING_SECRET=...
+
+# Channels auto-start when their config is present
+```
+
+## HTTP API
 
 OSA exposes a REST API on port 8089 for SDK clients and integrations:
 
@@ -196,78 +313,156 @@ curl -X POST http://localhost:8089/api/v1/orchestrate \
   -H "Content-Type: application/json" \
   -d '{"input": "Analyze our sales pipeline", "session_id": "my-session"}'
 
+# Execute a complex task (multi-agent orchestration)
+curl -X POST http://localhost:8089/api/v1/orchestrator/complex \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Build a REST API with auth and tests", "session_id": "s1"}'
+
+# Get orchestration progress
+curl http://localhost:8089/api/v1/orchestrator/progress/task_abc123
+
+# Launch an agent swarm
+curl -X POST http://localhost:8089/api/v1/swarm/launch \
+  -H "Content-Type: application/json" \
+  -d '{"task": "Review this codebase for security issues", "pattern": "review_loop"}'
+
 # List available skills
 curl http://localhost:8089/api/v1/skills
 
+# Create a dynamic skill
+curl -X POST http://localhost:8089/api/v1/skills/create \
+  -H "Content-Type: application/json" \
+  -d '{"name": "csv-analyzer", "description": "Analyze CSV files", "instructions": "..."}'
+
 # Stream events (SSE)
 curl http://localhost:8089/api/v1/stream/my-session
+
+# Channel webhooks
+curl -X POST http://localhost:8089/webhook/telegram
+curl -X POST http://localhost:8089/webhook/discord
+curl -X POST http://localhost:8089/webhook/slack
 ```
 
-JWT authentication is supported for production use — set `OSA_SHARED_SECRET` and `OSA_REQUIRE_AUTH=true`.
+JWT authentication is supported for production — set `OSA_SHARED_SECRET` and `OSA_REQUIRE_AUTH=true`.
 
-### Auto-Start on Login (macOS)
+## Architecture
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                      12 Channels                           │
+│  CLI │ HTTP │ Telegram │ Discord │ Slack │ WhatsApp │ ...  │
+└───────────────────────┬───────────────────────────────────┘
+                        │
+┌───────────────────────▼───────────────────────────────────┐
+│            Signal Classifier (LLM-primary)                 │
+│    S = (Mode, Genre, Type, Format, Weight)                 │
+│    ETS cache (SHA256, 10-min TTL)                          │
+│    Deterministic fallback when LLM unavailable             │
+└───────────────────────┬───────────────────────────────────┘
+                        │
+┌───────────────────────▼───────────────────────────────────┐
+│         Two-Tier Noise Filter                              │
+│    Tier 1: < 1ms deterministic │ Tier 2: ~200ms LLM       │
+│    40-60% of messages filtered before AI compute           │
+└───────────────────────┬───────────────────────────────────┘
+                        │ signals only
+┌───────────────────────▼───────────────────────────────────┐
+│         Events.Bus (:osa_event_router)                     │
+│         goldrush-compiled Erlang bytecode                  │
+└───────┬─────────┬─────────┬─────────┬────────────────────┘
+        │         │         │         │
+   ┌────▼───┐ ┌───▼────┐ ┌──▼──┐ ┌───▼──────────┐
+   │  Agent │ │Orchest-│ │Swarm│ │ Intelligence │
+   │  Loop  │ │ rator  │ │     │ │   (5 mods)   │
+   └───┬────┘ └───┬────┘ └──┬──┘ └──────────────┘
+       │          │         │
+  ┌────▼──────────▼─────────▼──────────────────────┐
+  │             Shared Infrastructure               │
+  │  Context Builder (token-budgeted)               │
+  │  Compactor (3-zone sliding window)              │
+  │  Memory (3-store + inverted index)              │
+  │  Cortex (knowledge synthesis)                   │
+  │  Workflow (multi-step tracking)                 │
+  │  Scheduler (cron + heartbeat)                   │
+  └────────────────────────────────────────────────┘
+       │          │         │          │
+  ┌────▼───┐ ┌───▼────┐ ┌──▼────┐ ┌───▼──────┐
+  │17 LLM  │ │Skills  │ │Memory │ │  OS      │
+  │Providers│ │Registry│ │(JSONL)│ │Templates │
+  └────────┘ └────────┘ └───────┘ └──────────┘
+```
+
+### OTP Supervision Tree
+
+Every component is supervised. If any part crashes, OTP restarts just that component — no downtime, no data loss, no manual intervention. This is the same technology that powers telecom switches with 99.9999% uptime.
+
+```
+OptimalSystemAgent.Supervisor (one_for_one)
+├── SessionRegistry
+├── Phoenix.PubSub
+├── Events.Bus (goldrush :osa_event_router)
+├── Bridge.PubSub (event fan-out, 3 tiers)
+├── Store.Repo (SQLite3)
+├── Providers.Registry (17 providers, :osa_provider_router)
+├── Skills.Registry (7 builtins + SKILL.md + MCP, :osa_tool_dispatcher)
+├── Machines (composable skill sets)
+├── OS.Registry (template discovery + connection)
+├── MCP.Supervisor (DynamicSupervisor)
+├── Channels.Supervisor (DynamicSupervisor, 12 adapters)
+├── Agent.Memory (3-store architecture)
+├── Agent.Workflow (multi-step tracking)
+├── Agent.Orchestrator (multi-agent spawning)
+├── Agent.Progress (real-time tracking)
+├── Agent.Scheduler (cron + heartbeat)
+├── Agent.Compactor (3-zone compression)
+├── Agent.Cortex (knowledge synthesis)
+├── Intelligence.Supervisor (5 communication modules)
+├── Swarm.Supervisor (multi-agent patterns)
+├── Bandit HTTP (port 8089)
+└── Sandbox.Supervisor (Docker, when enabled)
+```
+
+## Workflow Examples
+
+OSA ships with workflow templates for common complex tasks:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.osa.agent.plist    # Enable
-launchctl unload ~/Library/LaunchAgents/com.osa.agent.plist  # Disable
+# Example workflows in examples/workflows/
+build-rest-api.json         # 5-step API scaffolding
+build-fullstack-app.json    # 8-step full-stack build
+debug-production-issue.json # 7-step systematic debugging
+content-campaign.json       # 6-step content creation
+code-review.json            # 4-step code review
 ```
 
-## How It Works (Technical)
+The workflow engine tracks progress, accumulates context between steps, supports checkpointing/resume, and auto-detects when a task should become a workflow.
 
-### Signal Classification
+## Adding Custom Skills
 
-Every message is classified into a 5-tuple before processing:
+### Option 1: SKILL.md (No Code)
 
-```
-S = (Mode, Genre, Type, Format, Weight)
+Drop a markdown file in `~/.osa/skills/your-skill/SKILL.md`:
 
-Mode:   What to do       — BUILD, ASSIST, ANALYZE, EXECUTE, MAINTAIN
-Genre:  Purpose          — DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
-Type:   Domain category  — question, request, issue, scheduling, etc.
-Format: Container        — message, document, command, notification
-Weight: Information value — 0.0 (noise) to 1.0 (critical signal)
-```
+```markdown
+---
+name: data-analyzer
+description: Analyze datasets and produce insights
+tools:
+  - file_read
+  - shell_execute
+---
 
-### Architecture
+## Instructions
 
-```
-┌─────────────────────────────────────────────────┐
-│                    Channels                      │
-│  CLI │ HTTP API │ Telegram │ Discord │ SDK       │
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│              Signal Classifier                   │
-│  S = (Mode, Genre, Type, Format, Weight)         │
-│  Two-tier noise filter                           │
-└──────────────┬──────────────────────────────────┘
-               │ signals only (noise filtered)
-┌──────────────▼──────────────────────────────────┐
-│     Events.Bus (:osa_event_router)               │
-│     goldrush-compiled Erlang bytecode            │
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│              Agent Loop (ReAct)                   │
-│  Context → LLM → Tools → LLM → Response          │
-│  Max 20 iterations │ Bounded reasoning            │
-└──────────────┬──────────────────────────────────┘
-               │
-    ┌──────────┼──────────┼──────────┐
-    ▼          ▼          ▼          ▼
-┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
-│Machines│ │Provider│ │ Memory │ │  OS    │
-│(skills)│ │Registry│ │(JSONL) │ │Registry│
-└────────┘ └────────┘ └────────┘ └────────┘
-
-Intelligence Layer (always running):
-  CommProfiler │ CommCoach │ ConversationTracker
-  ContactDetector │ ProactiveMonitor
+When asked to analyze data:
+1. Read the file to understand its structure
+2. Use shell commands to run analysis (pandas, awk, etc.)
+3. Produce a summary with key findings
 ```
 
-### Adding Custom Skills
+Available immediately — no restart, no rebuild.
 
-Skills are Elixir modules with four functions — name, description, parameters, execute:
+### Option 2: Elixir Module (Full Power)
 
 ```elixir
 defmodule MyApp.Skills.Calculator do
@@ -294,13 +489,17 @@ defmodule MyApp.Skills.Calculator do
   end
 end
 
-# Register at runtime — available immediately, no restart:
+# Register at runtime — available immediately:
 OptimalSystemAgent.Skills.Registry.register(MyApp.Skills.Calculator)
 ```
 
-### MCP Integration
+### Option 3: Let OSA Create Skills Dynamically
 
-Full Model Context Protocol support. Drop in any MCP server:
+OSA can create its own skills at runtime when it encounters a task that needs a capability that doesn't exist yet. It writes a SKILL.md file and hot-registers it — the skill is available for all future sessions.
+
+## MCP Integration
+
+Full Model Context Protocol support:
 
 ```json
 // ~/.osa/mcp.json
@@ -309,8 +508,41 @@ Full Model Context Protocol support. Drop in any MCP server:
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
     }
   }
+}
+```
+
+MCP tools are auto-discovered and available alongside built-in skills.
+
+## OS Template Integration
+
+OSA auto-discovers and integrates with OS templates:
+
+```bash
+> connect to ~/Desktop/MIOSA/BusinessOS
+
+# OSA scans the directory, detects the stack (Go + Svelte + PostgreSQL),
+# finds modules (CRM, Projects, Invoicing), and saves the connection.
+```
+
+Ship a `.osa-manifest.json` for full integration:
+
+```json
+{
+  "osa_manifest": 1,
+  "name": "BusinessOS",
+  "stack": { "backend": "go", "frontend": "svelte", "database": "postgresql" },
+  "modules": [
+    { "id": "crm", "name": "CRM", "paths": ["backend/internal/modules/crm/"] }
+  ],
+  "skills": [
+    { "name": "create_contact", "endpoint": "POST /api/v1/contacts" }
+  ]
 }
 ```
 
@@ -318,161 +550,45 @@ Full Model Context Protocol support. Drop in any MCP server:
 
 OSA is grounded in four principles from communication and systems theory:
 
-1. **Shannon (Channel Capacity):** Every channel has a maximum information rate. Processing noise wastes capacity meant for real signals.
-2. **Ashby (Requisite Variety):** The system must match the variety of its inputs — enough capability to handle anything, but no unnecessary complexity.
+1. **Shannon (Channel Capacity):** Every channel has finite capacity. Processing noise wastes capacity meant for real signals.
+2. **Ashby (Requisite Variety):** The system must match the variety of its inputs — 17 providers, 12 channels, unlimited skills.
 3. **Beer (Viable System Model):** Five operational modes (Build, Assist, Analyze, Execute, Maintain) mirror the five subsystems every viable organization needs.
-4. **Wiener (Feedback Loops):** Every action produces feedback. Every feedback loop has a response. The agent learns and adapts.
+4. **Wiener (Feedback Loops):** Every action produces feedback. The agent learns and adapts — memory, cortex, profiling.
+
+**Research:** [Signal Theory: The Architecture of Optimal Intent Encoding in Communication Systems](https://zenodo.org/records/18774174) (Luna, 2026)
 
 ## MIOSA Ecosystem
 
-OSA is the intelligence layer of the MIOSA platform. It powers the AI behind every OS template — running locally on your machine or via the MIOSA Cloud API.
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    MIOSA Platform                         │
-│                                                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
-│  │  BusinessOS  │  │  ContentOS  │  │  Your OS    │      │
-│  │  (template)  │  │  (template) │  │  (template) │      │
-│  └──────┬───────┘  └──────┬──────┘  └──────┬──────┘      │
-│         │                 │                 │              │
-│  ┌──────▼─────────────────▼─────────────────▼──────┐      │
-│  │              OS Templates + SDK                  │      │
-│  │         Desktop / Mobile / Web UI                │      │
-│  └──────────────────────┬──────────────────────────┘      │
-│                         │                                  │
-│  ┌──────────────────────▼──────────────────────────┐      │
-│  │         OptimalSystemAgent (OSA)                 │      │
-│  │    Signal Theory intelligence — runs local       │      │
-│  │    or connects via MIOSA Cloud API               │      │
-│  └─────────────────────────────────────────────────┘      │
-└───────────────────────────────────────────────────────────┘
-```
-
-### How It Fits Together
-
-- **OS Templates** (BusinessOS, ContentOS, etc.) are the interface — they give you the screens, workflows, and tools for your domain
-- **OSA** is the brain — it classifies signals, monitors conversations, executes tools, and takes initiative when it detects something important
-- **MIOSA SDK** connects the templates to OSA, whether you're running locally or using the cloud
-- **Local mode:** Everything runs on your machine. Your data never leaves. Zero cloud dependency.
-- **Cloud mode:** Managed OSA with enterprise features, cross-OS reasoning, and fully autonomous operation.
-
-### Use Cases
+OSA is the intelligence layer of the MIOSA platform:
 
 | Setup | What You Get |
 |-------|-------------|
-| **OSA standalone** | A local AI agent in your terminal. Chat, automate tasks, manage files. |
-| **OSA + BusinessOS** | A proactive business assistant that monitors conversations, manages contacts, and schedules follow-ups automatically. |
-| **OSA + ContentOS** | A content operations agent that drafts, schedules, analyzes engagement, and manages publishing. |
-| **OSA + Custom Template** | Build your own OS template. OSA handles the intelligence, you design the experience. |
-| **MIOSA Cloud** | Managed OSA instances with enterprise governance, multi-tenant support, and 99.9% uptime. |
+| **OSA standalone** | Full AI agent in your terminal — chat, automate, orchestrate |
+| **OSA + BusinessOS** | Proactive business assistant with CRM, scheduling, revenue alerts |
+| **OSA + ContentOS** | Content operations agent — drafting, scheduling, engagement analysis |
+| **OSA + Custom Template** | Build your own OS template. OSA handles the intelligence. |
+| **MIOSA Cloud** | Managed instances with enterprise governance and 99.9% uptime |
 
 ### MIOSA Premium
 
-The open-source OSA is the full local agent. MIOSA Premium adds:
+The open-source OSA is the full agent. MIOSA Premium adds:
 
-- **SORX Skills Engine:** Enterprise-grade skill execution with reliability tiers and temperature control
+- **SORX Skills Engine:** Enterprise-grade skill execution with reliability tiers
 - **Cross-OS Reasoning:** Query across multiple OS instances simultaneously
 - **Enterprise Governance:** Custom autonomy policies, audit logging, compliance
 - **Cloud API:** Managed OSA instances with 99.9% uptime SLA
-- **24/7 Proactive Monitoring:** Fully autonomous operation
 
 [miosa.ai](https://miosa.ai)
-
-## Connecting OS Templates
-
-OSA auto-discovers and integrates with OS templates on your machine. Point it at a template and it learns the structure, modules, and API — then works inside it.
-
-```bash
-# From the CLI, connect a template:
-> connect to ~/Desktop/MIOSA/BusinessOS
-
-# OSA scans the directory, detects the stack (Go + Svelte + PostgreSQL),
-# finds modules (CRM, Projects, Invoicing), and saves the connection.
-# From now on, OSA knows how to navigate and operate within BusinessOS.
-```
-
-**How it works:**
-1. OSA scans for `.osa-manifest.json` at the template root (preferred)
-2. If no manifest, OSA detects the stack heuristically (go.mod, package.json, svelte.config, etc.)
-3. Discovers modules, API endpoints, and context sources automatically
-4. Saves the connection to `~/.osa/os/{name}.json` — persists across restarts
-5. Injects template context into the agent prompt so OSA understands the codebase
-
-**For template authors** — ship a `.osa-manifest.json` to give OSA full awareness:
-
-```json
-{
-  "osa_manifest": 1,
-  "name": "BusinessOS",
-  "version": "1.0.0",
-  "description": "All-in-one business management platform",
-  "stack": { "backend": "go", "frontend": "svelte", "database": "postgresql" },
-  "api": { "base_url": "http://localhost:8080", "auth": "jwt" },
-  "modules": [
-    { "id": "crm", "name": "CRM", "description": "Contact management", "paths": ["backend/internal/modules/crm/"] }
-  ],
-  "context_sources": ["backend/internal/models/", "docs/"],
-  "skills": [
-    { "name": "create_contact", "description": "Create a CRM contact", "endpoint": "POST /api/v1/contacts" }
-  ]
-}
-```
-
-Or generate one automatically:
-
-```bash
-cd ~/path/to/your-template
-osa generate-manifest
-# Creates .osa-manifest.json from detected project structure
-```
-
-Connected templates show up in the agent's context. Multiple templates can be connected simultaneously — OSA tracks each as a separate OS.
-
-## Ready-Made Skills
-
-Drop these into `~/.osa/skills/` and they work immediately — no restart, no rebuild:
-
-| Skill | What It Does |
-|-------|-------------|
-| [Email Assistant](examples/skills/email-assistant/) | Triage inbox, flag urgent, draft replies, track follow-ups |
-| [Daily Briefing](examples/skills/daily-briefing/) | Weather, calendar, news, task priorities — every morning automatically |
-| [Sales Pipeline](examples/skills/sales-pipeline/) | Track deals, catch stalled opportunities, forecast revenue |
-| [Content Writer](examples/skills/content-writer/) | Blog posts, social media, email campaigns — research-first drafting |
-| [Meeting Prep](examples/skills/meeting-prep/) | Research attendees, prep talking points, summarize past interactions |
-
-Copy the skill folder into `~/.osa/skills/` and it's live:
-
-```bash
-cp -r examples/skills/email-assistant ~/.osa/skills/
-# Done. Ask your agent: "triage my inbox"
-```
-
-See the [Skills Guide](docs/skills-guide.md) to write your own.
-
-## Real-World Use Cases
-
-| Use Case | Machines | What Happens |
-|----------|----------|-------------|
-| **Personal AI Assistant** | Core | Daily briefings, email triage, task management, file organization |
-| **Business Operations** | Core + Communication | Sales pipeline monitoring, client follow-ups, meeting prep, revenue alerts |
-| **Content Operations** | Core + Research | Blog drafting, social scheduling, engagement analysis, trend research |
-| **Customer Support** | Core + Communication | Ticket triage via signal classification, auto-categorization, response drafting |
-| **Development Workflow** | Core | Code review, bug triage, sprint planning, documentation |
-| **Research Assistant** | Core + Research | Deep web search, source summarization, knowledge management |
-
-Full details with example prompts: [Use Cases Guide](docs/use-cases.md)
 
 ## Documentation
 
 | Doc | What It Covers |
 |-----|---------------|
-| [Getting Started](docs/getting-started.md) | Install, first conversation, add skills, configure providers |
-| [Skills Guide](docs/skills-guide.md) | SKILL.md format, Elixir modules, hot reload, best practices |
-| [HTTP API Reference](docs/http-api.md) | Every endpoint, auth, SSE streaming, error codes |
-| [Architecture](docs/architecture.md) | Signal Theory deep dive, event bus, agent loop, supervision tree |
-| [Use Cases](docs/use-cases.md) | 6 real-world use cases with example prompts |
-| [SDK Architecture](docs/SDK-ARCHITECTURE.md) | SDK design, ADRs, API contract, migration path |
+| [Getting Started](docs/getting-started.md) | Install, first conversation, configure providers |
+| [Skills Guide](docs/skills-guide.md) | SKILL.md format, Elixir modules, hot reload |
+| [HTTP API Reference](docs/http-api.md) | Every endpoint, auth, SSE, error codes |
+| [Architecture](docs/architecture.md) | Signal Theory, event bus, supervision tree |
+| [SDK Architecture](docs/SDK-ARCHITECTURE.md) | SDK design, API contract, migration path |
 
 ## Contributing
 
@@ -484,4 +600,4 @@ Apache 2.0 — See [LICENSE](LICENSE).
 
 ---
 
-Built by [MIOSA](https://miosa.ai). Grounded in [Signal Theory](https://zenodo.org/records/18774174).
+Built by [MIOSA](https://miosa.ai). Grounded in [Signal Theory](https://zenodo.org/records/18774174). Powered by the BEAM.

@@ -119,7 +119,11 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
   @doc false
   def init_cache do
     if :ets.whereis(@cache_table) == :undefined do
-      :ets.new(@cache_table, [:set, :public, :named_table])
+      try do
+        :ets.new(@cache_table, [:set, :public, :named_table])
+      rescue
+        ArgumentError -> :already_exists
+      end
     end
   end
 
@@ -128,14 +132,24 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
     key = :crypto.hash(:sha256, message)
     now = System.system_time(:second)
 
-    case :ets.lookup(@cache_table, key) do
-      [{^key, result, ts}] when now - ts < @cache_ttl ->
-        result
+    try do
+      case :ets.lookup(@cache_table, key) do
+        [{^key, result, ts}] when now - ts < @cache_ttl ->
+          result
 
-      _ ->
-        result = tier_2(message, weight)
-        :ets.insert(@cache_table, {key, result, now})
-        result
+        _ ->
+          result = tier_2(message, weight)
+          try do
+            :ets.insert(@cache_table, {key, result, now})
+          rescue
+            ArgumentError -> :ok
+          end
+          result
+      end
+    rescue
+      ArgumentError ->
+        # ETS table was destroyed between init_cache and lookup (race condition in async tests)
+        tier_2(message, weight)
     end
   end
 end
