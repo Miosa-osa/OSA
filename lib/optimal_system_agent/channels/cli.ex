@@ -805,7 +805,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   end
 
   defp get_model_name(:ollama) do
-    Application.get_env(:optimal_system_agent, :ollama_model, "llama3")
+    Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
   end
 
   defp get_model_name(:openai) do

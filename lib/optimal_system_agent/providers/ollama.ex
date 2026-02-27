@@ -28,7 +28,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def name, do: :ollama
 
   @impl true
-  def default_model, do: "llama3.2:latest"
+  def default_model do
+    # Return whatever auto-detect found, not a hardcoded small model
+    Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
+  end
 
   @doc """
   Auto-detect the best available Ollama model and set it as the active model.
