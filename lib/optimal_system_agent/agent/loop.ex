@@ -68,6 +68,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       channel: Keyword.get(opts, :channel, :cli),
       provider: Keyword.get(opts, :provider),
       model: Keyword.get(opts, :model),
+      messages: Keyword.get(opts, :messages, []),
       tools: Skills.list_tools() ++ extra_tools
     }
 
@@ -144,6 +145,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         {:ok, %{content: plan_text}} ->
           Memory.append(state.session_id, %{role: "assistant", content: plan_text, channel: state.channel})
           state = %{state | plan_mode: false, status: :idle}
+          emit_context_pressure(state)
           {:reply, {:plan, plan_text, signal}, state}
 
         {:error, reason} ->
@@ -162,6 +164,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
           }
 
           Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
+
+          emit_context_pressure(state)
 
           Bus.emit(:agent_response, %{
             session_id: state.session_id,
@@ -183,6 +187,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
       # 6. Persist assistant response to JSONL session storage
       Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
+
+      emit_context_pressure(state)
 
       Bus.emit(:agent_response, %{
         session_id: state.session_id,
@@ -308,9 +314,30 @@ defmodule OptimalSystemAgent.Agent.Loop do
         run_loop(state)
 
       {:error, reason} ->
-        Logger.error("LLM call failed: #{inspect(reason)}")
-        {"I encountered an error processing your request. Please try again.", state}
+        reason_str = if is_binary(reason), do: reason, else: inspect(reason)
+
+        if context_overflow?(reason_str) and state.iteration < 3 do
+          Logger.warning("Context overflow — compacting and retrying (attempt #{state.iteration + 1})")
+          compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+          state = %{state | messages: compacted, iteration: state.iteration + 1}
+          run_loop(state)
+        else
+          if context_overflow?(reason_str) do
+            Logger.error("Context overflow after 3 compaction attempts")
+            {"I've exceeded the context window. Try breaking your request into smaller parts.", state}
+          else
+            Logger.error("LLM call failed: #{reason_str}")
+            {"I encountered an error processing your request. Please try again.", state}
+          end
+        end
     end
+  end
+
+  defp context_overflow?(reason) do
+    String.contains?(reason, "context_length") or
+      String.contains?(reason, "max_tokens") or
+      String.contains?(reason, "maximum context length") or
+      String.contains?(reason, "token limit")
   end
 
   defp tool_call_hint(%{"command" => cmd}), do: String.slice(cmd, 0, 60)
@@ -373,6 +400,23 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   defp temperature, do: Application.get_env(:optimal_system_agent, :temperature, 0.7)
+
+  # Emit context window pressure event so the CLI can display utilization
+  defp emit_context_pressure(state) do
+    max_tok = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    estimated = OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+    utilization = if max_tok > 0, do: Float.round(estimated / max_tok * 100, 1), else: 0.0
+
+    Bus.emit(:system_event, %{
+      event: :context_pressure,
+      session_id: state.session_id,
+      estimated_tokens: estimated,
+      max_tokens: max_tok,
+      utilization: utilization
+    })
+  rescue
+    _ -> :ok
+  end
 
   # Run hooks with fault isolation — never crash the loop if hooks are down
   defp run_hooks(event, payload) do

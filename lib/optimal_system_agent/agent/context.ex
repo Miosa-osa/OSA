@@ -182,6 +182,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       {tool_process_block(), 1, "tool_process"},
       {runtime_block(state), 1, "runtime"},
       {plan_mode_block(state), 1, "plan_mode"},
+      {environment_block(state), 1, "environment"},
 
       # Tier 2 — HIGH
       {skills_block(), 2, "skills"},
@@ -639,25 +640,29 @@ defmodule OptimalSystemAgent.Agent.Context do
     4. **Use the result.** Read the tool output, then decide: call another tool, or respond to the user.
     5. **Respond when done.** Summarize what you did and the results.
 
+    ### Tool Routing Rules (CRITICAL)
+
+    - Use **file_read** — NOT shell_execute with cat/head/tail
+    - Use **file_edit** for surgical changes — NOT shell_execute with sed/awk. NEVER file_write for small edits.
+    - Use **file_glob** — NOT shell_execute with find/ls for file search
+    - Use **file_grep** — NOT shell_execute with grep/rg for content search
+    - Use **dir_list** — NOT shell_execute with ls for directory listing
+    - Use **web_fetch** — NOT shell_execute with curl for fetching URLs
+    - Reserve **shell_execute** for system commands only (git, mix, npm, docker, make, etc.)
+
     ### When to Use Each Tool
 
-    - **file_read** — When the user mentions a file, asks about code, or you need to understand existing content. Always read before modifying.
-      Example: User says "fix the bug in main.py" → call file_read with path "main.py" first.
-
-    - **file_write** — When you need to create or modify a file. Read the file first if it exists.
-      Example: After reading and understanding a file, write the fixed version.
-
-    - **shell_execute** — When you need to run commands: install packages, run tests, check git status, list files, compile code.
-      Example: User says "run the tests" → call shell_execute with command "mix test" or "npm test".
-      Example: User says "what files are here" → call shell_execute with command "ls -la".
-
-    - **web_search** — When you need current information, documentation, or answers to factual questions.
-      Example: User asks about a library API → search for it.
-
-    - **memory_save** — When the user tells you something important to remember, or you learn a preference.
-      Example: User says "I always use tabs" → save that preference.
-
-    - **orchestrate** — Only for complex multi-part tasks that benefit from parallel sub-agents.
+    - **file_read** — Read file content. Always read before modifying.
+    - **file_write** — Create new files or completely rewrite existing ones. Read first if file exists.
+    - **file_edit** — Surgical string replacement in existing files. old_string must be unique. Preferred over file_write for modifications.
+    - **file_glob** — Find files by pattern (e.g. '**/*.ex', 'lib/**/*.ts').
+    - **file_grep** — Search file contents by regex. Returns file:line:content matches.
+    - **dir_list** — List directory contents with types and sizes.
+    - **shell_execute** — Run system commands: git, mix test, npm, docker, compile, etc.
+    - **web_search** — Search the web for current information or documentation.
+    - **web_fetch** — Fetch and read a specific URL's content.
+    - **memory_save** — Save important information to persistent memory.
+    - **orchestrate** — Spawn parallel sub-agents for complex multi-part tasks.
 
     ### When NOT to Use Tools
 
@@ -668,21 +673,83 @@ defmodule OptimalSystemAgent.Agent.Context do
     ### Important Rules
 
     - **Always read before writing.** Never modify a file you haven't read first.
+    - **Use file_edit for surgical changes.** Only use file_write for new files or complete rewrites.
     - **One tool call per turn.** Call one tool, get the result, then decide the next step.
     - **Use absolute paths.** The current working directory is: #{cwd}
-    - **Show your work.** After using tools, tell the user what you found or did.
-    - **Be proactive.** If the user asks to "fix" something, read the file, find the issue, fix it, and verify — don't just suggest changes.
+    - **Be proactive.** If the user asks to "fix" something, read → find → fix → verify.
 
-    ### Sequential Workflow Example
+    ### Brevity
 
-    User: "There's a bug in lib/app.ex, the function crashes on empty input"
+    - Answer concisely. Fewer than 4 lines unless detail is requested.
+    - No preamble. No postamble. Direct answers.
+    - Don't add features, refactor, or improve beyond what was asked.
 
-    Step 1: Call file_read(path: "lib/app.ex") → read the file
-    Step 2: Identify the bug in the code
-    Step 3: Call file_write(path: "lib/app.ex", content: <fixed code>) → write the fix
-    Step 4: Call shell_execute(command: "mix test") → verify the fix works
-    Step 5: Tell the user what was wrong and how you fixed it
+    ### Code Safety
+
+    - ALWAYS read a file before editing it.
+    - Use file_edit for surgical changes. Only use file_write for new files or complete rewrites.
+    - Don't add error handling for impossible scenarios.
+    - Don't create abstractions for one-time operations.
     """
+  end
+
+  @doc false
+  defp environment_block(_state) do
+    cwd = File.cwd!()
+    git_info = gather_git_info()
+    elixir_ver = System.version()
+    otp_release = :erlang.system_info(:otp_release) |> to_string()
+    {os_family, os_name} = :os.type()
+    date = Date.utc_today() |> Date.to_iso8601()
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+    model = get_active_model(provider)
+
+    """
+    ## Environment
+    - Working directory: #{cwd}
+    - Date: #{date}
+    - OS: #{os_family}/#{os_name}
+    - Elixir #{elixir_ver} / OTP #{otp_release}
+    - Provider: #{provider} / #{model}
+    #{git_info}
+    """
+  rescue
+    _ -> nil
+  end
+
+  @doc false
+  defp gather_git_info do
+    parts = []
+
+    parts = case System.cmd("git", ["branch", "--show-current"], stderr_to_stdout: true) do
+      {b, 0} -> ["- Git branch: #{String.trim(b)}" | parts]
+      _ -> parts
+    end
+
+    parts = case System.cmd("git", ["status", "--short"], stderr_to_stdout: true) do
+      {s, 0} when s != "" ->
+        trimmed = String.trim(s)
+        if trimmed != "", do: ["- Modified files:\n#{trimmed}" | parts], else: parts
+      _ -> parts
+    end
+
+    parts = case System.cmd("git", ["log", "--oneline", "-5"], stderr_to_stdout: true) do
+      {l, 0} -> ["- Recent commits:\n#{String.trim(l)}" | parts]
+      _ -> parts
+    end
+
+    Enum.reverse(parts) |> Enum.join("\n")
+  rescue
+    _ -> ""
+  end
+
+  @doc false
+  defp get_active_model(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+  defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "llama3")
+  defp get_active_model(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+  defp get_active_model(provider) do
+    key = :"#{provider}_model"
+    Application.get_env(:optimal_system_agent, key, to_string(provider))
   end
 
   @doc false

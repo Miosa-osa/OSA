@@ -82,33 +82,40 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
 
   def execute(_), do: {:error, "Missing required parameter: task"}
 
-  # Poll orchestrator progress until completed or timeout
   defp await_orchestration(task_id, timeout_ms) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    poll_orchestration(task_id, deadline)
-  end
+    caller = self()
+    ref = make_ref()
 
-  defp poll_orchestration(task_id, deadline) do
-    if System.monotonic_time(:millisecond) > deadline do
-      {:error, :timeout}
-    else
-      case OptimalSystemAgent.Agent.Orchestrator.progress(task_id) do
-        {:ok, %{status: :completed, synthesis: synthesis}} when is_binary(synthesis) ->
-          {:ok, synthesis}
+    handler_ref =
+      OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
+        case payload do
+          %{event: :orchestrator_task_completed, task_id: ^task_id} ->
+            send(caller, {:orchestration_done, ref, :completed})
 
-        {:ok, %{status: :completed}} ->
-          {:ok, "Orchestration completed but produced no synthesis result."}
+          %{event: :orchestrator_task_failed, task_id: ^task_id, reason: reason} ->
+            send(caller, {:orchestration_done, ref, {:failed, reason}})
 
-        {:ok, %{status: :failed, error: error}} ->
-          {:error, "Orchestration failed: #{inspect(error)}"}
+          _ ->
+            :ok
+        end
+      end)
 
-        {:ok, %{status: _}} ->
-          Process.sleep(500)
-          poll_orchestration(task_id, deadline)
+    result =
+      receive do
+        {:orchestration_done, ^ref, :completed} ->
+          case OptimalSystemAgent.Agent.Orchestrator.progress(task_id) do
+            {:ok, %{synthesis: s}} when is_binary(s) and s != "" -> {:ok, s}
+            {:ok, %{status: :completed}} -> {:ok, "Orchestration completed."}
+            _ -> {:ok, "Orchestration completed."}
+          end
 
-        {:error, :not_found} ->
-          {:error, :timeout}
+        {:orchestration_done, ^ref, {:failed, reason}} ->
+          {:error, "Orchestration failed: #{inspect(reason)}"}
+      after
+        timeout_ms -> {:error, :timeout}
       end
-    end
+
+    OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, handler_ref)
+    result
   end
 end

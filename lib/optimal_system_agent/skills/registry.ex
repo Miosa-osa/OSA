@@ -383,7 +383,12 @@ defmodule OptimalSystemAgent.Skills.Registry do
       "orchestrate" => OptimalSystemAgent.Skills.Builtins.Orchestrate,
       "create_skill" => OptimalSystemAgent.Skills.Builtins.CreateSkill,
       "budget_status" => OptimalSystemAgent.Skills.Builtins.BudgetStatus,
-      "wallet_ops" => OptimalSystemAgent.Skills.Builtins.WalletOps
+      "wallet_ops" => OptimalSystemAgent.Skills.Builtins.WalletOps,
+      "file_edit" => OptimalSystemAgent.Skills.Builtins.FileEdit,
+      "file_glob" => OptimalSystemAgent.Skills.Builtins.FileGlob,
+      "file_grep" => OptimalSystemAgent.Skills.Builtins.FileGrep,
+      "dir_list" => OptimalSystemAgent.Skills.Builtins.DirList,
+      "web_fetch" => OptimalSystemAgent.Skills.Builtins.WebFetch
     }
   end
 
@@ -526,6 +531,21 @@ defmodule OptimalSystemAgent.Skills.Registry do
 
   defp dispatch_builtin("wallet_ops", args),
     do: OptimalSystemAgent.Skills.Builtins.WalletOps.execute(args)
+
+  defp dispatch_builtin("file_edit", args),
+    do: OptimalSystemAgent.Skills.Builtins.FileEdit.execute(args)
+
+  defp dispatch_builtin("file_glob", args),
+    do: OptimalSystemAgent.Skills.Builtins.FileGlob.execute(args)
+
+  defp dispatch_builtin("file_grep", args),
+    do: OptimalSystemAgent.Skills.Builtins.FileGrep.execute(args)
+
+  defp dispatch_builtin("dir_list", args),
+    do: OptimalSystemAgent.Skills.Builtins.DirList.execute(args)
+
+  defp dispatch_builtin("web_fetch", args),
+    do: OptimalSystemAgent.Skills.Builtins.WebFetch.execute(args)
 
   defp dispatch_builtin(name, _args), do: {:error, "No built-in handler for: #{name}"}
 

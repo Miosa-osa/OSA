@@ -38,12 +38,26 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
     # Initialize history storage in ETS
     init_history()
+    init_active_request()
+
+    # Register async response handler
+    register_response_handler(session_id)
 
     loop(session_id)
   end
 
   defp loop(session_id) do
-    prompt = "#{@bold}#{@cyan}❯#{@reset} "
+    # Check for pending plan from async response
+    case :ets.lookup(:cli_active_request, :pending_plan) do
+      [{:pending_plan, ^session_id, plan_text, original_input}] ->
+        :ets.delete(:cli_active_request, :pending_plan)
+        handle_plan_review(plan_text, original_input, session_id, 0)
+
+      _ ->
+        :ok
+    end
+
+    prompt = build_prompt(session_id)
     history = get_history(session_id)
 
     case LineEditor.readline(prompt, history) do
@@ -52,7 +66,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
         System.halt(0)
 
       :interrupt ->
-        # LineEditor already writes \r\n before returning
+        if agent_active?(session_id) do
+          cancel_active_request(session_id)
+          IO.puts("\n#{@yellow}  ✗ Cancelled#{@reset}")
+        end
+
         loop(session_id)
 
       {:ok, ""} ->
@@ -64,8 +82,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
         if input == "" do
           loop(session_id)
         else
-          # Bare "exit"/"quit" handled as raw matches for speed;
-          # /exit and /quit flow through Commands.execute → handle_action(:exit)
           case input do
             x when x in ["exit", "quit"] ->
               print_goodbye()
@@ -78,12 +94,21 @@ defmodule OptimalSystemAgent.Channels.CLI do
               loop(session_id)
 
             _ ->
-              add_to_history(session_id, input)
-              next = process_input(input, session_id)
-              loop(next)
+              if agent_active?(session_id) do
+                IO.puts("#{@dim}  (agent is working — Ctrl+C to cancel)#{@reset}")
+                loop(session_id)
+              else
+                add_to_history(session_id, input)
+                next = process_input(input, session_id)
+                loop(next)
+              end
           end
         end
     end
+  rescue
+    e ->
+      Logger.warning("CLI loop error: #{Exception.message(e)}")
+      loop(session_id)
   end
 
   defp process_input(input, session_id) do
@@ -177,6 +202,38 @@ defmodule OptimalSystemAgent.Channels.CLI do
         %{event: :swarm_completed, swarm_id: id} ->
           clear_line()
           IO.puts("#{@cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... completed#{@reset}")
+
+        %{event: :orchestrator_task_appraised, estimated_cost_usd: cost, estimated_hours: hours} ->
+          clear_line()
+          cost_str = if cost < 0.01, do: "<$0.01", else: "$#{Float.round(cost, 2)}"
+          hours_str = if hours < 0.1, do: "<0.1h", else: "#{Float.round(hours, 1)}h"
+          IO.puts("#{@dim}  ⊕ Estimated: #{cost_str} · #{hours_str}#{@reset}")
+
+        %{event: :orchestrator_wave_started, wave_number: num, total_waves: total, agent_count: count} ->
+          clear_line()
+          IO.puts("#{@cyan}  ▶ Wave #{num}/#{total} — #{count} agent#{if count > 1, do: "s", else: ""}#{@reset}")
+
+        %{event: :context_pressure, utilization: util, estimated_tokens: tokens, max_tokens: max_t} ->
+          # Cache for status line readout
+          try do
+            :ets.insert(:cli_signal_cache, {:context_pressure, util})
+          rescue
+            _ -> :ok
+          end
+
+          # Only print the standalone pressure line when elevated (>= 70%)
+          if util >= 70.0 do
+            clear_line()
+            bar = context_pressure_bar(util)
+            tokens_k = Float.round(tokens / 1000, 1)
+            max_k = Float.round(max_t / 1000, 1)
+
+            color = if util >= 85.0, do: IO.ANSI.red(), else: @yellow
+
+            IO.puts(
+              "#{color}  #{bar} context: #{tokens_k}k/#{max_k}k (#{util}%)#{@reset}"
+            )
+          end
 
         _ ->
           :ok
@@ -278,11 +335,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
     new_session_id
   end
 
-  defp handle_action({:resume_session, target_id, _messages}, old_session_id) do
+  defp handle_action({:resume_session, target_id, messages}, old_session_id) do
     stop_session(old_session_id)
 
-    {:ok, _pid} = Loop.start_link(session_id: target_id, channel: :cli)
-    IO.puts("#{@dim}  resumed: #{target_id}#{@reset}\n")
+    {:ok, _pid} = Loop.start_link(session_id: target_id, channel: :cli, messages: messages)
+    IO.puts("#{@dim}  resumed: #{target_id} (#{length(messages)} messages restored)#{@reset}\n")
     target_id
   end
 
@@ -312,23 +369,14 @@ defmodule OptimalSystemAgent.Channels.CLI do
   defp send_to_agent(input, session_id, opts \\ []) do
     spinner = Spinner.start()
 
-    # Register per-request event handlers that forward to spinner.
-    # Capture refs so we can unregister after the request completes.
     tool_ref =
       Bus.register_handler(:tool_call, fn payload ->
         if Process.alive?(spinner) do
           case payload do
-            %{name: n, phase: :start, args: a} ->
-              Spinner.update(spinner, {:tool_start, n, a || ""})
-
-            %{name: n, phase: :start} ->
-              Spinner.update(spinner, {:tool_start, n, ""})
-
-            %{name: n, phase: :end, duration_ms: ms} ->
-              Spinner.update(spinner, {:tool_end, n, ms})
-
-            _ ->
-              :ok
+            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
+            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
+            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
+            _ -> :ok
           end
         end
       end)
@@ -337,18 +385,65 @@ defmodule OptimalSystemAgent.Channels.CLI do
       Bus.register_handler(:llm_response, fn payload ->
         if Process.alive?(spinner) do
           case payload do
-            %{usage: u} when is_map(u) and map_size(u) > 0 ->
-              Spinner.update(spinner, {:llm_response, u})
+            %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
+            _ -> :ok
+          end
+        end
+      end)
 
-            _ ->
-              :ok
+    request_id = System.unique_integer([:positive, :monotonic])
+
+    :ets.insert(:cli_active_request, {session_id, %{
+      request_id: request_id,
+      spinner: spinner,
+      tool_ref: tool_ref,
+      llm_ref: llm_ref,
+      input: input,
+      opts: opts
+    }})
+
+    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+      result = Loop.process_message(session_id, input, opts)
+
+      Bus.emit(:system_event, %{
+        event: :cli_agent_response_ready,
+        session_id: session_id,
+        request_id: request_id,
+        result: result
+      })
+    end)
+
+    :ok
+  end
+
+  # Synchronous version for plan execution and revision (needs response before continuing)
+  defp send_to_agent_sync(input, session_id, opts) do
+    spinner = Spinner.start()
+
+    tool_ref =
+      Bus.register_handler(:tool_call, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
+            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
+            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
+            _ -> :ok
+          end
+        end
+      end)
+
+    llm_ref =
+      Bus.register_handler(:llm_response, fn payload ->
+        if Process.alive?(spinner) do
+          case payload do
+            %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
+            _ -> :ok
           end
         end
       end)
 
     result = Loop.process_message(session_id, input, opts)
 
-    # Clean up per-request handlers to prevent accumulation
     Bus.unregister_handler(:tool_call, tool_ref)
     Bus.unregister_handler(:llm_response, llm_ref)
 
@@ -386,7 +481,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         execute_msg =
           "Execute the following approved plan. Do not re-plan — proceed directly with implementation.\n\n#{plan_text}\n\nOriginal request: #{original_input}"
 
-        send_to_agent(execute_msg, session_id, skip_plan: true)
+        send_to_agent_sync(execute_msg, session_id, skip_plan: true)
 
       :rejected ->
         IO.puts("#{@dim}  ✗ Plan rejected#{@reset}\n")
@@ -486,6 +581,26 @@ defmodule OptimalSystemAgent.Channels.CLI do
           parts
       end
 
+    # Append compact context utilization hint from the latest pressure event
+    parts =
+      try do
+        case :ets.lookup(:cli_signal_cache, :context_pressure) do
+          [{:context_pressure, util}] when util >= 50.0 ->
+            label = cond do
+              util >= 95.0 -> "#{IO.ANSI.red()}ctx #{Float.round(util, 0)}%#{@dim}"
+              util >= 85.0 -> "#{IO.ANSI.red()}ctx #{Float.round(util, 0)}%#{@dim}"
+              util >= 70.0 -> "#{@yellow}ctx #{Float.round(util, 0)}%#{@dim}"
+              true -> "ctx #{Float.round(util, 0)}%"
+            end
+            parts ++ [label]
+
+          _ ->
+            parts
+        end
+      rescue
+        _ -> parts
+      end
+
     IO.puts("#{@dim}  #{Enum.join(parts, " · ")}#{@reset}")
   end
 
@@ -506,6 +621,100 @@ defmodule OptimalSystemAgent.Channels.CLI do
   defp format_tokens(0), do: ""
   defp format_tokens(n) when n < 1_000, do: "↓ #{n}"
   defp format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
+
+  defp context_pressure_bar(util) when util >= 95.0, do: "█████ CRITICAL"
+  defp context_pressure_bar(util) when util >= 90.0, do: "████░ HIGH"
+  defp context_pressure_bar(util) when util >= 85.0, do: "███░░ ELEVATED"
+  defp context_pressure_bar(util) when util >= 70.0, do: "██░░░ WARM"
+  defp context_pressure_bar(_util), do: "█░░░░"
+
+  # ── Active Request Tracking ────────────────────────────────────────
+
+  defp init_active_request do
+    try do
+      :ets.new(:cli_active_request, [:set, :public, :named_table])
+    rescue
+      ArgumentError -> :cli_active_request
+    end
+  end
+
+  defp agent_active?(session_id) do
+    case :ets.lookup(:cli_active_request, session_id) do
+      [{^session_id, _}] -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp cancel_active_request(session_id) do
+    case :ets.lookup(:cli_active_request, session_id) do
+      [{^session_id, %{spinner: spinner, tool_ref: tool_ref, llm_ref: llm_ref}}] ->
+        Spinner.stop(spinner)
+        Bus.unregister_handler(:tool_call, tool_ref)
+        Bus.unregister_handler(:llm_response, llm_ref)
+        :ets.delete(:cli_active_request, session_id)
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp build_prompt(session_id) do
+    if agent_active?(session_id),
+      do: "#{@dim}#{@cyan}◉#{@reset} ",
+      else: "#{@bold}#{@cyan}❯#{@reset} "
+  end
+
+  defp register_response_handler(session_id) do
+    Bus.register_handler(:system_event, fn payload ->
+      case payload do
+        %{event: :cli_agent_response_ready, session_id: ^session_id, result: result, request_id: req_id} ->
+          handle_agent_response(session_id, result, req_id)
+
+        _ ->
+          :ok
+      end
+    end)
+  rescue
+    _ -> :ok
+  end
+
+  defp handle_agent_response(session_id, result, req_id) do
+    case :ets.lookup(:cli_active_request, session_id) do
+      [{^session_id, %{request_id: ^req_id, spinner: spinner, tool_ref: tool_ref, llm_ref: llm_ref, input: original_input}}] ->
+        Bus.unregister_handler(:tool_call, tool_ref)
+        Bus.unregister_handler(:llm_response, llm_ref)
+
+        case result do
+          {:ok, response} ->
+            {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
+            signal = get_cached_signal(session_id)
+            show_status_line(elapsed_ms, tool_count, total_tokens, signal)
+            print_response(response)
+            print_separator()
+
+          {:plan, plan_text, _signal} ->
+            {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
+            show_status_line(elapsed_ms, 0, total_tokens, nil)
+            :ets.insert(:cli_active_request, {:pending_plan, session_id, plan_text, original_input})
+
+          {:error, reason} ->
+            Spinner.stop(spinner)
+            IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
+        end
+
+        :ets.delete(:cli_active_request, session_id)
+
+      _ ->
+        # Stale request_id or already cancelled — ignore
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
 
   # ── History ──────────────────────────────────────────────────────────
 
