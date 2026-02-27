@@ -264,7 +264,7 @@ defmodule OSA.SDK do
   @doc "List all configured MCP servers."
   defdelegate list_mcp_servers(), to: OptimalSystemAgent.SDK.MCP, as: :list_servers
 
-  @doc "List all MCP-provided tools registered in Skills.Registry."
+  @doc "List all MCP-provided tools registered in Tools.Registry."
   defdelegate list_mcp_tools(), to: OptimalSystemAgent.SDK.MCP, as: :list_tools
 
   @doc "Reload MCP server configs from disk."
