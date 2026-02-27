@@ -7,14 +7,20 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   same Agent.Loop and Signal.Classifier pipeline.
 
   Endpoints (v1):
-    POST /api/v1/orchestrate          Full ReAct agent loop
-    GET  /api/v1/stream/:session_id   SSE event stream for a session
-    POST /api/v1/classify             Signal classification only
-    GET  /api/v1/skills               List available skills
-    POST /api/v1/skills/:name/execute Execute a skill directly
-    POST /api/v1/memory               Save to memory
-    GET  /api/v1/memory/recall        Recall memory
+    POST /api/v1/orchestrate           Full ReAct agent loop
+    GET  /api/v1/stream/:session_id    SSE event stream
+    POST /api/v1/classify              Signal classification
+    GET  /api/v1/tools                 List executable tools
+    POST /api/v1/tools/:name/execute   Execute a tool by name
+    GET  /api/v1/skills                List SKILL.md prompt definitions
+    POST /api/v1/skills/create         Create a new SKILL.md
+    POST /api/v1/orchestrate/complex   Multi-agent orchestration
+    POST /api/v1/swarm/launch          Launch agent swarm
+    POST /api/v1/memory                Save to memory
+    GET  /api/v1/memory/recall         Recall memory
     GET  /api/v1/machines              List active machines
+    POST /api/v1/fleet/*               Fleet management (register, heartbeat, dispatch)
+    POST /api/v1/channels/*/webhook    Channel adapter webhooks
     GET  /health                       Health check (no auth)
 
   Auth: HS256 JWT via Authorization: Bearer <token>

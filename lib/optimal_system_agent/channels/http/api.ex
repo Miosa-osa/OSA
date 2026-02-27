@@ -5,25 +5,67 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   Every route goes through JWT verification first. In dev mode (require_auth: false),
   unauthenticated requests are allowed with an "anonymous" user_id.
 
+  Agent endpoints:
+    POST   /orchestrate                    — Process message through agent loop
+    GET    /stream/:session_id             — SSE event stream for a session
+    POST   /classify                       — Signal classification only
+
+  Tool & skill endpoints:
+    GET    /tools                          — List executable tools
+    POST   /tools/:name/execute            — Execute a tool by name
+    GET    /skills                         — List SKILL.md prompt definitions
+    POST   /skills/create                  — Create a new SKILL.md file
+
   Orchestration endpoints:
-    POST   /api/v1/orchestrate/complex          — Launch multi-agent orchestrated task
-    GET    /api/v1/orchestrate/:task_id/progress — Real-time progress for orchestrated task
-    GET    /api/v1/orchestrate/tasks             — List all orchestrated tasks
-    POST   /api/v1/skills/create                 — Dynamically create a new skill
+    POST   /orchestrate/complex            — Launch multi-agent orchestrated task
+    GET    /orchestrate/:task_id/progress   — Real-time progress for orchestrated task
+    GET    /orchestrate/tasks              — List all orchestrated tasks
 
   Swarm endpoints:
-    POST   /api/v1/swarm/launch  — Launch a new multi-agent swarm
-    GET    /api/v1/swarm         — List all swarms
-    GET    /api/v1/swarm/:id     — Get swarm status and result
-    DELETE /api/v1/swarm/:id     — Cancel a running swarm
+    POST   /swarm/launch                   — Launch a new multi-agent swarm
+    GET    /swarm                          — List all swarms
+    GET    /swarm/:id                      — Get swarm status and result
+    DELETE /swarm/:id                      — Cancel a running swarm
+
+  Memory endpoints:
+    POST   /memory                         — Save to memory
+    GET    /memory/recall                  — Recall memory
+
+  Scheduler endpoints:
+    GET    /scheduler/jobs                 — List scheduled jobs
+    POST   /scheduler/reload               — Reload scheduler from config
 
   Fleet endpoints:
-    POST   /api/v1/fleet/register                — Self-register an edge agent
-    GET    /api/v1/fleet/:agent_id/instructions   — Poll for pending tasks (OSCP CloudEvent)
-    POST   /api/v1/fleet/heartbeat               — Forward agent heartbeat
-    GET    /api/v1/fleet/agents                  — List all registered agents
-    GET    /api/v1/fleet/:agent_id               — Get single agent details
-    POST   /api/v1/fleet/dispatch                — Dispatch instruction to agent
+    POST   /fleet/register                 — Self-register an edge agent
+    GET    /fleet/:agent_id/instructions    — Poll for pending tasks (OSCP CloudEvent)
+    POST   /fleet/heartbeat                — Forward agent heartbeat
+    GET    /fleet/agents                   — List all registered agents
+    GET    /fleet/:agent_id                — Get single agent details
+    POST   /fleet/dispatch                 — Dispatch instruction to agent
+
+  Event endpoints:
+    POST   /events                         — Publish an event to the bus
+    GET    /events/stream                  — SSE stream for all events
+
+  Channel webhooks:
+    GET    /channels                        — List active channel adapters
+    POST   /channels/telegram/webhook       — Telegram bot webhook
+    POST   /channels/discord/webhook        — Discord bot webhook
+    POST   /channels/slack/events           — Slack event subscription
+    GET    /channels/whatsapp/webhook       — WhatsApp verification
+    POST   /channels/whatsapp/webhook       — WhatsApp message webhook
+    POST   /channels/signal/webhook         — Signal messenger webhook
+    POST   /channels/matrix/webhook         — Matrix room webhook
+    POST   /channels/email/inbound          — Inbound email webhook
+    POST   /channels/qq/webhook             — QQ bot webhook
+    POST   /channels/dingtalk/webhook       — DingTalk bot webhook
+    POST   /channels/feishu/events          — Feishu/Lark event webhook
+
+  Other endpoints:
+    GET    /machines                        — List active machines
+    POST   /webhooks/:trigger_id            — Trigger a webhook
+    POST   /oscp                            — OSCP protocol endpoint
+    GET    /tasks/history                   — Task execution history
   """
   use Plug.Router
   require Logger
@@ -107,7 +149,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
               session_id: session_id,
               output: response,
               signal: signal_to_map(signal),
-              skills_used: [],
+              tools_used: [],
               iteration_count: 0,
               execution_ms: execution_ms,
               metadata: %{}
@@ -187,9 +229,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
-  # ── GET /skills ─────────────────────────────────────────────────────
+  # ── GET /tools ──────────────────────────────────────────────────────
 
-  get "/skills" do
+  get "/tools" do
     tools = Tools.list_tools()
 
     body =
@@ -203,17 +245,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     |> send_resp(200, body)
   end
 
-  # ── POST /skills/:name/execute ──────────────────────────────────────
+  # ── POST /tools/:name/execute ─────────────────────────────────────
 
-  post "/skills/:name/execute" do
-    skill_name = conn.params["name"]
+  post "/tools/:name/execute" do
+    tool_name = conn.params["name"]
     arguments = conn.body_params["arguments"] || %{}
 
-    case Tools.execute(skill_name, arguments) do
+    case Tools.execute(tool_name, arguments) do
       {:ok, result} ->
         body =
           Jason.encode!(%{
-            skill: skill_name,
+            tool: tool_name,
             status: "completed",
             result: result
           })
@@ -225,6 +267,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       {:error, reason} ->
         json_error(conn, 422, "tool_error", to_string(reason))
     end
+  end
+
+  # ── GET /skills ────────────────────────────────────────────────────
+
+  get "/skills" do
+    skills = Tools.load_skill_definitions()
+
+    summaries =
+      Enum.map(skills, &Map.take(&1, [:name, :description, :category, :triggers, :priority]))
+
+    body = Jason.encode!(%{skills: summaries, count: length(summaries)})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
   end
 
   # ── POST /memory ────────────────────────────────────────────────────

@@ -474,7 +474,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @doc false
   defp tools_block do
-    skills = Tools.list_skill_docs()
+    skills = Tools.list_docs()
 
     tools =
       try do
@@ -745,7 +745,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   @doc false
   defp environment_block(_state) do
     cwd = File.cwd!()
-    git_info = gather_git_info()
+    git_info = cached_git_info()
     elixir_ver = System.version()
     otp_release = :erlang.system_info(:otp_release) |> to_string()
     {os_family, os_name} = :os.type()
@@ -764,6 +764,21 @@ defmodule OptimalSystemAgent.Agent.Context do
     """
   rescue
     _ -> nil
+  end
+
+  @doc false
+  defp cached_git_info do
+    case Process.get(:osa_git_info_cache) do
+      nil ->
+        Logger.debug("[Context] git info cache miss — running git commands")
+        info = gather_git_info()
+        Process.put(:osa_git_info_cache, info)
+        info
+
+      cached ->
+        Logger.debug("[Context] git info cache hit")
+        cached
+    end
   end
 
   @doc false

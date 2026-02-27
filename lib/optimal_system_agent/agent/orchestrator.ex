@@ -1391,7 +1391,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   # ── Skill Discovery ───────────────────────────────────────────────
 
   defp do_find_matching_skills(task_description) do
-    search_results = Tools.search_skills(task_description)
+    search_results = Tools.search(task_description)
 
     if search_results == [] do
       :no_matches

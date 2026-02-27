@@ -62,15 +62,15 @@ defmodule OptimalSystemAgent.Tools.Registry do
     end
   end
 
-  @doc "List tool documentation (for context injection)."
-  def list_skill_docs do
-    GenServer.call(__MODULE__, :list_skill_docs)
+  @doc "List tool and skill documentation (for context injection)."
+  def list_docs do
+    GenServer.call(__MODULE__, :list_docs)
   end
 
   @doc "Search existing tools and skills by keyword matching against names and descriptions."
-  @spec search_skills(String.t()) :: list({String.t(), String.t(), float()})
-  def search_skills(query) do
-    GenServer.call(__MODULE__, {:search_skills, query})
+  @spec search(String.t()) :: list({String.t(), String.t(), float()})
+  def search(query) do
+    GenServer.call(__MODULE__, {:search, query})
   end
 
   @doc "Execute a tool by name with given arguments."
@@ -328,14 +328,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
     {:reply, state.tools, state}
   end
 
-  def handle_call(:list_skill_docs, _from, state) do
+  def handle_call(:list_docs, _from, state) do
     tool_docs = Enum.map(state.builtin_tools, fn {name, mod} -> {name, mod.description()} end)
     skill_docs = Enum.map(state.skills, fn {name, skill} -> {name, skill.description} end)
     {:reply, tool_docs ++ skill_docs, state}
   end
 
-  def handle_call({:search_skills, query}, _from, state) do
-    results = do_search_skills(query, state.builtin_tools, state.skills)
+  def handle_call({:search, query}, _from, state) do
+    results = do_search(query, state.builtin_tools, state.skills)
     {:reply, results, state}
   end
 
@@ -472,58 +472,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
     _ -> :ok
   end
 
-  # --- Fallback Dispatch ---
-
-  defp dispatch_tool("file_read", args),
-    do: OptimalSystemAgent.Tools.Builtins.FileRead.execute(args)
-
-  defp dispatch_tool("file_write", args),
-    do: OptimalSystemAgent.Tools.Builtins.FileWrite.execute(args)
-
-  defp dispatch_tool("shell_execute", args),
-    do: OptimalSystemAgent.Tools.Builtins.ShellExecute.execute(args)
-
-  defp dispatch_tool("web_search", args),
-    do: OptimalSystemAgent.Tools.Builtins.WebSearch.execute(args)
-
-  defp dispatch_tool("memory_save", args),
-    do: OptimalSystemAgent.Tools.Builtins.MemorySave.execute(args)
-
-  defp dispatch_tool("orchestrate", args),
-    do: OptimalSystemAgent.Tools.Builtins.Orchestrate.execute(args)
-
-  defp dispatch_tool("create_skill", args),
-    do: OptimalSystemAgent.Tools.Builtins.CreateSkill.execute(args)
-
-  defp dispatch_tool("budget_status", args),
-    do: OptimalSystemAgent.Tools.Builtins.BudgetStatus.execute(args)
-
-  defp dispatch_tool("wallet_ops", args),
-    do: OptimalSystemAgent.Tools.Builtins.WalletOps.execute(args)
-
-  defp dispatch_tool("file_edit", args),
-    do: OptimalSystemAgent.Tools.Builtins.FileEdit.execute(args)
-
-  defp dispatch_tool("file_glob", args),
-    do: OptimalSystemAgent.Tools.Builtins.FileGlob.execute(args)
-
-  defp dispatch_tool("file_grep", args),
-    do: OptimalSystemAgent.Tools.Builtins.FileGrep.execute(args)
-
-  defp dispatch_tool("dir_list", args),
-    do: OptimalSystemAgent.Tools.Builtins.DirList.execute(args)
-
-  defp dispatch_tool("web_fetch", args),
-    do: OptimalSystemAgent.Tools.Builtins.WebFetch.execute(args)
-
-  defp dispatch_tool("task_write", args),
-    do: OptimalSystemAgent.Tools.Builtins.TaskWrite.execute(args)
-
-  defp dispatch_tool(name, _args), do: {:error, "No built-in handler for: #{name}"}
 
   # --- Skill Search ---
 
-  defp do_search_skills(query, builtin_tools, skills) do
+  defp do_search(query, builtin_tools, skills) do
     keywords = extract_keywords(query)
 
     if keywords == [] do
