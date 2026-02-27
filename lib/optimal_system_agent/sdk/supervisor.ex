@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
   Supervision tree for embedded SDK mode.
 
   Starts the subset of OSA processes needed for SDK operation:
-  Registry, PubSub, Bus, Repo, Providers, Skills, Memory, Budget, Hooks,
+  Registry, PubSub, Bus, Repo, Providers, Tools, Memory, Budget, Hooks,
   Learning, Orchestrator, Progress, TaskQueue, Compactor, Swarm, and
   optionally Bandit.
 
@@ -60,8 +60,8 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
         # LLM providers
         OptimalSystemAgent.Providers.Registry,
 
-        # Skills
-        OptimalSystemAgent.Skills.Registry,
+        # Tools
+        OptimalSystemAgent.Tools.Registry,
 
         # Channel supervisor (for session Loop processes)
         {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
@@ -132,7 +132,7 @@ defmodule OptimalSystemAgent.SDK.Supervisor do
         OptimalSystemAgent.SDK.Tool.define(name, desc, params, handler)
 
       module when is_atom(module) ->
-        OptimalSystemAgent.Skills.Registry.register(module)
+        OptimalSystemAgent.Tools.Registry.register(module)
     end)
   end
 

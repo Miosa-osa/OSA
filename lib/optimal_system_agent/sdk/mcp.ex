@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.SDK.MCP do
   SDK wrapper for MCP (Model Context Protocol) integration.
 
   Lists configured MCP servers and their capabilities. MCP tools are
-  auto-discovered and registered in Skills.Registry at boot.
+  auto-discovered and registered in Tools.Registry at boot.
   """
 
   @doc """
@@ -23,13 +23,13 @@ defmodule OptimalSystemAgent.SDK.MCP do
   end
 
   @doc """
-  List all MCP-provided tools currently registered in Skills.Registry.
+  List all MCP-provided tools currently registered in Tools.Registry.
 
   MCP tools are prefixed with `mcp_` by convention.
   """
   @spec list_tools() :: [map()]
   def list_tools do
-    OptimalSystemAgent.Skills.Registry.list_tools()
+    OptimalSystemAgent.Tools.Registry.list_tools()
     |> Enum.filter(fn tool ->
       String.starts_with?(tool.name, "mcp_")
     end)
