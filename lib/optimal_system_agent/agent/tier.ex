@@ -343,7 +343,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
   end
 
   defp assign_ollama_tiers([large, small]) do
-    %{elite: large.name, specialist: large.name, utility: small.name}
+    %{elite: large.name, specialist: small.name, utility: small.name}
   end
 
   defp assign_ollama_tiers([large | rest]) do

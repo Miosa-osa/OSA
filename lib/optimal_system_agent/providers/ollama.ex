@@ -141,8 +141,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     end
   end
 
-  defp model_supports_tools?(model_name) do
-    # Check if model is in the known tool-capable list and likely large enough
+  @doc """
+  Check if a model name matches known tool-capable prefixes.
+  Returns true for models that can handle function/tool calling reliably.
+  """
+  @spec model_supports_tools?(String.t()) :: boolean()
+  def model_supports_tools?(model_name) do
     name = String.downcase(model_name)
     Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1)) and
       not String.contains?(name, ":1.") and

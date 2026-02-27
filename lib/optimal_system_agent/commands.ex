@@ -279,6 +279,12 @@ defmodule OptimalSystemAgent.Commands do
       {"mem-context", "Save conversation context", &cmd_memory_cmd/2},
       {"mem-export", "Export memory to file", &cmd_memory_cmd/2},
 
+      # ── Scheduler ──
+      {"schedule", "Scheduler overview", &cmd_schedule/2},
+      {"cron", "Manage cron jobs", &cmd_cron/2},
+      {"triggers", "Manage event triggers", &cmd_triggers/2},
+      {"heartbeat", "Heartbeat tasks", &cmd_heartbeat/2},
+
       # ── Analytics ──
       {"analytics", "Usage analytics and metrics", &cmd_utility/2},
       {"debug", "Start systematic debugging", &cmd_utility/2},
@@ -357,6 +363,20 @@ defmodule OptimalSystemAgent.Commands do
       /swarms             List swarm presets
       /hooks              Hook pipeline status
       /learning           Learning engine metrics
+
+    Scheduler:
+      /schedule           Scheduler overview (crons, triggers, heartbeat)
+      /cron               List cron jobs
+      /cron add           Create a new cron job
+      /cron run <id>      Execute a cron job immediately
+      /cron enable <id>   Enable a cron job
+      /cron disable <id>  Disable a cron job
+      /cron remove <id>   Remove a cron job
+      /triggers           List event triggers
+      /triggers add       Create a new trigger
+      /triggers remove <id>  Remove a trigger
+      /heartbeat          Show heartbeat tasks + next run
+      /heartbeat add <t>  Add a heartbeat task
 
     Commands:
       /create-command     Create a custom slash command
@@ -578,18 +598,67 @@ defmodule OptimalSystemAgent.Commands do
         key_name = String.upcase("#{provider}_API_KEY")
         {:command, "Provider #{provider_str} is not configured.\nSet #{key_name} environment variable and restart, or use /model list."}
 
-      true ->
-        # Switch provider
-        Application.put_env(:optimal_system_agent, :default_provider, provider)
-
-        # Switch model if specified
-        if model_override do
-          model_key = :"#{provider}_model"
-          Application.put_env(:optimal_system_agent, model_key, model_override)
+      # Fix 1: Validate Ollama model exists before switching
+      provider == :ollama and model_override != nil ->
+        case validate_ollama_model(model_override) do
+          :ok -> do_model_switch(provider, model_override)
+          {:warn, msg} -> do_model_switch(provider, model_override, msg)
+          {:error, msg} -> {:command, msg}
         end
 
-        model = active_model_for(provider)
-        {:command, "Switched to #{provider} / #{model}"}
+      true ->
+        do_model_switch(provider, model_override)
+    end
+  end
+
+  defp do_model_switch(provider, model_override, extra_warning \\ nil) do
+    Application.put_env(:optimal_system_agent, :default_provider, provider)
+
+    if model_override do
+      model_key = :"#{provider}_model"
+      Application.put_env(:optimal_system_agent, model_key, model_override)
+    end
+
+    model = active_model_for(provider)
+    parts = ["Switched to #{provider} / #{model}"]
+
+    # Fix 3: Refresh tier assignments when switching Ollama models
+    parts =
+      if provider == :ollama do
+        Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
+        parts ++ ["Refreshing tier assignments..."]
+      else
+        parts
+      end
+
+    # Fix 4: Warn when switched model doesn't support tools
+    parts =
+      if provider == :ollama and model_override != nil and
+           not OptimalSystemAgent.Providers.Ollama.model_supports_tools?(model_override) do
+        parts ++ ["⚠ #{model_override} does not support tool calling — tools will be disabled for this model."]
+      else
+        parts
+      end
+
+    parts = if extra_warning, do: parts ++ [extra_warning], else: parts
+
+    {:command, Enum.join(parts, "\n")}
+  end
+
+  defp validate_ollama_model(model_name) do
+    case OptimalSystemAgent.Providers.Ollama.list_models() do
+      {:ok, models} ->
+        names = Enum.map(models, & &1.name)
+
+        if model_name in names do
+          :ok
+        else
+          installed = Enum.join(names, ", ")
+          {:error, "Model '#{model_name}' not found on Ollama.\n\nInstalled: #{installed}\n\nPull it first: ollama pull #{model_name}"}
+        end
+
+      {:error, _} ->
+        {:warn, "⚠ Could not reach Ollama to verify model — switching anyway."}
     end
   end
 
@@ -628,7 +697,9 @@ defmodule OptimalSystemAgent.Commands do
       {:command, "Current Ollama URL: #{current}\n\nUsage: /model ollama-url <url>"}
     else
       Application.put_env(:optimal_system_agent, :ollama_url, url)
-      {:command, "Ollama URL set to: #{url}"}
+      # Fix 2: Refresh tier assignments when URL changes (new server may have different models)
+      Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
+      {:command, "Ollama URL set to: #{url}\nRefreshing tier assignments..."}
     end
   end
 
