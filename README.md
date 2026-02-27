@@ -354,51 +354,77 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 | **Codebase** | ~28.5K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
 | **Tests** | 440 | Minimal | Minimal | Basic | Basic | Basic |
 
-## Quick Start
+## Install
 
-### Install
+**30 seconds. No Erlang. No Elixir. No compilation.**
+
+### Homebrew (macOS / Linux)
 
 ```bash
-# Option A: Homebrew (macOS/Linux)
 brew tap miosa-osa/tap
 brew install osagent
+osagent
+```
 
-# Option B: Install script (no dependencies needed)
+### One-liner (macOS / Linux)
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | sh
+osagent
+```
 
-# Option C: From source (requires Elixir 1.17+)
+### From Source
+
+For contributors or if you want to hack on OSA itself:
+
+```bash
 git clone https://github.com/Miosa-osa/OSA.git
 cd OSA
-mix deps.get
-mix osa.setup
-mix ecto.create && mix ecto.migrate
-mix compile
+mix setup              # deps + database + compile
+mix chat               # start talking
 ```
 
-### Run
+Requires Elixir 1.17+ and Erlang/OTP 27+.
+
+---
+
+## Usage
 
 ```bash
-osagent              # Start chatting (binary install)
-osagent setup        # Configure provider + API keys
-osagent version      # Print version
-osagent serve        # Headless HTTP API mode
-
-# Or from source:
-mix chat
+osagent                # interactive chat (default)
+osagent setup          # configure provider + API keys
+osagent version        # print version
+osagent serve          # headless HTTP API mode (port 8089)
 ```
 
-### Configure
+On first run, `osagent` launches a setup wizard — pick your LLM provider, paste an API key (or choose Ollama for fully local), and you're chatting.
+
+### Switch Providers
 
 ```bash
-# Local AI (default — free, private)
-export OSA_DEFAULT_PROVIDER=ollama
+# Local AI (default — free, private, no API key)
+osagent setup          # select Ollama
 
-# Or any of the 18 supported providers:
-export OSA_DEFAULT_PROVIDER=anthropic    # or openai, groq, deepseek, together, etc.
-export ANTHROPIC_API_KEY=sk-...
+# Cloud — pick any of 18 providers
+osagent setup          # select Anthropic, OpenAI, Groq, DeepSeek, etc.
+
+# Or set env vars directly
+export OSA_DEFAULT_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+osagent
 ```
 
-Or edit `~/.osa/config.json` directly.
+Config lives in `~/.osa/config.json` — edit it directly if you prefer.
+
+### Upgrade
+
+```bash
+# Homebrew
+brew upgrade osagent
+
+# Install script — just re-run it
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | sh
+```
 
 ### Chat Channels
 
