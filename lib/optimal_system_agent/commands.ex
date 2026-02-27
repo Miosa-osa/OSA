@@ -1,0 +1,798 @@
+defmodule OptimalSystemAgent.Commands do
+  @moduledoc """
+  Slash command registry — built-in and dynamically created commands.
+
+  Commands are prefixed with `/` in the CLI and can be:
+  1. Built-in (hardcoded in this module)
+  2. User-created (stored in ETS, persisted to ~/.osa/commands/)
+  3. Agent-created (the agent can create commands for the user at runtime)
+
+  ## Usage
+
+      /help                — list available commands
+      /status              — system status
+      /skills              — list available skills
+      /memory              — show memory stats
+      /soul                — show current personality config
+      /model               — show active LLM provider/model
+      /reload              — reload soul/skill files from disk
+      /create-command      — create a new custom command
+      /new                 — start a fresh session
+      /sessions            — list stored sessions
+      /resume <id>         — resume a previous session
+      /compact             — context compaction stats
+      /usage               — token usage breakdown
+      /cortex              — cortex bulletin & active topics
+      /doctor              — system diagnostics
+      /verbose             — toggle verbose output
+      /think <level>       — set reasoning depth (fast/normal/deep)
+      /config              — show runtime configuration
+
+  ## Custom Commands
+
+  Custom commands are stored as markdown files in `~/.osa/commands/`.
+  Each file defines a command that expands into a prompt template:
+
+      ~/.osa/commands/standup.md →
+        ---
+        name: standup
+        description: Generate a daily standup summary
+        ---
+        Review my recent activity and generate a standup update.
+        Include: what I did, what I'm doing, any blockers.
+
+  When a user types `/standup`, the command's instructions become the
+  message sent to the agent loop — as if the user typed them.
+  """
+
+  use GenServer
+  require Logger
+
+  @commands_dir Application.compile_env(:optimal_system_agent, :commands_dir, "~/.osa/commands")
+  @ets_table :osa_commands
+  @settings_table :osa_settings
+
+  defstruct commands: %{}
+
+  # ── Client API ───────────────────────────────────────────────────
+
+  def start_link(_opts) do
+    GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+  end
+
+  @doc """
+  Execute a slash command.
+
+  Returns:
+    - `{:command, output}` — display output directly
+    - `{:prompt, expanded_text}` — send expanded text to agent loop
+    - `{:action, action, output}` — CLI takes action + displays output
+    - `:unknown` — command not found
+  """
+  @spec execute(String.t(), String.t()) ::
+          {:command, String.t()}
+          | {:prompt, String.t()}
+          | {:action, atom() | tuple(), String.t()}
+          | :unknown
+  def execute(input, session_id) do
+    [cmd | args] = String.split(input, ~r/\s+/, parts: 2)
+    cmd = String.downcase(cmd)
+    arg = List.first(args) || ""
+
+    case lookup(cmd) do
+      {:builtin, handler} ->
+        handler.(arg, session_id)
+
+      {:custom, template} ->
+        expanded =
+          if arg != "" do
+            template <> "\n\nAdditional context: " <> arg
+          else
+            template
+          end
+
+        {:prompt, expanded}
+
+      :not_found ->
+        :unknown
+    end
+  end
+
+  @doc "List all available commands with descriptions."
+  @spec list_commands() :: list({String.t(), String.t()})
+  def list_commands do
+    builtins = Enum.map(builtin_commands(), fn {name, desc, _} -> {name, desc} end)
+
+    customs =
+      try do
+        :ets.tab2list(@ets_table)
+        |> Enum.map(fn {name, _template, desc} -> {name, desc} end)
+      rescue
+        ArgumentError -> []
+      end
+
+    builtins ++ customs
+  end
+
+  @doc "Register a custom command at runtime."
+  @spec register(String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def register(name, description, template) do
+    GenServer.call(__MODULE__, {:register, name, description, template})
+  end
+
+  # ── GenServer ───────────────────────────────────────────────────
+
+  @doc "Read a per-session setting from ETS. Returns default if unset."
+  @spec get_setting(String.t(), atom(), term()) :: term()
+  def get_setting(session_id, key, default \\ nil) do
+    case :ets.lookup(@settings_table, {session_id, key}) do
+      [{_, value}] -> value
+      [] -> default
+    end
+  rescue
+    ArgumentError -> default
+  end
+
+  @doc "Write a per-session setting to ETS."
+  @spec put_setting(String.t(), atom(), term()) :: :ok
+  def put_setting(session_id, key, value) do
+    :ets.insert(@settings_table, {{session_id, key}, value})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # ── GenServer ───────────────────────────────────────────────────
+
+  @impl true
+  def init(:ok) do
+    # Create ETS table for command lookup
+    :ets.new(@ets_table, [:set, :public, :named_table, read_concurrency: true])
+
+    # Create ETS table for per-session runtime settings
+    :ets.new(@settings_table, [:set, :public, :named_table, read_concurrency: true])
+
+    # Load custom commands from disk
+    load_custom_commands()
+
+    Logger.info("[Commands] Loaded #{:ets.info(@ets_table, :size)} custom command(s)")
+    {:ok, %__MODULE__{}}
+  end
+
+  @impl true
+  def handle_call({:register, name, description, template}, _from, state) do
+    name = String.downcase(String.trim(name))
+
+    # Don't allow overriding builtins
+    if Enum.any?(builtin_commands(), fn {n, _, _} -> n == name end) do
+      {:reply, {:error, "Cannot override built-in command: /#{name}"}, state}
+    else
+      # Store in ETS
+      :ets.insert(@ets_table, {name, template, description})
+
+      # Persist to disk
+      persist_command(name, description, template)
+
+      Logger.info("[Commands] Registered custom command: /#{name}")
+      {:reply, :ok, state}
+    end
+  end
+
+  # ── Lookup ──────────────────────────────────────────────────────
+
+  defp lookup(cmd) do
+    # Check builtins first
+    case Enum.find(builtin_commands(), fn {name, _, _} -> name == cmd end) do
+      {_, _, handler} ->
+        {:builtin, handler}
+
+      nil ->
+        # Check ETS for custom commands
+        case :ets.lookup(@ets_table, cmd) do
+          [{^cmd, template, _desc}] -> {:custom, template}
+          [] -> :not_found
+        end
+    end
+  end
+
+  # ── Built-in Commands ──────────────────────────────────────────
+
+  defp builtin_commands do
+    [
+      # ── Info ──
+      {"help", "Show available commands", &cmd_help/2},
+      {"status", "System status", &cmd_status/2},
+      {"skills", "List available skills", &cmd_skills/2},
+      {"memory", "Memory statistics", &cmd_memory/2},
+      {"soul", "Show personality config", &cmd_soul/2},
+      {"model", "Show active LLM model", &cmd_model/2},
+      {"commands", "List all commands", &cmd_help/2},
+
+      # ── Session Management ──
+      {"new", "Start a fresh session", &cmd_new/2},
+      {"sessions", "List stored sessions", &cmd_sessions/2},
+      {"resume", "Resume a previous session", &cmd_resume/2},
+
+      # ── Context & Performance ──
+      {"compact", "Context compaction stats", &cmd_compact/2},
+      {"usage", "Token usage breakdown", &cmd_usage/2},
+
+      # ── Intelligence ──
+      {"cortex", "Cortex bulletin & topics", &cmd_cortex/2},
+
+      # ── Configuration ──
+      {"verbose", "Toggle verbose output", &cmd_verbose/2},
+      {"think", "Set reasoning depth", &cmd_think/2},
+      {"config", "Show runtime configuration", &cmd_config/2},
+
+      # ── System ──
+      {"reload", "Reload soul/skill files", &cmd_reload/2},
+      {"doctor", "System diagnostics", &cmd_doctor/2},
+      {"create-command", "Create a new command", &cmd_create/2},
+    ]
+  end
+
+  # ── Info Commands ──────────────────────────────────────────────
+
+  defp cmd_help(_arg, _session_id) do
+    commands = list_commands()
+
+    header = "Available commands:\n"
+
+    body =
+      Enum.map_join(commands, "\n", fn {name, desc} ->
+        "  /#{String.pad_trailing(name, 18)} #{desc}"
+      end)
+
+    footer = "\n\nType /command-name to run. Custom commands expand into prompts."
+
+    {:command, header <> body <> footer}
+  end
+
+  defp cmd_status(_arg, _session_id) do
+    providers = OptimalSystemAgent.Providers.Registry.list_providers()
+    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+    memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
+    soul_loaded = if OptimalSystemAgent.Soul.identity(), do: "yes", else: "defaults"
+
+    output =
+      """
+      System Status:
+        providers:  #{length(providers)} loaded
+        skills:     #{length(skills)} available
+        sessions:   #{memory_stats[:session_count] || 0} stored
+        memory:     #{memory_stats[:long_term_size] || 0} bytes
+        soul:       #{soul_loaded}
+        http:       port #{Application.get_env(:optimal_system_agent, :http_port, 8089)}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  defp cmd_skills(_arg, _session_id) do
+    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+
+    output =
+      if skills == [] do
+        "No skills loaded."
+      else
+        header = "Available skills (#{length(skills)}):\n"
+
+        body =
+          Enum.map_join(skills, "\n", fn skill ->
+            "  #{String.pad_trailing(skill.name, 18)} #{String.slice(skill.description, 0, 60)}"
+          end)
+
+        header <> body
+      end
+
+    {:command, output}
+  end
+
+  defp cmd_memory(_arg, _session_id) do
+    stats = OptimalSystemAgent.Agent.Memory.memory_stats()
+
+    output =
+      """
+      Memory:
+        sessions:    #{stats[:session_count] || 0}
+        long-term:   #{stats[:long_term_size] || 0} bytes
+        categories:  #{format_categories(stats[:categories])}
+        index keys:  #{stats[:index_keywords] || 0}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  defp cmd_soul(_arg, _session_id) do
+    identity = OptimalSystemAgent.Soul.identity()
+    soul = OptimalSystemAgent.Soul.soul()
+    user = OptimalSystemAgent.Soul.user()
+
+    parts = []
+
+    parts =
+      if identity do
+        ["IDENTITY.md: loaded (#{String.length(identity)} chars)" | parts]
+      else
+        ["IDENTITY.md: using defaults" | parts]
+      end
+
+    parts =
+      if soul do
+        ["SOUL.md: loaded (#{String.length(soul)} chars)" | parts]
+      else
+        ["SOUL.md: using defaults" | parts]
+      end
+
+    parts =
+      if user do
+        ["USER.md: loaded (#{String.length(user)} chars)" | parts]
+      else
+        ["USER.md: not found" | parts]
+      end
+
+    {:command, "Soul configuration:\n  " <> Enum.join(Enum.reverse(parts), "\n  ")}
+  end
+
+  defp cmd_model(_arg, _session_id) do
+    provider = Application.get_env(:optimal_system_agent, :default_provider, "unknown")
+    ollama_model = Application.get_env(:optimal_system_agent, :ollama_model, "unknown")
+    anthropic_model = Application.get_env(:optimal_system_agent, :anthropic_model, "unknown")
+
+    output =
+      """
+      Active model:
+        provider:  #{provider}
+        ollama:    #{ollama_model}
+        anthropic: #{anthropic_model}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  # ── Session Management ──────────────────────────────────────────
+
+  defp cmd_new(_arg, _session_id) do
+    {:action, :new_session, "Starting fresh session..."}
+  end
+
+  defp cmd_sessions(_arg, _session_id) do
+    sessions = OptimalSystemAgent.Agent.Memory.list_sessions()
+
+    output =
+      if sessions == [] do
+        "No stored sessions."
+      else
+        header = "Stored sessions (#{length(sessions)}):\n"
+
+        body =
+          sessions
+          |> Enum.sort_by(& &1[:last_active], :desc)
+          |> Enum.take(20)
+          |> Enum.map_join("\n", fn s ->
+            id = s[:session_id] || "?"
+            msgs = s[:message_count] || 0
+            last = format_timestamp(s[:last_active])
+            hint = s[:topic_hint] || ""
+            hint_str = if hint != "", do: " — #{String.slice(hint, 0, 50)}", else: ""
+            "  #{String.pad_trailing(id, 24)} #{String.pad_trailing("#{msgs} msgs", 10)} #{last}#{hint_str}"
+          end)
+
+        footer = "\n\nUse /resume <session-id> to continue a session."
+
+        header <> body <> footer
+      end
+
+    {:command, output}
+  end
+
+  defp cmd_resume(arg, _session_id) do
+    target = String.trim(arg)
+
+    if target == "" do
+      {:command, "Usage: /resume <session-id>\n\nUse /sessions to see available sessions."}
+    else
+      case OptimalSystemAgent.Agent.Memory.resume_session(target) do
+        {:ok, messages} ->
+          {:action, {:resume_session, target, messages}, "Resuming session #{target} (#{length(messages)} messages)..."}
+
+        {:error, :not_found} ->
+          {:command, "Session not found: #{target}\n\nUse /sessions to see available sessions."}
+      end
+    end
+  end
+
+  # ── Context & Performance ─────────────────────────────────────
+
+  defp cmd_compact(_arg, _session_id) do
+    stats = OptimalSystemAgent.Agent.Compactor.stats()
+
+    output =
+      """
+      Context Compactor:
+        compactions:     #{stats[:compaction_count] || 0}
+        tokens saved:    #{stats[:tokens_saved] || 0}
+        last compacted:  #{format_timestamp(stats[:last_compacted_at])}
+        pipeline steps:  #{format_pipeline_steps(stats[:pipeline_steps_used])}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  defp cmd_usage(_arg, _session_id) do
+    compactor_stats = OptimalSystemAgent.Agent.Compactor.stats()
+    memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
+    max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+
+    output =
+      """
+      Token Usage:
+        max context:     #{format_number(max_tokens)} tokens
+        tokens saved:    #{format_number(compactor_stats[:tokens_saved] || 0)} (via compaction)
+        compactions:     #{compactor_stats[:compaction_count] || 0}
+        sessions stored: #{memory_stats[:session_count] || 0}
+        memory on disk:  #{format_bytes(memory_stats[:long_term_size] || 0)}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  # ── Intelligence ──────────────────────────────────────────────
+
+  defp cmd_cortex(_arg, _session_id) do
+    bulletin = OptimalSystemAgent.Agent.Cortex.bulletin()
+    topics = OptimalSystemAgent.Agent.Cortex.active_topics()
+    stats = OptimalSystemAgent.Agent.Cortex.synthesis_stats()
+
+    parts = []
+
+    parts =
+      if bulletin do
+        ["Bulletin:\n#{indent(bulletin, 4)}" | parts]
+      else
+        ["Bulletin: (not yet generated — waiting for first synthesis cycle)" | parts]
+      end
+
+    parts =
+      if topics != [] do
+        topic_list =
+          topics
+          |> Enum.take(10)
+          |> Enum.map_join("\n", fn t ->
+            "    #{t[:topic] || t.topic}  (#{t[:frequency] || t.frequency}x)"
+          end)
+
+        ["Active topics:\n#{topic_list}" | parts]
+      else
+        parts
+      end
+
+    parts = [
+      "Stats: last refresh #{format_timestamp(stats[:last_refresh])}, #{stats[:bulletin_bytes] || 0} bytes, #{stats[:active_topic_count] || 0} topics"
+      | parts
+    ]
+
+    {:command, Enum.reverse(parts) |> Enum.join("\n\n")}
+  end
+
+  # ── Configuration ─────────────────────────────────────────────
+
+  defp cmd_verbose(_arg, session_id) do
+    current = get_setting(session_id, :verbose, false)
+    new_value = !current
+    put_setting(session_id, :verbose, new_value)
+    {:command, "Verbose mode: #{if new_value, do: "on", else: "off"}"}
+  end
+
+  defp cmd_think(arg, session_id) do
+    level = String.trim(arg) |> String.downcase()
+
+    case level do
+      "" ->
+        current = get_setting(session_id, :think_level, "normal")
+        {:command, "Current reasoning depth: #{current}\n\nUsage: /think fast|normal|deep"}
+
+      l when l in ["fast", "normal", "deep"] ->
+        put_setting(session_id, :think_level, l)
+        desc = case l do
+          "fast" -> "quick responses, minimal deliberation"
+          "normal" -> "balanced reasoning and speed"
+          "deep" -> "thorough analysis, extended thinking"
+        end
+        {:command, "Reasoning depth: #{l} (#{desc})"}
+
+      _ ->
+        {:command, "Unknown level: #{level}\n\nUsage: /think fast|normal|deep"}
+    end
+  end
+
+  defp cmd_config(_arg, session_id) do
+    verbose = get_setting(session_id, :verbose, false)
+    think = get_setting(session_id, :think_level, "normal")
+    provider = Application.get_env(:optimal_system_agent, :default_provider, "unknown")
+    max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    max_iter = Application.get_env(:optimal_system_agent, :max_iterations, 30)
+    http_port = Application.get_env(:optimal_system_agent, :http_port, 8089)
+    sandbox = Application.get_env(:optimal_system_agent, :sandbox_enabled, false)
+
+    output =
+      """
+      Runtime Configuration:
+        session:       #{session_id}
+        verbose:       #{verbose}
+        think level:   #{think}
+        provider:      #{provider}
+        max tokens:    #{format_number(max_tokens)}
+        max iterations: #{max_iter}
+        http port:     #{http_port}
+        sandbox:       #{sandbox}
+      """
+      |> String.trim()
+
+    {:command, output}
+  end
+
+  # ── System ────────────────────────────────────────────────────
+
+  defp cmd_reload(_arg, _session_id) do
+    OptimalSystemAgent.Soul.reload()
+    {:command, "Soul files reloaded from disk."}
+  end
+
+  defp cmd_doctor(_arg, _session_id) do
+    checks = [
+      check_soul(),
+      check_providers(),
+      check_skills(),
+      check_memory(),
+      check_cortex(),
+      check_scheduler(),
+      check_http(),
+    ]
+
+    passed = Enum.count(checks, fn {status, _, _} -> status == :ok end)
+    total = length(checks)
+
+    header = "System Diagnostics (#{passed}/#{total} passed):\n"
+
+    body =
+      Enum.map_join(checks, "\n", fn {status, name, detail} ->
+        icon = case status do
+          :ok -> "[ok]"
+          :warn -> "[!!]"
+          :fail -> "[XX]"
+        end
+        "  #{icon} #{String.pad_trailing(name, 20)} #{detail}"
+      end)
+
+    {:command, header <> body}
+  end
+
+  defp cmd_create(arg, _session_id) do
+    result =
+      case parse_create_args(arg) do
+        {:ok, name, description, template} ->
+          case register(name, description, template) do
+            :ok -> "Created command /#{name} — try it out!"
+            {:error, reason} -> "Failed: #{reason}"
+          end
+
+        :help ->
+          """
+          Usage: /create-command name | description | template
+
+          Example:
+            /create-command standup | Daily standup summary | Review my recent activity and generate a standup update. Include what I did, what I'm doing, and any blockers.
+
+          The template becomes the prompt sent to the agent when the command is used.
+          """
+          |> String.trim()
+      end
+
+    {:command, result}
+  end
+
+  defp parse_create_args(""), do: :help
+  defp parse_create_args(arg) do
+    case String.split(arg, "|", parts: 3) do
+      [name, desc, template] ->
+        {:ok, String.trim(name), String.trim(desc), String.trim(template)}
+
+      [name, template] ->
+        {:ok, String.trim(name), "Custom command", String.trim(template)}
+
+      _ ->
+        :help
+    end
+  end
+
+  # ── Doctor Checks ──────────────────────────────────────────────
+
+  defp check_soul do
+    identity = OptimalSystemAgent.Soul.identity()
+    soul = OptimalSystemAgent.Soul.soul()
+
+    cond do
+      identity && soul -> {:ok, "Soul", "identity + soul loaded"}
+      identity -> {:warn, "Soul", "identity loaded, soul using defaults"}
+      soul -> {:warn, "Soul", "soul loaded, identity using defaults"}
+      true -> {:warn, "Soul", "using defaults (no ~/.osa/IDENTITY.md or SOUL.md)"}
+    end
+  end
+
+  defp check_providers do
+    providers = OptimalSystemAgent.Providers.Registry.list_providers()
+
+    if length(providers) > 0 do
+      {:ok, "Providers", "#{length(providers)} loaded"}
+    else
+      {:fail, "Providers", "no LLM providers available"}
+    end
+  end
+
+  defp check_skills do
+    skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+
+    cond do
+      length(skills) >= 5 -> {:ok, "Skills", "#{length(skills)} available"}
+      length(skills) > 0 -> {:warn, "Skills", "#{length(skills)} available (low)"}
+      true -> {:fail, "Skills", "no skills loaded"}
+    end
+  end
+
+  defp check_memory do
+    stats = OptimalSystemAgent.Agent.Memory.memory_stats()
+    count = stats[:entry_count] || stats[:session_count] || 0
+
+    if count >= 0 do
+      {:ok, "Memory", "#{stats[:session_count] || 0} sessions, #{stats[:entry_count] || 0} entries"}
+    else
+      {:warn, "Memory", "no data yet"}
+    end
+  end
+
+  defp check_cortex do
+    stats = OptimalSystemAgent.Agent.Cortex.synthesis_stats()
+
+    if stats[:has_bulletin] do
+      {:ok, "Cortex", "bulletin active, #{stats[:active_topic_count] || 0} topics"}
+    else
+      {:warn, "Cortex", "no bulletin yet (will generate on first cycle)"}
+    end
+  end
+
+  defp check_scheduler do
+    # Check if scheduler process is alive
+    case Process.whereis(OptimalSystemAgent.Agent.Scheduler) do
+      nil -> {:fail, "Scheduler", "not running"}
+      pid when is_pid(pid) -> {:ok, "Scheduler", "running (pid #{inspect(pid)})"}
+    end
+  end
+
+  defp check_http do
+    port = Application.get_env(:optimal_system_agent, :http_port, 8089)
+    {:ok, "HTTP", "listening on port #{port}"}
+  end
+
+  # ── Formatting Helpers ────────────────────────────────────────
+
+  defp format_timestamp(nil), do: "never"
+  defp format_timestamp(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  defp format_timestamp(str) when is_binary(str), do: str
+  defp format_timestamp(_), do: "unknown"
+
+  defp format_categories(nil), do: "none"
+  defp format_categories(cats) when is_map(cats) do
+    cats
+    |> Enum.map_join(", ", fn {k, v} -> "#{k}:#{v}" end)
+  end
+  defp format_categories(_), do: "none"
+
+  defp format_pipeline_steps(nil), do: "none"
+  defp format_pipeline_steps(steps) when is_map(steps) and map_size(steps) == 0, do: "none"
+  defp format_pipeline_steps(steps) when is_map(steps) do
+    steps
+    |> Enum.map_join(", ", fn {k, v} -> "#{k}:#{v}" end)
+  end
+  defp format_pipeline_steps(_), do: "none"
+
+  defp format_number(n) when is_integer(n) do
+    n
+    |> Integer.to_string()
+    |> String.reverse()
+    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
+    |> String.reverse()
+  end
+  defp format_number(n), do: "#{n}"
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
+    "#{Float.round(bytes / 1_048_576, 1)} MB"
+  end
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
+    "#{Float.round(bytes / 1024, 1)} KB"
+  end
+  defp format_bytes(bytes) when is_integer(bytes), do: "#{bytes} bytes"
+  defp format_bytes(_), do: "0 bytes"
+
+  defp indent(text, spaces) do
+    pad = String.duplicate(" ", spaces)
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn line -> pad <> line end)
+  end
+
+  # ── Custom Command Persistence ─────────────────────────────────
+
+  defp load_custom_commands do
+    dir = Path.expand(@commands_dir)
+
+    if File.dir?(dir) do
+      dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".md"))
+      |> Enum.each(fn filename ->
+        path = Path.join(dir, filename)
+
+        case parse_command_file(path) do
+          {:ok, name, description, template} ->
+            :ets.insert(@ets_table, {name, template, description})
+
+          :error ->
+            Logger.warning("[Commands] Failed to parse: #{path}")
+        end
+      end)
+    end
+  rescue
+    e ->
+      Logger.warning("[Commands] Failed to load custom commands: #{Exception.message(e)}")
+  end
+
+  defp parse_command_file(path) do
+    content = File.read!(path)
+
+    case String.split(content, "---", parts: 3) do
+      ["", frontmatter, body] ->
+        case YamlElixir.read_from_string(frontmatter) do
+          {:ok, meta} ->
+            name = meta["name"] || Path.basename(path, ".md")
+            description = meta["description"] || ""
+            {:ok, name, description, String.trim(body)}
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        # No frontmatter — use filename as name, entire content as template
+        name = Path.basename(path, ".md")
+        {:ok, name, "Custom command", String.trim(content)}
+    end
+  end
+
+  defp persist_command(name, description, template) do
+    dir = Path.expand(@commands_dir)
+    File.mkdir_p!(dir)
+
+    content = """
+    ---
+    name: #{name}
+    description: #{description}
+    ---
+
+    #{template}
+    """
+
+    path = Path.join(dir, "#{name}.md")
+    File.write!(path, content)
+    Logger.debug("[Commands] Persisted command to #{path}")
+  rescue
+    e ->
+      Logger.warning("[Commands] Failed to persist command #{name}: #{Exception.message(e)}")
+  end
+end

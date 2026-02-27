@@ -35,6 +35,40 @@ defmodule OptimalSystemAgent.Skills.Registry do
     GenServer.call(__MODULE__, :list_tools)
   end
 
+  @doc """
+  List all available tools without going through the GenServer.
+
+  Uses :persistent_term for lock-free reads. Safe to call from inside
+  GenServer callbacks (e.g., during orchestration) without deadlocking.
+  """
+  def list_tools_direct do
+    :persistent_term.get({__MODULE__, :tools}, [])
+  end
+
+  @doc """
+  Execute a tool by name without going through the GenServer.
+
+  Uses :persistent_term for skill lookup. Safe to call from inside
+  GenServer callbacks or from sub-agent Tasks spawned during orchestration.
+  This prevents deadlock when Skills.Registry.execute calls orchestrate,
+  which spawns sub-agents that call back into Skills.
+  """
+  def execute_direct(tool_name, arguments) do
+    skills = :persistent_term.get({__MODULE__, :skills}, %{})
+    markdown_skills = :persistent_term.get({__MODULE__, :markdown_skills}, %{})
+
+    cond do
+      mod = Map.get(skills, tool_name) ->
+        mod.execute(arguments)
+
+      _skill = Map.get(markdown_skills, tool_name) ->
+        dispatch_builtin(tool_name, arguments)
+
+      true ->
+        {:error, "Unknown tool: #{tool_name}"}
+    end
+  end
+
   @doc "List skill documentation (for context injection)."
   def list_skill_docs do
     GenServer.call(__MODULE__, :list_skill_docs)
@@ -65,6 +99,12 @@ defmodule OptimalSystemAgent.Skills.Registry do
     # Compile goldrush tool dispatcher
     compile_dispatcher(builtin, markdown)
 
+    # Store in :persistent_term for lock-free reads (avoids GenServer deadlock
+    # when orchestrator sub-agents need tools/execution during a handle_call)
+    :persistent_term.put({__MODULE__, :skills}, builtin)
+    :persistent_term.put({__MODULE__, :markdown_skills}, markdown)
+    :persistent_term.put({__MODULE__, :tools}, tools)
+
     Logger.info("Skills registry: #{map_size(builtin)} built-in, #{map_size(markdown)} markdown, #{length(tools)} total tools")
     {:ok, %__MODULE__{skills: builtin, markdown_skills: markdown, tools: tools}}
   end
@@ -75,6 +115,11 @@ defmodule OptimalSystemAgent.Skills.Registry do
     skills = Map.put(state.skills, name, skill_module)
     tools = build_tool_list(skills, state.markdown_skills)
     compile_dispatcher(skills, state.markdown_skills)
+
+    # Update persistent_term for lock-free reads
+    :persistent_term.put({__MODULE__, :skills}, skills)
+    :persistent_term.put({__MODULE__, :tools}, tools)
+
     Logger.info("Registered skill: #{name} (hot reload)")
     {:reply, :ok, %{state | skills: skills, tools: tools}}
   end

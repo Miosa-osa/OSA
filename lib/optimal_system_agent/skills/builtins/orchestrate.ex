@@ -50,10 +50,14 @@ defmodule OptimalSystemAgent.Skills.Builtins.Orchestrate do
     strategy = params["strategy"] || "auto"
     session_id = params["session_id"] || "orchestrated_#{System.unique_integer([:positive])}"
 
+    # Read tools via persistent_term — we're inside Skills.Registry.handle_call,
+    # so calling list_tools() would deadlock. list_tools_direct() is lock-free.
+    tools = OptimalSystemAgent.Skills.Registry.list_tools_direct()
+
     Logger.info("[Orchestrate Skill] Launching orchestration for task: #{String.slice(task, 0, 100)}")
 
     try do
-      case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id, strategy: strategy) do
+      case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id, strategy: strategy, cached_tools: tools) do
         {:ok, _task_id, result} when is_binary(result) ->
           {:ok, result}
 

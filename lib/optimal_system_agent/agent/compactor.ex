@@ -135,7 +135,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @spec estimate_tokens([map()] | String.t() | nil) :: non_neg_integer()
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_tokens(to_string(Map.get(msg, :content) || ""))
+      content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
 
       tool_call_tokens =
         case Map.get(msg, :tool_calls) do
@@ -143,8 +143,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
           [] -> 0
           calls when is_list(calls) ->
             Enum.reduce(calls, 0, fn tc, tc_acc ->
-              name_tokens = estimate_tokens(to_string(Map.get(tc, :name, "")))
-              arg_tokens = estimate_tokens(to_string(Map.get(tc, :arguments, "")))
+              name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
+              arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
               tc_acc + name_tokens + arg_tokens + 4
             end)
           _ -> 0
@@ -425,10 +425,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
     # Tool results are also valuable
     tool_result_bonus =
-      if to_string(Map.get(msg, :role)) == "tool", do: 0.3, else: 0.0
+      if safe_to_string(Map.get(msg, :role)) == "tool", do: 0.3, else: 0.0
 
     # Length / substance bonus (capped at 0.3)
-    content = to_string(Map.get(msg, :content) || "")
+    content = safe_to_string(Map.get(msg, :content))
     length_bonus = min(String.length(content) / 500, 0.3)
 
     # Acknowledgment penalty
@@ -490,8 +490,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       case acc do
         [{prev_msg, prev_imp} | rest]
         when is_map(prev_msg) and is_map(msg) ->
-          prev_role = to_string(Map.get(prev_msg, :role))
-          curr_role = to_string(Map.get(msg, :role))
+          prev_role = safe_to_string(Map.get(prev_msg, :role))
+          curr_role = safe_to_string(Map.get(msg, :role))
 
           # Only merge user-user or assistant-assistant (not tool, not system)
           can_merge =
@@ -504,9 +504,9 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
           if can_merge do
             merged_content =
-              to_string(Map.get(prev_msg, :content) || "") <>
+              safe_to_string(Map.get(prev_msg, :content)) <>
                 "\n" <>
-                to_string(Map.get(msg, :content) || "")
+                safe_to_string(Map.get(msg, :content))
 
             merged_msg = Map.put(prev_msg, :content, merged_content)
             merged_imp = max(prev_imp, importance)
@@ -627,7 +627,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp split_system(messages) do
     Enum.split_with(messages, fn msg ->
-      to_string(Map.get(msg, :role)) == "system"
+      safe_to_string(Map.get(msg, :role)) == "system"
     end)
   end
 
@@ -635,15 +635,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp format_for_summary(messages) do
     messages
     |> Enum.map(fn msg ->
-      role = to_string(Map.get(msg, :role, "unknown"))
-      content = to_string(Map.get(msg, :content) || "")
+      role = safe_to_string(Map.get(msg, :role, "unknown"))
+      content = safe_to_string(Map.get(msg, :content))
 
       tool_info =
         case Map.get(msg, :tool_calls) do
           nil -> ""
           [] -> ""
           calls when is_list(calls) ->
-            names = Enum.map(calls, &to_string(Map.get(&1, :name, "?"))) |> Enum.join(", ")
+            names = Enum.map(calls, &safe_to_string(Map.get(&1, :name, "?"))) |> Enum.join(", ")
             " [tools: #{names}]"
           _ -> ""
         end
@@ -656,9 +656,9 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp extract_topics(messages) do
     messages
-    |> Enum.filter(fn msg -> to_string(Map.get(msg, :role)) == "user" end)
+    |> Enum.filter(fn msg -> safe_to_string(Map.get(msg, :role)) == "user" end)
     |> Enum.map(fn msg ->
-      content = to_string(Map.get(msg, :content) || "")
+      content = safe_to_string(Map.get(msg, :content))
       String.slice(content, 0, 100)
     end)
     |> Enum.reject(&(&1 == ""))
@@ -675,4 +675,11 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp pct(ratio), do: "#{Float.round(ratio * 100, 1)}%"
+
+  defp safe_to_string(nil), do: ""
+  defp safe_to_string(val) when is_binary(val), do: val
+  defp safe_to_string(val) when is_atom(val), do: Atom.to_string(val)
+  defp safe_to_string(val) when is_map(val), do: Jason.encode!(val)
+  defp safe_to_string(val) when is_list(val), do: Jason.encode!(val)
+  defp safe_to_string(val), do: inspect(val)
 end

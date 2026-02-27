@@ -6,14 +6,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Commands
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
   @dim IO.ANSI.faint()
   @cyan IO.ANSI.cyan()
-  @green IO.ANSI.green()
   @yellow IO.ANSI.yellow()
-  @magenta IO.ANSI.magenta()
   @white IO.ANSI.white()
 
   def start do
@@ -41,40 +40,99 @@ defmodule OptimalSystemAgent.Channels.CLI do
       "quit\n" ->
         print_goodbye()
 
-      "status\n" ->
-        print_status()
-        loop(session_id)
-
       "clear\n" ->
         IO.write(IO.ANSI.clear() <> IO.ANSI.home())
         print_banner()
         IO.puts("")
         loop(session_id)
 
-      "help\n" ->
-        print_help()
-        loop(session_id)
-
       input ->
         input = String.trim(input)
 
-        unless input == "" do
-          # Show thinking indicator
-          IO.write("#{@dim}  thinking...#{@reset}")
-
-          case Loop.process_message(session_id, input) do
-            {:ok, response} ->
-              # Clear the thinking indicator
-              IO.write("\r#{String.duplicate(" ", 40)}\r")
-              print_response(response)
-
-            {:error, reason} ->
-              IO.write("\r#{String.duplicate(" ", 40)}\r")
-              IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
+        next_session =
+          if input == "" do
+            session_id
+          else
+            process_input(input, session_id)
           end
-        end
 
-        loop(session_id)
+        loop(next_session)
+    end
+  end
+
+  defp process_input(input, session_id) do
+    if String.starts_with?(input, "/") do
+      cmd = String.trim_leading(input, "/")
+      handle_command(cmd, session_id)
+    else
+      send_to_agent(input, session_id)
+      session_id
+    end
+  end
+
+  # ── Command Handling ─────────────────────────────────────────────────
+
+  # Returns the next session_id (may change on /new or /resume)
+  defp handle_command(cmd, session_id) do
+    case Commands.execute(cmd, session_id) do
+      {:command, output} ->
+        print_response(output)
+        session_id
+
+      {:prompt, expanded} ->
+        IO.puts("#{@dim}  /#{String.split(cmd, " ") |> hd()}#{@reset}")
+        send_to_agent(expanded, session_id)
+        session_id
+
+      {:action, action, output} ->
+        print_response(output)
+        handle_action(action, session_id)
+
+      :unknown ->
+        IO.puts("#{@yellow}  unknown command: /#{cmd}#{@reset}")
+        IO.puts("#{@dim}  type /help to see available commands#{@reset}\n")
+        session_id
+    end
+  end
+
+  # Returns new session_id
+  defp handle_action(:new_session, old_session_id) do
+    stop_session(old_session_id)
+
+    new_session_id = "cli_#{:rand.uniform(999_999)}"
+    {:ok, _pid} = Loop.start_link(session_id: new_session_id, channel: :cli)
+    IO.puts("#{@dim}  session: #{new_session_id}#{@reset}\n")
+    new_session_id
+  end
+
+  defp handle_action({:resume_session, target_id, _messages}, old_session_id) do
+    stop_session(old_session_id)
+
+    {:ok, _pid} = Loop.start_link(session_id: target_id, channel: :cli)
+    IO.puts("#{@dim}  resumed: #{target_id}#{@reset}\n")
+    target_id
+  end
+
+  defp handle_action(_, session_id), do: session_id
+
+  defp stop_session(session_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] -> GenServer.stop(pid, :normal)
+      _ -> :ok
+    end
+  end
+
+  defp send_to_agent(input, session_id) do
+    IO.write("#{@dim}  thinking...#{@reset}")
+
+    case Loop.process_message(session_id, input) do
+      {:ok, response} ->
+        IO.write("\r#{String.duplicate(" ", 40)}\r")
+        print_response(response)
+
+      {:error, reason} ->
+        IO.write("\r#{String.duplicate(" ", 40)}\r")
+        IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
     end
   end
 
@@ -90,7 +148,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
      \\___/|____/_/   \\_\\#{@reset}
 
     #{@dim}Signal Theory AI Agent#{@reset}
-    #{@dim}Type #{@bold}help#{@reset}#{@dim} for commands#{@reset}
+    #{@dim}Type #{@bold}/help#{@reset}#{@dim} for commands#{@reset}
     """)
   end
 
@@ -109,42 +167,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
       IO.puts("#{@white}  #{line}#{@reset}")
     end)
     IO.puts("")
-  end
-
-  # ── Commands ───────────────────────────────────────────────────────────
-
-  defp print_status do
-    providers = OptimalSystemAgent.Providers.Registry.list_providers()
-    skills = OptimalSystemAgent.Skills.Registry.list_tools()
-    memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
-
-    IO.puts("""
-
-    #{@bold}#{@cyan}  Status#{@reset}
-    #{@dim}  ──────────────────────────────#{@reset}
-    #{@green}  providers  #{@reset}#{length(providers)} loaded
-    #{@green}  skills     #{@reset}#{length(skills)} available
-    #{@green}  sessions   #{@reset}#{memory_stats[:session_count] || 0} stored
-    #{@green}  memory     #{@reset}#{memory_stats[:long_term_size] || 0} bytes
-    #{@green}  http       #{@reset}port #{Application.get_env(:optimal_system_agent, :http_port, 8089)}
-    #{@dim}  ──────────────────────────────#{@reset}
-    """)
-  end
-
-  defp print_help do
-    IO.puts("""
-
-    #{@bold}#{@cyan}  Commands#{@reset}
-    #{@dim}  ──────────────────────────────#{@reset}
-    #{@magenta}  exit#{@reset}     quit the session
-    #{@magenta}  clear#{@reset}    clear the screen
-    #{@magenta}  status#{@reset}   show system info
-    #{@magenta}  help#{@reset}     show this message
-    #{@dim}  ──────────────────────────────#{@reset}
-
-    #{@dim}  Just type naturally. OSA classifies
-    #{@dim}  your intent and responds accordingly.#{@reset}
-    """)
   end
 
   # ── Text Wrapping ──────────────────────────────────────────────────────

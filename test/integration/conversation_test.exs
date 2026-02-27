@@ -162,8 +162,8 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       [system_msg | _rest] = context.messages
       assert system_msg.role == "system"
 
-      # Identity block always present
-      assert String.contains?(system_msg.content, "OptimalSystemAgent")
+      # Identity block always present (via Soul module)
+      assert String.contains?(system_msg.content, "OSA")
 
       # Signal classification block is injected for BUILD mode
       assert String.contains?(system_msg.content, "BUILD")
@@ -262,8 +262,8 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       context = Context.build(state, nil)
       [system_msg | _] = context.messages
 
-      # Without a signal, "Current Signal Classification" section is absent
-      refute String.contains?(system_msg.content, "Current Signal Classification")
+      # Without a signal, signal overlay section is absent
+      refute String.contains?(system_msg.content, "Active Signal:")
     end
 
     test "build with signal injects signal classification block" do
@@ -278,7 +278,8 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       context = Context.build(state, signal)
       [system_msg | _] = context.messages
 
-      assert String.contains?(system_msg.content, "Current Signal Classification")
+      # Signal overlay injected by Soul module (format: "Active Signal: MODE × GENRE")
+      assert String.contains?(system_msg.content, "Active Signal:")
     end
   end
 

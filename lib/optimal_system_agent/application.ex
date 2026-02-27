@@ -51,6 +51,9 @@ defmodule OptimalSystemAgent.Application do
       OptimalSystemAgent.Skills.Registry,
       OptimalSystemAgent.Machines,
 
+      # Slash command registry (built-in + custom + agent-created)
+      OptimalSystemAgent.Commands,
+
       # OS template discovery and connection
       OptimalSystemAgent.OS.Registry,
 
@@ -81,6 +84,10 @@ defmodule OptimalSystemAgent.Application do
     ] ++ sandbox_children()
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
+
+    # Load soul/personality files into persistent_term BEFORE supervision tree
+    # starts — agents need identity/soul content from their first LLM call.
+    OptimalSystemAgent.Soul.load()
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->

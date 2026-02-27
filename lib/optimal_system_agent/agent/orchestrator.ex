@@ -180,6 +180,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   def handle_call({:execute, message, session_id, opts}, _from, state) do
     task_id = generate_id("task")
     strategy = Keyword.get(opts, :strategy, "auto")
+    # Tools may be pre-cached by the caller to avoid GenServer deadlock
+    cached_tools = Keyword.get(opts, :cached_tools, [])
 
     Bus.emit(:system_event, %{
       event: :orchestrator_task_started,
@@ -213,7 +215,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         })
 
         # 2. Execute with dependency awareness
-        {results, state} = execute_with_dependencies(sub_tasks, task_id, session_id, state)
+        {results, state} = execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools)
 
         # 3. Synthesize results
         synthesis = synthesize_results(task_id, results, message)
@@ -534,7 +536,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Dependency-Aware Execution ──────────────────────────────────────
 
-  defp execute_with_dependencies(sub_tasks, task_id, session_id, state) do
+  defp execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools) do
     # Group by dependency waves
     waves = build_execution_waves(sub_tasks)
 
@@ -546,7 +548,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
             # Inject results from dependencies into context
             dep_context = build_dependency_context(sub_task.depends_on, results_acc)
             sub_task_with_context = %{sub_task | context: dep_context}
-            spawn_agent(sub_task_with_context, task_id, session_id)
+            spawn_agent(sub_task_with_context, task_id, session_id, cached_tools)
           end)
 
         # Register agents in state
@@ -690,7 +692,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Sub-Agent Spawning ──────────────────────────────────────────────
 
-  defp spawn_agent(sub_task, task_id, session_id) do
+  defp spawn_agent(sub_task, task_id, session_id, cached_tools) do
     agent_id = generate_id("agent")
 
     # Build specialized system prompt for this agent's role
@@ -719,7 +721,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     orchestrator_pid = self()
 
     task_ref = Task.async(fn ->
-      run_agent_loop(agent_id, task_id, system_prompt, sub_task, session_id, orchestrator_pid)
+      run_agent_loop(agent_id, task_id, system_prompt, sub_task, session_id, orchestrator_pid, cached_tools)
     end)
 
     {agent_id, agent_state, task_ref}
@@ -727,7 +729,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Agent Loop (runs inside Task.async) ─────────────────────────────
 
-  defp run_agent_loop(agent_id, task_id, system_prompt, sub_task, _session_id, orchestrator_pid) do
+  defp run_agent_loop(agent_id, task_id, system_prompt, sub_task, _session_id, orchestrator_pid, cached_tools) do
     # Build the conversation for this sub-agent
     user_message =
       if sub_task.context do
@@ -747,8 +749,15 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       %{role: "user", content: user_message}
     ]
 
-    # Get available tools
-    tools = Skills.list_tools()
+    # Use cached tools or read from persistent_term (lock-free).
+    # NEVER call Skills.list_tools() here — it goes through the GenServer
+    # which is blocked by the Skills.Registry.execute call that started us.
+    tools =
+      if cached_tools != [] do
+        cached_tools
+      else
+        Skills.list_tools_direct()
+      end
 
     # Filter tools to only what this agent needs (if specified)
     tools =
@@ -823,8 +832,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
                 current_action: "Running #{tool_call.name}"
               }})
 
+              # Use execute_direct to bypass GenServer — Skills.Registry is blocked
+              # by the parent execute("orchestrate") call that spawned us.
               result_str =
-                case Skills.execute(tool_call.name, tool_call.arguments) do
+                case Skills.execute_direct(tool_call.name, tool_call.arguments) do
                   {:ok, output} -> output
                   {:error, reason} -> "Error: #{reason}"
                 end
