@@ -12,3 +12,7 @@ optimal_system_agent-*.tar
 *.db-wal
 *.db-shm
 /priv/static/assets/
+
+# Compiled sidecar binaries (built locally or via mix osa.setup)
+priv/go/tokenizer/osa-tokenizer
+*.beam

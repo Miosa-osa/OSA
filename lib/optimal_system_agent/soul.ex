@@ -37,7 +37,9 @@ defmodule OptimalSystemAgent.Soul do
 
   require Logger
 
-  @soul_dir Application.compile_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
+  alias OptimalSystemAgent.PromptLoader
+
+  defp soul_dir, do: Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ defmodule OptimalSystemAgent.Soul do
   Called at application boot and on explicit reload.
   """
   def load do
-    dir = Path.expand(@soul_dir)
+    dir = Path.expand(soul_dir())
 
     identity = load_file(dir, "IDENTITY.md")
     soul = load_file(dir, "SOUL.md")
@@ -187,19 +189,55 @@ defmodule OptimalSystemAgent.Soul do
 
   defp signal_overlay(_), do: ""
 
-  defp mode_behavior(:execute), do: "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble."
-  defp mode_behavior(:build), do: "**Mode: BUILD** — Create with quality. Show your work. Structure the output."
-  defp mode_behavior(:analyze), do: "**Mode: ANALYZE** — Be thorough and data-driven. Show reasoning. Use structure."
-  defp mode_behavior(:maintain), do: "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact."
-  defp mode_behavior(:assist), do: "**Mode: ASSIST** — Guide and explain. Match the user's depth. Be genuinely helpful."
-  defp mode_behavior(_), do: ""
+  @mode_behavior_defaults %{
+    execute: "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble.",
+    build: "**Mode: BUILD** — Create with quality. Show your work. Structure the output.",
+    analyze: "**Mode: ANALYZE** — Be thorough and data-driven. Show reasoning. Use structure.",
+    maintain: "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact.",
+    assist: "**Mode: ASSIST** — Guide and explain. Match the user's depth. Be genuinely helpful."
+  }
 
-  defp genre_behavior(:direct), do: "**Genre: DIRECT** — The user is commanding. Respond with action, not explanation."
-  defp genre_behavior(:inform), do: "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later."
-  defp genre_behavior(:commit), do: "**Genre: COMMIT** — The user is committing to something. Confirm and track it."
-  defp genre_behavior(:decide), do: "**Genre: DECIDE** — The user needs a decision. Validate, recommend, then execute."
-  defp genre_behavior(:express), do: "**Genre: EXPRESS** — The user is expressing emotion. Lead with empathy, then help."
-  defp genre_behavior(_), do: ""
+  @genre_behavior_defaults %{
+    direct: "**Genre: DIRECT** — The user is commanding. Respond with action, not explanation.",
+    inform: "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later.",
+    commit: "**Genre: COMMIT** — The user is committing to something. Confirm and track it.",
+    decide: "**Genre: DECIDE** — The user needs a decision. Validate, recommend, then execute.",
+    express: "**Genre: EXPRESS** — The user is expressing emotion. Lead with empathy, then help."
+  }
+
+  defp mode_behavior(mode) do
+    case lookup_behavior(PromptLoader.get(:mode_behaviors), mode) do
+      nil -> Map.get(@mode_behavior_defaults, mode, "")
+      text -> text
+    end
+  end
+
+  defp genre_behavior(genre) do
+    case lookup_behavior(PromptLoader.get(:genre_behaviors), genre) do
+      nil -> Map.get(@genre_behavior_defaults, genre, "")
+      text -> text
+    end
+  end
+
+  defp lookup_behavior(nil, _key), do: nil
+
+  defp lookup_behavior(content, key) when is_binary(content) do
+    key_str = to_string(key)
+
+    content
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [k, v] ->
+          if String.trim(k) == key_str do
+            v |> String.trim() |> String.trim("\"")
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
 
   # ── File Loading ───────────────────────────────────────────────
 
@@ -252,6 +290,13 @@ defmodule OptimalSystemAgent.Soul do
 
   @doc false
   def default_identity do
+    case PromptLoader.get(:IDENTITY) do
+      nil -> default_identity_inline()
+      content -> content
+    end
+  end
+
+  defp default_identity_inline do
     """
     # OSA — Optimal System Agent
 
@@ -323,6 +368,13 @@ defmodule OptimalSystemAgent.Soul do
 
   @doc false
   def default_soul do
+    case PromptLoader.get(:SOUL) do
+      nil -> default_soul_inline()
+      content -> content
+    end
+  end
+
+  defp default_soul_inline do
     """
     # Soul
 

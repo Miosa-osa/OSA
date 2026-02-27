@@ -1,0 +1,5 @@
+direct: "**Genre: DIRECT** — The user is commanding. Respond with action, not explanation."
+inform: "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later."
+commit: "**Genre: COMMIT** — The user is committing to something. Confirm and track it."
+decide: "**Genre: DECIDE** — The user needs a decision. Validate, recommend, then execute."
+express: "**Genre: EXPRESS** — The user is expressing emotion. Lead with empathy, then help."

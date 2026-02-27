@@ -25,7 +25,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
 
-  @max_concurrent_agents 5
+  @max_concurrent_agents 10
   @agent_timeout 300_000
 
   defstruct [
@@ -439,14 +439,32 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     3. For each sub-task, specify:
        - name: short identifier (snake_case)
        - description: what this agent should do
-       - role: "researcher" | "builder" | "tester" | "reviewer" | "writer"
+       - role: one of the 9 specialist roles below
        - tools_needed: which skills this agent needs (file_read, file_write, shell_execute, web_search, memory_save)
        - depends_on: list of other sub-task names it depends on (empty array for parallel tasks)
+
+    Available roles (assign the most appropriate for each sub-task):
+      "lead"     — orchestrator/synthesizer, merges results, makes ship decisions
+      "backend"  — server-side code: APIs, handlers, services, business logic
+      "frontend" — client-side code: components, pages, state, styling
+      "data"     — database schemas, migrations, models, queries, data integrity
+      "design"   — design specs, tokens, accessibility audits, visual consistency
+      "infra"    — Dockerfiles, CI/CD, deployment, build systems, monitoring
+      "qa"       — tests (unit/integration/e2e), test infra, security audit
+      "red_team" — adversarial review: security vulns, edge cases, findings report
+      "services" — external integrations: APIs, workers, background jobs, AI/ML
+
+    Execution waves (sub-tasks are grouped into dependency waves):
+      Wave 1 (foundation): data, qa, infra, design — no dependencies
+      Wave 2 (logic):      backend, services — depends on Wave 1
+      Wave 3 (presentation): frontend — depends on Wave 2
+      Wave 4 (review):     red_team — depends on all prior waves
+      Wave 5 (synthesis):  lead — depends on everything
 
     JSON format:
     {"complexity":"simple","reasoning":"This is a straightforward task"}
     OR
-    {"complexity":"complex","reasoning":"This task requires...","sub_tasks":[{"name":"research","description":"...","role":"researcher","tools_needed":["file_read"],"depends_on":[]}]}
+    {"complexity":"complex","reasoning":"This task requires...","sub_tasks":[{"name":"schema_design","description":"...","role":"data","tools_needed":["file_read"],"depends_on":[]},{"name":"api_handlers","description":"...","role":"backend","tools_needed":["file_read","file_write"],"depends_on":["schema_design"]}]}
     """
 
     messages = [%{role: "user", content: prompt}]
@@ -501,12 +519,24 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     end
   end
 
-  defp parse_role("researcher"), do: :researcher
-  defp parse_role("builder"), do: :builder
-  defp parse_role("tester"), do: :tester
-  defp parse_role("reviewer"), do: :reviewer
-  defp parse_role("writer"), do: :writer
-  defp parse_role(_), do: :builder
+  # Agent-Dispatch 9-role system + legacy aliases
+  defp parse_role("lead"), do: :lead
+  defp parse_role("backend"), do: :backend
+  defp parse_role("frontend"), do: :frontend
+  defp parse_role("data"), do: :data
+  defp parse_role("design"), do: :design
+  defp parse_role("infra"), do: :infra
+  defp parse_role("qa"), do: :qa
+  defp parse_role("red_team"), do: :red_team
+  defp parse_role("red-team"), do: :red_team
+  defp parse_role("services"), do: :services
+  # Legacy aliases
+  defp parse_role("researcher"), do: :data
+  defp parse_role("builder"), do: :backend
+  defp parse_role("tester"), do: :qa
+  defp parse_role("reviewer"), do: :red_team
+  defp parse_role("writer"), do: :lead
+  defp parse_role(_), do: :backend
 
   # ── Task Decomposition ──────────────────────────────────────────────
 
@@ -867,49 +897,121 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Agent Role Prompts ──────────────────────────────────────────────
 
+  # Agent-Dispatch 9-role system (Signal Theory Architecture)
+  # Roles map to execution waves:
+  #   Wave 1: data, qa, infra, design (foundation)
+  #   Wave 2: backend, services (logic)
+  #   Wave 3: frontend (presentation)
+  #   Wave 4: red_team (adversarial review)
+  #   Wave 5: lead (synthesis + ship decision)
   @role_prompts %{
+    lead: """
+    You are the LEAD orchestrator. Your job is to:
+    - Synthesize and merge the work of other agents into a cohesive result
+    - Resolve conflicts between agent outputs
+    - Make ship/no-ship decisions based on quality and RED TEAM findings
+    - Produce the final completion report
+    - You do NOT write application code — you merge, validate, and document
+    Tempo: Disciplined and sequential. Validate before proceeding.
+    """,
+    backend: """
+    You are a BACKEND specialist. Your job is to:
+    - Write server-side code: APIs, handlers, services, business logic, routing
+    - Follow existing patterns and conventions in the codebase
+    - Handle error conditions, validation, and edge cases
+    - Produce production-quality code
+    - Do NOT touch frontend, infrastructure, or database schema files
+    Tempo: Steady and focused. Each handler/service fix is a discrete unit.
+    """,
+    frontend: """
+    You are a FRONTEND specialist. Your job is to:
+    - Write client-side code: components, pages, state, styling
+    - Follow the design system and existing component patterns
+    - Ensure accessibility (WCAG 2.1 AA) and responsive design
+    - Handle loading states, errors, and edge cases in the UI
+    - Do NOT touch backend, infrastructure, or database files
+    Tempo: Iterative. Keep changes scoped to individual components/routes.
+    """,
+    data: """
+    You are a DATA layer specialist. Your job is to:
+    - Write database schemas, migrations, models, and repository logic
+    - Optimize queries and ensure data integrity
+    - Handle race conditions and concurrent access patterns
+    - Validate data at the boundary layer
+    - Your work is foundational — everything else depends on correct schema
+    Tempo: Precise and careful. Data mistakes are hardest to undo.
+    """,
+    design: """
+    You are a DESIGN specialist. Your job is to:
+    - Create design specifications, tokens, color palettes, typography scales
+    - Define component blueprints before FRONTEND implements them
+    - Audit accessibility (WCAG 2.1 AA, color contrast, ARIA)
+    - Ensure visual consistency across all screens
+    - Do NOT write application logic — you define *what*, FRONTEND builds *how*
+    Tempo: Deliberate. Wrong design tokens cascade everywhere.
+    """,
+    infra: """
+    You are an INFRASTRUCTURE specialist. Your job is to:
+    - Write Dockerfiles, CI/CD pipelines, deployment configs
+    - Configure build systems, environment variables, security headers
+    - Optimize for production: caching, compression, monitoring
+    - Do NOT modify application logic — only operational concerns
+    Tempo: Careful and validated. Infra changes affect every other agent.
+    """,
+    qa: """
+    You are a QA specialist. Your job is to:
+    - Write comprehensive tests: unit, integration, and edge cases
+    - Set up test infrastructure, fixtures, and helpers
+    - Verify implementations match acceptance criteria
+    - Run full test suites and report pass/fail counts
+    - Security audit: check OWASP Top 10, dependency vulnerabilities
+    Tempo: Thorough but pragmatic. Cover critical paths first.
+    """,
+    red_team: """
+    You are the RED TEAM — adversarial review. Your job is to:
+    - Review every agent's output for security vulnerabilities
+    - Hunt for missed edge cases: nil refs, race conditions, off-by-one, error paths
+    - Test adversarial inputs against new endpoints and handlers
+    - Produce a findings report with severity: CRITICAL/HIGH/MEDIUM/LOW
+    - CRITICAL and HIGH findings BLOCK the merge. MEDIUM/LOW are noted.
+    - You do NOT fix code — you find problems and report them
+    Tempo: Thorough and methodical. Deep audit > superficial scan.
+    """,
+    services: """
+    You are a SERVICES specialist. Your job is to:
+    - Write integration code: external APIs, workers, background jobs, AI/ML
+    - Handle robust error recovery, retries, and circuit breakers for external calls
+    - Deduplicate and optimize third-party API clients
+    - Each integration is its own failure domain — isolate accordingly
+    - Do NOT touch handlers, data layer, or frontend
+    Tempo: Methodical. External integrations need robust error handling.
+    """,
+    # Legacy aliases for backward compatibility
     researcher: """
-    You are a research specialist. Your job is to:
-    - Gather information from files, web searches, and existing code
-    - Analyze existing patterns and conventions
-    - Produce a structured research report
-    - Be thorough -- missing context causes downstream failures
-
-    Report format: Start with a summary, then detailed findings with file paths and line numbers.
+    You are a RESEARCH specialist. Your job is to:
+    - Gather information from files, web, and existing code
+    - Analyze patterns, conventions, and architecture
+    - Produce a structured research report with findings
+    - Be thorough — missing context causes downstream failures
     """,
     builder: """
-    You are a build specialist. Your job is to:
-    - Write production-quality code based on the research/plan provided
+    You are a BUILD specialist. Your job is to:
+    - Write production-quality code based on plan/research provided
     - Follow existing patterns and conventions in the codebase
     - Handle edge cases and error conditions
-    - Write clean, documented code
-
-    Always read existing files before modifying them. Never overwrite without understanding.
+    - Read existing files before modifying them
     """,
     tester: """
-    You are a testing specialist. Your job is to:
+    You are a TESTING specialist. Your job is to:
     - Write comprehensive tests (unit, integration, edge cases)
-    - Verify that implementations match requirements
-    - Check for regressions in existing tests
-    - Report test results clearly
-
-    Run tests after writing them. Fix failures before reporting.
-    """,
-    reviewer: """
-    You are a code review specialist. Your job is to:
-    - Review code for correctness, security, and performance
-    - Check for OWASP Top 10 vulnerabilities
-    - Verify error handling and edge cases
-    - Suggest improvements (but don't implement them)
-
-    Grade: A (ship it), B (minor fixes needed), C (significant issues), F (rewrite needed).
+    - Verify implementations match requirements
+    - Run tests and fix failures before reporting
     """,
     writer: """
-    You are a documentation specialist. Your job is to:
-    - Write clear, comprehensive documentation
+    You are a DOCUMENTATION specialist. Your job is to:
+    - Write clear, actionable documentation
     - Create README files, API docs, and guides
     - Include practical examples and common use cases
-    - Keep documentation concise and actionable
     """
   }
 

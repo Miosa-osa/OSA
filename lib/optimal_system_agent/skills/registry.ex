@@ -17,7 +17,7 @@ defmodule OptimalSystemAgent.Skills.Registry do
   use GenServer
   require Logger
 
-  @skills_dir Application.compile_env(:optimal_system_agent, :skills_dir, "~/.osa/skills")
+  defp skills_dir, do: Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills")
 
   defstruct skills: %{}, markdown_skills: %{}, tools: []
 
@@ -174,7 +174,7 @@ defmodule OptimalSystemAgent.Skills.Registry do
   # --- SKILL.md Loading ---
 
   defp load_skill_files do
-    dir = Path.expand(@skills_dir)
+    dir = Path.expand(skills_dir())
 
     if File.dir?(dir) do
       dir

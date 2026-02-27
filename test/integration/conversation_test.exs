@@ -163,7 +163,8 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       assert system_msg.role == "system"
 
       # Identity block always present (via Soul module)
-      assert String.contains?(system_msg.content, "OSA")
+      assert String.contains?(system_msg.content, "Optimal System Agent") or
+             String.contains?(system_msg.content, "OSA")
 
       # Signal classification block is injected for BUILD mode
       assert String.contains?(system_msg.content, "BUILD")

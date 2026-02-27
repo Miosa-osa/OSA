@@ -18,6 +18,12 @@ defmodule Mix.Tasks.Osa.Chat do
     # Restore warnings after boot
     Logger.configure(level: :warning)
 
+    if OptimalSystemAgent.Onboarding.first_run?() do
+      OptimalSystemAgent.Onboarding.run()
+      OptimalSystemAgent.Onboarding.apply_config()
+      OptimalSystemAgent.Soul.reload()
+    end
+
     OptimalSystemAgent.Channels.CLI.start()
   end
 end

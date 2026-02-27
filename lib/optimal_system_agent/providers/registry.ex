@@ -2,10 +2,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @moduledoc """
   LLM provider routing, fallback chains, and dynamic registration.
 
-  Supports 17 providers across 3 categories:
+  Supports 18 providers across 3 categories:
   - Local:             ollama
   - OpenAI-compatible: openai, groq, together, fireworks, deepseek,
-                       perplexity, mistral, replicate,
+                       perplexity, mistral, replicate, openrouter,
                        qwen, moonshot, zhipu, volcengine, baichuan
   - Native APIs:       anthropic, google, cohere
 
@@ -58,6 +58,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     perplexity: Providers.Perplexity,
     mistral: Providers.Mistral,
     replicate: Providers.Replicate,
+    openrouter: Providers.OpenRouter,
 
     # Native API providers
     anthropic: Providers.Anthropic,
@@ -141,6 +142,51 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec register_provider(atom(), module()) :: :ok | {:error, String.t()}
   def register_provider(name, module) do
     GenServer.call(__MODULE__, {:register_provider, name, module})
+  end
+
+  @doc """
+  Stream a chat completion request through the configured provider.
+
+  If the provider implements `chat_stream/3`, uses streaming.
+  Otherwise falls back to synchronous `chat/2` and invokes the
+  callback with the full result.
+
+  The callback receives the same tuple types as `Behaviour.chat_stream/3`.
+  """
+  @spec chat_stream(list(), function(), keyword()) :: :ok | {:error, String.t()}
+  def chat_stream(messages, callback, opts \\ []) do
+    provider = Keyword.get(opts, :provider) || default_provider()
+    opts_without_provider = Keyword.delete(opts, :provider)
+
+    case Map.get(@providers, provider) do
+      nil ->
+        {:error, "Unknown provider: #{provider}. Available: #{inspect(Map.keys(@providers))}"}
+
+      module ->
+        if function_exported?(module, :chat_stream, 3) do
+          try do
+            module.chat_stream(messages, callback, opts_without_provider)
+          rescue
+            e ->
+              Logger.error("Provider #{module} chat_stream raised: #{Exception.message(e)}")
+              fallback_sync_stream(module, messages, callback, opts_without_provider)
+          end
+        else
+          fallback_sync_stream(module, messages, callback, opts_without_provider)
+        end
+    end
+  end
+
+  defp fallback_sync_stream(module, messages, callback, opts) do
+    case apply_provider(module, messages, opts) do
+      {:ok, result} ->
+        if result.content != "", do: callback.({:text_delta, result.content})
+        callback.({:done, result})
+        :ok
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   @doc """
@@ -229,9 +275,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  defp provider_configured?(:ollama), do: true
+  @doc """
+  Returns true if the provider has a configured API key (or is Ollama, which needs none).
+  """
+  @spec provider_configured?(atom()) :: boolean()
+  def provider_configured?(:ollama), do: true
 
-  defp provider_configured?(provider) do
+  def provider_configured?(provider) do
     key = :"#{provider}_api_key"
     case Application.get_env(:optimal_system_agent, key) do
       nil -> false

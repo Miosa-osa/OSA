@@ -306,6 +306,52 @@ defmodule OptimalSystemAgent.Agent.Memory do
   # ────────────────────────────────────────────────────────────────────
 
   defp do_recall_relevant(message, max_tokens) do
+    # Try semantic search first (Python sidecar), fall back to keyword search
+    case try_semantic_search(message, max_tokens) do
+      {:ok, results} when results != "" -> results
+      _ -> do_recall_relevant_keyword(message, max_tokens)
+    end
+  end
+
+  defp try_semantic_search(message, _max_tokens) do
+    if Application.get_env(:optimal_system_agent, :python_sidecar_enabled, false) do
+      alias OptimalSystemAgent.Python.Embeddings
+
+      if Embeddings.available?() do
+        case Embeddings.search(message, top_k: 10) do
+          {:ok, results} when is_list(results) and results != [] ->
+            # Look up full entries by ID and format them
+            formatted =
+              results
+              |> Enum.map(fn %{"id" => id, "score" => score} ->
+                case :ets.lookup(@entry_table, id) do
+                  [{^id, entry}] ->
+                    header = "## [#{entry[:category] || "general"}] #{entry[:timestamp] || "unknown"}"
+                    "#{header} (relevance: #{score})\n#{entry[:content] || ""}\n"
+
+                  [] ->
+                    nil
+                end
+              end)
+              |> Enum.reject(&is_nil/1)
+              |> Enum.join("\n")
+
+            if formatted == "", do: {:error, :no_results}, else: {:ok, formatted}
+
+          _ ->
+            {:error, :no_results}
+        end
+      else
+        {:error, :unavailable}
+      end
+    else
+      {:error, :disabled}
+    end
+  rescue
+    _ -> {:error, :exception}
+  end
+
+  defp do_recall_relevant_keyword(message, max_tokens) do
     keywords = extract_keywords(message)
 
     if keywords == [] do

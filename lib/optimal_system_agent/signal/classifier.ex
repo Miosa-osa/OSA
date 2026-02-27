@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.PromptLoader
 
   defstruct [:mode, :genre, :type, :format, :weight, :raw, :channel, :timestamp, confidence: :high]
 
@@ -78,7 +79,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   # LLM Classification (Primary)
   # ---------------------------------------------------------------------------
 
-  @classification_prompt """
+  @classification_prompt_fallback """
   You are a Signal Theory classifier. Classify this message into exactly 4 fields.
   Respond ONLY with a JSON object. No explanation, no markdown, no wrapping.
 
@@ -128,6 +129,10 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   Respond with ONLY: {"mode":"...","genre":"...","type":"...","weight":0.0}
   """
 
+  defp classification_prompt do
+    PromptLoader.get(:classifier, @classification_prompt_fallback)
+  end
+
   defp classify_llm(message, channel) do
     # Truncate to prevent prompt injection via extremely long messages
     safe_message =
@@ -137,7 +142,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
       |> String.replace("\n", " ")
 
     prompt =
-      @classification_prompt
+      classification_prompt()
       |> String.replace("%MESSAGE%", safe_message)
       |> String.replace("%CHANNEL%", to_string(channel))
 

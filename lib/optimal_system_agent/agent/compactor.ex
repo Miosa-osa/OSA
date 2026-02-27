@@ -56,12 +56,12 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.PromptLoader
 
-  @max_tokens Application.compile_env(:optimal_system_agent, :max_context_tokens, 128_000)
-
-  @tier1_threshold 0.80
-  @tier2_threshold 0.85
-  @tier3_threshold 0.95
+  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+  defp tier1_threshold, do: Application.get_env(:optimal_system_agent, :compaction_warn, 0.80)
+  defp tier2_threshold, do: Application.get_env(:optimal_system_agent, :compaction_aggressive, 0.85)
+  defp tier3_threshold, do: Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
 
   # Zone boundaries (counted from the end of the non-system message list)
   @hot_zone_size 10
@@ -120,7 +120,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @spec utilization([map()]) :: float()
   def utilization(messages) when is_list(messages) do
     tokens = estimate_tokens(messages)
-    Float.round(tokens / @max_tokens * 100, 1)
+    Float.round(tokens / max_tokens() * 100, 1)
   end
 
   @doc """
@@ -155,17 +155,27 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end)
   end
 
+  def estimate_tokens(nil), do: 0
+
   def estimate_tokens(text) when is_binary(text) do
     if text == "" do
       0
     else
-      words = text |> String.split(~r/\s+/, trim: true) |> length()
-      punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
-      round(words * 1.3 + punctuation * 0.5)
+      case OptimalSystemAgent.Go.Tokenizer.count_tokens(text) do
+        {:ok, count} -> count
+        {:error, _} -> estimate_tokens_heuristic(text)
+      end
     end
+  catch
+    _, _ -> estimate_tokens_heuristic(text)
   end
 
-  def estimate_tokens(nil), do: 0
+  @doc false
+  defp estimate_tokens_heuristic(text) do
+    words = text |> String.split(~r/\s+/, trim: true) |> length()
+    punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
+    round(words * 1.3 + punctuation * 0.5)
+  end
 
   # ---------------------------------------------------------------------------
   # GenServer callbacks
@@ -173,7 +183,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @impl true
   def init(%__MODULE__{} = state) do
-    Logger.info("Compactor started (max_tokens=#{@max_tokens})")
+    Logger.info("Compactor started (max_tokens=#{max_tokens()})")
     {:ok, state}
   end
 
@@ -211,23 +221,24 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @doc false
   defp do_maybe_compact(messages) do
     tokens_before = estimate_tokens(messages)
-    usage_ratio = tokens_before / @max_tokens
+    max_tok = max_tokens()
+    usage_ratio = tokens_before / max_tok
 
     cond do
-      usage_ratio > @tier3_threshold ->
+      usage_ratio > tier3_threshold() ->
         Logger.warning(
           "Compactor: usage at #{pct(usage_ratio)} — running full pipeline (emergency)"
         )
 
-        run_pipeline(messages, tokens_before, :emergency)
+        run_pipeline(messages, tokens_before, :emergency, max_tok)
 
-      usage_ratio > @tier2_threshold ->
+      usage_ratio > tier2_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running aggressive pipeline")
-        run_pipeline(messages, tokens_before, :aggressive)
+        run_pipeline(messages, tokens_before, :aggressive, max_tok)
 
-      usage_ratio > @tier1_threshold ->
+      usage_ratio > tier1_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running background pipeline")
-        run_pipeline(messages, tokens_before, :background)
+        run_pipeline(messages, tokens_before, :background, max_tok)
 
       true ->
         messages
@@ -239,13 +250,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp run_pipeline(messages, tokens_before, severity) do
+  defp run_pipeline(messages, tokens_before, severity, max_tok) do
     # Determine target: bring usage to 70% for background, 60% for aggressive/emergency
     target_tokens =
       case severity do
-        :background -> round(@max_tokens * 0.70)
-        :aggressive -> round(@max_tokens * 0.60)
-        :emergency -> round(@max_tokens * 0.50)
+        :background -> round(max_tok * 0.70)
+        :aggressive -> round(max_tok * 0.60)
+        :emergency -> round(max_tok * 0.50)
       end
 
     {system_msgs, non_system} = split_system(messages)
@@ -563,15 +574,25 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # LLM helpers
   # ---------------------------------------------------------------------------
 
+  @summary_prompt_fallback """
+  Summarize the following conversation excerpt concisely. Preserve key facts,
+  decisions, tool results, and context needed to continue the conversation.
+  Be terse — use bullet points.
+
+  %MESSAGES%
+  """
+
   @doc false
   defp call_summary_llm(messages_to_summarize) do
-    prompt = """
-    Summarize the following conversation excerpt concisely. Preserve key facts,
-    decisions, tool results, and context needed to continue the conversation.
-    Be terse — use bullet points.
+    template = PromptLoader.get(:compactor_summary, @summary_prompt_fallback)
+    formatted = format_for_summary(messages_to_summarize)
 
-    #{format_for_summary(messages_to_summarize)}
-    """
+    prompt =
+      if String.contains?(template, "%MESSAGES%") do
+        String.replace(template, "%MESSAGES%", formatted)
+      else
+        template <> "\n\n" <> formatted
+      end
 
     try do
       Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
@@ -591,16 +612,26 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
+  @key_facts_prompt_fallback """
+  Extract ONLY the essential facts from this conversation history.
+  Output a compact bullet list of: decisions made, user preferences stated,
+  key data/results, and any commitments. Omit pleasantries, meta-discussion,
+  and anything not needed to continue the conversation.
+
+  %MESSAGES%
+  """
+
   @doc false
   defp call_key_facts_llm(messages_to_compress) do
-    prompt = """
-    Extract ONLY the essential facts from this conversation history.
-    Output a compact bullet list of: decisions made, user preferences stated,
-    key data/results, and any commitments. Omit pleasantries, meta-discussion,
-    and anything not needed to continue the conversation.
+    template = PromptLoader.get(:compactor_key_facts, @key_facts_prompt_fallback)
+    formatted = format_for_summary(messages_to_compress)
 
-    #{format_for_summary(messages_to_compress)}
-    """
+    prompt =
+      if String.contains?(template, "%MESSAGES%") do
+        String.replace(template, "%MESSAGES%", formatted)
+      else
+        template <> "\n\n" <> formatted
+      end
 
     try do
       Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 512)

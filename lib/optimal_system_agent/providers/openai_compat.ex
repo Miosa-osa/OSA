@@ -38,10 +38,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(opts)
 
-    headers = [
-      {"Authorization", "Bearer #{api_key}"},
-      {"Content-Type", "application/json"}
-    ]
+    extra_headers = Keyword.get(opts, :extra_headers, [])
+
+    headers =
+      [
+        {"Authorization", "Bearer #{api_key}"},
+        {"Content-Type", "application/json"}
+      ] ++ extra_headers
 
     url = "#{base_url}/chat/completions"
 

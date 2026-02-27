@@ -1,0 +1,5 @@
+execute: "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble."
+build: "**Mode: BUILD** — Create with quality. Show your work. Structure the output."
+analyze: "**Mode: ANALYZE** — Be thorough and data-driven. Show reasoning. Use structure."
+maintain: "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact."
+assist: "**Mode: ASSIST** — Guide and explain. Match the user's depth. Be genuinely helpful."

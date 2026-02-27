@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
   require Logger
 
   alias OptimalSystemAgent.Signal.Classifier
+  alias OptimalSystemAgent.PromptLoader
 
   @cache_table :osa_noise_cache
   @cache_ttl 300
@@ -85,17 +86,27 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
     end
   end
 
+  @noise_filter_prompt_fallback """
+  Is this message a meaningful signal or just noise? Respond with ONLY "signal" or "noise".
+
+  Noise = greetings, acknowledgments, filler, empty pleasantries, social niceties
+  Signal = questions, requests, information sharing, tasks, decisions, anything with substance
+
+  Message: "%MESSAGE%"
+
+  Answer (signal or noise):
+  """
+
   defp classify_noise_llm(message) do
-    prompt = """
-    Is this message a meaningful signal or just noise? Respond with ONLY "signal" or "noise".
+    template = PromptLoader.get(:noise_filter, @noise_filter_prompt_fallback)
+    safe_message = String.slice(message, 0, 200)
 
-    Noise = greetings, acknowledgments, filler, empty pleasantries, social niceties
-    Signal = questions, requests, information sharing, tasks, decisions, anything with substance
-
-    Message: "#{String.slice(message, 0, 200)}"
-
-    Answer (signal or noise):
-    """
+    prompt =
+      if String.contains?(template, "%MESSAGE%") do
+        String.replace(template, "%MESSAGE%", safe_message)
+      else
+        String.replace(template, ~r/Message: ".*?"/, "Message: \"#{safe_message}\"")
+      end
 
     messages = [%{role: "user", content: prompt}]
 

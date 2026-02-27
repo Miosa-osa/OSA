@@ -81,21 +81,24 @@ defmodule OptimalSystemAgent.Application do
       # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
       # Started LAST so all agent processes are ready before accepting requests
       {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
-    ] ++ sandbox_children()
+    ] ++ go_children() ++ python_children() ++ sandbox_children()
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
 
     # Load soul/personality files into persistent_term BEFORE supervision tree
     # starts — agents need identity/soul content from their first LLM call.
     OptimalSystemAgent.Soul.load()
+    OptimalSystemAgent.PromptLoader.load()
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
+        # Auto-detect best Ollama model if using local provider (fast, ~100ms)
+        if Application.get_env(:optimal_system_agent, :default_provider) == :ollama do
+          OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+        end
+
         # Start configured channel adapters after the supervision tree is up.
-        # Each adapter's init/1 returns :ignore when its config is absent,
-        # so this is safe to call unconditionally on every boot.
         Task.start(fn ->
-          # Brief delay to allow Bandit to finish port binding
           Process.sleep(250)
           OptimalSystemAgent.Channels.Manager.start_configured_channels()
         end)
@@ -104,6 +107,26 @@ defmodule OptimalSystemAgent.Application do
 
       error ->
         error
+    end
+  end
+
+  # Go tokenizer starts unconditionally — operates in fallback mode if binary missing.
+  defp go_children do
+    if Application.get_env(:optimal_system_agent, :go_tokenizer_enabled, false) do
+      Logger.info("[Application] Go tokenizer enabled — starting Go.Tokenizer")
+      [OptimalSystemAgent.Go.Tokenizer]
+    else
+      []
+    end
+  end
+
+  # Python sidecar is opt-in — only started when python_sidecar_enabled is true.
+  defp python_children do
+    if Application.get_env(:optimal_system_agent, :python_sidecar_enabled, false) do
+      Logger.info("[Application] Python sidecar enabled — starting Python.Supervisor")
+      [OptimalSystemAgent.Python.Supervisor]
+    else
+      []
     end
   end
 

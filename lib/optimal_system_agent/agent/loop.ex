@@ -26,7 +26,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Skills.Registry, as: Skills
   alias OptimalSystemAgent.Events.Bus
 
-  @max_iterations Application.compile_env(:optimal_system_agent, :max_iterations, 30)
+  defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
 
   defstruct [
     :session_id,
@@ -101,12 +101,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   # --- Agent Loop ---
 
-  defp run_loop(%{iteration: iter} = state) when iter >= @max_iterations do
-    Logger.warning("Agent loop hit max iterations (#{@max_iterations})")
-    {"I've reached my reasoning limit for this request. Here's what I have so far.", state}
+  defp run_loop(%{iteration: iter} = state) do
+    max_iter = max_iterations()
+    if iter >= max_iter do
+      Logger.warning("Agent loop hit max iterations (#{max_iter})")
+      {"I've reached my reasoning limit for this request. Here's what I have so far.", state}
+    else
+      do_run_loop(state)
+    end
   end
 
-  defp run_loop(state) do
+  defp do_run_loop(state) do
     # Build context (passes current signal for signal-aware system prompt)
     context = Context.build(state, state.current_signal)
 
@@ -123,13 +128,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
         # Append assistant message with tool calls
         state = %{state | messages: state.messages ++ [%{role: "assistant", content: content, tool_calls: tool_calls}]}
 
-        # Execute each tool and append results
+        # Execute each tool and append results (with timing feedback)
         state = Enum.reduce(tool_calls, state, fn tool_call, acc ->
+          Bus.emit(:tool_call, %{name: tool_call.name, phase: :start})
+          start_time = System.monotonic_time(:millisecond)
+
           result_str =
             case Skills.execute(tool_call.name, tool_call.arguments) do
               {:ok, content} -> content
               {:error, reason} -> "Error: #{reason}"
             end
+
+          duration_ms = System.monotonic_time(:millisecond) - start_time
+          Bus.emit(:tool_call, %{name: tool_call.name, phase: :end, duration_ms: duration_ms})
 
           tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
           %{acc | messages: acc.messages ++ [tool_msg]}

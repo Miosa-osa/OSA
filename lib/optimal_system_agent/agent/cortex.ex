@@ -19,11 +19,37 @@ defmodule OptimalSystemAgent.Agent.Cortex do
 
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.PromptLoader
 
   @default_refresh_interval 300_000
   @boot_delay 30_000
   @max_recent_sessions 5
   @topic_ets_table :osa_cortex_topics
+
+  @synthesis_prompt_fallback """
+  You are a knowledge synthesis engine for an AI agent called OSA (Optimal System Agent). Based on the following context, produce a structured bulletin that will be injected into the agent's system prompt.
+
+  ## Active Sessions (most recent)
+  %SESSION_SECTION%
+
+  ## Long-term Memory (recent entries)
+  %TRIMMED_MEMORY%
+
+  ## Detected Active Topics
+  %TOPICS_SECTION%
+
+  Produce a bulletin with EXACTLY these sections. Be concise and actionable — the agent reads this before every response.
+
+  1. **Current Focus**: What is the user actively working on right now? (1-3 bullets)
+  2. **Pending Items**: Any open questions, unfinished tasks, or follow-ups needed? (1-3 bullets)
+  3. **Key Decisions**: Recent decisions or preferences that should inform responses (1-3 bullets)
+  4. **Patterns**: Notable patterns — recurring topics, workflow habits, communication preferences (1-2 bullets)
+  5. **Context**: Important background facts the agent should keep in mind (1-2 bullets)
+
+  Keep each section to 1-3 bullet points maximum. Total bulletin should be under 300 words.
+  If a section has no relevant content, write "None detected" for that section.
+  Do NOT include the raw data — synthesize it into actionable intelligence.
+  """
 
   defstruct [
     bulletin: nil,
@@ -371,30 +397,13 @@ defmodule OptimalSystemAgent.Agent.Cortex do
         "No active topics detected yet."
       end
 
-    prompt = """
-    You are a knowledge synthesis engine for an AI agent called OSA (Optimal System Agent). Based on the following context, produce a structured bulletin that will be injected into the agent's system prompt.
+    template = PromptLoader.get(:cortex_synthesis, @synthesis_prompt_fallback)
 
-    ## Active Sessions (most recent #{@max_recent_sessions})
-    #{session_section}
-
-    ## Long-term Memory (recent entries)
-    #{trimmed_memory}
-
-    ## Detected Active Topics
-    #{topics_section}
-
-    Produce a bulletin with EXACTLY these sections. Be concise and actionable — the agent reads this before every response.
-
-    1. **Current Focus**: What is the user actively working on right now? (1-3 bullets)
-    2. **Pending Items**: Any open questions, unfinished tasks, or follow-ups needed? (1-3 bullets)
-    3. **Key Decisions**: Recent decisions or preferences that should inform responses (1-3 bullets)
-    4. **Patterns**: Notable patterns — recurring topics, workflow habits, communication preferences (1-2 bullets)
-    5. **Context**: Important background facts the agent should keep in mind (1-2 bullets)
-
-    Keep each section to 1-3 bullet points maximum. Total bulletin should be under 300 words.
-    If a section has no relevant content, write "None detected" for that section.
-    Do NOT include the raw data — synthesize it into actionable intelligence.
-    """
+    prompt =
+      template
+      |> String.replace("%SESSION_SECTION%", session_section)
+      |> String.replace("%TRIMMED_MEMORY%", trimmed_memory)
+      |> String.replace("%TOPICS_SECTION%", topics_section)
 
     [%{role: "user", content: prompt}]
   end

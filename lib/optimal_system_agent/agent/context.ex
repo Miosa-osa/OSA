@@ -45,12 +45,11 @@ defmodule OptimalSystemAgent.Agent.Context do
   alias OptimalSystemAgent.Agent.Workflow
   alias OptimalSystemAgent.Soul
 
-  @max_tokens Application.compile_env(:optimal_system_agent, :max_context_tokens, 128_000)
   @response_reserve 4_096
 
-  # Tier budget percentages of the *system prompt* token budget
-  @tier2_pct 0.40
-  @tier3_pct 0.30
+  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+  defp tier2_pct, do: Application.get_env(:optimal_system_agent, :tier2_budget_pct, 0.40)
+  defp tier3_pct, do: Application.get_env(:optimal_system_agent, :tier3_budget_pct, 0.30)
   # Tier 4 gets whatever is left
 
   # ---------------------------------------------------------------------------
@@ -68,7 +67,8 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    system_budget = max(@max_tokens - @response_reserve - conversation_tokens, 2_000)
+    max_tok = max_tokens()
+    system_budget = max(max_tok - @response_reserve - conversation_tokens, 2_000)
 
     system_prompt = assemble_system_prompt(state, signal, system_budget)
 
@@ -77,8 +77,8 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     Logger.debug(
       "Context.build: system=#{system_tokens} conversation=#{conversation_tokens} " <>
-        "reserve=#{@response_reserve} total=#{total_tokens}/#{@max_tokens} " <>
-        "(#{Float.round(total_tokens / @max_tokens * 100, 1)}%)"
+        "reserve=#{@response_reserve} total=#{total_tokens}/#{max_tok} " <>
+        "(#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
     system_msg = %{role: "system", content: system_prompt}
@@ -95,7 +95,8 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    system_budget = max(@max_tokens - @response_reserve - conversation_tokens, 2_000)
+    max_tok = max_tokens()
+    system_budget = max(max_tok - @response_reserve - conversation_tokens, 2_000)
 
     # Gather all blocks with priorities to show individual costs
     blocks = gather_blocks(state, signal)
@@ -114,14 +115,14 @@ defmodule OptimalSystemAgent.Agent.Context do
     total_tokens = system_tokens + conversation_tokens + @response_reserve
 
     %{
-      max_tokens: @max_tokens,
+      max_tokens: max_tok,
       response_reserve: @response_reserve,
       conversation_tokens: conversation_tokens,
       system_prompt_budget: system_budget,
       system_prompt_actual: system_tokens,
       total_tokens: total_tokens,
-      utilization_pct: Float.round(total_tokens / @max_tokens * 100, 1),
-      headroom: @max_tokens - total_tokens,
+      utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
+      headroom: max_tok - total_tokens,
       blocks: block_details
     }
   end
@@ -147,12 +148,12 @@ defmodule OptimalSystemAgent.Agent.Context do
     remaining = system_budget - tier1_tokens
 
     # Tier 2 budget
-    tier2_budget = round(system_budget * @tier2_pct)
+    tier2_budget = round(system_budget * tier2_pct())
     {tier2_parts, tier2_used} = fit_blocks(tier2, min(tier2_budget, remaining))
     remaining = remaining - tier2_used
 
     # Tier 3 budget
-    tier3_budget = round(system_budget * @tier3_pct)
+    tier3_budget = round(system_budget * tier3_pct())
     {tier3_parts, tier3_used} = fit_blocks(tier3, min(tier3_budget, remaining))
     remaining = remaining - tier3_used
 
@@ -249,17 +250,24 @@ defmodule OptimalSystemAgent.Agent.Context do
   @doc """
   Estimates the number of tokens in a text string.
 
-  Uses a word + punctuation heuristic:
-  - Words (split on whitespace): ~1.3 tokens each
-  - Punctuation characters: ~0.5 tokens each
-
-  This is more accurate than the naive `div(String.length(text), 4)`.
+  Uses the Go tokenizer for accurate BPE counting when available,
+  falling back to a word + punctuation heuristic.
   """
   @spec estimate_tokens(String.t() | nil) :: non_neg_integer()
   def estimate_tokens(nil), do: 0
   def estimate_tokens(""), do: 0
 
   def estimate_tokens(text) when is_binary(text) do
+    case OptimalSystemAgent.Go.Tokenizer.count_tokens(text) do
+      {:ok, count} -> count
+      {:error, _} -> estimate_tokens_heuristic(text)
+    end
+  catch
+    _, _ -> estimate_tokens_heuristic(text)
+  end
+
+  @doc false
+  defp estimate_tokens_heuristic(text) do
     words = text |> String.split(~r/\s+/, trim: true) |> length()
     punctuation = Regex.scan(~r/[^\w\s]/, text) |> length()
     round(words * 1.3 + punctuation * 0.5)
@@ -458,21 +466,55 @@ defmodule OptimalSystemAgent.Agent.Context do
   @doc false
   defp skills_block do
     skills = Skills.list_skill_docs()
+    tools = try do Skills.list_tools() rescue _ -> [] end
 
     case skills do
       [] ->
         nil
 
       list ->
+        # Index tools by name for parameter lookup
+        tool_index = Map.new(tools, fn tool -> {tool.name, tool} end)
+
         docs =
           Enum.map(list, fn {name, desc} ->
-            "- **#{name}**: #{desc}"
+            base = "- **#{name}**: #{desc}"
+
+            case Map.get(tool_index, name) do
+              %{parameters: params} when is_map(params) and map_size(params) > 0 ->
+                param_info = format_parameters(params)
+                if param_info != "", do: base <> "\n  " <> param_info, else: base
+
+              _ ->
+                base
+            end
           end)
 
         "## Available Skills\n#{Enum.join(docs, "\n")}"
     end
   rescue
     _ -> nil
+  end
+
+  @doc false
+  defp format_parameters(params) do
+    properties = Map.get(params, "properties", %{})
+    required = MapSet.new(Map.get(params, "required", []))
+
+    if map_size(properties) == 0 do
+      ""
+    else
+      props =
+        Enum.map(properties, fn {name, spec} ->
+          type = Map.get(spec, "type", "any")
+          req = if MapSet.member?(required, name), do: " (required)", else: ""
+          desc = Map.get(spec, "description", "")
+          desc_part = if desc != "", do: " — #{desc}", else: ""
+          "`#{name}` (#{type}#{req})#{desc_part}"
+        end)
+
+      "Parameters: #{Enum.join(props, ", ")}"
+    end
   end
 
   @doc false

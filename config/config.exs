@@ -6,14 +6,18 @@ config :optimal_system_agent,
 
   # Ollama settings (local LLM — no API key needed)
   ollama_url: "http://localhost:11434",
-  ollama_model: "qwen3:8b",
+  ollama_model: "llama3.2:latest",
 
   # Anthropic settings (set ANTHROPIC_API_KEY env var)
-  anthropic_model: "anthropic-latest",
+  anthropic_model: "claude-sonnet-4-6",
 
   # OpenAI-compatible settings (set OPENAI_API_KEY env var)
   openai_url: "https://api.openai.com/v1",
   openai_model: "gpt-4o",
+
+  # OpenRouter settings (set OPENROUTER_API_KEY env var)
+  openrouter_url: "https://openrouter.ai/api/v1",
+  openrouter_model: "meta-llama/llama-3.3-70b-instruct",
 
   # Agent configuration
   max_iterations: 20,
@@ -27,6 +31,10 @@ config :optimal_system_agent,
   compaction_warn: 0.80,
   compaction_aggressive: 0.85,
   compaction_emergency: 0.95,
+
+  # Context builder tier budget percentages (of system prompt budget)
+  tier2_budget_pct: 0.40,
+  tier3_budget_pct: 0.30,
 
   # Proactive monitor interval (milliseconds)
   proactive_interval: 30 * 60 * 1000,
@@ -92,7 +100,25 @@ config :optimal_system_agent,
 
   # Security hardening flags
   sandbox_read_only_root: true,
-  sandbox_no_new_privileges: true
+  sandbox_no_new_privileges: true,
+
+  # ---------------------------------------------------------------------------
+  # Python Sidecar — semantic memory search via local embeddings
+  # ---------------------------------------------------------------------------
+  # Set OSA_PYTHON_SIDECAR=true to enable. Requires sentence-transformers.
+  # When disabled, memory search falls back to keyword-based retrieval.
+  python_sidecar_enabled: System.get_env("OSA_PYTHON_SIDECAR", "false") == "true",
+  python_sidecar_model: "all-MiniLM-L6-v2",
+  python_sidecar_timeout: 30_000,
+  python_path: System.get_env("OSA_PYTHON_PATH", "python3"),
+
+  # ---------------------------------------------------------------------------
+  # Go Tokenizer — accurate BPE token counting
+  # ---------------------------------------------------------------------------
+  # Set OSA_GO_TOKENIZER=true to enable. Requires pre-built Go binary.
+  # When disabled or binary missing, falls back to word-count heuristic.
+  go_tokenizer_enabled: System.get_env("OSA_GO_TOKENIZER", "false") == "true",
+  go_tokenizer_encoding: "cl100k_base"
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
