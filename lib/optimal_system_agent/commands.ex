@@ -48,7 +48,9 @@ defmodule OptimalSystemAgent.Commands do
   use GenServer
   require Logger
 
-  defp commands_dir, do: Application.get_env(:optimal_system_agent, :commands_dir, "~/.osa/commands")
+  defp commands_dir,
+    do: Application.get_env(:optimal_system_agent, :commands_dir, "~/.osa/commands")
+
   @ets_table :osa_commands
   @settings_table :osa_settings
 
@@ -217,6 +219,7 @@ defmodule OptimalSystemAgent.Commands do
       {"new", "Start a fresh session", &cmd_new/2},
       {"sessions", "List stored sessions", &cmd_sessions/2},
       {"resume", "Resume a previous session", &cmd_resume/2},
+      {"history", "Browse conversation history", &cmd_history/2},
 
       # ── Context & Performance ──
       {"compact", "Context compaction stats", &cmd_compact/2},
@@ -241,6 +244,7 @@ defmodule OptimalSystemAgent.Commands do
       # ── System ──
       {"reload", "Reload soul/skill files", &cmd_reload/2},
       {"doctor", "System diagnostics", &cmd_doctor/2},
+      {"setup", "Run channel setup wizard", &cmd_setup/2},
       {"create-command", "Create a new command", &cmd_create/2},
 
       # ── Workflow ──
@@ -298,7 +302,7 @@ defmodule OptimalSystemAgent.Commands do
       # ── Exit ──
       {"exit", "Exit the CLI", &cmd_exit/2},
       {"quit", "Exit the CLI", &cmd_exit/2},
-      {"clear", "Clear the screen", &cmd_clear/2},
+      {"clear", "Clear the screen", &cmd_clear/2}
     ]
   end
 
@@ -315,80 +319,87 @@ defmodule OptimalSystemAgent.Commands do
 
     custom_section =
       if custom_cmds != [] do
-        lines = Enum.map_join(custom_cmds, "\n", fn {n, d} ->
-          "  /#{String.pad_trailing(n, 18)} #{d}"
-        end)
+        lines =
+          Enum.map_join(custom_cmds, "\n", fn {n, d} ->
+            "  /#{String.pad_trailing(n, 18)} #{d}"
+          end)
+
         "\nCustom:\n#{lines}\n"
       else
         ""
       end
 
-    output = """
-    Info:
-      /status             System status
-      /skills             List available skills
-      /memory             Memory statistics
-      /soul               Show personality config
-      /doctor             System diagnostics
+    output =
+      """
+      Info:
+        /status             System status
+        /skills             List available skills
+        /memory             Memory statistics
+        /soul               Show personality config
+        /doctor             System diagnostics
 
-    Model & Provider:
-      /model              Show active provider + model
-      /model list         List all providers with status
-      /model <provider>   Switch provider (e.g. /model anthropic)
-      /model <p> <model>  Switch provider + model
-      /models             List installed Ollama models
-      /model ollama-url   Set Ollama URL (cloud support)
+      Model & Provider:
+        /model              Show active provider + model
+        /model list         List all providers with status
+        /model <provider>   Switch provider (e.g. /model anthropic)
+        /model <p> <model>  Switch provider + model
+        /models             List installed Ollama models
+        /model ollama-url   Set Ollama URL (cloud support)
 
-    Session:
-      /new                Start a fresh session
-      /sessions           List stored sessions
-      /resume <id>        Resume a previous session
+      Session:
+        /new                Start a fresh session
+        /sessions           List stored sessions
+        /resume <id>        Resume a previous session
+        /history            Browse conversation history
+        /history <id>       View messages in a session
+        /history search <q> Search all messages
 
-    Context:
-      /compact            Context compaction stats
-      /usage              Token usage breakdown
-      /cortex             Cortex bulletin & topics
+      Context:
+        /compact            Context compaction stats
+        /usage              Token usage breakdown
+        /cortex             Cortex bulletin & topics
 
-    Configuration:
-      /verbose            Toggle verbose output (signal indicators)
-      /think <level>      Set reasoning depth (fast/normal/deep)
-      /plan               Toggle autonomous plan mode
-      /config             Show runtime configuration
-      /reload             Reload soul + prompt files from disk
+      Configuration:
+        /verbose            Toggle verbose output (signal indicators)
+        /think <level>      Set reasoning depth (fast/normal/deep)
+        /plan               Toggle autonomous plan mode
+        /config             Show runtime configuration
+        /setup              Run channel setup wizard
+        /reload             Reload soul + prompt files from disk
 
-    Agents:
-      /agents             List all agents in the roster
-      /agents <name>      Show agent details
-      /tiers              Show model tier configuration
-      /swarms             List swarm presets
-      /hooks              Hook pipeline status
-      /learning           Learning engine metrics
+      Agents:
+        /agents             List all agents in the roster
+        /agents <name>      Show agent details
+        /tiers              Show model tier configuration
+        /swarms             List swarm presets
+        /hooks              Hook pipeline status
+        /learning           Learning engine metrics
 
-    Scheduler:
-      /schedule           Scheduler overview (crons, triggers, heartbeat)
-      /cron               List cron jobs
-      /cron add           Create a new cron job
-      /cron run <id>      Execute a cron job immediately
-      /cron enable <id>   Enable a cron job
-      /cron disable <id>  Disable a cron job
-      /cron remove <id>   Remove a cron job
-      /triggers           List event triggers
-      /triggers add       Create a new trigger
-      /triggers remove <id>  Remove a trigger
-      /heartbeat          Show heartbeat tasks + next run
-      /heartbeat add <t>  Add a heartbeat task
+      Scheduler:
+        /schedule           Scheduler overview (crons, triggers, heartbeat)
+        /cron               List cron jobs
+        /cron add           Create a new cron job
+        /cron run <id>      Execute a cron job immediately
+        /cron enable <id>   Enable a cron job
+        /cron disable <id>  Disable a cron job
+        /cron remove <id>   Remove a cron job
+        /triggers           List event triggers
+        /triggers add       Create a new trigger
+        /triggers remove <id>  Remove a trigger
+        /heartbeat          Show heartbeat tasks + next run
+        /heartbeat add <t>  Add a heartbeat task
 
-    Commands:
-      /create-command     Create a custom slash command
-    #{custom_section}
-    Examples:
-      /agents backend-go              Show the Go backend agent details
-      /models                         List Ollama models on your machine
-      /model ollama qwen3:32b         Switch to a specific local model
-      /model anthropic                Switch to Anthropic Claude
-      /create-command standup | Daily standup | Summarize my recent activity
-    """
-    |> String.trim_trailing()
+      Commands:
+        /create-command     Create a custom slash command
+      #{custom_section}
+      Examples:
+        /agents backend-go              Show the Go backend agent details
+        /models                         List Ollama models on your machine
+        /model ollama qwen3:32b         Switch to a specific local model
+        /model anthropic                Switch to Anthropic Claude
+        /create-command standup | Daily standup | Summarize my recent activity
+      """
+      |> String.trim_trailing()
 
     {:command, output}
   end
@@ -539,6 +550,7 @@ defmodule OptimalSystemAgent.Commands do
         budget = tier_mod.total_budget(tier)
         temp = tier_mod.temperature(tier)
         iters = tier_mod.max_iterations(tier)
+
         "  #{String.pad_trailing(to_string(tier), 12)} #{String.pad_trailing(tier_model, 32)} #{budget}t  T=#{temp}  max=#{iters}"
       end)
       |> Enum.join("\n")
@@ -592,11 +604,14 @@ defmodule OptimalSystemAgent.Commands do
 
     cond do
       provider not in available ->
-        {:command, "Unknown provider: #{provider_str}\n\nUse /model list to see available providers."}
+        {:command,
+         "Unknown provider: #{provider_str}\n\nUse /model list to see available providers."}
 
       not registry.provider_configured?(provider) ->
         key_name = String.upcase("#{provider}_API_KEY")
-        {:command, "Provider #{provider_str} is not configured.\nSet #{key_name} environment variable and restart, or use /model list."}
+
+        {:command,
+         "Provider #{provider_str} is not configured.\nSet #{key_name} environment variable and restart, or use /model list."}
 
       # Fix 1: Validate Ollama model exists before switching
       provider == :ollama and model_override != nil ->
@@ -635,7 +650,10 @@ defmodule OptimalSystemAgent.Commands do
     parts =
       if provider == :ollama and model_override != nil and
            not OptimalSystemAgent.Providers.Ollama.model_supports_tools?(model_override) do
-        parts ++ ["⚠ #{model_override} does not support tool calling — tools will be disabled for this model."]
+        parts ++
+          [
+            "⚠ #{model_override} does not support tool calling — tools will be disabled for this model."
+          ]
       else
         parts
       end
@@ -654,7 +672,9 @@ defmodule OptimalSystemAgent.Commands do
           :ok
         else
           installed = Enum.join(names, ", ")
-          {:error, "Model '#{model_name}' not found on Ollama.\n\nInstalled: #{installed}\n\nPull it first: ollama pull #{model_name}"}
+
+          {:error,
+           "Model '#{model_name}' not found on Ollama.\n\nInstalled: #{installed}\n\nPull it first: ollama pull #{model_name}"}
         end
 
       {:error, _} ->
@@ -687,7 +707,8 @@ defmodule OptimalSystemAgent.Commands do
         end
 
       {:error, reason} ->
-        {:command, "Cannot reach Ollama at #{url}: #{reason}\n\nIs Ollama running? Try: ollama serve"}
+        {:command,
+         "Cannot reach Ollama at #{url}: #{reason}\n\nIs Ollama running? Try: ollama serve"}
     end
   end
 
@@ -709,13 +730,16 @@ defmodule OptimalSystemAgent.Commands do
 
   defp active_model_for(provider) do
     model_key = :"#{provider}_model"
+
     case Application.get_env(:optimal_system_agent, model_key) do
       nil ->
         case OptimalSystemAgent.Providers.Registry.provider_info(provider) do
           {:ok, info} -> info.default_model
           _ -> "unknown"
         end
-      model -> model
+
+      model ->
+        model
     end
   end
 
@@ -744,6 +768,7 @@ defmodule OptimalSystemAgent.Commands do
             last = format_timestamp(s[:last_active])
             hint = s[:topic_hint] || ""
             hint_str = if hint != "", do: " — #{String.slice(hint, 0, 50)}", else: ""
+
             "  #{String.pad_trailing(id, 24)} #{String.pad_trailing("#{msgs} msgs", 10)} #{last}#{hint_str}"
           end)
 
@@ -763,11 +788,121 @@ defmodule OptimalSystemAgent.Commands do
     else
       case OptimalSystemAgent.Agent.Memory.resume_session(target) do
         {:ok, messages} ->
-          {:action, {:resume_session, target, messages}, "Resuming session #{target} (#{length(messages)} messages)..."}
+          {:action, {:resume_session, target, messages},
+           "Resuming session #{target} (#{length(messages)} messages)..."}
 
         {:error, :not_found} ->
           {:command, "Session not found: #{target}\n\nUse /sessions to see available sessions."}
       end
+    end
+  end
+
+  # ── History ──────────────────────────────────────────────────
+
+  defp cmd_history(arg, _session_id) do
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        cmd_history_list()
+
+      String.starts_with?(trimmed, "search ") ->
+        query = String.trim_leading(trimmed, "search ") |> String.trim()
+        cmd_history_search(query)
+
+      true ->
+        cmd_history_session(trimmed)
+    end
+  end
+
+  defp cmd_history_list do
+    import Ecto.Query
+    alias OptimalSystemAgent.Store.{Repo, Message}
+
+    sessions =
+      from(m in Message,
+        group_by: m.session_id,
+        order_by: [desc: max(m.inserted_at)],
+        limit: 20,
+        select: %{
+          session_id: m.session_id,
+          count: count(m.id),
+          last_at: max(m.inserted_at)
+        }
+      )
+      |> Repo.all()
+
+    if sessions == [] do
+      {:command,
+       "No message history found. Messages will be stored after your next conversation."}
+    else
+      lines =
+        Enum.map_join(sessions, "\n", fn s ->
+          last = if s.last_at, do: NaiveDateTime.to_string(s.last_at), else: "unknown"
+
+          "  #{String.pad_trailing(s.session_id, 36)} #{String.pad_leading(to_string(s.count), 5)} msgs  #{last}"
+        end)
+
+      {:command,
+       "Recent sessions:\n#{lines}\n\n  /history <session_id>    Browse messages\n  /history search <query>  Search all messages"}
+    end
+  rescue
+    _ ->
+      sessions = OptimalSystemAgent.Agent.Memory.list_sessions()
+
+      lines =
+        Enum.map_join(Enum.take(sessions, 20), "\n", fn s ->
+          "  #{String.pad_trailing(s.session_id, 36)} #{String.pad_leading(to_string(s.message_count), 5)} msgs"
+        end)
+
+      {:command, "Recent sessions (from files):\n#{lines}"}
+  end
+
+  defp cmd_history_session(session_id) do
+    import Ecto.Query
+    alias OptimalSystemAgent.Store.{Repo, Message}
+
+    messages =
+      from(m in Message,
+        where: m.session_id == ^session_id,
+        order_by: [asc: m.inserted_at],
+        limit: 50,
+        select: %{role: m.role, content: m.content, inserted_at: m.inserted_at}
+      )
+      |> Repo.all()
+
+    if messages == [] do
+      {:command, "No messages found for session: #{session_id}"}
+    else
+      lines =
+        Enum.map_join(messages, "\n", fn m ->
+          time = if m.inserted_at, do: NaiveDateTime.to_string(m.inserted_at), else: ""
+          role = String.pad_trailing(m.role, 10)
+          content = String.slice(m.content || "", 0, 120)
+          "  #{time}  #{role}  #{content}"
+        end)
+
+      {:command, "Session #{session_id} (#{length(messages)} messages):\n#{lines}"}
+    end
+  rescue
+    _ -> {:command, "Error loading session: #{session_id}"}
+  end
+
+  defp cmd_history_search(query) do
+    results = OptimalSystemAgent.Agent.Memory.search_messages(query, limit: 20)
+
+    if results == [] do
+      {:command, "No messages matching: #{query}"}
+    else
+      lines =
+        Enum.map_join(results, "\n", fn m ->
+          time = if m.inserted_at, do: NaiveDateTime.to_string(m.inserted_at), else: ""
+          sid = String.slice(m.session_id, 0, 12)
+          content = String.slice(m.content || "", 0, 100)
+          "  #{sid}  #{time}  #{content}"
+        end)
+
+      {:command, "Search results for \"#{query}\" (#{length(results)}):\n#{lines}"}
     end
   end
 
@@ -880,11 +1015,14 @@ defmodule OptimalSystemAgent.Commands do
 
       l when l in ["fast", "normal", "deep"] ->
         put_setting(session_id, :think_level, l)
-        desc = case l do
-          "fast" -> "quick responses, minimal deliberation"
-          "normal" -> "balanced reasoning and speed"
-          "deep" -> "thorough analysis, extended thinking"
-        end
+
+        desc =
+          case l do
+            "fast" -> "quick responses, minimal deliberation"
+            "normal" -> "balanced reasoning and speed"
+            "deep" -> "thorough analysis, extended thinking"
+          end
+
         {:command, "Reasoning depth: #{l} (#{desc})"}
 
       _ ->
@@ -934,7 +1072,7 @@ defmodule OptimalSystemAgent.Commands do
       check_memory(),
       check_cortex(),
       check_scheduler(),
-      check_http(),
+      check_http()
     ]
 
     passed = Enum.count(checks, fn {status, _, _} -> status == :ok end)
@@ -944,15 +1082,22 @@ defmodule OptimalSystemAgent.Commands do
 
     body =
       Enum.map_join(checks, "\n", fn {status, name, detail} ->
-        icon = case status do
-          :ok -> "[ok]"
-          :warn -> "[!!]"
-          :fail -> "[XX]"
-        end
+        icon =
+          case status do
+            :ok -> "[ok]"
+            :warn -> "[!!]"
+            :fail -> "[XX]"
+          end
+
         "  #{icon} #{String.pad_trailing(name, 20)} #{detail}"
       end)
 
     {:command, header <> body}
+  end
+
+  defp cmd_setup(_arg, _session_id) do
+    OptimalSystemAgent.Onboarding.Channels.run()
+    {:command, "Channel setup complete."}
   end
 
   # ── Agent Ecosystem Commands ──────────────────────────────────
@@ -977,14 +1122,23 @@ defmodule OptimalSystemAgent.Commands do
             Territory: #{Enum.join(agent.territory, ", ")}
             Escalates to: #{agent.escalate_to || "none"}
           """
+
           {:command, String.trim(output)}
       end
     else
       agents = Roster.all()
 
-      elite = agents |> Map.values() |> Enum.filter(& &1.tier == :elite) |> Enum.sort_by(& &1.name)
-      specialist = agents |> Map.values() |> Enum.filter(& &1.tier == :specialist) |> Enum.sort_by(& &1.name)
-      utility = agents |> Map.values() |> Enum.filter(& &1.tier == :utility) |> Enum.sort_by(& &1.name)
+      elite =
+        agents |> Map.values() |> Enum.filter(&(&1.tier == :elite)) |> Enum.sort_by(& &1.name)
+
+      specialist =
+        agents
+        |> Map.values()
+        |> Enum.filter(&(&1.tier == :specialist))
+        |> Enum.sort_by(& &1.name)
+
+      utility =
+        agents |> Map.values() |> Enum.filter(&(&1.tier == :utility)) |> Enum.sort_by(& &1.name)
 
       format_tier = fn tier_agents ->
         Enum.map_join(tier_agents, "\n", fn a ->
@@ -1046,10 +1200,11 @@ defmodule OptimalSystemAgent.Commands do
 
     presets = Roster.swarm_presets()
 
-    lines = Enum.map_join(presets, "\n", fn {name, preset} ->
-      agents_str = Enum.join(preset.agents, ", ")
-      "  #{String.pad_trailing(name, 20)} #{preset.pattern} — #{agents_str}"
-    end)
+    lines =
+      Enum.map_join(presets, "\n", fn {name, preset} ->
+        agents_str = Enum.join(preset.agents, ", ")
+        "  #{String.pad_trailing(name, 20)} #{preset.pattern} — #{agents_str}"
+      end)
 
     output = """
     Swarm Presets (#{map_size(presets)})
@@ -1067,14 +1222,16 @@ defmodule OptimalSystemAgent.Commands do
       hooks = OptimalSystemAgent.Agent.Hooks.list_hooks()
       metrics = OptimalSystemAgent.Agent.Hooks.metrics()
 
-      hook_lines = Enum.map_join(hooks, "\n", fn {event, entries} ->
-        entry_strs = Enum.map_join(entries, ", ", fn e -> "#{e.name}(p#{e.priority})" end)
-        "  #{String.pad_trailing(to_string(event), 18)} #{entry_strs}"
-      end)
+      hook_lines =
+        Enum.map_join(hooks, "\n", fn {event, entries} ->
+          entry_strs = Enum.map_join(entries, ", ", fn e -> "#{e.name}(p#{e.priority})" end)
+          "  #{String.pad_trailing(to_string(event), 18)} #{entry_strs}"
+        end)
 
-      metrics_lines = Enum.map_join(metrics, "\n", fn {event, m} ->
-        "  #{String.pad_trailing(to_string(event), 18)} #{m.calls} calls, avg #{m[:avg_us] || 0}μs, #{m.blocks} blocks"
-      end)
+      metrics_lines =
+        Enum.map_join(metrics, "\n", fn {event, m} ->
+          "  #{String.pad_trailing(to_string(event), 18)} #{m.calls} calls, avg #{m[:avg_us] || 0}μs, #{m.blocks} blocks"
+        end)
 
       output = """
       Hook Pipeline
@@ -1140,11 +1297,12 @@ defmodule OptimalSystemAgent.Commands do
         {:command, "Workflow command '#{cmd_name}' template not found."}
 
       template ->
-        expanded = if arg != "" and String.trim(arg) != "" do
-          template <> "\n\nAdditional context: " <> arg
-        else
-          template
-        end
+        expanded =
+          if arg != "" and String.trim(arg) != "" do
+            template <> "\n\nAdditional context: " <> arg
+          else
+            template
+          end
 
         {:prompt, expanded}
     end
@@ -1169,11 +1327,12 @@ defmodule OptimalSystemAgent.Commands do
         end
 
       template ->
-        expanded = if arg != "" and String.trim(arg) != "" do
-          template <> "\n\nFocus on: " <> arg
-        else
-          template
-        end
+        expanded =
+          if arg != "" and String.trim(arg) != "" do
+            template <> "\n\nFocus on: " <> arg
+          else
+            template
+          end
 
         {:prompt, expanded}
     end
@@ -1189,11 +1348,12 @@ defmodule OptimalSystemAgent.Commands do
         {:command, "Security command '#{cmd_name}' template not found."}
 
       template ->
-        expanded = if arg != "" and String.trim(arg) != "" do
-          template <> "\n\nTarget: " <> arg
-        else
-          template
-        end
+        expanded =
+          if arg != "" and String.trim(arg) != "" do
+            template <> "\n\nTarget: " <> arg
+          else
+            template
+          end
 
         {:prompt, expanded}
     end
@@ -1209,14 +1369,224 @@ defmodule OptimalSystemAgent.Commands do
         {:command, "Memory command '#{cmd_name}' template not found."}
 
       template ->
-        expanded = if arg != "" and String.trim(arg) != "" do
-          template <> "\n\nQuery: " <> arg
-        else
-          template
-        end
+        expanded =
+          if arg != "" and String.trim(arg) != "" do
+            template <> "\n\nQuery: " <> arg
+          else
+            template
+          end
 
         {:prompt, expanded}
     end
+  end
+
+  # ── Scheduler Commands ──────────────────────────────────────────────
+
+  defp cmd_schedule(_arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Scheduler
+
+    case Scheduler.status() do
+      %{} = s ->
+        next_str = Calendar.strftime(s.next_heartbeat, "%Y-%m-%dT%H:%M:%SZ")
+        diff_sec = DateTime.diff(s.next_heartbeat, DateTime.utc_now())
+        in_str = format_duration(diff_sec)
+
+        output =
+          """
+          Scheduler:
+            Cron jobs:    #{s.cron_active} active (#{s.cron_total} total)
+            Triggers:     #{s.trigger_active} active (#{s.trigger_total} total)
+            Heartbeat:    #{s.heartbeat_pending} pending tasks
+            Next beat:    #{next_str} (#{in_str})
+          """
+          |> String.trim()
+
+        {:command, output}
+    end
+  rescue
+    _ -> {:command, "Scheduler not available."}
+  end
+
+  defp cmd_cron(arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Scheduler
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        jobs = Scheduler.list_jobs()
+
+        if jobs == [] do
+          {:command, "No cron jobs configured.\n\nUse /cron add to create one."}
+        else
+          lines =
+            Enum.map_join(jobs, "\n", fn job ->
+              status =
+                cond do
+                  job["circuit_open"] -> "circuit-open"
+                  job["enabled"] -> "enabled"
+                  true -> "disabled"
+                end
+
+              "  #{String.pad_trailing(job["id"] || "?", 12)} " <>
+                "#{String.pad_trailing(job["name"] || "", 24)} " <>
+                "#{String.pad_trailing(job["schedule"] || "", 16)} [#{status}]"
+            end)
+
+          header = "Cron jobs (#{length(jobs)}):\n"
+          footer = "\n\nCommands: /cron add | run | enable | disable | remove <id>"
+          {:command, header <> lines <> footer}
+        end
+
+      trimmed == "add" ->
+        {:prompt,
+         "Create a new cron job. Provide: name, schedule (cron expression), type (agent/command/webhook), and the task/command/url."}
+
+      String.starts_with?(trimmed, "remove ") ->
+        id = String.trim(String.trim_leading(trimmed, "remove"))
+
+        case Scheduler.remove_job(id) do
+          :ok -> {:command, "Removed cron job: #{id}"}
+          {:error, reason} -> {:command, "Failed: #{reason}"}
+        end
+
+      String.starts_with?(trimmed, "enable ") ->
+        id = String.trim(String.trim_leading(trimmed, "enable"))
+
+        case Scheduler.toggle_job(id, true) do
+          :ok -> {:command, "Enabled cron job: #{id}"}
+          {:error, reason} -> {:command, "Failed: #{reason}"}
+        end
+
+      String.starts_with?(trimmed, "disable ") ->
+        id = String.trim(String.trim_leading(trimmed, "disable"))
+
+        case Scheduler.toggle_job(id, false) do
+          :ok -> {:command, "Disabled cron job: #{id}"}
+          {:error, reason} -> {:command, "Failed: #{reason}"}
+        end
+
+      String.starts_with?(trimmed, "run ") ->
+        id = String.trim(String.trim_leading(trimmed, "run"))
+
+        case Scheduler.run_job(id) do
+          {:ok, _result} -> {:command, "Cron job '#{id}' executed successfully."}
+          {:error, reason} -> {:command, "Failed: #{reason}"}
+        end
+
+      true ->
+        {:command,
+         "Unknown cron subcommand: #{trimmed}\n\nUsage: /cron [add | run | enable | disable | remove] <id>"}
+    end
+  rescue
+    _ -> {:command, "Scheduler not available."}
+  end
+
+  defp cmd_triggers(arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Scheduler
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        triggers = Scheduler.list_triggers()
+
+        if triggers == [] do
+          {:command, "No triggers configured.\n\nUse /triggers add to create one."}
+        else
+          lines =
+            Enum.map_join(triggers, "\n", fn t ->
+              status =
+                cond do
+                  t["circuit_open"] -> "circuit-open"
+                  t["enabled"] -> "enabled"
+                  true -> "disabled"
+                end
+
+              "  #{String.pad_trailing(t["id"] || "?", 12)} " <>
+                "#{String.pad_trailing(t["name"] || "", 24)} " <>
+                "#{String.pad_trailing(t["event"] || "", 16)} [#{status}]"
+            end)
+
+          header = "Triggers (#{length(triggers)}):\n"
+          footer = "\n\nCommands: /triggers add | remove <id>"
+          {:command, header <> lines <> footer}
+        end
+
+      trimmed == "add" ->
+        {:prompt,
+         "Create a new event trigger. Provide: name, event to watch for, type (agent/command), and the action (job description or command)."}
+
+      String.starts_with?(trimmed, "remove ") ->
+        id = String.trim(String.trim_leading(trimmed, "remove"))
+
+        case Scheduler.remove_trigger(id) do
+          :ok -> {:command, "Removed trigger: #{id}"}
+          {:error, reason} -> {:command, "Failed: #{reason}"}
+        end
+
+      true ->
+        {:command,
+         "Unknown triggers subcommand: #{trimmed}\n\nUsage: /triggers [add | remove <id>]"}
+    end
+  rescue
+    _ -> {:command, "Scheduler not available."}
+  end
+
+  defp cmd_heartbeat(arg, _session_id) do
+    alias OptimalSystemAgent.Agent.Scheduler
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        path = Scheduler.heartbeat_path()
+
+        content =
+          case File.read(path) do
+            {:ok, c} -> c
+            _ -> "(file not found)"
+          end
+
+        next = Scheduler.next_heartbeat_at()
+        next_str = Calendar.strftime(next, "%Y-%m-%dT%H:%M:%SZ")
+        diff_sec = DateTime.diff(next, DateTime.utc_now())
+        in_str = format_duration(diff_sec)
+
+        output =
+          """
+          #{String.trim(content)}
+
+          Next heartbeat: #{next_str} (#{in_str})
+          """
+          |> String.trim()
+
+        {:command, output}
+
+      String.starts_with?(trimmed, "add ") ->
+        text = String.trim(String.trim_leading(trimmed, "add"))
+
+        if text == "" do
+          {:command, "Usage: /heartbeat add <task description>"}
+        else
+          case Scheduler.add_heartbeat_task(text) do
+            :ok -> {:command, "Added heartbeat task: #{text}"}
+            {:error, reason} -> {:command, "Failed: #{reason}"}
+          end
+        end
+
+      true ->
+        {:command, "Unknown heartbeat subcommand: #{trimmed}\n\nUsage: /heartbeat [add <task>]"}
+    end
+  rescue
+    _ -> {:command, "Scheduler not available."}
+  end
+
+  defp format_duration(seconds) when seconds < 0, do: "now"
+  defp format_duration(seconds) when seconds < 60, do: "in #{seconds}s"
+  defp format_duration(seconds) when seconds < 3600, do: "in #{div(seconds, 60)} min"
+
+  defp format_duration(seconds) do
+    hours = div(seconds, 3600)
+    mins = div(rem(seconds, 3600), 60)
+    "in #{hours}h #{mins}m"
   end
 
   # ── Utility Commands (prompt expansion from priv/commands/utility/) ──
@@ -1229,11 +1599,12 @@ defmodule OptimalSystemAgent.Commands do
         {:command, "Utility command '#{cmd_name}' template not found."}
 
       template ->
-        expanded = if arg != "" and String.trim(arg) != "" do
-          template <> "\n\nContext: " <> arg
-        else
-          template
-        end
+        expanded =
+          if arg != "" and String.trim(arg) != "" do
+            template <> "\n\nContext: " <> arg
+          else
+            template
+          end
 
         {:prompt, expanded}
     end
@@ -1246,7 +1617,6 @@ defmodule OptimalSystemAgent.Commands do
   defp cmd_clear(_arg, _session_id) do
     {:action, :clear, ""}
   end
-
 
   defp cmd_create(arg, _session_id) do
     result =
@@ -1273,6 +1643,7 @@ defmodule OptimalSystemAgent.Commands do
   end
 
   defp parse_create_args(""), do: :help
+
   defp parse_create_args(arg) do
     case String.split(arg, "|", parts: 3) do
       [name, desc, template] ->
@@ -1325,7 +1696,8 @@ defmodule OptimalSystemAgent.Commands do
     count = stats[:entry_count] || stats[:session_count] || 0
 
     if count >= 0 do
-      {:ok, "Memory", "#{stats[:session_count] || 0} sessions, #{stats[:entry_count] || 0} entries"}
+      {:ok, "Memory",
+       "#{stats[:session_count] || 0} sessions, #{stats[:entry_count] || 0} entries"}
     else
       {:warn, "Memory", "no data yet"}
     end
@@ -1362,18 +1734,22 @@ defmodule OptimalSystemAgent.Commands do
   defp format_timestamp(_), do: "unknown"
 
   defp format_categories(nil), do: "none"
+
   defp format_categories(cats) when is_map(cats) do
     cats
     |> Enum.map_join(", ", fn {k, v} -> "#{k}:#{v}" end)
   end
+
   defp format_categories(_), do: "none"
 
   defp format_pipeline_steps(nil), do: "none"
   defp format_pipeline_steps(steps) when is_map(steps) and map_size(steps) == 0, do: "none"
+
   defp format_pipeline_steps(steps) when is_map(steps) do
     steps
     |> Enum.map_join(", ", fn {k, v} -> "#{k}:#{v}" end)
   end
+
   defp format_pipeline_steps(_), do: "none"
 
   defp format_number(n) when is_integer(n) do
@@ -1383,19 +1759,23 @@ defmodule OptimalSystemAgent.Commands do
     |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
     |> String.reverse()
   end
+
   defp format_number(n), do: "#{n}"
 
   defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
     "#{Float.round(bytes / 1_048_576, 1)} MB"
   end
+
   defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
     "#{Float.round(bytes / 1024, 1)} KB"
   end
+
   defp format_bytes(bytes) when is_integer(bytes), do: "#{bytes} bytes"
   defp format_bytes(_), do: "0 bytes"
 
   defp indent(text, spaces) do
     pad = String.duplicate(" ", spaces)
+
     text
     |> String.split("\n")
     |> Enum.map_join("\n", fn line -> pad <> line end)

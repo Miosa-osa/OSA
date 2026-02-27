@@ -197,7 +197,9 @@ defmodule OptimalSystemAgent.Skills.Registry do
       end
 
     # Collect additional metadata (everything not in our standard keys)
-    standard_keys = ~w(name skill_name skill description trigger triggers trigger_keywords priority tools)
+    standard_keys =
+      ~w(name skill_name skill description trigger triggers trigger_keywords priority tools)
+
     metadata = Map.drop(meta, standard_keys)
 
     %{
@@ -229,7 +231,9 @@ defmodule OptimalSystemAgent.Skills.Registry do
   # Parse a priority value from a string. Supports numeric strings and named levels.
   defp parse_priority(str) do
     case Integer.parse(str) do
-      {n, ""} -> n
+      {n, ""} ->
+        n
+
       _ ->
         case String.downcase(String.trim(str)) do
           "critical" -> 0
@@ -312,7 +316,10 @@ defmodule OptimalSystemAgent.Skills.Registry do
     :persistent_term.put({__MODULE__, :markdown_skills}, markdown)
     :persistent_term.put({__MODULE__, :tools}, tools)
 
-    Logger.info("Skills registry: #{map_size(builtin)} built-in, #{map_size(markdown)} markdown, #{length(tools)} total tools")
+    Logger.info(
+      "Skills registry: #{map_size(builtin)} built-in, #{map_size(markdown)} markdown, #{length(tools)} total tools"
+    )
+
     {:ok, %__MODULE__{skills: builtin, markdown_skills: markdown, tools: tools}}
   end
 
@@ -375,6 +382,8 @@ defmodule OptimalSystemAgent.Skills.Registry do
       "memory_save" => OptimalSystemAgent.Skills.Builtins.MemorySave,
       "orchestrate" => OptimalSystemAgent.Skills.Builtins.Orchestrate,
       "create_skill" => OptimalSystemAgent.Skills.Builtins.CreateSkill,
+      "budget_status" => OptimalSystemAgent.Skills.Builtins.BudgetStatus,
+      "wallet_ops" => OptimalSystemAgent.Skills.Builtins.WalletOps
     }
   end
 
@@ -468,15 +477,17 @@ defmodule OptimalSystemAgent.Skills.Registry do
   defp compile_dispatcher(behaviour_skills, _markdown_skills) do
     if map_size(behaviour_skills) > 0 do
       # Build tool name filters from registered skills
-      tool_filters = Enum.map(behaviour_skills, fn {name, _mod} ->
-        :glc.eq(:tool_name, name)
-      end)
+      tool_filters =
+        Enum.map(behaviour_skills, fn {name, _mod} ->
+          :glc.eq(:tool_name, name)
+        end)
 
       # Compile: match any registered tool name, dispatch via handler
-      query = :glc.with(:glc.any(tool_filters), fn event ->
-        _ = :gre.fetch(:tool_name, event)
-        :ok
-      end)
+      query =
+        :glc.with(:glc.any(tool_filters), fn event ->
+          _ = :gre.fetch(:tool_name, event)
+          :ok
+        end)
 
       case :glc.compile(:osa_tool_dispatcher, query) do
         {:ok, _} -> :ok
@@ -489,13 +500,33 @@ defmodule OptimalSystemAgent.Skills.Registry do
 
   # --- Fallback Dispatch ---
 
-  defp dispatch_builtin("file_read", args), do: OptimalSystemAgent.Skills.Builtins.FileRead.execute(args)
-  defp dispatch_builtin("file_write", args), do: OptimalSystemAgent.Skills.Builtins.FileWrite.execute(args)
-  defp dispatch_builtin("shell_execute", args), do: OptimalSystemAgent.Skills.Builtins.ShellExecute.execute(args)
-  defp dispatch_builtin("web_search", args), do: OptimalSystemAgent.Skills.Builtins.WebSearch.execute(args)
-  defp dispatch_builtin("memory_save", args), do: OptimalSystemAgent.Skills.Builtins.MemorySave.execute(args)
-  defp dispatch_builtin("orchestrate", args), do: OptimalSystemAgent.Skills.Builtins.Orchestrate.execute(args)
-  defp dispatch_builtin("create_skill", args), do: OptimalSystemAgent.Skills.Builtins.CreateSkill.execute(args)
+  defp dispatch_builtin("file_read", args),
+    do: OptimalSystemAgent.Skills.Builtins.FileRead.execute(args)
+
+  defp dispatch_builtin("file_write", args),
+    do: OptimalSystemAgent.Skills.Builtins.FileWrite.execute(args)
+
+  defp dispatch_builtin("shell_execute", args),
+    do: OptimalSystemAgent.Skills.Builtins.ShellExecute.execute(args)
+
+  defp dispatch_builtin("web_search", args),
+    do: OptimalSystemAgent.Skills.Builtins.WebSearch.execute(args)
+
+  defp dispatch_builtin("memory_save", args),
+    do: OptimalSystemAgent.Skills.Builtins.MemorySave.execute(args)
+
+  defp dispatch_builtin("orchestrate", args),
+    do: OptimalSystemAgent.Skills.Builtins.Orchestrate.execute(args)
+
+  defp dispatch_builtin("create_skill", args),
+    do: OptimalSystemAgent.Skills.Builtins.CreateSkill.execute(args)
+
+  defp dispatch_builtin("budget_status", args),
+    do: OptimalSystemAgent.Skills.Builtins.BudgetStatus.execute(args)
+
+  defp dispatch_builtin("wallet_ops", args),
+    do: OptimalSystemAgent.Skills.Builtins.WalletOps.execute(args)
+
   defp dispatch_builtin(name, _args), do: {:error, "No built-in handler for: #{name}"}
 
   # --- Skill Search ---
@@ -530,19 +561,108 @@ defmodule OptimalSystemAgent.Skills.Registry do
 
   defp extract_keywords(text) do
     # Common stop words to filter out
-    stop_words = MapSet.new([
-      "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-      "have", "has", "had", "do", "does", "did", "will", "would", "could",
-      "should", "may", "might", "shall", "can", "need", "dare", "ought",
-      "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-      "as", "into", "through", "during", "before", "after", "above", "below",
-      "between", "out", "off", "over", "under", "again", "further", "then",
-      "once", "that", "this", "these", "those", "i", "me", "my", "we", "our",
-      "you", "your", "it", "its", "and", "but", "or", "nor", "not", "so",
-      "if", "when", "what", "which", "who", "how", "all", "each", "every",
-      "both", "few", "more", "most", "other", "some", "such", "no", "only",
-      "same", "than", "too", "very", "just", "because", "about", "up"
-    ])
+    stop_words =
+      MapSet.new([
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "dare",
+        "ought",
+        "used",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "that",
+        "this",
+        "these",
+        "those",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "it",
+        "its",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "not",
+        "so",
+        "if",
+        "when",
+        "what",
+        "which",
+        "who",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "only",
+        "same",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "about",
+        "up"
+      ])
 
     text
     |> String.downcase()
@@ -588,9 +708,9 @@ defmodule OptimalSystemAgent.Skills.Registry do
       # Weighted score: name exact > name token > name substring > description
       raw_score =
         (name_exact_matches * 1.0 +
-         name_token_matches * 0.7 +
-         name_substring_matches * 0.5 +
-         desc_matches * 0.3) / total_keywords
+           name_token_matches * 0.7 +
+           name_substring_matches * 0.5 +
+           desc_matches * 0.3) / total_keywords
 
       # Clamp to 0.0-1.0
       min(raw_score, 1.0) |> Float.round(2)

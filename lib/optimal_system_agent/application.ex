@@ -34,56 +34,63 @@ defmodule OptimalSystemAgent.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      # Process registry for agent sessions
-      {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry},
+    children =
+      [
+        # Process registry for agent sessions
+        {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry},
 
-      # Core infrastructure
-      {Phoenix.PubSub, name: OptimalSystemAgent.PubSub},
-      OptimalSystemAgent.Events.Bus,
-      OptimalSystemAgent.Bridge.PubSub,
-      OptimalSystemAgent.Store.Repo,
+        # Core infrastructure
+        {Phoenix.PubSub, name: OptimalSystemAgent.PubSub},
+        OptimalSystemAgent.Events.Bus,
+        OptimalSystemAgent.Bridge.PubSub,
+        OptimalSystemAgent.Store.Repo,
 
-      # LLM providers (goldrush-compiled :osa_provider_router)
-      OptimalSystemAgent.Providers.Registry,
+        # LLM providers (goldrush-compiled :osa_provider_router)
+        OptimalSystemAgent.Providers.Registry,
 
-      # Skills + machines (goldrush-compiled :osa_tool_dispatcher)
-      OptimalSystemAgent.Skills.Registry,
-      OptimalSystemAgent.Machines,
+        # Skills + machines (goldrush-compiled :osa_tool_dispatcher)
+        OptimalSystemAgent.Skills.Registry,
+        OptimalSystemAgent.Machines,
 
-      # Slash command registry (built-in + custom + agent-created)
-      OptimalSystemAgent.Commands,
+        # Slash command registry (built-in + custom + agent-created)
+        OptimalSystemAgent.Commands,
 
-      # OS template discovery and connection
-      OptimalSystemAgent.OS.Registry,
+        # OS template discovery and connection
+        OptimalSystemAgent.OS.Registry,
 
-      # MCP integration
-      {DynamicSupervisor, name: OptimalSystemAgent.MCP.Supervisor, strategy: :one_for_one},
+        # MCP integration
+        {DynamicSupervisor, name: OptimalSystemAgent.MCP.Supervisor, strategy: :one_for_one},
 
-      # Channel adapters
-      {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
+        # Channel adapters
+        {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one},
 
-      # Agent processes
-      OptimalSystemAgent.Agent.Memory,
-      OptimalSystemAgent.Agent.Workflow,
-      OptimalSystemAgent.Agent.Orchestrator,
-      OptimalSystemAgent.Agent.Progress,
-      OptimalSystemAgent.Agent.Hooks,
-      OptimalSystemAgent.Agent.Learning,
-      OptimalSystemAgent.Agent.Scheduler,
-      OptimalSystemAgent.Agent.Compactor,
-      OptimalSystemAgent.Agent.Cortex,
+        # Agent processes
+        OptimalSystemAgent.Agent.Memory,
+        OptimalSystemAgent.Agent.HeartbeatState,
+        OptimalSystemAgent.Agent.Workflow,
+        OptimalSystemAgent.Agent.Budget,
+        OptimalSystemAgent.Agent.TaskQueue,
+        OptimalSystemAgent.Agent.Orchestrator,
+        OptimalSystemAgent.Agent.Progress,
+        OptimalSystemAgent.Agent.Hooks,
+        OptimalSystemAgent.Agent.Learning,
+        OptimalSystemAgent.Agent.Scheduler,
+        OptimalSystemAgent.Agent.Compactor,
+        OptimalSystemAgent.Agent.Cortex,
+        OptimalSystemAgent.Agent.Treasury,
 
-      # Communication intelligence (Signal Theory unique)
-      OptimalSystemAgent.Intelligence.Supervisor,
+        # Communication intelligence (Signal Theory unique)
+        OptimalSystemAgent.Intelligence.Supervisor,
 
-      # Multi-agent swarm collaboration system
-      OptimalSystemAgent.Swarm.Supervisor,
+        # Multi-agent swarm collaboration system
+        OptimalSystemAgent.Swarm.Supervisor,
 
-      # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
-      # Started LAST so all agent processes are ready before accepting requests
-      {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
-    ] ++ sidecar_children() ++ sandbox_children()
+        # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
+        # Started LAST so all agent processes are ready before accepting requests
+        {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
+      ] ++
+        fleet_children() ++
+        sidecar_children() ++ sandbox_children() ++ wallet_children() ++ updater_children()
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
 
@@ -152,7 +159,25 @@ defmodule OptimalSystemAgent.Application do
         []
       end
 
-    manager ++ go ++ python ++ go_git ++ go_sysmon
+    whatsapp_web =
+      if Application.get_env(:optimal_system_agent, :whatsapp_web_enabled, false) do
+        Logger.info("[Application] WhatsApp Web sidecar enabled — starting WhatsAppWeb")
+        [OptimalSystemAgent.WhatsAppWeb]
+      else
+        []
+      end
+
+    manager ++ go ++ python ++ go_git ++ go_sysmon ++ whatsapp_web
+  end
+
+  # Fleet management (registry + sentinels) — opt-in via OSA_FLEET_ENABLED=true
+  defp fleet_children do
+    if Application.get_env(:optimal_system_agent, :fleet_enabled, false) do
+      Logger.info("[Application] Fleet enabled — starting Fleet.Supervisor")
+      [OptimalSystemAgent.Fleet.Supervisor]
+    else
+      []
+    end
   end
 
   # Only add Sandbox.Supervisor to the tree when the sandbox is enabled.
@@ -161,6 +186,30 @@ defmodule OptimalSystemAgent.Application do
     if Application.get_env(:optimal_system_agent, :sandbox_enabled, false) do
       Logger.info("[Application] Sandbox enabled — starting Sandbox.Supervisor")
       [OptimalSystemAgent.Sandbox.Supervisor]
+    else
+      []
+    end
+  end
+
+  # Wallet integration — opt-in via OSA_WALLET_ENABLED=true
+  defp wallet_children do
+    if Application.get_env(:optimal_system_agent, :wallet_enabled, false) do
+      Logger.info("[Application] Wallet enabled — starting Wallet + Mock provider")
+
+      [
+        OptimalSystemAgent.Integrations.Wallet.Mock,
+        OptimalSystemAgent.Integrations.Wallet
+      ]
+    else
+      []
+    end
+  end
+
+  # OTA updater — opt-in via OSA_UPDATE_ENABLED=true
+  defp updater_children do
+    if Application.get_env(:optimal_system_agent, :update_enabled, false) do
+      Logger.info("[Application] OTA updater enabled — starting System.Updater")
+      [OptimalSystemAgent.System.Updater]
     else
       []
     end

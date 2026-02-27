@@ -55,6 +55,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Agent.HeartbeatState
   alias OptimalSystemAgent.Events.Bus
 
   @heartbeat_interval Application.compile_env(
@@ -68,7 +69,12 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   @circuit_breaker_limit 3
   @webhook_timeout_ms 10_000
 
-  defstruct failures: %{}, last_run: nil, cron_jobs: [], trigger_handlers: %{}
+  defstruct failures: %{},
+            last_run: nil,
+            cron_jobs: [],
+            trigger_handlers: %{},
+            triggers_raw: [],
+            heartbeat_started_at: nil
 
   # ── Public API ───────────────────────────────────────────────────────
 
@@ -96,6 +102,61 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     GenServer.cast(__MODULE__, {:fire_trigger, trigger_id, payload})
   end
 
+  @doc "Add a new cron job. Validates, persists to CRONS.json, and reloads."
+  def add_job(job_map) when is_map(job_map) do
+    GenServer.call(__MODULE__, {:add_job, job_map})
+  end
+
+  @doc "Remove a cron job by ID."
+  def remove_job(job_id) when is_binary(job_id) do
+    GenServer.call(__MODULE__, {:remove_job, job_id})
+  end
+
+  @doc "Enable or disable a cron job."
+  def toggle_job(job_id, enabled?) when is_binary(job_id) and is_boolean(enabled?) do
+    GenServer.call(__MODULE__, {:toggle_job, job_id, enabled?})
+  end
+
+  @doc "Execute a cron job immediately, bypassing schedule check."
+  def run_job(job_id) when is_binary(job_id) do
+    GenServer.call(__MODULE__, {:run_job, job_id}, 35_000)
+  end
+
+  @doc "Add a new trigger. Validates, persists to TRIGGERS.json, and reloads."
+  def add_trigger(trigger_map) when is_map(trigger_map) do
+    GenServer.call(__MODULE__, {:add_trigger, trigger_map})
+  end
+
+  @doc "Remove a trigger by ID."
+  def remove_trigger(trigger_id) when is_binary(trigger_id) do
+    GenServer.call(__MODULE__, {:remove_trigger, trigger_id})
+  end
+
+  @doc "Enable or disable a trigger."
+  def toggle_trigger(trigger_id, enabled?) when is_binary(trigger_id) and is_boolean(enabled?) do
+    GenServer.call(__MODULE__, {:toggle_trigger, trigger_id, enabled?})
+  end
+
+  @doc "Return the list of currently loaded triggers with their state."
+  def list_triggers do
+    GenServer.call(__MODULE__, :list_triggers)
+  end
+
+  @doc "Append an unchecked task to HEARTBEAT.md."
+  def add_heartbeat_task(text) when is_binary(text) do
+    GenServer.call(__MODULE__, {:add_heartbeat_task, text})
+  end
+
+  @doc "Return the DateTime of the next heartbeat tick."
+  def next_heartbeat_at do
+    GenServer.call(__MODULE__, :next_heartbeat_at)
+  end
+
+  @doc "Return scheduler status overview."
+  def status do
+    GenServer.call(__MODULE__, :status)
+  end
+
   @doc "Get the path to the HEARTBEAT.md file."
   def heartbeat_path do
     Path.expand(Path.join(@config_dir, "HEARTBEAT.md"))
@@ -109,6 +170,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     schedule_heartbeat()
     schedule_cron_check()
 
+    state = %{state | heartbeat_started_at: DateTime.utc_now()}
     state = load_crons(state)
     state = load_triggers(state)
 
@@ -163,6 +225,223 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       end)
 
     {:reply, jobs, state}
+  end
+
+  @impl true
+  def handle_call({:add_job, job_map}, _from, state) do
+    job =
+      job_map
+      |> Map.put_new("id", generate_id())
+      |> Map.put_new("enabled", true)
+
+    case validate_job(job) do
+      :ok ->
+        case atomic_update_crons(state, fn jobs -> jobs ++ [job] end) do
+          {:ok, state} -> {:reply, {:ok, job}, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:remove_job, job_id}, _from, state) do
+    if Enum.any?(state.cron_jobs, &(&1["id"] == job_id)) do
+      case atomic_update_crons(state, fn jobs ->
+             Enum.reject(jobs, &(&1["id"] == job_id))
+           end) do
+        {:ok, state} -> {:reply, :ok, state}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, "Job not found: #{job_id}"}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:toggle_job, job_id, enabled?}, _from, state) do
+    if Enum.any?(state.cron_jobs, &(&1["id"] == job_id)) do
+      case atomic_update_crons(state, fn jobs ->
+             Enum.map(jobs, fn job ->
+               if job["id"] == job_id, do: Map.put(job, "enabled", enabled?), else: job
+             end)
+           end) do
+        {:ok, state} ->
+          state =
+            if enabled?, do: %{state | failures: Map.delete(state.failures, job_id)}, else: state
+
+          {:reply, :ok, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, "Job not found: #{job_id}"}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:run_job, job_id}, _from, state) do
+    case Enum.find(state.cron_jobs, &(&1["id"] == job_id)) do
+      nil ->
+        {:reply, {:error, "Job not found: #{job_id}"}, state}
+
+      job ->
+        case execute_cron_job(job) do
+          {:ok, result} ->
+            state = %{state | failures: Map.delete(state.failures, job_id)}
+            {:reply, {:ok, result}, state}
+
+          {:error, reason} ->
+            failures = Map.get(state.failures, job_id, 0) + 1
+            state = %{state | failures: Map.put(state.failures, job_id, failures)}
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  @impl true
+  def handle_call({:add_trigger, trigger_map}, _from, state) do
+    trigger =
+      trigger_map
+      |> Map.put_new("id", generate_id())
+      |> Map.put_new("enabled", true)
+
+    case validate_trigger(trigger) do
+      :ok ->
+        case atomic_update_triggers(state, fn triggers -> triggers ++ [trigger] end) do
+          {:ok, state} -> {:reply, {:ok, trigger}, state}
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:remove_trigger, trigger_id}, _from, state) do
+    if Enum.any?(state.triggers_raw, &(&1["id"] == trigger_id)) do
+      case atomic_update_triggers(state, fn triggers ->
+             Enum.reject(triggers, &(&1["id"] == trigger_id))
+           end) do
+        {:ok, state} -> {:reply, :ok, state}
+        {:error, reason} -> {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, "Trigger not found: #{trigger_id}"}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:toggle_trigger, trigger_id, enabled?}, _from, state) do
+    if Enum.any?(state.triggers_raw, &(&1["id"] == trigger_id)) do
+      case atomic_update_triggers(state, fn triggers ->
+             Enum.map(triggers, fn t ->
+               if t["id"] == trigger_id, do: Map.put(t, "enabled", enabled?), else: t
+             end)
+           end) do
+        {:ok, state} ->
+          state =
+            if enabled?,
+              do: %{state | failures: Map.delete(state.failures, trigger_id)},
+              else: state
+
+          {:reply, :ok, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, "Trigger not found: #{trigger_id}"}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:list_triggers, _from, state) do
+    triggers =
+      Enum.map(state.triggers_raw, fn trigger ->
+        failures = Map.get(state.failures, trigger["id"], 0)
+
+        Map.merge(trigger, %{
+          "failure_count" => failures,
+          "circuit_open" => failures >= @circuit_breaker_limit
+        })
+      end)
+
+    {:reply, triggers, state}
+  end
+
+  @impl true
+  def handle_call({:add_heartbeat_task, text}, _from, state) do
+    path = heartbeat_path()
+
+    case File.read(path) do
+      {:ok, content} ->
+        new_line = "- [ ] #{text}"
+        updated = String.trim_trailing(content) <> "\n#{new_line}\n"
+        File.write!(path, updated)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, "Failed to read HEARTBEAT.md: #{inspect(reason)}"}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:next_heartbeat_at, _from, state) do
+    next =
+      case state.last_run do
+        nil ->
+          DateTime.add(
+            state.heartbeat_started_at || DateTime.utc_now(),
+            @heartbeat_interval,
+            :millisecond
+          )
+
+        last ->
+          DateTime.add(last, @heartbeat_interval, :millisecond)
+      end
+
+    {:reply, next, state}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    enabled_jobs = Enum.count(state.cron_jobs, &(&1["enabled"] == true))
+    enabled_triggers = Enum.count(state.triggers_raw, &(&1["enabled"] == true))
+
+    pending_tasks =
+      case File.read(heartbeat_path()) do
+        {:ok, content} -> length(parse_pending_tasks(content))
+        _ -> 0
+      end
+
+    next =
+      case state.last_run do
+        nil ->
+          DateTime.add(
+            state.heartbeat_started_at || DateTime.utc_now(),
+            @heartbeat_interval,
+            :millisecond
+          )
+
+        last ->
+          DateTime.add(last, @heartbeat_interval, :millisecond)
+      end
+
+    status = %{
+      cron_active: enabled_jobs,
+      cron_total: length(state.cron_jobs),
+      trigger_active: enabled_triggers,
+      trigger_total: length(state.triggers_raw),
+      heartbeat_pending: pending_tasks,
+      next_heartbeat: next
+    }
+
+    {:reply, status, state}
   end
 
   # ── Info Handlers ─────────────────────────────────────────────────────
@@ -237,7 +516,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
             "TRIGGERS.json: #{map_size(handler_map)} enabled trigger(s) out of #{length(triggers)}"
           )
 
-          %{state | trigger_handlers: handler_map}
+          %{state | trigger_handlers: handler_map, triggers_raw: triggers}
 
         {:error, reason} ->
           Logger.warning("Failed to parse TRIGGERS.json: #{inspect(reason)}")
@@ -281,7 +560,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     firing =
       Enum.filter(enabled_jobs, fn job ->
         case parse_cron_expression(job["schedule"]) do
-          {:ok, fields} -> cron_matches?(fields, now)
+          {:ok, fields} ->
+            cron_matches?(fields, now)
+
           {:error, reason} ->
             Logger.warning("Cron '#{job["id"]}': bad schedule '#{job["schedule"]}' — #{reason}")
             false
@@ -438,10 +719,10 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   # ── Shell Command Execution ───────────────────────────────────────────
 
   @blocked_commands MapSet.new(
-    ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
+                      ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
        kill killall pkill mount umount iptables systemctl passwd useradd userdel
        nc ncat)
-  )
+                    )
 
   @blocked_patterns [
     ~r/\brm\s+(-[a-zA-Z]*\s+)*\//,
@@ -669,6 +950,31 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   # ── Heartbeat Execution ─────────────────────────────────────────────
 
   defp run_heartbeat(state) do
+    # Check quiet hours — suppress heartbeat if active
+    quiet =
+      try do
+        HeartbeatState.in_quiet_hours?()
+      catch
+        :exit, _ -> false
+      end
+
+    if quiet do
+      Logger.debug("[Scheduler] Heartbeat suppressed — quiet hours active")
+      return = %{state | last_run: DateTime.utc_now()}
+
+      try do
+        HeartbeatState.record_check(:heartbeat, :suppressed_quiet_hours)
+      catch
+        :exit, _ -> :ok
+      end
+
+      return
+    else
+      run_heartbeat_tasks(state)
+    end
+  end
+
+  defp run_heartbeat_tasks(state) do
     path = heartbeat_path()
 
     if File.exists?(path) do
@@ -719,6 +1025,14 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
           completed: length(completed),
           total: length(tasks)
         })
+
+        result = %{completed: length(completed), total: length(tasks)}
+
+        try do
+          HeartbeatState.record_check(:heartbeat, result)
+        catch
+          :exit, _ -> :ok
+        end
 
         %{state | last_run: DateTime.utc_now()}
       end
@@ -775,6 +1089,125 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       replacement = "\\1[x]\\2 (completed #{timestamp})"
       String.replace(acc, pattern, replacement, global: false)
     end)
+  end
+
+  # ── Atomic JSON Writes ──────────────────────────────────────────────
+
+  defp atomic_update_crons(state, update_fn) do
+    path = crons_path()
+    tmp_path = path <> ".tmp"
+
+    current_jobs =
+      case File.read(path) do
+        {:ok, raw} ->
+          case Jason.decode(raw) do
+            {:ok, %{"jobs" => jobs}} -> jobs
+            _ -> state.cron_jobs
+          end
+
+        _ ->
+          state.cron_jobs
+      end
+
+    updated_jobs = update_fn.(current_jobs)
+    json = Jason.encode!(%{"jobs" => updated_jobs}, pretty: true)
+
+    with :ok <- File.write(tmp_path, json),
+         :ok <- File.rename(tmp_path, path) do
+      state = load_crons(%{state | cron_jobs: []})
+      {:ok, state}
+    else
+      {:error, reason} -> {:error, "Failed to write CRONS.json: #{inspect(reason)}"}
+    end
+  rescue
+    e -> {:error, "Failed to update CRONS.json: #{Exception.message(e)}"}
+  end
+
+  defp atomic_update_triggers(state, update_fn) do
+    path = triggers_path()
+    tmp_path = path <> ".tmp"
+
+    current_triggers =
+      case File.read(path) do
+        {:ok, raw} ->
+          case Jason.decode(raw) do
+            {:ok, %{"triggers" => triggers}} -> triggers
+            _ -> state.triggers_raw
+          end
+
+        _ ->
+          state.triggers_raw
+      end
+
+    updated_triggers = update_fn.(current_triggers)
+    json = Jason.encode!(%{"triggers" => updated_triggers}, pretty: true)
+
+    with :ok <- File.write(tmp_path, json),
+         :ok <- File.rename(tmp_path, path) do
+      state = load_triggers(%{state | trigger_handlers: %{}, triggers_raw: []})
+      {:ok, state}
+    else
+      {:error, reason} -> {:error, "Failed to write TRIGGERS.json: #{inspect(reason)}"}
+    end
+  rescue
+    e -> {:error, "Failed to update TRIGGERS.json: #{Exception.message(e)}"}
+  end
+
+  # ── Validation ─────────────────────────────────────────────────────
+
+  defp validate_job(job) do
+    cond do
+      not is_binary(job["name"]) or job["name"] == "" ->
+        {:error, "Job must have a non-empty 'name'"}
+
+      not is_binary(job["schedule"]) ->
+        {:error, "Job must have a 'schedule' (cron expression)"}
+
+      job["type"] not in ["agent", "command", "webhook"] ->
+        {:error, "Job 'type' must be one of: agent, command, webhook"}
+
+      job["type"] == "agent" and (not is_binary(job["job"]) or job["job"] == "") ->
+        {:error, "Agent job must have a 'job' field with the task description"}
+
+      job["type"] == "command" and (not is_binary(job["command"]) or job["command"] == "") ->
+        {:error, "Command job must have a 'command' field"}
+
+      job["type"] == "webhook" and (not is_binary(job["url"]) or job["url"] == "") ->
+        {:error, "Webhook job must have a 'url' field"}
+
+      true ->
+        case parse_cron_expression(job["schedule"]) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, "Invalid cron schedule: #{reason}"}
+        end
+    end
+  end
+
+  defp validate_trigger(trigger) do
+    cond do
+      not is_binary(trigger["name"]) or trigger["name"] == "" ->
+        {:error, "Trigger must have a non-empty 'name'"}
+
+      not is_binary(trigger["event"]) or trigger["event"] == "" ->
+        {:error, "Trigger must have an 'event' field"}
+
+      trigger["type"] not in ["agent", "command"] ->
+        {:error, "Trigger 'type' must be one of: agent, command"}
+
+      trigger["type"] == "agent" and (not is_binary(trigger["job"]) or trigger["job"] == "") ->
+        {:error, "Agent trigger must have a 'job' field"}
+
+      trigger["type"] == "command" and
+          (not is_binary(trigger["command"]) or trigger["command"] == "") ->
+        {:error, "Command trigger must have a 'command' field"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp generate_id do
+    :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false)
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────

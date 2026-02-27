@@ -21,8 +21,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Agent.Roster
-  alias OptimalSystemAgent.Agent.Tier
+  alias OptimalSystemAgent.Agent.{Appraiser, Roster, Tier, TaskQueue}
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Skills.Registry, as: Skills
@@ -30,11 +29,9 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   @max_concurrent_agents 10
   @agent_timeout 300_000
 
-  defstruct [
-    tasks: %{},
-    agent_pool: %{},
-    skill_cache: %{}
-  ]
+  defstruct tasks: %{},
+            agent_pool: %{},
+            skill_cache: %{}
 
   # ── Sub-task struct ──────────────────────────────────────────────────
 
@@ -105,7 +102,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   Execute a complex task with multiple sub-agents.
   Returns {:ok, task_id, synthesis} when all agents complete.
   """
-  @spec execute(String.t(), String.t(), keyword()) :: {:ok, String.t(), String.t()} | {:error, term()}
+  @spec execute(String.t(), String.t(), keyword()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
   def execute(message, session_id, opts \\ []) do
     GenServer.call(__MODULE__, {:execute, message, session_id, opts}, @agent_timeout + 30_000)
   end
@@ -123,7 +121,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   Dynamically create a new skill for a specific task.
   Writes a SKILL.md file and registers it with the Skills.Registry.
   """
-  @spec create_skill(String.t(), String.t(), String.t(), list()) :: {:ok, String.t()} | {:error, term()}
+  @spec create_skill(String.t(), String.t(), String.t(), list()) ::
+          {:ok, String.t()} | {:error, term()}
   def create_skill(name, description, instructions, tools \\ []) do
     GenServer.call(__MODULE__, {:create_skill, name, description, instructions, tools})
   end
@@ -160,7 +159,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   @impl true
   def init(state) do
-    Logger.info("[Orchestrator] Task orchestration engine started (max_agents=#{@max_concurrent_agents})")
+    Logger.info(
+      "[Orchestrator] Task orchestration engine started (max_agents=#{@max_concurrent_agents})"
+    )
+
     {:ok, state}
   end
 
@@ -197,6 +199,45 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         # Cap at max concurrent agents
         sub_tasks = Enum.take(sub_tasks, @max_concurrent_agents)
 
+        # Estimate task value via Appraiser (best-effort, non-blocking)
+        appraisal =
+          try do
+            estimates =
+              Enum.map(sub_tasks, fn st ->
+                role = st.role || :backend
+                %{role: role, complexity: length(st.depends_on) + 3}
+              end)
+
+            Appraiser.estimate_task(estimates)
+          rescue
+            _ -> nil
+          end
+
+        if appraisal do
+          Bus.emit(:system_event, %{
+            event: :orchestrator_task_appraised,
+            task_id: task_id,
+            estimated_cost_usd: appraisal.total_cost_usd,
+            estimated_hours: appraisal.total_hours
+          })
+        end
+
+        # Enqueue sub-tasks into TaskQueue (best-effort, non-blocking)
+        try do
+          Enum.each(sub_tasks, fn st ->
+            subtask_id = "#{task_id}_#{st.name}"
+
+            TaskQueue.enqueue(subtask_id, session_id, %{
+              name: st.name,
+              role: st.role,
+              description: st.description,
+              depends_on: st.depends_on
+            })
+          end)
+        catch
+          :exit, _ -> :ok
+        end
+
         task_state = %TaskState{
           id: task_id,
           message: message,
@@ -217,19 +258,23 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         })
 
         # 2. Execute with dependency awareness
-        {results, state} = execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools)
+        {results, state} =
+          execute_with_dependencies(sub_tasks, task_id, session_id, state, cached_tools)
 
         # 3. Synthesize results
         synthesis = synthesize_results(task_id, results, message)
 
         # 4. Mark task complete
         task_state = Map.get(state.tasks, task_id)
-        task_state = %{task_state |
-          status: :completed,
-          results: results,
-          synthesis: synthesis,
-          completed_at: DateTime.utc_now()
+
+        task_state = %{
+          task_state
+          | status: :completed,
+            results: results,
+            synthesis: synthesis,
+            completed_at: DateTime.utc_now()
         }
+
         state = %{state | tasks: Map.put(state.tasks, task_id, task_state)}
 
         Bus.emit(:system_event, %{
@@ -239,12 +284,17 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           result_preview: String.slice(synthesis || "", 0, 200)
         })
 
-        Logger.info("[Orchestrator] Task #{task_id} completed — #{length(sub_tasks)} agents, synthesis ready")
+        Logger.info(
+          "[Orchestrator] Task #{task_id} completed — #{length(sub_tasks)} agents, synthesis ready"
+        )
 
         {:reply, {:ok, task_id, synthesis}, state}
 
       {:ok, []} ->
-        Logger.warning("[Orchestrator] Task decomposition returned no sub-tasks, running as simple")
+        Logger.warning(
+          "[Orchestrator] Task decomposition returned no sub-tasks, running as simple"
+        )
+
         result = run_simple(message, session_id)
         {:reply, {:ok, task_id, result}, state}
 
@@ -273,7 +323,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           status: task_state.status,
           started_at: task_state.started_at,
           completed_at: task_state.completed_at,
-          agents: task_state.agents
+          agents:
+            task_state.agents
             |> Map.values()
             |> Enum.sort_by(& &1.started_at)
             |> Enum.map(fn agent ->
@@ -303,7 +354,14 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     state =
       case result do
         {:ok, _} ->
-          %{state | skill_cache: Map.put(state.skill_cache, name, %{description: description, created_at: DateTime.utc_now()})}
+          %{
+            state
+            | skill_cache:
+                Map.put(state.skill_cache, name, %{
+                  description: description,
+                  created_at: DateTime.utc_now()
+                })
+          }
 
         _ ->
           state
@@ -320,7 +378,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       |> Enum.sort_by(& &1.started_at, {:desc, DateTime})
       |> Enum.map(fn t ->
         agent_count = map_size(t.agents)
-        completed_count = t.agents |> Map.values() |> Enum.count(& &1.status == :completed)
+        completed_count = t.agents |> Map.values() |> Enum.count(&(&1.status == :completed))
 
         %{
           id: t.id,
@@ -349,7 +407,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         high_relevance = Enum.filter(matches, fn m -> m.relevance > 0.5 end)
 
         if high_relevance != [] do
-          Logger.info("[Orchestrator] Found #{length(high_relevance)} existing skill(s) matching '#{name}'")
+          Logger.info(
+            "[Orchestrator] Found #{length(high_relevance)} existing skill(s) matching '#{name}'"
+          )
+
           {:reply, {:existing_matches, high_relevance}, state}
         else
           # Low relevance matches only — proceed to create
@@ -358,7 +419,14 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           state =
             case result do
               {:ok, _} ->
-                %{state | skill_cache: Map.put(state.skill_cache, name, %{description: description, created_at: DateTime.utc_now()})}
+                %{
+                  state
+                  | skill_cache:
+                      Map.put(state.skill_cache, name, %{
+                        description: description,
+                        created_at: DateTime.utc_now()
+                      })
+                }
 
               _ ->
                 state
@@ -376,7 +444,14 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         state =
           case result do
             {:ok, _} ->
-              %{state | skill_cache: Map.put(state.skill_cache, name, %{description: description, created_at: DateTime.utc_now()})}
+              %{
+                state
+                | skill_cache:
+                    Map.put(state.skill_cache, name, %{
+                      description: description,
+                      created_at: DateTime.utc_now()
+                    })
+              }
 
             _ ->
               state
@@ -402,10 +477,11 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
             {:noreply, state}
 
           agent ->
-            updated_agent = %{agent |
-              tool_uses: Map.get(update, :tool_uses, agent.tool_uses),
-              tokens_used: Map.get(update, :tokens_used, agent.tokens_used),
-              current_action: Map.get(update, :current_action, agent.current_action)
+            updated_agent = %{
+              agent
+              | tool_uses: Map.get(update, :tool_uses, agent.tool_uses),
+                tokens_used: Map.get(update, :tokens_used, agent.tokens_used),
+                current_action: Map.get(update, :current_action, agent.current_action)
             }
 
             updated_agents = Map.put(task_state.agents, agent_id, updated_agent)
@@ -480,7 +556,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         :simple
 
       {:error, reason} ->
-        Logger.error("[Orchestrator] LLM call failed during complexity analysis: #{inspect(reason)}")
+        Logger.error(
+          "[Orchestrator] LLM call failed during complexity analysis: #{inspect(reason)}"
+        )
+
         :simple
     end
   end
@@ -547,15 +626,16 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       case analyze_complexity(message) do
         :simple ->
           # Create a single "do everything" sub-task
-          {:ok, [
-            %SubTask{
-              name: "execute",
-              description: message,
-              role: :builder,
-              tools_needed: ["file_read", "file_write", "shell_execute"],
-              depends_on: []
-            }
-          ]}
+          {:ok,
+           [
+             %SubTask{
+               name: "execute",
+               description: message,
+               role: :builder,
+               tools_needed: ["file_read", "file_write", "shell_execute"],
+               depends_on: []
+             }
+           ]}
 
         {:complex, sub_tasks} ->
           {:ok, sub_tasks}
@@ -584,12 +664,13 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           end)
 
         # Register agents in state
-        state_acc = Enum.reduce(agents_and_tasks, state_acc, fn {agent_id, agent_state, _task_ref}, st ->
-          task_state = Map.get(st.tasks, task_id)
-          updated_agents = Map.put(task_state.agents, agent_id, agent_state)
-          updated_task = %{task_state | agents: updated_agents}
-          %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
-        end)
+        state_acc =
+          Enum.reduce(agents_and_tasks, state_acc, fn {agent_id, agent_state, _task_ref}, st ->
+            task_state = Map.get(st.tasks, task_id)
+            updated_agents = Map.put(task_state.agents, agent_id, agent_state)
+            updated_task = %{task_state | agents: updated_agents}
+            %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
+          end)
 
         # Await all agents in this wave
         wave_results =
@@ -599,7 +680,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
                 Task.await(task_ref, @agent_timeout)
               rescue
                 e ->
-                  Logger.error("[Orchestrator] Agent #{agent_state.name} failed: #{Exception.message(e)}")
+                  Logger.error(
+                    "[Orchestrator] Agent #{agent_state.name} failed: #{Exception.message(e)}"
+                  )
+
                   {:error, Exception.message(e)}
               catch
                 :exit, {:timeout, _} ->
@@ -611,45 +695,47 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           end)
 
         # Update agent states with results
-        state_acc = Enum.reduce(wave_results, state_acc, fn {name, result}, st ->
-          task_state = Map.get(st.tasks, task_id)
+        state_acc =
+          Enum.reduce(wave_results, state_acc, fn {name, result}, st ->
+            task_state = Map.get(st.tasks, task_id)
 
-          agent =
-            task_state.agents
-            |> Map.values()
-            |> Enum.find(& &1.name == name)
+            agent =
+              task_state.agents
+              |> Map.values()
+              |> Enum.find(&(&1.name == name))
 
-          if agent do
-            {status, result_text, error} =
-              case result do
-                {:ok, text} -> {:completed, text, nil}
-                {:error, reason} -> {:failed, nil, reason}
-                text when is_binary(text) -> {:completed, text, nil}
-              end
+            if agent do
+              {status, result_text, error} =
+                case result do
+                  {:ok, text} -> {:completed, text, nil}
+                  {:error, reason} -> {:failed, nil, reason}
+                  text when is_binary(text) -> {:completed, text, nil}
+                end
 
-            updated_agent = %{agent |
-              status: status,
-              result: result_text,
-              error: error,
-              completed_at: DateTime.utc_now()
-            }
+              updated_agent = %{
+                agent
+                | status: status,
+                  result: result_text,
+                  error: error,
+                  completed_at: DateTime.utc_now()
+              }
 
-            updated_agents = Map.put(task_state.agents, agent.id, updated_agent)
-            updated_task = %{task_state | agents: updated_agents}
+              updated_agents = Map.put(task_state.agents, agent.id, updated_agent)
+              updated_task = %{task_state | agents: updated_agents}
 
-            Bus.emit(:system_event, %{
-              event: :orchestrator_agent_completed,
-              task_id: task_id,
-              agent_id: agent.id,
-              agent_name: name,
-              status: status
-            })
+              Bus.emit(:system_event, %{
+                event: :orchestrator_agent_completed,
+                task_id: task_id,
+                agent_id: agent.id,
+                agent_name: name,
+                status: status
+              })
 
-            %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
-          else
-            st
-          end
-        end)
+              %{st | tasks: Map.put(st.tasks, task_id, updated_task)}
+            else
+              st
+            end
+          end)
 
         # Merge wave results into accumulated results
         new_results =
@@ -693,7 +779,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
     if ready == [] and not_ready != [] do
       # Circular dependency or unresolvable — force everything into one wave
-      Logger.warning("[Orchestrator] Unresolvable dependencies detected, forcing parallel execution")
+      Logger.warning(
+        "[Orchestrator] Unresolvable dependencies detected, forcing parallel execution"
+      )
+
       Enum.reverse([not_ready | waves])
     else
       new_resolved =
@@ -766,9 +855,19 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     # Run the agent asynchronously
     orchestrator_pid = self()
 
-    task_ref = Task.async(fn ->
-      run_agent_loop(agent_id, task_id, system_prompt, sub_task, session_id, orchestrator_pid, cached_tools, tier_opts)
-    end)
+    task_ref =
+      Task.async(fn ->
+        run_agent_loop(
+          agent_id,
+          task_id,
+          system_prompt,
+          sub_task,
+          session_id,
+          orchestrator_pid,
+          cached_tools,
+          tier_opts
+        )
+      end)
 
     {agent_id, agent_state, task_ref}
   end
@@ -776,7 +875,9 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   # Resolve which tier an agent should run at based on Roster or role defaults.
   defp resolve_agent_tier(sub_task) do
     case Roster.find_by_trigger(sub_task.description) do
-      %{tier: tier} -> tier
+      %{tier: tier} ->
+        tier
+
       nil ->
         # Map roles to default tiers
         case sub_task.role do
@@ -789,7 +890,16 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Agent Loop (runs inside Task.async) ─────────────────────────────
 
-  defp run_agent_loop(agent_id, task_id, system_prompt, sub_task, _session_id, orchestrator_pid, cached_tools, tier_opts) do
+  defp run_agent_loop(
+         agent_id,
+         task_id,
+         system_prompt,
+         sub_task,
+         _session_id,
+         orchestrator_pid,
+         cached_tools,
+         tier_opts
+       ) do
     # Build the conversation for this sub-agent
     user_message =
       if sub_task.context do
@@ -831,19 +941,46 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
     # Run the agent's ReAct loop with tier-aware model and temperature
     max_iters = tier_opts.max_iterations
-    run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, 0, 0, 0, tier_opts, max_iters)
+
+    run_sub_agent_iterations(
+      agent_id,
+      task_id,
+      messages,
+      tools,
+      orchestrator_pid,
+      0,
+      0,
+      0,
+      tier_opts,
+      max_iters
+    )
   end
 
-  defp run_sub_agent_iterations(agent_id, task_id, messages, _tools, orchestrator_pid, iteration, tool_uses, tokens_used, _tier_opts, max_iters)
+  defp run_sub_agent_iterations(
+         agent_id,
+         task_id,
+         messages,
+         _tools,
+         orchestrator_pid,
+         iteration,
+         tool_uses,
+         tokens_used,
+         _tier_opts,
+         max_iters
+       )
        when iteration >= max_iters do
     Logger.warning("[Orchestrator] Sub-agent #{agent_id} hit max iterations (#{max_iters})")
 
     # Report final progress
-    GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
-      tool_uses: tool_uses,
-      tokens_used: tokens_used,
-      current_action: "Completed (max iterations)"
-    }})
+    GenServer.cast(
+      orchestrator_pid,
+      {:agent_progress, task_id, agent_id,
+       %{
+         tool_uses: tool_uses,
+         tokens_used: tokens_used,
+         current_action: "Completed (max iterations)"
+       }}
+    )
 
     # Extract the last assistant message as the result
     last_assistant =
@@ -851,16 +988,33 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       |> Enum.reverse()
       |> Enum.find(fn msg -> msg.role == "assistant" end)
 
-    {:ok, (last_assistant && last_assistant.content) || "Agent reached iteration limit without producing a result."}
+    {:ok,
+     (last_assistant && last_assistant.content) ||
+       "Agent reached iteration limit without producing a result."}
   end
 
-  defp run_sub_agent_iterations(agent_id, task_id, messages, tools, orchestrator_pid, iteration, tool_uses, tokens_used, tier_opts, max_iters) do
+  defp run_sub_agent_iterations(
+         agent_id,
+         task_id,
+         messages,
+         tools,
+         orchestrator_pid,
+         iteration,
+         tool_uses,
+         tokens_used,
+         tier_opts,
+         max_iters
+       ) do
     # Emit progress update
-    GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
-      tool_uses: tool_uses,
-      tokens_used: tokens_used,
-      current_action: "Thinking... (iteration #{iteration + 1}/#{max_iters})"
-    }})
+    GenServer.cast(
+      orchestrator_pid,
+      {:agent_progress, task_id, agent_id,
+       %{
+         tool_uses: tool_uses,
+         tokens_used: tokens_used,
+         current_action: "Thinking... (iteration #{iteration + 1}/#{max_iters})"
+       }}
+    )
 
     # Tier-aware LLM options: model + temperature from the agent's tier
     llm_opts = [
@@ -876,15 +1030,20 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           # No tool calls — final response
           estimated_tokens = tokens_used + estimate_tokens(content)
 
-          GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
-            tool_uses: tool_uses,
-            tokens_used: estimated_tokens,
-            current_action: "Done"
-          }})
+          GenServer.cast(
+            orchestrator_pid,
+            {:agent_progress, task_id, agent_id,
+             %{
+               tool_uses: tool_uses,
+               tokens_used: estimated_tokens,
+               current_action: "Done"
+             }}
+          )
 
           {:ok, content}
 
-        {:ok, %{content: content, tool_calls: tool_calls}} when is_list(tool_calls) and tool_calls != [] ->
+        {:ok, %{content: content, tool_calls: tool_calls}}
+        when is_list(tool_calls) and tool_calls != [] ->
           # Execute tool calls
           new_tool_uses = tool_uses + length(tool_calls)
           estimated_tokens = tokens_used + estimate_tokens(content)
@@ -893,13 +1052,18 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
           # Execute each tool and collect results
           {messages, new_tool_uses_final, estimated_tokens_final} =
-            Enum.reduce(tool_calls, {messages, new_tool_uses, estimated_tokens}, fn tool_call, {msgs, tu, et} ->
+            Enum.reduce(tool_calls, {messages, new_tool_uses, estimated_tokens}, fn tool_call,
+                                                                                    {msgs, tu, et} ->
               # Report what we're doing
-              GenServer.cast(orchestrator_pid, {:agent_progress, task_id, agent_id, %{
-                tool_uses: tu,
-                tokens_used: et,
-                current_action: "Running #{tool_call.name}"
-              }})
+              GenServer.cast(
+                orchestrator_pid,
+                {:agent_progress, task_id, agent_id,
+                 %{
+                   tool_uses: tu,
+                   tokens_used: et,
+                   current_action: "Running #{tool_call.name}"
+                 }}
+              )
 
               # Use execute_direct to bypass GenServer — Skills.Registry is blocked
               # by the parent execute("orchestrate") call that spawned us.
@@ -915,8 +1079,16 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
           # Re-prompt with same tier opts
           run_sub_agent_iterations(
-            agent_id, task_id, messages, tools, orchestrator_pid,
-            iteration + 1, new_tool_uses_final, estimated_tokens_final, tier_opts, max_iters
+            agent_id,
+            task_id,
+            messages,
+            tools,
+            orchestrator_pid,
+            iteration + 1,
+            new_tool_uses_final,
+            estimated_tokens_final,
+            tier_opts,
+            max_iters
           )
 
         {:ok, %{content: content}} when is_binary(content) and content != "" ->
@@ -1128,13 +1300,19 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       })
 
       try do
-        case Providers.chat([%{role: "user", content: prompt}], temperature: 0.3, max_tokens: 2000) do
+        case Providers.chat([%{role: "user", content: prompt}],
+               temperature: 0.3,
+               max_tokens: 2000
+             ) do
           {:ok, %{content: synthesis}} when is_binary(synthesis) and synthesis != "" ->
             synthesis
 
           _ ->
             # Fallback: join all results
-            Logger.warning("[Orchestrator] Synthesis LLM call failed -- falling back to joined results")
+            Logger.warning(
+              "[Orchestrator] Synthesis LLM call failed -- falling back to joined results"
+            )
+
             Enum.map_join(results, "\n\n---\n\n", fn {name, result} ->
               "## #{name}\n#{result}"
             end)
@@ -1142,6 +1320,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       rescue
         e ->
           Logger.error("[Orchestrator] Synthesis failed: #{Exception.message(e)}")
+
           Enum.map_join(results, "\n\n---\n\n", fn {name, result} ->
             "## #{name}\n#{result}"
           end)
@@ -1235,9 +1414,11 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   end
 
   defp estimate_tokens(nil), do: 0
+
   defp estimate_tokens(text) when is_binary(text) do
     # Rough estimate: ~4 chars per token
     div(String.length(text), 4)
   end
+
   defp estimate_tokens(_), do: 0
 end

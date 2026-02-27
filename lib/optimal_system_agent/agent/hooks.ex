@@ -26,10 +26,21 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   alias OptimalSystemAgent.Events.Bus
 
-  @type hook_event :: :pre_tool_use | :post_tool_use | :pre_compact |
-                      :session_start | :session_end | :pre_response | :post_response
+  @type hook_event ::
+          :pre_tool_use
+          | :post_tool_use
+          | :pre_compact
+          | :session_start
+          | :session_end
+          | :pre_response
+          | :post_response
   @type hook_fn :: (map() -> {:ok, map()} | {:block, String.t()} | :skip)
-  @type hook_entry :: %{name: String.t(), event: hook_event(), handler: hook_fn(), priority: integer()}
+  @type hook_entry :: %{
+          name: String.t(),
+          event: hook_event(),
+          handler: hook_fn(),
+          priority: integer()
+        }
 
   defstruct hooks: %{}, metrics: %{}
 
@@ -134,12 +145,14 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
         {:block, reason} ->
           Logger.warning("[Hooks] #{hook.name} blocked #{event}: #{reason}")
+
           Bus.emit(:system_event, %{
             event: :hook_blocked,
             hook_name: hook.name,
             hook_event: event,
             reason: reason
           })
+
           {{:blocked, reason}, state}
 
         :skip ->
@@ -169,12 +182,28 @@ defmodule OptimalSystemAgent.Agent.Hooks do
         handler: &security_check/1
       },
 
+      # Spend guard — blocks when budget exceeded (pre_tool_use, priority 8)
+      %{
+        name: "spend_guard",
+        event: :pre_tool_use,
+        priority: 8,
+        handler: &spend_guard/1
+      },
+
       # Token budget tracking (pre_tool_use, priority 20)
       %{
         name: "budget_tracker",
         event: :pre_tool_use,
         priority: 20,
         handler: &budget_tracker/1
+      },
+
+      # Cost tracker — records actual spend after tool use (post_tool_use, priority 25)
+      %{
+        name: "cost_tracker",
+        event: :post_tool_use,
+        priority: 25,
+        handler: &cost_tracker/1
       },
 
       # Learning capture (post_tool_use, priority 50)
@@ -308,7 +337,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
       ~r/DROP\s+DATABASE/i,
       ~r/mkfs\./,
       ~r/dd\s+if=/,
-      ~r/:()\{.*\|.*&\s*\};:/,  # fork bomb
+      # fork bomb
+      ~r/:()\{.*\|.*&\s*\};:/,
       ~r/curl.*\|\s*sh/,
       ~r/wget.*\|\s*sh/,
       ~r/chmod\s+777/,
@@ -324,11 +354,54 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   defp security_check(payload), do: {:ok, payload}
 
-  # Track token budget
+  # Spend guard — check budget limits before tool execution
+  defp spend_guard(payload) do
+    try do
+      case OptimalSystemAgent.Agent.Budget.check_budget() do
+        {:ok, _remaining} ->
+          {:ok, payload}
+
+        {:over_limit, period} ->
+          {:block, "Budget exceeded (#{period} limit reached). Use /budget to check status."}
+      end
+    catch
+      :exit, _ ->
+        # Budget GenServer not running — allow through
+        {:ok, payload}
+    end
+  end
+
+  # Track token budget (lightweight annotation)
   defp budget_tracker(payload) do
-    # Lightweight — just annotate the payload with budget info
     {:ok, Map.put(payload, :budget_check, :passed)}
   end
+
+  # Cost tracker — record actual API costs after tool use
+  defp cost_tracker(%{tool_name: _name, result: _result} = payload) do
+    try do
+      provider = Map.get(payload, :provider, "unknown")
+      model = Map.get(payload, :model, "unknown")
+      tokens_in = Map.get(payload, :tokens_in, 0)
+      tokens_out = Map.get(payload, :tokens_out, 0)
+      session_id = Map.get(payload, :session_id, "unknown")
+
+      if tokens_in > 0 or tokens_out > 0 do
+        OptimalSystemAgent.Agent.Budget.record_cost(
+          provider,
+          model,
+          tokens_in,
+          tokens_out,
+          session_id
+        )
+      end
+    catch
+      :exit, _ -> :ok
+    end
+
+    {:ok, payload}
+  end
+
+  defp cost_tracker(payload), do: {:ok, payload}
 
   # Capture learnings from tool use
   defp learning_capture(%{tool_name: name, result: result, duration_ms: ms} = payload)
@@ -421,9 +494,10 @@ defmodule OptimalSystemAgent.Agent.Hooks do
       dir = Path.join([home, ".osa", "learning", "episodes"])
       path = Path.join(dir, "#{date}-episodes.jsonl")
 
-      id = :crypto.hash(:sha256, "#{tool_name}#{result}#{System.monotonic_time()}")
-           |> Base.encode16(case: :lower)
-           |> String.slice(0, 16)
+      id =
+        :crypto.hash(:sha256, "#{tool_name}#{result}#{System.monotonic_time()}")
+        |> Base.encode16(case: :lower)
+        |> String.slice(0, 16)
 
       entry = %{
         id: id,
@@ -449,7 +523,9 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   defp episodic_memory(payload), do: {:ok, payload}
 
   # Metrics dashboard — track per-tool timing and write daily JSONL
-  defp metrics_dashboard(%{tool_name: tool_name, duration_ms: duration_ms, result: result} = payload) do
+  defp metrics_dashboard(
+         %{tool_name: tool_name, duration_ms: duration_ms, result: result} = payload
+       ) do
     home = System.user_home!()
     dir = Path.join([home, ".osa", "metrics"])
     daily_path = Path.join(dir, "daily.json")
@@ -528,10 +604,26 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
     hints =
       []
-      |> maybe_add_hint(lower, ~r/\btest\b/, "TDD: write the failing test first (RED → GREEN → REFACTOR)")
-      |> maybe_add_hint(lower, ~r/\b(bug|error)\b/, "Debugging: REPRODUCE → ISOLATE → HYPOTHESIZE → TEST → FIX → VERIFY → PREVENT")
-      |> maybe_add_hint(lower, ~r/\bsecurity\b/, "Security: apply OWASP Top 10 checklist; parameterize queries, validate inputs, check auth")
-      |> maybe_add_hint(lower, ~r/\bperformance\b/, "Performance: profile first with pprof/flamegraph before optimizing; measure the bottleneck")
+      |> maybe_add_hint(
+        lower,
+        ~r/\btest\b/,
+        "TDD: write the failing test first (RED → GREEN → REFACTOR)"
+      )
+      |> maybe_add_hint(
+        lower,
+        ~r/\b(bug|error)\b/,
+        "Debugging: REPRODUCE → ISOLATE → HYPOTHESIZE → TEST → FIX → VERIFY → PREVENT"
+      )
+      |> maybe_add_hint(
+        lower,
+        ~r/\bsecurity\b/,
+        "Security: apply OWASP Top 10 checklist; parameterize queries, validate inputs, check auth"
+      )
+      |> maybe_add_hint(
+        lower,
+        ~r/\bperformance\b/,
+        "Performance: profile first with pprof/flamegraph before optimizing; measure the bottleneck"
+      )
 
     {:ok, Map.put(payload, :prompt_hints, hints)}
   end
@@ -555,6 +647,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           token_count: token_count,
           token_limit: token_limit
         })
+
         {:ok, Map.put(payload, :compaction_state, :critical)}
 
       utilization >= 0.90 ->
@@ -564,6 +657,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           token_count: token_count,
           token_limit: token_limit
         })
+
         {:ok, Map.put(payload, :compaction_state, :needed)}
 
       utilization >= 0.80 ->
@@ -573,6 +667,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           token_count: token_count,
           token_limit: token_limit
         })
+
         {:ok, Map.put(payload, :compaction_state, :warning)}
 
       utilization >= 0.50 ->
@@ -696,7 +791,9 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     :persistent_term.put(counter_key, count)
 
     if count > 20 do
-      hint = "Context optimizer: #{count} tools loaded this session. Consider lazy loading — only require tools when needed to preserve context window."
+      hint =
+        "Context optimizer: #{count} tools loaded this session. Consider lazy loading — only require tools when needed to preserve context window."
+
       {:ok, Map.put(payload, :optimize_context, hint)}
     else
       {:ok, payload}
@@ -709,7 +806,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     {~r/file.*not found/i, "Check file path exists. Try listing the directory first."},
     {~r/permission denied/i, "Check file permissions. May need elevated access."},
     {~r/syntax error/i, "Review the code for syntax issues. Check matching brackets/quotes."},
-    {~r/import.*error|module.*not found/i, "Missing dependency. Check package.json/mix.exs/go.mod."},
+    {~r/import.*error|module.*not found/i,
+     "Missing dependency. Check package.json/mix.exs/go.mod."},
     {~r/type.*error/i, "Type mismatch. Check function signatures and variable types."},
     {~r/timeout/i, "Operation timed out. Try with a longer timeout or smaller input."},
     {~r/connection.*refused/i, "Service not running. Check if the server is started."},
@@ -717,9 +815,13 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   ]
 
   defp suggest_recovery(error) do
-    Enum.find_value(@error_patterns, "Investigate the error and try an alternative approach.", fn {pattern, suggestion} ->
-      if Regex.match?(pattern, error), do: suggestion
-    end)
+    Enum.find_value(
+      @error_patterns,
+      "Investigate the error and try an alternative approach.",
+      fn {pattern, suggestion} ->
+        if Regex.match?(pattern, error), do: suggestion
+      end
+    )
   end
 
   # ── Helpers ────────────────────────────────────────────────────────
@@ -731,10 +833,11 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   defp update_metrics(state, event, elapsed_us, result) do
     event_metrics = Map.get(state.metrics, event, %{calls: 0, total_us: 0, blocks: 0})
 
-    blocks = case result do
-      {:blocked, _} -> event_metrics.blocks + 1
-      _ -> event_metrics.blocks
-    end
+    blocks =
+      case result do
+        {:blocked, _} -> event_metrics.blocks + 1
+        _ -> event_metrics.blocks
+      end
 
     updated = %{
       calls: event_metrics.calls + 1,

@@ -1,0 +1,52 @@
+{
+  "roles": {
+    "lead": {
+      "hourly_rate": 150,
+      "label": "Tech Lead"
+    },
+    "backend": {
+      "hourly_rate": 120,
+      "label": "Backend Engineer"
+    },
+    "frontend": {
+      "hourly_rate": 110,
+      "label": "Frontend Engineer"
+    },
+    "data": {
+      "hourly_rate": 130,
+      "label": "Data Engineer"
+    },
+    "qa": {
+      "hourly_rate": 90,
+      "label": "QA Engineer"
+    },
+    "design": {
+      "hourly_rate": 100,
+      "label": "Designer"
+    },
+    "infra": {
+      "hourly_rate": 140,
+      "label": "Infrastructure Engineer"
+    },
+    "red_team": {
+      "hourly_rate": 160,
+      "label": "Security Engineer"
+    },
+    "services": {
+      "hourly_rate": 115,
+      "label": "Services Engineer"
+    }
+  },
+  "complexity_hours": {
+    "1": 0.25,
+    "2": 0.5,
+    "3": 1.0,
+    "4": 2.0,
+    "5": 4.0,
+    "6": 8.0,
+    "7": 16.0,
+    "8": 24.0,
+    "9": 40.0,
+    "10": 80.0
+  }
+}

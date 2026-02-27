@@ -31,7 +31,7 @@ defmodule OptimalSystemAgent.Sandbox.Executor do
 
   require Logger
 
-  alias OptimalSystemAgent.Sandbox.{Config, Docker}
+  alias OptimalSystemAgent.Sandbox.{Config, Docker, Wasm}
 
   @type exec_result ::
           {:ok, output :: String.t()}
@@ -71,8 +71,20 @@ defmodule OptimalSystemAgent.Sandbox.Executor do
         Logger.error(
           "[Sandbox.Executor] Docker sandbox is enabled but Docker daemon is unreachable"
         )
-        {:error, "Docker sandbox enabled but Docker is not available. " <>
-          "Either start Docker or set OSA_SANDBOX_ENABLED=false."}
+
+        {:error,
+         "Docker sandbox enabled but Docker is not available. " <>
+           "Either start Docker or set OSA_SANDBOX_ENABLED=false."}
+
+      config.enabled and config.mode == :wasm and Wasm.available?() ->
+        Logger.debug("[Sandbox.Executor] Routing to WASM sandbox")
+        Wasm.execute(command, opts)
+
+      config.enabled and config.mode == :wasm ->
+        Logger.error("[Sandbox.Executor] WASM sandbox enabled but wasmtime is not available")
+
+        {:error,
+         "WASM sandbox enabled but wasmtime is not available. Install wasmtime or set OSA_SANDBOX_MODE=beam."}
 
       config.enabled and config.mode == :beam ->
         Logger.debug("[Sandbox.Executor] Routing to BEAM sandbox (mode=:beam)")

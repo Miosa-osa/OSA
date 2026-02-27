@@ -103,6 +103,48 @@ config :optimal_system_agent,
   sandbox_no_new_privileges: true,
 
   # ---------------------------------------------------------------------------
+  # Budget — API cost tracking with spend limits
+  # ---------------------------------------------------------------------------
+  budget_daily_limit_usd: 50.0,
+  budget_monthly_limit_usd: 500.0,
+  budget_per_call_limit_usd: 5.0,
+
+  # ---------------------------------------------------------------------------
+  # Treasury — financial governance with transaction ledger
+  # ---------------------------------------------------------------------------
+  treasury_enabled: false,
+  treasury_daily_limit_usd: 250.0,
+  treasury_monthly_limit_usd: 2500.0,
+  treasury_min_reserve_usd: 10.0,
+  treasury_max_single_usd: 50.0,
+  treasury_approval_threshold_usd: 10.0,
+
+  # ---------------------------------------------------------------------------
+  # Fleet — remote agent fleet registry with sentinel monitoring
+  # ---------------------------------------------------------------------------
+  fleet_enabled: false,
+
+  # ---------------------------------------------------------------------------
+  # Wallet — crypto wallet connectivity
+  # ---------------------------------------------------------------------------
+  wallet_enabled: false,
+  wallet_provider: "mock",
+  wallet_address: nil,
+  wallet_rpc_url: nil,
+
+  # ---------------------------------------------------------------------------
+  # OTA Updater — secure updates with TUF verification
+  # ---------------------------------------------------------------------------
+  update_enabled: false,
+  update_url: nil,
+  update_interval: 86_400_000,
+
+  # ---------------------------------------------------------------------------
+  # Quiet Hours — heartbeat suppression windows
+  # ---------------------------------------------------------------------------
+  quiet_hours: nil,
+
+  # ---------------------------------------------------------------------------
   # Python Sidecar — semantic memory search via local embeddings
   # ---------------------------------------------------------------------------
   # Set OSA_PYTHON_SIDECAR=true to enable. Requires sentence-transformers.

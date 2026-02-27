@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Skills.Registry, as: Skills
   alias OptimalSystemAgent.Machines
   alias OptimalSystemAgent.Channels.HTTP.Auth
+  alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Swarm.Orchestrator, as: Swarm
   alias OptimalSystemAgent.Agent.Orchestrator, as: TaskOrchestrator
   alias OptimalSystemAgent.Agent.Progress
@@ -40,6 +41,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Channels.QQ
   alias OptimalSystemAgent.Channels.DingTalk
   alias OptimalSystemAgent.Channels.Feishu
+  alias OptimalSystemAgent.Protocol.CloudEvent
+  alias OptimalSystemAgent.Fleet.Registry, as: Fleet
 
   @known_channels %{
     "cli" => :cli,
@@ -58,15 +61,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     "filesystem" => :filesystem
   }
 
-  plug :authenticate
-  plug :match
+  plug(:authenticate)
+  plug(OptimalSystemAgent.Channels.HTTP.Integrity)
+  plug(:match)
 
-  plug Plug.Parsers,
+  plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
     json_decoder: Jason
+  )
 
-  plug :dispatch
+  plug(:dispatch)
 
   # ── POST /orchestrate ───────────────────────────────────────────────
 
@@ -87,27 +92,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           execution_ms = System.monotonic_time(:millisecond) - start_time
           signal = Classifier.classify(input, :http)
 
-          body = Jason.encode!(%{
-            session_id: session_id,
-            output: response,
-            signal: signal_to_map(signal),
-            skills_used: [],
-            iteration_count: 0,
-            execution_ms: execution_ms,
-            metadata: %{}
-          })
+          body =
+            Jason.encode!(%{
+              session_id: session_id,
+              output: response,
+              signal: signal_to_map(signal),
+              skills_used: [],
+              iteration_count: 0,
+              execution_ms: execution_ms,
+              metadata: %{}
+            })
 
           conn
           |> put_resp_content_type("application/json")
           |> send_resp(200, body)
 
         {:filtered, signal} ->
-          body = Jason.encode!(%{
-            error: "signal_filtered",
-            code: "SIGNAL_BELOW_THRESHOLD",
-            details: "Signal weight #{signal.weight} below threshold",
-            signal: signal_to_map(signal)
-          })
+          body =
+            Jason.encode!(%{
+              error: "signal_filtered",
+              code: "SIGNAL_BELOW_THRESHOLD",
+              details: "Signal weight #{signal.weight} below threshold",
+              signal: signal_to_map(signal)
+            })
 
           conn
           |> put_resp_content_type("application/json")
@@ -142,7 +149,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           |> send_chunked(200)
 
         # Send initial connection event
-        {:ok, conn} = chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
+        {:ok, conn} =
+          chunk(conn, "event: connected\ndata: {\"session_id\": \"#{session_id}\"}\n\n")
 
         # Enter SSE loop — blocks until client disconnects
         sse_loop(conn, session_id)
@@ -174,10 +182,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   get "/skills" do
     tools = Skills.list_tools()
 
-    body = Jason.encode!(%{
-      skills: tools,
-      count: length(tools)
-    })
+    body =
+      Jason.encode!(%{
+        skills: tools,
+        count: length(tools)
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -192,11 +201,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
     case Skills.execute(skill_name, arguments) do
       {:ok, result} ->
-        body = Jason.encode!(%{
-          skill: skill_name,
-          status: "completed",
-          result: result
-        })
+        body =
+          Jason.encode!(%{
+            skill: skill_name,
+            status: "completed",
+            result: result
+          })
 
         conn
         |> put_resp_content_type("application/json")
@@ -241,10 +251,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   get "/machines" do
     active = Machines.active()
 
-    body = Jason.encode!(%{
-      machines: active,
-      count: length(active)
-    })
+    body =
+      Jason.encode!(%{
+        machines: active,
+        count: length(active)
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -271,11 +282,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
     Scheduler.fire_trigger(trigger_id, payload)
 
-    body = Jason.encode!(%{
-      status: "accepted",
-      trigger_id: trigger_id,
-      message: "Trigger queued for execution"
-    })
+    body =
+      Jason.encode!(%{
+        status: "accepted",
+        trigger_id: trigger_id,
+        message: "Trigger queued for execution"
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -290,10 +302,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   get "/scheduler/jobs" do
     jobs = Scheduler.list_jobs()
 
-    body = Jason.encode!(%{
-      jobs: jobs,
-      count: length(jobs)
-    })
+    body =
+      Jason.encode!(%{
+        jobs: jobs,
+        count: length(jobs)
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -335,12 +348,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
       case TaskOrchestrator.execute(task, session_id, strategy: strategy) do
         {:ok, task_id, synthesis} ->
-          body = Jason.encode!(%{
-            task_id: task_id,
-            status: "completed",
-            synthesis: synthesis,
-            session_id: session_id
-          })
+          body =
+            Jason.encode!(%{
+              task_id: task_id,
+              status: "completed",
+              synthesis: synthesis,
+              session_id: session_id
+            })
 
           conn
           |> put_resp_content_type("application/json")
@@ -394,13 +408,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   get "/orchestrate/tasks" do
     tasks = TaskOrchestrator.list_tasks()
-    active_count = Enum.count(tasks, & &1.status == :running)
+    active_count = Enum.count(tasks, &(&1.status == :running))
 
-    body = Jason.encode!(%{
-      tasks: tasks,
-      count: length(tasks),
-      active_count: active_count
-    })
+    body =
+      Jason.encode!(%{
+        tasks: tasks,
+        count: length(tasks),
+        active_count: active_count
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -428,11 +443,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
       case TaskOrchestrator.create_skill(name, desc, instructions, tools) do
         {:ok, _} ->
-          body = Jason.encode!(%{
-            status: "created",
-            name: name,
-            message: "Skill '#{name}' created and registered at ~/.osa/skills/#{name}/SKILL.md"
-          })
+          body =
+            Jason.encode!(%{
+              status: "created",
+              name: name,
+              message: "Skill '#{name}' created and registered at ~/.osa/skills/#{name}/SKILL.md"
+            })
 
           conn
           |> put_resp_content_type("application/json")
@@ -442,7 +458,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           json_error(conn, 422, "skill_creation_error", inspect(reason))
       end
     else
-      _ -> json_error(conn, 400, "invalid_request", "Missing required fields: name, description, instructions")
+      _ ->
+        json_error(
+          conn,
+          400,
+          "invalid_request",
+          "Missing required fields: name, description, instructions"
+        )
     end
   end
 
@@ -472,14 +494,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         {:ok, swarm_id} ->
           {:ok, swarm} = Swarm.status(swarm_id)
 
-          body = Jason.encode!(%{
-            swarm_id: swarm_id,
-            status: swarm.status,
-            pattern: swarm.pattern,
-            agent_count: swarm.agent_count,
-            agents: swarm.agents || [],
-            started_at: swarm.started_at
-          })
+          body =
+            Jason.encode!(%{
+              swarm_id: swarm_id,
+              status: swarm.status,
+              pattern: swarm.pattern,
+              agent_count: swarm.agent_count,
+              agents: swarm.agents || [],
+              started_at: swarm.started_at
+            })
 
           conn
           |> put_resp_content_type("application/json")
@@ -505,11 +528,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       {:ok, swarms} ->
         active_count = Enum.count(swarms, &(&1.status == :running))
 
-        body = Jason.encode!(%{
-          swarms: Enum.map(swarms, &swarm_to_map/1),
-          count: length(swarms),
-          active_count: active_count
-        })
+        body =
+          Jason.encode!(%{
+            swarms: Enum.map(swarms, &swarm_to_map/1),
+            count: length(swarms),
+            active_count: active_count
+          })
 
         conn
         |> put_resp_content_type("application/json")
@@ -572,6 +596,107 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
+  # ── CloudEvents ─────────────────────────────────────────────────────
+
+  post "/events" do
+    case CloudEvent.decode(Jason.encode!(conn.body_params)) do
+      {:ok, event} ->
+        bus_event = CloudEvent.to_bus_event(event)
+        Bus.emit(:system_event, bus_event)
+
+        body = Jason.encode!(%{status: "accepted", event_id: event.id})
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(202, body)
+
+      {:error, reason} ->
+        json_error(conn, 400, "invalid_cloud_event", to_string(reason))
+    end
+  end
+
+  get "/events/stream" do
+    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:events:firehose")
+
+    conn =
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> put_resp_header("x-accel-buffering", "no")
+      |> send_chunked(200)
+
+    {:ok, conn} = chunk(conn, "event: connected\ndata: {}\n\n")
+    cloud_events_sse_loop(conn)
+  end
+
+  # ── Fleet Management ───────────────────────────────────────────────
+
+  post "/fleet/heartbeat" do
+    with %{"agent_id" => agent_id} <- conn.body_params do
+      metrics = Map.drop(conn.body_params, ["agent_id"])
+
+      try do
+        Fleet.heartbeat(agent_id, metrics)
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, Jason.encode!(%{status: "ok"}))
+      catch
+        :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required field: agent_id")
+    end
+  end
+
+  get "/fleet/agents" do
+    try do
+      agents = Fleet.list_agents()
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, Jason.encode!(%{agents: agents, count: length(agents)}))
+    catch
+      :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+    end
+  end
+
+  get "/fleet/:agent_id" do
+    agent_id = conn.params["agent_id"]
+
+    try do
+      case Fleet.get_agent(agent_id) do
+        {:ok, agent} ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(agent))
+
+        {:error, :not_found} ->
+          json_error(conn, 404, "not_found", "Agent #{agent_id} not found")
+      end
+    catch
+      :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+    end
+  end
+
+  post "/fleet/dispatch" do
+    with %{"agent_id" => agent_id, "instruction" => instruction} <- conn.body_params do
+      try do
+        task_id = "fleet_" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
+        OptimalSystemAgent.Agent.TaskQueue.enqueue(task_id, agent_id, %{instruction: instruction})
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(202, Jason.encode!(%{status: "dispatched", task_id: task_id}))
+      catch
+        :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing: agent_id, instruction")
+    end
+  end
+
   # ── Channel Webhooks ─────────────────────────────────────────────────
   #
   # These endpoints receive inbound events from external chat platforms.
@@ -603,13 +728,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
     channels = Manager.list_channels()
 
-    body = Jason.encode!(%{
-      channels: Enum.map(channels, fn ch ->
-        %{name: ch.name, connected: ch.connected, module: inspect(ch.module)}
-      end),
-      count: length(channels),
-      active_count: Enum.count(channels, & &1.connected)
-    })
+    body =
+      Jason.encode!(%{
+        channels:
+          Enum.map(channels, fn ch ->
+            %{name: ch.name, connected: ch.connected, module: inspect(ch.module)}
+          end),
+        count: length(channels),
+        active_count: Enum.count(channels, & &1.connected)
+      })
 
     conn
     |> put_resp_content_type("application/json")
@@ -620,8 +747,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   post "/channels/telegram/webhook" do
     case Telegram.handle_update(conn.body_params) do
-      :ok -> send_resp(conn, 200, "")
-      {:error, :not_started} -> json_error(conn, 503, "channel_unavailable", "Telegram adapter not started")
+      :ok ->
+        send_resp(conn, 200, "")
+
+      {:error, :not_started} ->
+        json_error(conn, 503, "channel_unavailable", "Telegram adapter not started")
     end
   end
 
@@ -699,8 +829,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   post "/channels/signal/webhook" do
     case SignalChannel.handle_webhook(conn.body_params) do
-      :ok -> send_resp(conn, 200, "")
-      {:error, :not_started} -> json_error(conn, 503, "channel_unavailable", "Signal adapter not started")
+      :ok ->
+        send_resp(conn, 200, "")
+
+      {:error, :not_started} ->
+        json_error(conn, 503, "channel_unavailable", "Signal adapter not started")
     end
   end
 
@@ -717,8 +850,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   post "/channels/email/inbound" do
     case EmailChannel.handle_inbound(conn.body_params) do
-      :ok -> send_resp(conn, 200, "")
-      {:error, :not_started} -> json_error(conn, 503, "channel_unavailable", "Email adapter not started")
+      :ok ->
+        send_resp(conn, 200, "")
+
+      {:error, :not_started} ->
+        json_error(conn, 503, "channel_unavailable", "Email adapter not started")
     end
   end
 
@@ -751,8 +887,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   post "/channels/dingtalk/webhook" do
     case DingTalk.handle_event(conn.body_params) do
-      :ok -> send_resp(conn, 200, "")
-      {:error, :not_started} -> json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started")
+      :ok ->
+        send_resp(conn, 200, "")
+
+      {:error, :not_started} ->
+        json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started")
     end
   end
 
@@ -809,6 +948,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           |> halt()
         else
           Logger.debug("HTTP request without auth — dev mode, allowing")
+
           conn
           |> assign(:user_id, "anonymous")
           |> assign(:workspace_id, nil)
@@ -846,11 +986,36 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
             Logger.debug("SSE client disconnected for session #{session_id}")
             conn
         end
-
     after
       30_000 ->
         case chunk(conn, ": keepalive\n\n") do
           {:ok, conn} -> sse_loop(conn, session_id)
+          {:error, _} -> conn
+        end
+    end
+  end
+
+  # ── CloudEvents SSE Loop ────────────────────────────────────────────
+
+  defp cloud_events_sse_loop(conn) do
+    receive do
+      {:osa_event, event} ->
+        cloud_event = CloudEvent.from_bus_event(event)
+
+        case CloudEvent.encode(cloud_event) do
+          {:ok, json} ->
+            case chunk(conn, "event: #{cloud_event.type}\ndata: #{json}\n\n") do
+              {:ok, conn} -> cloud_events_sse_loop(conn)
+              {:error, _} -> conn
+            end
+
+          _ ->
+            cloud_events_sse_loop(conn)
+        end
+    after
+      30_000 ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} -> cloud_events_sse_loop(conn)
           {:error, _} -> conn
         end
     end
@@ -887,6 +1052,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   defp parse_channel(nil), do: :http
+
   defp parse_channel(name) when is_binary(name) do
     Map.get(@known_channels, String.downcase(name), :http)
   end
@@ -921,10 +1087,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   defp parse_swarm_pattern(nil), do: nil
+
   defp parse_swarm_pattern(p) when is_binary(p) do
     valid = ~w(parallel pipeline debate review)
     if p in valid, do: String.to_existing_atom(p), else: nil
   end
+
   defp parse_swarm_pattern(_), do: nil
 
   # Only include in opts list when value is non-nil

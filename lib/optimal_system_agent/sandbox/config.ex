@@ -13,7 +13,7 @@ defmodule OptimalSystemAgent.Sandbox.Config do
   defstruct [
     # Master switch — false by default (opt-in)
     enabled: false,
-    # :docker | :beam (process-only fallback)
+    # :docker | :beam | :wasm (process-only fallback)
     mode: :docker,
     # Allow network access inside container
     network: false,
@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Sandbox.Config do
 
   @type t :: %__MODULE__{
           enabled: boolean(),
-          mode: :docker | :beam,
+          mode: :docker | :beam | :wasm,
           network: boolean(),
           max_memory: String.t(),
           max_cpu: String.t(),
@@ -75,6 +75,8 @@ defmodule OptimalSystemAgent.Sandbox.Config do
       case Application.get_env(app, :sandbox_mode, :docker) do
         :beam -> :beam
         "beam" -> :beam
+        :wasm -> :wasm
+        "wasm" -> :wasm
         _ -> :docker
       end
 
