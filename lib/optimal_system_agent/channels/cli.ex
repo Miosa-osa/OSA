@@ -77,7 +77,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
         loop(session_id)
 
       {:ok, input} ->
-        input = String.trim(input)
+        input = input |> sanitize_input() |> String.trim()
 
         if input == "" do
           loop(session_id)
@@ -109,6 +109,17 @@ defmodule OptimalSystemAgent.Channels.CLI do
     e ->
       Logger.warning("CLI loop error: #{Exception.message(e)}")
       loop(session_id)
+  end
+
+  defp sanitize_input(input) do
+    input
+    |> :unicode.characters_to_nfc_binary()
+    |> case do
+      {:error, _, _} -> input
+      bin when is_binary(bin) -> bin
+      _ -> input
+    end
+    |> String.replace(~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
   end
 
   defp process_input(input, session_id) do
