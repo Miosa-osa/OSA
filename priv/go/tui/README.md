@@ -8,29 +8,31 @@ checklists, plan review, and Signal Theory metadata on every response.
 
 ---
 
-## Prerequisites
+## Quick Start
 
-The OSA Elixir backend must be running before launching the TUI.
+From the project root — one command, one terminal:
 
 ```bash
-# From the project root
-mix osa.serve          # production mode
-# or
-osagent serve          # if installed as a Mix release
+bin/osa                # builds TUI on first run, starts backend, launches TUI
+bin/osa --dev          # dev profile + port 19001
 ```
 
-Default backend address: `http://localhost:8089`
+The wrapper script handles everything: backend lifecycle, health check, cleanup on exit.
 
 ---
 
-## Build & Run
+## Manual Setup
+
+If you prefer to manage the backend separately:
 
 ```bash
-# Build (fetches deps, strips debug info, embeds version from git tag)
-make build             # produces ./osa
+# Terminal 1: Start the backend
+mix osa.serve          # or: osagent serve
 
-# Run with defaults (connects to http://localhost:8089)
-./osa
+# Terminal 2: Build and run
+cd priv/go/tui
+make build             # produces ./osa
+./osa                  # connects to http://localhost:8089
 
 # Override backend URL and/or pre-set an auth token
 OSA_URL=http://localhost:9000 OSA_TOKEN=<jwt> ./osa

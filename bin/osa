@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# bin/osa — One command to start OSA with the Go TUI.
+#
+# Starts the Elixir backend in the background, waits for it to be healthy,
+# launches the Go TUI, and tears down the backend when you quit.
+#
+# Usage:
+#   bin/osa                    # default
+#   bin/osa --dev              # dev profile + port 19001
+#   bin/osa --profile staging  # named profile
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TUI_DIR="$ROOT/priv/go/tui"
+TUI_BIN="$TUI_DIR/osa"
+BACKEND_PID=""
+
+cleanup() {
+  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
+    kill "$BACKEND_PID" 2>/dev/null
+    wait "$BACKEND_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# ── Build Go TUI if needed ──────────────────────────────────────
+if [ ! -f "$TUI_BIN" ]; then
+  echo "Building Go TUI…"
+  (cd "$TUI_DIR" && make build)
+  echo ""
+fi
+
+# ── Determine port ──────────────────────────────────────────────
+PORT="${OSA_PORT:-8089}"
+for arg in "$@"; do
+  if [ "$arg" = "--dev" ]; then
+    PORT="${OSA_PORT:-19001}"
+    break
+  fi
+done
+
+# ── Start backend ───────────────────────────────────────────────
+export MIX_ENV="${MIX_ENV:-dev}"
+echo "Starting backend on :${PORT}…"
+(cd "$ROOT" && mix osa.serve) &
+BACKEND_PID=$!
+
+# ── Wait for health ─────────────────────────────────────────────
+URL="http://localhost:${PORT}/health"
+attempts=0
+max_attempts=30
+
+while [ $attempts -lt $max_attempts ]; do
+  if curl -sf "$URL" >/dev/null 2>&1; then
+    break
+  fi
+  attempts=$((attempts + 1))
+  sleep 1
+done
+
+if [ $attempts -eq $max_attempts ]; then
+  echo "Backend did not become healthy after ${max_attempts}s. Check logs."
+  exit 1
+fi
+
+# ── Launch TUI ──────────────────────────────────────────────────
+export OSA_URL="http://localhost:${PORT}"
+exec "$TUI_BIN" "$@"

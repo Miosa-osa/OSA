@@ -381,26 +381,12 @@ For contributors or if you want to hack on OSA itself:
 git clone https://github.com/Miosa-osa/OSA.git
 cd OSA
 mix setup              # deps + database + compile
-mix osa.chat           # start talking (built-in Elixir CLI)
+bin/osa                # start talking
 ```
 
-Requires Elixir 1.17+ and Erlang/OTP 27+. See [Getting Started](docs/getting-started/) for full setup guide.
+`bin/osa` builds the Go TUI on first run, starts the Elixir backend in the background, waits for health, and launches the terminal UI. One command, one terminal. When you quit, the backend shuts down automatically.
 
-### Go TUI (Optional)
-
-A native terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). Richer display than the built-in CLI — tree connectors, agent sub-status, task checklists, expandable tool feeds.
-
-```bash
-# Terminal 1: Start the backend
-mix osa.serve
-
-# Terminal 2: Build and run the Go TUI
-cd priv/go/tui
-make build             # → ./osa (14 MB binary)
-./osa                  # connects to http://localhost:8089
-```
-
-Flags: `--profile <name>`, `--dev`, `--no-color`, `--version`. See [Go TUI README](priv/go/tui/README.md).
+Requires Elixir 1.17+ and Erlang/OTP 27+, Go 1.21+ (for TUI build). See [Getting Started](docs/getting-started/) for full setup guide.
 
 ---
 
@@ -410,14 +396,17 @@ Flags: `--profile <name>`, `--dev`, `--no-color`, `--version`. See [Go TUI READM
 
 | Command | What it does |
 |---|---|
-| `mix osa.chat` | Start backend + built-in Elixir CLI (all-in-one) |
-| `mix osa.serve` | Start backend only (for Go TUI or API clients) |
+| `bin/osa` | **Recommended.** Backend + Go TUI in one command |
+| `bin/osa --dev` | Dev mode (profile isolation, port 19001) |
+| `mix osa.chat` | Backend + built-in Elixir CLI (no Go TUI) |
+| `mix osa.serve` | Backend only (for custom clients) |
 | `mix osa.setup` | Run the setup wizard without starting the app |
-| `osagent` | Release binary — same as `mix osa.chat` |
-| `osagent serve` | Release binary — same as `mix osa.serve` |
-| `./osa` | Go TUI — connects to running backend |
+| `osagent` | Release binary — same as `bin/osa` |
+| `osagent serve` | Release binary — backend only |
 
-**First time?** Just run `mix osa.chat`. It auto-detects first run and launches the setup wizard.
+**First time?** Just run `bin/osa`. It auto-detects first run and launches the setup wizard.
+
+The Go TUI gives you tree connectors on tool calls, per-agent sub-status, task checklists, thinking time display, expand/collapse with `ctrl+o`, and background tasks with `ctrl+b`. See [Go TUI README](priv/go/tui/README.md) for the full display reference.
 
 ## Usage
 
