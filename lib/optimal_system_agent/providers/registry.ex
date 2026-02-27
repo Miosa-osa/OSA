@@ -1,16 +1,78 @@
 defmodule OptimalSystemAgent.Providers.Registry do
   @moduledoc """
-  LLM provider routing and fallback chains.
+  LLM provider routing, fallback chains, and dynamic registration.
 
-  Supports: Ollama (local), Anthropic, OpenAI-compatible, Groq.
-  4-tier model routing:
+  Supports 17 providers across 3 categories:
+  - Local:             ollama
+  - OpenAI-compatible: openai, groq, together, fireworks, deepseek,
+                       perplexity, mistral, replicate,
+                       qwen, moonshot, zhipu, volcengine, baichuan
+  - Native APIs:       anthropic, google, cohere
+
+  ## Public API (backward-compatible)
+
+      # Basic usage
+      OptimalSystemAgent.Providers.Registry.chat(messages)
+
+      # With options
+      OptimalSystemAgent.Providers.Registry.chat(messages, provider: :groq, temperature: 0.5)
+
+      # List all registered providers
+      OptimalSystemAgent.Providers.Registry.list_providers()
+
+      # Get info about a specific provider
+      OptimalSystemAgent.Providers.Registry.provider_info(:groq)
+
+  ## Fallback Chains
+
+  Set a fallback chain in config:
+
+      config :optimal_system_agent, :fallback_chain, [:anthropic, :openai, :groq, :ollama]
+
+  The registry will try each provider in order until one succeeds.
+
+  ## 4-Tier Model Routing
+
   1. Process-type default (thinking = best, tool execution = fast)
   2. Task-type override (coding tasks upgrade tier)
   3. Fallback chain when rate-limited
   4. Local fallback (Ollama always available)
   """
+
   use GenServer
   require Logger
+
+  alias OptimalSystemAgent.Providers
+
+  # Canonical provider registry — maps atom → module
+  @providers %{
+    # Local
+    ollama: Providers.Ollama,
+
+    # OpenAI and OpenAI-compatible
+    openai: Providers.OpenAI,
+    groq: Providers.Groq,
+    together: Providers.Together,
+    fireworks: Providers.Fireworks,
+    deepseek: Providers.DeepSeek,
+    perplexity: Providers.Perplexity,
+    mistral: Providers.Mistral,
+    replicate: Providers.Replicate,
+
+    # Native API providers
+    anthropic: Providers.Anthropic,
+    google: Providers.Google,
+    cohere: Providers.Cohere,
+
+    # Chinese providers (OpenAI-compatible)
+    qwen: Providers.Qwen,
+    moonshot: Providers.Moonshot,
+    zhipu: Providers.Zhipu,
+    volcengine: Providers.Volcengine,
+    baichuan: Providers.Baichuan
+  }
+
+  # --- Public API ---
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -18,230 +80,167 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @doc """
   Send a chat completion request to the configured LLM provider.
+
+  Options:
+    - `:provider`    — override the default provider atom
+    - `:temperature` — sampling temperature (default: 0.7)
+    - `:max_tokens`  — maximum tokens to generate
+    - `:tools`       — list of tool definitions
+
+  Returns `{:ok, %{content: String.t(), tool_calls: list()}}` or `{:error, reason}`.
   """
+  @spec chat(list(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-    do_chat(provider, messages, opts)
+    provider = Keyword.get(opts, :provider) || default_provider()
+    opts_without_provider = Keyword.delete(opts, :provider)
+
+    case Map.get(@providers, provider) do
+      nil ->
+        {:error, "Unknown provider: #{provider}. Available: #{inspect(Map.keys(@providers))}"}
+
+      module ->
+        call_with_fallback(provider, module, messages, opts_without_provider)
+    end
   end
+
+  @doc """
+  List all registered provider atoms.
+  """
+  @spec list_providers() :: list(atom())
+  def list_providers, do: Map.keys(@providers)
+
+  @doc """
+  Get information about a specific provider.
+
+  Returns a map with `:name`, `:module`, `:default_model`, and `:configured?`.
+  """
+  @spec provider_info(atom()) :: {:ok, map()} | {:error, String.t()}
+  def provider_info(provider) do
+    case Map.get(@providers, provider) do
+      nil ->
+        {:error, "Unknown provider: #{provider}"}
+
+      module ->
+        info = %{
+          name: provider,
+          module: module,
+          default_model: module.default_model(),
+          configured?: provider_configured?(provider)
+        }
+
+        {:ok, info}
+    end
+  end
+
+  @doc """
+  Register a custom provider module at runtime.
+
+  The module must implement the `OptimalSystemAgent.Providers.Behaviour`.
+  This does not persist across restarts.
+  """
+  @spec register_provider(atom(), module()) :: :ok | {:error, String.t()}
+  def register_provider(name, module) do
+    GenServer.call(__MODULE__, {:register_provider, name, module})
+  end
+
+  @doc """
+  Execute a chat with explicit fallback chain.
+
+  Tries each provider in order, returning the first success.
+  If all fail, returns the last error.
+  """
+  @spec chat_with_fallback(list(), list(atom()), keyword()) ::
+          {:ok, map()} | {:error, String.t()}
+  def chat_with_fallback(messages, chain, opts \\ []) do
+    Enum.reduce_while(chain, {:error, "No providers in chain"}, fn provider, _acc ->
+      case chat(messages, Keyword.put(opts, :provider, provider)) do
+        {:ok, _} = result ->
+          {:halt, result}
+
+        {:error, reason} ->
+          Logger.warning("Provider #{provider} failed in fallback chain: #{reason}")
+          {:cont, {:error, reason}}
+      end
+    end)
+  end
+
+  # --- GenServer Callbacks ---
 
   @impl true
   def init(:ok) do
-    Logger.info("Provider registry initialized (default: #{default_provider()})")
-    {:ok, %{}}
+    providers = @providers
+    Logger.info("Provider registry initialized with #{map_size(providers)} providers (default: #{default_provider()})")
+    Logger.info("Providers: #{Map.keys(providers) |> Enum.join(", ")}")
+    {:ok, %{extra_providers: %{}}}
   end
 
-  # --- Provider Dispatch ---
-
-  defp do_chat(:ollama, messages, opts) do
-    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-    model = Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
-
-    body = %{
-      model: model,
-      messages: format_messages(messages),
-      stream: false,
-      options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
-    }
-
-    # Add tools if provided
-    body =
-      case Keyword.get(opts, :tools) do
-        nil -> body
-        [] -> body
-        tools -> Map.put(body, :tools, format_tools_ollama(tools))
-      end
-
-    case Req.post("#{url}/api/chat", json: body, receive_timeout: 120_000) do
-      {:ok, %{status: 200, body: %{"message" => %{"content" => content} = msg}}} ->
-        tool_calls = parse_ollama_tool_calls(msg)
-        {:ok, %{content: content || "", tool_calls: tool_calls}}
-
-      {:ok, %{status: status, body: body}} ->
-        {:error, "Ollama returned #{status}: #{inspect(body)}"}
-
-      {:error, reason} ->
-        {:error, "Ollama connection failed: #{inspect(reason)}"}
-    end
-  end
-
-  defp do_chat(:anthropic, messages, opts) do
-    api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-    model = Application.get_env(:optimal_system_agent, :anthropic_model, "anthropic-latest")
-
-    unless api_key do
-      {:error, "ANTHROPIC_API_KEY not set"}
+  @impl true
+  def handle_call({:register_provider, name, module}, _from, state) do
+    # Validate the module implements the behaviour
+    if function_exported?(module, :chat, 2) and
+         function_exported?(module, :name, 0) and
+         function_exported?(module, :default_model, 0) do
+      new_state = put_in(state[:extra_providers][name], module)
+      Logger.info("Registered custom provider: #{name} -> #{module}")
+      {:reply, :ok, new_state}
     else
-      {system_msgs, chat_msgs} =
-        Enum.split_with(format_messages(messages), &(&1.role == "system"))
-
-      system_text = Enum.map_join(system_msgs, "\n\n", & &1.content)
-
-      body = %{
-        model: model,
-        max_tokens: Keyword.get(opts, :max_tokens, 4096),
-        system: system_text,
-        messages: chat_msgs
-      }
-
-      body =
-        case Keyword.get(opts, :tools) do
-          nil -> body
-          [] -> body
-          tools -> Map.put(body, :tools, format_tools_anthropic(tools))
-        end
-
-      case Req.post("https://api.anthropic.com/v1/messages",
-             json: body,
-             headers: [
-               {"x-api-key", api_key},
-               {"anthropic-version", "2023-06-01"},
-               {"content-type", "application/json"}
-             ],
-             receive_timeout: 120_000
-           ) do
-        {:ok, %{status: 200, body: resp}} ->
-          content = extract_anthropic_content(resp)
-          tool_calls = extract_anthropic_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls}}
-
-        {:ok, %{status: status, body: body}} ->
-          {:error, "Anthropic returned #{status}: #{inspect(body)}"}
-
-        {:error, reason} ->
-          {:error, "Anthropic connection failed: #{inspect(reason)}"}
-      end
+      {:reply, {:error, "Module #{module} does not implement Providers.Behaviour"}, state}
     end
   end
 
-  defp do_chat(:openai, messages, opts) do
-    api_key = Application.get_env(:optimal_system_agent, :openai_api_key)
-    url = Application.get_env(:optimal_system_agent, :openai_url, "https://api.openai.com/v1")
-    model = Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+  # --- Private ---
 
-    unless api_key do
-      {:error, "OPENAI_API_KEY not set"}
-    else
-      body = %{
-        model: model,
-        messages: format_messages(messages),
-        temperature: Keyword.get(opts, :temperature, 0.7)
-      }
+  defp call_with_fallback(provider, module, messages, opts) do
+    case apply_provider(module, messages, opts) do
+      {:ok, _} = result ->
+        result
 
-      body =
-        case Keyword.get(opts, :tools) do
-          nil -> body
-          [] -> body
-          tools -> Map.put(body, :tools, format_tools_openai(tools))
+      {:error, reason} = err ->
+        fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
+
+        remaining_chain =
+          fallback_chain
+          |> Enum.drop_while(&(&1 == provider))
+          |> then(fn
+            # If provider wasn't in chain, try the whole chain
+            chain when chain == fallback_chain -> chain
+            # Otherwise use remainder after the failing provider
+            [_ | rest] -> rest
+            [] -> []
+          end)
+
+        if remaining_chain == [] do
+          Logger.error("Provider #{provider} failed, no fallback configured: #{reason}")
+          err
+        else
+          Logger.warning("Provider #{provider} failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}")
+          chat_with_fallback(messages, remaining_chain, opts)
         end
-
-      case Req.post("#{url}/chat/completions",
-             json: body,
-             headers: [{"Authorization", "Bearer #{api_key}"}],
-             receive_timeout: 120_000
-           ) do
-        {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]}}} ->
-          content = msg["content"] || ""
-          tool_calls = parse_openai_tool_calls(msg)
-          {:ok, %{content: content, tool_calls: tool_calls}}
-
-        {:ok, %{status: status, body: body}} ->
-          {:error, "OpenAI returned #{status}: #{inspect(body)}"}
-
-        {:error, reason} ->
-          {:error, "OpenAI connection failed: #{inspect(reason)}"}
-      end
     end
   end
 
-  defp do_chat(provider, _messages, _opts) do
-    {:error, "Unknown provider: #{provider}"}
+  defp apply_provider(module, messages, opts) do
+    try do
+      module.chat(messages, opts)
+    rescue
+      e ->
+        Logger.error("Provider module #{module} raised: #{Exception.message(e)}")
+        {:error, "Provider error: #{Exception.message(e)}"}
+    end
   end
 
-  # --- Message Formatting ---
+  defp provider_configured?(:ollama), do: true
 
-  defp format_messages(messages) do
-    Enum.map(messages, fn
-      %{role: role, content: content} ->
-        %{role: to_string(role), content: to_string(content)}
-
-      msg when is_map(msg) ->
-        msg
-    end)
+  defp provider_configured?(provider) do
+    key = :"#{provider}_api_key"
+    case Application.get_env(:optimal_system_agent, key) do
+      nil -> false
+      "" -> false
+      _ -> true
+    end
   end
 
-  # --- Tool Formatting ---
-
-  defp format_tools_ollama(tools) do
-    Enum.map(tools, fn tool ->
-      %{
-        type: "function",
-        function: %{
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters
-        }
-      }
-    end)
-  end
-
-  defp format_tools_anthropic(tools) do
-    Enum.map(tools, fn tool ->
-      %{name: tool.name, description: tool.description, input_schema: tool.parameters}
-    end)
-  end
-
-  defp format_tools_openai(tools), do: format_tools_ollama(tools)
-
-  # --- Response Parsing ---
-
-  defp parse_ollama_tool_calls(%{"tool_calls" => calls}) when is_list(calls) do
-    Enum.map(calls, fn call ->
-      %{
-        id: call["id"] || generate_id(),
-        name: call["function"]["name"],
-        arguments: call["function"]["arguments"] || %{}
-      }
-    end)
-  end
-
-  defp parse_ollama_tool_calls(_), do: []
-
-  defp extract_anthropic_content(%{"content" => blocks}) do
-    blocks
-    |> Enum.filter(&(&1["type"] == "text"))
-    |> Enum.map_join("\n", & &1["text"])
-  end
-
-  defp extract_anthropic_content(_), do: ""
-
-  defp extract_anthropic_tool_calls(%{"content" => blocks}) do
-    blocks
-    |> Enum.filter(&(&1["type"] == "tool_use"))
-    |> Enum.map(fn block ->
-      %{id: block["id"], name: block["name"], arguments: block["input"] || %{}}
-    end)
-  end
-
-  defp extract_anthropic_tool_calls(_), do: []
-
-  defp parse_openai_tool_calls(%{"tool_calls" => calls}) when is_list(calls) do
-    Enum.map(calls, fn call ->
-      args =
-        case Jason.decode(call["function"]["arguments"] || "{}") do
-          {:ok, parsed} -> parsed
-          _ -> %{}
-        end
-
-      %{id: call["id"], name: call["function"]["name"], arguments: args}
-    end)
-  end
-
-  defp parse_openai_tool_calls(_), do: []
-
-  defp default_provider,
-    do: Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-
-  defp generate_id do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+  defp default_provider do
+    Application.get_env(:optimal_system_agent, :default_provider, :ollama)
   end
 end

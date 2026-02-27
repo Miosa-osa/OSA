@@ -1,6 +1,10 @@
 defmodule OptimalSystemAgent.Skills.Builtins.ShellExecute do
   @behaviour OptimalSystemAgent.Skills.Behaviour
 
+  require Logger
+
+  alias OptimalSystemAgent.Sandbox.Executor
+
   @blocked_commands MapSet.new(
     ~w(rm sudo dd mkfs fdisk format shutdown reboot halt poweroff init telinit
        kill killall pkill mount umount iptables systemctl passwd useradd userdel
@@ -81,17 +85,16 @@ defmodule OptimalSystemAgent.Skills.Builtins.ShellExecute do
       case validate_command(trimmed) do
         :ok ->
           workspace = Path.expand("~/.osa/workspace")
+          # Prepend a workspace `cd` so relative paths work regardless of
+          # whether we're running in Docker (/workspace) or on the host.
           full_command = "cd #{workspace} 2>/dev/null || true; #{trimmed}"
 
-          task =
-            Task.async(fn ->
-              System.cmd("sh", ["-c", full_command], stderr_to_stdout: true)
-            end)
+          Logger.debug("[ShellExecute] Dispatching command via Sandbox.Executor")
 
-          case Task.yield(task, 30_000) || Task.shutdown(task) do
-            {:ok, {output, 0}} -> {:ok, maybe_truncate(output)}
-            {:ok, {output, code}} -> {:error, "Exit #{code}:\n#{output}"}
-            nil -> {:error, "Command timed out after 30 seconds"}
+          case Executor.execute(full_command, workspace: workspace) do
+            {:ok, output, 0} -> {:ok, maybe_truncate(output)}
+            {:ok, output, code} -> {:error, "Exit #{code}:\n#{maybe_truncate(output)}"}
+            {:error, reason} -> {:error, reason}
           end
 
         {:error, reason} ->

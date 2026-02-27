@@ -13,15 +13,21 @@ defmodule OptimalSystemAgent.Application do
     - Machines (composable skill set activation from ~/.osa/config.json)
     - OS.Registry (OS template discovery, connection, context injection)
     - MCP.Supervisor (MCP server/client processes)
-    - Channels.Supervisor (platform adapters: CLI, Telegram, etc.)
+    - Channels.Supervisor (platform adapters: CLI, HTTP, Telegram, Discord, Slack,
+        WhatsApp, Signal, Matrix, Email, QQ, DingTalk, Feishu)
+    - Channels.Manager (starts configured adapters after boot)
     - Agent.Memory (persistent JSONL session storage)
     - Agent.Loop (stateful ReAct agent via :osa_agent_loop)
     - Agent.Scheduler (cron + heartbeat)
     - Agent.Compactor (context compression, 3 thresholds)
     - Agent.Cortex (memory synthesis, periodic knowledge bulletin)
     - Intelligence.Supervisor (Signal Theory unique modules)
+    - Swarm.Supervisor (multi-agent swarm coordination subsystem)
+    - Sandbox.Supervisor (Docker container isolation — started when sandbox_enabled: true)
   """
   use Application
+
+  require Logger
 
   @impl true
   def start(_type, _args) do
@@ -60,13 +66,43 @@ defmodule OptimalSystemAgent.Application do
       # Communication intelligence (Signal Theory unique)
       OptimalSystemAgent.Intelligence.Supervisor,
 
+      # Multi-agent swarm collaboration system
+      OptimalSystemAgent.Swarm.Supervisor,
+
       # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
       # Started LAST so all agent processes are ready before accepting requests
       {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()},
-    ]
+    ] ++ sandbox_children()
 
     opts = [strategy: :one_for_one, name: OptimalSystemAgent.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, pid} ->
+        # Start configured channel adapters after the supervision tree is up.
+        # Each adapter's init/1 returns :ignore when its config is absent,
+        # so this is safe to call unconditionally on every boot.
+        Task.start(fn ->
+          # Brief delay to allow Bandit to finish port binding
+          Process.sleep(250)
+          OptimalSystemAgent.Channels.Manager.start_configured_channels()
+        end)
+
+        {:ok, pid}
+
+      error ->
+        error
+    end
+  end
+
+  # Only add Sandbox.Supervisor to the tree when the sandbox is enabled.
+  # This keeps the default startup path completely unchanged.
+  defp sandbox_children do
+    if Application.get_env(:optimal_system_agent, :sandbox_enabled, false) do
+      Logger.info("[Application] Sandbox enabled — starting Sandbox.Supervisor")
+      [OptimalSystemAgent.Sandbox.Supervisor]
+    else
+      []
+    end
   end
 
   defp http_port do

@@ -51,7 +51,48 @@ config :optimal_system_agent,
 
   # HTTP channel (SDK API surface)
   http_port: 8089,
-  require_auth: false
+  require_auth: false,
+
+  # ---------------------------------------------------------------------------
+  # Sandbox — Docker container isolation for skill execution
+  # ---------------------------------------------------------------------------
+  # Master switch. Set OSA_SANDBOX_ENABLED=true in your environment to enable.
+  # The sandbox is opt-in; all existing behaviour is preserved when disabled.
+  sandbox_enabled: System.get_env("OSA_SANDBOX_ENABLED", "false") == "true",
+
+  # Execution backend: :docker (OS-level isolation) or :beam (process-only)
+  sandbox_mode: :docker,
+
+  # Container image used for execution (build with: mix osa.sandbox.setup)
+  sandbox_image: "osa-sandbox:latest",
+
+  # Allow network access inside the container (false = --network none)
+  sandbox_network: false,
+
+  # Resource limits passed to Docker
+  sandbox_max_memory: "256m",
+  sandbox_max_cpu: "0.5",
+
+  # Per-command execution timeout in milliseconds
+  sandbox_timeout: 30_000,
+
+  # Mount ~/.osa/workspace into the container at /workspace
+  sandbox_workspace_mount: true,
+
+  # Images that skills are allowed to request via the :image opt
+  sandbox_allowed_images: [
+    "osa-sandbox:latest",
+    "python:3.12-slim",
+    "node:22-slim"
+  ],
+
+  # Linux capabilities management (defaults to maximum restriction)
+  sandbox_capabilities_drop: ["ALL"],
+  sandbox_capabilities_add: [],
+
+  # Security hardening flags
+  sandbox_read_only_root: true,
+  sandbox_no_new_privileges: true
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
