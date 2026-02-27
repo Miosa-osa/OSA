@@ -20,12 +20,16 @@ defmodule OptimalSystemAgent.Agent.LoopTest do
       assert Code.ensure_loaded?(Loop)
     end
 
+    # function_exported?/3 checks the raw BEAM export table; use __info__/1
+    # for functions defined via GenServer macros (defoverridable + def).
     test "exports start_link/1" do
-      assert function_exported?(Loop, :start_link, 1)
+      funs = Loop.__info__(:functions)
+      assert {:start_link, 1} in funs
     end
 
     test "exports process_message/2" do
-      assert function_exported?(Loop, :process_message, 2)
+      funs = Loop.__info__(:functions)
+      assert {:process_message, 2} in funs
     end
 
     test "exports get_owner/1" do
