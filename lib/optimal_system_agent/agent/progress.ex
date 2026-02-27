@@ -196,6 +196,8 @@ defmodule OptimalSystemAgent.Agent.Progress do
 
       if event in [
            :orchestrator_task_started,
+           :orchestrator_task_appraised,
+           :orchestrator_wave_started,
            :orchestrator_agents_spawning,
            :orchestrator_agent_started,
            :orchestrator_agent_progress,

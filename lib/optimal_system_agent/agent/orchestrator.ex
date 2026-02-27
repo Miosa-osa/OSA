@@ -526,6 +526,16 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         {:noreply, state, {:continue, {:synthesize, task_id}}}
 
       %{pending_waves: [wave | rest]} = task_state ->
+        total_waves = task_state.current_wave + 1 + length(rest)
+
+        Bus.emit(:system_event, %{
+          event: :orchestrator_wave_started,
+          task_id: task_id,
+          wave_number: task_state.current_wave + 1,
+          total_waves: total_waves,
+          agent_count: length(wave)
+        })
+
         session_id = task_state.session_id
         cached_tools = task_state.cached_tools
 

@@ -660,11 +660,9 @@ defmodule OptimalSystemAgent.Commands do
     model = active_model_for(provider)
     parts = ["Switched to #{provider} / #{model}"]
 
-    # Fix 3: Refresh tier assignments when switching Ollama models
     parts =
       if provider == :ollama do
-        Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
-        parts ++ ["Refreshing tier assignments..."]
+        parts ++ [format_tier_refresh()]
       else
         parts
       end
@@ -684,6 +682,29 @@ defmodule OptimalSystemAgent.Commands do
     parts = if extra_warning, do: parts ++ [extra_warning], else: parts
 
     {:command, Enum.join(parts, "\n")}
+  end
+
+  defp format_tier_refresh do
+    alias OptimalSystemAgent.Agent.Tier
+
+    case Tier.detect_ollama_tiers() do
+      {:ok, mapping} ->
+        sizes = Tier.ollama_model_sizes()
+
+        lines =
+          [:elite, :specialist, :utility]
+          |> Enum.map(fn tier ->
+            model = mapping[tier] || "none"
+            size = Map.get(sizes, model, 0)
+            size_gb = Float.round(size / 1_000_000_000, 1)
+            "    #{String.pad_trailing(to_string(tier), 13)}#{String.pad_trailing(model, 34)}#{size_gb} GB"
+          end)
+
+        "\nTier routing updated:\n" <> Enum.join(lines, "\n")
+
+      {:error, :no_models} ->
+        "\n⚠ No Ollama models found — tier routing cleared."
+    end
   end
 
   defp validate_ollama_model(model_name) do
@@ -741,9 +762,7 @@ defmodule OptimalSystemAgent.Commands do
       {:command, "Current Ollama URL: #{current}\n\nUsage: /model ollama-url <url>"}
     else
       Application.put_env(:optimal_system_agent, :ollama_url, url)
-      # Fix 2: Refresh tier assignments when URL changes (new server may have different models)
-      Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
-      {:command, "Ollama URL set to: #{url}\nRefreshing tier assignments..."}
+      {:command, "Ollama URL set to: #{url}\n" <> format_tier_refresh()}
     end
   end
 
@@ -1251,23 +1270,53 @@ defmodule OptimalSystemAgent.Commands do
     {:command, output}
   end
 
-  defp cmd_usage(_arg, _session_id) do
+  defp cmd_usage(_arg, session_id) do
     compactor_stats = OptimalSystemAgent.Agent.Compactor.stats()
     memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
     max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
-    output =
-      """
-      Token Usage:
-        max context:     #{format_number(max_tokens)} tokens
-        tokens saved:    #{format_number(compactor_stats[:tokens_saved] || 0)} (via compaction)
-        compactions:     #{compactor_stats[:compaction_count] || 0}
-        sessions stored: #{memory_stats[:session_count] || 0}
-        memory on disk:  #{format_bytes(memory_stats[:long_term_size] || 0)}
-      """
-      |> String.trim()
+    # Try to get live context utilization from the current session's Loop state
+    context_line =
+      try do
+        case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+          [{pid, _}] ->
+            # Use :sys.get_state to peek at the Loop's message list without a custom call
+            state = :sys.get_state(pid)
+            estimated = OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+            util = if max_tokens > 0, do: Float.round(estimated / max_tokens * 100, 1), else: 0.0
+            bar = context_utilization_bar(util)
+            "  context now:   #{bar} #{format_number(estimated)}/#{format_number(max_tokens)} (#{util}%)"
 
-    {:command, output}
+          _ ->
+            nil
+        end
+      rescue
+        _ -> nil
+      end
+
+    lines = [
+      "Token Usage:",
+      "  max context:     #{format_number(max_tokens)} tokens",
+      "  tokens saved:    #{format_number(compactor_stats[:tokens_saved] || 0)} (via compaction)",
+      "  compactions:     #{compactor_stats[:compaction_count] || 0}",
+      "  sessions stored: #{memory_stats[:session_count] || 0}",
+      "  memory on disk:  #{format_bytes(memory_stats[:long_term_size] || 0)}"
+    ]
+
+    lines = if context_line, do: [Enum.at(lines, 0)] ++ [context_line] ++ Enum.drop(lines, 1), else: lines
+
+    {:command, Enum.join(lines, "\n")}
+  end
+
+  defp context_utilization_bar(util) do
+    filled = round(util / 5) |> min(20) |> max(0)
+    empty = 20 - filled
+
+    cond do
+      util >= 90.0 -> "#{IO.ANSI.red()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
+      util >= 70.0 -> "#{IO.ANSI.yellow()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
+      true -> "#{IO.ANSI.green()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
+    end
   end
 
   # ── Intelligence ──────────────────────────────────────────────
@@ -1395,6 +1444,7 @@ defmodule OptimalSystemAgent.Commands do
     checks = [
       check_soul(),
       check_providers(),
+      check_ollama(),
       check_skills(),
       check_memory(),
       check_cortex(),
@@ -2055,6 +2105,29 @@ defmodule OptimalSystemAgent.Commands do
     end
   end
 
+  defp check_ollama do
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    if provider == :ollama do
+      url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+      case Req.get("#{url}/api/tags", receive_timeout: 3_000) do
+        {:ok, %{status: 200, body: %{"models" => models}}} ->
+          {:ok, "Ollama", "#{length(models)} models at #{url}"}
+
+        {:ok, %{status: status}} ->
+          {:warn, "Ollama", "responded with status #{status}"}
+
+        {:error, _} ->
+          {:fail, "Ollama", "unreachable at #{url}"}
+      end
+    else
+      {:ok, "Ollama", "skipped (provider: #{provider})"}
+    end
+  rescue
+    _ -> {:fail, "Ollama", "health check failed"}
+  end
+
   defp check_skills do
     skills = OptimalSystemAgent.Skills.Registry.list_tools_direct()
 
@@ -2097,7 +2170,15 @@ defmodule OptimalSystemAgent.Commands do
 
   defp check_http do
     port = Application.get_env(:optimal_system_agent, :http_port, 8089)
-    {:ok, "HTTP", "listening on port #{port}"}
+
+    case :gen_tcp.connect(~c"127.0.0.1", port, [], 1_000) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        {:ok, "HTTP", "listening on port #{port}"}
+
+      {:error, _} ->
+        {:fail, "HTTP", "port #{port} not responding"}
+    end
   end
 
   # ── Formatting Helpers ────────────────────────────────────────

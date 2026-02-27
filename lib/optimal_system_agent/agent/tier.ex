@@ -275,7 +275,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
   Call at boot or when Ollama models change. Maps largest→elite,
   medium→specialist, smallest→utility based on model file size.
   """
-  @spec detect_ollama_tiers() :: :ok
+  @spec detect_ollama_tiers() :: {:ok, map()} | {:error, :no_models}
   def detect_ollama_tiers do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
@@ -292,12 +292,23 @@ defmodule OptimalSystemAgent.Agent.Tier do
             end)
         )
 
-        :ok
+        {:ok, mapping}
 
       _ ->
         # No models or connection failed — clear any stale cache
         :persistent_term.put(:osa_ollama_tiers, %{})
-        :ok
+        {:error, :no_models}
+    end
+  end
+
+  @doc "Get Ollama model sizes for display (returns map of name => size_bytes)."
+  @spec ollama_model_sizes() :: map()
+  def ollama_model_sizes do
+    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+    case safe_list_ollama_models(url) do
+      {:ok, models} -> Map.new(models, fn m -> {m.name, m.size} end)
+      _ -> %{}
     end
   end
 
