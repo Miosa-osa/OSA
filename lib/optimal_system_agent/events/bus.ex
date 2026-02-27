@@ -19,8 +19,8 @@ defmodule OptimalSystemAgent.Events.Bus do
   - user_message: from channels -> Agent.Loop
   - llm_request: from Agent.Loop -> Providers.Registry
   - llm_response: from Providers -> Agent.Loop
-  - tool_call: from Agent.Loop -> Skills.Registry
-  - tool_result: from Skills -> Agent.Loop
+  - tool_call: from Agent.Loop -> Tools.Registry
+  - tool_result: from Tools -> Agent.Loop
   - agent_response: from Agent.Loop -> Channels, Bridge.PubSub
   - system_event: from Scheduler, internals -> Agent.Loop, Memory
   """

@@ -9,7 +9,7 @@ defmodule OptimalSystemAgent.Application do
     - Bridge.PubSub (goldrush → PubSub bridge, 3 tiers)
     - Repo (SQLite3 persistent storage)
     - Providers.Registry (LLM provider routing via :osa_provider_router)
-    - Skills.Registry (tool dispatch via :osa_tool_dispatcher)
+    - Tools.Registry (tool dispatch via :osa_tool_dispatcher)
     - Machines (composable skill set activation from ~/.osa/config.json)
     - OS.Registry (OS template discovery, connection, context injection)
     - MCP.Supervisor (MCP server/client processes)
@@ -54,8 +54,8 @@ defmodule OptimalSystemAgent.Application do
         # LLM providers (goldrush-compiled :osa_provider_router)
         OptimalSystemAgent.Providers.Registry,
 
-        # Skills + machines (goldrush-compiled :osa_tool_dispatcher)
-        OptimalSystemAgent.Skills.Registry,
+        # Tools + machines (goldrush-compiled :osa_tool_dispatcher)
+        OptimalSystemAgent.Tools.Registry,
         OptimalSystemAgent.Machines,
 
         # Slash command registry (built-in + custom + agent-created)
