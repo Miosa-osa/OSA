@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   bin/version-bump patch    0.1.0 → 0.1.1
+#   bin/version-bump minor    0.1.0 → 0.2.0
+#   bin/version-bump major    0.1.0 → 1.0.0
+#   bin/version-bump          (no arg = patch)
+#
+# Reads VERSION file, bumps it, writes it back, commits, and creates a git tag.
+# Push with: git push origin main --tags
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+VERSION_FILE="$ROOT/VERSION"
+
+if [ ! -f "$VERSION_FILE" ]; then
+  echo "error: VERSION file not found at $VERSION_FILE" >&2
+  exit 1
+fi
+
+CURRENT=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+BUMP="${1:-patch}"
+
+IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+case "$BUMP" in
+  major)
+    MAJOR=$((MAJOR + 1))
+    MINOR=0
+    PATCH=0
+    ;;
+  minor)
+    MINOR=$((MINOR + 1))
+    PATCH=0
+    ;;
+  patch)
+    PATCH=$((PATCH + 1))
+    ;;
+  *)
+    echo "usage: bin/version-bump [patch|minor|major]" >&2
+    exit 1
+    ;;
+esac
+
+NEW="${MAJOR}.${MINOR}.${PATCH}"
+
+echo "$NEW" > "$VERSION_FILE"
+
+echo "$CURRENT → $NEW"
+
+cd "$ROOT"
+git add VERSION
+git commit -m "bump: v${NEW}"
+git tag "v${NEW}"
+
+echo ""
+echo "Tagged v${NEW}. Push with:"
+echo "  git push origin main --tags"
