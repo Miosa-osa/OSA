@@ -116,13 +116,12 @@ defmodule OptimalSystemAgent.Application do
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
-        # Auto-detect best Ollama model and tier assignments (fast, ~100ms)
-        if Application.get_env(:optimal_system_agent, :default_provider) == :ollama do
+        # Always auto-detect best Ollama model + tier assignments at boot
+        # (ready for use even if another provider is default — user may switch)
+        Task.start(fn ->
           OptimalSystemAgent.Providers.Ollama.auto_detect_model()
-        end
-
-        # Always detect Ollama tiers if Ollama is reachable (for fallback routing)
-        Task.start(fn -> OptimalSystemAgent.Agent.Tier.detect_ollama_tiers() end)
+          OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+        end)
 
         {:ok, pid}
 

@@ -655,6 +655,11 @@ defmodule OptimalSystemAgent.Commands do
     if model_override do
       model_key = :"#{provider}_model"
       Application.put_env(:optimal_system_agent, model_key, model_override)
+    else
+      # No explicit model — auto-detect best for Ollama
+      if provider == :ollama do
+        OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+      end
     end
 
     model = active_model_for(provider)
