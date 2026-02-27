@@ -2,7 +2,7 @@
 
 > OptimalSystemAgent — The AI Agent Framework on Elixir/OTP
 >
-> 28,500+ LOC | 144 modules | 18 providers | 12+ channels | 440+ tests
+> 39,500+ LOC | 154 modules | 18 providers | 12+ channels | 627 tests
 
 ---
 
@@ -203,9 +203,9 @@ docs/
 
 | Metric | Value |
 |--------|-------|
-| Lines of code | 28,500+ |
-| Elixir modules | 144 |
-| Test cases | 440+ |
+| Lines of code | 39,500+ |
+| Elixir modules | 154 |
+| Test cases | 627 |
 | LLM providers | 18 |
 | Messaging channels | 12+ |
 | Built-in skills | 9 |

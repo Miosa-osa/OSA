@@ -1,12 +1,12 @@
 # OptimalSystemAgent
 
-> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 18 LLM providers, 12 chat channels, and unlimited custom skills. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
+> The AI agent that thinks before it acts. Signal Theory-grounded intelligence that classifies, filters, orchestrates, and learns — across 18 LLM providers, 12+ chat channels, and unlimited custom skills. Built on Elixir/OTP for fault tolerance and massive concurrency. An alternative to [NanoClaw](https://github.com/qwibitai/nanoclaw), [Nanobot](https://github.com/HKUDS/nanobot), and [OpenClaw](https://github.com/openclaw/openclaw). Runs on your machine. Your data stays yours.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Elixir](https://img.shields.io/badge/Elixir-1.19+-purple.svg)](https://elixir-lang.org)
-[![OTP](https://img.shields.io/badge/OTP-28+-green.svg)](https://www.erlang.org)
-[![Tests](https://img.shields.io/badge/Tests-440%20passing-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/Version-0.1.1-orange.svg)](#)
+[![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
+[![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
+[![Tests](https://img.shields.io/badge/Tests-627-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.2.5-orange.svg)](#)
 
 ---
 
@@ -18,7 +18,7 @@ We built Signal Theory to solve our own problem: most messages are noise, and pr
 
 Then we saw [OpenClaw](https://github.com/openclaw/openclaw), [NanoClaw](https://github.com/qwibitai/nanoclaw), and [Nanobot](https://github.com/HKUDS/nanobot) — and realized everyone else was still treating every message the same. Full pipeline, full cost, full latency, every time. No signal intelligence. No noise filtering. No cost optimization.
 
-So we open-sourced OSA. The same agent that powers MIOSA, available to everyone. 28,500+ lines of Elixir/OTP. 440 tests. Runs locally on your machine. Your data stays yours.
+So we open-sourced OSA. The same agent that powers MIOSA, available to everyone. 39,500+ lines of Elixir/OTP. 627 tests. Runs locally on your machine. Your data stays yours.
 
 **If you're looking for an OpenClaw alternative that actually thinks before it acts — this is it.**
 
@@ -32,7 +32,7 @@ None of them solve the **intelligence problem.** They're message processors, not
 
 OSA is different. It's grounded in [Signal Theory](https://zenodo.org/records/18774174) — every message is classified, weighted, and routed before a single token of AI compute is spent. Noise gets filtered. Signals get prioritized. Complex tasks get decomposed across multiple agents. The system learns and adapts.
 
-**28,500+ lines of Elixir/OTP. 440 tests. 147 resource files. Zero cloud dependency.**
+**39,500+ lines of Elixir/OTP. 627 tests. 147 resource files. Zero cloud dependency.**
 
 ## What Makes OSA Different
 
@@ -351,8 +351,8 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 | **Dynamic skill creation** | Runtime SKILL.md + register | No | No | No | No | No |
 | **Workflow tracking** | Multi-step + LLM decomposition | No | No | No | No | No |
 | **Language** | Elixir/OTP | TypeScript | Python | TypeScript | Python | Python |
-| **Codebase** | ~28.5K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
-| **Tests** | 440 | Minimal | Minimal | Basic | Basic | Basic |
+| **Codebase** | ~39.5K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
+| **Tests** | 627 | Minimal | Minimal | Basic | Basic | Basic |
 
 ## Install
 
@@ -384,7 +384,7 @@ mix setup              # deps + database + compile
 mix chat               # start talking
 ```
 
-Requires Elixir 1.17+ and Erlang/OTP 27+.
+Requires Elixir 1.17+ and Erlang/OTP 27+. See [Getting Started](docs/getting-started/) for full setup guide.
 
 ---
 
