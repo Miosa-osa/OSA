@@ -307,6 +307,17 @@ defmodule OptimalSystemAgent.Commands do
       {"banner", "Show OSA banner", &cmd_utility/2},
       {"init", "Initialize project", &cmd_utility/2},
 
+      # ── Auth ──
+      {"login", "Authenticate with the backend", &cmd_login/2},
+      {"logout", "End session and clear token", &cmd_logout/2},
+
+      # ── System Management ──
+      {"reset", "Reset local config/state", &cmd_reset/2},
+      {"logs", "Stream backend logs", &cmd_logs/2},
+      {"completion", "Generate shell completion", &cmd_completion/2},
+      {"docs", "Built-in documentation", &cmd_docs/2},
+      {"update", "Check for updates", &cmd_update/2},
+
       # ── Exit ──
       {"exit", "Exit the CLI", &cmd_exit/2},
       {"quit", "Exit the CLI", &cmd_exit/2},
@@ -2097,6 +2108,284 @@ defmodule OptimalSystemAgent.Commands do
 
   defp cmd_clear(_arg, _session_id) do
     {:action, :clear, ""}
+  end
+
+  # ── Auth Commands ──────────────────────────────────────────────
+
+  defp cmd_login(arg, session_id) do
+    user_id = if arg == "", do: "cli_#{session_id}", else: String.trim(arg)
+    token = OptimalSystemAgent.Channels.HTTP.Auth.generate_token(%{"user_id" => user_id})
+    refresh = OptimalSystemAgent.Channels.HTTP.Auth.generate_refresh_token(%{"user_id" => user_id})
+
+    # Persist tokens
+    auth_path = Path.expand("~/.osa/auth.json")
+    File.mkdir_p!(Path.dirname(auth_path))
+    auth_data = Jason.encode!(%{token: token, refresh_token: refresh, user_id: user_id})
+    File.write(auth_path, auth_data)
+
+    {:command,
+     """
+     Authenticated as #{user_id}
+       Token expires in 15 minutes
+       Refresh token valid for 7 days
+       Saved to ~/.osa/auth.json
+
+     TUI users: token is auto-loaded. CLI users: export OSA_TOKEN=#{token}
+     """}
+  end
+
+  defp cmd_logout(_arg, _session_id) do
+    auth_path = Path.expand("~/.osa/auth.json")
+    File.rm(auth_path)
+    {:command, "Logged out. Token cleared from ~/.osa/auth.json"}
+  end
+
+  # ── System Management Commands ─────────────────────────────────
+
+  defp cmd_reset(arg, _session_id) do
+    osa_dir = Path.expand("~/.osa")
+    trimmed = String.trim(arg)
+
+    case trimmed do
+      "--hard" ->
+        paths = ["sessions", "data", "commands", "osa.db", "auth.json"]
+
+        deleted =
+          Enum.filter(paths, fn p ->
+            full = Path.join(osa_dir, p)
+
+            case File.rm_rf(full) do
+              {:ok, _} -> true
+              _ -> false
+            end
+          end)
+
+        {:command, "Hard reset complete. Cleared: #{Enum.join(deleted, ", ")}"}
+
+      "--config" ->
+        File.rm(Path.join(osa_dir, "config.json"))
+        {:command, "Config reset. Run /setup to reconfigure."}
+
+      "--sessions" ->
+        File.rm_rf(Path.join(osa_dir, "sessions"))
+        File.mkdir_p(Path.join(osa_dir, "sessions"))
+        {:command, "All sessions cleared."}
+
+      "--auth" ->
+        File.rm(Path.join(osa_dir, "auth.json"))
+        {:command, "Auth tokens cleared."}
+
+      "" ->
+        {:command,
+         """
+         Usage: /reset <scope>
+           --hard       Clear sessions, data, commands, auth (keeps config)
+           --config     Reset provider configuration
+           --sessions   Clear conversation history
+           --auth       Clear stored auth tokens
+         """}
+
+      _ ->
+        {:command, "Unknown reset scope: #{trimmed}. Use /reset for usage."}
+    end
+  end
+
+  defp cmd_logs(arg, _session_id) do
+    trimmed = String.trim(arg)
+
+    lines =
+      case trimmed do
+        "" -> 20
+        n -> String.to_integer(n)
+      end
+
+    log_file = Application.get_env(:optimal_system_agent, :log_file, "log/dev.log")
+
+    case File.read(log_file) do
+      {:ok, content} ->
+        tail = content |> String.split("\n") |> Enum.take(-lines) |> Enum.join("\n")
+        {:command, "Last #{lines} log lines:\n\n#{tail}"}
+
+      {:error, _} ->
+        {:command, "No log file found at #{log_file}. Check Logger configuration."}
+    end
+  rescue
+    _ -> {:command, "Invalid line count. Usage: /logs [number]"}
+  end
+
+  defp cmd_completion(arg, _session_id) do
+    shell = String.trim(arg)
+    commands = builtin_commands() |> Enum.map(fn {name, _desc, _fn} -> name end)
+
+    case shell do
+      "bash" ->
+        script = generate_bash_completion(commands)
+        {:command, "# Add to ~/.bashrc:\n#{script}"}
+
+      "zsh" ->
+        script = generate_zsh_completion(commands)
+        {:command, "# Add to ~/.zshrc:\n#{script}"}
+
+      "fish" ->
+        script = generate_fish_completion(commands)
+        {:command, "# Save to ~/.config/fish/completions/osa.fish:\n#{script}"}
+
+      "" ->
+        {:command, "Usage: /completion <shell>\n  Supported: bash, zsh, fish"}
+
+      _ ->
+        {:command, "Unsupported shell: #{shell}. Use bash, zsh, or fish."}
+    end
+  end
+
+  defp generate_bash_completion(commands) do
+    cmds = Enum.join(commands, " ")
+
+    """
+    _osa_completions() {
+      local cur="${COMP_WORDS[COMP_CWORD]}"
+      if [[ "$cur" == /* ]]; then
+        COMPREPLY=($(compgen -W "#{cmds}" -- "${cur#/}"))
+        COMPREPLY=("${COMPREPLY[@]/#//}")
+      fi
+    }
+    complete -F _osa_completions osa
+    """
+  end
+
+  defp generate_zsh_completion(commands) do
+    items = Enum.map(commands, fn c -> "'#{c}'" end) |> Enum.join(" ")
+
+    """
+    _osa() {
+      local -a commands=(#{items})
+      _describe 'command' commands
+    }
+    compdef _osa osa
+    """
+  end
+
+  defp generate_fish_completion(commands) do
+    Enum.map_join(commands, "\n", fn c ->
+      "complete -c osa -a '/#{c}' -d '#{c}'"
+    end)
+  end
+
+  defp cmd_docs(arg, _session_id) do
+    topic = String.trim(arg) |> String.downcase()
+
+    docs = %{
+      "" => """
+      OSA Documentation — Available Topics:
+
+        /docs agents    — Agent roster, tiers, and dispatch
+        /docs swarms    — Multi-agent swarm patterns
+        /docs memory    — Episodic memory system
+        /docs signals   — Signal Theory framework
+        /docs security  — Security scanning and hardening
+        /docs commands  — Command system and custom commands
+        /docs config    — Configuration and providers
+        /docs channels  — Channel integrations
+        /docs api       — HTTP API reference
+
+      Usage: /docs <topic>
+      """,
+      "agents" => """
+      ## Agent System
+
+      OSA uses a 3-tier agent dispatch system:
+      - **Elite** (Opus): Complex orchestration, architecture
+      - **Specialist** (Sonnet): Domain-specific tasks
+      - **Utility** (Haiku): Quick lookups, formatting
+
+      Commands:
+        /agents        — List all 22+ agents with roles
+        /agents <name> — Show agent details
+        /tiers         — Show tier → model mapping
+        /tier <t> <m>  — Override a tier's model
+
+      Agents are auto-dispatched by keyword matching:
+        bug → debugger, test → test-automator, .go → backend-go
+      """,
+      "signals" => """
+      ## Signal Theory
+
+      Every output is a Signal: S = (M, G, T, F, W)
+        M = Mode (Linguistic, Visual, Code)
+        G = Genre (Spec, Report, PR, ADR)
+        T = Type (Direct, Inform, Commit)
+        F = Format (Markdown, code, CLI output)
+        W = Structure (genre-specific template)
+
+      4 Governing Constraints: Shannon, Ashby, Beer, Wiener
+      6 Encoding Principles: Mode-message, Genre-receiver, Structure,
+        Redundancy, Entropy, Bandwidth
+
+      The /verbose command shows signal metadata on each response.
+      """,
+      "config" => """
+      ## Configuration
+
+      Config files:
+        ~/.osa/config.json  — Provider, API keys, machines
+        ~/.osa/.env         — Environment overrides
+        .env (project root) — Project-specific overrides
+
+      Provider priority: OSA_DEFAULT_PROVIDER > API key detection > ollama
+      18 providers supported: ollama, anthropic, openai, groq, ...
+
+      Commands:
+        /config  — Show runtime config
+        /model   — Show/switch provider
+        /setup   — Run configuration wizard
+        /reset   — Reset config/state
+      """,
+      "api" => """
+      ## HTTP API Reference
+
+      Base: http://localhost:8089/api/v1
+
+      Auth:
+        POST /auth/login    — Get JWT token
+        POST /auth/logout   — Invalidate session
+        POST /auth/refresh  — Refresh expired token
+
+      Core:
+        POST /orchestrate        — Process message
+        GET  /stream/:session_id — SSE event stream
+        POST /classify           — Signal classification
+
+      Tools & Commands:
+        GET  /tools              — List tools
+        GET  /commands           — List commands
+        POST /commands/execute   — Execute command
+
+      Orchestration:
+        POST /orchestrate/complex     — Multi-agent task
+        GET  /orchestrate/:id/progress — Progress
+      """
+    }
+
+    case Map.get(docs, topic) do
+      nil -> {:command, "Unknown topic: #{topic}. Run /docs for available topics."}
+      content -> {:command, content}
+    end
+  end
+
+  defp cmd_update(_arg, _session_id) do
+    current = Application.spec(:optimal_system_agent, :vsn) |> to_string()
+
+    {:command,
+     """
+     OSA v#{current}
+
+     Update methods:
+       Mix: mix deps.get && mix compile
+       Binary: Download latest from releases
+       Homebrew: brew upgrade osa (when available)
+
+     Check for updates: https://github.com/miosa/osa/releases
+     """}
   end
 
   defp cmd_create(arg, _session_id) do

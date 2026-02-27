@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     status: :idle,
     tools: [],
     plan_mode: false,
-    plan_mode_enabled: true
+    plan_mode_enabled: false
   ]
 
   # --- Client API ---
@@ -69,7 +69,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       provider: Keyword.get(opts, :provider),
       model: Keyword.get(opts, :model),
       messages: Keyword.get(opts, :messages, []),
-      tools: Tools.list_tools() ++ extra_tools
+      tools: Tools.list_tools() ++ extra_tools,
+      plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false)
     }
 
     {:ok, state}
@@ -87,8 +88,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Apply per-call provider/model overrides (SDK passthrough)
     state = apply_overrides(state, opts)
 
-    # 1. Classify the signal — every user message is a signal, weight determines priority
-    signal = Classifier.classify(message, state.channel)
+    # 0. Clear per-message caches (git info runs once per message, not per iteration)
+    Process.delete(:osa_git_info_cache)
+
+    # 1. Classify the signal — deterministic fast path (<1ms), async LLM enrichment in background
+    signal = Classifier.classify_fast(message, state.channel)
+    Classifier.classify_async(message, state.channel, state.session_id)
 
     # 2. Check noise filter — but ALWAYS process, just log the classification
     #    Every message a user sends is a signal. The weight determines what kind.
@@ -281,19 +286,33 @@ defmodule OptimalSystemAgent.Agent.Loop do
               session_id: acc.session_id
             }
 
-            result_str =
+            tool_result =
               case run_hooks(:pre_tool_use, pre_payload) do
                 {:blocked, reason} ->
                   "Blocked: #{reason}"
 
                 _ ->
                   case Tools.execute(tool_call.name, tool_call.arguments) do
-                    {:ok, content} -> content
-                    {:error, reason} -> "Error: #{reason}"
+                    {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+                      {:image, mt, b64, p}
+
+                    {:ok, content} ->
+                      content
+
+                    {:error, reason} ->
+                      "Error: #{reason}"
                   end
               end
 
             tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
+
+            # Normalize result for hooks/events (images get a text summary)
+            result_str =
+              case tool_result do
+                {:image, _mt, _b64, path} -> "[image: #{path}]"
+                text when is_binary(text) -> text
+                other -> inspect(other)
+              end
 
             # Run post_tool_use hooks (cost tracker, telemetry, learning, etc.)
             post_payload = %{
@@ -312,7 +331,23 @@ defmodule OptimalSystemAgent.Agent.Loop do
               args: arg_hint
             })
 
-            tool_msg = %{role: "tool", tool_call_id: tool_call.id, content: result_str}
+            # Build tool message — images get structured content blocks
+            tool_msg =
+              case tool_result do
+                {:image, media_type, b64, path} ->
+                  %{
+                    role: "tool",
+                    tool_call_id: tool_call.id,
+                    content: [
+                      %{type: "text", text: "Image: #{path}"},
+                      %{type: "image", source: %{type: "base64", media_type: media_type, data: b64}}
+                    ]
+                  }
+
+                _ ->
+                  %{role: "tool", tool_call_id: tool_call.id, content: result_str}
+              end
+
             %{acc | messages: acc.messages ++ [tool_msg]}
           end)
 

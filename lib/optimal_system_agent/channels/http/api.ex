@@ -16,6 +16,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     GET    /skills                         — List SKILL.md prompt definitions
     POST   /skills/create                  — Create a new SKILL.md file
 
+  Command endpoints:
+    GET    /commands                       — List available slash commands
+    POST   /commands/execute               — Execute a slash command
+
   Orchestration endpoints:
     POST   /orchestrate/complex            — Launch multi-agent orchestrated task
     GET    /orchestrate/:task_id/progress   — Real-time progress for orchestrated task
@@ -75,6 +79,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Tools.Registry, as: Tools
+  alias OptimalSystemAgent.Commands
   alias OptimalSystemAgent.Machines
   alias OptimalSystemAgent.Channels.HTTP.Auth
   alias OptimalSystemAgent.Events.Bus
@@ -282,6 +287,47 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, body)
+  end
+
+  # ── GET /commands ─────────────────────────────────────────────────────
+
+  get "/commands" do
+    commands =
+      Commands.list_commands()
+      |> Enum.map(fn {name, description} -> %{name: name, description: description} end)
+
+    body = Jason.encode!(%{commands: commands, count: length(commands)})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  # ── POST /commands/execute ────────────────────────────────────────────
+
+  post "/commands/execute" do
+    with %{"command" => command} when is_binary(command) <- conn.body_params do
+      arg = conn.body_params["arg"] || ""
+      session_id = conn.body_params["session_id"] || "http-#{:erlang.unique_integer([:positive])}"
+
+      input = if arg == "", do: command, else: "#{command} #{arg}"
+
+      {kind, output, action} =
+        case Commands.execute(input, session_id) do
+          {:command, text} -> {"text", text, ""}
+          {:prompt, text} -> {"prompt", text, ""}
+          {:action, act, text} -> {"action", text, inspect(act)}
+          :unknown -> {"error", "Unknown command: #{command}", ""}
+        end
+
+      body = Jason.encode!(%{kind: kind, output: output, action: action})
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, body)
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
+    end
   end
 
   # ── POST /memory ────────────────────────────────────────────────────
@@ -1161,6 +1207,63 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     |> send_resp(200, body)
   end
 
+  # ── Auth ────────────────────────────────────────────────────────────
+
+  post "/auth/login" do
+    user_id =
+      get_in(conn.body_params, ["user_id"]) ||
+        "tui_#{System.unique_integer([:positive])}"
+
+    token = Auth.generate_token(%{"user_id" => user_id})
+    refresh = Auth.generate_refresh_token(%{"user_id" => user_id})
+
+    body =
+      Jason.encode!(%{
+        "token" => token,
+        "refresh_token" => refresh,
+        "expires_in" => 900
+      })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  post "/auth/logout" do
+    # Acknowledge logout — stateless JWT, nothing to invalidate server-side
+    body = Jason.encode!(%{"ok" => true})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  post "/auth/refresh" do
+    refresh_token = get_in(conn.body_params, ["refresh_token"]) || ""
+
+    case Auth.refresh(refresh_token) do
+      {:ok, tokens} ->
+        body =
+          Jason.encode!(%{
+            "token" => tokens.token,
+            "refresh_token" => tokens.refresh_token,
+            "expires_in" => tokens.expires_in
+          })
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, body)
+
+      {:error, reason} ->
+        body =
+          Jason.encode!(%{"error" => "refresh_failed", "details" => to_string(reason)})
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(401, body)
+    end
+  end
+
   # ── Catch-all ───────────────────────────────────────────────────────
 
   match _ do
@@ -1168,6 +1271,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   # ── JWT Authentication Plug ─────────────────────────────────────────
+
+  defp authenticate(%{request_path: "/api/v1/auth/" <> _} = conn, _opts), do: conn
 
   defp authenticate(conn, _opts) do
     case get_req_header(conn, "authorization") do

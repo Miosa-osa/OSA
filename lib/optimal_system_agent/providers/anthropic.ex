@@ -348,6 +348,22 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         text_content = [%{"type" => "text", "text" => to_string(content)}]
         %{"role" => to_string(role), "content" => thinking_content ++ text_content}
 
+      %{role: role, content: content} when is_list(content) ->
+        # Structured content blocks (images, mixed text+image tool results)
+        formatted_content = Enum.map(content, fn
+          %{type: "image", source: source} ->
+            %{"type" => "image", "source" => %{
+              "type" => source.type || source[:type],
+              "media_type" => source.media_type || source[:media_type],
+              "data" => source.data || source[:data]
+            }}
+          %{type: "text", text: text} ->
+            %{"type" => "text", "text" => to_string(text)}
+          other ->
+            other
+        end)
+        %{"role" => to_string(role), "content" => formatted_content}
+
       %{role: role, content: content} ->
         %{"role" => to_string(role), "content" => to_string(content)}
 
@@ -361,7 +377,28 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp maybe_add_system(body, ""), do: body
   defp maybe_add_system(body, nil), do: body
-  defp maybe_add_system(body, system_text), do: Map.put(body, :system, system_text)
+
+  defp maybe_add_system(body, system_text) do
+    if prompt_caching_enabled?() do
+      # Split system prompt into cacheable blocks.
+      # Anthropic caches from the end of the last cache_control marker,
+      # so we mark the full system text as one ephemeral cached block.
+      # Minimum cacheable size is 1024 tokens (~4K chars).
+      if byte_size(system_text) >= 4_000 do
+        Map.put(body, :system, [
+          %{type: "text", text: system_text, cache_control: %{type: "ephemeral"}}
+        ])
+      else
+        Map.put(body, :system, system_text)
+      end
+    else
+      Map.put(body, :system, system_text)
+    end
+  end
+
+  defp prompt_caching_enabled? do
+    Application.get_env(:optimal_system_agent, :prompt_caching_enabled, true)
+  end
 
   @doc """
   Add extended thinking configuration to request body.
@@ -391,10 +428,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       {"content-type", "application/json"}
     ]
 
-    if thinking do
-      [{"anthropic-beta", "interleaved-thinking-2025-05-14"} | base]
-    else
-      base
+    # Collect beta features
+    betas = []
+    betas = if thinking, do: ["interleaved-thinking-2025-05-14" | betas], else: betas
+    betas = if prompt_caching_enabled?(), do: ["prompt-caching-2024-07-31" | betas], else: betas
+
+    case betas do
+      [] -> base
+      _ -> [{"anthropic-beta", Enum.join(betas, ",")} | base]
     end
   end
 

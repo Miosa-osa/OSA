@@ -163,16 +163,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
         {:error, "Unknown provider: #{provider}. Available: #{inspect(Map.keys(@providers))}"}
 
       module ->
-        if function_exported?(module, :chat_stream, 3) do
-          try do
-            module.chat_stream(messages, callback, opts_without_provider)
-          rescue
-            e ->
-              Logger.error("Provider #{module} chat_stream raised: #{Exception.message(e)}")
-              fallback_sync_stream(module, messages, callback, opts_without_provider)
-          end
-        else
-          fallback_sync_stream(module, messages, callback, opts_without_provider)
+        case stream_with_fallback(provider, module, messages, callback, opts_without_provider) do
+          :ok -> :ok
+          {:error, _} = err -> err
         end
     end
   end
@@ -269,6 +262,66 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
           chat_with_fallback(messages, remaining_chain, opts)
         end
+    end
+  end
+
+  defp stream_with_fallback(provider, module, messages, callback, opts) do
+    result = try_stream_provider(module, messages, callback, opts)
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
+
+        remaining_chain =
+          fallback_chain
+          |> Enum.drop_while(&(&1 == provider))
+          |> then(fn
+            chain when chain == fallback_chain -> chain
+            [_ | rest] -> rest
+            [] -> []
+          end)
+
+        if remaining_chain == [] do
+          Logger.error("Provider #{provider} stream failed, no fallback: #{reason}")
+          {:error, reason}
+        else
+          Logger.warning(
+            "Provider #{provider} stream failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}"
+          )
+
+          # Try each fallback provider
+          Enum.reduce_while(remaining_chain, {:error, reason}, fn fb_provider, _acc ->
+            case Map.get(@providers, fb_provider) do
+              nil ->
+                {:cont, {:error, "Unknown fallback provider: #{fb_provider}"}}
+
+              fb_module ->
+                case try_stream_provider(fb_module, messages, callback, opts) do
+                  :ok -> {:halt, :ok}
+                  {:error, r} ->
+                    Logger.warning("Fallback stream provider #{fb_provider} failed: #{r}")
+                    {:cont, {:error, r}}
+                end
+            end
+          end)
+        end
+    end
+  end
+
+  defp try_stream_provider(module, messages, callback, opts) do
+    if function_exported?(module, :chat_stream, 3) do
+      try do
+        module.chat_stream(messages, callback, opts)
+      rescue
+        e ->
+          Logger.error("Provider #{module} chat_stream raised: #{Exception.message(e)}")
+          fallback_sync_stream(module, messages, callback, opts)
+      end
+    else
+      fallback_sync_stream(module, messages, callback, opts)
     end
   end
 

@@ -142,6 +142,39 @@ config :optimal_system_agent,
   update_url: System.get_env("OSA_UPDATE_URL"),
   update_interval: parse_int.(System.get_env("OSA_UPDATE_INTERVAL"), 86_400_000),
 
+  # Provider failover chain — auto-detected from configured API keys.
+  # Override with comma-separated list: OSA_FALLBACK_CHAIN=anthropic,openai,ollama
+  fallback_chain: (
+    case System.get_env("OSA_FALLBACK_CHAIN") do
+      nil ->
+        candidates = [
+          {:anthropic, System.get_env("ANTHROPIC_API_KEY")},
+          {:openai, System.get_env("OPENAI_API_KEY")},
+          {:groq, System.get_env("GROQ_API_KEY")},
+          {:openrouter, System.get_env("OPENROUTER_API_KEY")},
+          {:deepseek, System.get_env("DEEPSEEK_API_KEY")},
+          {:together, System.get_env("TOGETHER_API_KEY")},
+          {:fireworks, System.get_env("FIREWORKS_API_KEY")},
+          {:mistral, System.get_env("MISTRAL_API_KEY")},
+          {:google, System.get_env("GOOGLE_API_KEY")},
+          {:cohere, System.get_env("COHERE_API_KEY")}
+        ]
+
+        configured = for {name, key} <- candidates, key != nil and key != "", do: name
+        chain = (configured ++ [:ollama]) |> Enum.uniq()
+        Enum.reject(chain, &(&1 == default_provider))
+
+      csv ->
+        csv
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.map(&String.to_atom/1)
+    end
+  ),
+
+  # Plan mode (opt-in via OSA_PLAN_MODE=true)
+  plan_mode_enabled: System.get_env("OSA_PLAN_MODE") == "true",
+
   # Extended thinking
   thinking_enabled: System.get_env("OSA_THINKING_ENABLED") == "true",
   thinking_budget_tokens: parse_int.(System.get_env("OSA_THINKING_BUDGET"), 5_000),

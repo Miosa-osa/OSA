@@ -44,10 +44,14 @@ defmodule OptimalSystemAgent.Providers.AnthropicThinkingTest do
       assert val =~ "interleaved-thinking"
     end
 
-    test "does not include beta header when thinking is nil" do
+    test "does not include thinking beta header when thinking is nil" do
       headers = Anthropic.build_headers("test-key", nil)
       beta = Enum.find(headers, fn {k, _} -> k == "anthropic-beta" end)
-      assert beta == nil
+
+      case beta do
+        nil -> :ok
+        {_, val} -> refute val =~ "interleaved-thinking"
+      end
     end
   end
 

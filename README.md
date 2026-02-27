@@ -5,7 +5,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
-[![Tests](https://img.shields.io/badge/Tests-627-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/Tests-711-brightgreen.svg)](#)
 [![Version](https://img.shields.io/badge/Version-0.2.5-orange.svg)](#)
 
 ---
@@ -18,7 +18,7 @@ We built Signal Theory to solve our own problem: most messages are noise, and pr
 
 Then we saw [OpenClaw](https://github.com/openclaw/openclaw), [NanoClaw](https://github.com/qwibitai/nanoclaw), and [Nanobot](https://github.com/HKUDS/nanobot) — and realized everyone else was still treating every message the same. Full pipeline, full cost, full latency, every time. No signal intelligence. No noise filtering. No cost optimization.
 
-So we open-sourced OSA. The same agent that powers MIOSA, available to everyone. 39,500+ lines of Elixir/OTP. 627 tests. Runs locally on your machine. Your data stays yours.
+So we open-sourced OSA. The same agent that powers MIOSA, available to everyone. 39,500+ lines of Elixir/OTP. 711 tests. Runs locally on your machine. Your data stays yours.
 
 **If you're looking for an OpenClaw alternative that actually thinks before it acts — this is it.**
 
@@ -32,7 +32,7 @@ None of them solve the **intelligence problem.** They're message processors, not
 
 OSA is different. It's grounded in [Signal Theory](https://zenodo.org/records/18774174) — every message is classified, weighted, and routed before a single token of AI compute is spent. Noise gets filtered. Signals get prioritized. Complex tasks get decomposed across multiple agents. The system learns and adapts.
 
-**39,500+ lines of Elixir/OTP. 627 tests. 147 resource files. Zero cloud dependency.**
+**39,500+ lines of Elixir/OTP. 711 tests. 147 resource files. Zero cloud dependency.**
 
 ## What Makes OSA Different
 
@@ -352,7 +352,7 @@ Each channel adapter handles webhook signature verification, rate limiting, and 
 | **Workflow tracking** | Multi-step + LLM decomposition | No | No | No | No | No |
 | **Language** | Elixir/OTP | TypeScript | Python | TypeScript | Python | Python |
 | **Codebase** | ~39.5K lines | ~200 lines core | ~4K lines | ~430K lines | ~50K lines | ~30K lines |
-| **Tests** | 627 | Minimal | Minimal | Basic | Basic | Basic |
+| **Tests** | 711 | Minimal | Minimal | Basic | Basic | Basic |
 
 ## Install
 
@@ -381,23 +381,60 @@ For contributors or if you want to hack on OSA itself:
 git clone https://github.com/Miosa-osa/OSA.git
 cd OSA
 mix setup              # deps + database + compile
-mix chat               # start talking
+mix osa.chat           # start talking (built-in Elixir CLI)
 ```
 
 Requires Elixir 1.17+ and Erlang/OTP 27+. See [Getting Started](docs/getting-started/) for full setup guide.
 
+### Go TUI (Optional)
+
+A native terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). Richer display than the built-in CLI — tree connectors, agent sub-status, task checklists, expandable tool feeds.
+
+```bash
+# Terminal 1: Start the backend
+mix osa.serve
+
+# Terminal 2: Build and run the Go TUI
+cd priv/go/tui
+make build             # → ./osa (14 MB binary)
+./osa                  # connects to http://localhost:8089
+```
+
+Flags: `--profile <name>`, `--dev`, `--no-color`, `--version`. See [Go TUI README](priv/go/tui/README.md).
+
 ---
+
+## Quick Start
+
+### Which command do I use?
+
+| Command | What it does |
+|---|---|
+| `mix osa.chat` | Start backend + built-in Elixir CLI (all-in-one) |
+| `mix osa.serve` | Start backend only (for Go TUI or API clients) |
+| `mix osa.setup` | Run the setup wizard without starting the app |
+| `osagent` | Release binary — same as `mix osa.chat` |
+| `osagent serve` | Release binary — same as `mix osa.serve` |
+| `./osa` | Go TUI — connects to running backend |
+
+**First time?** Just run `mix osa.chat`. It auto-detects first run and launches the setup wizard.
 
 ## Usage
 
 ```bash
+# Release binary
 osagent                # interactive chat (default)
 osagent setup          # configure provider + API keys
 osagent version        # print version
 osagent serve          # headless HTTP API mode (port 8089)
+
+# Development (mix tasks)
+mix osa.chat           # backend + CLI
+mix osa.serve          # backend only (for Go TUI)
+mix osa.setup          # setup wizard only
 ```
 
-On first run, `osagent` launches a setup wizard — pick your LLM provider, paste an API key (or choose Ollama for fully local), and you're chatting.
+On first run, `osagent` (or `mix osa.chat`) launches a setup wizard — pick your LLM provider, paste an API key (or choose Ollama for fully local), and you're chatting.
 
 ### Switch Providers
 

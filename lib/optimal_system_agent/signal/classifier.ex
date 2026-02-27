@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.PromptLoader
+  alias OptimalSystemAgent.Events.Bus
 
   defstruct [
     :mode,
@@ -62,6 +63,45 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   @cache_table :osa_classifier_cache
   @cache_ttl 600
+
+  @doc """
+  Fast deterministic classification — always <1ms, returns full 5-tuple
+  with `confidence: :low`. Sufficient for routing (plan mode, soul overlay).
+  """
+  def classify_fast(message, channel \\ :cli) do
+    classify_deterministic(message, channel)
+  end
+
+  @doc """
+  Async LLM enrichment — spawns a supervised Task that:
+  1. Calls cached LLM classifier (ETS cache hit = instant)
+  2. Emits `Bus.emit(:signal_classified, enriched_signal)` for learning/analytics
+  3. Writes result to ETS cache for future `classify/2` calls
+
+  Fire-and-forget. Does not block the caller.
+  """
+  def classify_async(message, channel \\ :cli, session_id \\ nil) do
+    if llm_enabled?() do
+      Task.Supervisor.start_child(
+        OptimalSystemAgent.Events.TaskSupervisor,
+        fn ->
+          case cached_classify_llm(message, channel) do
+            {:ok, enriched} ->
+              Bus.emit(:signal_classified, %{
+                signal: enriched,
+                session_id: session_id,
+                source: :llm
+              })
+
+            {:error, reason} ->
+              Logger.debug("[Classifier] Async enrichment failed: #{inspect(reason)}")
+          end
+        end
+      )
+    end
+
+    :ok
+  end
 
   @doc """
   Classify a raw message into a Signal 5-tuple.

@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Onboarding do
   First-run onboarding wizard for OSA.
 
   Detects first-run state (no ~/.osa/config.json or missing provider),
-  walks the user through a 4-step TUI wizard, and writes all bootstrap
+  walks the user through a 5-step TUI wizard, and writes all bootstrap
   files to ~/.osa/.
 
   Called from:
@@ -11,9 +11,8 @@ defmodule OptimalSystemAgent.Onboarding do
     - `mix osa.setup` — manually via run_setup_mode/0 (no app.start needed)
   """
 
+  require Logger
   alias OptimalSystemAgent.Onboarding.{Channels, Selector}
-
-  @osa_dir Path.expand("~/.osa")
 
   @cyan IO.ANSI.cyan()
   @bold IO.ANSI.bright()
@@ -50,7 +49,7 @@ defmodule OptimalSystemAgent.Onboarding do
   @doc "Returns true if no config.json exists or it's missing a provider."
   @spec first_run?() :: boolean()
   def first_run? do
-    config_path = Path.join(@osa_dir, "config.json")
+    config_path = Path.join(config_dir(), "config.json")
     not File.exists?(config_path) or not config_has_provider?(config_path)
   end
 
@@ -58,6 +57,7 @@ defmodule OptimalSystemAgent.Onboarding do
   @spec run() :: :ok
   def run do
     print_welcome()
+    system_info = step_system_detection()
     agent_name = step_agent_name()
     {user_name, user_context} = step_user_profile()
     {provider, model, api_key, env_var} = step_provider()
@@ -71,7 +71,8 @@ defmodule OptimalSystemAgent.Onboarding do
       model: model,
       api_key: api_key,
       env_var: env_var,
-      channels: channels
+      channels: channels,
+      system_info: system_info
     }
 
     step_confirm_and_write(state)
@@ -83,7 +84,7 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec run_setup_mode() :: :ok
   def run_setup_mode do
-    config_path = Path.join(@osa_dir, "config.json")
+    config_path = Path.join(config_dir(), "config.json")
 
     if File.exists?(config_path) do
       answer = prompt("Existing configuration found. Reconfigure?", "N")
@@ -108,7 +109,7 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec apply_config() :: :ok
   def apply_config do
-    config_path = Path.join(@osa_dir, "config.json")
+    config_path = Path.join(config_dir(), "config.json")
 
     with {:ok, content} <- File.read(config_path),
          {:ok, config} <- Jason.decode(content) do
@@ -142,10 +143,93 @@ defmodule OptimalSystemAgent.Onboarding do
         Application.put_env(:optimal_system_agent, key_atom, value)
       end
 
+      # Rebuild fallback chain from newly applied config
+      # (runtime.exs ran before config.json existed on first run)
+      rebuild_fallback_chain()
+
       :ok
     else
       _ -> :ok
     end
+  end
+
+  defp rebuild_fallback_chain do
+    # Only rebuild if user hasn't set an explicit override
+    if System.get_env("OSA_FALLBACK_CHAIN") == nil do
+      default = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+      # Check which providers now have API keys configured
+      candidates = [
+        {:anthropic, :anthropic_api_key},
+        {:openai, :openai_api_key},
+        {:groq, :groq_api_key},
+        {:openrouter, :openrouter_api_key},
+        {:deepseek, :deepseek_api_key},
+        {:together, :together_api_key},
+        {:fireworks, :fireworks_api_key},
+        {:mistral, :mistral_api_key},
+        {:google, :google_api_key},
+        {:cohere, :cohere_api_key}
+      ]
+
+      configured =
+        for {name, key} <- candidates,
+            val = Application.get_env(:optimal_system_agent, key),
+            is_binary(val) and val != "",
+            do: name
+
+      # Ollama always available as last resort; remove the default (tried first)
+      chain = (configured ++ [:ollama]) |> Enum.uniq() |> Enum.reject(&(&1 == default))
+      Application.put_env(:optimal_system_agent, :fallback_chain, chain)
+
+      Logger.debug("[Onboarding] Fallback chain rebuilt: #{inspect(chain)} (default: #{default})")
+    end
+  end
+
+  @doc """
+  Run post-setup diagnostic checks. Returns a list of check results.
+
+  Each result is one of:
+    - `{:ok, description}` — check passed
+    - `{:error, description, reason}` — check failed with reason
+  """
+  @spec doctor_checks() :: [{:ok, String.t()} | {:error, String.t(), String.t()}]
+  def doctor_checks do
+    ensure_httpc_started()
+
+    [
+      check_config(),
+      check_provider(),
+      check_soul_files(),
+      check_session_dir(),
+      check_tools()
+    ]
+  end
+
+  @doc """
+  Detect the local system environment. Returns a map with OS, shell,
+  installed runtimes, and Ollama availability.
+  """
+  @spec detect_system() :: map()
+  def detect_system do
+    ensure_httpc_started()
+
+    os_info = detect_os()
+    shell = System.get_env("SHELL") || "unknown"
+
+    runtimes =
+      for cmd <- ~w(elixir go node python3 ruby), into: %{} do
+        {cmd, System.find_executable(cmd) != nil}
+      end
+
+    ollama = detect_ollama()
+
+    %{
+      os: os_info,
+      shell: shell,
+      runtimes: runtimes,
+      ollama: ollama
+    }
   end
 
   # ── Wizard Steps ────────────────────────────────────────────────
@@ -162,6 +246,36 @@ defmodule OptimalSystemAgent.Onboarding do
 
       #{@bold}Welcome to OSA — let's get you set up.#{@reset}
     """)
+  end
+
+  defp step_system_detection do
+    IO.puts("  #{@bold}System Detection#{@reset}")
+    IO.puts("  #{@dim}────────────────#{@reset}")
+
+    info = detect_system()
+
+    IO.puts("  OS: #{info.os}")
+    IO.puts("  Shell: #{info.shell}")
+
+    runtime_str =
+      info.runtimes
+      |> Enum.map(fn {name, available} ->
+        if available, do: "#{name} #{@green}✓#{@reset}", else: "#{name} #{@red}✗#{@reset}"
+      end)
+      |> Enum.join("  ")
+
+    IO.puts("  Runtimes: #{runtime_str}")
+
+    ollama_str =
+      case info.ollama do
+        {:running, count} -> "#{@green}running#{@reset} (#{count} model(s) available)"
+        :not_running -> "#{@dim}not running#{@reset}"
+      end
+
+    IO.puts("  Ollama: #{ollama_str}")
+    IO.puts("")
+
+    info
   end
 
   defp step_agent_name do
@@ -198,6 +312,17 @@ defmodule OptimalSystemAgent.Onboarding do
             key = prompt("API key", "")
             if key == "", do: nil, else: key
           end
+
+        IO.puts("\n  #{@dim}Testing connectivity...#{@reset}")
+
+        case test_provider_connectivity(provider, model, api_key) do
+          :ok ->
+            IO.puts("  #{@green}✓#{@reset} Connected to #{provider} (#{model})")
+
+          {:error, reason} ->
+            IO.puts("  #{@red}✗#{@reset} Connection failed: #{reason}")
+            IO.puts("  #{@dim}You can fix this later with /model#{@reset}")
+        end
 
         {provider, model, api_key, env_var}
     end
@@ -263,35 +388,38 @@ defmodule OptimalSystemAgent.Onboarding do
   # ── File Writers ────────────────────────────────────────────────
 
   defp write_all(state) do
-    File.mkdir_p!(@osa_dir)
-    File.mkdir_p!(Path.join(@osa_dir, "skills"))
-    File.mkdir_p!(Path.join(@osa_dir, "sessions"))
-    File.mkdir_p!(Path.join(@osa_dir, "data"))
+    dir = config_dir()
+    File.mkdir_p!(dir)
+    File.mkdir_p!(Path.join(dir, "skills"))
+    File.mkdir_p!(Path.join(dir, "sessions"))
+    File.mkdir_p!(Path.join(dir, "data"))
 
     IO.puts("")
     write_file("config.json", build_config(state))
     write_file("IDENTITY.md", identity_template(state.agent_name))
     write_file("USER.md", user_template(state.user_name, state.user_context))
 
-    soul_path = Path.join(@osa_dir, "SOUL.md")
+    soul_path = Path.join(dir, "SOUL.md")
 
     unless File.exists?(soul_path) do
       write_file("SOUL.md", soul_template())
     end
 
-    IO.puts("\n  #{@bold}Starting #{state.agent_name}...#{@reset}\n")
+    print_next_steps()
     :ok
   end
 
   defp write_file(filename, content) do
-    path = Path.join(@osa_dir, filename)
+    dir = config_dir()
+    path = Path.join(dir, filename)
+    display = String.replace(dir, Path.expand("~"), "~") <> "/#{filename}"
 
     case File.write(path, content) do
       :ok ->
-        IO.puts("  #{@green}✓#{@reset} ~/.osa/#{filename}")
+        IO.puts("  #{@green}✓#{@reset} #{display}")
 
       {:error, reason} ->
-        IO.puts("  #{@red}✗#{@reset} ~/.osa/#{filename} — #{inspect(reason)}")
+        IO.puts("  #{@red}✗#{@reset} #{display} — #{inspect(reason)}")
     end
   end
 
@@ -522,6 +650,215 @@ defmodule OptimalSystemAgent.Onboarding do
     If you learn something important about the user — save it. If you notice
     a pattern — note it. The goal: they should never have to tell you twice.
     """
+  end
+
+  defp print_next_steps do
+    IO.puts("""
+
+      #{@green}✓#{@reset} #{@bold}Setup complete!#{@reset}
+      #{@dim}────────────────#{@reset}
+      Next steps:
+        #{@cyan}/model#{@reset}          — Check your active provider
+        #{@cyan}/agents#{@reset}         — See available agents
+        #{@cyan}/prime#{@reset}          — Load context for your project
+        #{@cyan}/help#{@reset}           — See all commands
+
+      Start chatting by typing a message, or run #{@cyan}/doctor#{@reset} to verify your setup.
+    """)
+  end
+
+  # ── System Detection ──────────────────────────────────────────
+
+  defp detect_os do
+    case :os.type() do
+      {:unix, :darwin} ->
+        version = os_version()
+        "macOS (Darwin #{version})"
+
+      {:unix, :linux} ->
+        "Linux"
+
+      {:win32, _} ->
+        "Windows"
+
+      {family, name} ->
+        "#{family}/#{name}"
+    end
+  end
+
+  defp os_version do
+    case :os.version() do
+      {major, minor, patch} -> "#{major}.#{minor}.#{patch}"
+      _ -> "unknown"
+    end
+  end
+
+  defp detect_ollama do
+    ensure_httpc_started()
+
+    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+    case :httpc.request(:get, {~c"#{url}/api/tags", []}, [{:timeout, 3000}], []) do
+      {:ok, {{_, 200, _}, _, body}} ->
+        count =
+          case Jason.decode(to_string(body)) do
+            {:ok, %{"models" => models}} when is_list(models) -> length(models)
+            _ -> 0
+          end
+
+        {:running, count}
+
+      _ ->
+        :not_running
+    end
+  rescue
+    _ -> :not_running
+  end
+
+  # ── Provider Connectivity ─────────────────────────────────────
+
+  defp test_provider_connectivity("ollama", _model, _key) do
+    ensure_httpc_started()
+
+    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+    case :httpc.request(:get, {~c"#{url}/api/tags", []}, [{:timeout, 5000}], []) do
+      {:ok, {{_, 200, _}, _, _}} -> :ok
+      _ -> {:error, "Ollama not reachable at #{url}"}
+    end
+  rescue
+    _ -> {:error, "Ollama not reachable"}
+  end
+
+  defp test_provider_connectivity(_provider, _model, nil), do: {:error, "No API key provided"}
+  defp test_provider_connectivity(_provider, _model, ""), do: {:error, "No API key provided"}
+  defp test_provider_connectivity(_provider, _model, _key), do: :ok
+
+  defp ensure_httpc_started do
+    :inets.start()
+    :ssl.start()
+    :ok
+  end
+
+  # ── Profile-Aware Config Path ─────────────────────────────────
+
+  defp config_dir do
+    case System.get_env("OSA_PROFILE") do
+      nil -> Path.expand("~/.osa")
+      "" -> Path.expand("~/.osa")
+      profile -> Path.expand("~/.osa/profiles/#{profile}")
+    end
+  end
+
+  # ── Doctor Checks ─────────────────────────────────────────────
+
+  defp check_config do
+    config_path = Path.join(config_dir(), "config.json")
+
+    case File.read(config_path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, _} -> {:ok, "Config file is valid JSON"}
+          {:error, _} -> {:error, "Config file", "invalid JSON in #{config_path}"}
+        end
+
+      {:error, reason} ->
+        {:error, "Config file", "#{config_path}: #{inspect(reason)}"}
+    end
+  end
+
+  defp check_provider do
+    provider =
+      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+      |> to_string()
+
+    case test_provider_connectivity(provider, nil, provider_api_key(provider)) do
+      :ok -> {:ok, "Provider (#{provider}) is reachable"}
+      {:error, reason} -> {:error, "Provider (#{provider})", reason}
+    end
+  end
+
+  defp check_soul_files do
+    dir = config_dir()
+    identity = Path.join(dir, "IDENTITY.md")
+    soul = Path.join(dir, "SOUL.md")
+
+    cond do
+      File.exists?(identity) and File.exists?(soul) ->
+        {:ok, "Soul files present (IDENTITY.md, SOUL.md)"}
+
+      File.exists?(identity) ->
+        {:error, "Soul files", "SOUL.md missing in #{dir}"}
+
+      File.exists?(soul) ->
+        {:error, "Soul files", "IDENTITY.md missing in #{dir}"}
+
+      true ->
+        {:error, "Soul files", "IDENTITY.md and SOUL.md missing in #{dir}"}
+    end
+  end
+
+  defp check_session_dir do
+    dir = Path.join(config_dir(), "sessions")
+
+    cond do
+      not File.exists?(dir) ->
+        {:error, "Session directory", "#{dir} does not exist"}
+
+      not File.dir?(dir) ->
+        {:error, "Session directory", "#{dir} is not a directory"}
+
+      true ->
+        # Test writability by creating and removing a temp file
+        test_path = Path.join(dir, ".write_test_#{:erlang.unique_integer([:positive])}")
+
+        case File.write(test_path, "") do
+          :ok ->
+            File.rm(test_path)
+            {:ok, "Session directory is writable"}
+
+          {:error, reason} ->
+            {:error, "Session directory", "#{dir} not writable: #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp check_tools do
+    try do
+      tools = OptimalSystemAgent.Tools.Registry.list_tools_direct()
+
+      if length(tools) > 0 do
+        {:ok, "#{length(tools)} tool(s) registered"}
+      else
+        {:error, "Tools", "no tools registered"}
+      end
+    rescue
+      _ -> {:error, "Tools", "could not query tool registry"}
+    end
+  end
+
+  defp provider_api_key("ollama"), do: nil
+
+  defp provider_api_key(provider) do
+    key_atom =
+      case provider do
+        "anthropic" -> :anthropic_api_key
+        "openai" -> :openai_api_key
+        "groq" -> :groq_api_key
+        "openrouter" -> :openrouter_api_key
+        "deepseek" -> :deepseek_api_key
+        "google" -> :google_api_key
+        "mistral" -> :mistral_api_key
+        "together" -> :together_api_key
+        "fireworks" -> :fireworks_api_key
+        "cohere" -> :cohere_api_key
+        "perplexity" -> :perplexity_api_key
+        "replicate" -> :replicate_api_key
+        "qwen" -> :qwen_api_key
+        _ -> nil
+      end
+
+    if key_atom, do: Application.get_env(:optimal_system_agent, key_atom), else: nil
   end
 
   # ── Formatting Helpers ──────────────────────────────────────────

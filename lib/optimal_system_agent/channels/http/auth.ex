@@ -45,6 +45,42 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
     "#{header_b64}.#{payload_b64}.#{signature_b64}"
   end
 
+  @doc "Generate a refresh token (longer-lived, 7 days)."
+  def generate_refresh_token(claims) do
+    secret = shared_secret()
+    header = %{"alg" => "HS256", "typ" => "JWT"}
+    now = System.system_time(:second)
+
+    claims =
+      claims
+      |> Map.put("iat", now)
+      |> Map.put("exp", now + 604_800)
+      |> Map.put("type", "refresh")
+
+    header_b64 = Base.url_encode64(Jason.encode!(header), padding: false)
+    payload_b64 = Base.url_encode64(Jason.encode!(claims), padding: false)
+    signature = :crypto.mac(:hmac, :sha256, secret, "#{header_b64}.#{payload_b64}")
+    signature_b64 = Base.url_encode64(signature, padding: false)
+
+    "#{header_b64}.#{payload_b64}.#{signature_b64}"
+  end
+
+  @doc "Verify a refresh token and return new access + refresh tokens."
+  def refresh(refresh_token) do
+    case verify_token(refresh_token) do
+      {:ok, %{"type" => "refresh", "user_id" => user_id}} ->
+        access = generate_token(%{"user_id" => user_id})
+        refresh = generate_refresh_token(%{"user_id" => user_id})
+        {:ok, %{token: access, refresh_token: refresh, expires_in: 900}}
+
+      {:ok, _} ->
+        {:error, :not_refresh_token}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp verify_signature(header_b64, payload_b64, signature_b64, secret) do
     expected = :crypto.mac(:hmac, :sha256, secret, "#{header_b64}.#{payload_b64}")
     expected_b64 = Base.url_encode64(expected, padding: false)

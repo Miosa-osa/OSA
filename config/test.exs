@@ -4,9 +4,11 @@ config :logger, level: :warning
 
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo, pool: Ecto.Adapters.SQL.Sandbox
 
-# Disable LLM-tier classification in tests so deterministic paths are always
+# Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
+config :optimal_system_agent, compactor_llm_enabled: false
+config :optimal_system_agent, noise_filter_llm_enabled: false
 
 # Use a different HTTP port in tests to avoid conflicts
 config :optimal_system_agent, http_port: 0

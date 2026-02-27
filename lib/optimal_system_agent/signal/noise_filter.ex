@@ -78,16 +78,20 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
   # --- Tier 2: LLM-based (fallback for uncertain signals) ---
 
   defp tier_2(message, weight) do
-    case classify_noise_llm(message) do
-      {:ok, :signal} ->
-        {:signal, weight}
+    if not noise_filter_llm_enabled?() do
+      {:signal, weight}
+    else
+      case classify_noise_llm(message) do
+        {:ok, :signal} ->
+          {:signal, weight}
 
-      {:ok, :noise} ->
-        {:noise, :llm_classified}
+        {:ok, :noise} ->
+          {:noise, :llm_classified}
 
-      {:error, _} ->
-        Logger.debug("Tier 2 noise check: LLM unavailable, passing uncertain signal")
-        {:signal, weight}
+        {:error, _} ->
+          Logger.debug("Tier 2 noise check: LLM unavailable, passing uncertain signal")
+          {:signal, weight}
+      end
     end
   end
 
@@ -169,5 +173,9 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
         # ETS table was destroyed between init_cache and lookup (race condition in async tests)
         tier_2(message, weight)
     end
+  end
+
+  defp noise_filter_llm_enabled? do
+    Application.get_env(:optimal_system_agent, :noise_filter_llm_enabled, true)
   end
 end

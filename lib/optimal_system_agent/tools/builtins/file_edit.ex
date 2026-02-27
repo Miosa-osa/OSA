@@ -59,7 +59,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
           true ->
             new_content = String.replace(content, old, new, global: false)
             File.write!(expanded, new_content)
-            {:ok, "Replaced in #{display_path}"}
+            diff = format_diff(old, new, content, display_path)
+            {:ok, "Replaced in #{display_path}\n#{diff}"}
         end
       {:error, :enoent} -> {:error, "File not found: #{display_path}"}
       {:error, reason} -> {:error, "Cannot read #{display_path}: #{reason}"}
@@ -68,6 +69,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
 
   defp count_occurrences(content, pattern) do
     content |> String.split(pattern) |> length() |> Kernel.-(1)
+  end
+
+  # Build a minimal unified diff showing the change with context lines
+  defp format_diff(old, new, content, path) do
+    lines = String.split(content, "\n")
+    old_lines = String.split(old, "\n")
+    first_old_line = List.first(old_lines) || ""
+
+    # Find the line number where the match starts
+    start_idx = Enum.find_index(lines, fn l -> String.contains?(l, first_old_line) end) || 0
+
+    # Context: 2 lines before and after
+    ctx_before = Enum.slice(lines, max(start_idx - 2, 0), min(2, start_idx))
+    ctx_after = Enum.slice(lines, start_idx + length(old_lines), 2)
+
+    removed = old_lines |> Enum.map(fn l -> "- #{l}" end)
+    added = String.split(new, "\n") |> Enum.map(fn l -> "+ #{l}" end)
+    context_b = ctx_before |> Enum.map(fn l -> "  #{l}" end)
+    context_a = ctx_after |> Enum.map(fn l -> "  #{l}" end)
+
+    header = "--- #{path}\n+++ #{path}"
+    hunk = "@@ -#{max(start_idx - 1, 1)},#{length(old_lines) + 4} @@"
+
+    diff_lines = [header, hunk] ++ context_b ++ removed ++ added ++ context_a
+    Enum.join(diff_lines, "\n")
   end
 
   # Security: copy exact patterns from FileRead and FileWrite

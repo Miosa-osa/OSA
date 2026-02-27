@@ -595,31 +595,36 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp call_summary_llm(messages_to_summarize) do
-    template = PromptLoader.get(:compactor_summary, @summary_prompt_fallback)
-    formatted = format_for_summary(messages_to_summarize)
+    if not compactor_llm_enabled?() do
+      # Stub: return a placeholder summary when LLM is disabled (test env)
+      {:ok, "[Summary of #{length(messages_to_summarize)} messages]"}
+    else
+      template = PromptLoader.get(:compactor_summary, @summary_prompt_fallback)
+      formatted = format_for_summary(messages_to_summarize)
 
-    prompt =
-      if String.contains?(template, "%MESSAGES%") do
-        String.replace(template, "%MESSAGES%", formatted)
-      else
-        template <> "\n\n" <> formatted
+      prompt =
+        if String.contains?(template, "%MESSAGES%") do
+          String.replace(template, "%MESSAGES%", formatted)
+        else
+          template <> "\n\n" <> formatted
+        end
+
+      try do
+        Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
+        |> case do
+          {:ok, %{content: content}} when is_binary(content) and content != "" ->
+            {:ok, content}
+
+          {:ok, %{content: content}} ->
+            {:error, "Empty summary: #{inspect(content)}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      rescue
+        e ->
+          {:error, "LLM call exception: #{Exception.message(e)}"}
       end
-
-    try do
-      Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
-      |> case do
-        {:ok, %{content: content}} when is_binary(content) and content != "" ->
-          {:ok, content}
-
-        {:ok, %{content: content}} ->
-          {:error, "Empty summary: #{inspect(content)}"}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    rescue
-      e ->
-        {:error, "LLM call exception: #{Exception.message(e)}"}
     end
   end
 
@@ -634,31 +639,35 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp call_key_facts_llm(messages_to_compress) do
-    template = PromptLoader.get(:compactor_key_facts, @key_facts_prompt_fallback)
-    formatted = format_for_summary(messages_to_compress)
+    if not compactor_llm_enabled?() do
+      {:ok, "[Key facts from #{length(messages_to_compress)} messages]"}
+    else
+      template = PromptLoader.get(:compactor_key_facts, @key_facts_prompt_fallback)
+      formatted = format_for_summary(messages_to_compress)
 
-    prompt =
-      if String.contains?(template, "%MESSAGES%") do
-        String.replace(template, "%MESSAGES%", formatted)
-      else
-        template <> "\n\n" <> formatted
+      prompt =
+        if String.contains?(template, "%MESSAGES%") do
+          String.replace(template, "%MESSAGES%", formatted)
+        else
+          template <> "\n\n" <> formatted
+        end
+
+      try do
+        Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 512)
+        |> case do
+          {:ok, %{content: content}} when is_binary(content) and content != "" ->
+            {:ok, content}
+
+          {:ok, %{content: content}} ->
+            {:error, "Empty key-facts response: #{inspect(content)}"}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      rescue
+        e ->
+          {:error, "LLM call exception: #{Exception.message(e)}"}
       end
-
-    try do
-      Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 512)
-      |> case do
-        {:ok, %{content: content}} when is_binary(content) and content != "" ->
-          {:ok, content}
-
-        {:ok, %{content: content}} ->
-          {:error, "Empty key-facts response: #{inspect(content)}"}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    rescue
-      e ->
-        {:error, "LLM call exception: #{Exception.message(e)}"}
     end
   end
 
@@ -726,4 +735,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   defp safe_to_string(val),
     do: OptimalSystemAgent.Utils.Text.safe_to_string(val)
+
+  defp compactor_llm_enabled? do
+    Application.get_env(:optimal_system_agent, :compactor_llm_enabled, true)
+  end
 end
