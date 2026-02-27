@@ -17,12 +17,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
   def init(opts), do: opts
 
   def call(conn, _opts) do
-    if Application.get_env(:optimal_system_agent, :require_auth, false) do
-      verify_integrity(conn)
-    else
-      conn
+    cond do
+      Application.get_env(:optimal_system_agent, :require_auth, false) ->
+        verify_integrity(conn)
+
+      Application.get_env(:optimal_system_agent, :require_fleet_integrity, false) and
+          fleet_path?(conn) ->
+        verify_integrity(conn)
+
+      true ->
+        conn
     end
   end
+
+  defp fleet_path?(%{path_info: ["api", "v1", "fleet" | _]}), do: true
+  defp fleet_path?(_conn), do: false
 
   @doc "Start the nonce ETS table and reaper. Called from application startup or on first use."
   def ensure_table do

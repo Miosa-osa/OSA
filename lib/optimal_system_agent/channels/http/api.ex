@@ -16,6 +16,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     GET    /api/v1/swarm         — List all swarms
     GET    /api/v1/swarm/:id     — Get swarm status and result
     DELETE /api/v1/swarm/:id     — Cancel a running swarm
+
+  Fleet endpoints:
+    POST   /api/v1/fleet/register                — Self-register an edge agent
+    GET    /api/v1/fleet/:agent_id/instructions   — Poll for pending tasks (OSCP CloudEvent)
+    POST   /api/v1/fleet/heartbeat               — Forward agent heartbeat
+    GET    /api/v1/fleet/agents                  — List all registered agents
+    GET    /api/v1/fleet/:agent_id               — Get single agent details
+    POST   /api/v1/fleet/dispatch                — Dispatch instruction to agent
   """
   use Plug.Router
   require Logger
@@ -42,7 +50,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Channels.DingTalk
   alias OptimalSystemAgent.Channels.Feishu
   alias OptimalSystemAgent.Protocol.CloudEvent
+  alias OptimalSystemAgent.Protocol.OSCP
   alias OptimalSystemAgent.Fleet.Registry, as: Fleet
+  alias OptimalSystemAgent.Agent.TaskQueue
 
   @known_channels %{
     "cli" => :cli,
@@ -684,6 +694,64 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
+  post "/fleet/register" do
+    with %{"agent_id" => agent_id} when is_binary(agent_id) and agent_id != "" <-
+           conn.body_params do
+      capabilities = conn.body_params["capabilities"] || []
+
+      try do
+        case Fleet.register_agent(agent_id, capabilities) do
+          {:ok, _pid} ->
+            body =
+              Jason.encode!(%{
+                status: "registered",
+                agent_id: agent_id,
+                capabilities: capabilities
+              })
+
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(201, body)
+
+          {:error, :already_registered} ->
+            json_error(conn, 409, "conflict", "Agent #{agent_id} is already registered")
+
+          {:error, reason} ->
+            json_error(conn, 500, "registration_error", inspect(reason))
+        end
+      catch
+        :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required field: agent_id")
+    end
+  end
+
+  get "/fleet/:agent_id/instructions" do
+    agent_id = conn.params["agent_id"]
+
+    try do
+      case TaskQueue.lease(agent_id) do
+        {:ok, task} ->
+          event = OSCP.instruction(agent_id, task.task_id, task.payload,
+            priority: Map.get(task, :priority, 0),
+            lease_ms: Map.get(task, :lease_ms, 300_000)
+          )
+
+          {:ok, json} = OSCP.encode(event)
+
+          conn
+          |> put_resp_content_type("application/cloudevents+json")
+          |> send_resp(200, json)
+
+        :empty ->
+          send_resp(conn, 204, "")
+      end
+    catch
+      :exit, _ -> json_error(conn, 503, "fleet_unavailable", "Fleet management not enabled")
+    end
+  end
+
   get "/fleet/:agent_id" do
     agent_id = conn.params["agent_id"]
 
@@ -989,6 +1057,53 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
+  # ── OSCP Protocol Endpoint ──────────────────────────────────────────
+  #
+  # Accepts OSCP-typed CloudEvents. Routes to the appropriate subsystem:
+  #   oscp.heartbeat   → Fleet.heartbeat
+  #   oscp.instruction → TaskQueue.enqueue
+  #   oscp.result      → TaskQueue.complete/fail
+  #   oscp.signal      → Bus.emit (generic)
+
+  post "/oscp" do
+    json_body = Jason.encode!(conn.body_params)
+
+    case OSCP.decode(json_body) do
+      {:ok, event} ->
+        route_oscp_event(event)
+
+        body = Jason.encode!(%{status: "accepted", event_id: event.id, type: event.type})
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(202, body)
+
+      {:error, reason} ->
+        json_error(conn, 400, "invalid_oscp_event", to_string(reason))
+    end
+  end
+
+  # ── Task History ───────────────────────────────────────────────────
+  #
+  # Query completed/failed tasks from the database.
+  # Query params: agent_id, status, limit (default 50)
+
+  get "/tasks/history" do
+    opts =
+      []
+      |> maybe_put(:agent_id, conn.params["agent_id"])
+      |> maybe_put(:status, parse_task_status(conn.params["status"]))
+      |> maybe_put(:limit, parse_int(conn.params["limit"]))
+
+    tasks = TaskQueue.list_history(opts)
+
+    body = Jason.encode!(%{tasks: tasks, count: length(tasks)})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
   # ── Catch-all ───────────────────────────────────────────────────────
 
   match _ do
@@ -1261,6 +1376,73 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       {:error, :invalid_signature}
     end
   end
+
+  # ── OSCP Routing ───────────────────────────────────────────────────
+
+  defp route_oscp_event(%CloudEvent{type: "oscp.heartbeat"} = event) do
+    agent_id = event.data["agent_id"] || event.data[:agent_id] || "unknown"
+    metrics = Map.drop(event.data, ["agent_id", :agent_id])
+
+    try do
+      Fleet.heartbeat(agent_id, metrics)
+    catch
+      :exit, _ -> Logger.warning("[API] Fleet unavailable for heartbeat from #{agent_id}")
+    end
+  end
+
+  defp route_oscp_event(%CloudEvent{type: "oscp.instruction"} = event) do
+    task_id = event.data["task_id"] || event.data[:task_id]
+    agent_id = event.data["agent_id"] || event.data[:agent_id]
+    payload = event.data["payload"] || event.data[:payload] || %{}
+
+    if task_id && agent_id do
+      TaskQueue.enqueue(task_id, agent_id, payload)
+    else
+      Logger.warning("[API] OSCP instruction missing task_id or agent_id")
+    end
+  end
+
+  defp route_oscp_event(%CloudEvent{type: "oscp.result"} = event) do
+    task_id = event.data["task_id"] || event.data[:task_id]
+    status = event.data["status"] || event.data[:status]
+
+    cond do
+      is_nil(task_id) ->
+        Logger.warning("[API] OSCP result missing task_id")
+
+      status in ["failed", :failed] ->
+        error = event.data["error"] || event.data[:error] || "unknown error"
+        TaskQueue.fail(task_id, error)
+
+      true ->
+        output = event.data["output"] || event.data[:output] || %{}
+        TaskQueue.complete(task_id, output)
+    end
+  end
+
+  defp route_oscp_event(%CloudEvent{type: "oscp.signal"} = event) do
+    Bus.emit(:system_event, OSCP.to_bus_event(event))
+  end
+
+  defp route_oscp_event(%CloudEvent{} = event) do
+    Logger.warning("[API] Unknown OSCP type: #{event.type}")
+  end
+
+  defp parse_task_status(nil), do: nil
+  defp parse_task_status("completed"), do: :completed
+  defp parse_task_status("failed"), do: :failed
+  defp parse_task_status(_), do: nil
+
+  defp parse_int(nil), do: nil
+
+  defp parse_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_int(n) when is_integer(n), do: n
 
   # Email inbound: compare x-webhook-secret header against config secret.
   defp verify_email_signature(_conn, nil), do: {:error, :no_secret}
