@@ -267,7 +267,14 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.OnboardingStatusResult:
-		if v.Err != nil || !v.NeedsOnboarding {
+		if v.Err != nil {
+			// Fail-open: backend unreachable, skip onboarding with notice
+			m.state = StateIdle
+			m.recomputeLayout()
+			m.chat.AddSystemMessage("Could not check setup status — run /doctor to verify configuration")
+			return m, m.input.Focus()
+		}
+		if !v.NeedsOnboarding {
 			m.state = StateIdle
 			m.recomputeLayout()
 			return m, m.input.Focus()

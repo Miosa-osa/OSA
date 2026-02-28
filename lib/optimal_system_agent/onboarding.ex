@@ -544,7 +544,7 @@ defmodule OptimalSystemAgent.Onboarding do
 
   defp build_config(state) do
     api_keys =
-      if state.api_key && state.env_var do
+      if is_binary(state.api_key) and state.api_key != "" and state.env_var do
         %{state.env_var => state.api_key}
       else
         %{}

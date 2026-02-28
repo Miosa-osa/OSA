@@ -115,9 +115,10 @@ func (m *OnboardingModel) SetChannels(channels []msg.OnboardingChannel) {
 	}
 }
 
-// SetError displays an error message on the confirm screen.
+// SetError displays an error message on the confirm screen and resets focus to Confirm button.
 func (m *OnboardingModel) SetError(err string) {
 	m.err = err
+	m.confirmFocused = 0
 }
 
 // Update processes a key press and returns an optional tea.Cmd.
@@ -255,7 +256,7 @@ func (m *OnboardingModel) updateTemplate(k tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// ── Step 3: Provider ─────────────────────────────────────────
+// ── Step 4: Provider ─────────────────────────────────────────
 
 func (m *OnboardingModel) updateProvider(k tea.KeyPressMsg) tea.Cmd {
 	maxIdx := len(m.providers) - 1
@@ -274,10 +275,7 @@ func (m *OnboardingModel) updateProvider(k tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case key.Matches[tea.KeyPressMsg](k, key.NewBinding(key.WithKeys("enter"))):
-		if len(m.providers) == 0 {
-			return nil
-		}
-		selected := m.providers[m.providerCursor]
+		selected := m.selectedProvider() // safe fallback if providers is empty
 		if selected.EnvVar == "" {
 			m.step = stepMachines
 		} else {
@@ -292,7 +290,7 @@ func (m *OnboardingModel) updateProvider(k tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// ── Step 4: API Key ─────────────────────────────────────────
+// ── Step 5: API Key ─────────────────────────────────────────
 
 func (m *OnboardingModel) updateAPIKey(k tea.KeyPressMsg) tea.Cmd {
 	switch {
@@ -317,7 +315,7 @@ func (m *OnboardingModel) updateAPIKey(k tea.KeyPressMsg) tea.Cmd {
 	}
 }
 
-// ── Step 5: Machines ─────────────────────────────────────────
+// ── Step 6: Machines ─────────────────────────────────────────
 
 func (m *OnboardingModel) updateMachines(k tea.KeyPressMsg) tea.Cmd {
 	switch {
@@ -330,7 +328,7 @@ func (m *OnboardingModel) updateMachines(k tea.KeyPressMsg) tea.Cmd {
 			m.step = stepProvider
 		} else {
 			m.step = stepAPIKey
-			m.keyInput = InputCursor{Focused: true}
+			m.keyInput.Focused = true // preserve existing key value
 		}
 		return nil
 	default:
@@ -347,7 +345,7 @@ func (m *OnboardingModel) updateMachines(k tea.KeyPressMsg) tea.Cmd {
 	}
 }
 
-// ── Step 6: Channels ─────────────────────────────────────────
+// ── Step 7: Channels ─────────────────────────────────────────
 
 func (m *OnboardingModel) updateChannels(k tea.KeyPressMsg) tea.Cmd {
 	switch {
@@ -371,7 +369,7 @@ func (m *OnboardingModel) updateChannels(k tea.KeyPressMsg) tea.Cmd {
 	}
 }
 
-// ── Step 7: Confirm ─────────────────────────────────────────
+// ── Step 8: Confirm ─────────────────────────────────────────
 
 func (m *OnboardingModel) updateConfirm(k tea.KeyPressMsg) tea.Cmd {
 	switch {
