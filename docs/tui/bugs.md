@@ -194,6 +194,21 @@ treasury_*                       ✗ NO SID      ✗ not parsed ✗             
 **Issue:** `runtime.exs` set `default_model` from `System.get_env("OLLAMA_MODEL")` regardless of active provider. When using Groq, the health endpoint showed `llama3.2:latest` (Ollama's default) instead of the actual Groq model.
 **Fix:** `default_model` now resolves from provider-specific env vars (`GROQ_MODEL`, `ANTHROPIC_MODEL`, etc.) and only falls back to `OLLAMA_MODEL` when the active provider is actually Ollama. Health endpoint fallback uses `provider_info/1` to get the provider's built-in default model.
 
+### FIXED: GET /sessions crashes with NaiveDateTime.compare on nil (E2E Bug 24/22)
+**Files:** `lib/optimal_system_agent/channels/http/api.ex`
+**Issue:** `GET /sessions` sorted results with `Enum.sort_by(& &1.last_active, {:desc, NaiveDateTime})`. The `last_active` values from Memory are ISO8601 strings or nil — not NaiveDateTime structs. Crashed when any session had nil timestamps.
+**Fix:** Changed to nil-safe string sort: `Enum.sort_by(fn s -> s.last_active || "" end, :desc)`. ISO8601 strings sort lexicographically in correct chronological order.
+
+### FIXED: 40% session creation failure rate (E2E Bug 20)
+**Files:** `lib/optimal_system_agent/agent/loop.ex`
+**Issue:** `Loop.init/1` called `Tools.list_tools()` which is a `GenServer.call` to Tools.Registry. Under concurrent session creation, this serialized call becomes a bottleneck — if Tools.Registry is busy processing other requests, new sessions timeout waiting for the tool list.
+**Fix:** Switched to `Tools.list_tools_direct()` which reads from `:persistent_term` — lock-free, zero contention, safe from inside GenServer callbacks.
+
+### FIXED: Missing /analytics endpoint (E2E Bug 8)
+**Files:** `lib/optimal_system_agent/channels/http/api.ex`
+**Issue:** `GET /api/v1/analytics` returned 404. No route existed for analytics data.
+**Fix:** Added `GET /analytics` endpoint that aggregates data from Budget, Learning, Hooks, Compactor, and active session count from SessionRegistry.
+
 ### FIXED: Dead 2-tuple backward compat in API
 **Files:** `lib/optimal_system_agent/channels/http/api.ex`
 **Issue:** `GET /commands` had a `{name, description}` pattern match clause that could never match — `list_commands/0` always returns 3-tuples now.
