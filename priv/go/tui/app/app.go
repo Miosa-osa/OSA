@@ -64,6 +64,7 @@ type Model struct {
 	confirmQuit     bool
 	processingStart time.Time
 	streamBuf       strings.Builder
+	sseReconnecting bool // true while a ReconnectListenCmd goroutine is in-flight
 }
 
 func New(c *client.Client) Model {
@@ -125,9 +126,15 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case client.SSEConnectedEvent:
 		m.sessionID = v.SessionID
+		m.sseReconnecting = false
 		return m, nil
 	case client.SSEDisconnectedEvent:
+		if m.sseReconnecting {
+			// A reconnect goroutine is already running — ignore duplicate disconnect events.
+			return m, nil
+		}
 		if m.sessionID != "" && m.sse != nil && !m.sse.IsClosed() && m.program != nil {
+			m.sseReconnecting = true
 			return m, m.sse.ReconnectListenCmd(m.program)
 		}
 		return m, nil
@@ -267,6 +274,25 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.BudgetExceededEvent:
 		m.chat.AddSystemError(fmt.Sprintf("Budget exceeded: %s", v.Message))
 		return m, nil
+	case client.ToolResultEvent:
+		m.activity, _ = m.activity.Update(msg.ToolResult{Name: v.Name, Result: v.Result, Success: v.Success})
+		if v.Result != "" {
+			preview := v.Result
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			m.chat.AddSystemMessage(fmt.Sprintf("[%s] %s", v.Name, preview))
+		}
+		return m, nil
+	case client.SignalClassifiedEvent:
+		m.status.SetSignal(&model.Signal{Mode: v.Mode, Genre: v.Genre, Type: v.Type, Weight: v.Weight})
+		return m, nil
+	case client.SSEParseWarning:
+		m.toasts.Add(v.Message, model.ToastWarning)
+		return m, m.tickCmd()
+	case msg.SSEParseWarning:
+		m.toasts.Add(v.Message, model.ToastWarning)
+		return m, m.tickCmd()
 	case msg.ToggleExpand:
 		m.activity, _ = m.activity.Update(v)
 		m.agents, _ = m.agents.Update(v)
@@ -278,18 +304,21 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case msg.TickMsg:
 		m.toasts.Tick()
+		needTick := false
 		if m.state == StateProcessing {
 			m.status.SetStats(time.Since(m.processingStart), m.activity.ToolCount(), m.activity.InputTokens(), m.activity.OutputTokens())
-			// Push activity view inline into chat viewport (right below messages)
+			// Resize chat for dynamic content height and push activity view inline
+			m.chat.SetSize(m.width, m.chatHeight())
 			m.chat.SetProcessingView(m.activity.View())
-			cmds = append(cmds, m.tickCmd())
+			needTick = true
 		}
 		if m.toasts.HasToasts() {
+			needTick = true
+		}
+		m.activity, _ = m.activity.Update(rawMsg)
+		if needTick {
 			cmds = append(cmds, m.tickCmd())
 		}
-		var cmd tea.Cmd
-		m.activity, cmd = m.activity.Update(rawMsg)
-		cmds = append(cmds, cmd)
 		return m, tea.Batch(cmds...)
 	case model.PlanDecision:
 		return m.handlePlanDecision(v)
@@ -341,7 +370,6 @@ func (m Model) View() string {
 		sections = append(sections, m.input.View())
 	case StateProcessing:
 		// Activity view is rendered inline in the chat viewport (via SetProcessingView)
-		m.chat.SetSize(m.width, m.chatHeight())
 		sections = append(sections, m.banner.HeaderView())
 		sections = append(sections, m.chat.View())
 		if m.tasks.HasTasks() {
@@ -878,7 +906,7 @@ func (m Model) handlePlanDecision(d model.PlanDecision) (Model, tea.Cmd) {
 		m.state = StateProcessing
 		m.processingStart = time.Now()
 		m.status.SetActive(true)
-		return m, m.orchestrate("Approved. Execute the plan.")
+		return m, tea.Batch(m.orchestrate("Approved. Execute the plan."), m.tickCmd())
 	case "reject":
 		m.chat.AddSystemMessage("Plan rejected.")
 		m.state = StateIdle
@@ -939,6 +967,7 @@ func (m *Model) closeSSE() {
 		m.sse.Close()
 		m.sse = nil
 	}
+	m.sseReconnecting = false
 }
 
 func (m Model) checkHealth() tea.Cmd {
