@@ -475,14 +475,8 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @doc false
   defp tools_block do
-    skills = Tools.list_docs()
-
-    tools =
-      try do
-        Tools.list_tools()
-      rescue
-        _ -> []
-      end
+    skills = Tools.list_docs_direct()
+    tools = Tools.list_tools_direct()
 
     case skills do
       [] ->

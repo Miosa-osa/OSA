@@ -67,6 +67,21 @@ defmodule OptimalSystemAgent.Tools.Registry do
     GenServer.call(__MODULE__, :list_docs)
   end
 
+  @doc """
+  List tool and skill documentation without going through the GenServer.
+
+  Uses :persistent_term for lock-free reads. Safe to call from inside
+  GenServer callbacks (e.g., during context building in Loop) without
+  deadlocking or timing out under concurrent load.
+  """
+  def list_docs_direct do
+    builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+    skills = :persistent_term.get({__MODULE__, :skills}, %{})
+    tool_docs = Enum.map(builtin_tools, fn {name, mod} -> {name, mod.description()} end)
+    skill_docs = Enum.map(skills, fn {name, skill} -> {name, skill.description} end)
+    tool_docs ++ skill_docs
+  end
+
   @doc "Search existing tools and skills by keyword matching against names and descriptions."
   @spec search(String.t()) :: list({String.t(), String.t(), float()})
   def search(query) do

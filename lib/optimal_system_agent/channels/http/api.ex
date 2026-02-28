@@ -172,46 +172,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
       start_time = System.monotonic_time(:millisecond)
 
-      # Ensure an agent loop exists for this session
-      Session.ensure_loop(session_id, user_id, :http)
-
-      # Process through the agent loop (same pipeline as CLI)
-      case Loop.process_message(session_id, input) do
-        {:ok, response} ->
-          execution_ms = System.monotonic_time(:millisecond) - start_time
-          signal = Classifier.classify(input, :http)
-          meta = Loop.get_metadata(session_id)
-
-          body =
-            Jason.encode!(%{
-              session_id: session_id,
-              output: response,
-              signal: signal_to_map(signal),
-              tools_used: Map.get(meta, :tools_used, []),
-              iteration_count: Map.get(meta, :iteration_count, 0),
-              execution_ms: execution_ms,
-              metadata: %{}
-            })
-
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(200, body)
-
-        {:filtered, signal} ->
-          body =
-            Jason.encode!(%{
-              error: "signal_filtered",
-              code: "SIGNAL_BELOW_THRESHOLD",
-              details: "Signal weight #{signal.weight} below threshold",
-              signal: signal_to_map(signal)
-            })
-
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(422, body)
-
+      # Ensure an agent loop exists for this session (with retry on failure)
+      case Session.ensure_loop(session_id, user_id, :http) do
         {:error, reason} ->
-          json_error(conn, 500, "agent_error", to_string(reason))
+          json_error(conn, 503, "session_unavailable", "Could not start session: #{inspect(reason)}")
+
+        _ ->
+          # Process through the agent loop (same pipeline as CLI)
+          case Loop.process_message(session_id, input) do
+            {:ok, response} ->
+              execution_ms = System.monotonic_time(:millisecond) - start_time
+              signal = Classifier.classify(input, :http)
+              meta = Loop.get_metadata(session_id)
+
+              body =
+                Jason.encode!(%{
+                  session_id: session_id,
+                  output: response,
+                  signal: signal_to_map(signal),
+                  tools_used: Map.get(meta, :tools_used, []),
+                  iteration_count: Map.get(meta, :iteration_count, 0),
+                  execution_ms: execution_ms,
+                  metadata: %{}
+                })
+
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(200, body)
+
+            {:filtered, signal} ->
+              body =
+                Jason.encode!(%{
+                  error: "signal_filtered",
+                  code: "SIGNAL_BELOW_THRESHOLD",
+                  details: "Signal weight #{signal.weight} below threshold",
+                  signal: signal_to_map(signal)
+                })
+
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(422, body)
+
+            {:error, reason} ->
+              json_error(conn, 500, "agent_error", to_string(reason))
+          end
       end
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: input")
@@ -870,10 +874,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Analytics ─────────────────────────────────────────────────────
 
   get "/analytics" do
-    budget = try do OptimalSystemAgent.Agent.Budget.get_status() rescue _ -> %{} end
-    learning = try do OptimalSystemAgent.Agent.Learning.metrics() rescue _ -> %{} end
-    hooks = try do OptimalSystemAgent.Agent.Hooks.metrics() rescue _ -> %{} end
-    compactor = try do OptimalSystemAgent.Agent.Compactor.stats() rescue _ -> %{} end
+    budget = try do
+      case OptimalSystemAgent.Agent.Budget.get_status() do
+        {:ok, data} -> data
+        data when is_map(data) -> data
+        _ -> %{}
+      end
+    rescue _ -> %{}
+    end
+    learning = try do unwrap_ok(OptimalSystemAgent.Agent.Learning.metrics()) rescue _ -> %{} end
+    hooks = try do unwrap_ok(OptimalSystemAgent.Agent.Hooks.metrics()) rescue _ -> %{} end
+    compactor = try do unwrap_ok(OptimalSystemAgent.Agent.Compactor.stats()) rescue _ -> %{} end
 
     live_sessions =
       Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
@@ -1699,6 +1710,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     |> put_resp_content_type("application/json")
     |> send_resp(status, body)
   end
+
+  # Unwrap GenServer results that may return {:ok, data} tuples or raw maps.
+  defp unwrap_ok({:ok, data}), do: data
+  defp unwrap_ok(data) when is_map(data), do: data
+  defp unwrap_ok(_), do: %{}
 
   # ── Swarm Helpers ────────────────────────────────────────────────────
 
