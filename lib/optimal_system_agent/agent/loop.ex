@@ -28,6 +28,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Events.Bus
 
   defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
+  # Tool results larger than this are truncated before being added to the
+  # conversation to prevent context overflow. Default: 10 KB.
+  defp max_tool_output_bytes, do: Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
 
   defstruct [
     :session_id,
@@ -376,7 +379,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
                   }
 
                 _ ->
-                  %{role: "tool", tool_call_id: tool_call.id, content: result_str}
+                  limit = max_tool_output_bytes()
+                  content =
+                    if byte_size(result_str) > limit do
+                      truncated = binary_part(result_str, 0, limit)
+                      truncated <> "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{limit} bytes]"
+                    else
+                      result_str
+                    end
+
+                  %{role: "tool", tool_call_id: tool_call.id, content: content}
               end
 
             %{acc | messages: acc.messages ++ [tool_msg]}

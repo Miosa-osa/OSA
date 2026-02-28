@@ -97,6 +97,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           result = if thinking_blocks != [], do: Map.put(result, :thinking_blocks, thinking_blocks), else: result
           {:ok, result}
 
+        {:ok, %{status: 429, headers: headers, body: resp_body}} ->
+          retry_after = parse_retry_after(headers)
+          error_msg = extract_error(resp_body)
+          Logger.warning("Anthropic rate limited. retry-after: #{retry_after}s — #{error_msg}")
+          {:error, {:rate_limited, retry_after}}
+
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
           Logger.warning("Anthropic returned #{status}: #{error_msg}")
@@ -604,6 +610,22 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error(body), do: inspect(body)
+
+  # Parse Retry-After header — supports both integer seconds and HTTP date formats
+  defp parse_retry_after(headers) when is_list(headers) do
+    case List.keyfind(headers, "retry-after", 0) || List.keyfind(headers, "Retry-After", 0) do
+      {_, value} ->
+        case Integer.parse(value) do
+          {seconds, _} -> seconds
+          :error -> 60
+        end
+
+      nil ->
+        60
+    end
+  end
+
+  defp parse_retry_after(_), do: 60
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()
