@@ -6,6 +6,7 @@ Go-based terminal UI for OSA (`bin/osa`).
 
 | File | Description |
 |------|-------------|
+| [guide.md](guide.md) | User guide — quick start, commands, features, keybindings |
 | [roadmap.md](roadmap.md) | Development history, architecture, state machine, completed features, and planned work |
 | [bugs.md](bugs.md) | Known issues, pipeline audit findings, and recently fixed bugs |
 

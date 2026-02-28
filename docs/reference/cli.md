@@ -28,10 +28,12 @@ osagent version      # Print version
 | Command | Description |
 |---------|-------------|
 | `/model` | Show current provider and model |
-| `/model <provider>` | Switch provider (e.g., `/model anthropic`) |
-| `/model <provider> <model>` | Switch to specific model |
-| `/models` | List all available models across providers |
+| `/model <provider>/<model>` | Switch to specific provider/model (e.g., `/model anthropic/claude-3`) |
+| `/model <name>` | Switch Ollama model by name |
+| `/models` | Open interactive model picker (TUI) or list models (CLI) |
 | `/provider` | Show provider details |
+| `/theme` | List available TUI themes |
+| `/theme <name>` | Switch TUI theme (persisted to ~/.osa/tui.json) |
 
 ## Session Management
 
