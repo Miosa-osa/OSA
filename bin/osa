@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TUI_DIR="$ROOT/priv/go/tui"
+TUI_DIR="$ROOT/priv/go/tui-v2"
 TUI_BIN="$TUI_DIR/osa"
 LOG_DIR="${HOME}/.osa/logs"
 BACKEND_PID=""

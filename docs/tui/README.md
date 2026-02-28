@@ -14,7 +14,7 @@ Go-based terminal UI for OSA (`bin/osa`).
 
 ```bash
 # Build
-cd priv/go/tui && go build -o ../../../bin/osa .
+cd priv/go/tui-v2 && make build
 
 # Run
 bin/osa                    # Default profile
@@ -22,7 +22,7 @@ bin/osa --dev              # Dev mode (port 19001)
 bin/osa --profile staging  # Named profile
 
 # Test
-cd priv/go/tui && go build ./... && go vet ./...
+cd priv/go/tui-v2 && go build ./... && go vet ./...
 ```
 
 ## Architecture

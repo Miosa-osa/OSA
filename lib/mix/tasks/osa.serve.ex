@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Osa.Serve do
 
     port = Application.get_env(:optimal_system_agent, :http_port, 8089)
     IO.puts("OSA backend serving on http://localhost:#{port}")
-    IO.puts("Connect with: cd priv/go/tui && ./osa")
+    IO.puts("Connect with: cd priv/go/tui-v2 && ./osa")
     IO.puts("Or: curl http://localhost:#{port}/health")
     Process.sleep(:infinity)
   end
