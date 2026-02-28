@@ -41,7 +41,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     status: :idle,
     tools: [],
     plan_mode: false,
-    plan_mode_enabled: false
+    plan_mode_enabled: false,
+    last_meta: %{iteration_count: 0, tools_used: []}
   ]
 
   # --- Client API ---
@@ -54,6 +55,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def process_message(session_id, message, opts \\ []) do
     GenServer.call(via(session_id), {:process, message, opts}, :infinity)
+  end
+
+  @doc "Get metadata from the last process_message call (iteration_count, tools_used)."
+  def get_metadata(session_id) do
+    GenServer.call(via(session_id), :get_metadata)
+  rescue
+    _ -> %{iteration_count: 0, tools_used: []}
   end
 
   # --- Server Callbacks ---
@@ -105,6 +113,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
         ack = noise_acknowledgment(reason)
         Memory.append(state.session_id, %{role: "assistant", content: ack, channel: state.channel})
+        state = %{state | status: :idle}
         {:reply, {:ok, ack}, state}
 
       {:signal, _weight} ->
@@ -173,6 +182,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
               emit_context_pressure(state)
 
+              meta = %{iteration_count: state.iteration, tools_used: extract_tools_used(state.messages)}
+              state = %{state | last_meta: meta}
+
               Bus.emit(:agent_response, %{
                 session_id: state.session_id,
                 response: response,
@@ -185,10 +197,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
           # Normal execution path
           {response, state} = run_loop(state)
 
+          meta = %{iteration_count: state.iteration, tools_used: extract_tools_used(state.messages)}
+
           state = %{
             state
             | messages: state.messages ++ [%{role: "assistant", content: response}],
-              status: :idle
+              status: :idle,
+              last_meta: meta
           }
 
           # 6. Persist assistant response to JSONL session storage
@@ -205,6 +220,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
           {:reply, {:ok, response}, state}
         end
     end
+  end
+
+  @impl true
+  def handle_call(:get_metadata, _from, state) do
+    {:reply, state.last_meta, state}
   end
 
   @impl true
@@ -234,11 +254,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Bus.emit(:llm_request, %{session_id: state.session_id, iteration: state.iteration})
     start_time = System.monotonic_time(:millisecond)
 
-    # Call LLM (provider/model threaded from state, with optional thinking)
+    # Call LLM with streaming — emits per-token SSE events for live TUI display.
+    # Falls back to sync chat if streaming is unavailable.
     thinking_opts = thinking_config(state)
     llm_opts = [tools: state.tools, temperature: temperature()]
     llm_opts = if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
-    result = llm_chat(state, context.messages, llm_opts)
+    result = llm_chat_stream(state, context.messages, llm_opts)
 
     # Emit timing + usage event after LLM call
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -403,6 +424,51 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Providers.chat(messages, opts)
   end
 
+  # Streaming variant — emits per-token SSE events via Bus, returns {:ok, result} | {:error, reason}.
+  # Uses process dictionary to capture the {:done, result} from the streaming callback,
+  # since chat_stream/3 returns :ok on success (not the accumulated result).
+  defp llm_chat_stream(%{session_id: session_id, provider: provider, model: model}, messages, opts) do
+    # Stash result from {:done, _} callback into process dictionary
+    Process.put(:llm_stream_result, nil)
+
+    callback = fn
+      {:text_delta, text} ->
+        Bus.emit(:system_event, %{
+          event: :streaming_token,
+          session_id: session_id,
+          text: text
+        })
+
+      {:done, result} ->
+        Process.put(:llm_stream_result, result)
+
+      {:thinking_delta, text} ->
+        Bus.emit(:system_event, %{
+          event: :thinking_delta,
+          session_id: session_id,
+          text: text
+        })
+
+      # Ignore tool_use deltas — these are handled after the full result
+      _other ->
+        :ok
+    end
+
+    opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
+    opts = if model, do: Keyword.put(opts, :model, model), else: opts
+
+    case Providers.chat_stream(messages, callback, opts) do
+      :ok ->
+        case Process.get(:llm_stream_result) do
+          nil -> {:error, "Stream completed but no result received"}
+          result -> {:ok, result}
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
   # Apply per-call overrides from opts (SDK query passthrough)
   defp apply_overrides(state, opts) do
     state
@@ -502,6 +568,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
     catch
       :exit, _ -> :ok
     end
+  end
+
+  # Extract unique tool names used during the agent loop from message history
+  defp extract_tools_used(messages) do
+    messages
+    |> Enum.filter(fn
+      %{role: "assistant", tool_calls: tcs} when is_list(tcs) and tcs != [] -> true
+      _ -> false
+    end)
+    |> Enum.flat_map(& &1.tool_calls)
+    |> Enum.map(& &1.name)
+    |> Enum.uniq()
   end
 
   # --- Noise Acknowledgments ---

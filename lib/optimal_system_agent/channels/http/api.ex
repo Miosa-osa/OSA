@@ -171,14 +171,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         {:ok, response} ->
           execution_ms = System.monotonic_time(:millisecond) - start_time
           signal = Classifier.classify(input, :http)
+          meta = Loop.get_metadata(session_id)
 
           body =
             Jason.encode!(%{
               session_id: session_id,
               output: response,
               signal: signal_to_map(signal),
-              tools_used: [],
-              iteration_count: 0,
+              tools_used: Map.get(meta, :tools_used, []),
+              iteration_count: Map.get(meta, :iteration_count, 0),
               execution_ms: execution_ms,
               metadata: %{}
             })

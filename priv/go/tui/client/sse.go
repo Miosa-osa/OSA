@@ -64,7 +64,7 @@ type LLMResponseEvent struct {
 
 // StreamingTokenEvent carries a partial token during streaming responses.
 // The TUI accumulates these to show a live response as it's generated.
-// NOTE: Backend does not emit these yet — wired for when streaming ships.
+// Emitted by Agent.Loop via Bus.emit(:system_event, %{event: :streaming_token, ...}).
 type StreamingTokenEvent struct {
 	Text      string `json:"text"`
 	SessionID string `json:"session_id"`
@@ -183,6 +183,37 @@ type SwarmCancelledEvent struct {
 // SwarmTimeoutEvent is emitted when a swarm times out.
 type SwarmTimeoutEvent struct {
 	SwarmID string `json:"swarm_id"`
+}
+
+// ThinkingDeltaEvent carries a partial thinking/reasoning token from the LLM.
+type ThinkingDeltaEvent struct {
+	Text string `json:"text"`
+}
+
+// SwarmIntelligenceStartedEvent from system_event.
+type SwarmIntelligenceStartedEvent struct {
+	SwarmID string `json:"swarm_id"`
+	Type    string `json:"type"`
+	Task    string `json:"task"`
+}
+
+// SwarmIntelligenceRoundEvent from system_event.
+type SwarmIntelligenceRoundEvent struct {
+	SwarmID string `json:"swarm_id"`
+	Round   int    `json:"round"`
+}
+
+// SwarmIntelligenceConvergedEvent from system_event.
+type SwarmIntelligenceConvergedEvent struct {
+	SwarmID string `json:"swarm_id"`
+	Round   int    `json:"round"`
+}
+
+// SwarmIntelligenceCompletedEvent from system_event.
+type SwarmIntelligenceCompletedEvent struct {
+	SwarmID   string `json:"swarm_id"`
+	Converged bool   `json:"converged"`
+	Rounds    int    `json:"rounds"`
 }
 
 // ToolResultEvent is emitted when a tool invocation returns its result.
@@ -525,6 +556,12 @@ func parseSystemEvent(data []byte) tea.Msg {
 			return ev
 		}
 
+	case "streaming_token":
+		var ev StreamingTokenEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
 	case "context_pressure":
 		var ev ContextPressureEvent
 		if json.Unmarshal(data, &ev) == nil {
@@ -606,6 +643,41 @@ func parseSystemEvent(data []byte) tea.Msg {
 			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return BudgetExceededEvent{Message: ev.Message}
+
+	case "thinking_delta":
+		var ev ThinkingDeltaEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
+		}
+		return ev
+
+	case "swarm_intelligence_started":
+		var ev SwarmIntelligenceStartedEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
+		}
+		return ev
+
+	case "swarm_intelligence_round":
+		var ev SwarmIntelligenceRoundEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
+		}
+		return ev
+
+	case "swarm_intelligence_converged":
+		var ev SwarmIntelligenceConvergedEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
+		}
+		return ev
+
+	case "swarm_intelligence_completed":
+		var ev SwarmIntelligenceCompletedEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
+		}
+		return ev
 
 	default:
 		if base.Event != "" {

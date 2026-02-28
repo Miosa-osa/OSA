@@ -235,6 +235,9 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamBuf.WriteString(v.Text)
 		m.chat.SetStreamingContent(m.streamBuf.String())
 		return m, nil
+	case client.ThinkingDeltaEvent:
+		m.activity, _ = m.activity.Update(msg.ThinkingDelta{Text: v.Text})
+		return m, nil
 	case client.AgentResponseEvent:
 		m.streamBuf.Reset()
 		return m.handleClientAgentResponse(v)
@@ -316,6 +319,22 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = StateIdle
 		m.chat.AddSystemError(fmt.Sprintf("Swarm %s timed out.", v.SwarmID))
 		return m, m.input.Focus()
+	case client.SwarmIntelligenceStartedEvent:
+		m.chat.AddSystemMessage(fmt.Sprintf("Swarm intelligence (%s) started: %s", v.Type, v.Task))
+		return m, nil
+	case client.SwarmIntelligenceRoundEvent:
+		m.chat.AddSystemMessage(fmt.Sprintf("Swarm intelligence round %d", v.Round))
+		return m, nil
+	case client.SwarmIntelligenceConvergedEvent:
+		m.chat.AddSystemMessage(fmt.Sprintf("Swarm intelligence converged at round %d", v.Round))
+		return m, nil
+	case client.SwarmIntelligenceCompletedEvent:
+		status := "completed"
+		if v.Converged {
+			status = "converged"
+		}
+		m.chat.AddSystemMessage(fmt.Sprintf("Swarm intelligence %s after %d rounds", status, v.Rounds))
+		return m, nil
 	case client.HookBlockedEvent:
 		m.chat.AddSystemError(fmt.Sprintf("Blocked by %s: %s", v.HookName, v.Reason))
 		return m, nil
@@ -651,7 +670,8 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	case strings.HasPrefix(text, "/logout"):
 		return m, m.doLogout()
 	case text == "/sessions":
-		return m, m.listSessions()
+		m.toasts.Add("Loading sessions...", model.ToastInfo)
+		return m, tea.Batch(m.listSessions(), m.tickCmd())
 	case text == "/session" || strings.HasPrefix(text, "/session "):
 		arg := strings.TrimSpace(strings.TrimPrefix(text, "/session"))
 		if arg == "" {
@@ -663,7 +683,9 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 		}
 		return m, m.switchSession(arg)
 	case text == "/models":
-		return m, m.fetchModels()
+		m.toasts.Add("Loading models...", model.ToastInfo)
+		m.input.Blur()
+		return m, tea.Batch(m.fetchModels(), m.tickCmd())
 	case text == "/model":
 		m.chat.AddSystemMessage(fmt.Sprintf("Current: %s / %s", m.banner.Provider(), m.banner.ModelName()))
 		return m, nil
@@ -672,14 +694,18 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 		parts := strings.SplitN(arg, "/", 2)
 		if len(parts) == 2 {
 			// "/model provider/name" → direct switch
+			m.chat.AddSystemMessage(fmt.Sprintf("Switching to %s / %s...", parts[0], parts[1]))
 			return m, m.switchModel(parts[0], parts[1])
 		}
 		if isKnownProvider(arg) {
 			// "/model anthropic" → open picker filtered to this provider
 			m.pendingProviderFilter = strings.ToLower(arg)
-			return m, m.fetchModels()
+			m.toasts.Add(fmt.Sprintf("Loading %s models...", arg), model.ToastInfo)
+			m.input.Blur()
+			return m, tea.Batch(m.fetchModels(), m.tickCmd())
 		}
 		// "/model qwen3:8b" → default to ollama
+		m.chat.AddSystemMessage(fmt.Sprintf("Switching to ollama / %s...", arg))
 		return m, m.switchModel("ollama", arg)
 	case text == "/theme":
 		var sb strings.Builder
@@ -732,7 +758,8 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 		if len(parts) > 1 {
 			arg = parts[1]
 		}
-		return m, m.executeCommand(cmd, arg)
+		m.toasts.Add(fmt.Sprintf("Running /%s...", cmd), model.ToastInfo)
+		return m, tea.Batch(m.executeCommand(cmd, arg), m.tickCmd())
 	}
 	m.activity.Reset()
 	m.activity.Start()
@@ -1358,11 +1385,11 @@ Tips:
 func (m Model) handleModelList(r msg.ModelListResult) (Model, tea.Cmd) {
 	if r.Err != nil {
 		m.chat.AddSystemError(fmt.Sprintf("Failed to list models: %v", r.Err))
-		return m, nil
+		return m, m.input.Focus()
 	}
 	if len(r.Models) == 0 {
 		m.chat.AddSystemWarning(fmt.Sprintf("No models available. Current: %s. Is Ollama running?", m.banner.ModelName()))
-		return m, nil
+		return m, m.input.Focus()
 	}
 	// Convert to picker items, optionally filtered by provider
 	filter := m.pendingProviderFilter
@@ -1381,7 +1408,7 @@ func (m Model) handleModelList(r msg.ModelListResult) (Model, tea.Cmd) {
 	}
 	if len(items) == 0 {
 		m.chat.AddSystemError(fmt.Sprintf("No models available for provider: %s. Is the API key configured?", filter))
-		return m, nil
+		return m, m.input.Focus()
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Provider != items[j].Provider {

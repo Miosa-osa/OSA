@@ -51,9 +51,10 @@ type CommandResult struct {
 
 // LoginResult from /login command.
 type LoginResult struct {
-	Token     string
-	ExpiresIn int
-	Err       error
+	Token        string
+	RefreshToken string
+	ExpiresIn    int
+	Err          error
 }
 
 // LogoutResult from /logout command.
@@ -134,6 +135,13 @@ type OrchestratorTaskCompleted struct {
 	TaskID string `json:"task_id"`
 }
 
+// -- Thinking events --
+
+// ThinkingDelta carries a partial thinking/reasoning token from the LLM.
+type ThinkingDelta struct {
+	Text string
+}
+
 // -- UI events --
 
 // TickMsg for periodic timer updates.
@@ -158,9 +166,17 @@ type SessionListResult struct {
 	Err      error
 }
 
+// SessionMessage mirrors client.SessionMessage without the import cycle.
+type SessionMessage struct {
+	Role      string
+	Content   string
+	Timestamp string
+}
+
 // SessionSwitchResult from switching or creating sessions.
 type SessionSwitchResult struct {
 	SessionID string
+	Messages  []SessionMessage
 	Err       error
 }
 
@@ -169,14 +185,6 @@ type ToolResult struct {
 	Name    string `json:"name"`
 	Result  string `json:"result"`
 	Success bool   `json:"success"`
-}
-
-// SignalClassified from SSE event "signal_classified".
-type SignalClassified struct {
-	Mode   string  `json:"mode"`
-	Genre  string  `json:"genre"`
-	Type   string  `json:"type"`
-	Weight float64 `json:"weight"`
 }
 
 // SSEParseWarning carries a non-fatal SSE parse error to surface as a toast.

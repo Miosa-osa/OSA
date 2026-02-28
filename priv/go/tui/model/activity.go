@@ -32,6 +32,8 @@ type ActivityModel struct {
 	outputTokens     int
 	expanded         bool
 	thinkingMs       int64     // LLM thinking/reasoning duration
+	isThinking       bool      // true while receiving thinking deltas
+	thinkingStart    time.Time // when thinking started (for live duration)
 	iterationCount   int       // current iteration (from llm_request)
 	currentPhrase    string    // current witty phrase displayed in header
 	currentPhraseIdx int       // index of current phrase for avoiding repeats
@@ -66,6 +68,8 @@ func (m *ActivityModel) Reset() {
 	m.outputTokens = 0
 	m.expanded = false
 	m.thinkingMs = 0
+	m.isThinking = false
+	m.thinkingStart = time.Time{}
 	m.iterationCount = 0
 	m.currentPhrase = ""
 	m.currentPhraseIdx = -1
@@ -139,10 +143,32 @@ func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case msg.ToolResult:
+		// Annotate the most recent matching tool call with its success state.
+		// This supplements ToolCallEnd for backends that emit both events.
+		for i := len(m.toolCalls) - 1; i >= 0; i-- {
+			if m.toolCalls[i].Name == v.Name {
+				m.toolCalls[i].Success = v.Success
+				break
+			}
+		}
+		return m, nil
+
+	case msg.ThinkingDelta:
+		if !m.isThinking {
+			m.isThinking = true
+			m.thinkingStart = time.Now()
+		}
+		return m, nil
+
 	case msg.LLMResponse:
 		m.inputTokens += v.InputTokens
 		m.outputTokens += v.OutputTokens
-		if v.DurationMs > 0 {
+		if m.isThinking {
+			// Use live-measured thinking duration
+			m.thinkingMs = time.Since(m.thinkingStart).Milliseconds()
+			m.isThinking = false
+		} else if v.DurationMs > 0 {
 			m.thinkingMs = v.DurationMs
 		}
 		return m, nil
@@ -183,7 +209,10 @@ func (m ActivityModel) View() string {
 	if m.iterationCount > 1 {
 		hdr.WriteString(fmt.Sprintf(" · iter %d", m.iterationCount))
 	}
-	if m.thinkingMs > 2000 {
+	if m.isThinking {
+		thinkElapsed := time.Since(m.thinkingStart).Milliseconds()
+		hdr.WriteString(fmt.Sprintf(" · thinking %s", formatMs(thinkElapsed)))
+	} else if m.thinkingMs > 2000 {
 		hdr.WriteString(fmt.Sprintf(" · thought for %s", formatMs(m.thinkingMs)))
 	}
 	hdr.WriteString(")")

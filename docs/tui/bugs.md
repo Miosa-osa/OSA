@@ -57,16 +57,9 @@
 ## Pipeline Audit Findings (2026-02-28)
 
 > Full audit of Backend → SSE → TUI data pipeline. Backend emits 63+ system_event types.
-> After fixes: ~28 events fully wired end-to-end. Remaining gaps are low-priority subsystems.
-
-### BUG-014: Swarm intelligence rounds invisible — no SSE events parsed
-**Severity:** Medium
-**Files:** `lib/optimal_system_agent/swarm/intelligence.ex`, `priv/go/tui/client/sse.go`
-**Description:** Swarm Intelligence emits 6 event types (round progress, votes, consensus, convergence, divergence, deadlock) during debate/review patterns. None are parsed by the TUI. During a debate swarm, the user sees "Swarm launched" then nothing until "Swarm completed" — potentially minutes of silence.
-**Fix:** Add event types + parsers in sse.go, add progress display in app.go (could reuse the activity panel or agents panel).
+> After fixes: ~33 events fully wired end-to-end. Remaining gaps are low-priority subsystems.
 
 ### Remaining unparsed events (low priority)
-- Swarm Intelligence (6 events) — no TUI parser, no `session_id`
 - Pact workflows (9 events) — no TUI parser, no `session_id`
 - Treasury (8 events) — no TUI parser, no `session_id`
 - Learning (4 events) — no TUI parser, no `session_id`
@@ -101,8 +94,12 @@ task_updated                     ✓ session_id  ✓ parsed     ✓ handled     
 budget_warning                   ✓ session_id  ✓ parsed     ✓ handled     ✓ system warning
 budget_exceeded                  ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
 hook_blocked                     ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
-swarm_intelligence_round         ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-014)
-swarm_intelligence_converged     ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-014)
+thinking_delta                   ✓ session_id  ✓ parsed     ✓ handled     ✓ activity panel
+streaming_token                  ✓ session_id  ✓ parsed     ✓ handled     ✓ live response
+swarm_intelligence_started       ✓ session_id  ✓ parsed     ✓ handled     ✓ system message
+swarm_intelligence_round         ✓ session_id  ✓ parsed     ✓ handled     ✓ system message
+swarm_intelligence_converged     ✓ session_id  ✓ parsed     ✓ handled     ✓ system message
+swarm_intelligence_completed     ✓ session_id  ✓ parsed     ✓ handled     ✓ system message
 learning_consolidation           ✗ NO SID      ✗ not parsed ✗             ✗ (LOW)
 pact_*                           ✗ NO SID      ✗ not parsed ✗             ✗ (LOW)
 treasury_*                       ✗ NO SID      ✗ not parsed ✗             ✗ (LOW)
@@ -111,6 +108,21 @@ treasury_*                       ✗ NO SID      ✗ not parsed ✗             
 ---
 
 ## Recently Fixed (2026-02-28)
+
+### FIXED: iteration_count and tools_used always 0/empty in HTTP response
+**Files:** `lib/optimal_system_agent/agent/loop.ex`, `lib/optimal_system_agent/channels/http/api.ex`
+**Issue:** POST /orchestrate hardcoded `tools_used: []` and `iteration_count: 0`. Loop returned `{:ok, response}` with no metadata.
+**Fix:** Added `last_meta` to Loop state, populated with `iteration_count` and `tools_used` after each run. Added `Loop.get_metadata/1` public API. API endpoint now calls `get_metadata` after `process_message` to populate the response.
+
+### FIXED: Thinking/reasoning blocks silently dropped (BUG-014 partial)
+**Files:** `lib/optimal_system_agent/agent/loop.ex`, `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`, `priv/go/tui/model/activity.go`, `priv/go/tui/msg/msg.go`
+**Issue:** Anthropic provider emits `{:thinking_delta, text}` callbacks during extended thinking. Loop's streaming callback ignored all events except `{:text_delta, _}` and `{:done, _}`. Thinking was completely invisible.
+**Fix:** Added `{:thinking_delta, text}` handler in loop.ex that emits `thinking_delta` SSE event. Added `ThinkingDeltaEvent` type + parser in sse.go. Added handler in app.go that forwards to activity model. Activity model now tracks `isThinking` state and shows live "thinking Xs" in the header during active thinking.
+
+### FIXED: Swarm intelligence events invisible (BUG-014)
+**Files:** `lib/optimal_system_agent/swarm/intelligence.ex`, `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`
+**Issue:** All 6 swarm intelligence Bus.emit calls lacked `session_id`. No TUI parsers or handlers existed. During a debate/exploration swarm, the user saw nothing between "Swarm launched" and "Swarm completed".
+**Fix:** Added `session_id` to all 6 Bus.emit calls (threaded through opts → `explore/2`, `specialize/2`, `run_rounds/7`). Added 4 event types (Started, Round, Converged, Completed) + parsers in sse.go. Added handlers in app.go that display progress as system messages.
 
 ### FIXED: Orchestrator events never reached TUI (BUG-013)
 **Files:** `lib/optimal_system_agent/agent/orchestrator.ex`
