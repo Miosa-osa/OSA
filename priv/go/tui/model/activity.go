@@ -23,16 +23,19 @@ type ToolCallInfo struct {
 
 // ActivityModel renders a spinner, elapsed timer, and tool call feed.
 type ActivityModel struct {
-	sp             spinner.Model
-	active         bool
-	startTime      time.Time
-	toolCalls      []ToolCallInfo
-	totalToolUses  int
-	inputTokens    int
-	outputTokens   int
-	expanded       bool
-	thinkingMs     int64 // LLM thinking/reasoning duration
-	iterationCount int   // current iteration (from llm_request)
+	sp               spinner.Model
+	active           bool
+	startTime        time.Time
+	toolCalls        []ToolCallInfo
+	totalToolUses    int
+	inputTokens      int
+	outputTokens     int
+	expanded         bool
+	thinkingMs       int64     // LLM thinking/reasoning duration
+	iterationCount   int       // current iteration (from llm_request)
+	currentPhrase    string    // current witty phrase displayed in header
+	currentPhraseIdx int       // index of current phrase for avoiding repeats
+	phraseRotateTime time.Time // when the current phrase was set
 }
 
 // NewActivity constructs an ActivityModel with a Dot spinner.
@@ -47,6 +50,8 @@ func NewActivity() ActivityModel {
 func (m *ActivityModel) Start() {
 	m.active = true
 	m.startTime = time.Now()
+	m.currentPhrase, m.currentPhraseIdx = pickPhrase(-1)
+	m.phraseRotateTime = time.Now()
 }
 
 // Stop hides the activity display.
@@ -65,6 +70,9 @@ func (m *ActivityModel) Reset() {
 	m.expanded = false
 	m.thinkingMs = 0
 	m.iterationCount = 0
+	m.currentPhrase = ""
+	m.currentPhraseIdx = -1
+	m.phraseRotateTime = time.Time{}
 }
 
 // SetExpanded controls whether all tool calls are shown.
@@ -107,7 +115,11 @@ func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 		return m, cmd
 
 	case msg.TickMsg:
-		// Re-render elapsed; no state change needed.
+		// Rotate witty phrase every 4 seconds.
+		if m.active && time.Since(m.phraseRotateTime) >= 4*time.Second {
+			m.currentPhrase, m.currentPhraseIdx = pickPhrase(m.currentPhraseIdx)
+			m.phraseRotateTime = time.Now()
+		}
 		return m, nil
 
 	case msg.LLMRequest:
@@ -157,17 +169,27 @@ func (m ActivityModel) View() string {
 	}
 
 	elapsed := time.Since(m.startTime)
-	tokens := m.inputTokens + m.outputTokens
 
-	// Header: ⏺ Reasoning… (8s · 2 tools · ↓ 4.2k · thought for 3s)
+	// Use witty phrase or fallback
+	phrase := m.currentPhrase
+	if phrase == "" {
+		phrase = "Reasoning…"
+	}
+
+	// Header: ⏺ Filtering noise… (8s · 2 tools · ↓ 4.2k ↑ 1.1k · iter 3 · thought for 3s)
 	var hdr strings.Builder
 	hdr.WriteString(style.PrefixActive.Render("⏺"))
-	hdr.WriteString(" Reasoning… (")
+	hdr.WriteString(fmt.Sprintf(" %s (", phrase))
 	hdr.WriteString(formatElapsed(elapsed))
 	hdr.WriteString(" · ")
 	hdr.WriteString(fmt.Sprintf("%d tools", m.totalToolUses))
 	hdr.WriteString(" · ↓ ")
-	hdr.WriteString(formatTokens(tokens))
+	hdr.WriteString(formatTokens(m.inputTokens))
+	hdr.WriteString(" ↑ ")
+	hdr.WriteString(formatTokens(m.outputTokens))
+	if m.iterationCount > 1 {
+		hdr.WriteString(fmt.Sprintf(" · iter %d", m.iterationCount))
+	}
 	if m.thinkingMs > 0 {
 		hdr.WriteString(fmt.Sprintf(" · thought for %s", formatMs(m.thinkingMs)))
 	}

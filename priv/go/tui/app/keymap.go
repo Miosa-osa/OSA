@@ -6,7 +6,6 @@ import "github.com/charmbracelet/bubbles/key"
 type KeyMap struct {
 	Submit           key.Binding
 	Cancel           key.Binding
-	Quit             key.Binding
 	QuitEOF          key.Binding
 	ToggleExpand     key.Binding
 	ToggleBackground key.Binding
@@ -30,10 +29,6 @@ func DefaultKeyMap() KeyMap {
 		Cancel: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "cancel/quit"),
-		),
-		Quit: key.NewBinding(
-			key.WithKeys("ctrl+c"),
-			key.WithHelp("ctrl+c", "quit"),
 		),
 		QuitEOF: key.NewBinding(
 			key.WithKeys("ctrl+d"),

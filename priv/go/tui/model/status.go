@@ -26,11 +26,19 @@ type StatusModel struct {
 	contextUtil  float64 // 0.0–1.0
 	contextMax   int
 	active       bool
+	provider     string
+	modelName    string
 }
 
 // NewStatus returns a zero-value StatusModel.
 func NewStatus() StatusModel {
 	return StatusModel{}
+}
+
+// SetProviderInfo stores the provider and model name for idle display.
+func (m *StatusModel) SetProviderInfo(provider, modelName string) {
+	m.provider = provider
+	m.modelName = modelName
 }
 
 // SetSignal updates the current signal classification.
@@ -68,8 +76,7 @@ func (m StatusModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the status area. Returns an empty string when there is nothing
-// meaningful to display.
+// View renders the status area. Always shows at least provider/model when idle.
 func (m StatusModel) View() string {
 	ctxLine := m.contextLine()
 
@@ -77,24 +84,47 @@ func (m StatusModel) View() string {
 		return m.activeLine() + "\n" + ctxLine
 	}
 
-	// Idle: show context bar only when we have real data.
-	if m.contextMax > 0 {
-		return ctxLine
+	// Idle: always show provider/model footer; append context bar if available.
+	var parts []string
+	if m.provider != "" || m.modelName != "" {
+		parts = append(parts, m.idleLine())
 	}
-	return ""
+	if m.contextMax > 0 {
+		parts = append(parts, ctxLine)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
+// idleLine renders provider/model info when idle.
+//
+//	ollama / llama3.2
+func (m StatusModel) idleLine() string {
+	info := m.provider
+	if m.modelName != "" {
+		if info != "" {
+			info += " / " + m.modelName
+		} else {
+			info = m.modelName
+		}
+	}
+	return style.StatusBar.Render(info)
 }
 
 // activeLine builds the processing summary line.
 //
-//	✓ 1.2s · 3 tools · ↓ 4.2k · Linguistic · Spec · w0.92
+//	✓ 1.2s · 3 tools · ↓ 4.2k ↑ 1.1k · Linguistic · Spec · w0.92
 func (m StatusModel) activeLine() string {
 	var b strings.Builder
 
 	b.WriteString(style.StatusBar.Render(
-		fmt.Sprintf("✓ %s · %d tools · ↓ %s",
+		fmt.Sprintf("✓ %s · %d tools · ↓ %s ↑ %s",
 			formatElapsed(m.elapsed),
 			m.toolCount,
 			formatTokens(m.inputTokens),
+			formatTokens(m.outputTokens),
 		),
 	))
 

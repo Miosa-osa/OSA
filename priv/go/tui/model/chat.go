@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -125,7 +126,7 @@ func (m *ChatModel) refresh() {
 // renderAll builds the full string of all rendered messages.
 func (m *ChatModel) renderAll() string {
 	if len(m.messages) == 0 {
-		return ""
+		return style.Faint.Render("  No messages yet. Type below to get started.")
 	}
 
 	var sb strings.Builder
@@ -142,10 +143,17 @@ func (m *ChatModel) renderAll() string {
 func renderMessage(msg ChatMessage) string {
 	switch msg.Role {
 	case roleUser:
-		return style.UserLabel.Render("You") + "\n" + msg.Content
+		return style.UserLabel.Render("❯ You") + "\n" + msg.Content
 
 	case roleAgent:
-		return style.AgentLabel.Render("OSA") + "\n" + markdown.Render(msg.Content)
+		label := style.AgentLabel.Render("◈ OSA")
+		if msg.Signal != nil && msg.Signal.Mode != "" && msg.Signal.Genre != "" {
+			badge := style.StatusSignal.Render(
+				fmt.Sprintf(" [%s/%s]", msg.Signal.Mode, msg.Signal.Genre),
+			)
+			label += badge
+		}
+		return label + "\n" + markdown.Render(msg.Content)
 
 	case roleSystem:
 		return style.Faint.Render(msg.Content)
