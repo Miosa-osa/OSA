@@ -77,7 +77,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       provider: Keyword.get(opts, :provider),
       model: Keyword.get(opts, :model),
       messages: Keyword.get(opts, :messages, []),
-      tools: Tools.list_tools() ++ extra_tools,
+      tools: Tools.list_tools_direct() ++ extra_tools,
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false)
     }
 

@@ -71,6 +71,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     GET    /sessions/:id                    — Get session details + messages
     GET    /sessions/:id/messages           — Get messages for a session
 
+  Analytics:
+    GET    /analytics                       — Usage analytics (budget, learning, hooks, sessions)
+
   Other endpoints:
     GET    /machines                        — List active machines
     POST   /webhooks/:trigger_id            — Trigger a webhook
@@ -864,6 +867,31 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     end
   end
 
+  # ── Analytics ─────────────────────────────────────────────────────
+
+  get "/analytics" do
+    budget = try do OptimalSystemAgent.Agent.Budget.get_status() rescue _ -> %{} end
+    learning = try do OptimalSystemAgent.Agent.Learning.metrics() rescue _ -> %{} end
+    hooks = try do OptimalSystemAgent.Agent.Hooks.metrics() rescue _ -> %{} end
+    compactor = try do OptimalSystemAgent.Agent.Compactor.stats() rescue _ -> %{} end
+
+    live_sessions =
+      Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
+    body =
+      Jason.encode!(%{
+        sessions: %{active: length(live_sessions)},
+        budget: budget,
+        learning: learning,
+        hooks: hooks,
+        compactor: compactor
+      })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
   # ── CloudEvents ─────────────────────────────────────────────────────
 
   post "/events" do
@@ -1426,7 +1454,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           alive: alive
         }
       end)
-      |> Enum.sort_by(& &1.last_active, {:desc, NaiveDateTime})
+      |> Enum.sort_by(fn s -> s.last_active || "" end, :desc)
 
     body = Jason.encode!(%{sessions: sessions, count: length(sessions)})
 
