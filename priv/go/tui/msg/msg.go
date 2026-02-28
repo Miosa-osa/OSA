@@ -24,6 +24,7 @@ type HealthResult struct {
 	Version       string
 	UptimeSeconds int64
 	Provider      string
+	Model         string
 	Err           error
 }
 

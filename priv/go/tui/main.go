@@ -30,7 +30,7 @@ func main() {
 	}
 
 	if *noColor {
-		lipgloss.SetColorProfile(0) // No colors
+		lipgloss.SetColorProfile(0)
 	}
 
 	baseURL := os.Getenv("OSA_URL")
@@ -39,7 +39,6 @@ func main() {
 	}
 	token := os.Getenv("OSA_TOKEN")
 
-	// Profile resolution
 	profile := *profileFlag
 	if *devFlag {
 		profile = "dev"
@@ -53,7 +52,6 @@ func main() {
 		app.ProfileDir = filepath.Join(home, ".osa", "profiles", profile)
 		os.MkdirAll(app.ProfileDir, 0755)
 
-		// Load persisted token from profile if not set via env
 		if token == "" {
 			if data, err := os.ReadFile(filepath.Join(app.ProfileDir, "token")); err == nil {
 				token = strings.TrimSpace(string(data))
@@ -73,12 +71,10 @@ func main() {
 
 	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	}
 
 	p := tea.NewProgram(m, opts...)
 
-	// Inject program reference for SSE streaming.
 	go func() {
 		p.Send(app.ProgramReady{Program: p})
 	}()

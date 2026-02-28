@@ -6,6 +6,7 @@ type HealthResponse struct {
 	Version       string `json:"version"`
 	UptimeSeconds int64  `json:"uptime_seconds"`
 	Provider      string `json:"provider"`
+	Model         string `json:"model"`
 }
 
 // OrchestrateRequest for POST /api/v1/orchestrate.
