@@ -31,6 +31,7 @@ defmodule OptimalSystemAgent.Channels.Signal do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @send_timeout 15_000
 
@@ -123,7 +124,7 @@ defmodule OptimalSystemAgent.Channels.Signal do
     session_id = "signal_#{source}"
     Logger.debug("Signal: Message from #{source}: #{text}")
 
-    ensure_loop(session_id, source)
+    Session.ensure_loop(session_id, source, :signal)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -159,7 +160,7 @@ defmodule OptimalSystemAgent.Channels.Signal do
     session_id = "signal_group_#{group_id}"
     Logger.debug("Signal: Group message from #{source} in #{group_id}: #{text}")
 
-    ensure_loop(session_id, source)
+    Session.ensure_loop(session_id, source, :signal)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -226,16 +227,4 @@ defmodule OptimalSystemAgent.Channels.Signal do
     end
   end
 
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :signal}
-        )
-    end
-  end
 end

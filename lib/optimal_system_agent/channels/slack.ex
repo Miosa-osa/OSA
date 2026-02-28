@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.Channels.Slack do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @api_base "https://slack.com/api"
   @send_timeout 10_000
@@ -151,7 +152,7 @@ defmodule OptimalSystemAgent.Channels.Slack do
     session_id = "slack_#{user_id}_#{channel}"
     Logger.debug("Slack: Message from #{user_id} in #{channel}: #{text}")
 
-    ensure_loop(session_id, user_id)
+    Session.ensure_loop(session_id, user_id, :slack)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -239,19 +240,6 @@ defmodule OptimalSystemAgent.Channels.Slack do
   end
 
   # ── Misc Helpers ─────────────────────────────────────────────────────
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :slack}
-        )
-    end
-  end
 
   defp get_retry_after(headers) do
     case List.keyfind(headers, "retry-after", 0) do

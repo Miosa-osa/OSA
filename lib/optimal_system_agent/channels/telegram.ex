@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.Channels.Telegram do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @base_url "https://api.telegram.org"
   @send_timeout 10_000
@@ -140,7 +141,7 @@ defmodule OptimalSystemAgent.Channels.Telegram do
     from = get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
     Logger.debug("Telegram: Message from #{from} in chat #{chat_id}: #{text}")
 
-    ensure_loop(session_id, chat_id)
+    Session.ensure_loop(session_id, chat_id, :telegram)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -204,19 +205,6 @@ defmodule OptimalSystemAgent.Channels.Telegram do
       {:error, reason} ->
         Logger.warning("Telegram: HTTP error: #{inspect(reason)}")
         {:error, reason}
-    end
-  end
-
-  defp ensure_loop(session_id, chat_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(chat_id), channel: :telegram}
-        )
     end
   end
 

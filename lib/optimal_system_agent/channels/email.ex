@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Channels.Email do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @send_timeout 15_000
 
@@ -145,7 +146,7 @@ defmodule OptimalSystemAgent.Channels.Email do
     Logger.debug("Email: Inbound from #{from_email}: #{subject}")
 
     session_id = "email_#{sanitize_email(from_email)}"
-    ensure_loop(session_id, from_email)
+    Session.ensure_loop(session_id, from_email, :email)
 
     case Loop.process_message(session_id, text) do
       {:ok, response} ->
@@ -324,19 +325,6 @@ defmodule OptimalSystemAgent.Channels.Email do
           password: Application.get_env(:optimal_system_agent, :email_smtp_password),
           tls: Application.get_env(:optimal_system_agent, :email_smtp_tls, :always)
         }
-    end
-  end
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :email}
-        )
     end
   end
 

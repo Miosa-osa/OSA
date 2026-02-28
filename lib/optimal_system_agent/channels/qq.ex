@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.Channels.QQ do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @api_base "https://api.sgroup.qq.com"
   @send_timeout 15_000
@@ -177,7 +178,7 @@ defmodule OptimalSystemAgent.Channels.QQ do
       session_id = "qq_#{user_id}_#{channel_id}"
       Logger.debug("QQ: Message from #{user_id} in #{channel_id}: #{text}")
 
-      ensure_loop(session_id, user_id)
+      Session.ensure_loop(session_id, user_id, :qq)
 
       case Loop.process_message(session_id, text) do
         {:ok, response} ->
@@ -306,19 +307,6 @@ defmodule OptimalSystemAgent.Channels.QQ do
 
   defp auth_header(app_id, token) do
     [{"authorization", "QQBot #{app_id}.#{token}"}]
-  end
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :qq}
-        )
-    end
   end
 
   defp get_retry_after(headers) do

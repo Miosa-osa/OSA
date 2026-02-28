@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @sync_timeout 30_000
   @request_timeout 35_000
@@ -204,7 +205,7 @@ defmodule OptimalSystemAgent.Channels.Matrix do
       if age < 60_000 do
         Logger.debug("Matrix: Message from #{sender} in #{room_id}: #{text}")
         session_id = "matrix_#{room_id}_#{sender}"
-        ensure_loop(session_id, sender)
+        Session.ensure_loop(session_id, sender, :matrix)
 
         case Loop.process_message(session_id, text) do
           {:ok, response} ->
@@ -278,19 +279,6 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   end
 
   # ── Misc Helpers ─────────────────────────────────────────────────────
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :matrix}
-        )
-    end
-  end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

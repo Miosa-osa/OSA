@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
 
   @api_base "https://open.feishu.cn/open-apis"
   @send_timeout 15_000
@@ -207,7 +208,7 @@ defmodule OptimalSystemAgent.Channels.Feishu do
     if text != "" and chat_id do
       Logger.debug("Feishu: Message from #{sender_id} in #{chat_id}: #{text}")
       session_id = "feishu_#{chat_id}_#{sender_id}"
-      ensure_loop(session_id, sender_id)
+      Session.ensure_loop(session_id, sender_id, :feishu)
 
       state = maybe_refresh_token(state)
 
@@ -331,19 +332,6 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   end
 
   # ── Misc Helpers ─────────────────────────────────────────────────────
-
-  defp ensure_loop(session_id, user_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :feishu}
-        )
-    end
-  end
 
   defp get_retry_after(headers) do
     case List.keyfind(headers, "retry-after", 0) ||

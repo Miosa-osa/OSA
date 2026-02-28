@@ -29,22 +29,44 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   use Plug.Router
   require Logger
 
-  alias OptimalSystemAgent.Machines
-
+  plug(:security_headers)
   plug(Plug.Logger, log: :debug)
   plug(:match)
   plug(:dispatch)
 
+  # ── Security headers ──────────────────────────────────────────────
+
+  defp security_headers(conn, _opts) do
+    conn
+    |> put_resp_header("x-content-type-options", "nosniff")
+    |> put_resp_header("x-frame-options", "DENY")
+    |> put_resp_header("referrer-policy", "no-referrer")
+    |> put_resp_header("x-xss-protection", "1; mode=block")
+  end
+
   # ── Health (no auth) ────────────────────────────────────────────────
 
   get "/health" do
+    provider =
+      Application.get_env(:optimal_system_agent, :default_provider, "unknown")
+      |> to_string()
+
+    model_name =
+      Application.get_env(:optimal_system_agent, :default_model, "")
+      |> to_string()
+
+    version =
+      case Application.spec(:optimal_system_agent, :vsn) do
+        nil -> "0.2.5"
+        vsn -> to_string(vsn)
+      end
+
     body =
       Jason.encode!(%{
         status: "ok",
-        version: Application.spec(:optimal_system_agent, :vsn) |> to_string(),
-        uptime_seconds: System.monotonic_time(:second),
-        machines: Machines.active(),
-        provider: Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+        version: version,
+        provider: provider,
+        model: model_name
       })
 
     conn

@@ -187,6 +187,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
       # Tier 2 — HIGH
       {tools_block(), 2, "tools"},
+      {rules_block(), 2, "rules"},
       {memory_block_relevant(state), 2, "memory"},
       {workflow_block(state), 2, "workflow"},
       {task_state_block(state), 2, "task_state"},
@@ -530,6 +531,34 @@ defmodule OptimalSystemAgent.Agent.Context do
 
       "Parameters: #{Enum.join(props, ", ")}"
     end
+  end
+
+  defp rules_block do
+    rules_dir =
+      case :code.priv_dir(:optimal_system_agent) do
+        {:error, _} -> nil
+        dir -> Path.join(to_string(dir), "rules")
+      end
+
+    if rules_dir && File.dir?(rules_dir) do
+      rules_dir
+      |> Path.join("**/*.md")
+      |> Path.wildcard()
+      |> Enum.sort()
+      |> Enum.map(fn path ->
+        name = Path.relative_to(path, rules_dir) |> String.replace_suffix(".md", "")
+        content = File.read!(path)
+        "## Rule: #{name}\n#{content}"
+      end)
+      |> case do
+        [] -> nil
+        parts -> "# Active Rules\n\n" <> Enum.join(parts, "\n\n")
+      end
+    else
+      nil
+    end
+  rescue
+    _ -> nil
   end
 
   @doc false

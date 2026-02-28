@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.Session
   alias OptimalSystemAgent.Agent.Memory
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
@@ -136,12 +137,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     with %{"input" => input} <- conn.body_params do
       user_id = conn.body_params["user_id"] || conn.assigns[:user_id]
       session_id = conn.body_params["session_id"] || generate_session_id()
-      workspace_id = conn.body_params["workspace_id"]
+      _workspace_id = conn.body_params["workspace_id"]
 
       start_time = System.monotonic_time(:millisecond)
 
       # Ensure an agent loop exists for this session
-      ensure_loop(session_id, user_id, workspace_id)
+      Session.ensure_loop(session_id, user_id, :http)
 
       # Process through the agent loop (same pipeline as CLI)
       case Loop.process_message(session_id, input) do
@@ -1384,22 +1385,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────
-
-  defp ensure_loop(session_id, user_id, _workspace_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        {:ok, _pid} =
-          DynamicSupervisor.start_child(
-            OptimalSystemAgent.Channels.Supervisor,
-            {Loop, session_id: session_id, user_id: user_id, channel: :http}
-          )
-
-        :ok
-    end
-  end
 
   defp signal_to_map(%Classifier{} = signal) do
     %{

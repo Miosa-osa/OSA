@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.WhatsAppWeb do
 
   @behaviour OptimalSystemAgent.Sidecar.Behaviour
 
+  alias OptimalSystemAgent.Channels.Session
   alias OptimalSystemAgent.Sidecar.{Protocol, Registry}
   alias OptimalSystemAgent.Agent.Loop
 
@@ -224,7 +225,7 @@ defmodule OptimalSystemAgent.WhatsAppWeb do
     )
 
     Task.start(fn ->
-      ensure_loop(session_id, from)
+      Session.ensure_loop(session_id, from, :whatsapp_web)
 
       case Loop.process_message(session_id, text) do
         {:ok, response} ->
@@ -240,19 +241,6 @@ defmodule OptimalSystemAgent.WhatsAppWeb do
   end
 
   defp handle_inbound_message(_), do: :ok
-
-  defp ensure_loop(session_id, user_id) do
-    case Elixir.Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        :ok
-
-      [] ->
-        DynamicSupervisor.start_child(
-          OptimalSystemAgent.Channels.Supervisor,
-          {Loop, session_id: session_id, user_id: to_string(user_id), channel: :whatsapp_web}
-        )
-    end
-  end
 
   defp maybe_start_port(%{sidecar_path: nil} = state), do: state
 

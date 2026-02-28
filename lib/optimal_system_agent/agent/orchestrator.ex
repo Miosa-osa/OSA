@@ -92,15 +92,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
   end
 
   @doc """
-  Analyze a message and decide how to handle it.
-  Returns :simple or {:complex, plan} where plan is a list of sub-tasks.
-  """
-  @spec analyze(String.t(), keyword()) :: :simple | {:complex, list()}
-  def analyze(message, opts \\ []) do
-    GenServer.call(__MODULE__, {:analyze, message, opts}, 60_000)
-  end
-
-  @doc """
   Execute a complex task with multiple sub-agents.
   Returns {:ok, task_id} immediately — execution proceeds asynchronously
   via handle_continue. Poll progress/1 or subscribe to
@@ -168,20 +159,6 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     )
 
     {:ok, state}
-  end
-
-  @impl true
-  def handle_call({:analyze, message, _opts}, _from, state) do
-    result =
-      try do
-        analyze_complexity(message)
-      rescue
-        e ->
-          Logger.error("[Orchestrator] Complexity analysis failed: #{Exception.message(e)}")
-          :simple
-      end
-
-    {:reply, result, state}
   end
 
   @impl true

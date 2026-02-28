@@ -3,9 +3,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
 
   alias OptimalSystemAgent.Channels.HTTP.Auth
 
-  # The module falls back to the compile-time default when no env var is set.
-  # We test against that known default to keep tests hermetic.
-  @default_secret "osa-dev-secret-change-me"
+  # Retrieve the runtime secret so forge_token tests use the same key
+  defp test_secret do
+    Application.get_env(:optimal_system_agent, :shared_secret)
+  end
 
   # ---------------------------------------------------------------------------
   # Helpers
@@ -136,13 +137,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
       assert is_integer(claims["exp"])
     end
 
-    test "verifies a token without an 'exp' claim (no expiration)" do
-      # Build a token manually with no exp claim
+    test "rejects a token without an 'exp' claim" do
+      # Tokens must include an exp claim for security
       now = System.system_time(:second)
       claims = %{"user_id" => "u1", "iat" => now}
-      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, @default_secret)
+      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret())
 
-      assert {:ok, _} = Auth.verify_token(token)
+      assert {:error, :invalid_token} = Auth.verify_token(token)
     end
 
     test "round-trip: generate then verify preserves custom claims" do
@@ -164,14 +165,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
     test "returns {:error, :invalid_token} for token whose 'exp' is in the past" do
       past_exp = System.system_time(:second) - 1
       claims = %{"user_id" => "u1", "iat" => past_exp - 900, "exp" => past_exp}
-      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, @default_secret)
+      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret())
 
       assert {:error, :invalid_token} = Auth.verify_token(token)
     end
 
     test "returns error for token expired far in the past" do
       claims = %{"user_id" => "u1", "exp" => 1_000_000}
-      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, @default_secret)
+      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret())
 
       assert {:error, :invalid_token} = Auth.verify_token(token)
     end
@@ -179,7 +180,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
     test "token expiring 1 second from now is still valid" do
       exp = System.system_time(:second) + 1
       claims = %{"user_id" => "u1", "exp" => exp}
-      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, @default_secret)
+      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret())
 
       assert {:ok, _} = Auth.verify_token(token)
     end
@@ -271,7 +272,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
 
     test "returns {:error, :invalid_token} when secret is off by one character" do
       claims = build_claims()
-      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, @default_secret <> "!")
+      token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret() <> "!")
 
       assert {:error, :invalid_token} = Auth.verify_token(token)
     end
