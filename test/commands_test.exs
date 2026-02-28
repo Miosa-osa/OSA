@@ -35,11 +35,12 @@ defmodule OptimalSystemAgent.CommandsTest do
       assert is_list(result)
     end
 
-    test "each entry is a two-element tuple of strings" do
+    test "each entry is a three-element tuple of strings" do
       Commands.list_commands()
-      |> Enum.each(fn {name, desc} ->
+      |> Enum.each(fn {name, desc, category} ->
         assert is_binary(name), "expected name to be a string, got: #{inspect(name)}"
         assert is_binary(desc), "expected desc to be a string, got: #{inspect(desc)}"
+        assert is_binary(category), "expected category to be a string, got: #{inspect(category)}"
       end)
     end
 

@@ -103,20 +103,46 @@ defmodule OptimalSystemAgent.Commands do
     end
   end
 
-  @doc "List all available commands with descriptions."
-  @spec list_commands() :: list({String.t(), String.t()})
+  @doc "List all available commands with descriptions and categories."
+  @spec list_commands() :: list({String.t(), String.t(), String.t()})
   def list_commands do
-    builtins = Enum.map(builtin_commands(), fn {name, desc, _} -> {name, desc} end)
+    builtins = Enum.map(builtin_commands(), fn {name, desc, _} -> {name, desc, category_for(name)} end)
 
     customs =
       try do
         :ets.tab2list(@ets_table)
-        |> Enum.map(fn {name, _template, desc} -> {name, desc} end)
+        |> Enum.map(fn {name, _template, desc} -> {name, desc, "custom"} end)
       rescue
         ArgumentError -> []
       end
 
     builtins ++ customs
+  end
+
+  @doc false
+  defp category_for(name) do
+    case name do
+      n when n in ~w(help status skills memory soul model models provider commands) -> "info"
+      n when n in ~w(new sessions resume history) -> "session"
+      n when n in ~w(channels whatsapp) -> "channels"
+      n when n in ~w(compact usage) -> "context"
+      "cortex" -> "intelligence"
+      n when n in ~w(verbose think plan config) -> "config"
+      n when n in ~w(agents tiers tier swarms hooks learning) -> "agents"
+      n when n in ~w(budget thinking export machines providers) -> "info"
+      n when n in ~w(reload doctor setup create-command) -> "system"
+      n when n in ~w(commit build test lint verify create-pr fix explain) -> "workflow"
+      n when n in ~w(prime prime-backend prime-webdev prime-svelte prime-security prime-devops prime-testing prime-osa prime-miosa prime-businessos) -> "priming"
+      n when n in ~w(security-scan secret-scan harden) -> "security"
+      n when n in ~w(mem-search mem-save mem-recall mem-list mem-stats mem-delete mem-context mem-export) -> "memory"
+      n when n in ~w(schedule cron triggers heartbeat) -> "scheduler"
+      "tasks" -> "tasks"
+      n when n in ~w(analytics debug search review pr-review refactor banner init) -> "analytics"
+      n when n in ~w(login logout) -> "auth"
+      n when n in ~w(reset logs completion docs update) -> "system"
+      n when n in ~w(exit quit clear) -> "system"
+      _ -> "system"
+    end
   end
 
   @doc "Register a custom command at runtime."

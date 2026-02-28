@@ -295,7 +295,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   get "/commands" do
     commands =
       Commands.list_commands()
-      |> Enum.map(fn {name, description} -> %{name: name, description: description} end)
+      |> Enum.map(fn
+        {name, description, category} -> %{name: name, description: description, category: category}
+        {name, description} -> %{name: name, description: description, category: "system"}
+      end)
 
     body = Jason.encode!(%{commands: commands, count: length(commands)})
 
@@ -625,6 +628,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         |> maybe_put(:pattern, parse_swarm_pattern(conn.body_params["pattern"]))
         |> maybe_put(:max_agents, conn.body_params["max_agents"])
         |> maybe_put(:timeout_ms, conn.body_params["timeout_ms"])
+        |> maybe_put(:session_id, conn.body_params["session_id"])
 
       case Swarm.launch(task, opts) do
         {:ok, swarm_id} ->

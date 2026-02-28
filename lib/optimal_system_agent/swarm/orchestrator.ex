@@ -38,7 +38,8 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
   @valid_patterns [:parallel, :pipeline, :debate, :review]
 
   defstruct swarms: %{},
-            active_count: 0
+            active_count: 0,
+            session_map: %{}
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -130,7 +131,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
             active_count: new_count
         }
 
-        Bus.emit(:system_event, %{event: :swarm_cancelled, swarm_id: swarm_id})
+        Bus.emit(:system_event, %{event: :swarm_cancelled, swarm_id: swarm_id, session_id: Map.get(state.session_map, swarm_id)})
         Logger.info("Swarm #{swarm_id} cancelled")
 
         {:reply, :ok, state}
@@ -197,7 +198,8 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
           swarm_id: swarm_id,
           pattern: swarm.plan.pattern,
           agent_count: length(results),
-          result_preview: String.slice(final_result || "", 0, 200)
+          result_preview: String.slice(final_result || "", 0, 200),
+          session_id: Map.get(state.session_map, swarm_id)
         })
 
         Logger.info("Swarm #{swarm_id} completed (#{length(results)} agents)")
@@ -232,7 +234,8 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         Bus.emit(:system_event, %{
           event: :swarm_failed,
           swarm_id: swarm_id,
-          reason: inspect(reason)
+          reason: inspect(reason),
+          session_id: Map.get(state.session_map, swarm_id)
         })
 
         Logger.error("Swarm #{swarm_id} failed: #{inspect(reason)}")
@@ -257,7 +260,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
             active_count: new_count
         }
 
-        Bus.emit(:system_event, %{event: :swarm_timeout, swarm_id: swarm_id})
+        Bus.emit(:system_event, %{event: :swarm_timeout, swarm_id: swarm_id, session_id: Map.get(state.session_map, swarm_id)})
         {:noreply, state}
 
       _ ->
@@ -291,6 +294,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
     swarm_id = generate_id()
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     max_agents = Keyword.get(opts, :max_agents, @max_agents)
+    session_id = Keyword.get(opts, :session_id)
 
     # 1. Decompose task into a plan (LLM-powered, with fallback)
     plan =
@@ -372,13 +376,20 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         error: nil,
         started_at: DateTime.utc_now(),
         completed_at: nil,
-        timeout_ms: timeout_ms
+        timeout_ms: timeout_ms,
+        session_id: session_id
       }
+
+      session_map =
+        if session_id,
+          do: Map.put(state.session_map, swarm_id, session_id),
+          else: state.session_map
 
       new_state = %{
         state
         | swarms: Map.put(state.swarms, swarm_id, swarm_state),
-          active_count: state.active_count + 1
+          active_count: state.active_count + 1,
+          session_map: session_map
       }
 
       Bus.emit(:system_event, %{
@@ -386,7 +397,8 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
         swarm_id: swarm_id,
         pattern: plan.pattern,
         agent_count: length(workers),
-        task_preview: String.slice(task, 0, 200)
+        task_preview: String.slice(task, 0, 200),
+        session_id: session_id
       })
 
       Logger.info("Swarm #{swarm_id} launched: pattern=#{plan.pattern} agents=#{length(workers)}")
