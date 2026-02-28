@@ -93,6 +93,7 @@ type OrchestratorAgentProgressEvent struct {
 // OrchestratorAgentCompletedEvent from system_event.
 type OrchestratorAgentCompletedEvent struct {
 	AgentName  string `json:"agent_name"`
+	Status     string `json:"status"` // "completed" or "failed" — backend uses this event for both
 	ToolUses   int    `json:"tool_uses"`
 	TokensUsed int    `json:"tokens_used"`
 }
@@ -487,6 +488,14 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 		return ev
 
 	case "signal_classified":
+		// Backend sends {signal: {mode, genre, ...}, session_id, source}.
+		// Try nested shape first, fall back to flat.
+		var wrapper struct {
+			Signal SignalClassifiedEvent `json:"signal"`
+		}
+		if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Signal.Mode != "" {
+			return wrapper.Signal
+		}
 		var ev SignalClassifiedEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
 			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
@@ -535,10 +544,18 @@ func parseSystemEvent(data []byte) tea.Msg {
 	case "orchestrator_agent_completed":
 		var ev OrchestratorAgentCompletedEvent
 		if json.Unmarshal(data, &ev) == nil {
+			// Backend sends both success and failure via this event type.
+			// Dispatch as OrchestratorAgentFailedEvent when status is "failed".
+			if ev.Status == "failed" {
+				var failEv OrchestratorAgentFailedEvent
+				json.Unmarshal(data, &failEv) //nolint:errcheck
+				return failEv
+			}
 			return ev
 		}
 
 	case "orchestrator_agent_failed":
+		// Keep for forward compat if the backend ever emits this directly.
 		var ev OrchestratorAgentFailedEvent
 		if json.Unmarshal(data, &ev) == nil {
 			return ev

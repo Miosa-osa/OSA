@@ -239,6 +239,12 @@ treasury_*                       ✗ NO SID      ✗ not parsed ✗             
 **Issue:** Swarm events were emitted without `session_id`, so PubSub never routed them to the SSE stream. TUI also lacked parsers for swarm events.
 **Fix:** Added `session_id` to all swarm event emissions. Added event types + parsers in sse.go. Added handlers in app.go.
 
+### FIXED: SSE stream crashes on every message — "Connection lost" (BUG-026)
+**Severity:** Critical
+**Files:** `lib/optimal_system_agent/agent/loop.ex`, `lib/optimal_system_agent/channels/http/api.ex`
+**Root cause:** `agent_response` bus events included `signal: %Classifier{}` struct. The SSE loop's `Jason.encode!(event)` cannot encode Elixir structs without a `Jason.Encoder` implementation — it raises `Jason.EncodeError`, crashing the SSE Plug process and dropping the TCP connection. The Go TUI then detects the disconnect and enters reconnection mode, showing "Connection lost. Reconnecting (attempt N/10)..." on every single message.
+**Fix:** (1) Converted `signal` from struct to plain map via `Map.from_struct(signal)` in all three `Bus.emit(:agent_response, ...)` and `Bus.emit(:system_event, %{signal: ...})` calls in loop.ex. (2) Switched `sse_loop` from `Jason.encode!` (crash on failure) to `Jason.encode` (returns `{:ok, data}` / `{:error, reason}`) so non-serializable events are logged and skipped instead of killing the SSE stream.
+
 ---
 
 ## Testing Notes

@@ -107,7 +107,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     case NoiseFilter.filter(message) do
       {:noise, reason} ->
         Logger.debug("Signal classified as noise (#{reason}), weight=#{signal.weight}")
-        Bus.emit(:system_event, %{event: :signal_low_weight, signal: signal, reason: reason})
+        Bus.emit(:system_event, %{event: :signal_low_weight, signal: Map.from_struct(signal), reason: reason})
 
         # Persist to session but don't invoke LLM
         Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
@@ -188,7 +188,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
               Bus.emit(:agent_response, %{
                 session_id: state.session_id,
                 response: response,
-                signal: signal
+                signal: Map.from_struct(signal)
               })
 
               {:reply, {:ok, response}, state}
@@ -214,7 +214,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           Bus.emit(:agent_response, %{
             session_id: state.session_id,
             response: response,
-            signal: signal
+            signal: Map.from_struct(signal)
           })
 
           {:reply, {:ok, response}, state}
@@ -352,6 +352,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
               phase: :end,
               duration_ms: tool_duration_ms,
               args: arg_hint,
+              session_id: acc.session_id
+            })
+
+            Bus.emit(:tool_result, %{
+              name: tool_call.name,
+              result: String.slice(result_str, 0, 500),
+              success: !match?({:error, _}, tool_result),
               session_id: acc.session_id
             })
 

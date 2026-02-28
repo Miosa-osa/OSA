@@ -1634,15 +1634,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     receive do
       {:osa_event, event} ->
         event_type = Map.get(event, :type, "unknown") |> to_string()
-        data = Jason.encode!(event)
 
-        case chunk(conn, "event: #{event_type}\ndata: #{data}\n\n") do
-          {:ok, conn} ->
+        case Jason.encode(event) do
+          {:ok, data} ->
+            case chunk(conn, "event: #{event_type}\ndata: #{data}\n\n") do
+              {:ok, conn} ->
+                sse_loop(conn, session_id)
+
+              {:error, _reason} ->
+                Logger.debug("SSE client disconnected for session #{session_id}")
+                conn
+            end
+
+          {:error, reason} ->
+            # Skip non-serializable events rather than crashing the SSE stream
+            Logger.warning("[SSE] Failed to encode #{event_type} event: #{inspect(reason)}")
             sse_loop(conn, session_id)
-
-          {:error, _reason} ->
-            Logger.debug("SSE client disconnected for session #{session_id}")
-            conn
         end
     after
       30_000 ->
