@@ -12,6 +12,7 @@ import (
 
 	"github.com/miosa/osa-tui/app"
 	"github.com/miosa/osa-tui/client"
+	"github.com/miosa/osa-tui/style"
 )
 
 var version = "dev"
@@ -60,6 +61,13 @@ func main() {
 	} else {
 		home, _ := os.UserHomeDir()
 		app.ProfileDir = filepath.Join(home, ".osa")
+	}
+
+	// Auto-detect terminal background and set theme accordingly
+	if lipgloss.HasDarkBackground() {
+		style.SetTheme("dark")
+	} else {
+		style.SetTheme("light")
 	}
 
 	c := client.New(baseURL)

@@ -21,8 +21,9 @@
 | `0c93efc` | Feb 28 | Restore /clear as local command |
 | `b9fe501` | Feb 28 | Resolve remaining 4 bugs + hardening |
 | `ec37944` | Feb 28 | Swarm pattern validation + provider-aware model resolution |
+| `<next>` | Feb 28 | Phase 3: themes, command palette, toasts, streaming prep, dead code cleanup |
 
-**Total TUI-touching commits:** 15 over 5 days
+**Total TUI-touching commits:** 16 over 5 days
 
 ---
 
@@ -30,32 +31,36 @@
 
 ```
 priv/go/tui/
-├── main.go              Entry point; flags, profile, OAuth, program init
+├── main.go              Entry point; flags, profile, theme auto-detect
 ├── app/
 │   ├── app.go           Root Model; message routing, SSE, auth, commands, state
-│   ├── state.go         State machine (6 states)
+│   ├── state.go         State machine (7 states)
 │   └── keymap.go        All key bindings
 ├── client/
 │   ├── http.go          REST client (14 active endpoints)
 │   ├── types.go         Request/response DTOs
-│   └── sse.go           SSE streaming + reconnect (19 event types)
+│   └── sse.go           SSE streaming + reconnect (24 event types)
 ├── model/
-│   ├── chat.go          Scrollable message viewport
+│   ├── chat.go          Scrollable message viewport + token streaming
 │   ├── input.go         Text input + history + tab completion
-│   ├── activity.go      Spinner, tool calls, token counter
+│   ├── activity.go      Tool call feed, token counter, elapsed timer
 │   ├── agents.go        Multi-agent swarm panel
 │   ├── banner.go        Startup splash + header
+│   ├── palette.go       Command palette overlay (Ctrl+K)
+│   ├── picker.go        Model selector UI
+│   ├── plan.go          Plan review (approve/reject/edit)
 │   ├── status.go        Signal bar, context util, provider info
 │   ├── tasks.go         Task checklist with live status
-│   ├── plan.go          Plan review (approve/reject/edit)
-│   ├── picker.go        Model selector UI
+│   ├── toast.go         Toast notification queue (auto-dismiss)
 │   └── phrases.go       95 witty phrases
 ├── msg/msg.go           Tea.Msg types (import-cycle-free)
-├── style/style.go       Lipgloss palette + component styles
+├── style/
+│   ├── style.go         Lipgloss palette, component styles, SetTheme()
+│   └── themes.go        Theme definitions (dark, light, catppuccin)
 └── markdown/render.go   Glamour markdown → ANSI
 ```
 
-**Stats:** 20 files | ~4,500 LoC | 9 UI components | 6 states | 4 target platforms
+**Stats:** 23 files | ~5,200 LoC | 12 UI components | 7 states | 4 target platforms
 
 ---
 
@@ -69,6 +74,8 @@ Connecting ──[health OK]──→ Banner ──[any key]──→ Idle
                                                PlanReview
                                                    ↕ [/models / selection]
                                                ModelPicker
+                                                   ↕ [Ctrl+K / select or Esc]
+                                               Palette
 ```
 
 ---
@@ -213,7 +220,7 @@ These are fully built but receive no data. Fix = add `session_id` to backend emi
 ### P4 — UX Polish
 - [ ] Chat search/filter (grep within conversation history)
 - [ ] Copy-to-clipboard for messages
-- [ ] Theme switching (dark/light)
+- [x] Theme switching (dark/light/catppuccin) — Phase 3
 - [ ] Split-pane view (chat + activity side-by-side)
 
 ### P5 — DevEx
@@ -223,7 +230,48 @@ These are fully built but receive no data. Fix = add `session_id` to backend emi
 
 ---
 
-## Phase 3: Advanced
+## Phase 3: UX Polish (COMPLETED)
+
+### Dead Code Cleanup
+- [x] Removed 11 dead msg types (SubmitInput, ComplexResult, ClassifyResult, SSE duplicates, etc.)
+- [x] Removed 8 dead client types (ComplexRequest/Response, ProgressAgent, ClassifyRequest/Response, etc.)
+- [x] Removed 4 dead HTTP methods (OrchestrateComplex, Progress, Classify, RefreshToken)
+- [x] Removed 4 dead keybindings (ScrollUp, ScrollDown, HistoryPrev, HistoryNext)
+- [x] Removed dead spinner from activity model (sp.View() was never called)
+- [x] Removed dead SetModel() from banner (model set via SetHealth/SetModelOverride)
+- [x] Removed dead Bg/Fg style vars
+
+### Theme System
+- [x] Theme struct with 13 color fields (all lipgloss.TerminalColor)
+- [x] 3 built-in themes: dark (default), light (for white terminals), catppuccin (Mocha)
+- [x] SetTheme() + rebuildStyles() — all styles rebuilt when theme changes
+- [x] Auto-detect terminal background at startup (lipgloss.HasDarkBackground)
+- [x] `/theme` command (list) and `/theme <name>` (switch)
+
+### Toast Notifications
+- [x] ToastsModel with auto-dismiss queue (max 3, 4-second TTL)
+- [x] 3 levels: info (✓), warning (⚠), error (✘)
+- [x] Right-aligned rendering above input
+- [x] Used for transient confirmations (theme switch, bg task, session created)
+
+### Command Palette (Ctrl+K)
+- [x] Full-screen overlay with text filter input
+- [x] Substring matching across all local + backend commands
+- [x] Arrow key navigation with scroll windowing (12 visible items)
+- [x] Enter executes, Esc dismisses
+- [x] StatePalette added to state machine
+
+### Token Streaming Prep (TUI-side)
+- [x] StreamingTokenEvent type + SSE parser case
+- [x] streamingContent field in ChatModel with partial response rendering
+- [x] streamBuf accumulator in app.go
+- [x] No behavioral change — wired for when backend ships streaming
+
+**Files changed:** 12 modified + 3 new = 15 total | +713 / -377 lines
+
+---
+
+## Phase 4: Advanced
 
 - [ ] Embedded terminal (tool output rendering)
 - [ ] Image rendering (sixel/kitty protocol for AI-generated images)

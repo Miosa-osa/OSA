@@ -55,14 +55,15 @@ type ChatMessage struct {
 
 // ChatModel is a scrollable viewport that displays conversation history.
 type ChatModel struct {
-	vp             viewport.Model
-	messages       []ChatMessage
-	width          int
-	height         int
-	welcomeVersion string
-	welcomeDetail  string
-	welcomeCwd     string
-	processingView string // activity/thinking rendered inline after messages during processing
+	vp               viewport.Model
+	messages         []ChatMessage
+	width            int
+	height           int
+	welcomeVersion   string
+	welcomeDetail    string
+	welcomeCwd       string
+	processingView   string // activity/thinking rendered inline after messages during processing
+	streamingContent string // partial agent response being streamed
 }
 
 // NewChat constructs a ChatModel sized to width x height.
@@ -149,10 +150,27 @@ func (m *ChatModel) SetProcessingView(view string) {
 	m.refresh()
 }
 
-// ClearProcessingView removes the inline processing indicator.
+// ClearProcessingView removes the inline processing indicator and any streaming content.
 func (m *ChatModel) ClearProcessingView() {
 	m.processingView = ""
+	m.streamingContent = ""
 	m.refresh()
+}
+
+// SetStreamingContent updates the partial agent response shown during token streaming.
+func (m *ChatModel) SetStreamingContent(text string) {
+	m.streamingContent = text
+	m.refresh()
+}
+
+// HasMessages reports whether any conversation messages have been added.
+func (m ChatModel) HasMessages() bool {
+	return len(m.messages) > 0
+}
+
+// WelcomeView returns the welcome screen content without viewport wrapping.
+func (m *ChatModel) WelcomeView() string {
+	return m.renderWelcome()
 }
 
 // ScrollToTop scrolls the chat viewport to the very top.
@@ -211,8 +229,21 @@ func (m *ChatModel) renderAll() string {
 		}
 		sb.WriteString(m.renderMessage(msg))
 	}
-	// Append inline processing/activity view during processing
-	if m.processingView != "" {
+	// Show streaming content (partial agent response) or activity view
+	if m.streamingContent != "" {
+		label := style.AgentLabel.Render("◈ OSA")
+		contentWidth := m.width - 5
+		if contentWidth < 20 {
+			contentWidth = 20
+		}
+		border := lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder(), false, false, false, true).
+			BorderForeground(style.MsgBorderAgent).
+			PaddingLeft(1).
+			Width(contentWidth)
+		sb.WriteString("\n")
+		sb.WriteString(border.Render(label + "\n" + m.streamingContent))
+	} else if m.processingView != "" {
 		sb.WriteString("\n")
 		sb.WriteString(m.processingView)
 	}

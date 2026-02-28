@@ -74,7 +74,6 @@ func (m *BannerModel) SetHealth(h msg.HealthResult) {
 	}
 }
 
-func (m *BannerModel) SetModel(name string)     { m.model = name }
 func (m *BannerModel) SetToolCount(n int)       { m.toolCount = n }
 func (m *BannerModel) SetWorkspace(path string) { m.workspace = path }
 func (m *BannerModel) SetWidth(w int)           { m.width = w }
@@ -82,6 +81,12 @@ func (m BannerModel) Provider() string          { return m.provider }
 func (m BannerModel) ModelName() string         { return m.model }
 func (m BannerModel) Version() string           { return m.version }
 func (m BannerModel) Workspace() string         { return m.workspace }
+
+// SetModelOverride updates both provider and model (used after model switch).
+func (m *BannerModel) SetModelOverride(provider, modelName string) {
+	m.provider = provider
+	m.model = modelName
+}
 
 // WelcomeLine returns a summary like "ollama · llama3.2 · 15 tools" for the welcome screen.
 func (m BannerModel) WelcomeLine() string {

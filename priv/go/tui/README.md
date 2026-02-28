@@ -122,6 +122,7 @@ Commands are dispatched client-side (built-in) or forwarded to the backend via
 | `/compact` | Trigger context compaction |
 | `/clear` | Clear chat history |
 | `/help` | Show command reference |
+| `/theme [name]` | List or switch themes (dark, light, catppuccin) |
 | `/exit`, `/quit` | Exit OSA |
 
 ---
@@ -129,28 +130,32 @@ Commands are dispatched client-side (built-in) or forwarded to the backend via
 ## Architecture
 
 ```
-main.go              Entry point — flag parsing, profile resolution, program lifecycle
+main.go              Entry point — flag parsing, profile resolution, theme auto-detect
 app/
   app.go             Root Model; message routing, SSE lifecycle, auth, command dispatch
-  state.go           State machine: Connecting → Banner → Idle ↔ Processing ↔ PlanReview
+  state.go           State machine: 7 states (Connecting → Banner → Idle ↔ Processing ↔ PlanReview ↔ ModelPicker ↔ Palette)
   keymap.go          All key bindings via charmbracelet/bubbles/key
 client/
-  http.go            REST client (health, orchestrate, tools, commands, classify, auth)
+  http.go            REST client (health, orchestrate, tools, commands, auth)
   sse.go             SSE streaming client with exponential backoff reconnect (max 30s)
   types.go           Request/response DTOs and Signal struct
 model/
-  activity.go        Spinner + tool call feed + token counter
+  activity.go        Tool call feed + token counter + elapsed timer
   agents.go          Multi-agent swarm progress + wave tracking
   banner.go          Startup header (version, provider, tool count, uptime)
-  chat.go            Scrollable message viewport (user / agent / system messages)
+  chat.go            Scrollable message viewport (user / agent / system / streaming)
   input.go           Text input with history navigation and command autocomplete
+  palette.go         Command palette overlay (Ctrl+K) with fuzzy filtering
+  picker.go          Model selector UI
   plan.go            Plan review panel (approve / reject / edit)
   status.go          Signal metadata bar + context utilization bar
   tasks.go           Task checklist with live status icons
+  toast.go           Toast notification queue (auto-dismiss, max 3 visible)
 msg/
   msg.go             All tea.Msg types (import-cycle-free hub)
 style/
-  style.go           Lipgloss color palette and component styles
+  style.go           Lipgloss color palette, component styles, and SetTheme() API
+  themes.go          Theme definitions (dark, light, catppuccin)
 markdown/
   render.go          Glamour-based ANSI markdown renderer
 ```
@@ -159,6 +164,8 @@ markdown/
 
 ```
 Connecting  →  Banner  →  Idle  ↔  Processing  ↔  PlanReview
+                                ↔  ModelPicker
+                                ↔  Palette
 ```
 
 | State | Trigger |
@@ -168,6 +175,8 @@ Connecting  →  Banner  →  Idle  ↔  Processing  ↔  PlanReview
 | `Idle` | Ready for input; any key dismisses banner |
 | `Processing` | User submitted a message; waiting for agent response |
 | `PlanReview` | Agent response contains a `## Plan` block; prompts approve/reject/edit |
+| `ModelPicker` | `/models` command opens the model selector |
+| `Palette` | `Ctrl+K` opens the command palette overlay |
 
 ---
 
@@ -191,6 +200,12 @@ after the health check succeeds. All real-time updates arrive over this stream.
 | `system_event` | `orchestrator_agent_completed` | Marks agent done |
 | `system_event` | `orchestrator_task_completed` | Hides swarm panel |
 | `system_event` | `context_pressure` | Updates context utilization bar |
+| `streaming_token` | — | Accumulates partial response; renders inline (TUI-ready, backend pending) |
+| `system_event` | `hook_blocked` | Shows warning toast |
+| `system_event` | `budget_warning` | Shows budget warning toast |
+| `system_event` | `budget_exceeded` | Shows budget exceeded error |
+| `system_event` | `swarm_cancelled` | Shows cancellation notice |
+| `system_event` | `swarm_timeout` | Shows timeout warning |
 
 The SSE client reconnects automatically on unexpected disconnects using exponential
 backoff (2 s, 4 s, 8 s … capped at 30 s). Intentional closes (logout, quit) do not
@@ -257,15 +272,81 @@ and a context utilization bar when context pressure events arrive.
 | Key | Context | Action |
 |---|---|---|
 | `Enter` | Idle | Submit input |
+| `Alt+Enter` | Idle | Insert newline (multi-line input, up to 6 lines) |
 | `Ctrl+C` | Idle | Confirm-quit prompt (double-tap to exit) |
 | `Ctrl+C` | Processing | Cancel current request |
 | `Ctrl+D` | Idle (empty input) | Quit immediately |
+| `Ctrl+K` | Idle | Open command palette |
 | `Ctrl+O` | Processing | Expand / collapse tool detail feed |
 | `Ctrl+B` | Processing | Move task to background; return to input |
 | `Tab` | Idle (after `/`) | Autocomplete command name |
 | `Up / Down` | Idle | Navigate input history |
+| `Up / Down` | Palette | Navigate commands |
 | `PgUp / PgDn` | Processing | Scroll chat viewport |
+| `Enter` | Palette | Execute selected command |
+| `Esc` | Palette | Dismiss palette |
 | `Esc` | Any | Cancel current action |
+
+---
+
+## Theme System
+
+The TUI ships with 3 built-in themes and auto-detects your terminal background at startup.
+
+| Theme | Description |
+|---|---|
+| `dark` | Default — violet/cyan accents on dark backgrounds |
+| `light` | Darker accents (violet-700, cyan-600) for white/light terminals |
+| `catppuccin` | Mocha palette — mauve, sky, green, yellow, red |
+
+```
+/theme               # list available themes
+/theme catppuccin    # switch to catppuccin
+```
+
+Auto-detection uses `lipgloss.HasDarkBackground()` — if your terminal reports a light
+background, the `light` theme is applied automatically. Override any time with `/theme`.
+
+---
+
+## Command Palette
+
+Press `Ctrl+K` to open the command palette — a fuzzy-searchable overlay of all
+available commands (both local and backend).
+
+```
+┌──────────────────────────────────────────┐
+│  Command Palette                         │
+│  ┌────────────────────────────────────┐  │
+│  │ search…                            │  │
+│  └────────────────────────────────────┘  │
+│  > /agents   List agent roster    [cmd]  │
+│    /clear    Clear chat history    [cmd]  │
+│    /help     Show command ref      [cmd]  │
+│    /models   List available models [cmd]  │
+│    /theme    Switch theme          [cmd]  │
+│    …                                     │
+│                                          │
+│  ↑↓ navigate · enter select · esc close  │
+└──────────────────────────────────────────┘
+```
+
+Type to filter, arrow keys to navigate, Enter to execute, Esc to dismiss.
+
+---
+
+## Toast Notifications
+
+Transient feedback messages appear right-aligned above the input area and auto-dismiss
+after 4 seconds. Up to 3 toasts stack simultaneously.
+
+```
+                                    ✓ Theme set to: catppuccin
+                                    ⚠ Task moved to background
+```
+
+Toasts are used for confirmations (theme switch, session created, background task)
+while persistent messages (errors, agent responses) remain in the chat scrollback.
 
 ---
 

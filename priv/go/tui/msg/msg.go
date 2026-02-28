@@ -28,13 +28,6 @@ type HealthResult struct {
 	Err           error
 }
 
-// -- User input --
-
-// SubmitInput when the user presses Enter.
-type SubmitInput struct {
-	Text string
-}
-
 // -- HTTP responses --
 
 // OrchestrateResult from POST /orchestrate.
@@ -48,15 +41,6 @@ type OrchestrateResult struct {
 	Err            error
 }
 
-// ComplexResult from POST /orchestrate/complex.
-type ComplexResult struct {
-	TaskID    string
-	Status    string
-	SessionID string
-	Synthesis string
-	Err       error
-}
-
 // CommandResult from POST /commands/execute.
 type CommandResult struct {
 	Kind   string
@@ -64,17 +48,6 @@ type CommandResult struct {
 	Action string
 	Err    error
 }
-
-// ClassifyResult from POST /classify.
-type ClassifyResult struct {
-	Signal Signal
-	Err    error
-}
-
-// -- SSE events --
-
-// SSEAuthFailed when SSE gets 401/403.
-type SSEAuthFailed struct{}
 
 // LoginResult from /login command.
 type LoginResult struct {
@@ -86,27 +59,6 @@ type LoginResult struct {
 // LogoutResult from /logout command.
 type LogoutResult struct {
 	Err error
-}
-
-// SSEConnected when the SSE stream is established.
-type SSEConnected struct {
-	SessionID string
-}
-
-// SSEDisconnected when the SSE stream drops.
-type SSEDisconnected struct {
-	Err error
-}
-
-// SSEReconnecting when attempting reconnection.
-type SSEReconnecting struct {
-	Attempt int
-}
-
-// AgentResponse from SSE event "agent_response".
-type AgentResponse struct {
-	Response string  `json:"response"`
-	Signal   *Signal `json:"signal,omitempty"`
 }
 
 // ToolCallStart from SSE event "tool_call".
@@ -182,31 +134,13 @@ type OrchestratorTaskCompleted struct {
 	TaskID string `json:"task_id"`
 }
 
-// -- Context pressure --
-
-// ContextPressure from system_event.
-type ContextPressure struct {
-	Utilization     float64 `json:"utilization"`
-	EstimatedTokens int     `json:"estimated_tokens"`
-	MaxTokens       int     `json:"max_tokens"`
-}
-
 // -- UI events --
 
 // TickMsg for periodic timer updates.
 type TickMsg struct{}
 
-// WindowSizeMsg from terminal resize.
-type WindowSizeMsg struct {
-	Width  int
-	Height int
-}
-
 // ToggleExpand for Ctrl+O.
 type ToggleExpand struct{}
-
-// ToggleBackground for Ctrl+B.
-type ToggleBackground struct{}
 
 // -- Session events --
 
@@ -228,4 +162,29 @@ type SessionListResult struct {
 type SessionSwitchResult struct {
 	SessionID string
 	Err       error
+}
+
+// -- Model selection --
+
+// ModelEntry describes a single available model (mirrors client.ModelEntry).
+type ModelEntry struct {
+	Name     string
+	Provider string
+	Size     int64
+	Active   bool
+}
+
+// ModelListResult from GET /api/v1/models.
+type ModelListResult struct {
+	Models   []ModelEntry
+	Current  string
+	Provider string
+	Err      error
+}
+
+// ModelSwitchResult from POST /api/v1/models/switch.
+type ModelSwitchResult struct {
+	Provider string
+	Model    string
+	Err      error
 }

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/miosa/osa-tui/msg"
 	"github.com/miosa/osa-tui/style"
@@ -23,9 +22,8 @@ type ToolCallInfo struct {
 	Success    bool
 }
 
-// ActivityModel renders a spinner, elapsed timer, and tool call feed.
+// ActivityModel renders an elapsed timer and tool call feed.
 type ActivityModel struct {
-	sp               spinner.Model
 	active           bool
 	startTime        time.Time
 	toolCalls        []ToolCallInfo
@@ -40,12 +38,9 @@ type ActivityModel struct {
 	phraseRotateTime time.Time // when the current phrase was set
 }
 
-// NewActivity constructs an ActivityModel with a Dot spinner.
+// NewActivity constructs an ActivityModel.
 func NewActivity() ActivityModel {
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = style.SpinnerStyle
-	return ActivityModel{sp: sp}
+	return ActivityModel{}
 }
 
 // Start activates the activity display and resets the elapsed timer.
@@ -104,18 +99,12 @@ func (m ActivityModel) OutputTokens() int { return m.outputTokens }
 
 // Init satisfies tea.Model.
 func (m ActivityModel) Init() tea.Cmd {
-	return m.sp.Tick
+	return nil
 }
 
 // Update handles spinner ticks, timer ticks, and tool call events.
 func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 	switch v := teaMsg.(type) {
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.sp, cmd = m.sp.Update(v)
-		return m, cmd
-
 	case msg.TickMsg:
 		// Rotate witty phrase every 4 seconds.
 		if m.active && time.Since(m.phraseRotateTime) >= 4*time.Second {

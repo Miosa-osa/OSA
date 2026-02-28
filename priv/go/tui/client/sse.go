@@ -63,6 +63,14 @@ type LLMResponseEvent struct {
 	OutputTokens int
 }
 
+// StreamingTokenEvent carries a partial token during streaming responses.
+// The TUI accumulates these to show a live response as it's generated.
+// NOTE: Backend does not emit these yet — wired for when streaming ships.
+type StreamingTokenEvent struct {
+	Text      string `json:"text"`
+	SessionID string `json:"session_id"`
+}
+
 // OrchestratorTaskStartedEvent from system_event.
 type OrchestratorTaskStartedEvent struct {
 	TaskID string `json:"task_id"`
@@ -149,6 +157,33 @@ type SwarmCompletedEvent struct {
 type SwarmFailedEvent struct {
 	SwarmID string `json:"swarm_id"`
 	Reason  string `json:"reason"`
+}
+
+// HookBlockedEvent is emitted when a hook blocks an action (e.g. security_check).
+type HookBlockedEvent struct {
+	HookName string `json:"hook_name"`
+	Reason   string `json:"reason"`
+}
+
+// BudgetWarningEvent is emitted when spend crosses 80% of daily or monthly limit.
+type BudgetWarningEvent struct {
+	Utilization float64 `json:"utilization"`
+	Message     string  `json:"message"`
+}
+
+// BudgetExceededEvent is emitted when a budget limit is hit.
+type BudgetExceededEvent struct {
+	Message string `json:"message"`
+}
+
+// SwarmCancelledEvent is emitted when a swarm is cancelled.
+type SwarmCancelledEvent struct {
+	SwarmID string `json:"swarm_id"`
+}
+
+// SwarmTimeoutEvent is emitted when a swarm times out.
+type SwarmTimeoutEvent struct {
+	SwarmID string `json:"swarm_id"`
 }
 
 // -- SSEClient ----------------------------------------------------------------
@@ -391,6 +426,14 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			OutputTokens: raw.Usage.OutputTokens,
 		}
 
+	case "streaming_token":
+		var ev StreamingTokenEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
+		}
+		return ev
+
 	case "system_event":
 		return parseSystemEvent(data)
 
@@ -474,21 +517,75 @@ func parseSystemEvent(data []byte) tea.Msg {
 
 	case "swarm_started":
 		var ev SwarmStartedEvent
-		if json.Unmarshal(data, &ev) == nil {
-			return ev
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
 		}
+		return ev
 
 	case "swarm_completed":
 		var ev SwarmCompletedEvent
-		if json.Unmarshal(data, &ev) == nil {
-			return ev
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
 		}
+		return ev
 
 	case "swarm_failed":
 		var ev SwarmFailedEvent
-		if json.Unmarshal(data, &ev) == nil {
-			return ev
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
 		}
+		return ev
+
+	case "swarm_cancelled":
+		var ev SwarmCancelledEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
+		}
+		return ev
+
+	case "swarm_timeout":
+		var ev SwarmTimeoutEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
+		}
+		return ev
+
+	case "hook_blocked":
+		var ev struct {
+			HookName string `json:"hook_name"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
+		}
+		return HookBlockedEvent{HookName: ev.HookName, Reason: ev.Reason}
+
+	case "budget_warning":
+		var ev struct {
+			Utilization float64 `json:"utilization"`
+			Message     string  `json:"message"`
+		}
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
+		}
+		return BudgetWarningEvent{Utilization: ev.Utilization, Message: ev.Message}
+
+	case "budget_exceeded":
+		var ev struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
+			return nil
+		}
+		return BudgetExceededEvent{Message: ev.Message}
 
 	default:
 		if base.Event != "" {

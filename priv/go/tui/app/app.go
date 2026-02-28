@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,6 +48,9 @@ type Model struct {
 	status          model.StatusModel
 	plan            model.PlanModel
 	agents          model.AgentsModel
+	picker          model.PickerModel
+	toasts          model.ToastsModel
+	palette         model.PaletteModel
 	state           State
 	client          *client.Client
 	sse             *client.SSEClient
@@ -59,6 +63,7 @@ type Model struct {
 	commandEntries  []client.CommandEntry
 	confirmQuit     bool
 	processingStart time.Time
+	streamBuf       strings.Builder
 }
 
 func New(c *client.Client) Model {
@@ -68,7 +73,9 @@ func New(c *client.Client) Model {
 	return Model{
 		banner: banner, chat: model.NewChat(80, 20), input: model.NewInput(),
 		activity: model.NewActivity(), tasks: model.NewTasks(), status: model.NewStatus(),
-		plan: model.NewPlan(), agents: model.NewAgents(), state: StateConnecting,
+		plan: model.NewPlan(), agents: model.NewAgents(), picker: model.NewPicker(),
+		toasts: model.NewToasts(), palette: model.NewPalette(),
+		state:  StateConnecting,
 		client: c, keys: DefaultKeyMap(), width: 80, height: 24,
 	}
 }
@@ -85,6 +92,7 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = v.Height
 		m.chat.SetSize(v.Width, m.chatHeight())
 		m.plan.SetWidth(v.Width - 4)
+		m.picker.SetWidth(v.Width - 4)
 		m.input.SetWidth(v.Width)
 		m.banner.SetWidth(v.Width)
 		return m, nil
@@ -165,7 +173,12 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.input.Focus()
 		}
 		return m, nil
+	case client.StreamingTokenEvent:
+		m.streamBuf.WriteString(v.Text)
+		m.chat.SetStreamingContent(m.streamBuf.String())
+		return m, nil
 	case client.AgentResponseEvent:
+		m.streamBuf.Reset()
 		return m.handleClientAgentResponse(v)
 	case client.LLMRequestEvent:
 		m.activity, _ = m.activity.Update(msg.LLMRequest{Iteration: v.Iteration})
@@ -214,10 +227,45 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chat.AddSystemMessage(fmt.Sprintf("Swarm launched: %s pattern with %d agents", v.Pattern, v.AgentCount))
 		return m, nil
 	case client.SwarmCompletedEvent:
-		m.chat.AddAgentMessage(v.ResultPreview, nil, 0, fmt.Sprintf("swarm/%s", v.Pattern))
-		return m, nil
+		m.activity.Stop()
+		m.chat.ClearProcessingView()
+		m.status.SetActive(false)
+		m.state = StateIdle
+		if v.ResultPreview != "" {
+			m.chat.AddAgentMessage(v.ResultPreview, nil, 0, fmt.Sprintf("swarm/%s", v.Pattern))
+		} else {
+			m.chat.AddSystemMessage(fmt.Sprintf("Swarm %s (%s) completed.", v.SwarmID, v.Pattern))
+		}
+		return m, m.input.Focus()
 	case client.SwarmFailedEvent:
+		m.activity.Stop()
+		m.chat.ClearProcessingView()
+		m.status.SetActive(false)
+		m.state = StateIdle
 		m.chat.AddSystemError(fmt.Sprintf("Swarm %s failed: %s", v.SwarmID, v.Reason))
+		return m, m.input.Focus()
+	case client.SwarmCancelledEvent:
+		m.activity.Stop()
+		m.chat.ClearProcessingView()
+		m.status.SetActive(false)
+		m.state = StateIdle
+		m.chat.AddSystemWarning(fmt.Sprintf("Swarm %s was cancelled.", v.SwarmID))
+		return m, m.input.Focus()
+	case client.SwarmTimeoutEvent:
+		m.activity.Stop()
+		m.chat.ClearProcessingView()
+		m.status.SetActive(false)
+		m.state = StateIdle
+		m.chat.AddSystemError(fmt.Sprintf("Swarm %s timed out.", v.SwarmID))
+		return m, m.input.Focus()
+	case client.HookBlockedEvent:
+		m.chat.AddSystemError(fmt.Sprintf("Blocked by %s: %s", v.HookName, v.Reason))
+		return m, nil
+	case client.BudgetWarningEvent:
+		m.chat.AddSystemWarning(fmt.Sprintf("Budget at %.0f%%: %s", v.Utilization*100, v.Message))
+		return m, nil
+	case client.BudgetExceededEvent:
+		m.chat.AddSystemError(fmt.Sprintf("Budget exceeded: %s", v.Message))
 		return m, nil
 	case msg.ToggleExpand:
 		m.activity, _ = m.activity.Update(v)
@@ -229,10 +277,14 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case msg.TickMsg:
+		m.toasts.Tick()
 		if m.state == StateProcessing {
 			m.status.SetStats(time.Since(m.processingStart), m.activity.ToolCount(), m.activity.InputTokens(), m.activity.OutputTokens())
 			// Push activity view inline into chat viewport (right below messages)
 			m.chat.SetProcessingView(m.activity.View())
+			cmds = append(cmds, m.tickCmd())
+		}
+		if m.toasts.HasToasts() {
 			cmds = append(cmds, m.tickCmd())
 		}
 		var cmd tea.Cmd
@@ -241,6 +293,22 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case model.PlanDecision:
 		return m.handlePlanDecision(v)
+	case msg.ModelListResult:
+		return m.handleModelList(v)
+	case msg.ModelSwitchResult:
+		return m.handleModelSwitch(v)
+	case model.PickerChoice:
+		return m.handlePickerChoice(v)
+	case model.PickerCancel:
+		m.picker.Clear()
+		m.state = StateIdle
+		return m, m.input.Focus()
+	case model.PaletteExecuteMsg:
+		m.state = StateIdle
+		return m.submitInput(v.Command)
+	case model.PaletteDismissMsg:
+		m.state = StateIdle
+		return m, m.input.Focus()
 	}
 	if m.state == StateProcessing {
 		var cmd tea.Cmd
@@ -261,11 +329,15 @@ func (m Model) View() string {
 		sections = append(sections, m.input.View())
 	case StateIdle:
 		sections = append(sections, m.banner.HeaderView())
-		sections = append(sections, m.chat.View())
-		if m.tasks.HasTasks() {
-			sections = append(sections, m.tasks.View())
+		if m.chat.HasMessages() {
+			sections = append(sections, m.chat.View())
+			if m.tasks.HasTasks() {
+				sections = append(sections, m.tasks.View())
+			}
+			sections = append(sections, m.status.View())
+		} else {
+			sections = append(sections, m.chat.WelcomeView())
 		}
-		sections = append(sections, m.status.View())
 		sections = append(sections, m.input.View())
 	case StateProcessing:
 		// Activity view is rendered inline in the chat viewport (via SetProcessingView)
@@ -284,6 +356,19 @@ func (m Model) View() string {
 		sections = append(sections, m.chat.View())
 		sections = append(sections, m.plan.View())
 		sections = append(sections, m.status.View())
+	case StateModelPicker:
+		sections = append(sections, m.banner.HeaderView())
+		if m.chat.HasMessages() {
+			sections = append(sections, m.chat.View())
+		}
+		sections = append(sections, m.picker.View())
+	case StatePalette:
+		if m.palette.IsActive() {
+			return m.palette.View()
+		}
+	}
+	if m.toasts.HasToasts() {
+		sections = append(sections, m.toasts.View(m.width))
 	}
 	if m.confirmQuit {
 		sections = append(sections, "\n  Press Ctrl+C again to quit, or any key to cancel.")
@@ -307,6 +392,10 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProcessingKey(k)
 	case StatePlanReview:
 		return m.handlePlanKey(k)
+	case StateModelPicker:
+		return m.handlePickerKey(k)
+	case StatePalette:
+		return m.handlePaletteKey(k)
 	case StateBanner:
 		m.state = StateIdle
 		return m, m.input.Focus()
@@ -352,6 +441,8 @@ func (m Model) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, m.keys.ClearInput):
 		m.input.ClearInput()
 		return m, nil
+	case key.Matches(k, m.keys.Palette):
+		return m.openPalette()
 	case key.Matches(k, m.keys.PageUp), key.Matches(k, m.keys.PageDown):
 		updated, cmd := m.chat.Update(k)
 		if c, ok := updated.(model.ChatModel); ok {
@@ -383,7 +474,7 @@ func (m Model) handleProcessingKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status.SetBackgroundCount(len(m.bgTasks))
 		m.state = StateIdle
 		m.chat.ClearProcessingView()
-		m.chat.AddSystemMessage("Task moved to background.")
+		m.toasts.Add("Task moved to background", model.ToastInfo)
 		return m, m.input.Focus()
 	}
 	if key.Matches(k, m.keys.PageUp) || key.Matches(k, m.keys.PageDown) {
@@ -401,6 +492,64 @@ func (m Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if p, ok := updated.(model.PlanModel); ok {
 		m.plan = p
 	}
+	return m, cmd
+}
+
+func (m Model) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+C in picker emits PickerCancel (same path as Esc)
+	if key.Matches(k, m.keys.Cancel) {
+		m.picker.Clear()
+		return m, func() tea.Msg { return model.PickerCancel{} }
+	}
+	updated, cmd := m.picker.Update(k)
+	if p, ok := updated.(model.PickerModel); ok {
+		m.picker = p
+	}
+	return m, cmd
+}
+
+func (m Model) openPalette() (Model, tea.Cmd) {
+	// Build palette items from command entries + local commands
+	var items []model.PaletteItem
+
+	// Local-only commands first
+	localCmds := []model.PaletteItem{
+		{Name: "/help", Description: "Show available commands", Category: "system"},
+		{Name: "/clear", Description: "Clear chat history", Category: "system"},
+		{Name: "/theme", Description: "List or switch themes", Category: "system"},
+		{Name: "/models", Description: "Browse & switch models", Category: "config"},
+		{Name: "/sessions", Description: "List all sessions", Category: "session"},
+		{Name: "/session new", Description: "Create new session", Category: "session"},
+		{Name: "/bg", Description: "List background tasks", Category: "system"},
+		{Name: "/exit", Description: "Exit OSA", Category: "system"},
+	}
+	items = append(items, localCmds...)
+
+	// Backend commands (skip duplicates)
+	seen := make(map[string]bool)
+	for _, lc := range localCmds {
+		seen[lc.Name] = true
+	}
+	for _, cmd := range m.commandEntries {
+		name := "/" + cmd.Name
+		if !seen[name] {
+			items = append(items, model.PaletteItem{
+				Name:        name,
+				Description: cmd.Description,
+				Category:    cmd.Category,
+			})
+		}
+	}
+
+	m.state = StatePalette
+	m.input.Blur()
+	cmd := m.palette.Open(items, m.width, m.height)
+	return m, cmd
+}
+
+func (m Model) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.palette, cmd = m.palette.Update(k)
 	return m, cmd
 }
 
@@ -433,6 +582,49 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 			return m, m.createSession()
 		}
 		return m, m.switchSession(arg)
+	case text == "/models":
+		return m, m.fetchModels()
+	case text == "/model":
+		info := m.status.View()
+		if info == "" {
+			info = "No model info available."
+		}
+		m.chat.AddSystemMessage(fmt.Sprintf("Current: %s", m.banner.ModelName()))
+		return m, nil
+	case strings.HasPrefix(text, "/model "):
+		arg := strings.TrimSpace(strings.TrimPrefix(text, "/model"))
+		// Direct model switch: /model provider/name or /model name
+		parts := strings.SplitN(arg, "/", 2)
+		var prov, mdl string
+		if len(parts) == 2 {
+			prov = parts[0]
+			mdl = parts[1]
+		} else {
+			prov = "ollama" // default to ollama
+			mdl = arg
+		}
+		return m, m.switchModel(prov, mdl)
+	case text == "/theme":
+		var sb strings.Builder
+		sb.WriteString("Available themes:\n")
+		for _, name := range style.ThemeNames {
+			marker := "  "
+			if name == style.CurrentThemeName {
+				marker = "* "
+			}
+			sb.WriteString(fmt.Sprintf("  %s%s\n", marker, name))
+		}
+		sb.WriteString("\nUsage: /theme <name>")
+		m.chat.AddSystemMessage(strings.TrimRight(sb.String(), "\n"))
+		return m, nil
+	case strings.HasPrefix(text, "/theme "):
+		name := strings.TrimSpace(strings.TrimPrefix(text, "/theme"))
+		if !style.SetTheme(name) {
+			m.chat.AddSystemError(fmt.Sprintf("Unknown theme: %s (available: %s)", name, strings.Join(style.ThemeNames, ", ")))
+			return m, nil
+		}
+		m.toasts.Add(fmt.Sprintf("Theme set to: %s", name), model.ToastInfo)
+		return m, m.tickCmd()
 	case text == "/bg":
 		if len(m.bgTasks) == 0 {
 			m.chat.AddSystemMessage("No background tasks running.")
@@ -459,6 +651,7 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	m.activity.Start()
 	m.agents.Reset()
 	m.tasks.Reset()
+	m.streamBuf.Reset()
 	m.state = StateProcessing
 	m.processingStart = time.Now()
 	m.status.SetActive(true)
@@ -585,6 +778,7 @@ func (m Model) submitPrompt(text string) (Model, tea.Cmd) {
 	m.activity.Start()
 	m.agents.Reset()
 	m.tasks.Reset()
+	m.streamBuf.Reset()
 	m.state = StateProcessing
 	m.processingStart = time.Now()
 	m.status.SetActive(true)
@@ -659,13 +853,13 @@ func (m Model) handleCommandAction(action, output string) (Model, tea.Cmd) {
 // extractResumeSessionID extracts the session ID from an Elixir tuple string
 // like "{:resume_session, \"abc123\"}" or "{:resume_session, abc123}".
 func extractResumeSessionID(action string) string {
-	// Strip the tuple wrapper
-	s := strings.TrimPrefix(action, "{:resume_session, ")
-	s = strings.TrimSuffix(s, "}")
-	s = strings.Trim(s, "\" ")
-	if s == "" || s == action {
+	const prefix = "{:resume_session, "
+	if !strings.HasPrefix(action, prefix) {
 		return ""
 	}
+	s := strings.TrimPrefix(action, prefix)
+	s = strings.TrimSuffix(s, "}")
+	s = strings.Trim(s, "\" ")
 	return s
 }
 
@@ -676,6 +870,7 @@ func (m Model) handlePlanDecision(d model.PlanDecision) (Model, tea.Cmd) {
 		m.chat.AddSystemMessage("Plan approved. Executing...")
 		m.activity.Reset()
 		m.activity.Start()
+		m.streamBuf.Reset()
 		m.state = StateProcessing
 		m.processingStart = time.Now()
 		m.status.SetActive(true)
@@ -943,19 +1138,21 @@ func (m Model) dynamicHelpText() string {
 
 func staticHelpText() string {
 	return `Commands:
-  /help        Show this help
-  /status      System status
-  /model       Current model info
-  /models      List available models
-  /agents      List agent roster
-  /tools       List available tools
-  /sessions    List all sessions
-  /session     Show current session
-  /session new Create new session
-  /session <id> Switch to session
-  /bg          List background tasks
-  /clear       Clear chat history
-  /exit        Exit OSA
+  /help          Show this help
+  /status        System status
+  /models        Browse & switch models (↑↓ picker)
+  /model         Show current model
+  /model <name>  Switch to model (e.g. /model qwen3:8b)
+  /agents        List agent roster
+  /tools         List available tools
+  /sessions      List all sessions
+  /session       Show current session
+  /session new   Create new session
+  /session <id>  Switch to session
+  /bg            List background tasks
+  /theme         List or switch themes
+  /clear         Clear chat history
+  /exit          Exit OSA
 ` + keybindingsHelp()
 }
 
@@ -967,6 +1164,7 @@ Keybindings:
   Ctrl+C       Cancel / quit
   Ctrl+O       Expand/collapse details
   Ctrl+B       Move task to background
+  Ctrl+K       Command palette
   Ctrl+N       New session
   Ctrl+U       Clear input
   F1           Show this help
@@ -980,6 +1178,90 @@ Tips:
   · Use Alt+Enter to compose multi-line messages
   · Ctrl+B moves a running task to background
   · /sessions lists sessions; /session <id> to switch`
+}
+
+// -- Model management --
+
+func (m Model) handleModelList(r msg.ModelListResult) (Model, tea.Cmd) {
+	if r.Err != nil {
+		m.chat.AddSystemError(fmt.Sprintf("Failed to list models: %v", r.Err))
+		return m, nil
+	}
+	if len(r.Models) == 0 {
+		m.chat.AddSystemWarning(fmt.Sprintf("No models available. Current: %s. Is Ollama running?", m.banner.ModelName()))
+		return m, nil
+	}
+	// Convert to picker items, sorted by provider then name
+	items := make([]model.PickerItem, len(r.Models))
+	for i, entry := range r.Models {
+		items[i] = model.PickerItem{
+			Name:     entry.Name,
+			Provider: entry.Provider,
+			Size:     entry.Size,
+			Active:   entry.Active,
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Provider != items[j].Provider {
+			return items[i].Provider < items[j].Provider
+		}
+		return items[i].Name < items[j].Name
+	})
+	m.picker.SetWidth(m.width - 4)
+	m.picker.SetItems(items)
+	m.state = StateModelPicker
+	m.input.Blur()
+	return m, nil
+}
+
+func (m Model) handleModelSwitch(r msg.ModelSwitchResult) (Model, tea.Cmd) {
+	if r.Err != nil {
+		m.chat.AddSystemError(fmt.Sprintf("Switch failed: %v", r.Err))
+		return m, nil
+	}
+	m.status.SetProviderInfo(r.Provider, r.Model)
+	m.banner.SetModelOverride(r.Provider, r.Model)
+	m.chat.AddSystemMessage(fmt.Sprintf("Switched to %s / %s", r.Provider, r.Model))
+	// Re-check health to confirm
+	return m, m.checkHealth()
+}
+
+func (m Model) handlePickerChoice(c model.PickerChoice) (Model, tea.Cmd) {
+	m.picker.Clear()
+	m.state = StateIdle
+	m.chat.AddSystemMessage(fmt.Sprintf("Switching to %s / %s...", c.Provider, c.Name))
+	return m, tea.Batch(m.input.Focus(), m.switchModel(c.Provider, c.Name))
+}
+
+func (m Model) fetchModels() tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		resp, err := c.ListModels()
+		if err != nil {
+			return msg.ModelListResult{Err: err}
+		}
+		var models []msg.ModelEntry
+		for _, entry := range resp.Models {
+			models = append(models, msg.ModelEntry{
+				Name:     entry.Name,
+				Provider: entry.Provider,
+				Size:     entry.Size,
+				Active:   entry.Active,
+			})
+		}
+		return msg.ModelListResult{Models: models, Current: resp.Current, Provider: resp.Provider}
+	}
+}
+
+func (m Model) switchModel(provider, modelName string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		resp, err := c.SwitchModel(client.ModelSwitchRequest{Provider: provider, Model: modelName})
+		if err != nil {
+			return msg.ModelSwitchResult{Err: err}
+		}
+		return msg.ModelSwitchResult{Provider: resp.Provider, Model: resp.Model}
+	}
 }
 
 // -- Session management --

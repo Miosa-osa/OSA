@@ -38,43 +38,6 @@ type OrchestrateResponse struct {
 	ExecutionMs    int64    `json:"execution_ms"`
 }
 
-// ComplexRequest for POST /api/v1/orchestrate/complex.
-type ComplexRequest struct {
-	Task      string `json:"task"`
-	Strategy  string `json:"strategy,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Blocking  bool   `json:"blocking"`
-}
-
-// ComplexResponse from POST /api/v1/orchestrate/complex.
-type ComplexResponse struct {
-	TaskID    string `json:"task_id"`
-	Status    string `json:"status"`
-	SessionID string `json:"session_id"`
-	Synthesis string `json:"synthesis,omitempty"`
-}
-
-// ProgressAgent represents a single agent's progress.
-type ProgressAgent struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Role          string `json:"role"`
-	Status        string `json:"status"`
-	ToolUses      int    `json:"tool_uses"`
-	TokensUsed    int    `json:"tokens_used"`
-	CurrentAction string `json:"current_action"`
-}
-
-// ProgressResponse from GET /api/v1/orchestrate/:task_id/progress.
-type ProgressResponse struct {
-	TaskID      string          `json:"task_id"`
-	Status      string          `json:"status"`
-	Agents      []ProgressAgent `json:"agents"`
-	Formatted   string          `json:"formatted"`
-	StartedAt   string          `json:"started_at"`
-	CompletedAt string          `json:"completed_at,omitempty"`
-}
-
 // CommandEntry from GET /api/v1/commands.
 type CommandEntry struct {
 	Name        string `json:"name"`
@@ -103,16 +66,6 @@ type ToolEntry struct {
 	Module      string `json:"module,omitempty"`
 }
 
-// ClassifyRequest for POST /api/v1/classify.
-type ClassifyRequest struct {
-	Input string `json:"input"`
-}
-
-// ClassifyResponse from POST /api/v1/classify.
-type ClassifyResponse struct {
-	Signal Signal `json:"signal"`
-}
-
 // ErrorResponse for API errors.
 type ErrorResponse struct {
 	Error   string `json:"error"`
@@ -132,17 +85,6 @@ type LoginResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 }
 
-// RefreshRequest for POST /api/v1/auth/refresh.
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
-
-// RefreshResponse from POST /api/v1/auth/refresh.
-type RefreshResponse struct {
-	Token     string `json:"token"`
-	ExpiresIn int    `json:"expires_in"`
-}
-
 // SessionInfo from GET /api/v1/sessions.
 type SessionInfo struct {
 	ID           string `json:"id"`
@@ -156,4 +98,32 @@ type SessionCreateResponse struct {
 	ID        string `json:"id"`
 	CreatedAt string `json:"created_at"`
 	Title     string `json:"title"`
+}
+
+// ModelEntry describes a single available model.
+type ModelEntry struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Size     int64  `json:"size,omitempty"`
+	Active   bool   `json:"active,omitempty"`
+}
+
+// ModelListResponse from GET /api/v1/models.
+type ModelListResponse struct {
+	Models   []ModelEntry `json:"models"`
+	Current  string       `json:"current"`
+	Provider string       `json:"provider"`
+}
+
+// ModelSwitchRequest for POST /api/v1/models/switch.
+type ModelSwitchRequest struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// ModelSwitchResponse from POST /api/v1/models/switch.
+type ModelSwitchResponse struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Status   string `json:"status"`
 }

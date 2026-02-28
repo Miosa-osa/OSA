@@ -60,38 +60,6 @@ func (c *Client) Orchestrate(req OrchestrateRequest) (*OrchestrateResponse, erro
 	return &result, nil
 }
 
-func (c *Client) OrchestrateComplex(req ComplexRequest) (*ComplexResponse, error) {
-	resp, err := c.postJSON("/api/v1/orchestrate/complex", req)
-	if err != nil {
-		return nil, fmt.Errorf("orchestrate complex: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return nil, c.parseError(resp)
-	}
-	var result ComplexResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode complex: %w", err)
-	}
-	return &result, nil
-}
-
-func (c *Client) Progress(taskID string) (*ProgressResponse, error) {
-	resp, err := c.get(fmt.Sprintf("/api/v1/orchestrate/%s/progress", taskID))
-	if err != nil {
-		return nil, fmt.Errorf("progress: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
-	}
-	var result ProgressResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode progress: %w", err)
-	}
-	return &result, nil
-}
-
 func (c *Client) ListTools() ([]ToolEntry, error) {
 	resp, err := c.get("/api/v1/tools")
 	if err != nil {
@@ -146,22 +114,6 @@ func (c *Client) ExecuteCommand(req CommandExecuteRequest) (*CommandExecuteRespo
 	return &result, nil
 }
 
-func (c *Client) Classify(input string) (*ClassifyResponse, error) {
-	resp, err := c.postJSON("/api/v1/classify", ClassifyRequest{Input: input})
-	if err != nil {
-		return nil, fmt.Errorf("classify: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
-	}
-	var result ClassifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode classify: %w", err)
-	}
-	return &result, nil
-}
-
 func (c *Client) Login(userID string) (*LoginResponse, error) {
 	resp, err := c.postJSON("/api/v1/auth/login", LoginRequest{UserID: userID})
 	if err != nil {
@@ -190,23 +142,6 @@ func (c *Client) Logout() error {
 	}
 	c.Token = ""
 	return nil
-}
-
-func (c *Client) RefreshToken(refreshToken string) (*RefreshResponse, error) {
-	resp, err := c.postJSON("/api/v1/auth/refresh", RefreshRequest{RefreshToken: refreshToken})
-	if err != nil {
-		return nil, fmt.Errorf("refresh: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
-	}
-	var result RefreshResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode refresh: %w", err)
-	}
-	c.Token = result.Token
-	return &result, nil
 }
 
 func (c *Client) ListSessions() ([]SessionInfo, error) {
@@ -239,6 +174,38 @@ func (c *Client) CreateSession() (*SessionCreateResponse, error) {
 	var result SessionCreateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) ListModels() (*ModelListResponse, error) {
+	resp, err := c.get("/api/v1/models")
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result ModelListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) SwitchModel(req ModelSwitchRequest) (*ModelSwitchResponse, error) {
+	resp, err := c.postJSON("/api/v1/models/switch", req)
+	if err != nil {
+		return nil, fmt.Errorf("switch model: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result ModelSwitchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode switch: %w", err)
 	}
 	return &result, nil
 }
