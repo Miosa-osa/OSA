@@ -341,34 +341,124 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @doc false
   def format_messages(messages) do
     Enum.map(messages, fn
-      %{role: role, content: content, thinking_blocks: blocks} when is_list(blocks) and blocks != [] ->
-        # When assistant message has thinking blocks, include them as content blocks
-        # (required by Anthropic API for tool use turns with thinking)
+      # Thinking blocks (possibly combined with tool_calls for interleaved-thinking turns)
+      %{role: role, content: content, thinking_blocks: blocks} = msg
+      when is_list(blocks) and blocks != [] ->
         thinking_content =
           Enum.map(blocks, fn block ->
             base = %{"type" => "thinking", "thinking" => block.thinking || block[:thinking]}
-            if block[:signature] || block.signature, do: Map.put(base, "signature", block.signature || block[:signature]), else: base
+            if block[:signature] || block.signature,
+              do: Map.put(base, "signature", block.signature || block[:signature]),
+              else: base
           end)
 
-        text_content = [%{"type" => "text", "text" => to_string(content)}]
-        %{"role" => to_string(role), "content" => thinking_content ++ text_content}
+        text_blocks =
+          if to_string(content) != "",
+            do: [%{"type" => "text", "text" => to_string(content)}],
+            else: []
 
+        # Include any tool_use blocks when thinking + tool_calls co-exist
+        tool_blocks =
+          case Map.get(msg, :tool_calls) do
+            tcs when is_list(tcs) and tcs != [] ->
+              Enum.map(tcs, fn tc ->
+                %{
+                  "type" => "tool_use",
+                  "id" => tc.id || tc[:id],
+                  "name" => tc.name || tc[:name],
+                  "input" => tc.arguments || tc[:arguments] || %{}
+                }
+              end)
+
+            _ ->
+              []
+          end
+
+        %{"role" => to_string(role), "content" => thinking_content ++ text_blocks ++ tool_blocks}
+
+      # Tool result with structured content (e.g., image + text)
+      %{role: "tool", tool_call_id: id, content: content} when is_list(content) ->
+        formatted_blocks =
+          Enum.map(content, fn
+            %{type: "image", source: source} ->
+              %{
+                "type" => "image",
+                "source" => %{
+                  "type" => source.type || source[:type],
+                  "media_type" => source.media_type || source[:media_type],
+                  "data" => source.data || source[:data]
+                }
+              }
+
+            %{type: "text", text: text} ->
+              %{"type" => "text", "text" => to_string(text)}
+
+            other ->
+              other
+          end)
+
+        %{
+          "role" => "user",
+          "content" => [
+            %{"type" => "tool_result", "tool_use_id" => to_string(id), "content" => formatted_blocks}
+          ]
+        }
+
+      # Tool result with plain text content
+      %{role: "tool", tool_call_id: id, content: content} ->
+        %{
+          "role" => "user",
+          "content" => [
+            %{"type" => "tool_result", "tool_use_id" => to_string(id), "content" => to_string(content)}
+          ]
+        }
+
+      # Assistant message with tool_calls — format as Anthropic content blocks
+      %{role: role, tool_calls: tool_calls} = msg
+      when is_list(tool_calls) and tool_calls != [] ->
+        content = Map.get(msg, :content, "")
+
+        text_blocks =
+          if to_string(content) != "",
+            do: [%{"type" => "text", "text" => to_string(content)}],
+            else: []
+
+        tool_blocks =
+          Enum.map(tool_calls, fn tc ->
+            %{
+              "type" => "tool_use",
+              "id" => tc.id || tc[:id],
+              "name" => tc.name || tc[:name],
+              "input" => tc.arguments || tc[:arguments] || %{}
+            }
+          end)
+
+        %{"role" => to_string(role), "content" => text_blocks ++ tool_blocks}
+
+      # Structured content blocks (images, mixed content in non-tool messages)
       %{role: role, content: content} when is_list(content) ->
-        # Structured content blocks (images, mixed text+image tool results)
-        formatted_content = Enum.map(content, fn
-          %{type: "image", source: source} ->
-            %{"type" => "image", "source" => %{
-              "type" => source.type || source[:type],
-              "media_type" => source.media_type || source[:media_type],
-              "data" => source.data || source[:data]
-            }}
-          %{type: "text", text: text} ->
-            %{"type" => "text", "text" => to_string(text)}
-          other ->
-            other
-        end)
+        formatted_content =
+          Enum.map(content, fn
+            %{type: "image", source: source} ->
+              %{
+                "type" => "image",
+                "source" => %{
+                  "type" => source.type || source[:type],
+                  "media_type" => source.media_type || source[:media_type],
+                  "data" => source.data || source[:data]
+                }
+              }
+
+            %{type: "text", text: text} ->
+              %{"type" => "text", "text" => to_string(text)}
+
+            other ->
+              other
+          end)
+
         %{"role" => to_string(role), "content" => formatted_content}
 
+      # Regular text message
       %{role: role, content: content} ->
         %{"role" => to_string(role), "content" => to_string(content)}
 
