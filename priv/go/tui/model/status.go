@@ -29,6 +29,7 @@ type StatusModel struct {
 	active          bool
 	provider        string
 	modelName       string
+	bgCount         int // number of background tasks
 }
 
 // NewStatus returns a zero-value StatusModel.
@@ -60,6 +61,11 @@ func (m *StatusModel) SetStats(elapsed time.Duration, tools, inputTok, outputTok
 	m.toolCount = tools
 	m.inputTokens = inputTok
 	m.outputTokens = outputTok
+}
+
+// SetBackgroundCount updates the number of background tasks for idle display.
+func (m *StatusModel) SetBackgroundCount(n int) {
+	m.bgCount = n
 }
 
 // SetActive marks the model as processing (true) or idle (false).
@@ -96,6 +102,9 @@ func (m StatusModel) View() string {
 			line += style.StatusSignal.Render(
 				fmt.Sprintf(" · %s/%s", m.signal.Mode, m.signal.Genre),
 			)
+		}
+		if m.bgCount > 0 {
+			line += style.Hint.Render(fmt.Sprintf(" · %d bg", m.bgCount))
 		}
 		parts = append(parts, line)
 	}

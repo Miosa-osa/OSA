@@ -155,6 +155,16 @@ func (m *ChatModel) ClearProcessingView() {
 	m.refresh()
 }
 
+// ScrollToTop scrolls the chat viewport to the very top.
+func (m *ChatModel) ScrollToTop() {
+	m.vp.GotoTop()
+}
+
+// ScrollToBottom scrolls the chat viewport to the very bottom.
+func (m *ChatModel) ScrollToBottom() {
+	m.vp.GotoBottom()
+}
+
 // SetSize resizes the underlying viewport.
 func (m *ChatModel) SetSize(width, height int) {
 	m.width = width

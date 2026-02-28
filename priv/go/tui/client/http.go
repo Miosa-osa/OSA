@@ -209,6 +209,56 @@ func (c *Client) RefreshToken(refreshToken string) (*RefreshResponse, error) {
 	return &result, nil
 }
 
+func (c *Client) ListSessions() ([]SessionInfo, error) {
+	resp, err := c.get("/api/v1/sessions")
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var wrapper struct {
+		Sessions []SessionInfo `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
+		return nil, fmt.Errorf("decode sessions: %w", err)
+	}
+	return wrapper.Sessions, nil
+}
+
+func (c *Client) CreateSession() (*SessionCreateResponse, error) {
+	resp, err := c.postJSON("/api/v1/sessions", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+	var result SessionCreateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) GetSession(id string) (*SessionInfo, error) {
+	resp, err := c.get(fmt.Sprintf("/api/v1/sessions/%s", id))
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result SessionInfo
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *Client) get(path string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
 	if err != nil {
@@ -218,7 +268,7 @@ func (c *Client) get(path string) (*http.Response, error) {
 	return c.HTTPClient.Do(req)
 }
 
-func (c *Client) postJSON(path string, body interface{}) (*http.Response, error) {
+func (c *Client) postJSON(path string, body any) (*http.Response, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)

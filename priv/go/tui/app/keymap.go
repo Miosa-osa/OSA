@@ -17,6 +17,11 @@ type KeyMap struct {
 	HistoryNext      key.Binding
 	Tab              key.Binding
 	Escape           key.Binding
+	Help             key.Binding
+	NewSession       key.Binding
+	ScrollTop        key.Binding
+	ScrollBottom     key.Binding
+	ClearInput       key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -73,6 +78,26 @@ func DefaultKeyMap() KeyMap {
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "cancel"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("f1"),
+			key.WithHelp("F1", "help"),
+		),
+		NewSession: key.NewBinding(
+			key.WithKeys("ctrl+n"),
+			key.WithHelp("ctrl+n", "new session"),
+		),
+		ScrollTop: key.NewBinding(
+			key.WithKeys("home"),
+			key.WithHelp("home", "scroll top"),
+		),
+		ScrollBottom: key.NewBinding(
+			key.WithKeys("end"),
+			key.WithHelp("end", "scroll bottom"),
+		),
+		ClearInput: key.NewBinding(
+			key.WithKeys("ctrl+u"),
+			key.WithHelp("ctrl+u", "clear input"),
 		),
 	}
 }

@@ -1,7 +1,9 @@
 package app
 
 import (
+	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +34,7 @@ func truncateResponse(s string) string {
 
 type ProgramReady struct{ Program *tea.Program }
 type bannerTimeout struct{}
-type commandsLoaded []string
+type commandsLoaded []client.CommandEntry
 type toolCountLoaded int
 type retryHealth struct{}
 
@@ -54,6 +56,7 @@ type Model struct {
 	height          int
 	keys            KeyMap
 	bgTasks         []string
+	commandEntries  []client.CommandEntry
 	confirmQuit     bool
 	processingStart time.Time
 }
@@ -100,7 +103,12 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 	case msg.CommandResult:
 		return m.handleCommand(v)
 	case commandsLoaded:
-		m.input.SetCommands([]string(v))
+		m.commandEntries = []client.CommandEntry(v)
+		names := make([]string, len(v))
+		for i, cmd := range v {
+			names[i] = "/" + cmd.Name
+		}
+		m.input.SetCommands(names)
 		return m, nil
 	case toolCountLoaded:
 		m.banner.SetToolCount(int(v))
@@ -114,6 +122,9 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sessionID != "" && m.sse != nil && !m.sse.IsClosed() && m.program != nil {
 			return m, m.sse.ReconnectListenCmd(m.program)
 		}
+		return m, nil
+	case client.SSEReconnectingEvent:
+		m.chat.AddSystemWarning(fmt.Sprintf("Connection lost. Reconnecting (attempt %d/%d)...", v.Attempt, client.MaxReconnects))
 		return m, nil
 	case client.SSEAuthFailedEvent:
 		m.chat.AddSystemWarning("Authentication expired. Use /login to re-authenticate.")
@@ -141,6 +152,10 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 			m.closeSSE()
 		}
 		return m, nil
+	case msg.SessionListResult:
+		return m.handleSessionList(v)
+	case msg.SessionSwitchResult:
+		return m.handleSessionSwitch(v)
 	case retryHealth:
 		return m, m.checkHealth()
 	case bannerTimeout:
@@ -168,6 +183,12 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 	case client.ContextPressureEvent:
 		m.status.SetContext(v.Utilization, v.MaxTokens, v.EstimatedTokens)
 		return m, nil
+	case client.TaskCreatedEvent:
+		m.tasks.AddTask(model.Task{ID: v.TaskID, Subject: v.Subject, Status: "pending", ActiveForm: v.ActiveForm})
+		return m, nil
+	case client.TaskUpdatedEvent:
+		m.tasks.UpdateTask(v.TaskID, v.Status)
+		return m, nil
 	case client.OrchestratorTaskStartedEvent:
 		m.agents.Start()
 		return m, nil
@@ -188,6 +209,15 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case client.OrchestratorTaskCompletedEvent:
 		m.agents.Stop()
+		return m, nil
+	case client.SwarmStartedEvent:
+		m.chat.AddSystemMessage(fmt.Sprintf("Swarm launched: %s pattern with %d agents", v.Pattern, v.AgentCount))
+		return m, nil
+	case client.SwarmCompletedEvent:
+		m.chat.AddAgentMessage(v.ResultPreview, nil, 0, fmt.Sprintf("swarm/%s", v.Pattern))
+		return m, nil
+	case client.SwarmFailedEvent:
+		m.chat.AddSystemError(fmt.Sprintf("Swarm %s failed: %s", v.SwarmID, v.Reason))
 		return m, nil
 	case msg.ToggleExpand:
 		m.activity, _ = m.activity.Update(v)
@@ -308,6 +338,20 @@ func (m Model) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Submit(text)
 		return m.submitInput(text)
+	case key.Matches(k, m.keys.Help):
+		m.chat.AddSystemMessage(m.dynamicHelpText())
+		return m, nil
+	case key.Matches(k, m.keys.NewSession):
+		return m, m.createSession()
+	case key.Matches(k, m.keys.ScrollTop):
+		m.chat.ScrollToTop()
+		return m, nil
+	case key.Matches(k, m.keys.ScrollBottom):
+		m.chat.ScrollToBottom()
+		return m, nil
+	case key.Matches(k, m.keys.ClearInput):
+		m.input.ClearInput()
+		return m, nil
 	case key.Matches(k, m.keys.PageUp), key.Matches(k, m.keys.PageDown):
 		updated, cmd := m.chat.Update(k)
 		if c, ok := updated.(model.ChatModel); ok {
@@ -336,6 +380,7 @@ func (m Model) handleProcessingKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(k, m.keys.ToggleBackground):
 		m.bgTasks = append(m.bgTasks, m.activity.Summary())
+		m.status.SetBackgroundCount(len(m.bgTasks))
 		m.state = StateIdle
 		m.chat.ClearProcessingView()
 		m.chat.AddSystemMessage("Task moved to background.")
@@ -365,16 +410,37 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	case text == "/exit" || text == "/quit":
 		m.closeSSE()
 		return m, tea.Quit
-	case text == "/clear":
-		m.chat = model.NewChat(m.width, m.chatHeight())
-		return m, nil
 	case text == "/help":
-		m.chat.AddSystemMessage(helpText())
+		m.chat.AddSystemMessage(m.dynamicHelpText())
 		return m, nil
 	case strings.HasPrefix(text, "/login"):
 		return m, m.doLogin(strings.TrimSpace(strings.TrimPrefix(text, "/login")))
 	case strings.HasPrefix(text, "/logout"):
 		return m, m.doLogout()
+	case text == "/sessions":
+		return m, m.listSessions()
+	case text == "/session" || strings.HasPrefix(text, "/session "):
+		arg := strings.TrimSpace(strings.TrimPrefix(text, "/session"))
+		if arg == "" {
+			m.chat.AddSystemMessage("Current session: " + shortID(m.sessionID))
+			return m, nil
+		}
+		if arg == "new" {
+			return m, m.createSession()
+		}
+		return m, m.switchSession(arg)
+	case text == "/bg":
+		if len(m.bgTasks) == 0 {
+			m.chat.AddSystemMessage("No background tasks running.")
+			return m, nil
+		}
+		var sb strings.Builder
+		sb.WriteString("Background tasks:\n")
+		for i, t := range m.bgTasks {
+			sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, t))
+		}
+		m.chat.AddSystemMessage(strings.TrimRight(sb.String(), "\n"))
+		return m, nil
 	}
 	if strings.HasPrefix(text, "/") {
 		parts := strings.SplitN(text[1:], " ", 2)
@@ -406,7 +472,9 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 	m.banner.SetHealth(h)
 	m.status.SetProviderInfo(h.Provider, h.Model)
 	m.state = StateIdle
-	m.sessionID = fmt.Sprintf("tui_%d", time.Now().UnixNano())
+	b := make([]byte, 4)
+	io.ReadFull(rand.Reader, b) //nolint:errcheck
+	m.sessionID = fmt.Sprintf("tui_%d_%x", time.Now().UnixNano(), b)
 
 	// Populate welcome screen data (shown in chat viewport when no messages)
 	m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
@@ -436,6 +504,10 @@ func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 	}
 	if wasBackground {
 		m.chat.AddSystemMessage("Background task completed")
+		if len(m.bgTasks) > 0 {
+			m.bgTasks = m.bgTasks[1:]
+		}
+		m.status.SetBackgroundCount(len(m.bgTasks))
 	}
 	output := truncateResponse(r.Output)
 	if output == "" {
@@ -472,6 +544,10 @@ func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, te
 	cmd := m.input.Focus()
 	if wasBackground {
 		m.chat.AddSystemMessage("Background task completed")
+		if len(m.bgTasks) > 0 {
+			m.bgTasks = m.bgTasks[1:]
+		}
+		m.status.SetBackgroundCount(len(m.bgTasks))
 	}
 	sig := clientSignalToModel(r.Signal)
 	m.chat.AddAgentMessage(truncateResponse(r.Response), sig, time.Since(m.processingStart).Milliseconds(), m.banner.ModelName())
@@ -486,8 +562,107 @@ func (m Model) handleCommand(r msg.CommandResult) (Model, tea.Cmd) {
 		m.chat.AddSystemError(fmt.Sprintf("Command error: %v", r.Err))
 		return m, nil
 	}
-	m.chat.AddSystemMessage(r.Output)
+	switch r.Kind {
+	case "prompt":
+		// Custom commands expand to prompts — send to agent
+		return m.submitPrompt(r.Output)
+	case "action":
+		return m.handleCommandAction(r.Action, r.Output)
+	case "error":
+		m.chat.AddSystemError(r.Output)
+	default: // "text"
+		m.chat.AddSystemMessage(r.Output)
+	}
 	return m, nil
+}
+
+func (m Model) submitPrompt(text string) (Model, tea.Cmd) {
+	m.activity.Reset()
+	m.activity.Start()
+	m.agents.Reset()
+	m.tasks.Reset()
+	m.state = StateProcessing
+	m.processingStart = time.Now()
+	m.status.SetActive(true)
+	m.chat.SetProcessingView(m.activity.View())
+	m.input.Blur()
+	return m, tea.Batch(m.orchestrate(text), m.tickCmd())
+}
+
+func (m Model) handleCommandAction(action, output string) (Model, tea.Cmd) {
+	switch {
+	case action == ":new_session":
+		m.closeSSE()
+		b := make([]byte, 4)
+		io.ReadFull(rand.Reader, b) //nolint:errcheck
+		m.sessionID = fmt.Sprintf("tui_%d_%x", time.Now().UnixNano(), b)
+		m.chat = model.NewChat(m.width, m.chatHeight())
+		m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
+		if output != "" {
+			m.chat.AddSystemMessage(output)
+		} else {
+			m.chat.AddSystemMessage("New session started.")
+		}
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.input.Focus())
+		if m.program != nil {
+			if cmd := m.startSSE(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+	case action == ":exit":
+		m.closeSSE()
+		return m, tea.Quit
+	case action == ":clear":
+		m.chat = model.NewChat(m.width, m.chatHeight())
+		m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
+		if output != "" {
+			m.chat.AddSystemMessage(output)
+		}
+		return m, nil
+	case strings.HasPrefix(action, "{:resume_session"):
+		// Extract session ID from "{:resume_session, \"session_id\"}"
+		sid := extractResumeSessionID(action)
+		if sid != "" {
+			m.closeSSE()
+			m.sessionID = sid
+			if output != "" {
+				m.chat.AddSystemMessage(output)
+			} else {
+				m.chat.AddSystemMessage(fmt.Sprintf("Resumed session: %s", sid))
+			}
+			var cmds []tea.Cmd
+			cmds = append(cmds, m.input.Focus())
+			if m.program != nil {
+				if cmd := m.startSSE(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			return m, tea.Batch(cmds...)
+		}
+		m.chat.AddSystemMessage(output)
+		return m, nil
+	default:
+		// Unknown action — just show the output
+		if output != "" {
+			m.chat.AddSystemMessage(output)
+		}
+		return m, nil
+	}
+}
+
+// extractResumeSessionID extracts the session ID from an Elixir tuple string
+// like "{:resume_session, \"abc123\"}" or "{:resume_session, abc123}".
+func extractResumeSessionID(action string) string {
+	// Strip the tuple wrapper
+	s := strings.TrimPrefix(action, "{:resume_session, ")
+	s = strings.TrimSuffix(s, "}")
+	s = strings.Trim(s, "\" ")
+	if s == "" || s == action {
+		return ""
+	}
+	return s
 }
 
 func (m Model) handlePlanDecision(d model.PlanDecision) (Model, tea.Cmd) {
@@ -525,8 +700,12 @@ func (m Model) doLogin(userID string) tea.Cmd {
 		}
 		pd := profileDirPath()
 		if pd != "" {
-			os.MkdirAll(pd, 0755)
-			os.WriteFile(filepath.Join(pd, "token"), []byte(resp.Token), 0600)
+			if err := os.MkdirAll(pd, 0755); err != nil {
+				return msg.LoginResult{Err: fmt.Errorf("create profile dir: %w", err)}
+			}
+			if err := os.WriteFile(filepath.Join(pd, "token"), []byte(resp.Token), 0600); err != nil {
+				return msg.LoginResult{Token: resp.Token, Err: fmt.Errorf("save token: %w", err)}
+			}
 		}
 		return msg.LoginResult{Token: resp.Token, ExpiresIn: resp.ExpiresIn}
 	}
@@ -605,11 +784,7 @@ func (m Model) fetchCommands() tea.Cmd {
 		if err != nil {
 			return commandsLoaded(nil)
 		}
-		names := make([]string, len(commands))
-		for i, cmd := range commands {
-			names[i] = "/" + cmd.Name
-		}
-		return commandsLoaded(names)
+		return commandsLoaded(commands)
 	}
 }
 
@@ -689,21 +864,210 @@ func (m Model) renderConnecting() string {
 	return logo + "\n\n" + label
 }
 
-func helpText() string {
-	return "Available commands:\n" +
-		"  /help       Show this help\n" +
-		"  /status     System status\n" +
-		"  /model      Current model info\n" +
-		"  /models     List available models\n" +
-		"  /agents     List agent roster\n" +
-		"  /tools      List available tools\n" +
-		"  /clear      Clear chat history\n" +
-		"  /exit       Exit OSA\n" +
-		"\nKeys:\n" +
-		"  ESC         Cancel / clear input\n" +
-		"  Ctrl+C      Cancel / quit\n" +
-		"  Ctrl+O      Expand/collapse details\n" +
-		"  Ctrl+B      Background current task\n" +
-		"  PgUp/PgDn   Scroll chat history\n" +
-		"  Tab         Autocomplete commands"
+// dynamicHelpText builds help output from backend command entries, grouped by category.
+// Falls back to static help if no commands were fetched.
+func (m Model) dynamicHelpText() string {
+	if len(m.commandEntries) == 0 {
+		return staticHelpText()
+	}
+
+	// Group commands by category
+	categoryOrder := []string{
+		"info", "session", "channels", "context", "intelligence",
+		"config", "agents", "workflow", "priming", "security",
+		"memory", "scheduler", "tasks", "analytics", "auth", "system",
+	}
+	categoryLabels := map[string]string{
+		"info": "Info", "session": "Session", "channels": "Channels",
+		"context": "Context", "intelligence": "Intelligence",
+		"config": "Configuration", "agents": "Agents & Swarms",
+		"workflow": "Workflow", "priming": "Context Priming",
+		"security": "Security", "memory": "Memory",
+		"scheduler": "Scheduler", "tasks": "Tasks",
+		"analytics": "Analytics & Tools", "auth": "Authentication",
+		"system": "System",
+	}
+
+	groups := make(map[string][]client.CommandEntry)
+	for _, cmd := range m.commandEntries {
+		cat := cmd.Category
+		if cat == "" {
+			cat = "system"
+		}
+		groups[cat] = append(groups[cat], cmd)
+	}
+
+	var b strings.Builder
+	b.WriteString("Available commands:\n")
+
+	for _, cat := range categoryOrder {
+		cmds, ok := groups[cat]
+		if !ok || len(cmds) == 0 {
+			continue
+		}
+		label := categoryLabels[cat]
+		if label == "" {
+			label = cat
+		}
+		b.WriteString(fmt.Sprintf("\n  %s:\n", label))
+		for _, cmd := range cmds {
+			b.WriteString(fmt.Sprintf("    /%-18s %s\n", cmd.Name, cmd.Description))
+		}
+	}
+
+	// Add any categories not in the order list
+	for cat, cmds := range groups {
+		found := false
+		for _, c := range categoryOrder {
+			if c == cat {
+				found = true
+				break
+			}
+		}
+		if !found && len(cmds) > 0 {
+			b.WriteString(fmt.Sprintf("\n  %s:\n", cat))
+			for _, cmd := range cmds {
+				b.WriteString(fmt.Sprintf("    /%-18s %s\n", cmd.Name, cmd.Description))
+			}
+		}
+	}
+
+	b.WriteString(keybindingsHelp())
+
+	return b.String()
+}
+
+func staticHelpText() string {
+	return `Commands:
+  /help        Show this help
+  /status      System status
+  /model       Current model info
+  /models      List available models
+  /agents      List agent roster
+  /tools       List available tools
+  /sessions    List all sessions
+  /session     Show current session
+  /session new Create new session
+  /session <id> Switch to session
+  /bg          List background tasks
+  /clear       Clear chat history
+  /exit        Exit OSA
+` + keybindingsHelp()
+}
+
+func keybindingsHelp() string {
+	return `
+Keybindings:
+  Enter        Submit message
+  Alt+Enter    Insert newline (multi-line input)
+  Ctrl+C       Cancel / quit
+  Ctrl+O       Expand/collapse details
+  Ctrl+B       Move task to background
+  Ctrl+N       New session
+  Ctrl+U       Clear input
+  F1           Show this help
+  Home         Scroll to top
+  End          Scroll to bottom
+  PgUp/PgDn    Scroll chat history
+  Tab          Autocomplete commands
+  Up/Down      Navigate input history
+
+Tips:
+  · Use Alt+Enter to compose multi-line messages
+  · Ctrl+B moves a running task to background
+  · /sessions lists sessions; /session <id> to switch`
+}
+
+// -- Session management --
+
+func (m Model) listSessions() tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		sessions, err := c.ListSessions()
+		if err != nil {
+			return msg.SessionListResult{Err: err}
+		}
+		var result []msg.SessionInfo
+		for _, s := range sessions {
+			result = append(result, msg.SessionInfo{
+				ID:           s.ID,
+				CreatedAt:    s.CreatedAt,
+				Title:        s.Title,
+				MessageCount: s.MessageCount,
+			})
+		}
+		return msg.SessionListResult{Sessions: result}
+	}
+}
+
+func (m Model) createSession() tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		resp, err := c.CreateSession()
+		if err != nil {
+			return msg.SessionSwitchResult{Err: err}
+		}
+		return msg.SessionSwitchResult{SessionID: resp.ID}
+	}
+}
+
+func (m Model) switchSession(id string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		info, err := c.GetSession(id)
+		if err != nil {
+			return msg.SessionSwitchResult{Err: err}
+		}
+		return msg.SessionSwitchResult{SessionID: info.ID}
+	}
+}
+
+func (m Model) handleSessionList(r msg.SessionListResult) (Model, tea.Cmd) {
+	if r.Err != nil {
+		m.chat.AddSystemError(fmt.Sprintf("Session list error: %v", r.Err))
+		return m, nil
+	}
+	if len(r.Sessions) == 0 {
+		m.chat.AddSystemMessage("No sessions found.")
+		return m, nil
+	}
+	var sb strings.Builder
+	sb.WriteString("Sessions:\n")
+	for i, s := range r.Sessions {
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		sb.WriteString(fmt.Sprintf("  %d. %s — %s (%d messages)\n", i+1, shortID(s.ID), title, s.MessageCount))
+	}
+	m.chat.AddSystemMessage(strings.TrimRight(sb.String(), "\n"))
+	return m, nil
+}
+
+func (m Model) handleSessionSwitch(r msg.SessionSwitchResult) (Model, tea.Cmd) {
+	if r.Err != nil {
+		m.chat.AddSystemError(fmt.Sprintf("Session error: %v", r.Err))
+		return m, nil
+	}
+	m.closeSSE()
+	m.sessionID = r.SessionID
+	m.chat = model.NewChat(m.width, m.chatHeight())
+	m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
+	m.chat.AddSystemMessage(fmt.Sprintf("Switched to session %s", shortID(r.SessionID)))
+	var cmds []tea.Cmd
+	cmds = append(cmds, m.input.Focus())
+	if m.program != nil {
+		if cmd := m.startSSE(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// shortID truncates an ID to 8 characters for display.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }

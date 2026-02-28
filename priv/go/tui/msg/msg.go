@@ -207,3 +207,25 @@ type ToggleExpand struct{}
 
 // ToggleBackground for Ctrl+B.
 type ToggleBackground struct{}
+
+// -- Session events --
+
+// SessionInfo describes a session (mirrors client.SessionInfo without JSON tags).
+type SessionInfo struct {
+	ID           string
+	CreatedAt    string
+	Title        string
+	MessageCount int
+}
+
+// SessionListResult from listing sessions.
+type SessionListResult struct {
+	Sessions []SessionInfo
+	Err      error
+}
+
+// SessionSwitchResult from switching or creating sessions.
+type SessionSwitchResult struct {
+	SessionID string
+	Err       error
+}

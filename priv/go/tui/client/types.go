@@ -79,6 +79,7 @@ type ProgressResponse struct {
 type CommandEntry struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Category    string `json:"category,omitempty"`
 }
 
 // CommandExecuteRequest for POST /api/v1/commands/execute.
@@ -140,4 +141,19 @@ type RefreshRequest struct {
 type RefreshResponse struct {
 	Token     string `json:"token"`
 	ExpiresIn int    `json:"expires_in"`
+}
+
+// SessionInfo from GET /api/v1/sessions.
+type SessionInfo struct {
+	ID           string `json:"id"`
+	CreatedAt    string `json:"created_at"`
+	Title        string `json:"title"`
+	MessageCount int    `json:"message_count"`
+}
+
+// SessionCreateResponse from POST /api/v1/sessions.
+type SessionCreateResponse struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Title     string `json:"title"`
 }

@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -18,13 +19,10 @@ func truncatePath(path string, maxWidth int) string {
 		return path
 	}
 	// Try replacing home dir with ~
-	if idx := strings.Index(path, "/Users/"); idx >= 0 {
-		parts := strings.SplitN(path[idx+len("/Users/"):], "/", 2)
-		if len(parts) == 2 {
-			short := "~/" + parts[1]
-			if len(short) <= maxWidth {
-				return short
-			}
+	if home, err := os.UserHomeDir(); err == nil && home != "" && strings.HasPrefix(path, home) {
+		short := "~" + path[len(home):]
+		if len(short) <= maxWidth {
+			return short
 		}
 	}
 	// Try last two path segments

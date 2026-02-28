@@ -116,6 +116,41 @@ type ContextPressureEvent struct {
 	MaxTokens       int     `json:"max_tokens"`
 }
 
+// TaskCreatedEvent from system_event.
+type TaskCreatedEvent struct {
+	TaskID     string `json:"task_id"`
+	Subject    string `json:"subject"`
+	ActiveForm string `json:"active_form"`
+}
+
+// TaskUpdatedEvent from system_event.
+type TaskUpdatedEvent struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+}
+
+// SwarmStartedEvent from system_event.
+type SwarmStartedEvent struct {
+	SwarmID     string `json:"swarm_id"`
+	Pattern     string `json:"pattern"`
+	AgentCount  int    `json:"agent_count"`
+	TaskPreview string `json:"task_preview"`
+}
+
+// SwarmCompletedEvent from system_event.
+type SwarmCompletedEvent struct {
+	SwarmID       string `json:"swarm_id"`
+	Pattern       string `json:"pattern"`
+	AgentCount    int    `json:"agent_count"`
+	ResultPreview string `json:"result_preview"`
+}
+
+// SwarmFailedEvent from system_event.
+type SwarmFailedEvent struct {
+	SwarmID string `json:"swarm_id"`
+	Reason  string `json:"reason"`
+}
+
 // -- SSEClient ----------------------------------------------------------------
 
 // SSEClient manages the Server-Sent Events connection.
@@ -124,6 +159,7 @@ type SSEClient struct {
 	token     string
 	sessionID string
 	done      chan struct{}
+	httpCli   *http.Client
 }
 
 // NewSSE creates an SSE client for the given session.
@@ -133,6 +169,7 @@ func NewSSE(baseURL, token, sessionID string) *SSEClient {
 		token:     token,
 		sessionID: sessionID,
 		done:      make(chan struct{}),
+		httpCli:   &http.Client{Timeout: 0},
 	}
 }
 
@@ -169,7 +206,7 @@ func (s *SSEClient) ListenCmd(p *tea.Program) tea.Cmd {
 			req.Header.Set("Authorization", "Bearer "+s.token)
 		}
 
-		c := &http.Client{Timeout: 0} // no timeout for SSE
+		c := s.httpCli
 		resp, err := c.Do(req)
 		if err != nil {
 			return SSEDisconnectedEvent{Err: err}
@@ -227,12 +264,12 @@ func (s *SSEClient) ListenCmd(p *tea.Program) tea.Cmd {
 	}
 }
 
-// maxReconnects is the maximum number of reconnect attempts before giving up.
-const maxReconnects = 10
+// MaxReconnects is the maximum number of reconnect attempts before giving up.
+const MaxReconnects = 10
 
 // ReconnectListenCmd is a tea.Cmd that reconnects the SSE stream with backoff.
 // Used by the disconnect handler when an unintentional disconnect occurs.
-// After maxReconnects failed attempts it returns an error instead of looping forever.
+// After MaxReconnects failed attempts it returns an error instead of looping forever.
 func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 	return func() tea.Msg {
 		attempt := 0
@@ -245,9 +282,9 @@ func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 			default:
 			}
 
-			if attempt >= maxReconnects {
+			if attempt >= MaxReconnects {
 				return SSEDisconnectedEvent{
-					Err: fmt.Errorf("SSE reconnect failed after %d attempts", maxReconnects),
+					Err: fmt.Errorf("SSE reconnect failed after %d attempts", MaxReconnects),
 				}
 			}
 
@@ -270,11 +307,7 @@ func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 			// Attempt reconnect by running ListenCmd inline.
 			p.Send(SSEReconnectingEvent{Attempt: attempt})
 			result := s.ListenCmd(p)()
-			if result == nil {
-				continue
-			}
-			// If ListenCmd returned a disconnect, loop and retry.
-			if _, ok := result.(SSEDisconnectedEvent); ok {
+			if _, ok := result.(SSEDisconnectedEvent); ok || result == nil {
 				continue
 			}
 			return result
@@ -289,15 +322,19 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 		var ev struct {
 			SessionID string `json:"session_id"`
 		}
-		if json.Unmarshal(data, &ev) == nil {
-			return SSEConnectedEvent{SessionID: ev.SessionID}
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
 		}
+		return SSEConnectedEvent{SessionID: ev.SessionID}
 
 	case "agent_response":
 		var ev AgentResponseEvent
-		if json.Unmarshal(data, &ev) == nil {
-			return ev
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
 		}
+		return ev
 
 	case "tool_call":
 		// Elixir sends a single "tool_call" event with a "phase" field
@@ -309,28 +346,32 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			DurationMs int64  `json:"duration_ms"`
 			Success    *bool  `json:"success,omitempty"`
 		}
-		if json.Unmarshal(data, &raw) == nil {
-			switch raw.Phase {
-			case "end":
-				success := true // default if omitted for backward compat
-				if raw.Success != nil {
-					success = *raw.Success
-				}
-				return ToolCallEndEvent{
-					Name:       raw.Name,
-					DurationMs: raw.DurationMs,
-					Success:    success,
-				}
-			default: // "start" or missing
-				return ToolCallStartEvent{Name: raw.Name, Args: raw.Args}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
+		}
+		switch raw.Phase {
+		case "end":
+			success := true // default if omitted for backward compat
+			if raw.Success != nil {
+				success = *raw.Success
 			}
+			return ToolCallEndEvent{
+				Name:       raw.Name,
+				DurationMs: raw.DurationMs,
+				Success:    success,
+			}
+		default: // "start" or missing
+			return ToolCallStartEvent{Name: raw.Name, Args: raw.Args}
 		}
 
 	case "llm_request":
 		var ev LLMRequestEvent
-		if json.Unmarshal(data, &ev) == nil {
-			return ev
+		if err := json.Unmarshal(data, &ev); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
 		}
+		return ev
 
 	case "llm_response":
 		var raw struct {
@@ -340,12 +381,14 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal(data, &raw) == nil {
-			return LLMResponseEvent{
-				DurationMs:   raw.DurationMs,
-				InputTokens:  raw.Usage.InputTokens,
-				OutputTokens: raw.Usage.OutputTokens,
-			}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
+			return nil
+		}
+		return LLMResponseEvent{
+			DurationMs:   raw.DurationMs,
+			InputTokens:  raw.Usage.InputTokens,
+			OutputTokens: raw.Usage.OutputTokens,
 		}
 
 	case "system_event":
@@ -413,6 +456,36 @@ func parseSystemEvent(data []byte) tea.Msg {
 
 	case "context_pressure":
 		var ev ContextPressureEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
+	case "task_created":
+		var ev TaskCreatedEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
+	case "task_updated":
+		var ev TaskUpdatedEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
+	case "swarm_started":
+		var ev SwarmStartedEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
+	case "swarm_completed":
+		var ev SwarmCompletedEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
+	case "swarm_failed":
+		var ev SwarmFailedEvent
 		if json.Unmarshal(data, &ev) == nil {
 			return ev
 		}

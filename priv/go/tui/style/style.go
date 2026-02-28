@@ -1,6 +1,10 @@
 package style
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Colors — matches OSA branding.
 var (
@@ -149,16 +153,8 @@ func ContextBarRender(utilization float64, width int) string {
 		color = Primary
 	}
 
-	bar := lipgloss.NewStyle().Foreground(color).Render(repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(Dim).Render(repeat("░", empty))
+	bar := lipgloss.NewStyle().Foreground(color).Render(strings.Repeat("█", filled)) +
+		lipgloss.NewStyle().Foreground(Dim).Render(strings.Repeat("░", empty))
 
 	return bar
-}
-
-func repeat(s string, n int) string {
-	out := ""
-	for i := 0; i < n; i++ {
-		out += s
-	}
-	return out
 }
