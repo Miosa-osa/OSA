@@ -1,35 +1,33 @@
 defmodule OptimalSystemAgent.Agent.Context do
   @moduledoc """
-  Token-budgeted priority assembly for the system prompt.
+  Two-tier token-budgeted system prompt assembly.
 
-  ## Strategy
+  ## Architecture (v2)
 
-  The context builder assembles the system prompt from layered sources, each
-  assigned to a priority tier. Instead of blindly concatenating every block,
-  it operates within a **token budget**:
+  The context builder operates in two tiers:
 
-      Total budget          = @max_tokens (from config, default 128_000)
-      Response reserve      = @response_reserve (4 096 tokens for the LLM reply)
-      Conversation reserve  = estimate_tokens(state.messages)
-      System prompt budget  = Total - Response reserve - Conversation reserve
+      Tier 1 — Static Base (cached, from Soul.static_base/0)
+        SYSTEM.md interpolated with {{TOOL_DEFINITIONS}}, {{RULES}}, {{USER_PROFILE}}.
+        Cached in persistent_term. Never recomputed within a session.
 
-  Blocks are assembled in priority order. Each tier has a percentage ceiling
-  of the system prompt budget:
+      Tier 2 — Dynamic Context (per-request, token-budgeted)
+        Signal overlay, environment, runtime, plan mode, memory, tasks,
+        workflow, communication profile, cortex bulletin, OS templates, machines.
+        Assembled fresh per call with priority-based fitting.
 
-      Tier 1 — CRITICAL (always included, no cap)
-        Identity block, signal classification, runtime context
+  ## Token Budget
 
-      Tier 2 — HIGH (up to 40% of system prompt budget)
-        Active skills docs, relevant memories, workflow state
+      dynamic_budget = max_tokens - static_tokens - conversation_tokens - reserve
+      Priority 1 blocks: always included (signal, env, runtime, plan mode)
+      Priority 2 blocks: budget-fitted (memory, tasks, workflow)
+      Priority 3 blocks: budget-fitted (comm profile, cortex)
+      Priority 4 blocks: remaining budget (OS templates, machines)
 
-      Tier 3 — MEDIUM (up to 30%)
-        Bootstrap files, communication profile, cortex bulletin
+  ## Provider Cache Hints
 
-      Tier 4 — LOW (remaining budget)
-        OS templates, machine addendums, full contact info
-
-  Blocks that exceed their tier allocation are truncated with
-  `[...truncated...]`. The builder logs actual token usage at debug level.
+  For Anthropic, the system message is split into 2 content blocks:
+    - Static base with `cache_control: %{type: "ephemeral"}` (~90% cache hit)
+    - Dynamic context (per-request, uncached)
 
   ## Public API
 
@@ -39,11 +37,11 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   require Logger
 
-  alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Intelligence.CommProfiler
   alias OptimalSystemAgent.Agent.Workflow
   alias OptimalSystemAgent.Agent.TaskTracker
+  alias OptimalSystemAgent.PromptLoader
   alias OptimalSystemAgent.Soul
 
   @response_reserve 4_096
@@ -51,7 +49,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
   defp tier2_pct, do: Application.get_env(:optimal_system_agent, :tier2_budget_pct, 0.40)
   defp tier3_pct, do: Application.get_env(:optimal_system_agent, :tier3_budget_pct, 0.30)
-  # Tier 4 gets whatever is left
+  # Priority 4 gets whatever is left
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -69,27 +67,30 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation_tokens = estimate_tokens_messages(conversation)
 
     max_tok = max_tokens()
-    system_budget = max(max_tok - @response_reserve - conversation_tokens, 2_000)
 
-    system_prompt = assemble_system_prompt(state, signal, system_budget)
+    # Tier 1: Cached static base
+    static_base = Soul.static_base()
+    static_tokens = Soul.static_token_count()
 
-    system_tokens = estimate_tokens(system_prompt)
-    total_tokens = system_tokens + conversation_tokens + @response_reserve
+    # Tier 2: Dynamic context
+    dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
+    dynamic_context = assemble_dynamic_context(state, signal, dynamic_budget)
+
+    dynamic_tokens = estimate_tokens(dynamic_context)
+    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
 
     Logger.debug(
-      "Context.build: system=#{system_tokens} conversation=#{conversation_tokens} " <>
-        "reserve=#{@response_reserve} total=#{total_tokens}/#{max_tok} " <>
-        "(#{Float.round(total_tokens / max_tok * 100, 1)}%)"
+      "Context.build: static=#{static_tokens} dynamic=#{dynamic_tokens} " <>
+        "conversation=#{conversation_tokens} reserve=#{@response_reserve} " <>
+        "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = %{role: "system", content: system_prompt}
+    system_msg = build_system_message(static_base, dynamic_context)
     %{messages: [system_msg | conversation]}
   end
 
   @doc """
   Returns a token usage breakdown for debugging purposes.
-
-  When `signal` is nil the signal block is omitted from the calculation.
   """
   @spec token_budget(map(), Classifier.t() | nil) :: map()
   def token_budget(state, signal \\ nil) do
@@ -97,10 +98,10 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation_tokens = estimate_tokens_messages(conversation)
 
     max_tok = max_tokens()
-    system_budget = max(max_tok - @response_reserve - conversation_tokens, 2_000)
+    static_tokens = Soul.static_token_count()
 
-    # Gather all blocks with priorities to show individual costs
-    blocks = gather_blocks(state, signal)
+    # Gather dynamic blocks for individual cost breakdown
+    blocks = gather_dynamic_blocks(state, signal)
 
     block_details =
       Enum.map(blocks, fn {content, priority, label} ->
@@ -111,16 +112,19 @@ defmodule OptimalSystemAgent.Agent.Context do
         }
       end)
 
-    system_prompt = assemble_system_prompt(state, signal, system_budget)
-    system_tokens = estimate_tokens(system_prompt)
-    total_tokens = system_tokens + conversation_tokens + @response_reserve
+    dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
+    dynamic_context = assemble_dynamic_context(state, signal, dynamic_budget)
+    dynamic_tokens = estimate_tokens(dynamic_context)
+    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
 
     %{
       max_tokens: max_tok,
       response_reserve: @response_reserve,
       conversation_tokens: conversation_tokens,
-      system_prompt_budget: system_budget,
-      system_prompt_actual: system_tokens,
+      static_base_tokens: static_tokens,
+      dynamic_context_tokens: dynamic_tokens,
+      system_prompt_budget: max_tok - @response_reserve - conversation_tokens,
+      system_prompt_actual: static_tokens + dynamic_tokens,
       total_tokens: total_tokens,
       utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
       headroom: max_tok - total_tokens,
@@ -129,39 +133,68 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   # ---------------------------------------------------------------------------
-  # Assembly engine
+  # System message construction
   # ---------------------------------------------------------------------------
 
-  @doc false
-  defp assemble_system_prompt(state, signal, system_budget) do
-    blocks = gather_blocks(state, signal)
+  defp build_system_message(static_base, dynamic_context) do
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
 
-    # Group by tier
-    tier1 = Enum.filter(blocks, fn {_, p, _} -> p == 1 end)
-    tier2 = Enum.filter(blocks, fn {_, p, _} -> p == 2 end)
-    tier3 = Enum.filter(blocks, fn {_, p, _} -> p == 3 end)
-    tier4 = Enum.filter(blocks, fn {_, p, _} -> p == 4 end)
+    if provider == :anthropic and dynamic_context != "" do
+      # Anthropic cache hint: split into 2 content blocks.
+      # The static base gets cache_control for ~90% input token savings after first call.
+      %{
+        role: "system",
+        content: [
+          %{type: "text", text: static_base, cache_control: %{type: "ephemeral"}},
+          %{type: "text", text: dynamic_context}
+        ]
+      }
+    else
+      # All other providers: single concatenated string
+      full_prompt =
+        if dynamic_context == "" do
+          static_base
+        else
+          static_base <> "\n\n" <> dynamic_context
+        end
 
-    # Tier 1 is always included in full — compute its cost
-    tier1_parts = extract_parts(tier1)
-    tier1_tokens = tokens_for_parts(tier1_parts)
+      %{role: "system", content: full_prompt}
+    end
+  end
 
-    remaining = system_budget - tier1_tokens
+  # ---------------------------------------------------------------------------
+  # Dynamic context assembly
+  # ---------------------------------------------------------------------------
 
-    # Tier 2 budget
-    tier2_budget = round(system_budget * tier2_pct())
-    {tier2_parts, tier2_used} = fit_blocks(tier2, min(tier2_budget, remaining))
-    remaining = remaining - tier2_used
+  defp assemble_dynamic_context(state, signal, budget) do
+    blocks = gather_dynamic_blocks(state, signal)
 
-    # Tier 3 budget
-    tier3_budget = round(system_budget * tier3_pct())
-    {tier3_parts, tier3_used} = fit_blocks(tier3, min(tier3_budget, remaining))
-    remaining = remaining - tier3_used
+    # Group by priority
+    p1 = Enum.filter(blocks, fn {_, p, _} -> p == 1 end)
+    p2 = Enum.filter(blocks, fn {_, p, _} -> p == 2 end)
+    p3 = Enum.filter(blocks, fn {_, p, _} -> p == 3 end)
+    p4 = Enum.filter(blocks, fn {_, p, _} -> p == 4 end)
 
-    # Tier 4 gets whatever is left
-    {tier4_parts, _tier4_used} = fit_blocks(tier4, max(remaining, 0))
+    # Priority 1: always included in full
+    p1_parts = extract_parts(p1)
+    p1_tokens = tokens_for_parts(p1_parts)
 
-    all_parts = tier1_parts ++ tier2_parts ++ tier3_parts ++ tier4_parts
+    remaining = budget - p1_tokens
+
+    # Priority 2: up to tier2_pct of total dynamic budget
+    p2_budget = round(budget * tier2_pct())
+    {p2_parts, p2_used} = fit_blocks(p2, min(p2_budget, remaining))
+    remaining = remaining - p2_used
+
+    # Priority 3: up to tier3_pct of total dynamic budget
+    p3_budget = round(budget * tier3_pct())
+    {p3_parts, p3_used} = fit_blocks(p3, min(p3_budget, remaining))
+    remaining = remaining - p3_used
+
+    # Priority 4: whatever is left
+    {p4_parts, _p4_used} = fit_blocks(p4, max(remaining, 0))
+
+    all_parts = p1_parts ++ p2_parts ++ p3_parts ++ p4_parts
 
     all_parts
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
@@ -169,35 +202,27 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   # ---------------------------------------------------------------------------
-  # Block gathering — each returns {content, priority_tier, label}
+  # Dynamic block gathering — each returns {content, priority, label}
   # ---------------------------------------------------------------------------
 
-  @doc false
-  defp gather_blocks(state, signal) do
+  defp gather_dynamic_blocks(state, signal) do
     [
-      # Tier 1 — CRITICAL
-      # Soul.system_prompt/1 composes IDENTITY.md + SOUL.md + signal overlay.
-      # This replaces the old hard-coded identity_block() AND signal_block()
-      # AND the Tier 3 bootstrap_files() — all unified under Soul.
-      {Soul.system_prompt(signal), 1, "soul"},
-      {tool_process_block(), 1, "tool_process"},
+      # Priority 1 — always included
+      {signal_overlay_block(signal), 1, "signal_overlay"},
       {runtime_block(state), 1, "runtime"},
-      {plan_mode_block(state), 1, "plan_mode"},
       {environment_block(state), 1, "environment"},
+      {plan_mode_block(state), 1, "plan_mode"},
 
-      # Tier 2 — HIGH
-      {tools_block(), 2, "tools"},
-      {rules_block(), 2, "rules"},
+      # Priority 2 — budget-fitted
       {memory_block_relevant(state), 2, "memory"},
-      {workflow_block(state), 2, "workflow"},
       {task_state_block(state), 2, "task_state"},
+      {workflow_block(state), 2, "workflow"},
 
-      # Tier 3 — MEDIUM
-      {Soul.user_block(), 3, "user_profile"},
+      # Priority 3 — budget-fitted
       {intelligence_block(state), 3, "communication_profile"},
       {cortex_block(), 3, "cortex_bulletin"},
 
-      # Tier 4 — LOW
+      # Priority 4 — remaining budget
       {os_templates_block(), 4, "os_templates"},
       {machines_block(), 4, "machines"}
     ]
@@ -205,10 +230,103 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   # ---------------------------------------------------------------------------
+  # Signal overlay (moved from Soul — dynamic per-request content)
+  # ---------------------------------------------------------------------------
+
+  @mode_behavior_defaults %{
+    execute:
+      "**Mode: EXECUTE** — Be concise and action-oriented. Do the thing, confirm it's done. No preamble.",
+    build: "**Mode: BUILD** — Create with quality. Show your work. Structure the output.",
+    analyze: "**Mode: ANALYZE** — Be thorough and data-driven. Show reasoning. Use structure.",
+    maintain:
+      "**Mode: MAINTAIN** — Be careful and precise. Check before changing. Explain impact.",
+    assist: "**Mode: ASSIST** — Guide and explain. Match the user's depth. Be genuinely helpful."
+  }
+
+  @genre_behavior_defaults %{
+    direct: "**Genre: DIRECT** — The user is commanding. Respond with action, not explanation.",
+    inform:
+      "**Genre: INFORM** — The user is sharing information. Acknowledge, process, note for later.",
+    commit: "**Genre: COMMIT** — The user is committing to something. Confirm and track it.",
+    decide: "**Genre: DECIDE** — The user needs a decision. Validate, recommend, then execute.",
+    express: "**Genre: EXPRESS** — The user is expressing emotion. Lead with empathy, then help."
+  }
+
+  defp signal_overlay_block(nil), do: nil
+
+  defp signal_overlay_block(%{mode: mode, genre: genre, weight: weight}) do
+    mode_str = mode |> to_string() |> String.upcase()
+    genre_str = genre |> to_string() |> String.upcase()
+
+    mode_guidance = mode_behavior(mode)
+    genre_guidance = genre_behavior(genre)
+
+    weight_guidance =
+      cond do
+        weight < 0.3 ->
+          "This is a lightweight signal. Keep your response brief and natural."
+
+        weight > 0.8 ->
+          "This is a high-density signal. Give it your full attention and thoroughness."
+
+        true ->
+          ""
+      end
+
+    """
+    ## Active Signal: #{mode_str} × #{genre_str} (weight: #{Float.round(weight, 2)})
+
+    **IMPORTANT: This signal classification is internal behavioral guidance only. Do NOT mention signal mode, genre, weight, or classification in your response. Never echo or reference "Active Signal" text. Just respond naturally.**
+
+    #{mode_guidance}
+
+    #{genre_guidance}
+
+    #{weight_guidance}
+    """
+    |> String.trim()
+  end
+
+  defp signal_overlay_block(_), do: nil
+
+  defp mode_behavior(mode) do
+    case lookup_behavior(PromptLoader.get(:mode_behaviors), mode) do
+      nil -> Map.get(@mode_behavior_defaults, mode, "")
+      text -> text
+    end
+  end
+
+  defp genre_behavior(genre) do
+    case lookup_behavior(PromptLoader.get(:genre_behaviors), genre) do
+      nil -> Map.get(@genre_behavior_defaults, genre, "")
+      text -> text
+    end
+  end
+
+  defp lookup_behavior(nil, _key), do: nil
+
+  defp lookup_behavior(content, key) when is_binary(content) do
+    key_str = to_string(key)
+
+    content
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn line ->
+      case String.split(line, ":", parts: 2) do
+        [k, v] ->
+          if String.trim(k) == key_str do
+            v |> String.trim() |> String.trim("\"")
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
   # Fitting blocks into a budget
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp fit_blocks(_blocks, budget) when budget <= 0, do: {[], 0}
 
   defp fit_blocks(blocks, budget) do
@@ -219,15 +337,12 @@ defmodule OptimalSystemAgent.Agent.Context do
 
         cond do
           available <= 0 ->
-            # No budget left — skip
             {acc, tokens_used}
 
           block_tokens <= available ->
-            # Fits entirely
             {acc ++ [content], tokens_used + block_tokens}
 
           true ->
-            # Truncate to fit
             truncated = truncate_to_tokens(content, available)
             truncated_tokens = estimate_tokens(truncated)
             {acc ++ [truncated], tokens_used + truncated_tokens}
@@ -237,12 +352,10 @@ defmodule OptimalSystemAgent.Agent.Context do
     {parts, used}
   end
 
-  @doc false
   defp extract_parts(blocks) do
     Enum.map(blocks, fn {content, _, _} -> content end)
   end
 
-  @doc false
   defp tokens_for_parts(parts) do
     parts
     |> Enum.map(&estimate_tokens/1)
@@ -272,7 +385,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _, _ -> estimate_tokens_heuristic(text)
   end
 
-  @doc false
   defp estimate_tokens_heuristic(text),
     do: OptimalSystemAgent.Utils.Tokens.estimate(text)
 
@@ -286,7 +398,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     Enum.reduce(messages, 0, fn msg, acc ->
       content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
 
-      # Tool calls add tokens for function names and arguments
       tool_call_tokens =
         case Map.get(msg, :tool_calls) do
           nil ->
@@ -299,12 +410,10 @@ defmodule OptimalSystemAgent.Agent.Context do
             Enum.reduce(calls, 0, fn tc, tc_acc ->
               name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
               arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
-              # overhead per tool call
               tc_acc + name_tokens + arg_tokens + 4
             end)
         end
 
-      # Per-message overhead (role tag, separators)
       acc + content_tokens + tool_call_tokens + 4
     end)
   end
@@ -316,13 +425,10 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Truncation
   # ---------------------------------------------------------------------------
 
-  @doc false
   defp truncate_to_tokens(_text, target_tokens) when target_tokens <= 0, do: ""
 
   defp truncate_to_tokens(text, target_tokens) do
     words = String.split(text, ~r/\s+/, trim: true)
-
-    # Rough: target_tokens / 1.3 gives approximate word count
     max_words = max(round(target_tokens / 1.3), 1)
 
     if length(words) <= max_words do
@@ -338,19 +444,10 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   # ---------------------------------------------------------------------------
-  # Block builders
+  # Dynamic block builders
   # ---------------------------------------------------------------------------
 
-  # identity_block/0 removed — replaced by Soul.system_prompt/1 which composes
-  # IDENTITY.md + SOUL.md + signal overlay dynamically.
-
-  # bootstrap_files/0 removed — IDENTITY.md and SOUL.md are now loaded by
-  # Soul module (Tier 1). USER.md is served via Soul.user_block() (Tier 3).
-
-  @doc false
   defp memory_block_relevant(state) do
-    # Attempt relevance-based memory retrieval using the latest user message.
-    # Falls back to full recall if no user messages or if relevance search unavailable.
     latest_user_msg = find_latest_user_message(state.messages)
 
     content =
@@ -371,7 +468,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp find_latest_user_message(nil), do: nil
   defp find_latest_user_message([]), do: nil
 
@@ -385,11 +481,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     end)
   end
 
-  @doc false
   defp recall_relevant(query) do
-    # Retrieve full memory, then extract lines relevant to the query.
-    # This is a lightweight keyword-overlap relevance filter — not semantic
-    # search, but far better than dumping the entire MEMORY.md.
     full = full_recall()
 
     case full do
@@ -408,7 +500,6 @@ defmodule OptimalSystemAgent.Agent.Context do
           |> MapSet.new()
 
         if MapSet.size(query_words) == 0 do
-          # No meaningful query words — return full memory
           text
         else
           sections = String.split(text, ~r/\n(?=## )/, trim: true)
@@ -423,12 +514,10 @@ defmodule OptimalSystemAgent.Agent.Context do
                 |> MapSet.new()
 
               overlap = MapSet.intersection(query_words, section_words) |> MapSet.size()
-              # Keep section if it shares at least 2 words or 20% of query words
               overlap >= 2 or overlap >= MapSet.size(query_words) * 0.2
             end)
 
           case relevant do
-            # No matches — include everything rather than nothing
             [] -> text
             _ -> Enum.join(relevant, "\n\n")
           end
@@ -436,7 +525,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp full_recall do
     try do
       content = OptimalSystemAgent.Agent.Memory.recall()
@@ -446,7 +534,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp machines_block do
     addendums = OptimalSystemAgent.Machines.prompt_addendums()
 
@@ -458,7 +545,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp os_templates_block do
     addendums = OptimalSystemAgent.OS.Registry.prompt_addendums()
 
@@ -470,95 +556,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  # signal_block/1 removed — signal overlay is now integrated into
-  # Soul.system_prompt/1 which includes mode/genre-specific behavior guidance.
-
-  @doc false
-  defp tools_block do
-    skills = Tools.list_docs_direct()
-    tools = Tools.list_tools_direct()
-
-    case skills do
-      [] ->
-        nil
-
-      list ->
-        # Index tools by name for parameter lookup
-        tool_index = Map.new(tools, fn tool -> {tool.name, tool} end)
-
-        docs =
-          Enum.map(list, fn {name, desc} ->
-            base = "- **#{name}**: #{desc}"
-
-            case Map.get(tool_index, name) do
-              %{parameters: params} when is_map(params) and map_size(params) > 0 ->
-                param_info = format_parameters(params)
-                if param_info != "", do: base <> "\n  " <> param_info, else: base
-
-              _ ->
-                base
-            end
-          end)
-
-        "## Available Tools\n#{Enum.join(docs, "\n")}"
-    end
-  rescue
-    _ -> nil
-  end
-
-  @doc false
-  defp format_parameters(params) do
-    properties = Map.get(params, "properties", %{})
-    required = MapSet.new(Map.get(params, "required", []))
-
-    if map_size(properties) == 0 do
-      ""
-    else
-      props =
-        Enum.map(properties, fn {name, spec} ->
-          type = Map.get(spec, "type", "any")
-          req = if MapSet.member?(required, name), do: " (required)", else: ""
-          desc = Map.get(spec, "description", "")
-          desc_part = if desc != "", do: " — #{desc}", else: ""
-          "`#{name}` (#{type}#{req})#{desc_part}"
-        end)
-
-      "Parameters: #{Enum.join(props, ", ")}"
-    end
-  end
-
-  defp rules_block do
-    rules_dir =
-      case :code.priv_dir(:optimal_system_agent) do
-        {:error, _} -> nil
-        dir -> Path.join(to_string(dir), "rules")
-      end
-
-    if rules_dir && File.dir?(rules_dir) do
-      rules_dir
-      |> Path.join("**/*.md")
-      |> Path.wildcard()
-      |> Enum.sort()
-      |> Enum.map(fn path ->
-        name = Path.relative_to(path, rules_dir) |> String.replace_suffix(".md", "")
-        content = File.read!(path)
-        "## Rule: #{name}\n#{content}"
-      end)
-      |> case do
-        [] -> nil
-        parts -> "# Active Rules\n\n" <> Enum.join(parts, "\n\n")
-      end
-    else
-      nil
-    end
-  rescue
-    _ -> nil
-  end
-
-  @doc false
   defp workflow_block(state) do
-    # Query the Workflow GenServer for active workflow context.
-    # Falls back to nil if the GenServer is not running or has no active workflow.
     session_id = Map.get(state, :session_id)
 
     if session_id do
@@ -570,7 +568,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp intelligence_block(state) do
     parts = []
 
@@ -591,7 +588,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp format_comm_profile(profile) do
     topics = Map.get(profile, :topics, []) |> Enum.join(", ")
 
@@ -605,7 +601,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     """
   end
 
-  @doc false
   defp task_state_block(state) do
     session_id = Map.get(state, :session_id, "default")
 
@@ -652,7 +647,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp task_suffix(%{status: :failed, reason: reason}), do: "  [failed: #{reason}]"
   defp task_suffix(_), do: ""
 
-  @doc false
   defp cortex_block do
     case OptimalSystemAgent.Agent.Cortex.bulletin() do
       nil -> nil
@@ -663,7 +657,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp plan_mode_block(%{plan_mode: true}) do
     """
     ## PLAN MODE — ACTIVE
@@ -695,79 +688,6 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp plan_mode_block(_), do: nil
 
-  @doc false
-  defp tool_process_block do
-    cwd = File.cwd!()
-
-    """
-    ## How to Use Tools
-
-    You have tools available. Use them proactively to accomplish tasks. Follow this process:
-
-    ### Process
-
-    1. **Read the user's request.** Understand what they need.
-    2. **Decide if tools are needed.** Simple conversation = no tools. Tasks involving files, commands, search, or memory = use tools.
-    3. **Call ONE tool at a time.** Wait for the result before deciding what to do next.
-    4. **Use the result.** Read the tool output, then decide: call another tool, or respond to the user.
-    5. **Respond when done.** Summarize what you did and the results.
-
-    ### Tool Routing Rules (CRITICAL)
-
-    - Use **file_read** — NOT shell_execute with cat/head/tail
-    - Use **file_edit** for surgical changes — NOT shell_execute with sed/awk. NEVER file_write for small edits.
-    - Use **mcts_index** — for finding relevant files in a large/unfamiliar codebase. Faster and smarter than file_glob loops.
-    - Use **file_glob** — for specific pattern-based file search when you know what you're looking for.
-    - Use **file_grep** — NOT shell_execute with grep/rg for content search
-    - Use **dir_list** — NOT shell_execute with ls for directory listing
-    - Use **web_fetch** — NOT shell_execute with curl for fetching URLs
-    - Reserve **shell_execute** for system commands only (git, mix, npm, docker, make, etc.)
-
-    ### When to Use Each Tool
-
-    - **file_read** — Read file content. Always read before modifying.
-    - **file_write** — Create new files or completely rewrite existing ones. Read first if file exists.
-    - **file_edit** — Surgical string replacement in existing files. old_string must be unique. Preferred over file_write for modifications.
-    - **file_glob** — Find files by pattern (e.g. '**/*.ex', 'lib/**/*.ts').
-    - **file_grep** — Search file contents by regex. Returns file:line:content matches.
-    - **dir_list** — List directory contents with types and sizes.
-    - **shell_execute** — Run system commands: git, mix test, npm, docker, compile, etc.
-    - **web_search** — Search the web for current information or documentation.
-    - **web_fetch** — Fetch and read a specific URL's content.
-    - **memory_save** — Save important information to persistent memory.
-    - **orchestrate** — Spawn parallel sub-agents for complex multi-part tasks.
-    - **mcts_index** — MCTS-powered codebase indexer. Use when you need to find relevant files in a large codebase efficiently. Ranks files by relevance to your goal using Monte Carlo Tree Search.
-
-    ### When NOT to Use Tools
-
-    - Greetings and casual conversation ("hey", "thanks", "what's up")
-    - Questions you can answer from your training knowledge
-    - Opinions or recommendations that don't require looking at files
-
-    ### Important Rules
-
-    - **Always read before writing.** Never modify a file you haven't read first.
-    - **Use file_edit for surgical changes.** Only use file_write for new files or complete rewrites.
-    - **One tool call per turn.** Call one tool, get the result, then decide the next step.
-    - **Use absolute paths.** The current working directory is: #{cwd}
-    - **Be proactive.** If the user asks to "fix" something, read → find → fix → verify.
-
-    ### Brevity
-
-    - Answer concisely. Fewer than 4 lines unless detail is requested.
-    - No preamble. No postamble. Direct answers.
-    - Don't add features, refactor, or improve beyond what was asked.
-
-    ### Code Safety
-
-    - ALWAYS read a file before editing it.
-    - Use file_edit for surgical changes. Only use file_write for new files or complete rewrites.
-    - Don't add error handling for impossible scenarios.
-    - Don't create abstractions for one-time operations.
-    """
-  end
-
-  @doc false
   defp environment_block(_state) do
     cwd = File.cwd!()
     git_info = cached_git_info()
@@ -791,7 +711,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> nil
   end
 
-  @doc false
   defp cached_git_info do
     case Process.get(:osa_git_info_cache) do
       nil ->
@@ -806,7 +725,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
-  @doc false
   defp gather_git_info do
     parts = []
 
@@ -832,7 +750,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     _ -> ""
   end
 
-  @doc false
   defp get_active_model(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
   defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
   defp get_active_model(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
@@ -841,7 +758,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     Application.get_env(:optimal_system_agent, key, to_string(provider))
   end
 
-  @doc false
   defp runtime_block(state) do
     """
     ## Runtime Context

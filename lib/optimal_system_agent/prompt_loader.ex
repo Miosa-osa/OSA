@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.PromptLoader do
 
   @known_keys ~w(
     classifier
+    SYSTEM
     IDENTITY
     SOUL
     mode_behaviors
