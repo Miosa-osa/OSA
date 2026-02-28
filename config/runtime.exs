@@ -111,7 +111,7 @@ config :optimal_system_agent,
        else
          "osa-dev-secret-#{:crypto.strong_rand_bytes(16) |> Base.url_encode64()}"
        end),
-  require_auth: System.get_env("OSA_REQUIRE_AUTH") == "true",
+  require_auth: System.get_env("OSA_REQUIRE_AUTH", "true") == "true",
 
   # Budget limits (USD)
   daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
@@ -157,14 +157,40 @@ config :optimal_system_agent,
         ]
 
         configured = for {name, key} <- candidates, key != nil and key != "", do: name
-        chain = (configured ++ [:ollama]) |> Enum.uniq()
+
+        # Only add Ollama if it's actually reachable (TCP check, 1s timeout).
+        # Prevents Req.TransportError{reason: :econnrefused} on every provider failure.
+        ollama_url = System.get_env("OLLAMA_URL") || "http://localhost:11434"
+        ollama_uri = URI.parse(ollama_url)
+        ollama_host = String.to_charlist(ollama_uri.host || "localhost")
+        ollama_port = ollama_uri.port || 11434
+
+        ollama_reachable =
+          case :gen_tcp.connect(ollama_host, ollama_port, [], 1_000) do
+            {:ok, sock} -> :gen_tcp.close(sock); true
+            {:error, _} -> false
+          end
+
+        chain = if ollama_reachable do
+          (configured ++ [:ollama]) |> Enum.uniq()
+        else
+          configured
+        end
+
         Enum.reject(chain, &(&1 == default_provider))
 
       csv ->
         csv
         |> String.split(",", trim: true)
         |> Enum.map(&String.trim/1)
-        |> Enum.map(&String.to_atom/1)
+        |> Enum.map(fn name ->
+          try do
+            String.to_existing_atom(name)
+          rescue
+            ArgumentError -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
     end
   ),
 

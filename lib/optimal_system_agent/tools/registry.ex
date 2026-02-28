@@ -358,6 +358,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "shell_execute" => OptimalSystemAgent.Tools.Builtins.ShellExecute,
       "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch,
       "memory_save" => OptimalSystemAgent.Tools.Builtins.MemorySave,
+      "memory_recall" => OptimalSystemAgent.Tools.Builtins.MemoryRecall,
       "orchestrate" => OptimalSystemAgent.Tools.Builtins.Orchestrate,
       "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
       "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,

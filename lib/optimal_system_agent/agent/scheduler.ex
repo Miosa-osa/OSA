@@ -469,7 +469,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     path = crons_path()
 
     if File.exists?(path) do
-      case File.read(path) |> then(fn {:ok, raw} -> Jason.decode(raw) end) do
+      case (with {:ok, raw} <- File.read(path), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
         {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
           enabled = Enum.filter(jobs, &(&1["enabled"] == true))
           Logger.info("CRONS.json: #{length(enabled)} enabled job(s) out of #{length(jobs)}")
@@ -497,7 +497,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     path = triggers_path()
 
     if File.exists?(path) do
-      case File.read(path) |> then(fn {:ok, raw} -> Jason.decode(raw) end) do
+      case (with {:ok, raw} <- File.read(path), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
         {:ok, %{"triggers" => triggers}} when is_list(triggers) ->
           enabled = Enum.filter(triggers, &(&1["enabled"] == true))
 

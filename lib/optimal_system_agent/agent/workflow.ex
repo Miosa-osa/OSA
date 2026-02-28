@@ -493,7 +493,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     expanded = Path.expand(path)
 
     if File.exists?(expanded) do
-      case File.read(expanded) |> then(fn {:ok, raw} -> Jason.decode(raw) end) do
+      case (with {:ok, raw} <- File.read(expanded), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
         {:ok, %{"steps" => steps}} when is_list(steps) ->
           parsed =
             steps

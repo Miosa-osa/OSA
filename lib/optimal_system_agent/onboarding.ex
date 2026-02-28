@@ -178,8 +178,26 @@ defmodule OptimalSystemAgent.Onboarding do
             is_binary(val) and val != "",
             do: name
 
-      # Ollama always available as last resort; remove the default (tried first)
-      chain = (configured ++ [:ollama]) |> Enum.uniq() |> Enum.reject(&(&1 == default))
+      # Only add Ollama if it's actually reachable (TCP probe, 1s timeout).
+      # Prevents :econnrefused errors cascading through the fallback chain.
+      ollama_url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+      ollama_uri = URI.parse(ollama_url)
+      ollama_host = String.to_charlist(ollama_uri.host || "localhost")
+      ollama_port = ollama_uri.port || 11434
+
+      ollama_reachable =
+        case :gen_tcp.connect(ollama_host, ollama_port, [], 1_000) do
+          {:ok, sock} -> :gen_tcp.close(sock); true
+          {:error, _} -> false
+        end
+
+      chain = if ollama_reachable do
+        (configured ++ [:ollama]) |> Enum.uniq()
+      else
+        configured
+      end
+
+      chain = Enum.reject(chain, &(&1 == default))
       Application.put_env(:optimal_system_agent, :fallback_chain, chain)
 
       Logger.debug("[Onboarding] Fallback chain rebuilt: #{inspect(chain)} (default: #{default})")

@@ -174,7 +174,11 @@ config :optimal_system_agent,
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
   database: Path.expand("~/.osa/osa.db"),
   pool_size: 5,
-  journal_mode: :wal
+  journal_mode: :wal,
+  # Ensure UTF-8 encoding for full Unicode support (Japanese, emoji, etc.)
+  # This PRAGMA is effective only when creating a new database; for existing
+  # databases it is a no-op (already locked to the creation-time encoding).
+  custom_pragmas: [encoding: "'UTF-8'"]
 
 config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 

@@ -14,7 +14,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TUI_DIR="$ROOT/priv/go/tui"
 TUI_BIN="$TUI_DIR/osa"
+LOG_DIR="${HOME}/.osa/logs"
 BACKEND_PID=""
+
+mkdir -p "$LOG_DIR"
 
 cleanup() {
   if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
@@ -53,8 +56,22 @@ else
   fi
 
   export MIX_ENV="${MIX_ENV:-dev}"
+  LOG_FILE="$LOG_DIR/backend.log"
   echo "Starting backend on :${PORT}…"
-  (cd "$ROOT" && mix osa.serve) &
+
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+    # Windows (Git Bash / MSYS2 / Cygwin): redirect all I/O to prevent
+    # prim_tty crash — backgrounding detaches the console handle and
+    # Erlang's prim_tty fails with:
+    #   {case_clause,{error,{'SetConsoleModeInitIn','The handle is invalid.'}}}
+    (cd "$ROOT" && elixir --no-halt \
+      -e "Application.put_env(:elixir, :ansi_enabled, false)" \
+      -S mix osa.serve) </dev/null >"$LOG_FILE" 2>&1 &
+  else
+    # Unix: backend is backgrounded; send output to log file to keep
+    # the terminal clean for the TUI.
+    (cd "$ROOT" && mix osa.serve) >"$LOG_FILE" 2>&1 &
+  fi
   BACKEND_PID=$!
 fi
 
@@ -71,7 +88,8 @@ while [ $attempts -lt $max_attempts ]; do
 done
 
 if [ $attempts -eq $max_attempts ]; then
-  echo "Backend did not become healthy after ${max_attempts}s. Check logs."
+  echo "Backend did not become healthy after ${max_attempts}s."
+  echo "Check logs: $LOG_DIR/backend.log"
   exit 1
 fi
 

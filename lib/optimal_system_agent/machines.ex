@@ -67,9 +67,13 @@ defmodule OptimalSystemAgent.Machines do
     config_path = Path.join(config_dir(), "config.json")
 
     if File.exists?(config_path) do
-      case Jason.decode(File.read!(config_path)) do
-        {:ok, config} -> config
-        _ -> %{}
+      case File.read(config_path) do
+        {:ok, raw} ->
+          case Jason.decode(raw) do
+            {:ok, config} -> config
+            _ -> %{}
+          end
+        {:error, _} -> %{}
       end
     else
       %{}

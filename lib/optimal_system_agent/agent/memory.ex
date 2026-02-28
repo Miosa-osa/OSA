@@ -991,7 +991,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
     attrs = %{
       session_id: session_id,
       role: to_string(Map.get(entry, :role, Map.get(entry, "role", "user"))),
-      content: to_string(Map.get(entry, :content, Map.get(entry, "content", ""))),
+      content: ensure_utf8(Map.get(entry, :content, Map.get(entry, "content", ""))),
       tool_calls: Map.get(entry, :tool_calls, Map.get(entry, "tool_calls")),
       tool_call_id: Map.get(entry, :tool_call_id, Map.get(entry, "tool_call_id")),
       signal_mode: Map.get(entry, :signal_mode, Map.get(entry, "signal_mode")),
@@ -1151,4 +1151,26 @@ defmodule OptimalSystemAgent.Agent.Memory do
   end
 
   defp parse_int(_), do: nil
+
+  # Ensure a value is a valid UTF-8 binary before SQLite storage.
+  # Handles: nil, charlists (from Erlang), binaries with invalid bytes,
+  # and arbitrary terms. Without this, multi-byte characters (Japanese,
+  # emoji, CJK) can be mangled into '?????' sequences.
+  defp ensure_utf8(nil), do: ""
+  defp ensure_utf8(val) when is_list(val), do: :unicode.characters_to_binary(val)
+  defp ensure_utf8(val) when is_binary(val) do
+    if String.valid?(val) do
+      val
+    else
+      # Replace invalid bytes — preserves valid UTF-8 portions
+      val
+      |> :unicode.characters_to_binary(:utf8, :utf8)
+      |> case do
+        bin when is_binary(bin) -> bin
+        {:error, good, _bad} -> good
+        {:incomplete, good, _rest} -> good
+      end
+    end
+  end
+  defp ensure_utf8(val), do: to_string(val)
 end

@@ -42,6 +42,8 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> put_resp_header("x-frame-options", "DENY")
     |> put_resp_header("referrer-policy", "no-referrer")
     |> put_resp_header("x-xss-protection", "1; mode=block")
+    |> put_resp_header("content-security-policy", "default-src 'none'")
+    |> put_resp_header("strict-transport-security", "max-age=31536000; includeSubDomains")
   end
 
   # ── Health (no auth) ────────────────────────────────────────────────

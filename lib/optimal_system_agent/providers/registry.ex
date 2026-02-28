@@ -36,7 +36,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   1. Process-type default (thinking = best, tool execution = fast)
   2. Task-type override (coding tasks upgrade tier)
   3. Fallback chain when rate-limited
-  4. Local fallback (Ollama always available)
+  4. Local fallback (Ollama, if reachable)
   """
 
   use GenServer
@@ -336,10 +336,21 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   @doc """
-  Returns true if the provider has a configured API key (or is Ollama, which needs none).
+  Returns true if the provider has a configured API key (or is Ollama, which needs none
+  but must be reachable). Ollama reachability is checked via TCP probe with 1s timeout.
   """
   @spec provider_configured?(atom()) :: boolean()
-  def provider_configured?(:ollama), do: true
+  def provider_configured?(:ollama) do
+    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+    uri = URI.parse(url)
+    host = String.to_charlist(uri.host || "localhost")
+    port = uri.port || 11434
+
+    case :gen_tcp.connect(host, port, [], 1_000) do
+      {:ok, sock} -> :gen_tcp.close(sock); true
+      {:error, _} -> false
+    end
+  end
 
   def provider_configured?(provider) do
     key = :"#{provider}_api_key"
