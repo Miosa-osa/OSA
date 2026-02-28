@@ -31,3 +31,6 @@ Application
 - **Tier-Aware Routing** — elite/specialist/utility maps to models automatically
 - **Tool Gating** — small models get NO tools to prevent hallucination
 - **Signal Theory** — every output classified by 5-tuple (Mode, Genre, Type, Format, Weight)
+- **Parallel Tool Execution** — independent tool calls from a single LLM response execute concurrently via `Task.async_stream` (max 10, 60s timeout). Pre-tool hooks (security_check, spend_guard) run sync per-tool inside each task.
+- **Doom Loop Detection** — if the same set of tools fails 3 consecutive iterations, the agent halts with an explanation instead of looping indefinitely. Tracked via `consecutive_failures` + `last_tool_signature` on the Loop state.
+- **Destructive Git Protection** — `ShellPolicy` blocks `git push --force`, `git reset --hard`, `git clean -f`, `git checkout -- .`, `git branch -D`, and `--no-verify` flags. Safe operations (`git push`, `git commit`, `git checkout <branch>`) are allowed.

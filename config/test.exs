@@ -2,7 +2,11 @@ import Config
 
 config :logger, level: :warning
 
-config :optimal_system_agent, OptimalSystemAgent.Store.Repo, pool: Ecto.Adapters.SQL.Sandbox
+# Sandbox pool removed — singleton GenServers (Memory, TaskQueue, etc.) call
+# Repo from their own processes and can't do Sandbox.checkout!(), which causes
+# DBConnection.OwnershipError → rest_for_one cascade → flaky "no process" failures.
+# Tests use unique IDs and don't need transaction isolation.
+config :optimal_system_agent, OptimalSystemAgent.Store.Repo, pool_size: 2
 
 # Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.

@@ -10,6 +10,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **Parallel Tool Execution** (`agent/loop.ex`): Tool calls from a single LLM response now execute concurrently via `Task.async_stream` (max 10 concurrency, 60s timeout). Results are collected and appended in original order. Pre-tool hooks (security_check, spend_guard) run synchronously per-tool inside each parallel task; post-tool hooks fire async.
+- **Doom Loop Detection** (`agent/loop.ex`): Agent tracks `consecutive_failures` and `last_tool_signature`. If the same set of tools fails 3 consecutive iterations, the agent halts with an explanation instead of looping indefinitely. Emits `:doom_loop_detected` system event for observability.
+- **Destructive Git Protection** (`security/shell_policy.ex`): 7 new regex patterns block `git push --force/-f`, `git reset --hard`, `git clean -f*`, `git checkout -- .`, `git branch -D`, and `--no-verify` flags. Safe git operations (push, commit, checkout branch) remain allowed.
 - **TUI Onboarding Wizard**: 8-step first-run setup directly in the terminal
   - Step 1: Agent name
   - Step 2: User profile (name + work context → writes USER.md)

@@ -38,6 +38,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :model,
     messages: [],
     iteration: 0,
+    consecutive_failures: 0,
+    last_tool_signature: nil,
     status: :idle,
     tools: [],
     plan_mode: false,
@@ -161,6 +163,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
               Memory.append(state.session_id, %{role: "assistant", content: plan_text, channel: state.channel})
               state = %{state | plan_mode: false, status: :idle}
               emit_context_pressure(state)
+
+              Bus.emit(:agent_response, %{
+                session_id: state.session_id,
+                response: plan_text,
+                response_type: "plan",
+                signal: Map.from_struct(signal)
+              })
+
               {:reply, {:plan, plan_text, signal}, state}
 
             {:error, reason} ->
@@ -295,95 +305,71 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         state = %{state | messages: state.messages ++ [assistant_msg]}
 
-        # Execute each tool and append results (with timing feedback)
-        state =
-          Enum.reduce(tool_calls, state, fn tool_call, acc ->
-            arg_hint = tool_call_hint(tool_call.arguments)
-            Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint, session_id: acc.session_id})
-            start_time_tool = System.monotonic_time(:millisecond)
+        # Execute all tool calls in parallel — independent by contract
+        # (if the LLM needed sequential execution, it would return them
+        # across separate iterations)
+        results =
+          tool_calls
+          |> Task.async_stream(
+            fn tool_call -> execute_tool_call(tool_call, state) end,
+            max_concurrency: 10,
+            timeout: 60_000,
+            on_timeout: :kill_task
+          )
+          |> Enum.zip(tool_calls)
+          |> Enum.map(fn
+            {{:ok, result}, tool_call} ->
+              {tool_call, result}
 
-            # Run pre_tool_use hooks (budget guard, security check, etc.)
-            pre_payload = %{
-              tool_name: tool_call.name,
-              arguments: tool_call.arguments,
-              session_id: acc.session_id
-            }
-
-            tool_result =
-              case run_hooks(:pre_tool_use, pre_payload) do
-                {:blocked, reason} ->
-                  "Blocked: #{reason}"
-
-                _ ->
-                  case Tools.execute(tool_call.name, tool_call.arguments) do
-                    {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-                      {:image, mt, b64, p}
-
-                    {:ok, content} ->
-                      content
-
-                    {:error, reason} ->
-                      "Error: #{reason}"
-                  end
-              end
-
-            tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
-
-            # Normalize result for hooks/events (images get a text summary)
-            result_str =
-              case tool_result do
-                {:image, _mt, _b64, path} -> "[image: #{path}]"
-                text when is_binary(text) -> text
-                other -> inspect(other)
-              end
-
-            # Run post_tool_use hooks (cost tracker, telemetry, learning, etc.)
-            post_payload = %{
-              tool_name: tool_call.name,
-              result: result_str,
-              duration_ms: tool_duration_ms,
-              session_id: acc.session_id
-            }
-
-            run_hooks_async(:post_tool_use, post_payload)
-
-            Bus.emit(:tool_call, %{
-              name: tool_call.name,
-              phase: :end,
-              duration_ms: tool_duration_ms,
-              args: arg_hint,
-              session_id: acc.session_id
-            })
-
-            Bus.emit(:tool_result, %{
-              name: tool_call.name,
-              result: String.slice(result_str, 0, 500),
-              success: !match?({:error, _}, tool_result),
-              session_id: acc.session_id
-            })
-
-            # Build tool message — images get structured content blocks
-            tool_msg =
-              case tool_result do
-                {:image, media_type, b64, path} ->
-                  %{
-                    role: "tool",
-                    tool_call_id: tool_call.id,
-                    content: [
-                      %{type: "text", text: "Image: #{path}"},
-                      %{type: "image", source: %{type: "base64", media_type: media_type, data: b64}}
-                    ]
-                  }
-
-                _ ->
-                  %{role: "tool", tool_call_id: tool_call.id, content: result_str}
-              end
-
-            %{acc | messages: acc.messages ++ [tool_msg]}
+            {_, tool_call} ->
+              timeout_msg = %{role: "tool", tool_call_id: tool_call.id, content: "Error: Tool execution timed out"}
+              {tool_call, {timeout_msg, "Error: Tool execution timed out"}}
           end)
 
-        # Re-prompt
-        run_loop(state)
+        # Append all tool messages in original order
+        tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
+        state = %{state | messages: state.messages ++ tool_messages}
+
+        # Doom loop detection — if the same tools fail 3x consecutively, halt
+        tool_signature = tool_calls |> Enum.map(& &1.name) |> Enum.sort()
+
+        all_failed =
+          Enum.all?(results, fn {_tc, {_msg, result_str}} ->
+            String.starts_with?(result_str, "Error:") or
+              String.starts_with?(result_str, "Blocked:")
+          end)
+
+        {consecutive_failures, last_sig} =
+          cond do
+            all_failed and tool_signature == state.last_tool_signature ->
+              {state.consecutive_failures + 1, tool_signature}
+
+            all_failed ->
+              {1, tool_signature}
+
+            true ->
+              {0, nil}
+          end
+
+        state = %{state |
+          consecutive_failures: consecutive_failures,
+          last_tool_signature: last_sig
+        }
+
+        if consecutive_failures >= 3 do
+          Bus.emit(:system_event, %{
+            event: :doom_loop_detected,
+            session_id: state.session_id,
+            tool_signature: tool_signature,
+            consecutive_failures: consecutive_failures
+          })
+
+          {"I'm stuck — the same tools have failed 3 times in a row. " <>
+             "Let me reassess the approach rather than keep trying the same thing.", state}
+        else
+          # Re-prompt
+          run_loop(state)
+        end
 
       {:error, reason} ->
         reason_str = if is_binary(reason), do: reason, else: inspect(reason)
@@ -421,6 +407,95 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   defp tool_call_hint(_), do: ""
+
+  # --- Parallel Tool Execution ---
+
+  # Execute a single tool call — used by parallel Task.async_stream.
+  # Returns {tool_msg, result_str} tuple.
+  defp execute_tool_call(tool_call, state) do
+    arg_hint = tool_call_hint(tool_call.arguments)
+    Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint, session_id: state.session_id})
+    start_time_tool = System.monotonic_time(:millisecond)
+
+    # Run pre_tool_use hooks sync (security_check/spend_guard can block)
+    pre_payload = %{
+      tool_name: tool_call.name,
+      arguments: tool_call.arguments,
+      session_id: state.session_id
+    }
+
+    tool_result =
+      case run_hooks(:pre_tool_use, pre_payload) do
+        {:blocked, reason} ->
+          "Blocked: #{reason}"
+
+        _ ->
+          case Tools.execute(tool_call.name, tool_call.arguments) do
+            {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+              {:image, mt, b64, p}
+
+            {:ok, content} ->
+              content
+
+            {:error, reason} ->
+              "Error: #{reason}"
+          end
+      end
+
+    tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
+
+    # Normalize result for hooks/events
+    result_str =
+      case tool_result do
+        {:image, _mt, _b64, path} -> "[image: #{path}]"
+        text when is_binary(text) -> text
+        other -> inspect(other)
+      end
+
+    # Run post_tool_use hooks async (cost tracker, telemetry, learning)
+    post_payload = %{
+      tool_name: tool_call.name,
+      result: result_str,
+      duration_ms: tool_duration_ms,
+      session_id: state.session_id
+    }
+
+    run_hooks_async(:post_tool_use, post_payload)
+
+    Bus.emit(:tool_call, %{
+      name: tool_call.name,
+      phase: :end,
+      duration_ms: tool_duration_ms,
+      args: arg_hint,
+      session_id: state.session_id
+    })
+
+    Bus.emit(:tool_result, %{
+      name: tool_call.name,
+      result: String.slice(result_str, 0, 500),
+      success: !match?({:error, _}, tool_result),
+      session_id: state.session_id
+    })
+
+    # Build tool message — images get structured content blocks
+    tool_msg =
+      case tool_result do
+        {:image, media_type, b64, path} ->
+          %{
+            role: "tool",
+            tool_call_id: tool_call.id,
+            content: [
+              %{type: "text", text: "Image: #{path}"},
+              %{type: "image", source: %{type: "base64", media_type: media_type, data: b64}}
+            ]
+          }
+
+        _ ->
+          %{role: "tool", tool_call_id: tool_call.id, content: result_str}
+      end
+
+    {tool_msg, result_str}
+  end
 
   # --- Provider/Model Passthrough ---
 

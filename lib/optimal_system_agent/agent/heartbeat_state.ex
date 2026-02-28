@@ -20,31 +20,32 @@ defmodule OptimalSystemAgent.Agent.HeartbeatState do
   # ── Client API ────────────────────────────────────────────────────
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @doc "Record a check result. Updates run count and persists to disk."
-  @spec record_check(atom(), any()) :: :ok
-  def record_check(type, result) when is_atom(type) do
-    GenServer.cast(__MODULE__, {:record_check, type, result})
+  @spec record_check(atom(), any(), GenServer.server()) :: :ok
+  def record_check(type, result, server \\ __MODULE__) when is_atom(type) do
+    GenServer.cast(server, {:record_check, type, result})
   end
 
   @doc "Get the last check info for a given type."
-  @spec last_check(atom()) :: {:ok, map()} | :not_found
-  def last_check(type) when is_atom(type) do
-    GenServer.call(__MODULE__, {:last_check, type})
+  @spec last_check(atom(), GenServer.server()) :: {:ok, map()} | :not_found
+  def last_check(type, server \\ __MODULE__) when is_atom(type) do
+    GenServer.call(server, {:last_check, type})
   end
 
   @doc "Check if current UTC time falls within configured quiet hours."
-  @spec in_quiet_hours?() :: boolean()
-  def in_quiet_hours? do
-    GenServer.call(__MODULE__, :in_quiet_hours?)
+  @spec in_quiet_hours?(GenServer.server()) :: boolean()
+  def in_quiet_hours?(server \\ __MODULE__) do
+    GenServer.call(server, :in_quiet_hours?)
   end
 
   @doc "Set quiet hours ranges. Each range is {start_hour, start_min, end_hour, end_min}."
-  @spec set_quiet_hours(list(tuple())) :: :ok
-  def set_quiet_hours(ranges) when is_list(ranges) do
-    GenServer.call(__MODULE__, {:set_quiet_hours, ranges})
+  @spec set_quiet_hours(list(tuple()), GenServer.server()) :: :ok
+  def set_quiet_hours(ranges, server \\ __MODULE__) when is_list(ranges) do
+    GenServer.call(server, {:set_quiet_hours, ranges})
   end
 
   # ── Server callbacks ──────────────────────────────────────────────

@@ -821,10 +821,11 @@ Noise?  → short-circuit (< 2ms total, no LLM)
     │  ~200ms–2s  LLM call (first token, streaming begins)
     │              → streaming_token events emitted per delta
     │
-    │  ~50–500ms per tool  (tool execution)
-    │   └── pre hooks (sync, < 5ms for security/budget)
-    │   └── tool execute
-    │   └── post hooks (async, fire-and-forget)
+    │  ~50–500ms per tool  (PARALLEL tool execution via Task.async_stream)
+    │   └── All tool calls from one LLM response execute concurrently (max 10)
+    │   └── Per-tool: pre hooks (sync) → execute → post hooks (async)
+    │   └── Results collected and appended in original order
+    │   └── Doom loop detection: 3 consecutive identical failures → halt
     │
     │  (repeat per iteration, max 30)
     │

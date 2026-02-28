@@ -97,7 +97,16 @@ defmodule OptimalSystemAgent.Security.ShellPolicy do
     ~r/\bcurl\b.*\s(-o\s|--output\s)/,
     ~r/\bcurl\b.*\s-[a-zA-Z]*o\s/,
     ~r/\bwget\b.*\s(-O\s|--output-document\s)/,
-    ~r/\bwget\b.*\s-[a-zA-Z]*O\s/
+    ~r/\bwget\b.*\s-[a-zA-Z]*O\s/,
+
+    # ── Destructive git operations ─────────────────────────────────────
+    ~r/\bgit\s+push\s+.*--force\b/,
+    ~r/\bgit\s+push\s+-f\b/,
+    ~r/\bgit\s+reset\s+--hard\b/,
+    ~r/\bgit\s+clean\s+-[a-zA-Z]*f/,
+    ~r/\bgit\s+checkout\s+--\s*\./,
+    ~r/\bgit\s+branch\s+-D\b/,
+    ~r/\bgit\s+.*--no-verify\b/
   ]
 
   @max_output_bytes 100_000
