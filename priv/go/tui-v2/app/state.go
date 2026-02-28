@@ -15,6 +15,7 @@ const (
 	StateQuit                     // Quit confirmation dialog
 	StateSessions                 // Session browser dialog
 	StateModels                   // Enhanced model picker dialog
+	StateOnboarding               // First-run onboarding wizard
 )
 
 func (s State) String() string {
@@ -41,6 +42,8 @@ func (s State) String() string {
 		return "sessions"
 	case StateModels:
 		return "models"
+	case StateOnboarding:
+		return "onboarding"
 	default:
 		return "unknown"
 	}

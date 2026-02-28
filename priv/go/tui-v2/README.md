@@ -47,6 +47,31 @@ bin/osa
 bin/osa --dev
 ```
 
+## First-Run Onboarding
+
+On first launch (no `~/.osa/config.json`), the TUI presents an 8-step setup wizard:
+
+```
+Welcome → Profile → Template → Provider → API Key → Machines → Channels → Confirm
+```
+
+| Step | What it does |
+|------|-------------|
+| 1. Agent Name | Name your agent (default: "OSA") |
+| 2. Profile | Your name + what you work on (optional, writes USER.md) |
+| 3. Template | Select OS template or Blank (auto-discovers .osa-manifest.json) |
+| 4. Provider | Pick from 18 LLM providers (Local/Cloud groups) |
+| 5. API Key | Enter key (masked input, skipped for Ollama) |
+| 6. Machines | Toggle skill groups: Communication, Productivity, Research |
+| 7. Channels | Select messaging platforms: Telegram, WhatsApp, Discord, Slack |
+| 8. Confirm | Review summary, write config files |
+
+**Backend endpoints** (unauthenticated):
+- `GET /onboarding/status` — check if setup needed + system info
+- `POST /onboarding/setup` — write config + doctor health checks
+
+Returning users skip onboarding entirely (zero overhead).
+
 ## Architecture
 
 ```
@@ -56,7 +81,7 @@ priv/go/tui-v2/
 │
 ├── app/
 │   ├── app.go                  Root model: Init, Update (60+ handlers), View
-│   ├── state.go                11 app states
+│   ├── state.go                12 app states (incl. StateOnboarding)
 │   ├── keys.go                 22 key bindings
 │   └── layout.go               Responsive layout (compact vs sidebar)
 │
@@ -69,7 +94,7 @@ priv/go/tui-v2/
 │   ├── input/                  Multi-line textarea with history
 │   ├── completions/            Command completions popup
 │   ├── status/                 Bottom bar (signal, tokens, context) + pills
-│   ├── dialog/                 Stacking modals (picker, palette, plan, permissions, ...)
+│   ├── dialog/                 Stacking modals (picker, palette, plan, permissions, onboarding, ...)
 │   ├── toast/                  Notification overlay
 │   ├── diff/                   Inline diff + syntax highlighting
 │   ├── anim/                   Gradient animated spinner
@@ -82,7 +107,7 @@ priv/go/tui-v2/
 │   └── common/                 Shared helpers (highlight, scrollbar, keybinds, OS)
 │
 ├── client/                     Backend communication
-│   ├── http.go                 32 REST methods (all backend endpoints)
+│   ├── http.go                 34 REST methods (all backend endpoints + onboarding)
 │   ├── sse.go                  SSE streaming + reconnect (33 event types)
 │   └── types.go                Request/response structs
 │
@@ -104,7 +129,7 @@ Top-level: `connected`, `agent_response`, `tool_call`, `llm_request`, `llm_respo
 System events (24): orchestrator lifecycle, swarm lifecycle, thinking deltas,
 context pressure, task CRUD, hook/budget notifications, swarm intelligence rounds.
 
-### HTTP Client (32 methods)
+### HTTP Client (34 methods)
 
 Every backend endpoint has a corresponding client method in `client/http.go`:
 
@@ -121,6 +146,7 @@ Every backend endpoint has a corresponding client method in `client/http.go`:
 - **Analytics**: Get
 - **Scheduler**: ListJobs, Reload
 - **Machines**: List
+- **Onboarding**: CheckOnboarding, CompleteOnboarding
 
 ### Command Routing
 

@@ -35,3 +35,17 @@ type FilePickerResult struct {
 
 // FilePickerCancel signals that the file picker was dismissed.
 type FilePickerCancel struct{}
+
+// OnboardingDone is emitted when the onboarding wizard completes.
+type OnboardingDone struct {
+	Provider    string
+	Model       string
+	APIKey      string
+	EnvVar      string
+	AgentName   string
+	UserName    string
+	UserContext string
+	Machines    map[string]bool
+	Channels    []string
+	OSTemplate  map[string]string // nil if blank, {name, path} if selected
+}

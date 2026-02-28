@@ -101,6 +101,7 @@ type Model struct {
 	sessions    dialog.SessionsModel
 	quit        dialog.QuitModel
 	models      dialog.ModelsModel
+	onboarding  dialog.OnboardingModel
 
 	// Text selection + clipboard (Wave 6)
 	selection selection.Model
@@ -167,6 +168,7 @@ func New(c *client.Client) Model {
 		sessions:    dialog.NewSessions(),
 		quit:        dialog.NewQuit(),
 		models:      dialog.NewModels(),
+		onboarding:  dialog.NewOnboarding(),
 		selection:   selection.New(),
 		state:       StateConnecting,
 		layoutMode:  layoutMode,
@@ -213,6 +215,7 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions.SetSize(v.Width, v.Height)
 		m.quit.SetSize(v.Width, v.Height)
 		m.models.SetSize(v.Width, v.Height)
+		m.onboarding.SetSize(v.Width, v.Height)
 		return m, nil
 
 	case tea.MouseClickMsg:
@@ -259,11 +262,41 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bannerTimeout:
 		if m.state == StateBanner {
+			return m, m.checkOnboarding()
+		}
+		return m, nil
+
+	case msg.OnboardingStatusResult:
+		if v.Err != nil || !v.NeedsOnboarding {
 			m.state = StateIdle
 			m.recomputeLayout()
 			return m, m.input.Focus()
 		}
+		m.onboarding.SetProviders(v.Providers, v.SystemInfo)
+		m.onboarding.SetTemplates(v.Templates)
+		m.onboarding.SetMachines(v.Machines)
+		m.onboarding.SetChannels(v.Channels)
+		m.onboarding.SetSize(m.width, m.height)
+		m.state = StateOnboarding
 		return m, nil
+
+	case dialog.OnboardingDone:
+		// Fire POST to complete setup
+		return m, m.completeOnboarding(v)
+
+	case msg.OnboardingSetupError:
+		// Return to wizard with error visible on confirm screen
+		m.onboarding.SetError(v.Err.Error())
+		return m, nil
+
+	case msg.OnboardingComplete:
+		m.state = StateIdle
+		m.recomputeLayout()
+		m.header.SetHealth(msg.HealthResult{Provider: v.Provider, Model: v.Model})
+		m.status.SetProviderInfo(v.Provider, v.Model)
+		m.sidebar.SetModelInfo(v.Provider, v.Model)
+		m.chat.AddSystemMessage(fmt.Sprintf("Setup complete — using %s/%s", v.Provider, v.Model))
+		return m, m.input.Focus()
 
 	// -- Orchestration --
 
@@ -719,6 +752,9 @@ func (m Model) renderView() string {
 	if m.state == StateModels {
 		return m.models.View()
 	}
+	if m.state == StateOnboarding {
+		return m.onboarding.View()
+	}
 
 	var sections []string
 
@@ -811,6 +847,9 @@ func (m Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleSessionsKey(k)
 	case StateModels:
 		return m.handleModelsKey(k)
+	case StateOnboarding:
+		cmd := m.onboarding.Update(k)
+		return m, cmd
 	case StateBanner:
 		m.state = StateIdle
 		return m, m.input.Focus()
@@ -1580,6 +1619,95 @@ func (m Model) checkHealth() tea.Cmd {
 			Model:    health.Model,
 		}
 	}
+}
+
+// -- Onboarding commands -----------------------------------------------------
+
+func (m Model) checkOnboarding() tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.client.CheckOnboarding()
+		if err != nil {
+			return msg.OnboardingStatusResult{Err: err}
+		}
+		providers := make([]msg.OnboardingProvider, len(result.Providers))
+		for i, p := range result.Providers {
+			providers[i] = msg.OnboardingProvider{
+				Key:          p.Key,
+				Name:         p.Name,
+				DefaultModel: p.DefaultModel,
+				EnvVar:       p.EnvVar,
+			}
+		}
+		templates := make([]msg.OnboardingTemplate, len(result.Templates))
+		for i, t := range result.Templates {
+			templates[i] = msg.OnboardingTemplate{
+				Name:    t.Name,
+				Path:    t.Path,
+				Stack:   t.Stack,
+				Modules: t.Modules,
+			}
+		}
+		machines := make([]msg.OnboardingMachine, len(result.Machines))
+		for i, mach := range result.Machines {
+			machines[i] = msg.OnboardingMachine{
+				Key:         mach.Key,
+				Name:        mach.Name,
+				Description: mach.Description,
+			}
+		}
+		channels := make([]msg.OnboardingChannel, len(result.Channels))
+		for i, ch := range result.Channels {
+			channels[i] = msg.OnboardingChannel{
+				Key:         ch.Key,
+				Name:        ch.Name,
+				Description: ch.Description,
+			}
+		}
+		return msg.OnboardingStatusResult{
+			NeedsOnboarding: result.NeedsOnboarding,
+			Providers:       providers,
+			Templates:       templates,
+			Machines:        machines,
+			Channels:        channels,
+			SystemInfo:      result.SystemInfo,
+		}
+	}
+}
+
+func (m Model) completeOnboarding(done dialog.OnboardingDone) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.client.CompleteOnboarding(client.OnboardingSetupRequest{
+			Provider:    done.Provider,
+			Model:       done.Model,
+			APIKey:      done.APIKey,
+			EnvVar:      done.EnvVar,
+			AgentName:   done.AgentName,
+			UserName:    done.UserName,
+			UserContext: done.UserContext,
+			Machines:    done.Machines,
+			Channels:    convertChannels(done.Channels),
+			OSTemplate:  done.OSTemplate,
+		})
+		if err != nil {
+			return msg.OnboardingSetupError{Err: err}
+		}
+		return msg.OnboardingComplete{
+			Provider: result.Provider,
+			Model:    result.Model,
+		}
+	}
+}
+
+// convertChannels builds the channel config map for the setup request.
+func convertChannels(keys []string) map[string]any {
+	if len(keys) == 0 {
+		return nil
+	}
+	result := make(map[string]any, len(keys))
+	for _, k := range keys {
+		result[k] = map[string]any{"enabled": true}
+	}
+	return result
 }
 
 // -- Orchestrate commands ----------------------------------------------------

@@ -7,6 +7,7 @@ defmodule Mix.Tasks.Osa.Serve do
   Usage: mix osa.serve
   """
   use Mix.Task
+  require Logger
 
   @shortdoc "Start HTTP backend (no CLI)"
 
@@ -16,8 +17,7 @@ defmodule Mix.Tasks.Osa.Serve do
     Mix.Task.run("app.start")
 
     if OptimalSystemAgent.Onboarding.first_run?() do
-      OptimalSystemAgent.Onboarding.run()
-      OptimalSystemAgent.Soul.reload()
+      Logger.info("First run detected — complete setup via TUI or: mix osa.setup")
     end
 
     OptimalSystemAgent.Onboarding.apply_config()

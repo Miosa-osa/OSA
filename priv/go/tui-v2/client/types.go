@@ -317,3 +317,68 @@ type MachineInfo struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 }
+
+// -- Onboarding ---------------------------------------------------------------
+
+// OnboardingProvider describes a provider available for setup.
+type OnboardingProvider struct {
+	Key          string `json:"key"`
+	Name         string `json:"name"`
+	DefaultModel string `json:"default_model"`
+	EnvVar       string `json:"env_var"`
+}
+
+// OnboardingTemplate describes a discovered OS template.
+type OnboardingTemplate struct {
+	Name    string         `json:"name"`
+	Path    string         `json:"path"`
+	Stack   map[string]any `json:"stack"`
+	Modules int            `json:"modules"`
+}
+
+// OnboardingMachine describes a machine skill group.
+type OnboardingMachine struct {
+	Key         string   `json:"key"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Tools       []string `json:"tools"`
+}
+
+// OnboardingChannel describes an available channel.
+type OnboardingChannel struct {
+	Key         string   `json:"key"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Fields      []string `json:"fields"`
+}
+
+// OnboardingStatusResponse from GET /onboarding/status.
+type OnboardingStatusResponse struct {
+	NeedsOnboarding bool                 `json:"needs_onboarding"`
+	SystemInfo      map[string]any       `json:"system_info"`
+	Providers       []OnboardingProvider `json:"providers"`
+	Templates       []OnboardingTemplate `json:"templates"`
+	Machines        []OnboardingMachine  `json:"machines"`
+	Channels        []OnboardingChannel  `json:"channels"`
+}
+
+// OnboardingSetupRequest for POST /onboarding/setup.
+type OnboardingSetupRequest struct {
+	Provider    string            `json:"provider"`
+	Model       string            `json:"model"`
+	APIKey      string            `json:"api_key,omitempty"`
+	EnvVar      string            `json:"env_var,omitempty"`
+	AgentName   string            `json:"agent_name"`
+	UserName    string            `json:"user_name,omitempty"`
+	UserContext string            `json:"user_context,omitempty"`
+	Machines    map[string]bool   `json:"machines,omitempty"`
+	Channels    map[string]any    `json:"channels,omitempty"`
+	OSTemplate  map[string]string `json:"os_template,omitempty"`
+}
+
+// OnboardingSetupResponse from POST /onboarding/setup.
+type OnboardingSetupResponse struct {
+	Status   string `json:"status"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}

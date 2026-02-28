@@ -199,3 +199,57 @@ type ModelSwitchResult struct {
 	Model    string
 	Err      error
 }
+
+// -- Onboarding events --
+
+// OnboardingProvider mirrors client.OnboardingProvider for msg layer.
+type OnboardingProvider struct {
+	Key          string
+	Name         string
+	DefaultModel string
+	EnvVar       string
+}
+
+// OnboardingTemplate describes a discovered OS template.
+type OnboardingTemplate struct {
+	Name    string
+	Path    string
+	Stack   map[string]any
+	Modules int
+}
+
+// OnboardingMachine describes an available machine skill group.
+type OnboardingMachine struct {
+	Key         string
+	Name        string
+	Description string
+}
+
+// OnboardingChannel describes an available channel.
+type OnboardingChannel struct {
+	Key         string
+	Name        string
+	Description string
+}
+
+// OnboardingStatusResult from the onboarding status check.
+type OnboardingStatusResult struct {
+	NeedsOnboarding bool
+	Providers       []OnboardingProvider
+	Templates       []OnboardingTemplate
+	Machines        []OnboardingMachine
+	Channels        []OnboardingChannel
+	SystemInfo      map[string]any
+	Err             error
+}
+
+// OnboardingComplete signals successful onboarding setup.
+type OnboardingComplete struct {
+	Provider string
+	Model    string
+}
+
+// OnboardingSetupError signals that the setup POST failed.
+type OnboardingSetupError struct {
+	Err error
+}

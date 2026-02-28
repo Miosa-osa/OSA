@@ -10,6 +10,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **TUI Onboarding Wizard**: 8-step first-run setup directly in the terminal
+  - Step 1: Agent name
+  - Step 2: User profile (name + work context → writes USER.md)
+  - Step 3: OS template / use case selection (auto-discovers .osa-manifest.json projects)
+  - Step 4: LLM provider (18 providers, Local/Cloud grouping, scrollable list)
+  - Step 5: API key input (masked, auto-skipped for Ollama)
+  - Step 6: Machine/skill group toggles (communication, productivity, research)
+  - Step 7: Channel selection (Telegram, WhatsApp, Discord, Slack)
+  - Step 8: Review summary + confirm → writes config.json, IDENTITY.md, USER.md, SOUL.md
+  - Post-setup health checks (doctor_checks) included in setup response
+  - Error handling: setup failures display on confirm screen with retry
+  - Fail-open: if backend unreachable during check, wizard is skipped gracefully
+- **Backend onboarding API** (unauthenticated, alongside /health):
+  - `GET /onboarding/status` → needs_onboarding, system_info, providers, templates, machines, channels
+  - `POST /onboarding/setup` → writes all config, runs doctor checks, returns results
+  - Headless `write_setup/1` public function for programmatic setup
+  - `providers_list/0`, `templates_list/0`, `machines_list/0`, `channels_list/0` data accessors
 - **TUI Phase 4**: Mouse scroll, smart model switching, provider recognition
   - Mouse wheel scrolls chat viewport and model picker
   - `/model <provider>` opens picker filtered to that provider (18 providers recognized)
@@ -19,6 +36,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Feature matrix comparing 14 competitors
 - 5-phase roadmap with gap analysis
 - Changelog structure
+
+### Changed
+- `mix osa.serve` no longer runs interactive onboarding — logs hint to use TUI or `mix osa.setup`
 
 ---
 

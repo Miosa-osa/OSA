@@ -551,6 +551,40 @@ func (c *Client) ListMachines() ([]MachineInfo, error) {
 	return wrapper.Machines, nil
 }
 
+// -- Onboarding ---------------------------------------------------------------
+
+func (c *Client) CheckOnboarding() (*OnboardingStatusResponse, error) {
+	resp, err := c.get("/onboarding/status")
+	if err != nil {
+		return nil, fmt.Errorf("check onboarding: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result OnboardingStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode onboarding status: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) CompleteOnboarding(req OnboardingSetupRequest) (*OnboardingSetupResponse, error) {
+	resp, err := c.postJSON("/onboarding/setup", req)
+	if err != nil {
+		return nil, fmt.Errorf("complete onboarding: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result OnboardingSetupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode onboarding setup: %w", err)
+	}
+	return &result, nil
+}
+
 // -- HTTP helpers -------------------------------------------------------------
 
 func (c *Client) get(path string) (*http.Response, error) {

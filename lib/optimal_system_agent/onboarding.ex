@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Onboarding do
   First-run onboarding wizard for OSA.
 
   Detects first-run state (no ~/.osa/config.json or missing provider),
-  walks the user through a 5-step TUI wizard, and writes all bootstrap
+  walks the user through a multi-step wizard, and writes all bootstrap
   files to ~/.osa/.
 
   Called from:
@@ -403,41 +403,142 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
-  # ── File Writers ────────────────────────────────────────────────
+  @doc "Returns the list of available providers as maps for the HTTP API."
+  @spec providers_list() :: [map()]
+  def providers_list do
+    Enum.map(@providers, fn {_num, key, name, default_model, env_var} ->
+      %{
+        key: key,
+        name: name,
+        default_model: default_model,
+        env_var: env_var
+      }
+    end)
+  end
 
-  defp write_all(state) do
+  @doc "Scan for OS templates and return as maps for the HTTP API."
+  @spec templates_list() :: [map()]
+  def templates_list do
+    try do
+      templates = OptimalSystemAgent.OS.Scanner.scan_all()
+
+      Enum.map(templates, fn t ->
+        %{
+          name: Map.get(t, :name, "Unknown"),
+          path: Map.get(t, :path, ""),
+          stack: Map.get(t, :stack, %{}),
+          modules: length(Map.get(t, :modules, []))
+        }
+      end)
+    rescue
+      _ -> []
+    end
+  end
+
+  @doc "Returns the available machine groups for onboarding."
+  @spec machines_list() :: [map()]
+  def machines_list do
+    [
+      %{key: "communication", name: "Communication", description: "Telegram, Discord, Slack messaging", tools: ["telegram_send", "discord_send", "slack_send"]},
+      %{key: "productivity", name: "Productivity", description: "Calendar, tasks, scheduling", tools: ["calendar_read", "calendar_create", "task_manager"]},
+      %{key: "research", name: "Research", description: "Deep web search, summarization, translation", tools: ["web_search_deep", "summarize", "translate"]}
+    ]
+  end
+
+  @doc "Returns the available channels for onboarding."
+  @spec channels_list() :: [map()]
+  def channels_list do
+    [
+      %{key: "telegram", name: "Telegram", description: "Bot via BotFather token", fields: ["token"]},
+      %{key: "whatsapp", name: "WhatsApp", description: "Meta Cloud API or Baileys Web", fields: ["mode", "token", "phone_number_id"]},
+      %{key: "discord", name: "Discord", description: "Bot via Discord Developer Portal", fields: ["token"]},
+      %{key: "slack", name: "Slack", description: "Bot via Slack App", fields: ["token", "signing_secret"]}
+    ]
+  end
+
+  @doc """
+  Write all bootstrap files for the given setup state.
+  Called from the HTTP onboarding endpoint (headless, no IO output).
+  Returns :ok on success.
+  """
+  @spec write_setup(map()) :: :ok | {:error, String.t()}
+  def write_setup(state) do
     dir = config_dir()
     File.mkdir_p!(dir)
     File.mkdir_p!(Path.join(dir, "skills"))
     File.mkdir_p!(Path.join(dir, "sessions"))
     File.mkdir_p!(Path.join(dir, "data"))
 
-    IO.puts("")
-    write_file("config.json", build_config(state))
-    write_file("IDENTITY.md", identity_template(state.agent_name))
-    write_file("USER.md", user_template(state.user_name, state.user_context))
+    agent_name = Map.get(state, :agent_name, "OSA")
+
+    # Build state with defaults for optional fields
+    full_state = %{
+      agent_name: agent_name,
+      user_name: Map.get(state, :user_name),
+      user_context: Map.get(state, :user_context),
+      provider: Map.get(state, :provider, "ollama"),
+      model: Map.get(state, :model, "llama3.2:latest"),
+      api_key: Map.get(state, :api_key),
+      env_var: Map.get(state, :env_var),
+      channels: Map.get(state, :channels, []),
+      system_info: Map.get(state, :system_info, %{}),
+      machines: Map.get(state, :machines, %{"communication" => false, "productivity" => false, "research" => false}),
+      channels_config: Map.get(state, :channels_config, %{}),
+      os_template: Map.get(state, :os_template)
+    }
+
+    results = [
+      write_file_silent("config.json", build_config(full_state)),
+      write_file_silent("IDENTITY.md", identity_template(agent_name)),
+      write_file_silent("USER.md", user_template(full_state.user_name, full_state.user_context))
+    ]
 
     soul_path = Path.join(dir, "SOUL.md")
 
-    unless File.exists?(soul_path) do
-      write_file("SOUL.md", soul_template())
-    end
+    results =
+      if not File.exists?(soul_path) do
+        results ++ [write_file_silent("SOUL.md", soul_template())]
+      else
+        results
+      end
 
-    print_next_steps()
-    :ok
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      nil -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
-  defp write_file(filename, content) do
-    dir = config_dir()
-    path = Path.join(dir, filename)
-    display = String.replace(dir, Path.expand("~"), "~") <> "/#{filename}"
+  # ── File Writers ────────────────────────────────────────────────
 
-    case File.write(path, content) do
+  defp write_all(state) do
+    IO.puts("")
+
+    case write_setup(state) do
       :ok ->
-        IO.puts("  #{@green}✓#{@reset} #{display}")
+        # Print success for each file
+        dir = config_dir()
+        display = String.replace(dir, Path.expand("~"), "~")
+
+        for f <- ["config.json", "IDENTITY.md", "USER.md", "SOUL.md"] do
+          IO.puts("  #{@green}✓#{@reset} #{display}/#{f}")
+        end
+
+        print_next_steps()
+        :ok
 
       {:error, reason} ->
-        IO.puts("  #{@red}✗#{@reset} #{display} — #{inspect(reason)}")
+        IO.puts("  #{@red}✗#{@reset} #{reason}")
+        :ok
+    end
+  end
+
+  defp write_file_silent(filename, content) do
+    dir = config_dir()
+    path = Path.join(dir, filename)
+
+    case File.write(path, content) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to write #{filename}: #{inspect(reason)}"}
     end
   end
 
@@ -449,6 +550,13 @@ defmodule OptimalSystemAgent.Onboarding do
         %{}
       end
 
+    os_template_config =
+      case Map.get(state, :os_template) do
+        nil -> %{}
+        t when is_map(t) -> %{"name" => t["name"] || Map.get(t, :name), "path" => t["path"] || Map.get(t, :path)}
+        _ -> %{}
+      end
+
     Jason.encode!(
       %{
         "version" => "1.0",
@@ -458,11 +566,11 @@ defmodule OptimalSystemAgent.Onboarding do
           "model" => state.model
         },
         "api_keys" => api_keys,
-        "machines" => %{
+        "machines" => Map.get(state, :machines, %{
           "communication" => false,
           "productivity" => false,
           "research" => false
-        },
+        }),
         "scheduler" => %{
           "heartbeat_interval_minutes" => 15,
           "cron_jobs" => []
@@ -471,7 +579,9 @@ defmodule OptimalSystemAgent.Onboarding do
           "workspace_sandbox" => true,
           "tool_timeout_seconds" => 60,
           "require_confirmation_for" => []
-        }
+        },
+        "channels" => Map.get(state, :channels_config, %{}),
+        "os" => os_template_config
       },
       pretty: true
     )
