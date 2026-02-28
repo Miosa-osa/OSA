@@ -62,6 +62,7 @@ type ChatModel struct {
 	welcomeVersion string
 	welcomeDetail  string
 	welcomeCwd     string
+	processingView string // activity/thinking rendered inline after messages during processing
 }
 
 // NewChat constructs a ChatModel sized to width x height.
@@ -141,6 +142,19 @@ func (m *ChatModel) AddSystemError(text string) {
 	m.refresh()
 }
 
+// SetProcessingView sets the inline activity/thinking view shown below messages
+// during processing. Pass empty string to clear.
+func (m *ChatModel) SetProcessingView(view string) {
+	m.processingView = view
+	m.refresh()
+}
+
+// ClearProcessingView removes the inline processing indicator.
+func (m *ChatModel) ClearProcessingView() {
+	m.processingView = ""
+	m.refresh()
+}
+
 // SetSize resizes the underlying viewport.
 func (m *ChatModel) SetSize(width, height int) {
 	m.width = width
@@ -186,6 +200,11 @@ func (m *ChatModel) renderAll() string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString(m.renderMessage(msg))
+	}
+	// Append inline processing/activity view during processing
+	if m.processingView != "" {
+		sb.WriteString("\n")
+		sb.WriteString(m.processingView)
 	}
 	return sb.String()
 }
@@ -233,15 +252,7 @@ func (m *ChatModel) renderWelcome() string {
 	lines = append(lines, "")
 	lines = append(lines, center(tip))
 
-	content := strings.Join(lines, "\n")
-	contentLines := strings.Count(content, "\n") + 1
-
-	// Vertically center by prepending blank lines
-	topPad := (m.height - contentLines) / 2
-	if topPad < 0 {
-		topPad = 0
-	}
-	return strings.Repeat("\n", topPad) + content
+	return strings.Join(lines, "\n")
 }
 
 // renderMessage converts a single ChatMessage to a display string with

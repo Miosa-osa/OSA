@@ -201,6 +201,8 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 	case msg.TickMsg:
 		if m.state == StateProcessing {
 			m.status.SetStats(time.Since(m.processingStart), m.activity.ToolCount(), m.activity.InputTokens(), m.activity.OutputTokens())
+			// Push activity view inline into chat viewport (right below messages)
+			m.chat.SetProcessingView(m.activity.View())
 			cmds = append(cmds, m.tickCmd())
 		}
 		var cmd tea.Cmd
@@ -236,7 +238,7 @@ func (m Model) View() string {
 		sections = append(sections, m.status.View())
 		sections = append(sections, m.input.View())
 	case StateProcessing:
-		// Recalculate chat height dynamically as activity/agents panels change size
+		// Activity view is rendered inline in the chat viewport (via SetProcessingView)
 		m.chat.SetSize(m.width, m.chatHeight())
 		sections = append(sections, m.banner.HeaderView())
 		sections = append(sections, m.chat.View())
@@ -246,7 +248,6 @@ func (m Model) View() string {
 		if m.agents.IsActive() {
 			sections = append(sections, m.agents.View())
 		}
-		sections = append(sections, m.activity.View())
 		sections = append(sections, m.status.View())
 	case StatePlanReview:
 		sections = append(sections, m.banner.HeaderView())
@@ -326,6 +327,7 @@ func (m Model) handleProcessingKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, m.keys.Cancel), key.Matches(k, m.keys.Escape):
 		m.state = StateIdle
 		m.activity.Stop()
+		m.chat.ClearProcessingView()
 		m.status.SetActive(false)
 		m.chat.AddSystemMessage("Request cancelled.")
 		return m, m.input.Focus()
@@ -335,6 +337,7 @@ func (m Model) handleProcessingKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, m.keys.ToggleBackground):
 		m.bgTasks = append(m.bgTasks, m.activity.Summary())
 		m.state = StateIdle
+		m.chat.ClearProcessingView()
 		m.chat.AddSystemMessage("Task moved to background.")
 		return m, m.input.Focus()
 	}
@@ -389,6 +392,7 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	m.state = StateProcessing
 	m.processingStart = time.Now()
 	m.status.SetActive(true)
+	m.chat.SetProcessingView(m.activity.View()) // show activity inline immediately
 	m.input.Blur()
 	return m, tea.Batch(m.orchestrate(text), m.tickCmd())
 }
@@ -421,6 +425,7 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 	wasBackground := (m.state == StateIdle)
 	m.activity.Stop()
+	m.chat.ClearProcessingView()
 	m.status.SetActive(false)
 	m.state = StateIdle
 	var cmds []tea.Cmd
@@ -461,6 +466,7 @@ func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, te
 	}
 	wasBackground := (m.state == StateIdle)
 	m.activity.Stop()
+	m.chat.ClearProcessingView()
 	m.status.SetActive(false)
 	m.state = StateIdle
 	cmd := m.input.Focus()
@@ -650,7 +656,8 @@ func (m Model) chatHeight() int {
 	}
 
 	if m.state == StateProcessing {
-		reserved += countLines(m.activity.View())
+		// Activity is rendered inline in the chat viewport, no separate reservation.
+		// Only reserve for agents panel (rendered separately below chat).
 		if m.agents.IsActive() {
 			reserved += countLines(m.agents.View())
 		}
