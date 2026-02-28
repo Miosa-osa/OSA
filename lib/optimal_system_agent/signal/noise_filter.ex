@@ -26,7 +26,7 @@ defmodule OptimalSystemAgent.Signal.NoiseFilter do
 
   @noise_patterns [
     ~r/^(hi|hello|hey|yo|sup)[\s!.]*$/i,
-    ~r/^(ok|okay|sure|yep|yeah|yes|no|nah|nope)[\s!.]*$/i,
+    ~r/^(ok|okay|sure|yep|yeah|yes|no|nah|nope|k|kk|yea|ya|naw)[\s!.]*$/i,
     ~r/^(thanks|thank you|ty|thx|cheers)[\s!.]*$/i,
     ~r/^(lol|haha|hehe|lmao|rofl|😂|👍|🙏|❤️)[\s!.]*$/i,
     ~r/^(good morning|good night|gm|gn)[\s!.]*$/i,

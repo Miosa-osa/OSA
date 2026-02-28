@@ -73,9 +73,34 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   @doc "Format messages into the OpenAI wire format."
   def format_messages(messages) do
     Enum.map(messages, fn
-      %{role: "tool", tool_call_id: tool_call_id} = msg ->
-        %{"role" => "tool", "tool_call_id" => tool_call_id, "content" => to_string(Map.get(msg, :content, ""))}
+      # Tool result messages — preserve tool_call_id for the API
+      %{role: "tool", content: content, tool_call_id: id} ->
+        %{"role" => "tool", "content" => to_string(content), "tool_call_id" => to_string(id)}
 
+      # Assistant messages with tool_calls — preserve structured tool calls
+      %{role: "assistant", content: content, tool_calls: calls} when is_list(calls) and calls != [] ->
+        msg = %{"role" => "assistant", "content" => to_string(content)}
+
+        formatted_calls =
+          Enum.map(calls, fn tc ->
+            %{
+              "id" => to_string(tc[:id] || tc["id"] || ""),
+              "type" => "function",
+              "function" => %{
+                "name" => to_string(tc[:name] || tc["name"] || ""),
+                "arguments" =>
+                  case tc[:arguments] || tc["arguments"] do
+                    a when is_binary(a) -> a
+                    a when is_map(a) -> Jason.encode!(a)
+                    _ -> "{}"
+                  end
+              }
+            }
+          end)
+
+        Map.put(msg, "tool_calls", formatted_calls)
+
+      # Generic atom-keyed messages
       %{role: role, content: content} ->
         %{"role" => to_string(role), "content" => to_string(content)}
 
@@ -112,13 +137,83 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
       %{
         id: call["id"] || generate_id(),
-        name: call["function"]["name"],
+        name: call["function"]["name"] |> to_string() |> String.split(~r/\s+/) |> List.first(),
         arguments: args
       }
     end)
   end
 
+  # Fallback: detect tool calls embedded as XML/JSON in the content field
+  def parse_tool_calls(%{"content" => content}) when is_binary(content) do
+    parse_tool_calls_from_content(content)
+  end
+
   def parse_tool_calls(_), do: []
+
+  @doc false
+  def parse_tool_calls_from_content(content) when is_binary(content) do
+    cond do
+      # Format 1: <function name="tool_name" parameters={...}></function>
+      String.contains?(content, "<function") ->
+        ~r/<function\s+name="([^"]+)"\s+parameters=(\{.*?\})>\s*<\/function>/s
+        |> Regex.scan(content)
+        |> Enum.map(fn [_full, name, args_str] ->
+          args =
+            case Jason.decode(args_str) do
+              {:ok, parsed} -> parsed
+              _ -> %{}
+            end
+
+          %{
+            id: generate_id(),
+            name: name |> String.split(~r/\s+/) |> List.first(),
+            arguments: args
+          }
+        end)
+
+      # Format 2: <function_call>{"name": "...", "arguments": {...}}</function_call>
+      String.contains?(content, "<function_call>") ->
+        ~r/<function_call>\s*(\{.*?\})\s*<\/function_call>/s
+        |> Regex.scan(content)
+        |> Enum.flat_map(fn [_full, json_str] ->
+          case Jason.decode(json_str) do
+            {:ok, %{"name" => name, "arguments" => args}} when is_map(args) ->
+              [%{id: generate_id(), name: name |> String.split(~r/\s+/) |> List.first(), arguments: args}]
+
+            {:ok, %{"name" => name, "arguments" => args}} when is_binary(args) ->
+              case Jason.decode(args) do
+                {:ok, parsed} ->
+                  [%{id: generate_id(), name: name |> String.split(~r/\s+/) |> List.first(), arguments: parsed}]
+
+                _ ->
+                  [%{id: generate_id(), name: name |> String.split(~r/\s+/) |> List.first(), arguments: %{}}]
+              end
+
+            _ ->
+              []
+          end
+        end)
+
+      # Format 3: raw JSON tool call object {"name": "...", "arguments": {...}}
+      String.contains?(content, "\"name\"") and String.contains?(content, "\"arguments\"") ->
+        ~r/\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}/s
+        |> Regex.scan(content)
+        |> Enum.flat_map(fn [json_str] ->
+          case Jason.decode(json_str) do
+            {:ok, %{"name" => name, "arguments" => args}} when is_map(args) ->
+              [%{id: generate_id(), name: name |> String.split(~r/\s+/) |> List.first(), arguments: args}]
+
+            _ ->
+              []
+          end
+        end)
+
+      true ->
+        []
+    end
+  end
+
+  def parse_tool_calls_from_content(_), do: []
 
   # --- Private helpers ---
 

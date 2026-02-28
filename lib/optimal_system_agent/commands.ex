@@ -246,6 +246,13 @@ defmodule OptimalSystemAgent.Commands do
       {"hooks", "Show hook pipeline status", &cmd_hooks/2},
       {"learning", "Learning engine metrics", &cmd_learning/2},
 
+      # ── Missing commands ──
+      {"budget", "Token and cost budget status", &cmd_budget/2},
+      {"thinking", "Toggle extended thinking mode", &cmd_thinking/2},
+      {"export", "Export session to file", &cmd_export/2},
+      {"machines", "List connected machines", &cmd_machines/2},
+      {"providers", "List available LLM providers", &cmd_providers/2},
+
       # ── System ──
       {"reload", "Reload soul/skill files", &cmd_reload/2},
       {"doctor", "System diagnostics", &cmd_doctor/2},
@@ -404,6 +411,13 @@ defmodule OptimalSystemAgent.Commands do
         /swarms             List swarm presets
         /hooks              Hook pipeline status
         /learning           Learning engine metrics
+
+      Budget & Providers:
+        /budget             Token and cost budget status
+        /providers          List all LLM providers with status
+        /thinking           Toggle extended thinking mode
+        /export [file]      Export session to file
+        /machines           List connected machines and fleet
 
       Scheduler:
         /schedule           Scheduler overview (crons, triggers, heartbeat)
@@ -1725,6 +1739,225 @@ defmodule OptimalSystemAgent.Commands do
     rescue
       _ -> {:command, "Learning engine not initialized yet."}
     end
+  end
+
+  # ── Budget Command ──────────────────────────────────────────────
+
+  defp cmd_budget(_arg, _session_id) do
+    try do
+      {:ok, status} = OptimalSystemAgent.Agent.Budget.get_status()
+
+      daily_pct =
+        if status.daily_limit > 0,
+          do: Float.round(status.daily_spent / status.daily_limit * 100, 1),
+          else: 0.0
+
+      monthly_pct =
+        if status.monthly_limit > 0,
+          do: Float.round(status.monthly_spent / status.monthly_limit * 100, 1),
+          else: 0.0
+
+      output =
+        """
+        Budget Status
+
+        Daily:
+          Spent:     $#{Float.round(status.daily_spent, 4)}
+          Limit:     $#{Float.round(status.daily_limit, 2)}
+          Remaining: $#{Float.round(status.daily_remaining, 4)} (#{daily_pct}% used)
+
+        Monthly:
+          Spent:     $#{Float.round(status.monthly_spent, 4)}
+          Limit:     $#{Float.round(status.monthly_limit, 2)}
+          Remaining: $#{Float.round(status.monthly_remaining, 4)} (#{monthly_pct}% used)
+
+        Per-call limit: $#{Float.round(status.per_call_limit, 2)}
+        Ledger entries: #{status.ledger_entries}
+        """
+        |> String.trim()
+
+      {:command, output}
+    rescue
+      _ -> {:command, "Budget tracker not available."}
+    end
+  end
+
+  # ── Thinking Command ──────────────────────────────────────────────
+
+  defp cmd_thinking(arg, _session_id) do
+    trimmed = String.trim(arg)
+
+    cond do
+      trimmed == "" ->
+        # Show current thinking status
+        enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
+        budget = Application.get_env(:optimal_system_agent, :thinking_budget_tokens, 5_000)
+        provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+        status_str = if enabled, do: "enabled", else: "disabled"
+        provider_note =
+          if enabled and provider not in [:anthropic],
+            do: "\n  Note: Extended thinking only works with Anthropic provider (current: #{provider})",
+            else: ""
+
+        output =
+          """
+          Extended Thinking: #{status_str}
+            Budget tokens: #{format_number(budget)}
+            Provider:      #{provider}#{provider_note}
+
+          Usage:
+            /thinking on         Enable extended thinking
+            /thinking off        Disable extended thinking
+            /thinking budget N   Set thinking budget tokens
+          """
+          |> String.trim()
+
+        {:command, output}
+
+      trimmed == "on" ->
+        Application.put_env(:optimal_system_agent, :thinking_enabled, true)
+        {:command, "Extended thinking enabled."}
+
+      trimmed == "off" ->
+        Application.put_env(:optimal_system_agent, :thinking_enabled, false)
+        {:command, "Extended thinking disabled."}
+
+      String.starts_with?(trimmed, "budget ") ->
+        budget_str = String.trim(String.trim_leading(trimmed, "budget"))
+
+        case Integer.parse(budget_str) do
+          {n, _} when n > 0 ->
+            Application.put_env(:optimal_system_agent, :thinking_budget_tokens, n)
+            {:command, "Thinking budget set to #{format_number(n)} tokens."}
+
+          _ ->
+            {:command, "Invalid budget. Usage: /thinking budget 10000"}
+        end
+
+      true ->
+        {:command, "Unknown option: #{trimmed}\n\nUsage: /thinking [on|off|budget N]"}
+    end
+  end
+
+  # ── Export Command ──────────────────────────────────────────────
+
+  defp cmd_export(arg, session_id) do
+    trimmed = String.trim(arg)
+
+    filename =
+      if trimmed == "" do
+        timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d_%H%M%S")
+        "osa_session_#{timestamp}.md"
+      else
+        trimmed
+      end
+
+    try do
+      messages = OptimalSystemAgent.Agent.Memory.load_session(session_id)
+
+      if messages == [] or is_nil(messages) do
+        {:command, "No messages in current session to export."}
+      else
+        content =
+          [
+            "# OSA Session Export",
+            "Session: #{session_id}",
+            "Exported: #{Calendar.strftime(DateTime.utc_now(), "%Y-%m-%d %H:%M:%S UTC")}",
+            "Messages: #{length(messages)}",
+            "",
+            "---",
+            ""
+            | Enum.map(messages, fn msg ->
+                role = msg[:role] || msg["role"] || "unknown"
+                text = msg[:content] || msg["content"] || ""
+                "## #{String.capitalize(to_string(role))}\n\n#{text}\n"
+              end)
+          ]
+          |> Enum.join("\n")
+
+        path = Path.expand(filename)
+        File.write!(path, content)
+
+        {:command, "Session exported to: #{path}\n  Messages: #{length(messages)}"}
+      end
+    rescue
+      e -> {:command, "Export failed: #{Exception.message(e)}"}
+    end
+  end
+
+  # ── Machines Command ──────────────────────────────────────────────
+
+  defp cmd_machines(_arg, _session_id) do
+    try do
+      machines = OptimalSystemAgent.Machines.active()
+
+      active_list =
+        if machines == [] do
+          "  (none active)"
+        else
+          Enum.map_join(machines, "\n", fn m ->
+            "  #{String.pad_trailing(to_string(m), 20)} active"
+          end)
+        end
+
+      # Also check fleet for remote agents
+      fleet_output =
+        try do
+          agents = OptimalSystemAgent.Fleet.Registry.list_agents()
+          stats = OptimalSystemAgent.Fleet.Registry.get_stats()
+
+          if agents == [] do
+            "\nFleet: no remote agents registered"
+          else
+            agent_lines =
+              Enum.map_join(agents, "\n", fn a ->
+                status = a[:status] || "unknown"
+                id = a[:agent_id] || a[:id] || "?"
+                "  #{String.pad_trailing(to_string(id), 24)} #{status}"
+              end)
+
+            "\nFleet (#{stats.total} total, #{stats.online} online):\n#{agent_lines}"
+          end
+        rescue
+          _ -> "\nFleet: registry not available"
+        end
+
+      output = "Machines (skill groups):\n#{active_list}#{fleet_output}"
+      {:command, output}
+    rescue
+      _ -> {:command, "Machines module not available."}
+    end
+  end
+
+  # ── Providers Command ──────────────────────────────────────────────
+
+  defp cmd_providers(_arg, _session_id) do
+    alias OptimalSystemAgent.Providers.Registry, as: ProvReg
+
+    providers = ProvReg.list_providers()
+    default = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    lines =
+      providers
+      |> Enum.sort()
+      |> Enum.map(fn p ->
+        configured = ProvReg.provider_configured?(p)
+        active_marker = if p == default, do: " *", else: "  "
+        status = if configured, do: "configured", else: "no API key"
+
+        model =
+          case ProvReg.provider_info(p) do
+            {:ok, info} -> info.default_model || "—"
+            _ -> "—"
+          end
+
+        "#{active_marker}#{String.pad_trailing(to_string(p), 16)} #{String.pad_trailing(status, 14)} #{model}"
+      end)
+
+    header = "LLM Providers (* = active, #{length(providers)} total):\n"
+    footer = "\n\nSwitch: /model <provider> [model]"
+    {:command, header <> Enum.join(lines, "\n") <> footer}
   end
 
   # ── Workflow Commands (prompt expansion from priv/commands/workflow/) ──

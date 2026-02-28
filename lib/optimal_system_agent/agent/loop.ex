@@ -95,71 +95,94 @@ defmodule OptimalSystemAgent.Agent.Loop do
     signal = Classifier.classify_fast(message, state.channel)
     Classifier.classify_async(message, state.channel, state.session_id)
 
-    # 2. Check noise filter — but ALWAYS process, just log the classification
-    #    Every message a user sends is a signal. The weight determines what kind.
-    #    Noise filtering is informational, not a gate.
+    # 2. Check noise filter — gate low-signal messages to avoid wasting LLM calls
     case NoiseFilter.filter(message) do
       {:noise, reason} ->
-        Logger.debug("Signal classified as low-weight (#{reason}), weight=#{signal.weight}")
+        Logger.debug("Signal classified as noise (#{reason}), weight=#{signal.weight}")
         Bus.emit(:system_event, %{event: :signal_low_weight, signal: signal, reason: reason})
 
+        # Persist to session but don't invoke LLM
+        Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
+        ack = noise_acknowledgment(reason)
+        Memory.append(state.session_id, %{role: "assistant", content: ack, channel: state.channel})
+        {:reply, {:ok, ack}, state}
+
       {:signal, _weight} ->
-        :ok
-    end
+        # 3. Persist user message to JSONL session storage
+        Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
 
-    # 3. Persist user message to JSONL session storage
-    Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
+        # 4. Compact message history if needed, then process through agent loop
+        compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+        state = %{state | messages: compacted, current_signal: signal}
 
-    # 4. Compact message history if needed, then process through agent loop
-    compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
-    state = %{state | messages: compacted, current_signal: signal}
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "user", content: message}],
+            iteration: 0,
+            status: :thinking
+        }
 
-    state = %{
-      state
-      | messages: state.messages ++ [%{role: "user", content: message}],
-        iteration: 0,
-        status: :thinking
-    }
+        # 5. Check if plan mode should trigger
+        if not skip_plan and should_plan?(signal, state) do
+          # Plan mode: single LLM call with plan overlay, no tools
+          state = %{state | plan_mode: true}
+          context = Context.build(state, signal)
 
-    # 5. Check if plan mode should trigger
-    if not skip_plan and should_plan?(signal, state) do
-      # Plan mode: single LLM call with plan overlay, no tools
-      state = %{state | plan_mode: true}
-      context = Context.build(state, signal)
+          Bus.emit(:llm_request, %{session_id: state.session_id, iteration: 0})
+          start_time = System.monotonic_time(:millisecond)
 
-      Bus.emit(:llm_request, %{session_id: state.session_id, iteration: 0})
-      start_time = System.monotonic_time(:millisecond)
+          result = llm_chat(state, context.messages, tools: [], temperature: 0.3)
 
-      result = llm_chat(state, context.messages, tools: [], temperature: 0.3)
+          duration_ms = System.monotonic_time(:millisecond) - start_time
 
-      duration_ms = System.monotonic_time(:millisecond) - start_time
+          usage =
+            case result do
+              {:ok, resp} -> Map.get(resp, :usage, %{})
+              _ -> %{}
+            end
 
-      usage =
-        case result do
-          {:ok, resp} -> Map.get(resp, :usage, %{})
-          _ -> %{}
-        end
+          Bus.emit(:llm_response, %{
+            session_id: state.session_id,
+            duration_ms: duration_ms,
+            usage: usage
+          })
 
-      Bus.emit(:llm_response, %{
-        session_id: state.session_id,
-        duration_ms: duration_ms,
-        usage: usage
-      })
+          case result do
+            {:ok, %{content: plan_text}} ->
+              Memory.append(state.session_id, %{role: "assistant", content: plan_text, channel: state.channel})
+              state = %{state | plan_mode: false, status: :idle}
+              emit_context_pressure(state)
+              {:reply, {:plan, plan_text, signal}, state}
 
-      case result do
-        {:ok, %{content: plan_text}} ->
-          Memory.append(state.session_id, %{role: "assistant", content: plan_text, channel: state.channel})
-          state = %{state | plan_mode: false, status: :idle}
-          emit_context_pressure(state)
-          {:reply, {:plan, plan_text, signal}, state}
+            {:error, reason} ->
+              # Fall through to normal execution on plan failure
+              Logger.warning(
+                "Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution"
+              )
 
-        {:error, reason} ->
-          # Fall through to normal execution on plan failure
-          Logger.warning(
-            "Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution"
-          )
+              state = %{state | plan_mode: false}
+              {response, state} = run_loop(state)
 
-          state = %{state | plan_mode: false}
+              state = %{
+                state
+                | messages: state.messages ++ [%{role: "assistant", content: response}],
+                  status: :idle
+              }
+
+              Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
+
+              emit_context_pressure(state)
+
+              Bus.emit(:agent_response, %{
+                session_id: state.session_id,
+                response: response,
+                signal: signal
+              })
+
+              {:reply, {:ok, response}, state}
+          end
+        else
+          # Normal execution path
           {response, state} = run_loop(state)
 
           state = %{
@@ -168,6 +191,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
               status: :idle
           }
 
+          # 6. Persist assistant response to JSONL session storage
           Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
 
           emit_context_pressure(state)
@@ -179,29 +203,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           })
 
           {:reply, {:ok, response}, state}
-      end
-    else
-      # Normal execution path
-      {response, state} = run_loop(state)
-
-      state = %{
-        state
-        | messages: state.messages ++ [%{role: "assistant", content: response}],
-          status: :idle
-      }
-
-      # 6. Persist assistant response to JSONL session storage
-      Memory.append(state.session_id, %{role: "assistant", content: response, channel: state.channel})
-
-      emit_context_pressure(state)
-
-      Bus.emit(:agent_response, %{
-        session_id: state.session_id,
-        response: response,
-        signal: signal
-      })
-
-      {:reply, {:ok, response}, state}
+        end
     end
   end
 
@@ -501,4 +503,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
       :exit, _ -> :ok
     end
   end
+
+  # --- Noise Acknowledgments ---
+  # Minimal responses for noise-classified messages (no LLM call needed)
+  defp noise_acknowledgment(:empty), do: ""
+  defp noise_acknowledgment(:too_short), do: "\u{1F44D}"
+  defp noise_acknowledgment(:pattern_match), do: "\u{1F44D}"
+  defp noise_acknowledgment(:low_weight), do: "Got it."
+  defp noise_acknowledgment(:llm_classified), do: "Noted."
+  defp noise_acknowledgment(_), do: "\u{1F44D}"
 end

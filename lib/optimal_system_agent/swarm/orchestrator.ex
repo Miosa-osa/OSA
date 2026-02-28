@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
   @max_agents 10
   # 5 minutes
   @default_timeout_ms 300_000
+  @valid_patterns [:parallel, :pipeline, :debate, :review]
 
   defstruct swarms: %{},
             active_count: 0
@@ -267,6 +268,26 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
   # ── Launch Logic ─────────────────────────────────────────────────────
 
   defp do_launch(task, opts, state) do
+    # 0. Validate pattern early — reject unknown patterns before spawning anything
+    if Keyword.has_key?(opts, :pattern) do
+      pattern = Keyword.get(opts, :pattern)
+
+      if pattern not in @valid_patterns do
+        valid_str = @valid_patterns |> Enum.map_join(", ", &to_string/1)
+
+        {:reply,
+         {:error,
+          "Unknown swarm pattern: #{inspect(pattern)}. Valid patterns: #{valid_str}"},
+         state}
+      else
+        do_launch_validated(task, opts, state)
+      end
+    else
+      do_launch_validated(task, opts, state)
+    end
+  end
+
+  defp do_launch_validated(task, opts, state) do
     swarm_id = generate_id()
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     max_agents = Keyword.get(opts, :max_agents, @max_agents)
@@ -330,8 +351,7 @@ defmodule OptimalSystemAgent.Swarm.Orchestrator do
                 Patterns.review_loop(workers, plan.agents, swarm_id)
 
               other ->
-                Logger.warning("Unknown pattern #{inspect(other)}, falling back to parallel")
-                Patterns.parallel(workers, plan.agents, swarm_id)
+                raise "Invalid swarm pattern #{inspect(other)} reached execution — this should have been caught by validation"
             end
 
           GenServer.cast(orchestrator, {:swarm_complete, swarm_id, results})
