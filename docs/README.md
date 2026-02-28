@@ -69,6 +69,14 @@
 | Feishu | [feishu.md](guides/channels/feishu.md) |
 | QQ | [qq.md](guides/channels/qq.md) |
 
+## TUI (Terminal UI)
+
+| Doc | Description |
+|-----|-------------|
+| [Overview](tui/README.md) | Architecture, build, and run instructions |
+| [Roadmap](tui/roadmap.md) | Development history, state machine, completed features, planned work |
+| [Known Issues](tui/bugs.md) | Bug tracker, pipeline audit, recently fixed issues |
+
 ## Reference
 
 | Doc | Description |
@@ -171,6 +179,10 @@ docs/
 │   ├── orchestration.md
 │   ├── hooks.md
 │   └── skills.md
+├── tui/                           ← Go terminal UI
+│   ├── README.md
+│   ├── roadmap.md
+│   └── bugs.md
 ├── reference/                     ← API & CLI reference
 │   ├── README.md
 │   ├── cli.md

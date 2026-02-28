@@ -7,12 +7,6 @@
 
 ## Open
 
-### BUG-001: swarm_cancelled and swarm_timeout SSE events not parsed
-**Severity:** Medium
-**File:** `priv/go/tui/client/sse.go` → `parseSystemEvent()`
-**Description:** Backend emits `swarm_cancelled` and `swarm_timeout` system events with `session_id`, but the TUI's `parseSystemEvent()` only handles `swarm_started`, `swarm_completed`, and `swarm_failed`. The cancelled/timeout events are silently logged as "unknown system_event" to stderr.
-**Fix:** Add event types + cases to sse.go, add handlers in app.go (terminate processing state, show message).
-
 ### BUG-002: RefreshToken endpoint defined but never called
 **Severity:** Low
 **File:** `priv/go/tui/client/http.go`
@@ -62,41 +56,8 @@
 
 ## Pipeline Audit Findings (2026-02-28)
 
-> Full audit of Backend → SSE → TUI data pipeline. The backend emits 63+ system_event types.
-> The TUI parses 18 (28% coverage). 45+ events are silently dropped.
-
-### BUG-011: 45+ backend events missing session_id — never reach TUI [CRITICAL]
-**Severity:** Critical
-**Scope:** Backend (`lib/optimal_system_agent/agent/orchestrator.ex`, `swarm/intelligence.ex`, `swarm/pact.ex`, `agent/hooks.ex`, `agent/learning.ex`, `budget.ex`, `treasury.ex`)
-**Description:** The SSE bridge routes events to `osa:session:{session_id}`. Events without `session_id` go to a global firehose the TUI never subscribes to. The following event categories are completely invisible to the TUI:
-
-| Category | Events | session_id? | Impact |
-|----------|--------|-------------|--------|
-| Agent Orchestrator | orchestrator_task_started, _appraised, _agents_spawning, _wave_started, _agent_started, _agent_progress, _agent_completed, _agent_failed, _task_completed, _task_failed, _synthesis_started, _synthesis_completed | **NO** | Orchestrator progress panel shows nothing |
-| Swarm Intelligence | swarm_intelligence_round, _vote, _consensus_progress, _converged, _diverged, _deadlocked | NO | Swarm appears frozen between launch and completion |
-| Pact Workflows | pact_proposed, _voted, _ratified, _rejected, _expired, _revoked, _enacted, _rollback, _checkpoint | NO | Pact system invisible |
-| Budget | budget_warning, budget_exceeded, cost_tier_update, budget_reset | NO (except cost_recorded) | Spending limits invisible |
-| Treasury | treasury_*, balance_*, payout_* | NO | Token economics invisible |
-| Learning | learning_consolidation, pattern_detected, skill_generated, error_recovered | NO | Self-improvement invisible |
-| Hooks | hook_blocked | NO | Security violations invisible |
-| Scheduler | heartbeat, proactive_alert | NO | Scheduler invisible |
-
-**Fix:** Add `session_id` to all Bus.emit calls in the affected modules, same pattern used in `swarm/orchestrator.ex`.
-
-### BUG-012: task_created/task_updated are ghost events — backend never emits them [CRITICAL]
-**Severity:** Critical
-**Files:** `priv/go/tui/client/sse.go:463-472` (parser), `priv/go/tui/model/tasks.go` (display)
-**Description:** The TUI parses `task_created` and `task_updated` system events and has a full TasksModel panel to display them. However, the backend **never emits** events with those names. The backend's task queue (`lib/optimal_system_agent/task_queue.ex`) emits `task_enqueued`, `task_completed`, `task_failed`, `task_leased` — completely different names. The TUI's task checklist panel is dead UI that never gets populated.
-**Fix:** Either:
-- (a) Rename TUI parsers to match backend event names (`task_enqueued` → `TaskCreatedEvent`, etc.)
-- (b) Add `task_created`/`task_updated` emissions in the backend at appropriate lifecycle points
-- (c) Both — wire up task_queue events AND add Claude Code-style task tracking events
-
-### BUG-013: Agent Orchestrator events never reach TUI despite having handlers [CRITICAL]
-**Severity:** Critical
-**Files:** `lib/optimal_system_agent/agent/orchestrator.ex`, `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`
-**Description:** The TUI has full handlers for `orchestrator_task_started`, `orchestrator_wave_started`, `orchestrator_agent_started`, `orchestrator_agent_progress`, `orchestrator_agent_completed`, `orchestrator_agent_failed`, `orchestrator_task_completed` — with a dedicated AgentsModel panel showing roles, waves, tool counts, token usage. But Agent.Orchestrator's Bus.emit calls don't include `session_id`, so these events never reach the TUI's session-scoped SSE stream. The multi-agent progress panel is fully built but always empty.
-**Fix:** Add `session_id` to all 12 Bus.emit calls in `agent/orchestrator.ex`. The orchestrator's TaskState already stores `session_id` (from the orchestrate API call) — it just needs to be included in the event payloads.
+> Full audit of Backend → SSE → TUI data pipeline. Backend emits 63+ system_event types.
+> After fixes: ~28 events fully wired end-to-end. Remaining gaps are low-priority subsystems.
 
 ### BUG-014: Swarm intelligence rounds invisible — no SSE events parsed
 **Severity:** Medium
@@ -104,17 +65,12 @@
 **Description:** Swarm Intelligence emits 6 event types (round progress, votes, consensus, convergence, divergence, deadlock) during debate/review patterns. None are parsed by the TUI. During a debate swarm, the user sees "Swarm launched" then nothing until "Swarm completed" — potentially minutes of silence.
 **Fix:** Add event types + parsers in sse.go, add progress display in app.go (could reuse the activity panel or agents panel).
 
-### BUG-015: Budget warnings and spending limits invisible
-**Severity:** Medium
-**Files:** `lib/optimal_system_agent/budget.ex`, `priv/go/tui/client/sse.go`
-**Description:** Backend emits `budget_warning` (75% threshold), `budget_exceeded` (100%), and `cost_recorded` events. None reach the TUI because they lack `session_id` (except `cost_recorded`). User has no visibility into token spending or budget limits.
-**Fix:** Add `session_id` to budget events. Add TUI parsers. Display as system warnings in chat.
-
-### BUG-016: Security hook blocks invisible to user
-**Severity:** High
-**Files:** `lib/optimal_system_agent/agent/hooks.ex`, `priv/go/tui/client/sse.go`
-**Description:** When the security hook blocks a dangerous command (e.g., `rm -rf`), it emits `hook_blocked` without `session_id`. The user never sees that their action was blocked or why. The processing state may hang with no feedback.
-**Fix:** Add `session_id` to hook_blocked emissions. Parse in TUI. Display as system error with the blocked reason.
+### Remaining unparsed events (low priority)
+- Swarm Intelligence (6 events) — no TUI parser, no `session_id`
+- Pact workflows (9 events) — no TUI parser, no `session_id`
+- Treasury (8 events) — no TUI parser, no `session_id`
+- Learning (4 events) — no TUI parser, no `session_id`
+- Scheduler heartbeats (2 events) — no TUI parser
 
 ---
 
@@ -131,20 +87,20 @@ context_pressure                 ✓ session_id  ✓ parsed     ✓ handled     
 swarm_started                    ✓ session_id  ✓ parsed     ✓ handled     ✓ system message
 swarm_completed                  ✓ session_id  ✓ parsed     ✓ handled     ✓ agent message
 swarm_failed                     ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
-swarm_cancelled                  ✓ session_id  ✗ NOT PARSED ✗             ✗ (BUG-001)
-swarm_timeout                    ✓ session_id  ✗ NOT PARSED ✗             ✗ (BUG-001)
-orchestrator_task_started        ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_wave_started        ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_agent_started       ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_agent_progress      ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_agent_completed     ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_agent_failed        ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-orchestrator_task_completed      ✗ NO SID      ✓ parsed     ✓ handled     ✗ DEAD (BUG-013)
-task_created                     ✗ NEVER EMITTED ✓ parsed   ✓ handled     ✗ DEAD (BUG-012)
-task_updated                     ✗ NEVER EMITTED ✓ parsed   ✓ handled     ✗ DEAD (BUG-012)
-budget_warning                   ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-015)
-budget_exceeded                  ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-015)
-hook_blocked                     ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-016)
+swarm_cancelled                  ✓ session_id  ✓ parsed     ✓ handled     ✓ system warning
+swarm_timeout                    ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
+orchestrator_task_started        ✓ session_id  ✓ parsed     ✓ handled     ✓ agents panel
+orchestrator_wave_started        ✓ session_id  ✓ parsed     ✓ handled     ✓ wave counter
+orchestrator_agent_started       ✓ session_id  ✓ parsed     ✓ handled     ✓ agent added
+orchestrator_agent_progress      ✓ session_id  ✓ parsed     ✓ handled     ✓ progress update
+orchestrator_agent_completed     ✓ session_id  ✓ parsed     ✓ handled     ✓ agent done
+orchestrator_agent_failed        ✓ session_id  ✓ parsed     ✓ handled     ✓ agent failed
+orchestrator_task_completed      ✓ session_id  ✓ parsed     ✓ handled     ✓ panel stop
+task_created                     ✓ session_id  ✓ parsed     ✓ handled     ✓ task checklist
+task_updated                     ✓ session_id  ✓ parsed     ✓ handled     ✓ status update
+budget_warning                   ✓ session_id  ✓ parsed     ✓ handled     ✓ system warning
+budget_exceeded                  ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
+hook_blocked                     ✓ session_id  ✓ parsed     ✓ handled     ✓ error message
 swarm_intelligence_round         ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-014)
 swarm_intelligence_converged     ✗ NO SID      ✗ not parsed ✗             ✗ (BUG-014)
 learning_consolidation           ✗ NO SID      ✗ not parsed ✗             ✗ (LOW)

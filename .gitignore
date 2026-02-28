@@ -25,3 +25,10 @@ native/osa_nif/target/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# macOS/iCloud duplicate artifacts
+*" 2"*
+*" 3"*
+
+# Go TUI compiled binary
+priv/go/tui/osa

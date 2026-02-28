@@ -62,6 +62,21 @@ ollama pull llama3.2:latest    # Pull the model
 /model ollama llama3.2:latest  # Use it
 ```
 
+### Health endpoint shows wrong model
+
+**Cause**: Prior to `ec37944`, the health endpoint read `OLLAMA_MODEL` regardless of active provider.
+
+**Fix**: Now resolved automatically. The model name resolves from provider-specific env vars:
+```bash
+# Override for any provider
+export OSA_MODEL=my-custom-model
+
+# Or set provider-specific
+export GROQ_MODEL=llama-3.3-70b-versatile
+export ANTHROPIC_MODEL=claude-sonnet-4-6
+export OPENAI_MODEL=gpt-4o
+```
+
 ### Hallucinated tool calls from small models
 
 **Cause**: Model too small for tool use, but tool gating not working.

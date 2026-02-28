@@ -98,9 +98,16 @@ curl http://localhost:8089/health
 ```json
 {
   "status": "ok",
-  "version": "0.1.0"
+  "version": "0.2.5",
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile"
 }
 ```
+
+The `model` field resolves from:
+1. `OSA_MODEL` env var (explicit override)
+2. Provider-specific env var (`GROQ_MODEL`, `ANTHROPIC_MODEL`, `OPENAI_MODEL`, etc.)
+3. Provider's built-in default (e.g., Groq → `llama-3.3-70b-versatile`)
 
 ---
 
@@ -230,21 +237,21 @@ curl -X POST http://localhost:8089/api/v1/classify \
 
 ---
 
-### GET /api/v1/skills
+### GET /api/v1/tools
 
-List all registered skills (built-in + SKILL.md + MCP).
+List all registered executable tools (built-in Elixir modules the LLM can call).
 
 **Request:**
 
 ```bash
-curl http://localhost:8089/api/v1/skills
+curl http://localhost:8089/api/v1/tools
 ```
 
 **Response (200):**
 
 ```json
 {
-  "skills": [
+  "tools": [
     {
       "name": "file_read",
       "description": "Read the contents of a file from the filesystem",
@@ -257,18 +264,6 @@ curl http://localhost:8089/api/v1/skills
           }
         },
         "required": ["path"]
-      }
-    },
-    {
-      "name": "file_write",
-      "description": "Write content to a file on the filesystem",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": { "type": "string" },
-          "content": { "type": "string" }
-        },
-        "required": ["path", "content"]
       }
     },
     {
@@ -292,34 +287,22 @@ curl http://localhost:8089/api/v1/skills
         },
         "required": ["query"]
       }
-    },
-    {
-      "name": "memory_save",
-      "description": "Save information to long-term memory",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "content": { "type": "string" },
-          "category": { "type": "string" }
-        },
-        "required": ["content"]
-      }
     }
   ],
-  "count": 5
+  "count": 3
 }
 ```
 
 ---
 
-### POST /api/v1/skills/:name/execute
+### POST /api/v1/tools/:name/execute
 
-Execute a specific skill directly, bypassing the agent loop. Useful for SDK integrations where you want to call a tool programmatically.
+Execute a tool directly, bypassing the agent loop. Useful for SDK integrations.
 
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/skills/web_search/execute \
+curl -X POST http://localhost:8089/api/v1/tools/web_search/execute \
   -H "Content-Type: application/json" \
   -d '{
     "arguments": {
@@ -330,24 +313,53 @@ curl -X POST http://localhost:8089/api/v1/skills/web_search/execute \
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `arguments` | object | No | Arguments matching the skill's parameter schema. Default: `{}` |
+| `arguments` | object | No | Arguments matching the tool's parameter schema. Default: `{}` |
 
 **Response (200):**
 
 ```json
 {
-  "skill": "web_search",
+  "tool": "web_search",
   "status": "completed",
   "result": "Top results for 'Elixir OTP 28 release notes':\n1. ..."
 }
 ```
 
-**Response (422 — Skill Error):**
+**Response (422 — Tool Error):**
 
 ```json
 {
-  "error": "skill_error",
+  "error": "tool_error",
   "details": "Ticker 'INVALID' not found"
+}
+```
+
+---
+
+### GET /api/v1/skills
+
+List SKILL.md prompt template definitions (not executable tools).
+
+**Request:**
+
+```bash
+curl http://localhost:8089/api/v1/skills
+```
+
+**Response (200):**
+
+```json
+{
+  "skills": [
+    {
+      "name": "tdd-enforcer",
+      "description": "Enforces TDD discipline with RED-GREEN-REFACTOR cycle",
+      "category": "methodology",
+      "triggers": ["test", "tdd", "coverage"],
+      "priority": 80
+    }
+  ],
+  "count": 1
 }
 ```
 
@@ -425,6 +437,74 @@ curl http://localhost:8089/api/v1/machines
 
 ---
 
+### POST /api/v1/swarm/launch
+
+Launch a multi-agent swarm. Returns immediately with the swarm ID.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:8089/api/v1/swarm/launch \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{
+    "task": "Analyze this codebase for security vulnerabilities",
+    "pattern": "parallel",
+    "max_agents": 5,
+    "session_id": "my-session"
+  }'
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `task` | string | Yes | The task for the swarm to execute |
+| `pattern` | string | No | Swarm pattern: `parallel`, `pipeline`, `debate`, `review`. Invalid values return 400. |
+| `max_agents` | integer | No | Maximum agents to spawn |
+| `timeout_ms` | integer | No | Swarm timeout in milliseconds (default: 300000) |
+| `session_id` | string | No | Session for SSE event routing |
+
+**Response (202 — Launched):**
+
+```json
+{
+  "swarm_id": "swarm_abc123",
+  "status": "running",
+  "pattern": "parallel",
+  "agent_count": 3,
+  "agents": [],
+  "started_at": "2026-02-28T10:30:00Z"
+}
+```
+
+**Response (400 — Invalid Pattern):**
+
+```json
+{
+  "error": "invalid_pattern",
+  "details": "Invalid swarm pattern 'yolo'. Valid patterns: parallel, pipeline, debate, review"
+}
+```
+
+---
+
+### GET /api/v1/swarm/:id
+
+Get the status and result of a specific swarm.
+
+```bash
+curl http://localhost:8089/api/v1/swarm/swarm_abc123
+```
+
+### DELETE /api/v1/swarm/:id
+
+Cancel a running swarm.
+
+```bash
+curl -X DELETE http://localhost:8089/api/v1/swarm/swarm_abc123
+```
+
+---
+
 ### GET /api/v1/stream/:session_id
 
 Server-Sent Events (SSE) stream for a specific session. Connect to this endpoint before sending a message to that session to receive real-time events.
@@ -478,11 +558,13 @@ When the client disconnects, the server detects the broken pipe and cleans up th
 | HTTP Status | Error Code | Description |
 |-------------|------------|-------------|
 | 400 | `invalid_request` | Missing required field or malformed JSON |
+| 400 | `invalid_pattern` | Invalid swarm pattern (valid: `parallel`, `pipeline`, `debate`, `review`) |
 | 401 | `MISSING_TOKEN` | Authentication required but no token provided |
 | 401 | `INVALID_TOKEN` | Token is invalid, expired, or has bad signature |
 | 404 | `not_found` | Endpoint does not exist |
 | 422 | `SIGNAL_BELOW_THRESHOLD` | Message classified as noise and filtered |
 | 422 | `skill_error` | Skill execution failed with expected error |
+| 422 | `swarm_error` | Swarm launch or execution failed |
 | 500 | `agent_error` | Unexpected error in the agent loop |
 
 All error responses follow this format:
