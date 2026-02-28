@@ -666,9 +666,11 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 		m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
 		return m, nil
 	case strings.HasPrefix(text, "/login"):
-		return m, m.doLogin(strings.TrimSpace(strings.TrimPrefix(text, "/login")))
+		m.toasts.Add("Authenticating...", model.ToastInfo)
+		return m, tea.Batch(m.doLogin(strings.TrimSpace(strings.TrimPrefix(text, "/login"))), m.tickCmd())
 	case strings.HasPrefix(text, "/logout"):
-		return m, m.doLogout()
+		m.toasts.Add("Logging out...", model.ToastInfo)
+		return m, tea.Batch(m.doLogout(), m.tickCmd())
 	case text == "/sessions":
 		m.toasts.Add("Loading sessions...", model.ToastInfo)
 		return m, tea.Batch(m.listSessions(), m.tickCmd())
@@ -679,16 +681,21 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if arg == "new" {
-			return m, m.createSession()
+			m.toasts.Add("Creating session...", model.ToastInfo)
+			return m, tea.Batch(m.createSession(), m.tickCmd())
 		}
-		return m, m.switchSession(arg)
+		m.toasts.Add(fmt.Sprintf("Switching to session %s...", arg), model.ToastInfo)
+		return m, tea.Batch(m.switchSession(arg), m.tickCmd())
 	case text == "/models":
 		m.toasts.Add("Loading models...", model.ToastInfo)
 		m.input.Blur()
 		return m, tea.Batch(m.fetchModels(), m.tickCmd())
 	case text == "/model":
-		m.chat.AddSystemMessage(fmt.Sprintf("Current: %s / %s", m.banner.Provider(), m.banner.ModelName()))
-		return m, nil
+		// Open picker filtered to current provider for quick switching
+		m.pendingProviderFilter = strings.ToLower(m.banner.Provider())
+		m.toasts.Add(fmt.Sprintf("Loading %s models...", m.banner.Provider()), model.ToastInfo)
+		m.input.Blur()
+		return m, tea.Batch(m.fetchModels(), m.tickCmd())
 	case strings.HasPrefix(text, "/model "):
 		arg := strings.TrimSpace(strings.TrimPrefix(text, "/model"))
 		parts := strings.SplitN(arg, "/", 2)

@@ -25,6 +25,11 @@ defmodule OptimalSystemAgent.Providers.Groq do
   def default_model, do: "llama-3.3-70b-versatile"
 
   @impl true
+  def available_models do
+    ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+  end
+
+  @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :groq_api_key)
 

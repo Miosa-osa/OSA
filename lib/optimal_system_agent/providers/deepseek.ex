@@ -26,6 +26,11 @@ defmodule OptimalSystemAgent.Providers.DeepSeek do
   def default_model, do: "deepseek-chat"
 
   @impl true
+  def available_models do
+    ["deepseek-chat", "deepseek-reasoner"]
+  end
+
+  @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :deepseek_api_key)
 

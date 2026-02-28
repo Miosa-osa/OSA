@@ -25,6 +25,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def default_model, do: "claude-sonnet-4-6"
 
   @impl true
+  def available_models do
+    ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
+  end
+
+  @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
 

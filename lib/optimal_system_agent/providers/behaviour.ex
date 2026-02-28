@@ -43,5 +43,8 @@ defmodule OptimalSystemAgent.Providers.Behaviour do
   @doc "Return the default model string for this provider."
   @callback default_model() :: String.t()
 
-  @optional_callbacks [chat_stream: 3]
+  @doc "Return the list of models this provider supports."
+  @callback available_models() :: list(String.t())
+
+  @optional_callbacks [chat_stream: 3, available_models: 0]
 end

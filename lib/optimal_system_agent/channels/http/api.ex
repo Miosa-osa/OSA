@@ -411,29 +411,27 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           []
       end
 
-    # Cloud providers with API keys configured
+    # Cloud providers with API keys configured — emit all available models
     cloud_models =
       Providers.Registry.list_providers()
       |> Enum.reject(&(&1 == :ollama))
       |> Enum.filter(&Providers.Registry.provider_configured?/1)
-      |> Enum.reduce([], fn p, acc ->
+      |> Enum.flat_map(fn p ->
         case Providers.Registry.provider_info(p) do
           {:ok, info} ->
-            [
+            Enum.map(info.available_models, fn model_name ->
               %{
-                name: info.default_model,
+                name: model_name,
                 provider: to_string(p),
                 size: 0,
-                active: provider == p and info.default_model == current_model
+                active: provider == p and model_name == current_model
               }
-              | acc
-            ]
+            end)
 
           _ ->
-            acc
+            []
         end
       end)
-      |> Enum.reverse()
 
     body =
       Jason.encode!(%{

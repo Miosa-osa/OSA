@@ -25,6 +25,11 @@ defmodule OptimalSystemAgent.Providers.Google do
   def default_model, do: "gemini-2.0-flash"
 
   @impl true
+  def available_models do
+    ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+  end
+
+  @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :google_api_key)
 

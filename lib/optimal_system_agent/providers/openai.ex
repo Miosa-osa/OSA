@@ -25,6 +25,11 @@ defmodule OptimalSystemAgent.Providers.OpenAI do
   def default_model, do: "gpt-4o"
 
   @impl true
+  def available_models do
+    ["gpt-4o", "gpt-4o-mini", "o3", "o3-mini", "o4-mini"]
+  end
+
+  @impl true
   def chat(messages, opts \\ []) do
     api_key = Application.get_env(:optimal_system_agent, :openai_api_key)
 

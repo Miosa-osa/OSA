@@ -122,10 +122,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
         {:error, "Unknown provider: #{provider}"}
 
       module ->
+        models =
+          if function_exported?(module, :available_models, 0) do
+            module.available_models()
+          else
+            [module.default_model()]
+          end
+
         info = %{
           name: provider,
           module: module,
           default_model: module.default_model(),
+          available_models: models,
           configured?: provider_configured?(provider)
         }
 
