@@ -305,7 +305,7 @@ defmodule OptimalSystemAgent.Onboarding do
         # Cancelled or fallback default — use Ollama
         {"ollama", "llama3.2:latest", nil, nil}
 
-      {provider, model, env_var} ->
+      {:selected, {provider, model, env_var}} ->
         api_key =
           if env_var do
             IO.puts("\n  #{@dim}(or set #{env_var} and press Enter)#{@reset}")

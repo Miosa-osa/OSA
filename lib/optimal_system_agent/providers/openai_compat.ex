@@ -73,6 +73,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   @doc "Format messages into the OpenAI wire format."
   def format_messages(messages) do
     Enum.map(messages, fn
+      %{role: "tool", tool_call_id: tool_call_id} = msg ->
+        %{"role" => "tool", "tool_call_id" => tool_call_id, "content" => to_string(Map.get(msg, :content, ""))}
+
       %{role: role, content: content} ->
         %{"role" => to_string(role), "content" => to_string(content)}
 
