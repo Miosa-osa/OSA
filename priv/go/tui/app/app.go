@@ -413,6 +413,10 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	case text == "/help":
 		m.chat.AddSystemMessage(m.dynamicHelpText())
 		return m, nil
+	case text == "/clear":
+		m.chat = model.NewChat(m.width, m.chatHeight())
+		m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
+		return m, nil
 	case strings.HasPrefix(text, "/login"):
 		return m, m.doLogin(strings.TrimSpace(strings.TrimPrefix(text, "/login")))
 	case strings.HasPrefix(text, "/logout"):
