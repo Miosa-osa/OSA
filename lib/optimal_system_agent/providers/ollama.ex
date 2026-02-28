@@ -42,28 +42,36 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec auto_detect_model() :: :ok
   def auto_detect_model do
-    url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+    explicit = Application.get_env(:optimal_system_agent, :default_model)
 
-    case list_models(url) do
-      {:ok, models} ->
-        best = pick_best_model(models)
+    if explicit && explicit != "" do
+      Logger.info("[Ollama] Using explicitly configured model: #{explicit}")
+      Application.put_env(:optimal_system_agent, :ollama_model, explicit)
+      :ok
+    else
+      url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
-        if best do
-          current = Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+      case list_models(url) do
+        {:ok, models} ->
+          best = pick_best_model(models)
 
-          if best.name != current do
-            Logger.info(
-              "[Ollama] Auto-selected model: #{best.name} (#{Float.round(best.size / 1.0e9, 1)} GB)"
-            )
+          if best do
+            current = Application.get_env(:optimal_system_agent, :ollama_model, default_model())
 
-            Application.put_env(:optimal_system_agent, :ollama_model, best.name)
+            if best.name != current do
+              Logger.info(
+                "[Ollama] Auto-selected model: #{best.name} (#{Float.round(best.size / 1.0e9, 1)} GB)"
+              )
+
+              Application.put_env(:optimal_system_agent, :ollama_model, best.name)
+            end
           end
-        end
 
-        :ok
+          :ok
 
-      {:error, _} ->
-        :ok
+        {:error, _} ->
+          :ok
+      end
     end
   end
 
@@ -104,6 +112,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: false,
+        keep_alive: "30m",
         options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
       }
       |> maybe_add_tools(model, opts)

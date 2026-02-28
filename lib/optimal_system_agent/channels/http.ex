@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   require Logger
 
   plug(:security_headers)
+  plug(:cors_headers)
   plug(Plug.Logger, log: :debug)
   plug(:match)
   plug(:dispatch)
@@ -44,6 +45,23 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> put_resp_header("x-xss-protection", "1; mode=block")
     |> put_resp_header("content-security-policy", "default-src 'none'")
     |> put_resp_header("strict-transport-security", "max-age=31536000; includeSubDomains")
+  end
+
+  # ── CORS middleware ────────────────────────────────────────────────
+
+  defp cors_headers(conn, _opts) do
+    conn
+    |> put_resp_header("access-control-allow-origin", "*")
+    |> put_resp_header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
+    |> put_resp_header("access-control-allow-headers", "content-type, authorization")
+    |> put_resp_header("access-control-max-age", "86400")
+  end
+
+  # ── OPTIONS preflight (CORS) ────────────────────────────────────────
+
+  options _ do
+    conn
+    |> send_resp(204, "")
   end
 
   # ── Health (no auth) ────────────────────────────────────────────────

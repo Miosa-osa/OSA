@@ -164,6 +164,26 @@ type SessionSwitchResult struct {
 	Err       error
 }
 
+// ToolResult from SSE event "tool_result".
+type ToolResult struct {
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	Success bool   `json:"success"`
+}
+
+// SignalClassified from SSE event "signal_classified".
+type SignalClassified struct {
+	Mode   string  `json:"mode"`
+	Genre  string  `json:"genre"`
+	Type   string  `json:"type"`
+	Weight float64 `json:"weight"`
+}
+
+// SSEParseWarning carries a non-fatal SSE parse error to surface as a toast.
+type SSEParseWarning struct {
+	Message string
+}
+
 // -- Model selection --
 
 // ModelEntry describes a single available model (mirrors client.ModelEntry).

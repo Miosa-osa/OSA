@@ -171,6 +171,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     Bus.emit(:system_event, %{
       event: :orchestrator_task_started,
       task_id: task_id,
+      session_id: session_id,
       message_preview: String.slice(message, 0, 200)
     })
 
@@ -197,6 +198,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
           Bus.emit(:system_event, %{
             event: :orchestrator_task_appraised,
             task_id: task_id,
+            session_id: session_id,
             estimated_cost_usd: appraisal.total_cost_usd,
             estimated_hours: appraisal.total_hours
           })
@@ -212,6 +214,16 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
               role: st.role,
               description: st.description,
               depends_on: st.depends_on
+            })
+
+            # Emit task_created so the TUI task checklist is populated.
+            # active_form is the active-voice description shown while in_progress.
+            Bus.emit(:system_event, %{
+              event: :task_created,
+              task_id: subtask_id,
+              subject: st.name,
+              active_form: String.slice(st.description || st.name, 0, 80),
+              session_id: session_id
             })
           end)
         catch
@@ -234,6 +246,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         Bus.emit(:system_event, %{
           event: :orchestrator_agents_spawning,
           task_id: task_id,
+          session_id: session_id,
           agent_count: length(sub_tasks),
           agents: Enum.map(sub_tasks, fn st -> %{name: st.name, role: st.role} end)
         })
@@ -265,6 +278,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         Bus.emit(:system_event, %{
           event: :orchestrator_task_completed,
           task_id: task_id,
+          session_id: session_id,
           agent_count: 0,
           result_preview: String.slice(result || "", 0, 200)
         })
@@ -277,6 +291,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         Bus.emit(:system_event, %{
           event: :orchestrator_task_failed,
           task_id: task_id,
+          session_id: session_id,
           reason: inspect(reason)
         })
 
@@ -465,6 +480,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
             Bus.emit(:system_event, %{
               event: :orchestrator_agent_progress,
               task_id: task_id,
+              session_id: task_state.session_id,
               agent_id: agent_id,
               agent_name: agent.name,
               tool_uses: updated_agent.tool_uses,
@@ -508,6 +524,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         Bus.emit(:system_event, %{
           event: :orchestrator_wave_started,
           task_id: task_id,
+          session_id: task_state.session_id,
           wave_number: task_state.current_wave + 1,
           total_waves: total_waves,
           agent_count: length(wave)
@@ -561,7 +578,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         {:noreply, state}
 
       task_state ->
-        synthesis = synthesize_results(task_id, task_state.results, task_state.message)
+        synthesis = synthesize_results(task_id, task_state.results, task_state.message, task_state.session_id)
 
         task_state = %{
           task_state
@@ -575,6 +592,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
         Bus.emit(:system_event, %{
           event: :orchestrator_task_completed,
           task_id: task_id,
+          session_id: task_state.session_id,
           agent_count: map_size(task_state.agents),
           result_preview: String.slice(synthesis || "", 0, 200)
         })
@@ -896,9 +914,19 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     Bus.emit(:system_event, %{
       event: :orchestrator_agent_completed,
       task_id: task_id,
+      session_id: task_state.session_id,
       agent_id: agent_id,
       agent_name: agent_name,
       status: status
+    })
+
+    # Emit task_updated so the TUI reflects the final state of this subtask.
+    status_str = if status == :completed, do: "completed", else: "failed"
+    Bus.emit(:system_event, %{
+      event: :task_updated,
+      task_id: subtask_id,
+      status: status_str,
+      session_id: task_state.session_id
     })
 
     %{state | tasks: Map.put(state.tasks, task_id, task_state)}
@@ -938,11 +966,21 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
     Bus.emit(:system_event, %{
       event: :orchestrator_agent_started,
       task_id: task_id,
+      session_id: session_id,
       agent_id: agent_id,
       agent_name: sub_task.name,
       role: sub_task.role,
       tier: agent_tier,
       model: tier_opts.model
+    })
+
+    # Emit task_updated (in_progress) so the TUI marks this subtask active.
+    subtask_id = "#{task_id}_#{sub_task.name}"
+    Bus.emit(:system_event, %{
+      event: :task_updated,
+      task_id: subtask_id,
+      status: "in_progress",
+      session_id: session_id
     })
 
     # Run the agent asynchronously
@@ -1243,7 +1281,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
 
   # ── Result Synthesis ────────────────────────────────────────────────
 
-  defp synthesize_results(task_id, results, original_message) do
+  defp synthesize_results(task_id, results, original_message, session_id) do
     if map_size(results) == 0 do
       "No agents produced results."
     else
@@ -1271,6 +1309,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator do
       Bus.emit(:system_event, %{
         event: :orchestrator_synthesizing,
         task_id: task_id,
+        session_id: session_id,
         agent_count: map_size(results)
       })
 

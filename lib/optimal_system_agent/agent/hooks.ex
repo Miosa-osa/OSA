@@ -174,7 +174,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
             event: :hook_blocked,
             hook_name: hook.name,
             hook_event: event,
-            reason: reason
+            reason: reason,
+            session_id: Map.get(payload, :session_id, "unknown")
           })
 
           {{:blocked, reason}, state}

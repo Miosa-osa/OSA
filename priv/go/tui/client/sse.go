@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -186,6 +185,27 @@ type SwarmTimeoutEvent struct {
 	SwarmID string `json:"swarm_id"`
 }
 
+// ToolResultEvent is emitted when a tool invocation returns its result.
+type ToolResultEvent struct {
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	Success bool   `json:"success"`
+}
+
+// SignalClassifiedEvent is emitted when the backend classifies the response signal.
+type SignalClassifiedEvent struct {
+	Mode   string  `json:"mode"`
+	Genre  string  `json:"genre"`
+	Type   string  `json:"type"`
+	Weight float64 `json:"weight"`
+}
+
+// SSEParseWarning is emitted when an SSE event cannot be parsed.
+// The TUI surfaces it as a toast instead of writing to stderr.
+type SSEParseWarning struct {
+	Message string
+}
+
 // -- SSEClient ----------------------------------------------------------------
 
 // SSEClient manages the Server-Sent Events connection.
@@ -358,16 +378,14 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			SessionID string `json:"session_id"`
 		}
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		return SSEConnectedEvent{SessionID: ev.SessionID}
 
 	case "agent_response":
 		var ev AgentResponseEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		return ev
 
@@ -382,8 +400,7 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			Success    *bool  `json:"success,omitempty"`
 		}
 		if err := json.Unmarshal(data, &raw); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		switch raw.Phase {
 		case "end":
@@ -403,8 +420,7 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 	case "llm_request":
 		var ev LLMRequestEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		return ev
 
@@ -417,8 +433,7 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &raw); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		return LLMResponseEvent{
 			DurationMs:   raw.DurationMs,
@@ -429,8 +444,21 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 	case "streaming_token":
 		var ev StreamingTokenEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", eventType, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
+		}
+		return ev
+
+	case "tool_result":
+		var ev ToolResultEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
+		}
+		return ev
+
+	case "signal_classified":
+		var ev SignalClassifiedEvent
+		if err := json.Unmarshal(data, &ev); err != nil {
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", eventType, err)}
 		}
 		return ev
 
@@ -439,7 +467,7 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 
 	default:
 		if eventType != "" {
-			fmt.Fprintf(os.Stderr, "[sse] unknown event type: %s\n", eventType)
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] unknown event type: %s", eventType)}
 		}
 	}
 	return nil
@@ -518,40 +546,35 @@ func parseSystemEvent(data []byte) tea.Msg {
 	case "swarm_started":
 		var ev SwarmStartedEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return ev
 
 	case "swarm_completed":
 		var ev SwarmCompletedEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return ev
 
 	case "swarm_failed":
 		var ev SwarmFailedEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return ev
 
 	case "swarm_cancelled":
 		var ev SwarmCancelledEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return ev
 
 	case "swarm_timeout":
 		var ev SwarmTimeoutEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return ev
 
@@ -561,8 +584,7 @@ func parseSystemEvent(data []byte) tea.Msg {
 			Reason   string `json:"reason"`
 		}
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return HookBlockedEvent{HookName: ev.HookName, Reason: ev.Reason}
 
@@ -572,8 +594,7 @@ func parseSystemEvent(data []byte) tea.Msg {
 			Message     string  `json:"message"`
 		}
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return BudgetWarningEvent{Utilization: ev.Utilization, Message: ev.Message}
 
@@ -582,14 +603,13 @@ func parseSystemEvent(data []byte) tea.Msg {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(data, &ev); err != nil {
-			fmt.Fprintf(os.Stderr, "[sse] parse %s: %v\n", base.Event, err)
-			return nil
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] parse %s: %v", base.Event, err)}
 		}
 		return BudgetExceededEvent{Message: ev.Message}
 
 	default:
 		if base.Event != "" {
-			fmt.Fprintf(os.Stderr, "[sse] unknown system_event: %s\n", base.Event)
+			return SSEParseWarning{Message: fmt.Sprintf("[sse] unknown system_event: %s", base.Event)}
 		}
 	}
 	return nil

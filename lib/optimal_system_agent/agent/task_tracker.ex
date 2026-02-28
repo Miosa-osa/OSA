@@ -129,6 +129,15 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
       title: title
     })
 
+    # Emit task_created for the TUI task checklist.
+    safe_emit(:system_event, %{
+      event: :task_created,
+      task_id: task.id,
+      subject: title,
+      active_form: title,
+      session_id: session_id
+    })
+
     {:reply, {:ok, task.id}, state}
   end
 
@@ -148,6 +157,15 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
         session_id: session_id,
         task_id: t.id,
         title: t.title
+      })
+
+      # Emit task_created for the TUI task checklist.
+      safe_emit(:system_event, %{
+        event: :task_created,
+        task_id: t.id,
+        subject: t.title,
+        active_form: t.title,
+        session_id: session_id
       })
     end)
 
@@ -169,6 +187,14 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
           session_id: session_id,
           task_id: task_id,
           title: task.title
+        })
+
+        # Emit task_updated for the TUI task checklist.
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "in_progress",
+          session_id: session_id
         })
 
         {:reply, :ok, updated_state}
@@ -195,6 +221,14 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
           title: task.title
         })
 
+        # Emit task_updated for the TUI task checklist.
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "completed",
+          session_id: session_id
+        })
+
         {:reply, :ok, updated_state}
 
       :not_found ->
@@ -218,6 +252,14 @@ defmodule OptimalSystemAgent.Agent.TaskTracker do
           task_id: task_id,
           title: task.title,
           reason: reason
+        })
+
+        # Emit task_updated for the TUI task checklist.
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "failed",
+          session_id: session_id
         })
 
         {:reply, :ok, updated_state}

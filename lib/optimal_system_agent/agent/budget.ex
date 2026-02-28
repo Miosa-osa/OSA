@@ -176,7 +176,10 @@ defmodule OptimalSystemAgent.Agent.Budget do
         event: :budget_warning,
         type: :daily,
         spent: new_daily,
-        limit: state.daily_limit
+        limit: state.daily_limit,
+        utilization: new_daily / state.daily_limit,
+        message: "Daily spend at #{round(new_daily / state.daily_limit * 100)}% ($#{Float.round(new_daily, 2)} / $#{state.daily_limit})",
+        session_id: session_id
       })
     end
 
@@ -185,7 +188,10 @@ defmodule OptimalSystemAgent.Agent.Budget do
         event: :budget_warning,
         type: :monthly,
         spent: new_monthly,
-        limit: state.monthly_limit
+        limit: state.monthly_limit,
+        utilization: new_monthly / state.monthly_limit,
+        message: "Monthly spend at #{round(new_monthly / state.monthly_limit * 100)}% ($#{Float.round(new_monthly, 2)} / $#{state.monthly_limit})",
+        session_id: session_id
       })
     end
 
@@ -195,7 +201,9 @@ defmodule OptimalSystemAgent.Agent.Budget do
         event: :budget_exceeded,
         type: :daily,
         spent: new_daily,
-        limit: state.daily_limit
+        limit: state.daily_limit,
+        message: "Daily budget exceeded: $#{Float.round(new_daily, 2)} / $#{state.daily_limit}",
+        session_id: session_id
       })
 
       Logger.warning(
@@ -208,7 +216,9 @@ defmodule OptimalSystemAgent.Agent.Budget do
         event: :budget_exceeded,
         type: :monthly,
         spent: new_monthly,
-        limit: state.monthly_limit
+        limit: state.monthly_limit,
+        message: "Monthly budget exceeded: $#{Float.round(new_monthly, 2)} / $#{state.monthly_limit}",
+        session_id: session_id
       })
 
       Logger.warning(

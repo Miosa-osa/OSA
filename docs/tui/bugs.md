@@ -112,6 +112,31 @@ treasury_*                       ✗ NO SID      ✗ not parsed ✗             
 
 ## Recently Fixed (2026-02-28)
 
+### FIXED: Orchestrator events never reached TUI (BUG-013)
+**Files:** `lib/optimal_system_agent/agent/orchestrator.ex`
+**Issue:** All 12 orchestrator Bus.emit calls lacked `session_id`. Events vanished into the global firehose — multi-agent progress panel was always empty.
+**Fix:** Added `session_id` to all 10 orchestrator event emissions (1 left intentionally system-level). Sources: `session_id` param in handle_call, `task_state.session_id` in handle_cast/handle_continue.
+
+### FIXED: task_created/task_updated never emitted (BUG-012)
+**Files:** `lib/optimal_system_agent/agent/orchestrator.ex`, `lib/optimal_system_agent/agent/task_tracker.ex`
+**Issue:** TUI parsed `task_created`/`task_updated` events but backend emitted `task_enqueued`/`task_completed` — different names. Task checklist panel was dead UI.
+**Fix:** Added `task_created` emissions after task enqueue (orchestrator subtasks + task_tracker add_task/add_tasks). Added `task_updated` emissions on status transitions (start/complete/fail) in both orchestrator and task_tracker. All include `session_id`.
+
+### FIXED: Budget warnings invisible (BUG-015)
+**Files:** `lib/optimal_system_agent/agent/budget.ex`, `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`
+**Issue:** `budget_warning` and `budget_exceeded` events lacked `session_id` and had no TUI parser.
+**Fix:** Added `session_id`, `utilization`, `message` fields to 4 budget Bus.emit calls. Added `BudgetWarningEvent`/`BudgetExceededEvent` types + parsers in sse.go. Added handlers in app.go (system warning/error).
+
+### FIXED: Security hook blocks invisible (BUG-016)
+**Files:** `lib/optimal_system_agent/agent/hooks.ex`, `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`
+**Issue:** `hook_blocked` events lacked `session_id` and had no TUI parser. Blocked actions were invisible.
+**Fix:** Added `session_id: Map.get(payload, :session_id, "unknown")` to hook_blocked emission. Added `HookBlockedEvent` type + parser + handler in TUI.
+
+### FIXED: swarm_cancelled/swarm_timeout not parsed (BUG-001)
+**Files:** `priv/go/tui/client/sse.go`, `priv/go/tui/app/app.go`
+**Issue:** Backend emitted these events but TUI had no parsers or handlers.
+**Fix:** Added `SwarmCancelledEvent`/`SwarmTimeoutEvent` types + parsers. Handlers terminate StateProcessing and show warning/error.
+
 ### FIXED: session_map memory leak in orchestrator
 **Files:** `lib/optimal_system_agent/swarm/orchestrator.ex`
 **Issue:** `session_map` entries were never cleaned up when swarms reached terminal state (cancelled/completed/failed/timeout).

@@ -132,7 +132,7 @@ defmodule OptimalSystemAgent.Commands do
       n when n in ~w(budget thinking export machines providers) -> "info"
       n when n in ~w(reload doctor setup create-command) -> "system"
       n when n in ~w(commit build test lint verify create-pr fix explain) -> "workflow"
-      n when n in ~w(prime prime-backend prime-webdev prime-svelte prime-security prime-devops prime-testing prime-osa prime-miosa prime-businessos) -> "priming"
+      n when n in ~w(prime prime-backend prime-webdev prime-svelte prime-security prime-devops prime-testing prime-osa prime-miosa) -> "priming"
       n when n in ~w(security-scan secret-scan harden) -> "security"
       n when n in ~w(mem-search mem-save mem-recall mem-list mem-stats mem-delete mem-context mem-export) -> "memory"
       n when n in ~w(schedule cron triggers heartbeat) -> "scheduler"

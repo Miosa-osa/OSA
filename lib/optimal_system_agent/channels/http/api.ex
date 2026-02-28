@@ -74,6 +74,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   use Plug.Router
   require Logger
 
+  # ── Global error handler ─────────────────────────────────────────────
+  # Wraps the Plug.Router-generated call/2 to catch unhandled exceptions
+  # and return structured JSON 500 responses instead of crashing the conn.
+
+  @impl Plug
+  def call(conn, opts) do
+    super(conn, opts)
+  rescue
+    e ->
+      Logger.error("[API] Unhandled exception: #{Exception.message(e)}",
+        exception: Exception.format(:error, e, __STACKTRACE__)
+      )
+
+      body = Jason.encode!(%{error: "internal_error", details: Exception.message(e)})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(500, body)
+  end
+
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Channels.Session
   alias OptimalSystemAgent.Agent.Memory
@@ -127,7 +147,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
-    json_decoder: Jason
+    json_decoder: Jason,
+    length: 1_000_000
   )
 
   plug(:dispatch)
