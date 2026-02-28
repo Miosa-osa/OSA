@@ -131,6 +131,23 @@ func (c *Client) Login(userID string) (*LoginResponse, error) {
 	return &result, nil
 }
 
+func (c *Client) RefreshToken(refreshToken string) (*LoginResponse, error) {
+	resp, err := c.postJSON("/api/v1/auth/refresh", map[string]string{"refresh_token": refreshToken})
+	if err != nil {
+		return nil, fmt.Errorf("refresh token: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var result LoginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode refresh: %w", err)
+	}
+	c.Token = result.Token
+	return &result, nil
+}
+
 func (c *Client) Logout() error {
 	resp, err := c.postJSON("/api/v1/auth/logout", nil)
 	if err != nil {
@@ -224,6 +241,24 @@ func (c *Client) GetSession(id string) (*SessionInfo, error) {
 		return nil, fmt.Errorf("decode session: %w", err)
 	}
 	return &result, nil
+}
+
+func (c *Client) GetSessionMessages(id string) ([]SessionMessage, error) {
+	resp, err := c.get(fmt.Sprintf("/api/v1/sessions/%s/messages", id))
+	if err != nil {
+		return nil, fmt.Errorf("get session messages: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+	var wrapper struct {
+		Messages []SessionMessage `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
+		return nil, fmt.Errorf("decode messages: %w", err)
+	}
+	return wrapper.Messages, nil
 }
 
 func (c *Client) get(path string) (*http.Response, error) {

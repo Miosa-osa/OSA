@@ -87,10 +87,18 @@ type LoginResponse struct {
 
 // SessionInfo from GET /api/v1/sessions.
 type SessionInfo struct {
-	ID           string `json:"id"`
-	CreatedAt    string `json:"created_at"`
-	Title        string `json:"title"`
-	MessageCount int    `json:"message_count"`
+	ID           string           `json:"id"`
+	CreatedAt    string           `json:"created_at"`
+	Title        string           `json:"title"`
+	MessageCount int              `json:"message_count"`
+	Messages     []SessionMessage `json:"messages,omitempty"`
+}
+
+// SessionMessage is a single message in a session's history.
+type SessionMessage struct {
+	Role      string `json:"role"` // "user" | "assistant" | "system"
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // SessionCreateResponse from POST /api/v1/sessions.

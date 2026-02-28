@@ -65,6 +65,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     POST   /channels/dingtalk/webhook       — DingTalk bot webhook
     POST   /channels/feishu/events          — Feishu/Lark event webhook
 
+  Session endpoints:
+    GET    /sessions                        — List all sessions (persisted + live)
+    POST   /sessions                        — Create a new session
+    GET    /sessions/:id                    — Get session details + messages
+    GET    /sessions/:id/messages           — Get messages for a session
+
   Other endpoints:
     GET    /machines                        — List active machines
     POST   /webhooks/:trigger_id            — Trigger a webhook
@@ -1389,6 +1395,122 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         |> put_resp_content_type("application/json")
         |> send_resp(401, body)
     end
+  end
+
+  # ── Session Management ──────────────────────────────────────────────
+
+  get "/sessions" do
+    # Merge persisted sessions (from Memory/SQLite) with live Registry sessions.
+    persisted = Memory.list_sessions()
+
+    live_ids =
+      Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
+    # Build a map from persisted data keyed by session_id
+    persisted_map = Map.new(persisted, fn s -> {s.session_id, s} end)
+
+    # Merge: persisted sessions get their metadata; live-only sessions get defaults
+    all_ids = Enum.uniq(Map.keys(persisted_map) ++ live_ids)
+
+    sessions =
+      Enum.map(all_ids, fn sid ->
+        meta = Map.get(persisted_map, sid, %{})
+        alive = sid in live_ids
+
+        %{
+          id: sid,
+          title: Map.get(meta, :topic_hint),
+          message_count: Map.get(meta, :message_count, 0),
+          created_at: Map.get(meta, :first_active),
+          last_active: Map.get(meta, :last_active),
+          alive: alive
+        }
+      end)
+      |> Enum.sort_by(& &1.last_active, {:desc, NaiveDateTime})
+
+    body = Jason.encode!(%{sessions: sessions, count: length(sessions)})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  post "/sessions" do
+    user_id = conn.assigns[:user_id] || "anonymous"
+
+    case OptimalSystemAgent.SDK.Session.create(user_id: user_id, channel: :http) do
+      {:ok, session_id} ->
+        body = Jason.encode!(%{id: session_id, status: "created"})
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(201, body)
+
+      {:error, reason} ->
+        json_error(conn, 500, "session_create_failed", inspect(reason))
+    end
+  end
+
+  get "/sessions/:id" do
+    session_id = conn.params["id"]
+    persisted = Memory.list_sessions()
+    meta = Enum.find(persisted, fn s -> s.session_id == session_id end)
+
+    alive =
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+        [{_pid, _}] -> true
+        [] -> false
+      end
+
+    if meta || alive do
+      messages = Memory.load_session(session_id) || []
+
+      formatted_messages =
+        Enum.map(messages, fn m ->
+          %{
+            role: m["role"],
+            content: m["content"],
+            timestamp: m["timestamp"]
+          }
+        end)
+
+      body =
+        Jason.encode!(%{
+          id: session_id,
+          title: if(meta, do: meta.topic_hint),
+          message_count: if(meta, do: meta.message_count, else: length(messages)),
+          created_at: if(meta, do: meta.first_active),
+          last_active: if(meta, do: meta.last_active),
+          alive: alive,
+          messages: formatted_messages
+        })
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, body)
+    else
+      json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+    end
+  end
+
+  get "/sessions/:id/messages" do
+    session_id = conn.params["id"]
+    messages = Memory.load_session(session_id) || []
+
+    formatted =
+      Enum.map(messages, fn m ->
+        %{
+          role: m["role"],
+          content: m["content"],
+          timestamp: m["timestamp"]
+        }
+      end)
+
+    body = Jason.encode!(%{messages: formatted, count: length(formatted)})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
   end
 
   # ── Catch-all ───────────────────────────────────────────────────────
