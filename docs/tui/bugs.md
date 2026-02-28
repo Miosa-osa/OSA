@@ -194,6 +194,16 @@ treasury_*                       ✗ NO SID      ✗ not parsed ✗             
 **Issue:** `runtime.exs` set `default_model` from `System.get_env("OLLAMA_MODEL")` regardless of active provider. When using Groq, the health endpoint showed `llama3.2:latest` (Ollama's default) instead of the actual Groq model.
 **Fix:** `default_model` now resolves from provider-specific env vars (`GROQ_MODEL`, `ANTHROPIC_MODEL`, etc.) and only falls back to `OLLAMA_MODEL` when the active provider is actually Ollama. Health endpoint fallback uses `provider_info/1` to get the provider's built-in default model.
 
+### FIXED: Session race condition — second source (E2E Bug 20, round 2)
+**Files:** `lib/optimal_system_agent/tools/registry.ex`, `lib/optimal_system_agent/agent/context.ex`, `lib/optimal_system_agent/channels/session.ex`, `lib/optimal_system_agent/channels/http/api.ex`
+**Issue:** After fixing `list_tools()` in Loop.init (round 1), session creation still failed ~25% under concurrent load. Root cause: `Context.build()` called `Tools.list_docs()` and `Tools.list_tools()` via GenServer.call on EVERY LLM iteration. Under concurrent load, 10 Loop processes all serialized on Tools.Registry, causing 5s timeouts that crashed the Loop GenServer.
+**Fix:** Added `list_docs_direct()` using `:persistent_term` (lock-free). Switched `context.ex:tools_block()` to use `list_docs_direct()` and `list_tools_direct()`. Hardened `ensure_loop` with retry logic and `{:already_started, _}` handling. Orchestrate handler now returns 503 on session start failure instead of crashing.
+
+### FIXED: /analytics crashes with Jason.Encoder error (E2E Bug 25)
+**Files:** `lib/optimal_system_agent/channels/http/api.ex`
+**Issue:** `GET /analytics` crashed with `Protocol.UndefinedError: protocol Jason.Encoder not implemented for Tuple`. `Budget.get_status()` returns `{:ok, map}` tuple but the handler passed it directly to `Jason.encode!`.
+**Fix:** Added `unwrap_ok/1` helper that extracts data from `{:ok, data}` tuples, raw maps, or returns `%{}` as fallback. Applied to all 4 analytics GenServer calls.
+
 ### FIXED: GET /sessions crashes with NaiveDateTime.compare on nil (E2E Bug 24/22)
 **Files:** `lib/optimal_system_agent/channels/http/api.ex`
 **Issue:** `GET /sessions` sorted results with `Enum.sort_by(& &1.last_active, {:desc, NaiveDateTime})`. The `last_active` values from Memory are ISO8601 strings or nil — not NaiveDateTime structs. Crashed when any session had nil timestamps.
