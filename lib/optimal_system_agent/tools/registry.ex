@@ -383,7 +383,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep,
       "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList,
       "web_fetch" => OptimalSystemAgent.Tools.Builtins.WebFetch,
-      "task_write" => OptimalSystemAgent.Tools.Builtins.TaskWrite
+      "task_write" => OptimalSystemAgent.Tools.Builtins.TaskWrite,
+      "mcts_index" => OptimalSystemAgent.Tools.Builtins.MCTSIndex
     }
   end
 
