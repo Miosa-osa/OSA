@@ -52,8 +52,23 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       |> to_string()
 
     model_name =
-      Application.get_env(:optimal_system_agent, :default_model, "")
-      |> to_string()
+      case Application.get_env(:optimal_system_agent, :default_model) do
+        nil ->
+          # Resolve from provider's default_model/0
+          prov = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+          try do
+            OptimalSystemAgent.Providers.Registry.provider_info(prov)
+            |> case do
+              {:ok, info} -> Map.get(info, :default_model, "")
+              _ -> ""
+            end
+          rescue
+            _ -> ""
+          end
+
+        m ->
+          to_string(m)
+      end
 
     version =
       case Application.spec(:optimal_system_agent, :vsn) do

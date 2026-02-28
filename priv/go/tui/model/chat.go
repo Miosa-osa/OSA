@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/miosa/osa-tui/markdown"
 	"github.com/miosa/osa-tui/style"
 )
@@ -34,18 +35,23 @@ const (
 
 // ChatMessage is a single entry in the conversation history.
 type ChatMessage struct {
-	Role      messageRole
-	Content   string
-	Signal    *Signal
-	Timestamp time.Time
+	Role       messageRole
+	Content    string
+	Signal     *Signal
+	Timestamp  time.Time
+	DurationMs int64  // agent response wall time
+	ModelName  string // model that produced the response
 }
 
 // ChatModel is a scrollable viewport that displays conversation history.
 type ChatModel struct {
-	vp       viewport.Model
-	messages []ChatMessage
-	width    int
-	height   int
+	vp             viewport.Model
+	messages       []ChatMessage
+	width          int
+	height         int
+	welcomeVersion string
+	welcomeDetail  string
+	welcomeCwd     string
 }
 
 // NewChat constructs a ChatModel sized to width x height.
@@ -56,6 +62,16 @@ func NewChat(width, height int) ChatModel {
 		vp:     vp,
 		width:  width,
 		height: height,
+	}
+}
+
+// SetWelcomeData populates the welcome screen with version, provider detail, and CWD.
+func (m *ChatModel) SetWelcomeData(version, detail, cwd string) {
+	m.welcomeVersion = version
+	m.welcomeDetail = detail
+	m.welcomeCwd = cwd
+	if len(m.messages) == 0 {
+		m.refresh()
 	}
 }
 
@@ -70,12 +86,14 @@ func (m *ChatModel) AddUserMessage(text string) {
 }
 
 // AddAgentMessage appends an agent-role message with optional Signal metadata.
-func (m *ChatModel) AddAgentMessage(text string, sig *Signal) {
+func (m *ChatModel) AddAgentMessage(text string, sig *Signal, durationMs int64, modelName string) {
 	m.messages = append(m.messages, ChatMessage{
-		Role:      roleAgent,
-		Content:   text,
-		Signal:    sig,
-		Timestamp: time.Now(),
+		Role:       roleAgent,
+		Content:    text,
+		Signal:     sig,
+		Timestamp:  time.Now(),
+		DurationMs: durationMs,
+		ModelName:  modelName,
 	})
 	m.refresh()
 }
@@ -126,7 +144,7 @@ func (m *ChatModel) refresh() {
 // renderAll builds the full string of all rendered messages.
 func (m *ChatModel) renderAll() string {
 	if len(m.messages) == 0 {
-		return style.Faint.Render("  No messages yet. Type below to get started.")
+		return m.renderWelcome()
 	}
 
 	var sb strings.Builder
@@ -134,16 +152,73 @@ func (m *ChatModel) renderAll() string {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(renderMessage(msg))
+		sb.WriteString(m.renderMessage(msg))
 	}
 	return sb.String()
 }
 
-// renderMessage converts a single ChatMessage to a display string.
-func renderMessage(msg ChatMessage) string {
+// renderWelcome produces the vertically-centered welcome screen shown when
+// no messages exist yet.
+func (m *ChatModel) renderWelcome() string {
+	logoStyle := lipgloss.NewStyle().Foreground(style.Primary)
+	logo := logoStyle.Render(OsaLogo)
+
+	title := style.WelcomeTitle.Render(fmt.Sprintf("◈ OSA Agent  %s", m.welcomeVersion))
+	detail := style.WelcomeMeta.Render(m.welcomeDetail)
+	cwd := style.WelcomeCwd.Render(m.welcomeCwd)
+	tip := style.WelcomeTip.Render("/help for help  ·  Ctrl+O expand  ·  Ctrl+B background")
+
+	// Center each line
+	center := func(s string) string {
+		w := lipgloss.Width(s)
+		if w >= m.width {
+			return s
+		}
+		pad := (m.width - w) / 2
+		return strings.Repeat(" ", pad) + s
+	}
+
+	var lines []string
+	for _, l := range strings.Split(logo, "\n") {
+		lines = append(lines, center(l))
+	}
+	lines = append(lines, "")
+	lines = append(lines, center(title))
+	lines = append(lines, center(detail))
+	if cwd != "" {
+		lines = append(lines, center(cwd))
+	}
+	lines = append(lines, "")
+	lines = append(lines, center(tip))
+
+	content := strings.Join(lines, "\n")
+	contentLines := strings.Count(content, "\n") + 1
+
+	// Vertically center by prepending blank lines
+	topPad := (m.height - contentLines) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+	return strings.Repeat("\n", topPad) + content
+}
+
+// renderMessage converts a single ChatMessage to a display string with
+// OpenCode-style thick left borders.
+func (m *ChatModel) renderMessage(msg ChatMessage) string {
+	contentWidth := m.width - 5 // border (2) + padding (2) + margin
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+
 	switch msg.Role {
 	case roleUser:
-		return style.UserLabel.Render("❯ You") + "\n" + msg.Content
+		label := style.UserLabel.Render("❯  You")
+		border := lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder(), false, false, false, true).
+			BorderForeground(style.MsgBorderUser).
+			PaddingLeft(1).
+			Width(contentWidth)
+		return border.Render(label + "\n" + msg.Content)
 
 	case roleAgent:
 		label := style.AgentLabel.Render("◈ OSA")
@@ -153,12 +228,48 @@ func renderMessage(msg ChatMessage) string {
 			)
 			label += badge
 		}
-		return label + "\n" + markdown.Render(msg.Content)
+
+		rendered := markdown.RenderWidth(msg.Content, contentWidth-2)
+		rendered = strings.TrimRight(rendered, "\n")
+
+		// Metadata footer
+		var meta string
+		if msg.ModelName != "" || msg.DurationMs > 0 {
+			var parts []string
+			if msg.ModelName != "" {
+				parts = append(parts, msg.ModelName)
+			}
+			if msg.DurationMs > 0 {
+				parts = append(parts, formatDuration(msg.DurationMs))
+			}
+			meta = "\n" + style.MsgMeta.Render("— "+strings.Join(parts, " · "))
+		}
+
+		border := lipgloss.NewStyle().
+			Border(lipgloss.ThickBorder(), false, false, false, true).
+			BorderForeground(style.MsgBorderAgent).
+			PaddingLeft(1).
+			Width(contentWidth)
+		return border.Render(label + "\n" + rendered + meta)
 
 	case roleSystem:
-		return style.Faint.Render(msg.Content)
+		content := style.Faint.Render(msg.Content)
+		border := lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(style.MsgBorderSystem).
+			PaddingLeft(1).
+			Width(contentWidth)
+		return border.Render(content)
 
 	default:
 		return msg.Content
 	}
+}
+
+// formatDuration converts milliseconds to a human-readable duration.
+func formatDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000.0)
 }

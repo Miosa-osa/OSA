@@ -40,14 +40,25 @@ for arg in "$@"; do
   fi
 done
 
-# ── Start backend ───────────────────────────────────────────────
-export MIX_ENV="${MIX_ENV:-dev}"
-echo "Starting backend on :${PORT}…"
-(cd "$ROOT" && mix osa.serve) &
-BACKEND_PID=$!
+# ── Check if backend is already running ─────────────────────────
+URL="http://localhost:${PORT}/health"
+if curl -sf "$URL" >/dev/null 2>&1; then
+  echo "Backend already running on :${PORT}"
+else
+  # Check if port is occupied by something else
+  if lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port ${PORT} is in use. Killing previous instance…"
+    lsof -ti ":${PORT}" -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
+
+  export MIX_ENV="${MIX_ENV:-dev}"
+  echo "Starting backend on :${PORT}…"
+  (cd "$ROOT" && mix osa.serve) &
+  BACKEND_PID=$!
+fi
 
 # ── Wait for health ─────────────────────────────────────────────
-URL="http://localhost:${PORT}/health"
 attempts=0
 max_attempts=30
 

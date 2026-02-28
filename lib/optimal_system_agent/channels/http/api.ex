@@ -1329,7 +1329,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
         end
 
       _ ->
-        {:error, :not_found}
+        # Session doesn't exist yet — allow SSE to connect and wait.
+        # The TUI creates the session_id client-side and connects SSE before
+        # the first orchestrate call registers the session. PubSub subscription
+        # is safe regardless — events will flow once the session is created.
+        if user_id == "anonymous" do
+          :ok
+        else
+          {:error, :not_found}
+        end
     end
   end
 

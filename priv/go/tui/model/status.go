@@ -76,21 +76,29 @@ func (m StatusModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the status area. Always shows at least provider/model when idle.
+// View renders the status area.
+//
+// Processing: context bar only (activity panel already shows timing/tokens).
+// Idle: provider/model + optional signal badge + optional context bar.
 func (m StatusModel) View() string {
-	ctxLine := m.contextLine()
-
 	if m.active {
-		return m.activeLine() + "\n" + ctxLine
+		// Only context bar — activity panel handles timing/tokens
+		return m.contextLine()
 	}
 
-	// Idle: always show provider/model footer; append context bar if available.
+	// Idle: provider/model footer + optional signal + context bar
 	var parts []string
 	if m.provider != "" || m.modelName != "" {
-		parts = append(parts, m.idleLine())
+		line := m.idleLine()
+		if m.signal != nil && m.signal.Mode != "" {
+			line += style.StatusSignal.Render(
+				fmt.Sprintf(" · %s/%s", m.signal.Mode, m.signal.Genre),
+			)
+		}
+		parts = append(parts, line)
 	}
 	if m.contextMax > 0 {
-		parts = append(parts, ctxLine)
+		parts = append(parts, m.contextLine())
 	}
 	if len(parts) == 0 {
 		return ""
@@ -111,34 +119,6 @@ func (m StatusModel) idleLine() string {
 		}
 	}
 	return style.StatusBar.Render(info)
-}
-
-// activeLine builds the processing summary line.
-//
-//	✓ 1.2s · 3 tools · ↓ 4.2k ↑ 1.1k · Linguistic · Spec · w0.92
-func (m StatusModel) activeLine() string {
-	var b strings.Builder
-
-	b.WriteString(style.StatusBar.Render(
-		fmt.Sprintf("✓ %s · %d tools · ↓ %s ↑ %s",
-			formatElapsed(m.elapsed),
-			m.toolCount,
-			formatTokens(m.inputTokens),
-			formatTokens(m.outputTokens),
-		),
-	))
-
-	if m.signal != nil {
-		b.WriteString(style.StatusSignal.Render(
-			fmt.Sprintf(" · %s · %s · w%.2f",
-				m.signal.Mode,
-				m.signal.Genre,
-				m.signal.Weight,
-			),
-		))
-	}
-
-	return b.String()
 }
 
 // contextLine builds the context utilisation bar line.

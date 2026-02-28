@@ -56,7 +56,6 @@ type Model struct {
 	bgTasks         []string
 	confirmQuit     bool
 	processingStart time.Time
-	shownWelcome    bool
 }
 
 func New(c *client.Client) Model {
@@ -105,6 +104,8 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case toolCountLoaded:
 		m.banner.SetToolCount(int(v))
+		// Refresh welcome screen with updated tool count
+		m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
 		return m, nil
 	case client.SSEConnectedEvent:
 		m.sessionID = v.SessionID
@@ -398,14 +399,8 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 	m.state = StateBanner
 	m.sessionID = fmt.Sprintf("tui_%d", time.Now().UnixNano())
 
-	// Inject welcome message (shown after banner fades to idle)
-	if !m.shownWelcome {
-		m.shownWelcome = true
-		m.chat.AddSystemMessage(
-			"Welcome to OSA. Type a message to get started, or /help for commands.\n\n" +
-				"Shortcuts: Ctrl+O expand · Ctrl+B background · Tab autocomplete",
-		)
-	}
+	// Populate welcome screen data (shown in chat viewport when no messages)
+	m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
 
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.fetchCommands(), m.fetchToolCount())
@@ -423,22 +418,34 @@ func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 	m.activity.Stop()
 	m.status.SetActive(false)
 	m.state = StateIdle
-	cmd := m.input.Focus()
+	var cmds []tea.Cmd
+	cmds = append(cmds, m.input.Focus())
 	if r.Err != nil {
 		m.chat.AddSystemMessage(fmt.Sprintf("Error: %v", r.Err))
-		return m, cmd
+		return m, tea.Batch(cmds...)
 	}
 	if wasBackground {
 		m.chat.AddSystemMessage("Background task completed")
 	}
-	m.chat.AddAgentMessage(truncateResponse(r.Output), toModelSignal(r.Signal))
+	output := truncateResponse(r.Output)
+	if output == "" {
+		output = "(no response)"
+	}
+	m.chat.AddAgentMessage(output, toModelSignal(r.Signal), r.ExecutionMs, m.banner.ModelName())
 	if r.Signal != nil {
 		m.status.SetSignal(toModelSignal(r.Signal))
 	}
+	// Update session ID from backend response
 	if r.SessionID != "" && m.sessionID != r.SessionID {
 		m.sessionID = r.SessionID
 	}
-	return m, cmd
+	// Start SSE if not connected yet (session now exists server-side)
+	if m.sse == nil && m.program != nil && m.sessionID != "" {
+		if cmd := m.startSSE(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, tea.Cmd) {
@@ -456,7 +463,7 @@ func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, te
 		m.chat.AddSystemMessage("Background task completed")
 	}
 	sig := clientSignalToModel(r.Signal)
-	m.chat.AddAgentMessage(truncateResponse(r.Response), sig)
+	m.chat.AddAgentMessage(truncateResponse(r.Response), sig, time.Since(m.processingStart).Milliseconds(), m.banner.ModelName())
 	if sig != nil {
 		m.status.SetSignal(sig)
 	}
@@ -621,7 +628,12 @@ func clientSignalToModel(s *client.Signal) *model.Signal {
 // chatHeight calculates available lines for the chat viewport based on current state.
 func (m Model) chatHeight() int {
 	reserved := 2 // header + separator
-	reserved += 1 // status footer
+	statusView := m.status.View()
+	if statusView != "" {
+		reserved += countLines(statusView)
+	} else {
+		reserved += 1
+	}
 	if m.state != StatePlanReview {
 		reserved += 2 // input separator + prompt line
 	}

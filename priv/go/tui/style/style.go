@@ -14,6 +14,11 @@ var (
 	Fg        = lipgloss.Color("#E5E7EB") // gray-200
 	Bg        = lipgloss.Color("#111827") // gray-900
 	Border    = lipgloss.Color("#4B5563") // gray-600
+
+	// Message left-border colors (OpenCode style)
+	MsgBorderUser   = lipgloss.Color("#06B6D4") // cyan — user messages
+	MsgBorderAgent  = lipgloss.Color("#7C3AED") // violet — agent messages
+	MsgBorderSystem = lipgloss.Color("#374151") // dim — system messages
 )
 
 // Base styles.
@@ -106,6 +111,22 @@ var (
 	// Hint text (ctrl+b, ctrl+o)
 	Hint = lipgloss.NewStyle().
 		Foreground(Dim)
+
+	// Message metadata (duration, model)
+	MsgMeta = lipgloss.NewStyle().
+		Foreground(Muted).
+		Italic(true)
+
+	// Welcome screen
+	WelcomeTitle = lipgloss.NewStyle().
+			Foreground(Primary).
+			Bold(true)
+	WelcomeMeta = lipgloss.NewStyle().
+			Foreground(Muted)
+	WelcomeCwd = lipgloss.NewStyle().
+			Foreground(Secondary)
+	WelcomeTip = lipgloss.NewStyle().
+			Foreground(Dim)
 )
 
 // ContextBarRender renders a context utilization bar like: ██████░░░░ 62%

@@ -99,6 +99,9 @@ config :optimal_system_agent,
 
   # Provider selection
   default_provider: default_provider,
+  # Default model — resolved from OSA_MODEL env or provider-specific env/defaults.
+  # The health endpoint and TUI read this at runtime.
+  default_model: System.get_env("OSA_MODEL") || System.get_env("OLLAMA_MODEL"),
 
   # HTTP channel
   shared_secret:

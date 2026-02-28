@@ -39,12 +39,27 @@ func (m *BannerModel) SetHealth(h msg.HealthResult) {
 	}
 }
 
-func (m *BannerModel) SetModel(name string)                   { m.model = name }
-func (m *BannerModel) SetToolCount(n int)                     { m.toolCount = n }
-func (m *BannerModel) SetWorkspace(path string)               { m.workspace = path }
-func (m *BannerModel) SetWidth(w int)                         { m.width = w }
-func (m BannerModel) Provider() string                        { return m.provider }
-func (m BannerModel) ModelName() string                       { return m.model }
+func (m *BannerModel) SetModel(name string)     { m.model = name }
+func (m *BannerModel) SetToolCount(n int)       { m.toolCount = n }
+func (m *BannerModel) SetWorkspace(path string) { m.workspace = path }
+func (m *BannerModel) SetWidth(w int)           { m.width = w }
+func (m BannerModel) Provider() string          { return m.provider }
+func (m BannerModel) ModelName() string         { return m.model }
+func (m BannerModel) Version() string           { return m.version }
+func (m BannerModel) Workspace() string         { return m.workspace }
+
+// WelcomeLine returns a summary like "ollama · llama3.2 · 15 tools" for the welcome screen.
+func (m BannerModel) WelcomeLine() string {
+	var parts []string
+	if m.provider != "" {
+		parts = append(parts, m.provider)
+	}
+	if m.model != "" {
+		parts = append(parts, m.model)
+	}
+	parts = append(parts, fmt.Sprintf("%d tools", m.toolCount))
+	return strings.Join(parts, " · ")
+}
 func (m BannerModel) Init() tea.Cmd                           { return nil }
 func (m BannerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
 

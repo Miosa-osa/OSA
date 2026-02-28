@@ -31,8 +31,16 @@ defmodule OptimalSystemAgent.Agent.Memory do
   require Logger
   alias OptimalSystemAgent.Store.{Repo, Message}
 
-  @sessions_dir Application.compile_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions")
-  @osa_dir Application.compile_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
+  # Resolve at runtime to avoid baking in compile-host paths (/Users/runner/.osa)
+  defp sessions_dir do
+    Application.get_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions")
+    |> Path.expand()
+  end
+
+  defp osa_dir do
+    Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
+    |> Path.expand()
+  end
 
   @index_table :osa_memory_index
   @entry_table :osa_memory_entries
@@ -184,7 +192,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
 
   @impl true
   def init(:ok) do
-    dir = Path.expand(@sessions_dir)
+    dir = sessions_dir()
     File.mkdir_p!(dir)
 
     # Create ETS tables for the episodic index
@@ -578,7 +586,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
     else
       try do
         # Write archived entries to dated archive file
-        archive_dir = Path.expand(Path.join(@osa_dir, "archive"))
+        archive_dir = Path.join(osa_dir(), "archive")
         File.mkdir_p!(archive_dir)
         date_str = Date.utc_today() |> Date.to_iso8601()
         archive_path = Path.join(archive_dir, "MEMORY-#{date_str}.md")
@@ -972,7 +980,7 @@ defmodule OptimalSystemAgent.Agent.Memory do
   end
 
   defp memory_file_path do
-    Path.expand(Path.join(@osa_dir, "MEMORY.md"))
+    Path.join(osa_dir(), "MEMORY.md")
   end
 
   # ────────────────────────────────────────────────────────────────────

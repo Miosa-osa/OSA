@@ -276,7 +276,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         state =
           Enum.reduce(tool_calls, state, fn tool_call, acc ->
             arg_hint = tool_call_hint(tool_call.arguments)
-            Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint})
+            Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint, session_id: acc.session_id})
             start_time_tool = System.monotonic_time(:millisecond)
 
             # Run pre_tool_use hooks (budget guard, security check, etc.)
@@ -328,7 +328,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
               name: tool_call.name,
               phase: :end,
               duration_ms: tool_duration_ms,
-              args: arg_hint
+              args: arg_hint,
+              session_id: acc.session_id
             })
 
             # Build tool message — images get structured content blocks
