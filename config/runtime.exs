@@ -99,9 +99,29 @@ config :optimal_system_agent,
 
   # Provider selection
   default_provider: default_provider,
-  # Default model — resolved from OSA_MODEL env or provider-specific env/defaults.
-  # The health endpoint and TUI read this at runtime.
-  default_model: System.get_env("OSA_MODEL") || System.get_env("OLLAMA_MODEL"),
+  # Default model — resolved from OSA_MODEL env, or provider-specific env var.
+  # Falls back to OLLAMA_MODEL only when the active provider is actually ollama.
+  default_model: (
+    System.get_env("OSA_MODEL") ||
+      case default_provider do
+        :ollama -> System.get_env("OLLAMA_MODEL") || "llama3.2:latest"
+        :groq -> System.get_env("GROQ_MODEL")
+        :anthropic -> System.get_env("ANTHROPIC_MODEL")
+        :openai -> System.get_env("OPENAI_MODEL")
+        :openrouter -> System.get_env("OPENROUTER_MODEL")
+        :deepseek -> System.get_env("DEEPSEEK_MODEL")
+        :together -> System.get_env("TOGETHER_MODEL")
+        :fireworks -> System.get_env("FIREWORKS_MODEL")
+        :mistral -> System.get_env("MISTRAL_MODEL")
+        :google -> System.get_env("GOOGLE_MODEL")
+        :cohere -> System.get_env("COHERE_MODEL")
+        :xai -> System.get_env("XAI_MODEL")
+        :cerebras -> System.get_env("CEREBRAS_MODEL")
+        :lmstudio -> System.get_env("LMSTUDIO_MODEL")
+        :llamacpp -> System.get_env("LLAMACPP_MODEL")
+        _ -> nil
+      end
+  ),
 
   # HTTP channel
   shared_secret:

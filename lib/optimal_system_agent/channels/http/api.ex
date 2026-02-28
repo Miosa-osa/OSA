@@ -77,6 +77,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Channels.Session
   alias OptimalSystemAgent.Agent.Memory
+  alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Tools.Registry, as: Tools
@@ -295,9 +296,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   get "/commands" do
     commands =
       Commands.list_commands()
-      |> Enum.map(fn
-        {name, description, category} -> %{name: name, description: description, category: category}
-        {name, description} -> %{name: name, description: description, category: "system"}
+      |> Enum.map(fn {name, description, category} ->
+        %{name: name, description: description, category: category}
       end)
 
     body = Jason.encode!(%{commands: commands, count: length(commands)})
@@ -361,6 +361,104 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, body)
+  end
+
+  # ── GET /models ─────────────────────────────────────────────────────
+
+  get "/models" do
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    current_model =
+      Application.get_env(:optimal_system_agent, :default_model) ||
+        Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
+
+    # Ollama models (local)
+    ollama_models =
+      case Providers.Ollama.list_models() do
+        {:ok, models} ->
+          Enum.map(models, fn m ->
+            %{
+              name: m.name,
+              provider: "ollama",
+              size: m.size,
+              active: to_string(provider) == "ollama" and m.name == current_model
+            }
+          end)
+
+        _ ->
+          []
+      end
+
+    # Cloud providers with API keys configured
+    cloud_models =
+      Providers.Registry.list_providers()
+      |> Enum.reject(&(&1 == :ollama))
+      |> Enum.filter(&Providers.Registry.provider_configured?/1)
+      |> Enum.reduce([], fn p, acc ->
+        case Providers.Registry.provider_info(p) do
+          {:ok, info} ->
+            [
+              %{
+                name: info.default_model,
+                provider: to_string(p),
+                size: 0,
+                active: provider == p and info.default_model == current_model
+              }
+              | acc
+            ]
+
+          _ ->
+            acc
+        end
+      end)
+      |> Enum.reverse()
+
+    body =
+      Jason.encode!(%{
+        models: ollama_models ++ cloud_models,
+        current: to_string(current_model),
+        provider: to_string(provider)
+      })
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  # ── POST /models/switch ────────────────────────────────────────────
+
+  post "/models/switch" do
+    valid_providers = Providers.Registry.list_providers()
+    valid_names = Enum.map(valid_providers, &Atom.to_string/1)
+
+    with %{"provider" => prov_str, "model" => model_name} <- conn.body_params,
+         true <- prov_str in valid_names,
+         provider <- String.to_existing_atom(prov_str) do
+      Application.put_env(:optimal_system_agent, :default_provider, provider)
+      Application.put_env(:optimal_system_agent, :default_model, model_name)
+
+      if provider == :ollama do
+        Application.put_env(:optimal_system_agent, :ollama_model, model_name)
+      end
+
+      Logger.info("[Models] Switched to #{prov_str}/#{model_name}")
+
+      body = Jason.encode!(%{provider: prov_str, model: model_name, status: "ok"})
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, body)
+    else
+      false ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(400, Jason.encode!(%{error: "unknown provider"}))
+
+      _ ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(400, Jason.encode!(%{error: "missing or invalid provider/model"}))
+    end
   end
 
   # ── GET /machines ───────────────────────────────────────────────────
@@ -622,10 +720,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   #     "agent_count": 3, "agents": [...] }
 
   post "/swarm/launch" do
-    with %{"task" => task} when is_binary(task) and task != "" <- conn.body_params do
+    with %{"task" => task} when is_binary(task) and task != "" <- conn.body_params,
+         {:ok, pattern_opts} <- parse_swarm_pattern_opts(conn.body_params["pattern"]) do
       opts =
-        []
-        |> maybe_put(:pattern, parse_swarm_pattern(conn.body_params["pattern"]))
+        pattern_opts
         |> maybe_put(:max_agents, conn.body_params["max_agents"])
         |> maybe_put(:timeout_ms, conn.body_params["timeout_ms"])
         |> maybe_put(:session_id, conn.body_params["session_id"])
@@ -652,7 +750,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
           json_error(conn, 422, "swarm_error", to_string(reason))
       end
     else
-      _ -> json_error(conn, 400, "invalid_request", "Missing required field: task")
+      {:error, :invalid_pattern, msg} ->
+        json_error(conn, 400, "invalid_pattern", msg)
+
+      _ ->
+        json_error(conn, 400, "invalid_request", "Missing required field: task")
     end
   end
 
@@ -1445,14 +1547,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     }
   end
 
-  defp parse_swarm_pattern(nil), do: nil
+  @valid_swarm_patterns ~w(parallel pipeline debate review)
 
-  defp parse_swarm_pattern(p) when is_binary(p) do
-    valid = ~w(parallel pipeline debate review)
-    if p in valid, do: String.to_existing_atom(p), else: nil
+  defp parse_swarm_pattern_opts(nil), do: {:ok, []}
+
+  defp parse_swarm_pattern_opts(p) when is_binary(p) do
+    if p in @valid_swarm_patterns do
+      {:ok, [pattern: String.to_existing_atom(p)]}
+    else
+      {:error, :invalid_pattern,
+       "Invalid swarm pattern '#{p}'. Valid patterns: #{Enum.join(@valid_swarm_patterns, ", ")}"}
+    end
   end
 
-  defp parse_swarm_pattern(_), do: nil
+  defp parse_swarm_pattern_opts(_), do: {:error, :invalid_pattern, "Pattern must be a string"}
 
   # Poll orchestrator until task completes or timeout (for blocking HTTP callers)
   defp await_orchestration_http(task_id, timeout_ms) do
