@@ -641,6 +641,10 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		parts := strings.SplitN(text[1:], " ", 2)
 		cmd := parts[0]
+		if cmd == "" {
+			m.chat.AddSystemMessage("Type /help for available commands, or Ctrl+K for command palette.")
+			return m, nil
+		}
 		arg := ""
 		if len(parts) > 1 {
 			arg = parts[1]
