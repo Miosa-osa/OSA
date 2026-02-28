@@ -18,16 +18,17 @@ import (
 // Signal uses the package-local mirror type defined in chat.go to avoid the
 // import cycle between client ↔ msg.
 type StatusModel struct {
-	signal       *Signal // local mirror; see Signal type in chat.go
-	elapsed      time.Duration
-	toolCount    int
-	inputTokens  int
-	outputTokens int
-	contextUtil  float64 // 0.0–1.0
-	contextMax   int
-	active       bool
-	provider     string
-	modelName    string
+	signal          *Signal // local mirror; see Signal type in chat.go
+	elapsed         time.Duration
+	toolCount       int
+	inputTokens     int
+	outputTokens    int
+	contextUtil     float64 // 0.0–1.0
+	contextMax      int
+	estimatedTokens int
+	active          bool
+	provider        string
+	modelName       string
 }
 
 // NewStatus returns a zero-value StatusModel.
@@ -46,10 +47,11 @@ func (m *StatusModel) SetSignal(s *Signal) {
 	m.signal = s
 }
 
-// SetContext updates context utilisation and the token ceiling.
-func (m *StatusModel) SetContext(util float64, max int) {
+// SetContext updates context utilisation, the token ceiling, and estimated tokens.
+func (m *StatusModel) SetContext(util float64, max int, estimated int) {
 	m.contextUtil = util
 	m.contextMax = max
+	m.estimatedTokens = estimated
 }
 
 // SetStats updates elapsed time and token/tool counts.
@@ -123,10 +125,18 @@ func (m StatusModel) idleLine() string {
 
 // contextLine builds the context utilisation bar line.
 //
-//	██████░░░░ ctx 62%
+//	██████░░░░ ctx 62% (125k/200k)
 func (m StatusModel) contextLine() string {
+	if m.contextMax <= 0 {
+		return ""
+	}
 	bar := style.ContextBarRender(m.contextUtil, 10)
 	pct := int(m.contextUtil * 100)
+	if m.estimatedTokens > 0 && m.contextMax > 0 {
+		label := style.ContextBar.Render(fmt.Sprintf(" ctx %d%% (%s/%s)",
+			pct, formatTokens(m.estimatedTokens), formatTokens(m.contextMax)))
+		return bar + label
+	}
 	label := style.ContextBar.Render(fmt.Sprintf(" ctx %d%%", pct))
 	return bar + label
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -85,6 +86,14 @@ type OrchestratorAgentProgressEvent struct {
 // OrchestratorAgentCompletedEvent from system_event.
 type OrchestratorAgentCompletedEvent struct {
 	AgentName  string `json:"agent_name"`
+	ToolUses   int    `json:"tool_uses"`
+	TokensUsed int    `json:"tokens_used"`
+}
+
+// OrchestratorAgentFailedEvent from system_event.
+type OrchestratorAgentFailedEvent struct {
+	AgentName  string `json:"agent_name"`
+	Error      string `json:"error"`
 	ToolUses   int    `json:"tool_uses"`
 	TokensUsed int    `json:"tokens_used"`
 }
@@ -218,8 +227,12 @@ func (s *SSEClient) ListenCmd(p *tea.Program) tea.Cmd {
 	}
 }
 
+// maxReconnects is the maximum number of reconnect attempts before giving up.
+const maxReconnects = 10
+
 // ReconnectListenCmd is a tea.Cmd that reconnects the SSE stream with backoff.
 // Used by the disconnect handler when an unintentional disconnect occurs.
+// After maxReconnects failed attempts it returns an error instead of looping forever.
 func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 	return func() tea.Msg {
 		attempt := 0
@@ -230,6 +243,12 @@ func (s *SSEClient) ReconnectListenCmd(p *tea.Program) tea.Cmd {
 			case <-s.done:
 				return SSEDisconnectedEvent{Err: nil}
 			default:
+			}
+
+			if attempt >= maxReconnects {
+				return SSEDisconnectedEvent{
+					Err: fmt.Errorf("SSE reconnect failed after %d attempts", maxReconnects),
+				}
 			}
 
 			attempt++
@@ -288,14 +307,19 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 			Phase      string `json:"phase"`
 			Args       string `json:"args"`
 			DurationMs int64  `json:"duration_ms"`
+			Success    *bool  `json:"success,omitempty"`
 		}
 		if json.Unmarshal(data, &raw) == nil {
 			switch raw.Phase {
 			case "end":
+				success := true // default if omitted for backward compat
+				if raw.Success != nil {
+					success = *raw.Success
+				}
 				return ToolCallEndEvent{
 					Name:       raw.Name,
 					DurationMs: raw.DurationMs,
-					Success:    true, // Elixir omits success; default true
+					Success:    success,
 				}
 			default: // "start" or missing
 				return ToolCallStartEvent{Name: raw.Name, Args: raw.Args}
@@ -326,6 +350,11 @@ func parseSSEEvent(eventType string, data []byte) tea.Msg {
 
 	case "system_event":
 		return parseSystemEvent(data)
+
+	default:
+		if eventType != "" {
+			fmt.Fprintf(os.Stderr, "[sse] unknown event type: %s\n", eventType)
+		}
 	}
 	return nil
 }
@@ -364,6 +393,12 @@ func parseSystemEvent(data []byte) tea.Msg {
 			return ev
 		}
 
+	case "orchestrator_agent_failed":
+		var ev OrchestratorAgentFailedEvent
+		if json.Unmarshal(data, &ev) == nil {
+			return ev
+		}
+
 	case "orchestrator_wave_started":
 		var ev OrchestratorWaveStartedEvent
 		if json.Unmarshal(data, &ev) == nil {
@@ -380,6 +415,11 @@ func parseSystemEvent(data []byte) tea.Msg {
 		var ev ContextPressureEvent
 		if json.Unmarshal(data, &ev) == nil {
 			return ev
+		}
+
+	default:
+		if base.Event != "" {
+			fmt.Fprintf(os.Stderr, "[sse] unknown system_event: %s\n", base.Event)
 		}
 	}
 	return nil

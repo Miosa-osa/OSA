@@ -18,12 +18,6 @@ defmodule OptimalSystemAgent.Agent.Workflow do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
 
-  @workflows_dir Application.compile_env(
-                   :optimal_system_agent,
-                   :workflows_dir,
-                   "~/.osa/workflows"
-                 )
-
   # ── Structs ──────────────────────────────────────────────────────────
 
   defstruct id: nil,
@@ -781,7 +775,7 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     do: OptimalSystemAgent.Utils.Text.now_iso()
 
   defp workflows_dir do
-    Path.expand(@workflows_dir)
+    Application.get_env(:optimal_system_agent, :workflows_dir, "~/.osa/workflows") |> Path.expand()
   end
 
   defp parse_status(nil), do: :pending

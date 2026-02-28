@@ -28,10 +28,10 @@ defmodule OptimalSystemAgent.MCP.Client do
   """
   require Logger
 
-  @mcp_config Application.compile_env(:optimal_system_agent, :mcp_config_path, "~/.osa/mcp.json")
+  defp mcp_config_path, do: Application.get_env(:optimal_system_agent, :mcp_config_path, "~/.osa/mcp.json") |> Path.expand()
 
   def load_servers do
-    config_path = Path.expand(@mcp_config)
+    config_path = mcp_config_path()
 
     if File.exists?(config_path) do
       case Jason.decode(File.read!(config_path)) do

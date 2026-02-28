@@ -35,8 +35,6 @@ defmodule OptimalSystemAgent.OS.Registry do
 
   alias OptimalSystemAgent.OS.{Manifest, Scanner}
 
-  @config_dir Application.compile_env(:optimal_system_agent, :config_dir, "~/.osa")
-
   @type state :: %__MODULE__{
           connected: %{String.t() => Manifest.t()},
           discovered: %{String.t() => Manifest.t()}
@@ -195,7 +193,9 @@ defmodule OptimalSystemAgent.OS.Registry do
 
   # --- Persistence ---
 
-  defp os_dir, do: Path.expand(Path.join(@config_dir, "os"))
+  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+
+  defp os_dir, do: Path.join(config_dir(), "os")
 
   defp ensure_os_dir do
     dir = os_dir()

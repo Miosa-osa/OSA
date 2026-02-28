@@ -33,14 +33,24 @@ const (
 	roleSystem
 )
 
+// systemLevel classifies system message severity.
+type systemLevel int
+
+const (
+	levelInfo    systemLevel = iota // default — dim gray border
+	levelWarning                    // amber border
+	levelError                      // red border
+)
+
 // ChatMessage is a single entry in the conversation history.
 type ChatMessage struct {
 	Role       messageRole
 	Content    string
 	Signal     *Signal
 	Timestamp  time.Time
-	DurationMs int64  // agent response wall time
-	ModelName  string // model that produced the response
+	DurationMs int64       // agent response wall time
+	ModelName  string      // model that produced the response
+	Level      systemLevel // system message severity (only for roleSystem)
 }
 
 // ChatModel is a scrollable viewport that displays conversation history.
@@ -98,12 +108,35 @@ func (m *ChatModel) AddAgentMessage(text string, sig *Signal, durationMs int64, 
 	m.refresh()
 }
 
-// AddSystemMessage appends a dimmed system-role message.
+// AddSystemMessage appends a dimmed system-role message (info level).
 func (m *ChatModel) AddSystemMessage(text string) {
 	m.messages = append(m.messages, ChatMessage{
 		Role:      roleSystem,
 		Content:   text,
 		Timestamp: time.Now(),
+		Level:     levelInfo,
+	})
+	m.refresh()
+}
+
+// AddSystemWarning appends a warning-level system message with amber border.
+func (m *ChatModel) AddSystemWarning(text string) {
+	m.messages = append(m.messages, ChatMessage{
+		Role:      roleSystem,
+		Content:   text,
+		Timestamp: time.Now(),
+		Level:     levelWarning,
+	})
+	m.refresh()
+}
+
+// AddSystemError appends an error-level system message with red border.
+func (m *ChatModel) AddSystemError(text string) {
+	m.messages = append(m.messages, ChatMessage{
+		Role:      roleSystem,
+		Content:   text,
+		Timestamp: time.Now(),
+		Level:     levelError,
 	})
 	m.refresh()
 }
@@ -165,7 +198,16 @@ func (m *ChatModel) renderWelcome() string {
 
 	title := style.WelcomeTitle.Render(fmt.Sprintf("◈ OSA Agent  %s", m.welcomeVersion))
 	detail := style.WelcomeMeta.Render(m.welcomeDetail)
-	cwd := style.WelcomeCwd.Render(m.welcomeCwd)
+	// Truncate CWD to fit viewport width with some margin
+	cwdPath := m.welcomeCwd
+	maxCwd := m.width - 10
+	if maxCwd < 20 {
+		maxCwd = 20
+	}
+	if len(cwdPath) > maxCwd {
+		cwdPath = truncatePath(cwdPath, maxCwd)
+	}
+	cwd := style.WelcomeCwd.Render(cwdPath)
 	tip := style.WelcomeTip.Render("/help for help  ·  Ctrl+O expand  ·  Ctrl+B background")
 
 	// Center each line
@@ -253,10 +295,28 @@ func (m *ChatModel) renderMessage(msg ChatMessage) string {
 		return border.Render(label + "\n" + rendered + meta)
 
 	case roleSystem:
-		content := style.Faint.Render(msg.Content)
+		// Choose border color based on level
+		borderColor := style.MsgBorderSystem
+		switch msg.Level {
+		case levelWarning:
+			borderColor = style.MsgBorderWarning
+		case levelError:
+			borderColor = style.MsgBorderError
+		}
+
+		var content string
+		switch msg.Level {
+		case levelError:
+			content = style.ErrorText.Render(msg.Content)
+		case levelWarning:
+			content = lipgloss.NewStyle().Foreground(style.Warning).Render(msg.Content)
+		default:
+			content = style.Faint.Render(msg.Content)
+		}
+
 		border := lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, false, true).
-			BorderForeground(style.MsgBorderSystem).
+			BorderForeground(borderColor).
 			PaddingLeft(1).
 			Width(contentWidth)
 		return border.Render(content)

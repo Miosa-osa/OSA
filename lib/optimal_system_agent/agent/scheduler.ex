@@ -58,13 +58,8 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   alias OptimalSystemAgent.Agent.HeartbeatState
   alias OptimalSystemAgent.Events.Bus
 
-  @heartbeat_interval Application.compile_env(
-                        :optimal_system_agent,
-                        :heartbeat_interval,
-                        30 * 60 * 1000
-                      )
-
-  @config_dir Application.compile_env(:optimal_system_agent, :config_dir, "~/.osa")
+  defp heartbeat_interval, do: Application.get_env(:optimal_system_agent, :heartbeat_interval, 1_800_000)
+  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   @circuit_breaker_limit 3
   @webhook_timeout_ms 10_000
@@ -159,7 +154,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   @doc "Get the path to the HEARTBEAT.md file."
   def heartbeat_path do
-    Path.expand(Path.join(@config_dir, "HEARTBEAT.md"))
+    Path.expand(Path.join(config_dir(), "HEARTBEAT.md"))
   end
 
   # ── Init ─────────────────────────────────────────────────────────────
@@ -175,7 +170,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     state = load_triggers(state)
 
     Logger.info(
-      "Scheduler started — heartbeat every #{div(@heartbeat_interval, 60_000)} min, " <>
+      "Scheduler started — heartbeat every #{div(heartbeat_interval(), 60_000)} min, " <>
         "#{length(state.cron_jobs)} cron job(s), " <>
         "#{map_size(state.trigger_handlers)} trigger(s)"
     )
@@ -397,12 +392,12 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
         nil ->
           DateTime.add(
             state.heartbeat_started_at || DateTime.utc_now(),
-            @heartbeat_interval,
+            heartbeat_interval(),
             :millisecond
           )
 
         last ->
-          DateTime.add(last, @heartbeat_interval, :millisecond)
+          DateTime.add(last, heartbeat_interval(), :millisecond)
       end
 
     {:reply, next, state}
@@ -424,12 +419,12 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
         nil ->
           DateTime.add(
             state.heartbeat_started_at || DateTime.utc_now(),
-            @heartbeat_interval,
+            heartbeat_interval(),
             :millisecond
           )
 
         last ->
-          DateTime.add(last, @heartbeat_interval, :millisecond)
+          DateTime.add(last, heartbeat_interval(), :millisecond)
       end
 
     status = %{
@@ -463,11 +458,11 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   # ── CRONS.json Loading ────────────────────────────────────────────────
 
   defp crons_path do
-    Path.expand(Path.join(@config_dir, "CRONS.json"))
+    Path.expand(Path.join(config_dir(), "CRONS.json"))
   end
 
   defp triggers_path do
-    Path.expand(Path.join(@config_dir, "TRIGGERS.json"))
+    Path.expand(Path.join(config_dir(), "TRIGGERS.json"))
   end
 
   defp load_crons(state) do
@@ -1204,7 +1199,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       File.write!(path, """
       # Heartbeat Tasks
 
-      Add tasks here as a markdown checklist. OSA checks this file every #{div(@heartbeat_interval, 60_000)} minutes
+      Add tasks here as a markdown checklist. OSA checks this file every #{div(heartbeat_interval(), 60_000)} minutes
       and executes any unchecked items through the agent loop.
 
       ## Periodic Tasks
@@ -1218,7 +1213,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   end
 
   defp schedule_heartbeat do
-    Process.send_after(self(), :heartbeat, @heartbeat_interval)
+    Process.send_after(self(), :heartbeat, heartbeat_interval())
   end
 
   defp schedule_cron_check do

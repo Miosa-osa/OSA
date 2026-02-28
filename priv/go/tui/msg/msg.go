@@ -163,6 +163,14 @@ type OrchestratorAgentCompleted struct {
 	TokensUsed int    `json:"tokens_used"`
 }
 
+// OrchestratorAgentFailed from system_event.
+type OrchestratorAgentFailed struct {
+	AgentName  string `json:"agent_name"`
+	Error      string `json:"error"`
+	ToolUses   int    `json:"tool_uses"`
+	TokensUsed int    `json:"tokens_used"`
+}
+
 // OrchestratorWaveStarted from system_event.
 type OrchestratorWaveStarted struct {
 	WaveNumber int `json:"wave_number"`

@@ -116,13 +116,13 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case client.SSEAuthFailedEvent:
-		m.chat.AddSystemMessage("Authentication expired. Use /login to re-authenticate.")
+		m.chat.AddSystemWarning("Authentication expired. Use /login to re-authenticate.")
 		m.closeSSE()
 		m.state = StateIdle
 		return m, m.input.Focus()
 	case msg.LoginResult:
 		if v.Err != nil {
-			m.chat.AddSystemMessage(fmt.Sprintf("Login failed: %v", v.Err))
+			m.chat.AddSystemError(fmt.Sprintf("Login failed: %v", v.Err))
 		} else {
 			m.chat.AddSystemMessage(fmt.Sprintf("Authenticated (token expires in %ds)", v.ExpiresIn))
 			if m.sse != nil {
@@ -135,7 +135,7 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case msg.LogoutResult:
 		if v.Err != nil {
-			m.chat.AddSystemMessage(fmt.Sprintf("Logout error: %v", v.Err))
+			m.chat.AddSystemError(fmt.Sprintf("Logout error: %v", v.Err))
 		} else {
 			m.chat.AddSystemMessage("Logged out")
 			m.closeSSE()
@@ -166,7 +166,7 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status.SetStats(time.Since(m.processingStart), m.activity.ToolCount(), v.InputTokens, v.OutputTokens)
 		return m, nil
 	case client.ContextPressureEvent:
-		m.status.SetContext(v.Utilization, v.MaxTokens)
+		m.status.SetContext(v.Utilization, v.MaxTokens, v.EstimatedTokens)
 		return m, nil
 	case client.OrchestratorTaskStartedEvent:
 		m.agents.Start()
@@ -182,6 +182,9 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case client.OrchestratorAgentCompletedEvent:
 		m.agents, _ = m.agents.Update(msg.OrchestratorAgentCompleted{AgentName: v.AgentName, ToolUses: v.ToolUses, TokensUsed: v.TokensUsed})
+		return m, nil
+	case client.OrchestratorAgentFailedEvent:
+		m.agents, _ = m.agents.Update(msg.OrchestratorAgentFailed{AgentName: v.AgentName, Error: v.Error, ToolUses: v.ToolUses, TokensUsed: v.TokensUsed})
 		return m, nil
 	case client.OrchestratorTaskCompletedEvent:
 		m.agents.Stop()
@@ -233,6 +236,8 @@ func (m Model) View() string {
 		sections = append(sections, m.status.View())
 		sections = append(sections, m.input.View())
 	case StateProcessing:
+		// Recalculate chat height dynamically as activity/agents panels change size
+		m.chat.SetSize(m.width, m.chatHeight())
 		sections = append(sections, m.banner.HeaderView())
 		sections = append(sections, m.chat.View())
 		if m.tasks.HasTasks() {
@@ -390,21 +395,21 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 
 func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 	if h.Err != nil {
-		m.chat.AddSystemMessage(fmt.Sprintf("Backend unreachable: %v -- retrying in 5s", h.Err))
+		m.chat.AddSystemError(fmt.Sprintf("Backend unreachable: %v -- retrying in 5s", h.Err))
 		m.state = StateConnecting
 		return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg { return retryHealth{} })
 	}
 	m.banner.SetHealth(h)
 	m.status.SetProviderInfo(h.Provider, h.Model)
-	m.state = StateBanner
+	m.state = StateIdle
 	m.sessionID = fmt.Sprintf("tui_%d", time.Now().UnixNano())
 
 	// Populate welcome screen data (shown in chat viewport when no messages)
 	m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
+	m.chat.SetSize(m.width, m.chatHeight())
 
 	var cmds []tea.Cmd
-	cmds = append(cmds, m.fetchCommands(), m.fetchToolCount())
-	cmds = append(cmds, tea.Tick(3*time.Second, func(time.Time) tea.Msg { return bannerTimeout{} }))
+	cmds = append(cmds, m.fetchCommands(), m.fetchToolCount(), m.input.Focus())
 	if m.program != nil {
 		if cmd := m.startSSE(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -421,7 +426,7 @@ func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.input.Focus())
 	if r.Err != nil {
-		m.chat.AddSystemMessage(fmt.Sprintf("Error: %v", r.Err))
+		m.chat.AddSystemError(fmt.Sprintf("Error: %v", r.Err))
 		return m, tea.Batch(cmds...)
 	}
 	if wasBackground {
@@ -472,7 +477,7 @@ func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, te
 
 func (m Model) handleCommand(r msg.CommandResult) (Model, tea.Cmd) {
 	if r.Err != nil {
-		m.chat.AddSystemMessage(fmt.Sprintf("Command error: %v", r.Err))
+		m.chat.AddSystemError(fmt.Sprintf("Command error: %v", r.Err))
 		return m, nil
 	}
 	m.chat.AddSystemMessage(r.Output)
@@ -492,8 +497,14 @@ func (m Model) handlePlanDecision(d model.PlanDecision) (Model, tea.Cmd) {
 		return m, m.orchestrate("Approved. Execute the plan.")
 	case "reject":
 		m.chat.AddSystemMessage("Plan rejected.")
+		m.state = StateIdle
+		return m, m.input.Focus()
 	case "edit":
-		m.chat.AddSystemMessage("Edit mode -- type your feedback.")
+		m.chat.AddSystemMessage("Edit the plan below:")
+		m.state = StateIdle
+		focusCmd := m.input.Focus()
+		m.input.SetValue("Regarding the plan: ")
+		return m, focusCmd
 	}
 	m.state = StateIdle
 	return m, m.input.Focus()

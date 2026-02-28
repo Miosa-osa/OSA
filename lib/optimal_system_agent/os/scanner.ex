@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.OS.Scanner do
   alias OptimalSystemAgent.OS.Manifest
   require Logger
 
-  @config_dir Application.compile_env(:optimal_system_agent, :config_dir, "~/.osa")
+  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   @default_scan_dirs [
     "~/.osa/templates",
@@ -153,7 +153,7 @@ defmodule OptimalSystemAgent.OS.Scanner do
   end
 
   defp load_configured_paths do
-    config_path = Path.expand(Path.join(@config_dir, "config.json"))
+    config_path = Path.join(config_dir(), "config.json")
 
     with {:ok, raw} <- File.read(config_path),
          {:ok, config} <- Jason.decode(raw) do

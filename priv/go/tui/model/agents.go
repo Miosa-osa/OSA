@@ -19,7 +19,7 @@ type AgentInfo struct {
 	Name          string
 	Role          string
 	Model         string
-	Status        string // "running" | "completed"
+	Status        string // "running" | "completed" | "failed"
 	CurrentAction string
 	ToolUses      int
 	TokensUsed    int
@@ -102,6 +102,14 @@ func (m AgentsModel) Update(message tea.Msg) (AgentsModel, tea.Cmd) {
 			agent.CurrentAction = ""
 		}
 
+	case msg.OrchestratorAgentFailed:
+		if agent, ok := m.agents[ev.AgentName]; ok {
+			agent.Status = "failed"
+			agent.ToolUses = ev.ToolUses
+			agent.TokensUsed = ev.TokensUsed
+			agent.CurrentAction = ""
+		}
+
 	case msg.OrchestratorTaskCompleted:
 		m.Stop()
 
@@ -165,7 +173,7 @@ func (m AgentsModel) View() string {
 			continuation = "   │  "
 		}
 
-		// Agent line: ├─ researcher · 14 tool uses · 70.8k tokens
+		// Agent line: ├─ ⏺ researcher (backend) · 14 tool uses · 70.8k tokens
 		sb.WriteString(renderAgentLine(branch, agent))
 		sb.WriteByte('\n')
 
@@ -175,7 +183,7 @@ func (m AgentsModel) View() string {
 			sb.WriteString(continuation)
 			sb.WriteString(style.Connector.Render("⎿"))
 			sb.WriteString("  ")
-			sb.WriteString(style.Faint.Render(subStatus))
+			sb.WriteString(subStatus)
 			sb.WriteByte('\n')
 		}
 	}
@@ -191,14 +199,30 @@ func (m AgentsModel) View() string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// renderAgentLine builds one agent row, e.g.:
+// renderAgentLine builds one agent row with status prefix, e.g.:
 //
-//	├─ researcher · 14 tool uses · 70.8k tokens
+//	├─ ⏺ researcher (backend) · 14 tool uses · 70.8k tokens
 func renderAgentLine(branch string, agent *AgentInfo) string {
 	var sb strings.Builder
 
 	sb.WriteString(style.AgentRole.Render(branch))
+
+	// Status prefix
+	switch agent.Status {
+	case "completed":
+		sb.WriteString(style.PrefixDone.Render("✓ "))
+	case "failed":
+		sb.WriteString(style.ErrorText.Render("✘ "))
+	default:
+		sb.WriteString(style.PrefixActive.Render("⏺ "))
+	}
+
 	sb.WriteString(style.AgentName.Render(agent.Name))
+
+	// Show role in parentheses if available
+	if agent.Role != "" {
+		sb.WriteString(style.AgentRole.Render(fmt.Sprintf(" (%s)", agent.Role)))
+	}
 
 	sb.WriteString(style.AgentRole.Render(
 		fmt.Sprintf(" · %d tool uses · %s tokens", agent.ToolUses, formatTokens(agent.TokensUsed)),
@@ -209,13 +233,25 @@ func renderAgentLine(branch string, agent *AgentInfo) string {
 
 // agentSubStatus returns the contextual sub-status for an agent.
 func agentSubStatus(agent *AgentInfo) string {
-	if agent.Status == "completed" {
-		return "Done"
+	switch agent.Status {
+	case "completed":
+		sub := "Done"
+		if agent.Model != "" {
+			sub += " · model: " + agent.Model
+		}
+		return style.Faint.Render(sub)
+	case "failed":
+		sub := "Failed"
+		if agent.Model != "" {
+			sub += " · model: " + agent.Model
+		}
+		return style.ErrorText.Render(sub)
+	default:
+		if agent.CurrentAction != "" {
+			return style.Faint.Render(agent.CurrentAction)
+		}
+		return ""
 	}
-	if agent.CurrentAction != "" {
-		return agent.CurrentAction
-	}
-	return ""
 }
 
 // formatTokens converts a raw token count to a compact display string.

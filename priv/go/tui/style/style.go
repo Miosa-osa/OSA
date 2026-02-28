@@ -16,9 +16,11 @@ var (
 	Border    = lipgloss.Color("#4B5563") // gray-600
 
 	// Message left-border colors (OpenCode style)
-	MsgBorderUser   = lipgloss.Color("#06B6D4") // cyan — user messages
-	MsgBorderAgent  = lipgloss.Color("#7C3AED") // violet — agent messages
-	MsgBorderSystem = lipgloss.Color("#374151") // dim — system messages
+	MsgBorderUser    = lipgloss.Color("#06B6D4") // cyan — user messages
+	MsgBorderAgent   = lipgloss.Color("#7C3AED") // violet — agent messages
+	MsgBorderSystem  = lipgloss.Color("#374151") // dim — system messages
+	MsgBorderWarning = lipgloss.Color("#F59E0B") // amber — warning messages
+	MsgBorderError   = lipgloss.Color("#EF4444") // red — error messages
 )
 
 // Base styles.

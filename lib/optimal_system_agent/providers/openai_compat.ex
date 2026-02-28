@@ -13,6 +13,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   require Logger
 
+  alias OptimalSystemAgent.Utils.Text
+
   @doc """
   Execute a chat completion against any OpenAI-compatible endpoint.
 
@@ -51,7 +53,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     try do
       case Req.post(url, json: body, headers: headers, receive_timeout: 120_000) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp}} ->
-          content = msg["content"] || ""
+          content = Text.strip_thinking_tokens(msg["content"] || "")
           tool_calls = parse_tool_calls(msg)
           usage = parse_usage(resp)
           {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}

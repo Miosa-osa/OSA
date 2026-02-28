@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,6 +10,42 @@ import (
 	"github.com/miosa/osa-tui/msg"
 	"github.com/miosa/osa-tui/style"
 )
+
+// truncatePath shortens a filesystem path to fit within maxWidth characters.
+// It tries: full path → ~/relative → …/last-two-segments → …/basename.
+func truncatePath(path string, maxWidth int) string {
+	if len(path) <= maxWidth {
+		return path
+	}
+	// Try replacing home dir with ~
+	if idx := strings.Index(path, "/Users/"); idx >= 0 {
+		parts := strings.SplitN(path[idx+len("/Users/"):], "/", 2)
+		if len(parts) == 2 {
+			short := "~/" + parts[1]
+			if len(short) <= maxWidth {
+				return short
+			}
+		}
+	}
+	// Try last two path segments
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	parent := filepath.Base(dir)
+	short := "…/" + parent + "/" + base
+	if len(short) <= maxWidth {
+		return short
+	}
+	// Just basename
+	short = "…/" + base
+	if len(short) <= maxWidth {
+		return short
+	}
+	// Hard truncate
+	if maxWidth > 3 {
+		return path[:maxWidth-1] + "…"
+	}
+	return path[:maxWidth]
+}
 
 // OsaLogo is the ASCII art logo rendered on startup and connecting screens.
 const OsaLogo = ` ██████╗ ███████╗ █████╗
@@ -106,17 +143,22 @@ func (m BannerModel) ViewFull() string {
 	}
 	detailParts = append(detailParts, fmt.Sprintf("%d tools", m.toolCount))
 	detailLine := muted.Render(strings.Join(detailParts, " · "))
-	wsLine := ""
-	if m.workspace != "" {
-		wsLine = muted.Render(m.workspace)
-	}
 	hintLine := muted.Render("/help for help")
 	boxWidth := m.width - 4
 	if boxWidth < 40 {
-		boxWidth = 60
+		boxWidth = 40
 	}
-	if boxWidth > 70 {
-		boxWidth = 70
+	if boxWidth > 80 {
+		boxWidth = 80
+	}
+	wsLine := ""
+	if m.workspace != "" {
+		// Truncate path to fit box content area (boxWidth - border - padding - indent)
+		maxPathWidth := boxWidth - 8 // 2 border + 4 padding + 2 indent
+		if maxPathWidth < 20 {
+			maxPathWidth = 20
+		}
+		wsLine = muted.Render(truncatePath(m.workspace, maxPathWidth))
 	}
 	titlePadding := boxWidth - lipgloss.Width(titleLeft) - lipgloss.Width(titleRight) - 4
 	if titlePadding < 2 {

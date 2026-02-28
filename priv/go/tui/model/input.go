@@ -33,6 +33,7 @@ func (m *InputModel) SetWidth(w int)            { m.width = w; m.ti.Width = w - 
 func (m *InputModel) Focus() tea.Cmd            { return m.ti.Focus() }
 func (m *InputModel) Blur()                     { m.ti.Blur() }
 func (m InputModel) Value() string              { return m.ti.Value() }
+func (m *InputModel) SetValue(s string)         { m.ti.SetValue(s); m.ti.CursorEnd() }
 
 func (m *InputModel) Reset() {
 	m.historyIdx = len(m.history)

@@ -21,7 +21,7 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Agent.Memory
 
-  @interval Application.compile_env(:optimal_system_agent, :proactive_interval, 30 * 60 * 1000)
+  defp interval, do: Application.get_env(:optimal_system_agent, :proactive_interval, 1_800_000)
 
   # Max alerts held in memory at one time
   @max_alerts 50
@@ -475,5 +475,5 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
     end
   end
 
-  defp schedule_scan, do: Process.send_after(self(), :scan, @interval)
+  defp schedule_scan, do: Process.send_after(self(), :scan, interval())
 end

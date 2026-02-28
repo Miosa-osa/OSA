@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ type ToolCallInfo struct {
 	Args       string
 	DurationMs int64
 	Done       bool
+	Success    bool
 }
 
 // ActivityModel renders a spinner, elapsed timer, and tool call feed.
@@ -128,9 +130,10 @@ func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 
 	case msg.ToolCallStart:
 		m.toolCalls = append(m.toolCalls, ToolCallInfo{
-			Name: v.Name,
-			Args: v.Args,
-			Done: false,
+			Name:    v.Name,
+			Args:    v.Args,
+			Done:    false,
+			Success: true, // default until end event
 		})
 		m.totalToolUses++
 		return m, nil
@@ -141,6 +144,7 @@ func (m ActivityModel) Update(teaMsg tea.Msg) (ActivityModel, tea.Cmd) {
 			if m.toolCalls[i].Name == v.Name && !m.toolCalls[i].Done {
 				m.toolCalls[i].Done = true
 				m.toolCalls[i].DurationMs = v.DurationMs
+				m.toolCalls[i].Success = v.Success
 				break
 			}
 		}
@@ -190,7 +194,7 @@ func (m ActivityModel) View() string {
 	if m.iterationCount > 1 {
 		hdr.WriteString(fmt.Sprintf(" · iter %d", m.iterationCount))
 	}
-	if m.thinkingMs > 0 {
+	if m.thinkingMs > 2000 {
 		hdr.WriteString(fmt.Sprintf(" · thought for %s", formatMs(m.thinkingMs)))
 	}
 	hdr.WriteString(")")
@@ -242,7 +246,12 @@ func renderToolCall(tc ToolCallInfo, isLast bool) string {
 
 	var suffix string
 	if tc.Done {
-		suffix = style.ToolDuration.Render(fmt.Sprintf(" (%dms)", tc.DurationMs))
+		dur := formatToolDuration(tc.DurationMs)
+		if tc.Success {
+			suffix = style.ToolDuration.Render(fmt.Sprintf(" ✓ %s", dur))
+		} else {
+			suffix = style.ErrorText.Render(fmt.Sprintf(" ✘ %s", dur))
+		}
 	} else {
 		suffix = style.ToolDuration.Render(" (running…)")
 	}
@@ -252,42 +261,104 @@ func renderToolCall(tc ToolCallInfo, isLast bool) string {
 
 // contextualDescription returns a human-readable description for a tool call.
 func contextualDescription(name, args string) string {
+	extracted := extractArg(name, args)
 	switch name {
-	case "file_read":
-		if args != "" {
-			return style.Faint.Render("Reading " + args)
+	case "file_read", "Read":
+		if extracted != "" {
+			return style.Faint.Render("Reading " + extracted)
 		}
 		return style.Faint.Render("Reading file…")
-	case "file_edit":
-		if args != "" {
-			return style.Faint.Render("Editing " + args)
+	case "file_edit", "Edit":
+		if extracted != "" {
+			return style.Faint.Render("Editing " + extracted)
 		}
 		return style.Faint.Render("Editing file…")
-	case "file_write":
-		if args != "" {
-			return style.Faint.Render("Writing " + args)
+	case "file_write", "Write":
+		if extracted != "" {
+			return style.Faint.Render("Writing " + extracted)
 		}
 		return style.Faint.Render("Writing file…")
-	case "file_glob":
+	case "file_glob", "Glob":
+		if extracted != "" {
+			return style.Faint.Render("Matching " + extracted)
+		}
 		return style.Faint.Render("Searching for patterns…")
-	case "file_grep":
-		if args != "" {
-			return style.Faint.Render("Searching for " + args)
+	case "file_grep", "Grep":
+		if extracted != "" {
+			return style.Faint.Render("Searching for " + extracted)
 		}
 		return style.Faint.Render("Searching files…")
-	case "shell_execute", "bash":
-		if args != "" {
-			return style.Faint.Render("Running " + args)
+	case "shell_execute", "bash", "Bash":
+		if extracted != "" {
+			return style.Faint.Render("Running " + extracted)
 		}
 		return style.Faint.Render("Running command…")
 	case "orchestrate":
 		return style.Faint.Render("Running agents…")
+	case "web_search":
+		if extracted != "" {
+			return style.Faint.Render("Searching " + extracted)
+		}
+		return style.Faint.Render("Searching the web…")
+	case "web_fetch":
+		if extracted != "" {
+			return style.Faint.Render("Fetching " + extracted)
+		}
+		return style.Faint.Render("Fetching URL…")
+	case "memory_recall":
+		if extracted != "" {
+			return style.Faint.Render("Recalling " + extracted)
+		}
+		return style.Faint.Render("Searching memory…")
+	case "memory_save":
+		return style.Faint.Render("Saving to memory…")
 	default:
-		if args != "" {
-			return style.ToolArg.Render("— " + args)
+		if extracted != "" {
+			return style.ToolArg.Render("— " + extracted)
 		}
 		return ""
 	}
+}
+
+// extractArg tries to pull the most relevant argument from raw args.
+// For JSON args, it extracts key fields (path, command, query, url, pattern).
+// For plain strings, it truncates to 60 chars.
+func extractArg(toolName, args string) string {
+	if args == "" {
+		return ""
+	}
+	// Try JSON extraction
+	if strings.HasPrefix(strings.TrimSpace(args), "{") {
+		var parsed map[string]interface{}
+		if json.Unmarshal([]byte(args), &parsed) == nil {
+			// Try common keys in priority order based on tool
+			keys := []string{"path", "file_path", "command", "query", "pattern", "url", "content"}
+			for _, k := range keys {
+				if v, ok := parsed[k]; ok {
+					if s, ok := v.(string); ok && s != "" {
+						return truncateStr(s, 60)
+					}
+				}
+			}
+		}
+	}
+	return truncateStr(args, 60)
+}
+
+// truncateStr shortens s to maxLen, appending "…" if truncated.
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
+}
+
+// formatToolDuration renders tool duration concisely.
+func formatToolDuration(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000.0)
 }
 
 // formatElapsed renders a duration as a concise string.

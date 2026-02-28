@@ -70,6 +70,25 @@ defmodule OptimalSystemAgent.Utils.Text do
   def strip_markdown_fences(content), do: content
 
   @doc """
+  Strips model reasoning/thinking blocks from raw LLM output.
+
+  Handles `<think>`, `<|start|>...<|end|>`, and `<reasoning>` tags
+  emitted by DeepSeek, Qwen, and other reasoning models.
+  """
+  @spec strip_thinking_tokens(String.t() | nil | any()) :: String.t()
+  def strip_thinking_tokens(nil), do: ""
+
+  def strip_thinking_tokens(content) when is_binary(content) do
+    content
+    |> String.replace(~r/<think>[\s\S]*?<\/think>/m, "")
+    |> String.replace(~r/<\|start\|>[\s\S]*?<\|end\|>/m, "")
+    |> String.replace(~r/<reasoning>[\s\S]*?<\/reasoning>/m, "")
+    |> String.trim()
+  end
+
+  def strip_thinking_tokens(other), do: other
+
+  @doc """
   Converts any value to a string safely.
 
   - `nil`     → `""`

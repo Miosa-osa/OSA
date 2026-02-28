@@ -15,9 +15,9 @@ defmodule OptimalSystemAgent.Machines do
   use GenServer
   require Logger
 
-  @config_dir Application.compile_env(:optimal_system_agent, :config_dir, "~/.osa")
-
   defstruct active_machines: [:core], config: %{}
+
+  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -64,7 +64,7 @@ defmodule OptimalSystemAgent.Machines do
   end
 
   defp load_config do
-    config_path = Path.expand(Path.join(@config_dir, "config.json"))
+    config_path = Path.join(config_dir(), "config.json")
 
     if File.exists?(config_path) do
       case Jason.decode(File.read!(config_path)) do

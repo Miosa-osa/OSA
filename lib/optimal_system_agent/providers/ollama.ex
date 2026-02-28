@@ -17,6 +17,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   require Logger
 
+  alias OptimalSystemAgent.Utils.Text
+
   # Models known to handle tool calling well (name prefix → min size in GB)
   # Include both hyphenated and non-hyphenated variants (glm-4 AND glm4)
   @tool_capable_prefixes ~w(qwen3 qwen2.5 llama3.3 llama3.1 gemma3 glm-4 glm4 mistral mixtral deepseek command-r)
@@ -110,7 +112,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       case Req.post("#{url}/api/chat", json: body, receive_timeout: 120_000) do
         {:ok, %{status: 200, body: %{"message" => %{"content" => content} = msg}}} ->
           tool_calls = parse_tool_calls(msg)
-          {:ok, %{content: content || "", tool_calls: tool_calls}}
+          {:ok, %{content: Text.strip_thinking_tokens(content || ""), tool_calls: tool_calls}}
 
         {:ok, %{status: status, body: resp_body}} ->
           Logger.warning("Ollama returned #{status}: #{inspect(resp_body)}")
