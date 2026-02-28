@@ -63,6 +63,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
 
   @cache_table :osa_classifier_cache
   @cache_ttl 600
+  @max_cache_size 500
 
   @doc """
   Fast deterministic classification — always <1ms, returns full 5-tuple
@@ -293,6 +294,7 @@ defmodule OptimalSystemAgent.Signal.Classifier do
         case result do
           {:ok, _} = ok ->
             :ets.insert(@cache_table, {key, ok, now})
+            maybe_prune_cache(now)
             ok
 
           error ->
@@ -304,6 +306,27 @@ defmodule OptimalSystemAgent.Signal.Classifier do
   defp ensure_cache do
     if :ets.whereis(@cache_table) == :undefined do
       :ets.new(@cache_table, [:set, :public, :named_table])
+    end
+  end
+
+  # Prune cache when it exceeds @max_cache_size:
+  # 1. Delete expired entries (TTL elapsed)
+  # 2. If still over limit, evict the oldest half by insertion timestamp
+  defp maybe_prune_cache(now) do
+    if :ets.info(@cache_table, :size) > @max_cache_size do
+      expired_before = now - @cache_ttl
+
+      :ets.select_delete(@cache_table, [
+        {{:_, :_, :"$1"}, [{:"=<", :"$1", expired_before}], [true]}
+      ])
+
+      if :ets.info(@cache_table, :size) > @max_cache_size do
+        @cache_table
+        |> :ets.tab2list()
+        |> Enum.sort_by(fn {_k, _v, ts} -> ts end)
+        |> Enum.take(div(@max_cache_size, 2))
+        |> Enum.each(fn {key, _v, _ts} -> :ets.delete(@cache_table, key) end)
+      end
     end
   end
 

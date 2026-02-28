@@ -191,8 +191,8 @@ defmodule OptimalSystemAgent.Go.Tokenizer do
   def handle_info({:request_timeout, id}, state) do
     case Map.pop(state.pending, id) do
       {{from, _timer_ref}, pending} ->
-        # fallback to 0 on timeout
-        GenServer.reply(from, {:ok, 0})
+        # Signal timeout so callers fall back to heuristic estimation
+        GenServer.reply(from, {:error, :timeout})
         {:noreply, %{state | pending: pending}}
 
       {nil, _} ->

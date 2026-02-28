@@ -59,22 +59,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
       "[Orchestrate Skill] Launching orchestration for task: #{String.slice(task, 0, 100)}"
     )
 
-    try do
-      case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id,
-             strategy: strategy,
-             cached_tools: tools
-           ) do
-        {:ok, task_id} ->
-          case await_orchestration(task_id, 300_000) do
-            {:ok, synthesis} -> {:ok, synthesis}
-            {:error, :timeout} -> {:error, "Orchestration timed out after 300s (task: #{task_id})"}
-          end
+    caller = self()
+    ref = make_ref()
 
-        {:error, reason} ->
-          {:error, "Orchestration failed: #{inspect(reason)}"}
-      end
+    # Register handler BEFORE calling execute to close the race window where
+    # the orchestrator could complete and emit its event before we start
+    # listening. Handler sends all orchestration events to our mailbox;
+    # await_result/3 filters by task_id once we know it.
+    handler_ref =
+      OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
+        event = Map.get(payload, :event)
+
+        if event == :orchestrator_task_completed or event == :orchestrator_task_failed do
+          send(caller, {:orch_event, ref, event, Map.get(payload, :task_id), Map.get(payload, :reason)})
+        end
+      end)
+
+    try do
+      result =
+        case OptimalSystemAgent.Agent.Orchestrator.execute(task, session_id,
+               strategy: strategy,
+               cached_tools: tools
+             ) do
+          {:ok, task_id} ->
+            case await_result(task_id, ref, 300_000) do
+              {:ok, synthesis} -> {:ok, synthesis}
+              {:error, :timeout} -> {:error, "Orchestration timed out after 300s (task: #{task_id})"}
+            end
+
+          {:error, reason} ->
+            {:error, "Orchestration failed: #{inspect(reason)}"}
+        end
+
+      OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, handler_ref)
+      result
     rescue
       e ->
+        OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, handler_ref)
         Logger.error("[Orchestrate Skill] Exception: #{Exception.message(e)}")
         {:error, "Orchestration crashed: #{Exception.message(e)}"}
     end
@@ -82,40 +103,37 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
 
   def execute(_), do: {:error, "Missing required parameter: task"}
 
-  defp await_orchestration(task_id, timeout_ms) do
-    caller = self()
-    ref = make_ref()
+  # Wait for the orchestration result with a monotonic deadline.
+  # Uses a deadline (not rolling timeout) so re-dispatched events for other
+  # tasks don't silently extend the wait window.
+  defp await_result(task_id, ref, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_result(task_id, ref, deadline)
+  end
 
-    handler_ref =
-      OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
-        case payload do
-          %{event: :orchestrator_task_completed, task_id: ^task_id} ->
-            send(caller, {:orchestration_done, ref, :completed})
+  defp do_await_result(task_id, ref, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
 
-          %{event: :orchestrator_task_failed, task_id: ^task_id, reason: reason} ->
-            send(caller, {:orchestration_done, ref, {:failed, reason}})
-
-          _ ->
-            :ok
-        end
-      end)
-
-    result =
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
       receive do
-        {:orchestration_done, ^ref, :completed} ->
+        {:orch_event, ^ref, :orchestrator_task_completed, ^task_id, _reason} ->
           case OptimalSystemAgent.Agent.Orchestrator.progress(task_id) do
             {:ok, %{synthesis: s}} when is_binary(s) and s != "" -> {:ok, s}
             {:ok, %{status: :completed}} -> {:ok, "Orchestration completed."}
             _ -> {:ok, "Orchestration completed."}
           end
 
-        {:orchestration_done, ^ref, {:failed, reason}} ->
+        {:orch_event, ^ref, :orchestrator_task_failed, ^task_id, reason} ->
           {:error, "Orchestration failed: #{inspect(reason)}"}
-      after
-        timeout_ms -> {:error, :timeout}
-      end
 
-    OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, handler_ref)
-    result
+        {:orch_event, ^ref, _event, _other_task_id, _reason} ->
+          # Event for a different task — discard and keep waiting, preserving deadline
+          do_await_result(task_id, ref, deadline)
+      after
+        remaining -> {:error, :timeout}
+      end
+    end
   end
 end

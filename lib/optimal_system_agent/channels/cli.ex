@@ -28,7 +28,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     IO.write(IO.ANSI.clear() <> IO.ANSI.home())
     print_banner()
 
-    session_id = "cli_#{:rand.uniform(999_999)}"
+    session_id = "cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
     {:ok, _pid} = Loop.start_link(session_id: session_id, channel: :cli)
 
     # Register event handlers for CLI feedback
