@@ -48,6 +48,8 @@ func main() {
 		}
 	}
 
+	var refreshToken string
+
 	if profile != "" {
 		home, _ := os.UserHomeDir()
 		app.ProfileDir = filepath.Join(home, ".osa", "profiles", profile)
@@ -58,9 +60,20 @@ func main() {
 				token = strings.TrimSpace(string(data))
 			}
 		}
+		if data, err := os.ReadFile(filepath.Join(app.ProfileDir, "refresh_token")); err == nil {
+			refreshToken = strings.TrimSpace(string(data))
+		}
 	} else {
 		home, _ := os.UserHomeDir()
 		app.ProfileDir = filepath.Join(home, ".osa")
+		if token == "" {
+			if data, err := os.ReadFile(filepath.Join(app.ProfileDir, "token")); err == nil {
+				token = strings.TrimSpace(string(data))
+			}
+		}
+		if data, err := os.ReadFile(filepath.Join(app.ProfileDir, "refresh_token")); err == nil {
+			refreshToken = strings.TrimSpace(string(data))
+		}
 	}
 
 	// Auto-detect terminal background and set theme accordingly
@@ -76,9 +89,13 @@ func main() {
 	}
 
 	m := app.New(c)
+	if refreshToken != "" {
+		m.SetRefreshToken(refreshToken)
+	}
 
 	opts := []tea.ProgramOption{
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	}
 
 	p := tea.NewProgram(m, opts...)

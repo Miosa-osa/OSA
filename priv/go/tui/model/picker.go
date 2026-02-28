@@ -95,11 +95,32 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	keyMsg, ok := msg.(tea.KeyMsg)
-	if !ok {
+	switch v := msg.(type) {
+	case tea.MouseMsg:
+		switch v.Button {
+		case tea.MouseButtonWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+				if m.cursor < m.offset {
+					m.offset = m.cursor
+				}
+			}
+		case tea.MouseButtonWheelDown:
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+				if m.cursor >= m.offset+m.pageSize {
+					m.offset = m.cursor - m.pageSize + 1
+				}
+			}
+		}
+		return m, nil
+	case tea.KeyMsg:
+		// handled below
+	default:
 		return m, nil
 	}
 
+	keyMsg := msg.(tea.KeyMsg)
 	switch keyMsg.Type {
 	case tea.KeyUp:
 		if m.cursor > 0 {

@@ -22,8 +22,9 @@
 | `b9fe501` | Feb 28 | Resolve remaining 4 bugs + hardening |
 | `ec37944` | Feb 28 | Swarm pattern validation + provider-aware model resolution |
 | `<next>` | Feb 28 | Phase 3: themes, command palette, toasts, streaming prep, dead code cleanup |
+| `<next>` | Feb 28 | Phase 4: mouse scroll, smart model switching, provider recognition |
 
-**Total TUI-touching commits:** 16 over 5 days
+**Total TUI-touching commits:** 17 over 5 days
 
 ---
 
@@ -271,7 +272,27 @@ These are fully built but receive no data. Fix = add `session_id` to backend emi
 
 ---
 
-## Phase 4: Advanced
+## Phase 4: Mouse & Model UX (COMPLETED)
+
+### Mouse Support
+- [x] `tea.WithMouseCellMotion()` enabled in program options
+- [x] Mouse wheel scrolls chat viewport (Idle, Processing, PlanReview states)
+- [x] Mouse wheel navigates model picker items
+- [x] Mouse events routed per state (chat vs picker)
+
+### Smart Model Switching
+- [x] 18-provider recognition map (mirrors backend `registry.ex`)
+- [x] `/model <provider>` opens picker filtered to that provider
+- [x] `/model <provider>/<name>` direct switch
+- [x] `/model <name>` defaults to Ollama
+- [x] `/model` shows `Current: provider / model` (was model-only)
+- [x] "No models available for provider: X. Is the API key configured?" error
+
+**Files changed:** 3 modified | +60 / -20 lines
+
+---
+
+## Phase 5: Advanced
 
 - [ ] Embedded terminal (tool output rendering)
 - [ ] Image rendering (sixel/kitty protocol for AI-generated images)

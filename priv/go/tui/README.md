@@ -114,7 +114,9 @@ Commands are dispatched client-side (built-in) or forwarded to the backend via
 | `/login [id]` | Authenticate with the backend |
 | `/logout` | End session and clear token |
 | `/status` | System status |
-| `/model` | Current model info |
+| `/model` | Current provider / model |
+| `/model <provider>` | Open picker filtered to provider (18 recognized) |
+| `/model <provider>/<name>` | Direct model switch |
 | `/models` | List available models |
 | `/agents` | List agent roster |
 | `/tools` | List available tools |
@@ -282,6 +284,7 @@ and a context utilization bar when context pressure events arrive.
 | `Tab` | Idle (after `/`) | Autocomplete command name |
 | `Up / Down` | Idle | Navigate input history |
 | `Up / Down` | Palette | Navigate commands |
+| `Mouse wheel` | Idle / Processing | Scroll chat viewport or picker |
 | `PgUp / PgDn` | Processing | Scroll chat viewport |
 | `Enter` | Palette | Execute selected command |
 | `Esc` | Palette | Dismiss palette |

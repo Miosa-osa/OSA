@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/miosa/osa-tui/client"
+	"github.com/miosa/osa-tui/config"
 	"github.com/miosa/osa-tui/model"
 	"github.com/miosa/osa-tui/msg"
 	"github.com/miosa/osa-tui/style"
@@ -33,6 +34,19 @@ func truncateResponse(s string) string {
 	return s
 }
 
+// knownProviders mirrors the backend's 18-provider registry (registry.ex).
+var knownProviders = map[string]bool{
+	"ollama": true, "anthropic": true, "openai": true, "groq": true,
+	"together": true, "fireworks": true, "deepseek": true, "perplexity": true,
+	"mistral": true, "replicate": true, "openrouter": true, "google": true,
+	"cohere": true, "qwen": true, "moonshot": true, "zhipu": true,
+	"volcengine": true, "baichuan": true,
+}
+
+func isKnownProvider(name string) bool {
+	return knownProviders[strings.ToLower(name)]
+}
+
 type ProgramReady struct{ Program *tea.Program }
 type bannerTimeout struct{}
 type commandsLoaded []client.CommandEntry
@@ -40,37 +54,48 @@ type toolCountLoaded int
 type retryHealth struct{}
 
 type Model struct {
-	banner          model.BannerModel
-	chat            model.ChatModel
-	input           model.InputModel
-	activity        model.ActivityModel
-	tasks           model.TasksModel
-	status          model.StatusModel
-	plan            model.PlanModel
-	agents          model.AgentsModel
-	picker          model.PickerModel
-	toasts          model.ToastsModel
-	palette         model.PaletteModel
-	state           State
-	client          *client.Client
-	sse             *client.SSEClient
-	program         *tea.Program
-	sessionID       string
-	width           int
-	height          int
-	keys            KeyMap
-	bgTasks         []string
-	commandEntries  []client.CommandEntry
-	confirmQuit     bool
-	processingStart time.Time
-	streamBuf       strings.Builder
-	sseReconnecting bool // true while a ReconnectListenCmd goroutine is in-flight
+	banner                model.BannerModel
+	chat                  model.ChatModel
+	input                 model.InputModel
+	activity              model.ActivityModel
+	tasks                 model.TasksModel
+	status                model.StatusModel
+	plan                  model.PlanModel
+	agents                model.AgentsModel
+	picker                model.PickerModel
+	toasts                model.ToastsModel
+	palette               model.PaletteModel
+	state                 State
+	client                *client.Client
+	sse                   *client.SSEClient
+	program               *tea.Program
+	sessionID             string
+	width                 int
+	height                int
+	keys                  KeyMap
+	bgTasks               []string
+	commandEntries        []client.CommandEntry
+	confirmQuit           bool
+	processingStart       time.Time
+	streamBuf             strings.Builder
+	sseReconnecting       bool   // true while a ReconnectListenCmd goroutine is in-flight
+	responseReceived      bool   // true when SSE agent_response already rendered for current request
+	cancelled             bool   // true when user cancelled the current request (Ctrl+C)
+	pendingProviderFilter string // set by "/model <provider>" to filter picker
+	config                config.Config
+	refreshToken          string
 }
 
 func New(c *client.Client) Model {
 	workspace, _ := os.Getwd()
 	banner := model.NewBanner()
 	banner.SetWorkspace(workspace)
+
+	cfg := config.Load(profileDirPath())
+	if cfg.Theme != "" {
+		style.SetTheme(cfg.Theme)
+	}
+
 	return Model{
 		banner: banner, chat: model.NewChat(80, 20), input: model.NewInput(),
 		activity: model.NewActivity(), tasks: model.NewTasks(), status: model.NewStatus(),
@@ -78,8 +103,12 @@ func New(c *client.Client) Model {
 		toasts: model.NewToasts(), palette: model.NewPalette(),
 		state:  StateConnecting,
 		client: c, keys: DefaultKeyMap(), width: 80, height: 24,
+		config: cfg,
 	}
 }
+
+// SetRefreshToken sets the refresh token to use for automatic token renewal.
+func (m *Model) SetRefreshToken(t string) { m.refreshToken = t }
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.checkHealth(), m.input.Init(), m.activity.Init(), tea.WindowSize())
@@ -96,6 +125,22 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.SetWidth(v.Width - 4)
 		m.input.SetWidth(v.Width)
 		m.banner.SetWidth(v.Width)
+		return m, nil
+	case tea.MouseMsg:
+		switch m.state {
+		case StateIdle, StateProcessing, StatePlanReview:
+			updated, cmd := m.chat.Update(v)
+			if c, ok := updated.(model.ChatModel); ok {
+				m.chat = c
+			}
+			return m, cmd
+		case StateModelPicker:
+			updated, cmd := m.picker.Update(v)
+			if p, ok := updated.(model.PickerModel); ok {
+				m.picker = p
+			}
+			return m, cmd
+		}
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(v)
@@ -142,14 +187,20 @@ func (m Model) Update(rawMsg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chat.AddSystemWarning(fmt.Sprintf("Connection lost. Reconnecting (attempt %d/%d)...", v.Attempt, client.MaxReconnects))
 		return m, nil
 	case client.SSEAuthFailedEvent:
-		m.chat.AddSystemWarning("Authentication expired. Use /login to re-authenticate.")
 		m.closeSSE()
+		if m.refreshToken != "" {
+			return m, m.doRefreshToken(m.refreshToken)
+		}
+		m.chat.AddSystemWarning("Authentication expired. Use /login to re-authenticate.")
 		m.state = StateIdle
 		return m, m.input.Focus()
+	case refreshTokenResult:
+		return m.handleRefreshTokenResult(v)
 	case msg.LoginResult:
 		if v.Err != nil {
 			m.chat.AddSystemError(fmt.Sprintf("Login failed: %v", v.Err))
 		} else {
+			m.refreshToken = v.RefreshToken
 			m.chat.AddSystemMessage(fmt.Sprintf("Authenticated (token expires in %ds)", v.ExpiresIn))
 			if m.sse != nil {
 				m.closeSSE()
@@ -488,6 +539,7 @@ func (m Model) handleIdleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleProcessingKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(k, m.keys.Cancel), key.Matches(k, m.keys.Escape):
+		m.cancelled = true
 		m.state = StateIdle
 		m.activity.Stop()
 		m.chat.ClearProcessingView()
@@ -613,25 +665,22 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	case text == "/models":
 		return m, m.fetchModels()
 	case text == "/model":
-		info := m.status.View()
-		if info == "" {
-			info = "No model info available."
-		}
-		m.chat.AddSystemMessage(fmt.Sprintf("Current: %s", m.banner.ModelName()))
+		m.chat.AddSystemMessage(fmt.Sprintf("Current: %s / %s", m.banner.Provider(), m.banner.ModelName()))
 		return m, nil
 	case strings.HasPrefix(text, "/model "):
 		arg := strings.TrimSpace(strings.TrimPrefix(text, "/model"))
-		// Direct model switch: /model provider/name or /model name
 		parts := strings.SplitN(arg, "/", 2)
-		var prov, mdl string
 		if len(parts) == 2 {
-			prov = parts[0]
-			mdl = parts[1]
-		} else {
-			prov = "ollama" // default to ollama
-			mdl = arg
+			// "/model provider/name" → direct switch
+			return m, m.switchModel(parts[0], parts[1])
 		}
-		return m, m.switchModel(prov, mdl)
+		if isKnownProvider(arg) {
+			// "/model anthropic" → open picker filtered to this provider
+			m.pendingProviderFilter = strings.ToLower(arg)
+			return m, m.fetchModels()
+		}
+		// "/model qwen3:8b" → default to ollama
+		return m, m.switchModel("ollama", arg)
 	case text == "/theme":
 		var sb strings.Builder
 		sb.WriteString("Available themes:\n")
@@ -651,6 +700,12 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 			m.chat.AddSystemError(fmt.Sprintf("Unknown theme: %s (available: %s)", name, strings.Join(style.ThemeNames, ", ")))
 			return m, nil
 		}
+		m.config.Theme = name
+		if err := config.Save(profileDirPath(), m.config); err != nil {
+			m.chat.AddSystemWarning(fmt.Sprintf("Theme applied but could not persist: %v", err))
+		}
+		// Force re-render all messages with new theme colors (BUG-019).
+		m.chat.SetSize(m.width, m.chatHeight())
 		m.toasts.Add(fmt.Sprintf("Theme set to: %s", name), model.ToastInfo)
 		return m, m.tickCmd()
 	case text == "/bg":
@@ -684,6 +739,8 @@ func (m Model) submitInput(text string) (Model, tea.Cmd) {
 	m.agents.Reset()
 	m.tasks.Reset()
 	m.streamBuf.Reset()
+	m.responseReceived = false
+	m.cancelled = false
 	m.state = StateProcessing
 	m.processingStart = time.Now()
 	m.status.SetActive(true)
@@ -700,9 +757,12 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 	}
 	m.banner.SetHealth(h)
 	m.status.SetProviderInfo(h.Provider, h.Model)
-	m.state = StateIdle
+	m.state = StateBanner
 	b := make([]byte, 4)
-	io.ReadFull(rand.Reader, b) //nolint:errcheck
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		// Fallback to timestamp-only session ID
+		b = []byte{0, 0, 0, 0}
+	}
 	m.sessionID = fmt.Sprintf("tui_%d_%x", time.Now().UnixNano(), b)
 
 	// Populate welcome screen data (shown in chat viewport when no messages)
@@ -710,7 +770,8 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 	m.chat.SetSize(m.width, m.chatHeight())
 
 	var cmds []tea.Cmd
-	cmds = append(cmds, m.fetchCommands(), m.fetchToolCount(), m.input.Focus())
+	cmds = append(cmds, m.fetchCommands(), m.fetchToolCount())
+	cmds = append(cmds, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return bannerTimeout{} }))
 	if m.program != nil {
 		if cmd := m.startSSE(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -720,6 +781,31 @@ func (m Model) handleHealth(h msg.HealthResult) (Model, tea.Cmd) {
 }
 
 func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
+	// If user cancelled, silently drop the late-arriving response (BUG-018).
+	if m.cancelled {
+		if r.Err == nil && r.SessionID != "" && m.sessionID != r.SessionID {
+			m.sessionID = r.SessionID
+		}
+		if m.sse == nil && m.program != nil && m.sessionID != "" {
+			if cmd := m.startSSE(); cmd != nil {
+				return m, cmd
+			}
+		}
+		return m, nil
+	}
+	// If SSE already rendered this response, skip duplicate (BUG-017).
+	if m.responseReceived {
+		if r.SessionID != "" && m.sessionID != r.SessionID {
+			m.sessionID = r.SessionID
+		}
+		if m.sse == nil && m.program != nil && m.sessionID != "" {
+			if cmd := m.startSSE(); cmd != nil {
+				return m, cmd
+			}
+		}
+		return m, nil
+	}
+
 	wasBackground := (m.state == StateIdle)
 	m.activity.Stop()
 	m.chat.ClearProcessingView()
@@ -738,6 +824,7 @@ func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 		}
 		m.status.SetBackgroundCount(len(m.bgTasks))
 	}
+	m.responseReceived = true
 	output := truncateResponse(r.Output)
 	if output == "" {
 		output = "(no response)"
@@ -760,11 +847,16 @@ func (m Model) handleOrchestrate(r msg.OrchestrateResult) (Model, tea.Cmd) {
 }
 
 func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, tea.Cmd) {
+	// Drop if user cancelled or REST already rendered (BUG-017/018).
+	if m.cancelled || m.responseReceived {
+		return m, nil
+	}
 	if strings.Contains(r.Response, "## Plan") || strings.Contains(r.Response, "# Plan") {
 		m.plan.SetPlan(r.Response)
 		m.state = StatePlanReview
 		return m, nil
 	}
+	m.responseReceived = true
 	wasBackground := (m.state == StateIdle)
 	m.activity.Stop()
 	m.chat.ClearProcessingView()
@@ -811,6 +903,8 @@ func (m Model) submitPrompt(text string) (Model, tea.Cmd) {
 	m.agents.Reset()
 	m.tasks.Reset()
 	m.streamBuf.Reset()
+	m.responseReceived = false
+	m.cancelled = false
 	m.state = StateProcessing
 	m.processingStart = time.Now()
 	m.status.SetActive(true)
@@ -937,9 +1031,55 @@ func (m Model) doLogin(userID string) tea.Cmd {
 			if err := os.WriteFile(filepath.Join(pd, "token"), []byte(resp.Token), 0600); err != nil {
 				return msg.LoginResult{Token: resp.Token, Err: fmt.Errorf("save token: %w", err)}
 			}
+			if resp.RefreshToken != "" {
+				_ = os.WriteFile(filepath.Join(pd, "refresh_token"), []byte(resp.RefreshToken), 0600)
+			}
 		}
-		return msg.LoginResult{Token: resp.Token, ExpiresIn: resp.ExpiresIn}
+		return msg.LoginResult{Token: resp.Token, RefreshToken: resp.RefreshToken, ExpiresIn: resp.ExpiresIn}
 	}
+}
+
+// refreshTokenResult is the internal msg for a completed token refresh attempt.
+type refreshTokenResult struct {
+	token        string
+	refreshToken string
+	expiresIn    int
+	err          error
+}
+
+func (m Model) doRefreshToken(refreshToken string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		resp, err := c.RefreshToken(refreshToken)
+		if err != nil {
+			return refreshTokenResult{err: err}
+		}
+		pd := profileDirPath()
+		if pd != "" {
+			_ = os.WriteFile(filepath.Join(pd, "token"), []byte(resp.Token), 0600)
+			if resp.RefreshToken != "" {
+				_ = os.WriteFile(filepath.Join(pd, "refresh_token"), []byte(resp.RefreshToken), 0600)
+			}
+		}
+		return refreshTokenResult{token: resp.Token, refreshToken: resp.RefreshToken, expiresIn: resp.ExpiresIn}
+	}
+}
+
+func (m Model) handleRefreshTokenResult(r refreshTokenResult) (Model, tea.Cmd) {
+	if r.err != nil {
+		// Refresh failed — fall back to manual re-login
+		m.chat.AddSystemWarning("Session expired. Use /login to re-authenticate.")
+		m.state = StateIdle
+		return m, m.input.Focus()
+	}
+	// Refresh succeeded: update client token and store new refresh token
+	m.client.SetToken(r.token)
+	m.refreshToken = r.refreshToken
+	// Restart SSE with new token
+	if m.program != nil && m.sessionID != "" {
+		return m, m.startSSE()
+	}
+	return m, nil
 }
 
 func (m Model) doLogout() tea.Cmd {
@@ -1224,15 +1364,24 @@ func (m Model) handleModelList(r msg.ModelListResult) (Model, tea.Cmd) {
 		m.chat.AddSystemWarning(fmt.Sprintf("No models available. Current: %s. Is Ollama running?", m.banner.ModelName()))
 		return m, nil
 	}
-	// Convert to picker items, sorted by provider then name
-	items := make([]model.PickerItem, len(r.Models))
-	for i, entry := range r.Models {
-		items[i] = model.PickerItem{
+	// Convert to picker items, optionally filtered by provider
+	filter := m.pendingProviderFilter
+	m.pendingProviderFilter = ""
+	var items []model.PickerItem
+	for _, entry := range r.Models {
+		if filter != "" && strings.ToLower(entry.Provider) != filter {
+			continue
+		}
+		items = append(items, model.PickerItem{
 			Name:     entry.Name,
 			Provider: entry.Provider,
 			Size:     entry.Size,
 			Active:   entry.Active,
-		}
+		})
+	}
+	if len(items) == 0 {
+		m.chat.AddSystemError(fmt.Sprintf("No models available for provider: %s. Is the API key configured?", filter))
+		return m, nil
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Provider != items[j].Provider {
@@ -1337,7 +1486,25 @@ func (m Model) switchSession(id string) tea.Cmd {
 		if err != nil {
 			return msg.SessionSwitchResult{Err: err}
 		}
-		return msg.SessionSwitchResult{SessionID: info.ID}
+		// Prefer messages embedded in the session info response.
+		// Fall back to the dedicated messages endpoint if the list is empty.
+		messages := info.Messages
+		if len(messages) == 0 {
+			fetched, err := c.GetSessionMessages(id)
+			if err == nil {
+				messages = fetched
+			}
+			// On error we still switch sessions — just without history.
+		}
+		var result []msg.SessionMessage
+		for _, m := range messages {
+			result = append(result, msg.SessionMessage{
+				Role:      m.Role,
+				Content:   m.Content,
+				Timestamp: m.Timestamp,
+			})
+		}
+		return msg.SessionSwitchResult{SessionID: info.ID, Messages: result}
 	}
 }
 
@@ -1372,7 +1539,24 @@ func (m Model) handleSessionSwitch(r msg.SessionSwitchResult) (Model, tea.Cmd) {
 	m.sessionID = r.SessionID
 	m.chat = model.NewChat(m.width, m.chatHeight())
 	m.chat.SetWelcomeData(m.banner.Version(), m.banner.WelcomeLine(), m.banner.Workspace())
-	m.chat.AddSystemMessage(fmt.Sprintf("Switched to session %s", shortID(r.SessionID)))
+
+	// Replay message history when available.
+	if len(r.Messages) > 0 {
+		for _, sm := range r.Messages {
+			switch sm.Role {
+			case "user":
+				m.chat.AddUserMessage(sm.Content)
+			case "assistant":
+				m.chat.AddAgentMessage(sm.Content, nil, 0, "")
+			default:
+				m.chat.AddSystemMessage(sm.Content)
+			}
+		}
+		m.chat.AddSystemMessage(fmt.Sprintf("--- Resumed session %s (%d messages) ---", shortID(r.SessionID), len(r.Messages)))
+	} else {
+		m.chat.AddSystemMessage(fmt.Sprintf("Switched to session %s", shortID(r.SessionID)))
+	}
+
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.input.Focus())
 	if m.program != nil {

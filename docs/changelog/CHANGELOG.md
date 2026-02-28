@@ -10,6 +10,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **TUI Phase 4**: Mouse scroll, smart model switching, provider recognition
+  - Mouse wheel scrolls chat viewport and model picker
+  - `/model <provider>` opens picker filtered to that provider (18 providers recognized)
+  - `/model` shows `Current: provider / model` (was model-only)
+  - `/model <provider>/<name>` direct switch, `/model <name>` defaults to Ollama
 - Competitive intelligence docs (`docs/competitors/`)
 - Feature matrix comparing 14 competitors
 - 5-phase roadmap with gap analysis
