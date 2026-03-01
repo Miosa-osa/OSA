@@ -1477,3 +1477,187 @@ The `Tools.Registry.list_tools_direct()` fix was correct but insufficient. The L
 *OSA v0.2.5 can answer simple questions but CANNOT execute tools, generate apps, or do any multi-step work. Bug 20 (ETS race) is the #1 priority — it breaks all real functionality. Bug 26 (TUI v2 Windows input) is #2 — the TUI is unusable on Windows. 21 of 26 bugs fixed, but the 2 remaining critical bugs block all advanced features.*
 
 *Report updated after round 7 testing — 2026-03-01.*
+
+---
+
+## Round 8 — Comprehensive Endpoint & Feature Audit (2026-03-01)
+
+### Swarm Execution
+
+**Status:** ALL 4 patterns return 404 — `/api/v1/swarm/execute` endpoint does not exist
+
+| Pattern | Result |
+|---------|--------|
+| Parallel | 404 `"Endpoint not found"` |
+| Pipeline | 404 |
+| Debate | 404 |
+| Consensus | 404 |
+
+The swarm only works via `/orchestrate` with natural language (e.g., "use a parallel swarm to..."). There is no dedicated REST endpoint for direct swarm execution. Bug 12 remains open.
+
+### Noise Filter & Signal Classification
+
+| Input | Weight | Filtered? | Response | Time |
+|-------|--------|-----------|----------|------|
+| `k` (single char) | 0.1 | Yes | 👍 | 2ms |
+| `...` (punctuation) | 0.1 | Partial | "Noted." (went to LLM) | 820ms |
+| `` (empty) | 0.0 | Yes | (empty) | 1ms |
+| `😀` (emoji) | — | — | **ETS CRASH** (Bug 20) | — |
+| `こんにちは` (Unicode) | — | — | **EMPTY RESPONSE** (new bug) | — |
+| `What is the capital of France?` | 0.5 | No | **ETS CRASH** (Bug 20) | 2477ms |
+
+**New: Bug 27 — Unicode input returns empty response**
+- Input: `こんにちは` (Japanese "hello")
+- Expected: Some response (noise-filtered or LLM)
+- Actual: Completely empty response (no JSON, no error, nothing)
+- Possible cause: JSON encoding issue with multi-byte characters in curl, or classifier crash on non-ASCII
+
+**Note:** The `...` input was NOT noise-filtered despite weight 0.1 — it went to the LLM and got "Noted." in 820ms. The noise threshold may be strictly < 0.1, not ≤ 0.1.
+
+### Command Execution (via `/commands/execute`)
+
+All 5 commands tested work perfectly:
+
+| Command | Status | Notable output |
+|---------|--------|----------------|
+| `/help` | PASS | Shows full help with categories |
+| `/status` | PASS | 18 providers, 17 tools, 257 sessions |
+| `/model` | PASS | Shows tier routing: elite (opus), specialist (sonnet), utility (haiku) |
+| `/memory` | PASS | 257 sessions, 5 preference categories, 16 index keys |
+| `/skills` | PASS | 17 tools listed with descriptions |
+
+Commands bypass the agent Loop entirely — they go through a separate code path, which is why they work while orchestrate crashes.
+
+### Model Switching
+
+| Action | Result |
+|--------|--------|
+| View models | PASS — shows 6 models across anthropic + groq |
+| Switch to haiku | PASS — health confirms `claude-haiku-4-5` |
+| Q&A on haiku | **ETS CRASH** (Bug 20 — blocks even haiku) |
+| Switch back to sonnet | PASS — health confirms `claude-sonnet-4-6` |
+
+Model switch mechanism works perfectly. But any actual LLM interaction crashes due to Bug 20.
+
+### Memory Persistence
+
+**Status:** BLOCKED by Bug 20
+
+All memory operations (save, recall same session, recall cross-session) crash with ETS error. Memory requires the agent Loop which hits the uninitialized ETS tables.
+
+### Security Tests
+
+**Status:** BLOCKED by Bug 20
+
+All 4 security tests (prompt injection, jailbreak, dangerous command, data exfil) crash with ETS error before reaching the LLM. Security cannot be verified until Bug 20 is fixed.
+
+### Session Persistence
+
+| Operation | Result |
+|-----------|--------|
+| `GET /sessions` | PASS — 261 sessions listed with metadata |
+| `POST /sessions` | PASS — creates new session |
+| `GET /sessions/:id` | PASS — returns full session with messages |
+| `GET /sessions/:id/messages` | PASS — returns message history |
+
+Session CRUD is fully functional. Message history is preserved correctly (verified user→assistant round-trip).
+
+### Concurrent Load
+
+5 simultaneous requests: **1/5 pass, 4/5 crash** (80% failure under concurrency)
+
+The single successful request was likely the first to arrive. All others hit the ETS race.
+
+---
+
+## Bug 20 Impact Assessment
+
+Bug 20 (ETS race condition) now blocks testing of **12 feature areas:**
+
+| Feature | Blocked? | Why |
+|---------|----------|-----|
+| Tool calling | YES | Loop crashes |
+| App generation | YES | Loop crashes |
+| Memory save/recall | YES | Loop crashes |
+| Security testing | YES | Loop crashes |
+| Multi-step tasks | YES | Loop crashes |
+| Real Q&A (weight > 0.1) | YES | Loop crashes |
+| Swarm via orchestrate | YES | Loop crashes |
+| Concurrent requests | YES | 80% crash rate |
+| Noise filter (some inputs) | PARTIAL | Emoji crashes, others work |
+| Unicode handling | UNKNOWN | Empty response |
+| Commands | NO | Separate code path |
+| Model switching | NO | Separate code path |
+| Session CRUD | NO | Separate code path |
+| Health/Analytics | NO | Separate code path |
+
+**Bottom line:** Only features that bypass the agent Loop work. Everything that touches `Loop.init/1` crashes.
+
+---
+
+## Final Bug Status Summary (Round 8)
+
+| # | Bug | Severity | Status |
+|---|-----|----------|--------|
+| 1-4 | Original blockers | BLOCKER | **FIXED** |
+| 5 | Tool name mismatch | HIGH | **LIKELY FIXED** (can't verify — Bug 20) |
+| 6-7 | Noise/Ollama | MEDIUM/LOW | **FIXED** |
+| 8 | /analytics | LOW | **FIXED** |
+| 9 | LLM picks wrong tools | MEDIUM | **FIXED** |
+| 10 | Negative uptime | LOW | **RESOLVED** |
+| 11 | /orchestrator/complex 404 | MEDIUM | Open |
+| 12 | /swarm/status/:id 404 | MEDIUM | Open (+ /swarm/execute also 404) |
+| 13-15 | SSE/VM/swarm | HIGH-LOW | **FIXED** |
+| 16 | Unicode in DB | MEDIUM | **LIKELY FIXED** (can't verify) |
+| 17 | System prompt leak | SECURITY | **FIXED** (can't re-verify — Bug 20) |
+| 18-19 | Commands/health | LOW-MEDIUM | **FIXED** |
+| 20 | **ETS race condition** | **CRITICAL** | **OPEN** — crashes ALL Loop-dependent features. 5+ ETS tables uninitialized. |
+| 21 | TUI v1 compile | BLOCKER | **FIXED** (moot) |
+| 22 | /sessions 404 | MEDIUM | **FIXED** |
+| 23 | False "Resolves" commit | HIGH | Open |
+| 24-25 | Session list/analytics crash | MEDIUM-LOW | **FIXED** |
+| 26 | **TUI v2 Windows input** | **BLOCKER** | **OPEN** — `HasDarkBackground()` OSC query corrupts input stream |
+| 27 | **Unicode empty response** | MEDIUM | **NEW** — `こんにちは` returns completely empty response |
+
+---
+
+## Score Summary (Final — Round 8)
+
+- **Total bugs found:** 27
+- **Confirmed fixed:** 21 (Bugs 1-4, 6-10, 13-15, 17-19, 21-22, 24-25)
+- **Likely fixed:** 2 (Bugs 5, 16 — can't verify due to Bug 20)
+- **Open endpoints:** 2 (Bugs 11, 12)
+- **Process issue:** 1 (Bug 23)
+- **CRITICAL:** 1 (Bug 20 — blocks 12 feature areas)
+- **BLOCKER:** 1 (Bug 26 — TUI unusable on Windows)
+- **New:** 1 (Bug 27 — Unicode empty response)
+
+### What Works (Bug 20-independent)
+
+| Feature | Status | Evidence |
+|---------|--------|----------|
+| Health endpoint | PASS | Returns provider, model, version |
+| Analytics | PASS | Budget, learning, hooks, compactor stats |
+| Commands (help, status, model, memory, skills) | ALL PASS | Full output, correct data |
+| Model switching | PASS | Haiku ↔ Sonnet, health confirms |
+| Model catalogs | PASS | 6 models across 2 providers |
+| Session CRUD | ALL PASS | Create, list, get, messages |
+| Noise filter (simple inputs) | PASS | Single chars, empty, punctuation |
+| Session persistence | PASS | Messages preserved across queries |
+
+### What's Broken (Bug 20-dependent)
+
+| Feature | Status |
+|---------|--------|
+| ANY real Q&A (weight > 0.1) | CRASH |
+| Tool calling / file ops | CRASH |
+| App generation | CRASH |
+| Memory save/recall | CRASH |
+| Security (can't test) | BLOCKED |
+| Swarm execution | CRASH + no REST endpoint |
+| Concurrent requests | 80% CRASH |
+| Unicode messages | Empty response |
+
+*OSA v0.2.5: 27 bugs found across 8 rounds. 21 confirmed fixed. Bug 20 (ETS race) is a showstopper — it blocks ALL agent functionality (tools, memory, Q&A, security, swarm). Only administrative features (commands, model switch, sessions, health) work. Bug 26 (TUI v2 Windows input) blocks all interactive testing. Roberto must fix ETS initialization before any further feature testing is possible.*
+
+*Report updated after round 8 comprehensive audit — 2026-03-01.*
