@@ -1,4 +1,4 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use tracing::warn;
 
 use super::App;
@@ -16,7 +16,12 @@ impl App {
                 self.recompute_layout();
                 false
             }
-            Event::Terminal(CrosstermEvent::Key(key)) => self.handle_key(key),
+            Event::Terminal(CrosstermEvent::Key(key))
+                if key.kind == KeyEventKind::Press =>
+            {
+                self.handle_key(key)
+            }
+            Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
             Event::Terminal(CrosstermEvent::Mouse(mouse)) => {
                 self.handle_mouse(mouse);
                 false

@@ -11,42 +11,37 @@ Get-Content ".env" | ForEach-Object {
     }
 }
 
-# --- TUI binary selection: prefer Rust TUI, fallback to Go TUI ---
+# --- Build Rust TUI ---
 $RUST_TUI = "$OSA_DIR\priv\rust\tui\target\release\osagent.exe"
 $GO_TUI   = "$OSA_DIR\priv\go\tui-v2\osa.exe"
 
-if (Test-Path $RUST_TUI) {
-    $TUI = $RUST_TUI
-    Write-Host "Using Rust TUI" -ForegroundColor Green
-} elseif (Test-Path $GO_TUI) {
-    Write-Host "Rust TUI not found at $RUST_TUI" -ForegroundColor Yellow
-    Write-Host "Falling back to Go TUI" -ForegroundColor Yellow
-    # Offer to build if cargo is available
-    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
-    if ($cargo) {
-        $build = Read-Host "cargo found — build Rust TUI now? (y/N)"
-        if ($build -eq "y") {
-            Write-Host "Building Rust TUI (this may take a few minutes)..." -ForegroundColor Cyan
-            Push-Location "$OSA_DIR\priv\rust\tui"
-            & cargo build --release
-            Pop-Location
-            if (Test-Path $RUST_TUI) {
-                $TUI = $RUST_TUI
-                Write-Host "Build succeeded! Using Rust TUI" -ForegroundColor Green
-            } else {
-                Write-Host "Build failed. Using Go TUI" -ForegroundColor Red
-                $TUI = $GO_TUI
-            }
-        } else {
-            $TUI = $GO_TUI
-        }
+$cargoExe = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe"
+if (-not (Test-Path $cargoExe)) {
+    $cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($cargoCmd) { $cargoExe = $cargoCmd.Source } else { $cargoExe = $null }
+}
+
+if ($cargoExe) {
+    Write-Host "Building Rust TUI..." -ForegroundColor Cyan
+    $env:PATH = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin;" + $env:PATH
+    Push-Location "$OSA_DIR\priv\rust\tui"
+    & $cargoExe build --release
+    Pop-Location
+    if (Test-Path $RUST_TUI) {
+        $TUI = $RUST_TUI
+        Write-Host "Rust TUI built OK" -ForegroundColor Green
     } else {
+        Write-Host "Rust TUI build failed - falling back to Go TUI" -ForegroundColor Red
         $TUI = $GO_TUI
     }
+} elseif (Test-Path $RUST_TUI) {
+    Write-Host "cargo not found - using existing Rust TUI binary" -ForegroundColor Yellow
+    $TUI = $RUST_TUI
+} elseif (Test-Path $GO_TUI) {
+    Write-Host "cargo not found and no Rust binary - using Go TUI" -ForegroundColor Yellow
+    $TUI = $GO_TUI
 } else {
-    Write-Host "ERROR: No TUI binary found!" -ForegroundColor Red
-    Write-Host "  Expected Rust TUI at: $RUST_TUI" -ForegroundColor Red
-    Write-Host "  Expected Go TUI at:   $GO_TUI" -ForegroundColor Red
+    Write-Host "ERROR: No TUI binary found and cargo not available!" -ForegroundColor Red
     exit 1
 }
 
@@ -99,7 +94,7 @@ Write-Host "Starting OSA backend on :8089..." -ForegroundColor Cyan
 # Use single-quoted here-string so $_, $Matches, $env:PATH are literal in the generated script.
 # Variable parts (paths) are substituted via -replace after building the string.
 $backendScript = @'
-$env:PATH = 'ELIXIR_BIN_PLACEHOLDER;C:\Program Files\Erlang OTP\bin;' + $env:PATH
+$env:PATH = 'ELIXIR_BIN_PLACEHOLDER;' + $env:PATH + ';C:\Program Files\Erlang OTP\bin'
 Set-Location 'OSA_DIR_PLACEHOLDER'
 Get-Content '.env' | ForEach-Object {
     if ($_ -match '^\s*([^#][^=]+)=(.*)$') {
@@ -108,6 +103,9 @@ Get-Content '.env' | ForEach-Object {
 }
 EXTRA_ENV_PLACEHOLDER
 $env:OSA_SKIP_NIF = 'true'
+$emptyArchives = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), '_osa_no_archives')
+if (-not (Test-Path $emptyArchives)) { New-Item -ItemType Directory -Path $emptyArchives | Out-Null }
+$env:MIX_ARCHIVES = $emptyArchives
 & 'MIX_PATH_PLACEHOLDER' osa.serve
 '@
 $backendScript = $backendScript -replace 'ELIXIR_BIN_PLACEHOLDER', $ELIXIR_BIN
@@ -121,7 +119,7 @@ $backend = Start-Process powershell -ArgumentList "-NoExit", "-File", "$env:TEMP
 # Wait for health
 Write-Host "Waiting for backend..." -ForegroundColor Yellow
 $attempts = 0
-while ($attempts -lt 40) {
+while ($attempts -lt 300) {
     try {
         $r = Invoke-WebRequest -Uri "http://127.0.0.1:8089/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
         if ($r.StatusCode -eq 200) { break }
@@ -130,7 +128,7 @@ while ($attempts -lt 40) {
     $attempts++
 }
 
-if ($attempts -eq 40) {
+if ($attempts -eq 300) {
     Write-Host "Backend failed to start. Check the backend window for errors." -ForegroundColor Red
     Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
     exit 1
