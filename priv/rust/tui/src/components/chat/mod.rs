@@ -148,7 +148,12 @@ impl Chat {
     pub fn update_streaming(&mut self, content: &str) {
         self.streaming_content = Some(content.to_string());
         self.has_messages = true; // ensure welcome screen is dismissed
-        self.scroll_to_bottom();
+        // Auto-scroll to follow new content only when the user has not manually
+        // scrolled up.  scroll_offset == 0 means the viewport is pinned to the
+        // bottom; any positive value means the user scrolled up intentionally.
+        if self.scroll_offset == 0 {
+            self.scroll_to_bottom();
+        }
     }
 
     pub fn clear_streaming(&mut self) {
@@ -233,8 +238,15 @@ impl Chat {
             .map(|m| m.height(self.width).saturating_add(1)) // +1 for spacing
             .sum();
 
-        let streaming_height: u16 = if self.streaming_content.is_some() {
-            3 // label + content estimate + spacing
+        let streaming_height: u16 = if let Some(ref streaming) = self.streaming_content {
+            // Use the same height calculation as the real draw path so that
+            // scroll accounting and scrollbar positioning are accurate.
+            let streaming_msg = message::Message::new(
+                message::MessageType::Agent,
+                format!("{}█", streaming),
+                None,
+            );
+            streaming_msg.height(self.width).saturating_add(1) // +1 for spacing
         } else {
             0
         };

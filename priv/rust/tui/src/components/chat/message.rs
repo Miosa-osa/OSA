@@ -90,8 +90,12 @@ impl Message {
         }
 
         // For agent messages, use the markdown renderer for accurate line count.
+        // Use width-2 to match draw_agent's actual render width (LEFT border = 1
+        // char; the block adds 1 char of left padding = 2 total subtracted from
+        // area width).
         if matches!(self.msg_type, MessageType::Agent) {
-            let rendered = crate::render::markdown::render_markdown(&self.content, content_width);
+            let render_width = width.saturating_sub(2);
+            let rendered = crate::render::markdown::render_markdown(&self.content, render_width);
             let rendered_lines = rendered.lines.len() as u16;
             let h = rendered_lines.max(1) + 1; // +1 for label
             return h.max(2);
