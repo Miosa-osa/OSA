@@ -3,10 +3,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
 
   alias OptimalSystemAgent.Channels.HTTP.Auth
 
-  # Retrieve the runtime secret so forge_token tests use the same key
-  defp test_secret do
-    Application.get_env(:optimal_system_agent, :shared_secret)
+  @test_secret "test-secret-deterministic"
+
+  setup do
+    Application.put_env(:optimal_system_agent, :shared_secret, @test_secret)
+    on_exit(fn -> Application.delete_env(:optimal_system_agent, :shared_secret) end)
+    :ok
   end
+
+  # Return the deterministic test secret used in this module
+  defp test_secret, do: @test_secret
 
   # ---------------------------------------------------------------------------
   # Helpers
