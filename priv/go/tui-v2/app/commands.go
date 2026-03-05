@@ -178,7 +178,6 @@ func (m Model) submitPrompt(text string) (Model, tea.Cmd) {
 	return m, tea.Batch(m.orchestrate(text), m.tickCmd())
 }
 
-
 // -- Command handler ----------------------------------------------------------
 
 func (m Model) handleCommand(r msg.CommandResult) (Model, tea.Cmd) {
@@ -277,7 +276,6 @@ func extractResumeSessionID(action string) string {
 	return s
 }
 
-
 // -- Plan decision ------------------------------------------------------------
 
 func (m Model) handlePlanDecision(d dialog.PlanDecision) (Model, tea.Cmd) {
@@ -288,6 +286,7 @@ func (m Model) handlePlanDecision(d dialog.PlanDecision) (Model, tea.Cmd) {
 		m.activity.Reset()
 		m.activity.Start()
 		m.streamBuf.Reset()
+		m.thinkingBuf.Reset()
 		m.cancelled = false
 		m.state = StateProcessing
 		m.processingStart = time.Now()
@@ -310,7 +309,6 @@ func (m Model) handlePlanDecision(d dialog.PlanDecision) (Model, tea.Cmd) {
 	m.state = StateIdle
 	return m, m.input.Focus()
 }
-
 
 func (m Model) executeCommand(cmd, arg string) tea.Cmd {
 	c := m.client
@@ -339,8 +337,6 @@ func (m Model) fetchCommands() tea.Cmd {
 	}
 }
 
-
-
 func (m Model) handlePermissionDecision(d dialog.PermissionDecision) (Model, tea.Cmd) {
 	m.state = StateIdle
 	switch d.Decision {
@@ -351,4 +347,3 @@ func (m Model) handlePermissionDecision(d dialog.PermissionDecision) (Model, tea
 	}
 	return m, m.input.Focus()
 }
-

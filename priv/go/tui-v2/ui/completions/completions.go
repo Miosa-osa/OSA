@@ -156,7 +156,8 @@ func (m Model) optimalWidth() int {
 	maxW := 40
 	for _, item := range m.filtered {
 		// icon(1) + spaces(3) + name + gap(2) + description
-		w := 4 + len(item.Name) + 2 + len(item.Description)
+		// Use lipgloss.Width for correct display-column count with multi-byte chars.
+		w := 4 + lipgloss.Width(item.Name) + 2 + lipgloss.Width(item.Description)
 		if w > maxW {
 			maxW = w
 		}

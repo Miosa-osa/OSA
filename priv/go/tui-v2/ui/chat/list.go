@@ -96,7 +96,7 @@ type Item interface {
 	// The render cache is invalidated when this value or width change.
 	ContentVersion() int
 	// Height returns the number of terminal lines this item occupies at width.
-	Height(width int) string
+	Height(width int) int
 	// Render produces the full styled display string at the given width.
 	Render(width int) string
 }
@@ -252,9 +252,9 @@ func newUserItem(id, content string) *userMessageItem {
 	return &userMessageItem{id: id, content: content, ts: time.Now()}
 }
 
-func (u *userMessageItem) ID() string              { return u.id }
-func (u *userMessageItem) ContentVersion() int     { return u.version }
-func (u *userMessageItem) Height(width int) string { return u.Render(width) }
+func (u *userMessageItem) ID() string           { return u.id }
+func (u *userMessageItem) ContentVersion() int  { return u.version }
+func (u *userMessageItem) Height(width int) int { return strings.Count(u.Render(width), "\n") + 1 }
 
 func (u *userMessageItem) Render(cw int) string {
 	cw = cappedWidth(cw)
@@ -301,9 +301,9 @@ func newAssistantItem(id, content string, sig *Signal, durationMs int64, model s
 	}
 }
 
-func (a *assistantMessageItem) ID() string              { return a.id }
-func (a *assistantMessageItem) ContentVersion() int     { return a.version }
-func (a *assistantMessageItem) Height(width int) string { return a.Render(width) }
+func (a *assistantMessageItem) ID() string           { return a.id }
+func (a *assistantMessageItem) ContentVersion() int  { return a.version }
+func (a *assistantMessageItem) Height(width int) int { return strings.Count(a.Render(width), "\n") + 1 }
 
 // shouldSkip returns true when this message has no content and no tool calls —
 // nothing meaningful to render.
@@ -430,9 +430,9 @@ func newSystemItem(id, content string, level SystemLevel) *systemMessageItem {
 	return &systemMessageItem{id: id, content: content, level: level, ts: time.Now()}
 }
 
-func (s *systemMessageItem) ID() string              { return s.id }
-func (s *systemMessageItem) ContentVersion() int     { return s.version }
-func (s *systemMessageItem) Height(width int) string { return s.Render(width) }
+func (s *systemMessageItem) ID() string           { return s.id }
+func (s *systemMessageItem) ContentVersion() int  { return s.version }
+func (s *systemMessageItem) Height(width int) int { return strings.Count(s.Render(width), "\n") + 1 }
 
 func (s *systemMessageItem) Render(cw int) string {
 	cw = cappedWidth(cw)
