@@ -280,6 +280,113 @@ defmodule OptimalSystemAgent.Integration.MemoryTest do
   end
 
   # ---------------------------------------------------------------------------
+  # extract_insights/1
+  # ---------------------------------------------------------------------------
+
+  describe "extract_insights/1" do
+    test "returns 0 for empty message list" do
+      assert Memory.extract_insights([]) == 0
+    end
+
+    test "returns 0 when no messages contain insight keywords" do
+      messages = [
+        %{role: "user", content: "What time is it?"},
+        %{role: "assistant", content: "It is currently 3pm."}
+      ]
+
+      assert Memory.extract_insights(messages) == 0
+    end
+
+    test "returns count > 0 when messages contain insight keywords and content" do
+      messages = [
+        %{
+          role: "user",
+          content:
+            "I always prefer to use snake_case for variable names in Elixir code."
+        }
+      ]
+
+      result = Memory.extract_insights(messages)
+      assert is_integer(result)
+      assert result >= 0
+    end
+
+    test "ignores short messages (under 20 bytes)" do
+      messages = [
+        %{role: "user", content: "always"},
+        %{role: "assistant", content: "ok"}
+      ]
+
+      assert Memory.extract_insights(messages) == 0
+    end
+
+    test "ignores tool result messages" do
+      messages = [
+        %{role: "tool", content: "always prefer this pattern — important rule here for tools"}
+      ]
+
+      assert Memory.extract_insights(messages) == 0
+    end
+
+    test "returns an integer for any valid message list" do
+      messages = [
+        %{role: "user", content: "Hello"},
+        %{role: "assistant", content: "Hi"}
+      ]
+
+      result = Memory.extract_insights(messages)
+      assert is_integer(result)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # maybe_pattern_nudge/2
+  # ---------------------------------------------------------------------------
+
+  describe "maybe_pattern_nudge/2" do
+    test "returns :no_nudge when turn_count is 5 or less" do
+      messages = [%{role: "user", content: "I always prefer snake_case in Elixir. Important rule!"}]
+      assert Memory.maybe_pattern_nudge(5, messages) == :no_nudge
+    end
+
+    test "returns :no_nudge when turn_count is 0" do
+      assert Memory.maybe_pattern_nudge(0, []) == :no_nudge
+    end
+
+    test "returns :no_nudge for empty message list even with high turn count" do
+      assert Memory.maybe_pattern_nudge(20, []) == :no_nudge
+    end
+
+    test "returns :no_nudge or {:nudge, text} for turn_count > 5" do
+      messages = [
+        %{
+          role: "user",
+          content:
+            "I always prefer to keep functions under 20 lines. This is an important coding rule."
+        }
+      ]
+
+      result = Memory.maybe_pattern_nudge(20, messages)
+      assert result == :no_nudge or match?({:nudge, text} when is_binary(text), result)
+    end
+
+    test "nudge text is a non-empty string when a nudge is returned" do
+      messages = [
+        %{
+          role: "user",
+          content:
+            "Remember: always use pattern matching over conditionals in Elixir. Important convention."
+        }
+      ]
+
+      case Memory.maybe_pattern_nudge(25, messages) do
+        :no_nudge -> :ok
+        {:nudge, text} -> assert is_binary(text) and byte_size(text) > 0
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 

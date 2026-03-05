@@ -22,7 +22,6 @@ defmodule OptimalSystemAgent.Intelligence.Supervisor do
       OptimalSystemAgent.Intelligence.CommProfiler,
       OptimalSystemAgent.Intelligence.CommCoach,
       OptimalSystemAgent.Intelligence.ConversationTracker,
-      OptimalSystemAgent.Intelligence.ContactDetector,
       OptimalSystemAgent.Intelligence.ProactiveMonitor
     ]
 

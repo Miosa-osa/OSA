@@ -70,7 +70,7 @@ defmodule OptimalSystemAgent.Telemetry.Metrics do
     filter_rate = if total_noise > 0, do: (noise.filtered + noise.clarify) / total_noise, else: 0.0
 
     %{
-      tool_executions: Map.get(m, :tool_executions, %{}),
+      tool_executions: summarize_tool_executions(Map.get(m, :tool_executions, %{})),
       provider_latency: summarize_latencies(Map.get(m, :provider_latency, %{})),
       session_stats: Map.get(m, :session_stats, %{turns_by_session: %{}, messages_today: 0}),
       noise_filter_rate: Float.round(filter_rate * 100, 2),
@@ -180,9 +180,32 @@ defmodule OptimalSystemAgent.Telemetry.Metrics do
     :ets.insert(:osa_telemetry, {:signal_weights, empty_weight_buckets()})
   end
 
-  defp update_tool_execution(tool_name, _duration_ms) do
-    [{_, counts}] = :ets.lookup(:osa_telemetry, :tool_executions)
-    updated = Map.update(counts, tool_name, 1, &(&1 + 1))
+  # Tool execution stats: %{tool_name => %{count, total_ms, min_ms, max_ms, window}}
+  # window is a circular buffer of the last 100 durations for p99 calculation.
+  defp update_tool_execution(tool_name, duration_ms) do
+    [{_, executions}] = :ets.lookup(:osa_telemetry, :tool_executions)
+
+    updated =
+      Map.update(
+        executions,
+        tool_name,
+        %{count: 1, total_ms: duration_ms, min_ms: duration_ms, max_ms: duration_ms,
+          window: [duration_ms]},
+        fn stats ->
+          new_window =
+            [duration_ms | stats.window]
+            |> Enum.take(@latency_window)
+
+          %{stats |
+            count: stats.count + 1,
+            total_ms: stats.total_ms + duration_ms,
+            min_ms: min(stats.min_ms, duration_ms),
+            max_ms: max(stats.max_ms, duration_ms),
+            window: new_window
+          }
+        end
+      )
+
     :ets.insert(:osa_telemetry, {:tool_executions, updated})
   end
 
@@ -245,6 +268,30 @@ defmodule OptimalSystemAgent.Telemetry.Metrics do
         [{^key, value}] -> Map.put(acc, key, value)
         [] -> acc
       end
+    end)
+  end
+
+  defp summarize_tool_executions(executions) do
+    Map.new(executions, fn {tool_name, stats} ->
+      {count, p99_ms, avg_ms} =
+        if stats.count == 0 do
+          {0, 0, 0.0}
+        else
+          sorted = Enum.sort(stats.window)
+          window_count = length(sorted)
+          p99_idx = max(0, round(window_count * 0.99) - 1)
+          p99 = Enum.at(sorted, p99_idx, 0)
+          avg = stats.total_ms / stats.count
+          {stats.count, p99, Float.round(avg, 2)}
+        end
+
+      {tool_name, %{
+        count: count,
+        avg_ms: avg_ms,
+        min_ms: stats.min_ms,
+        max_ms: stats.max_ms,
+        p99_ms: p99_ms
+      }}
     end)
   end
 

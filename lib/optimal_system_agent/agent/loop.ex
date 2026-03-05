@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Channels.NoiseFilter
 
   defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
   # Tool results larger than this are truncated before being added to the
@@ -151,6 +152,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # 1. Persist user message to JSONL session storage
     Memory.append(state.session_id, %{role: "user", content: message, channel: state.channel})
 
+    # 1.5. Noise filter — intercept low-signal messages before reaching the LLM.
+    # signal_weight comes from an upstream classifier (e.g. HTTP handler that called
+    # /api/v1/classify first). Defaults to nil (no weight check, Tier 1 regex only).
+    signal_weight = Keyword.get(opts, :signal_weight, nil)
+
+    noise_result = NoiseFilter.check(message, signal_weight)
+
+    if noise_result != :pass do
+      ack =
+        case noise_result do
+          {:filtered, ack} -> ack
+          {:clarify, prompt} -> prompt
+        end
+
+      Memory.append(state.session_id, %{role: "assistant", content: ack, channel: state.channel})
+      state = %{state | status: :idle}
+      {:reply, {:ok, ack}, state}
+    else
+
     # 2. Compact message history if needed, then process through agent loop
     compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
     state = %{state | messages: compacted}
@@ -213,6 +233,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
         status: :thinking
     }
 
+    # 2.5. Genre routing — adjust behavior based on signal type when provided by caller.
+    # Callers that pre-classify messages pass :signal_genre in opts.
+    # Defaults to :direct (current behavior: execute tools immediately).
+    signal_genre = Keyword.get(opts, :signal_genre, :direct)
+
+    genre_route = route_by_genre(signal_genre, message, state)
+
+    case genre_route do
+      {:respond, genre_response} ->
+        Memory.append(state.session_id, %{role: "assistant", content: genre_response, channel: state.channel})
+        state = %{state | status: :idle}
+        Bus.emit(:agent_response, %{session_id: state.session_id, response: genre_response})
+        {:reply, {:ok, genre_response}, state}
+
+      :execute_tools ->
     # 3. Check if plan mode should trigger
     if not skip_plan and should_plan?(state) do
       # Plan mode: single LLM call with plan overlay, no tools
@@ -306,6 +341,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
       {:reply, {:ok, response}, state}
     end
+    end  # closes :execute_tools arm of route_by_genre case
+    end  # closes noise_filter :pass else branch
     end  # closes prompt_injection? else branch
   end
 
@@ -809,6 +846,70 @@ defmodule OptimalSystemAgent.Agent.Loop do
     state.plan_mode_enabled and not state.plan_mode
   end
 
+  # --- Genre Routing ---
+
+  # Routes message handling based on the signal genre from upstream classification.
+  # Returns {:respond, text} to short-circuit with a direct response,
+  # or :execute_tools to continue normal LLM + tool execution.
+  #
+  # Genres from Signal Theory 5-tuple Type field:
+  #   :direct   — user wants something done → execute tools (default)
+  #   :inform   — user is sharing info → suggest memory_save, no tools
+  #   :express  — emotional content → empathetic response, no tools
+  #   :decide   — user needs help deciding → ask clarifying question first
+  #   :commit   — user is committing to an action → confirm plan before executing
+
+  defp route_by_genre(:inform, _message, _state) do
+    {:respond,
+     "Got it — I've noted that. Would you like me to save this to memory with `memory_save` so I can reference it later?"}
+  end
+
+  defp route_by_genre(:express, message, _state) do
+    # Acknowledge emotional content with empathy, skip tools
+    lower = String.downcase(message)
+
+    response =
+      cond do
+        Regex.match?(~r/\b(frustrated?|annoyed?|angry|upset|irritated?)\b/, lower) ->
+          "I hear you — that sounds frustrating. I'm here to help. What would make things easier right now?"
+
+        Regex.match?(~r/\b(worried|anxious|nervous|scared|overwhelmed)\b/, lower) ->
+          "That sounds stressful. Let's take it one step at a time. What's the most pressing thing on your mind?"
+
+        Regex.match?(~r/\b(happy|excited|great|awesome|amazing|love)\b/, lower) ->
+          "That's great to hear! How can I help you build on that?"
+
+        true ->
+          "I appreciate you sharing that. How can I best support you right now?"
+      end
+
+    {:respond, response}
+  end
+
+  defp route_by_genre(:decide, _message, _state) do
+    # Ask a clarifying question before committing to any action
+    {:respond,
+     "Before I proceed — could you help me understand a bit more? Specifically: what outcome matters most to you here, and are there any constraints I should know about? Once I have that I can give you a more useful recommendation."}
+  end
+
+  defp route_by_genre(:commit, message, _state) do
+    # Surface the implied plan and ask for confirmation before executing
+    {:respond,
+     "Just to confirm before I proceed: based on what you've said, my plan would be to #{summarize_intent(message)}. Should I go ahead with that?"}
+  end
+
+  defp route_by_genre(_genre, _message, _state) do
+    # :direct or any unknown genre → normal tool execution
+    :execute_tools
+  end
+
+  # Extract a short intent summary from the message for the :commit confirmation prompt.
+  defp summarize_intent(message) do
+    words = message |> String.split(~r/\s+/, trim: true) |> Enum.take(12)
+    summary = Enum.join(words, " ")
+    if String.length(message) > String.length(summary), do: "#{summary}…", else: summary
+  end
+
   # --- Helpers ---
 
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
@@ -926,13 +1027,27 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @injection_patterns [
     ~r/what\s+(is|are|was)\s+(your\s+)?(system\s+prompt|instructions?|rules?|configuration|directives?)/i,
     ~r/what\s+(is|are|was)\s+the\s+(system\s+prompt|instructions?|configuration|directives?)/i,
-    ~r/(show(\s+me)?|print|display|reveal|repeat|output|tell me|give me)\s+(your\s+)?(system\s+prompt|instructions?|full\s+prompt|prompt|initial\s+prompt)/i,
+    ~r/(show(\s+me)?|print|display|reveal|repeat|output|tell\s+me|give\s+me)\s+(your\s+)?(system\s+prompt|instructions?|full\s+prompt|prompt|initial\s+prompt)/i,
+    # "tell me your system prompt word for word" and inverted variants
+    ~r/tell\s+me\s+.{0,30}(system\s+prompt|instructions?|rules?|prompt)\s*(word\s+for\s+word|verbatim|exactly|literally)?/i,
+    ~r/(word\s+for\s+word|verbatim|character\s+for\s+character).{0,40}(prompt|instructions?|told|rules?)/i,
+    # "ignore all instructions" without requiring previous/prior/above
+    ~r/ignore\s+all\s+(instructions?|rules?|guidelines?|context|constraints?)/i,
     ~r/ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompt|context|rules?)/i,
     ~r/repeat\s+everything\s+(above|before|prior)/i,
     ~r/what\s+(were\s+)?(you\s+)?(told|instructed|programmed|trained|configured)\s+to/i,
-    ~r/(jailbreak|DAN|do anything now|developer\s+mode|prompt\s+injection)/i,
+    # DAN / jailbreak persona adoption
+    ~r/(jailbreak|do\s+anything\s+now|developer\s+mode|prompt\s+injection)/i,
+    ~r/\byou\s+(are|were|become|act\s+as)\s+DAN\b/i,
+    ~r/\bDAN\s+(mode|protocol|activated|enabled)\b/i,
+    # "pretend/act as if you have no restrictions"
+    ~r/(pretend|act\s+as\s+if|imagine|behave\s+as\s+if)\s+.{0,40}(no\s+restrictions?|no\s+guidelines?|no\s+rules?|unrestricted|without\s+limits?|uncensored)/i,
+    # "output everything above/before this"
+    ~r/(output|print|repeat|copy|write\s+out)\s+(everything|all\s+text|all\s+content)\s+(above|before|prior)/i,
     ~r/disregard\s+(your\s+)?(previous\s+)?(instructions?|guidelines?|rules?)/i,
-    ~r/forget\s+(everything|all)\s+(you\s+)?(were\s+)?(told|instructed|programmed)/i
+    ~r/forget\s+(everything|all)\s+(you\s+)?(were\s+)?(told|instructed|programmed)/i,
+    # "override/bypass/circumvent your instructions/restrictions"
+    ~r/(override|bypass|circumvent|disable)\s+.{0,30}(instructions?|restrictions?|guidelines?|safety\s+filter)/i
   ]
 
   # Tier 3 — structural boundary markers that signal injected prompt sections.

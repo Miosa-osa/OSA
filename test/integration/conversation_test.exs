@@ -1,89 +1,14 @@
 defmodule OptimalSystemAgent.Integration.ConversationTest do
   use ExUnit.Case, async: true
 
-  alias OptimalSystemAgent.Signal.Classifier
   alias OptimalSystemAgent.Agent.{Context, Compactor, Workflow}
-
-  # ---------------------------------------------------------------------------
-  # Building an app — full conversation flow (deterministic classifier)
-  # ---------------------------------------------------------------------------
-
-  describe "building an app — full conversation flow" do
-    test "user request to build a REST API is classified correctly" do
-      message = "Build me a REST API for a todo app with CRUD endpoints"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :build
-      assert signal.weight >= 0.5
-      assert signal.format == :command
-    end
-
-    test "follow-up technical question during build is classified as question type" do
-      message = "Should I use PostgreSQL or SQLite for the database?"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.type == "question"
-      assert signal.weight >= 0.5
-    end
-
-    test "fix command is MAINTAIN mode" do
-      message = "Fix the authentication bug — users cant log in after the migration"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :maintain
-      assert signal.type == "issue"
-    end
-
-    test "performance analysis request is ANALYZE mode" do
-      message = "Analyze the API response times and show me which endpoints are slowest"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :analyze
-    end
-
-    test "run command is EXECUTE mode" do
-      message = "run the deployment script now"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :execute
-    end
-
-    test "update command is MAINTAIN mode" do
-      # Note: 'update' triggers :maintain, but keywords like 'run' fire :execute first
-      # in the classify_mode cond. Use a message with only the maintain keyword.
-      message = "update the configuration file for the deployment"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :maintain
-    end
-
-    test "create command is BUILD mode" do
-      message = "create a new database migration for the users table"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert signal.mode == :build
-    end
-
-    test "multi-step request produces a valid 5-tuple signal" do
-      message = "Build me a complete REST API from scratch with authentication and deployment"
-      signal = Classifier.classify_fast(message, :cli)
-
-      assert %Classifier{} = signal
-      assert signal.mode in [:build, :execute, :analyze, :assist, :maintain]
-      assert signal.genre in [:direct, :inform, :commit, :decide, :express]
-      assert is_binary(signal.type)
-      assert signal.format in [:command, :message, :notification, :document, :transcript]
-      assert is_float(signal.weight)
-      assert signal.weight >= 0.0 and signal.weight <= 1.0
-    end
-  end
 
   # ---------------------------------------------------------------------------
   # Context builder — token budgeting
   # ---------------------------------------------------------------------------
 
   describe "context builder — token budgeting" do
-    test "builds context with signal classification injected" do
+    test "builds context with system message first" do
       state = %{
         session_id: "test-session-1",
         user_id: "user-1",
@@ -93,8 +18,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
         ]
       }
 
-      signal = Classifier.classify_fast("Build me a REST API", :cli)
-      context = Context.build(state, signal)
+      context = Context.build(state, nil)
 
       assert is_map(context)
       assert is_list(context.messages)
@@ -107,9 +31,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       assert String.contains?(system_msg.content, "Optimal System Agent") or
                String.contains?(system_msg.content, "OSA")
 
-      # SYSTEM.md static content references Signal Theory modes including BUILD
-      # (no dynamic signal block is injected — signal classification was removed
-      # in the middleware-to-prompt migration; "BUILD" appears in the static base)
+      # SYSTEM.md static content references Signal Theory modes
       assert String.contains?(system_msg.content, "BUILD") or
                String.contains?(system_msg.content, "EXECUTE") or
                String.contains?(system_msg.content, "ANALYZE")
@@ -212,7 +134,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       refute String.contains?(system_msg.content, "Active Signal:")
     end
 
-    test "build without signal overlay — LLM self-classifies via SYSTEM.md" do
+    test "build without signal — LLM self-classifies via SYSTEM.md" do
       state = %{
         session_id: "test-no-overlay",
         user_id: nil,
@@ -220,10 +142,8 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
         messages: []
       }
 
-      # Even with a signal struct passed, no signal overlay is injected —
-      # Signal Theory instructions are in the static SYSTEM.md prompt
-      signal = Classifier.classify_fast("analyze the logs", :cli)
-      context = Context.build(state, signal)
+      # No signal is injected — Signal Theory instructions are in the static SYSTEM.md prompt
+      context = Context.build(state, nil)
       [system_msg | _] = context.messages
 
       refute String.contains?(system_msg.content, "Active Signal:")
@@ -389,231 +309,6 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
     test "should_create_workflow? returns false for empty string" do
       refute Workflow.should_create_workflow?("")
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Multi-channel classification
-  # ---------------------------------------------------------------------------
-
-  describe "multi-channel classification" do
-    test "same message produces consistent mode across cli, telegram, and discord" do
-      message = "fix the login bug — users cannot authenticate"
-
-      cli_signal = Classifier.classify_fast(message, :cli)
-      telegram_signal = Classifier.classify_fast(message, :telegram)
-      discord_signal = Classifier.classify_fast(message, :discord)
-
-      assert cli_signal.mode == telegram_signal.mode
-      assert cli_signal.mode == discord_signal.mode
-    end
-
-    test "same message produces consistent genre across channels" do
-      message = "fix the login bug — users cannot authenticate"
-
-      cli_signal = Classifier.classify_fast(message, :cli)
-      telegram_signal = Classifier.classify_fast(message, :telegram)
-
-      assert cli_signal.genre == telegram_signal.genre
-    end
-
-    test "same message produces consistent type across channels" do
-      message = "fix the login bug — users cannot authenticate"
-
-      cli_signal = Classifier.classify_fast(message, :cli)
-      discord_signal = Classifier.classify_fast(message, :discord)
-
-      assert cli_signal.type == discord_signal.type
-    end
-
-    test "format differs by channel: cli is :command, telegram is :message" do
-      message = "analyze the performance metrics"
-
-      cli_signal = Classifier.classify_fast(message, :cli)
-      telegram_signal = Classifier.classify_fast(message, :telegram)
-
-      assert cli_signal.format == :command
-      assert telegram_signal.format == :message
-    end
-
-    test "format for webhook channel is :notification" do
-      signal = Classifier.classify_fast("incoming event payload", :webhook)
-      assert signal.format == :notification
-    end
-
-    test "all supported channels produce a valid format" do
-      channels = [
-        :cli,
-        :telegram,
-        :discord,
-        :slack,
-        :whatsapp,
-        :signal,
-        :matrix,
-        :email,
-        :qq,
-        :dingtalk,
-        :feishu,
-        :webhook
-      ]
-
-      Enum.each(channels, fn channel ->
-        signal = Classifier.classify_fast("test message for channel", channel)
-
-        assert signal.format in [:command, :message, :notification, :document, :transcript],
-               "Unexpected format #{signal.format} for channel #{channel}"
-
-        assert signal.channel == channel,
-               "Expected channel #{channel}, got #{signal.channel}"
-      end)
-    end
-
-    test "channel is stored on the signal struct" do
-      signal = Classifier.classify_fast("run the tests", :slack)
-      assert signal.channel == :slack
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Weight calculation — realistic messages
-  # ---------------------------------------------------------------------------
-
-  describe "weight calculation — realistic messages" do
-    test "production incident with URGENT keyword gets high weight" do
-      weight =
-        Classifier.calculate_weight(
-          "URGENT: Database connection pool exhausted, all API requests timing out"
-        )
-
-      assert weight >= 0.7
-    end
-
-    test "technical question with question mark gets medium-to-high weight" do
-      weight = Classifier.calculate_weight("How do I configure the connection pool size in Ecto?")
-
-      assert weight >= 0.5
-    end
-
-    test "short greeting gets low weight" do
-      weight = Classifier.calculate_weight("hi")
-      assert weight < 0.3
-    end
-
-    test "complex multi-part request gets high weight due to length bonus" do
-      weight =
-        Classifier.calculate_weight(
-          "I need you to analyze our Q3 revenue data, compare it with Q2, " <>
-            "identify the top 3 growth drivers, and create a presentation deck " <>
-            "with charts for the board meeting tomorrow"
-        )
-
-      assert weight >= 0.6
-    end
-
-    test "critical urgency keyword adds 0.2 bonus" do
-      base = Classifier.calculate_weight("fix the bug")
-      with_critical = Classifier.calculate_weight("critical fix the bug")
-
-      assert with_critical > base
-      assert with_critical - base >= 0.15
-    end
-
-    test "question mark adds 0.15 bonus" do
-      base = Classifier.calculate_weight("analyze the logs")
-      with_question = Classifier.calculate_weight("analyze the logs?")
-
-      # Question bonus is 0.15 plus a tiny length bonus for the extra char
-      diff = with_question - base
-      assert_in_delta diff, 0.15 + 1 / 500.0, 0.001
-    end
-
-    test "weight is always between 0.0 and 1.0" do
-      messages = [
-        "",
-        "hi",
-        "Run the tests now!",
-        "URGENT CRITICAL EMERGENCY: everything is broken immediately asap",
-        String.duplicate("analyze ", 200)
-      ]
-
-      Enum.each(messages, fn msg ->
-        w = Classifier.calculate_weight(msg)
-
-        assert w >= 0.0 and w <= 1.0,
-               "Weight #{w} out of range for message: #{String.slice(msg, 0, 40)}"
-      end)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Signal classification — documented deterministic behavior
-  # ---------------------------------------------------------------------------
-
-  describe "signal classification — deterministic keyword matching" do
-    test "'help me build this feature' — 'build' keyword fires BUILD mode" do
-      # Deterministic path: 'build' is checked before 'help' in mode classification.
-      # In the classify_mode cond, BUILD keywords are checked first.
-      signal = Classifier.classify_fast("help me build this feature")
-      assert signal.mode == :build
-    end
-
-    test "'help me understand this' without build keywords falls through to :assist" do
-      signal = Classifier.classify_fast("help me understand this")
-      assert signal.mode == :assist
-    end
-
-    test "question mark in message produces type 'question'" do
-      signal = Classifier.classify_fast("Can you run the test suite?")
-      assert signal.type == "question"
-    end
-
-    test "run keyword triggers :execute mode" do
-      signal = Classifier.classify_fast("Can you run the test suite?")
-      assert signal.mode == :execute
-    end
-
-    test "emotional + technical message with fix keyword resolves to :maintain" do
-      signal =
-        Classifier.classify_fast(
-          "This is terrible — the login page has been broken for 3 days, fix it immediately!"
-        )
-
-      assert signal.mode == :maintain
-    end
-
-    test "emotional message with exclamation resolves to :direct genre" do
-      signal =
-        Classifier.classify_fast(
-          "This is terrible — the login page has been broken for 3 days, fix it immediately!"
-        )
-
-      # Ends with '!' → :direct genre
-      assert signal.genre == :direct
-    end
-
-    test "issue keywords in message produce 'issue' type" do
-      signal =
-        Classifier.classify_fast(
-          "This is terrible — the login page has been broken for 3 days, fix it immediately!"
-        )
-
-      assert signal.type == "issue"
-    end
-
-    test "mode classification is prioritized in cond order: build > execute > analyze > maintain > assist" do
-      # 'build' fires before 'update' in the cond
-      signal = Classifier.classify_fast("build and update the schema")
-      assert signal.mode == :build
-    end
-
-    test "analyze keyword produces :analyze mode" do
-      signal = Classifier.classify_fast("analyze the API response times")
-      assert signal.mode == :analyze
-    end
-
-    test "sync keyword produces :execute mode" do
-      signal = Classifier.classify_fast("sync the database now")
-      assert signal.mode == :execute
     end
   end
 end

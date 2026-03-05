@@ -644,7 +644,54 @@ defmodule OptimalSystemAgent.Commands.System do
     end
   end
 
-  @doc "Handle utility commands: /analytics, /debug, /search, /review, /pr-review, /refactor, /banner, /init."
+  @doc "Handle the `/analytics` command — show real SICA + budget + session metrics."
+  def cmd_analytics(_arg, _session_id) do
+    try do
+      metrics = OptimalSystemAgent.Agent.Learning.metrics()
+      sessions = Registry.count(OptimalSystemAgent.Channels.SessionRegistry)
+
+      budget_line =
+        try do
+          {:ok, status} = OptimalSystemAgent.Agent.Budget.get_status()
+          "  Tokens used:          #{status.tokens_used} / #{status.tokens_limit}"
+        rescue
+          _ -> "  Budget tracker not available"
+        end
+
+      compactor_line =
+        try do
+          stats = OptimalSystemAgent.Agent.Compactor.stats()
+          "  Compactions:          #{stats.total_compactions} (#{stats.tokens_saved} tokens saved)"
+        rescue
+          _ -> "  Compactor not available"
+        end
+
+      output = """
+      Analytics
+
+      Sessions:
+        Active sessions:      #{sessions}
+
+      Learning (SICA):
+        Total interactions:   #{metrics.total_interactions}
+        Patterns captured:    #{metrics.patterns_captured}
+        Skills generated:     #{metrics.skills_generated}
+        Errors recovered:     #{metrics.errors_recovered}
+
+      Budget:
+      #{budget_line}
+
+      Context:
+      #{compactor_line}
+      """
+
+      {:command, String.trim(output)}
+    rescue
+      _ -> {:command, "Analytics not available — agent subsystems may not be fully initialized."}
+    end
+  end
+
+  @doc "Handle utility commands: /debug, /search, /review, /pr-review, /refactor, /banner, /init."
   def cmd_utility(arg, _session_id) do
     cmd_name = Process.get(:osa_current_cmd, "unknown")
 

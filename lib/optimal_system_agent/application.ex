@@ -38,7 +38,7 @@ defmodule OptimalSystemAgent.Application do
 
   @impl true
   def start(_type, _args) do
-    Application.put_env(:optimal_system_agent, :start_time, System.monotonic_time(:second))
+    Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
@@ -60,6 +60,9 @@ defmodule OptimalSystemAgent.Application do
 
         # Telemetry — subscribes to Events.Bus; must start after Bus + TaskSupervisor
         OptimalSystemAgent.Telemetry.Metrics,
+
+        # Provider health / circuit breaker — must start before Registry
+        OptimalSystemAgent.Providers.HealthChecker,
 
         # LLM providers (goldrush-compiled :osa_provider_router)
         OptimalSystemAgent.Providers.Registry,

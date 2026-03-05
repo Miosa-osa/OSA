@@ -62,6 +62,21 @@ defmodule OptimalSystemAgent.Intelligence.ProactiveMonitor do
     GenServer.call(__MODULE__, :stats)
   end
 
+  @doc """
+  Emit a single alert directly onto the event bus.
+  `severity` is one of `:info | :warning | :critical`.
+  `message` is a plain binary string.
+  """
+  def emit_alert(severity, message)
+      when severity in [:info, :warning, :critical] and is_binary(message) do
+    Bus.emit(:system_event, %{
+      event: :proactive_alert,
+      severity: severity,
+      message: message,
+      emitted_at: DateTime.utc_now()
+    })
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------

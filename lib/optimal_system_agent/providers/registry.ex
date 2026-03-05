@@ -43,6 +43,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   require Logger
 
   alias OptimalSystemAgent.Providers
+  alias OptimalSystemAgent.Providers.HealthChecker
 
   # Consolidated compat provider — one module handles 13 OpenAI-compatible APIs
   @compat Providers.OpenAICompatProvider
@@ -209,12 +210,27 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec chat_with_fallback(list(), list(atom()), keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def chat_with_fallback(messages, chain, opts \\ []) do
-    Enum.reduce_while(chain, {:error, "No providers in chain"}, fn provider, _acc ->
+    available_chain = Enum.filter(chain, fn provider ->
+      if HealthChecker.is_available?(provider) do
+        true
+      else
+        Logger.warning("Provider #{provider} skipped in fallback chain (circuit open or rate-limited)")
+        false
+      end
+    end)
+
+    Enum.reduce_while(available_chain, {:error, "No providers in chain"}, fn provider, _acc ->
       case chat(messages, Keyword.put(opts, :provider, provider)) do
         {:ok, _} = result ->
           {:halt, result}
 
+        {:error, {:rate_limited, retry_after}} ->
+          HealthChecker.record_rate_limited(provider, retry_after)
+          Logger.warning("Provider #{provider} rate-limited in fallback chain, trying Y")
+          {:cont, {:error, "rate-limited"}}
+
         {:error, reason} ->
+          HealthChecker.record_failure(provider, reason)
           Logger.warning("Provider #{provider} failed in fallback chain: #{reason}")
           {:cont, {:error, reason}}
       end
@@ -254,21 +270,26 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp call_with_fallback(provider, module, messages, opts) do
     case with_retry(fn -> apply_provider(module, messages, opts) end) do
       {:ok, _} = result ->
+        HealthChecker.record_success(provider)
         result
 
+      {:error, {:rate_limited, retry_after}} = _rate_err ->
+        HealthChecker.record_rate_limited(provider, retry_after)
+        try_fallback_chain(provider, messages, opts, "rate-limited (HTTP 429)")
+
       {:error, reason} = err ->
+        HealthChecker.record_failure(provider, reason)
         fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
 
         remaining_chain =
           fallback_chain
           |> Enum.drop_while(&(&1 == provider))
           |> then(fn
-            # If provider wasn't in chain, try the whole chain
             chain when chain == fallback_chain -> chain
-            # Otherwise use remainder after the failing provider
             [_ | rest] -> rest
             [] -> []
           end)
+          |> Enum.filter(&HealthChecker.is_available?/1)
 
         if remaining_chain == [] do
           Logger.error("Provider #{provider} failed, no fallback configured: #{reason}")
@@ -280,6 +301,32 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
           chat_with_fallback(messages, remaining_chain, opts)
         end
+    end
+  end
+
+  defp try_fallback_chain(failed_provider, messages, opts, reason) do
+    fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
+
+    remaining_chain =
+      fallback_chain
+      |> Enum.drop_while(&(&1 == failed_provider))
+      |> then(fn
+        chain when chain == fallback_chain -> chain
+        [_ | rest] -> rest
+        [] -> []
+      end)
+      |> Enum.filter(&HealthChecker.is_available?/1)
+
+    if remaining_chain == [] do
+      Logger.error(
+        "Provider #{failed_provider} #{reason}, no available fallback in chain: #{inspect(fallback_chain)}"
+      )
+      {:error, "Provider #{failed_provider} #{reason} and no fallback available"}
+    else
+      Logger.warning(
+        "Provider #{failed_provider} #{reason}, trying next available: #{inspect(remaining_chain)}"
+      )
+      chat_with_fallback(messages, remaining_chain, opts)
     end
   end
 
@@ -418,13 +465,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec provider_configured?(atom()) :: boolean()
   def provider_configured?(:ollama) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
-    uri = URI.parse(url)
-    host = String.to_charlist(uri.host || "localhost")
-    port = uri.port || 11434
 
-    case :gen_tcp.connect(host, port, [], 1_000) do
-      {:ok, sock} -> :gen_tcp.close(sock); true
-      {:error, _} -> false
+    case Req.get(url <> "/api/version", receive_timeout: 2_000, retry: false) do
+      {:ok, %{status: status}} when status in 200..299 -> true
+      _ -> false
     end
   end
 

@@ -75,10 +75,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     try do
       case Req.post(url, json: body, headers: headers, receive_timeout: timeout) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp}} ->
-          content = Text.strip_thinking_tokens(msg["content"] || "")
+          raw_content = msg["content"] || ""
           tool_calls = parse_tool_calls(msg, model)
+          # Strip XML tool-call markup from content when calls were parsed from text (not tool_calls field)
+          content =
+            if tool_calls != [] and not Map.has_key?(msg, "tool_calls") do
+              strip_tool_call_markup(raw_content)
+            else
+              raw_content
+            end
+            |> Text.strip_thinking_tokens()
           usage = parse_usage(resp)
           {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
+
+        {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
+          retry_after = parse_retry_after(resp_headers)
+          error_msg = extract_error_message(resp_body)
+          Logger.warning("Rate limited by provider (HTTP 429): #{error_msg}")
+          {:error, {:rate_limited, retry_after}}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error_message(resp_body)
@@ -212,7 +226,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     acc =
       case delta do
         %{"content" => text} when is_binary(text) and text != "" ->
-          callback.({:text_delta, text})
+          # Suppress XML tool-call markup from streaming output — it will be stripped in finalize
+          unless xml_tool_call_content?(acc.content <> text) do
+            callback.({:text_delta, text})
+          end
           %{acc | content: acc.content <> text}
 
         _ ->
@@ -286,13 +303,21 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       end)
 
     # Fallback: parse tool calls from content if none streamed
-    tool_calls =
+    {tool_calls, content} =
       if streamed_tool_calls != [] do
-        streamed_tool_calls
+        {streamed_tool_calls, content}
       else
-        case ToolCallParsers.parse(acc.content, model) do
-          [] -> parse_tool_calls_from_content(acc.content)
-          calls -> calls
+        parsed =
+          case ToolCallParsers.parse(acc.content, model) do
+            [] -> parse_tool_calls_from_content(acc.content)
+            calls -> calls
+          end
+
+        if parsed != [] do
+          clean = acc.content |> strip_tool_call_markup() |> Text.strip_thinking_tokens()
+          {parsed, clean}
+        else
+          {[], content}
         end
       end
 
@@ -318,7 +343,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
               "id" => to_string(tc[:id] || tc["id"] || ""),
               "type" => "function",
               "function" => %{
-                "name" => to_string(tc[:name] || tc["name"] || ""),
+                "name" => (tc[:name] || tc["name"] || "") |> to_string() |> normalize_tool_name(),
                 "arguments" =>
                   case tc[:arguments] || tc["arguments"] do
                     a when is_binary(a) -> a
@@ -572,6 +597,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     name |> String.split(~r/[\s({]/) |> List.first() |> String.trim()
   end
 
+  @doc "Strip XML/text tool-call markup so it doesn't appear in chat output."
+  def strip_tool_call_markup(content) when is_binary(content) do
+    content
+    |> String.replace(~r/<function\s+name="[^"]+"\s+parameters=\{.*?\}\s*>\s*<\/function>/s, "")
+    |> String.replace(~r/<function_call>.*?<\/function_call>/s, "")
+    |> String.trim()
+  end
+  def strip_tool_call_markup(content), do: content
+
+  defp xml_tool_call_content?(content) when is_binary(content) do
+    String.contains?(content, "<function") or String.contains?(content, "<function_call>")
+  end
+  defp xml_tool_call_content?(_), do: false
+
   # --- Private helpers ---
 
   defp maybe_add_tools(body, opts) do
@@ -628,6 +667,27 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp extract_error_message(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error_message(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error_message(body), do: inspect(body)
+
+  # Parse the Retry-After header from HTTP 429 responses.
+  # Returns the number of seconds to wait, or nil if the header is absent/unparseable.
+  defp parse_retry_after(headers) when is_list(headers) do
+    headers
+    |> Enum.find_value(fn
+      {"retry-after", v} -> v
+      {"Retry-After", v} -> v
+      _ -> nil
+    end)
+    |> case do
+      nil -> nil
+      v ->
+        case Integer.parse(v) do
+          {seconds, _} when seconds > 0 -> seconds
+          _ -> nil
+        end
+    end
+  end
+
+  defp parse_retry_after(_), do: nil
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()

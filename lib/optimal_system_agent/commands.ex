@@ -341,7 +341,7 @@ defmodule OptimalSystemAgent.Commands do
       {"tasks", "Show/manage tracked tasks", &System.cmd_tasks/2},
 
       # ── Analytics ──
-      {"analytics", "Usage analytics and metrics", &System.cmd_utility/2},
+      {"analytics", "Usage analytics and metrics", &System.cmd_analytics/2},
       {"debug", "Start systematic debugging", &System.cmd_utility/2},
       {"search", "Search codebase and docs", &System.cmd_utility/2},
       {"review", "Code review on recent changes", &System.cmd_utility/2},

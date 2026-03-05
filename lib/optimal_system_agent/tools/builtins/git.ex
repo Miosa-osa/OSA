@@ -12,7 +12,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
   def description,
     do:
       "Run git operations in a repository: status, diff, log, commit, add, push, pull, clone, " <>
-        "branch, show, stash, reset, remote, tag. " <>
+        "branch, show, stash, reset, remote, tag, " <>
+        "blame (line authorship), search (grep+pickaxe history mining), cherry_pick, worktree, bisect, reflog, pr_diff. " <>
         "Safe — runs specific git subcommands only, no arbitrary shell execution."
 
   @impl true
@@ -28,11 +29,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
             "stash", "reset", "remote", "tag"
           ],
           "description" =>
-            "Git operation: status, diff, log (with optional since/format), commit (stage all + commit), " <>
-              "add (stage files), push (push to remote or push tags), pull (pull from remote), " <>
-              "clone (clone repo), branch (list/create/switch), show (inspect ref), " <>
-              "stash (push/pop/list), reset (unstage/undo), remote (list/add remotes), " <>
-              "tag (list/create/delete/push — for semantic versioning)"
+            "Git operation: status, diff, log, commit, add, push, pull, clone, branch, show, " <>
+              "stash (push/pop/list/drop), reset, remote, tag, " <>
+              "blame (line authorship), search (grep+pickaxe), cherry_pick, worktree, bisect, reflog, pr_diff"
         },
         "path" => %{
           "type" => "string",
@@ -94,9 +93,33 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
         },
         "stash_action" => %{
           "type" => "string",
-          "enum" => ["push", "pop", "list"],
+          "enum" => ["push", "pop", "list", "drop"],
           "description" => "Stash action (default: list)"
         },
+        "line_start" => %{"type" => "integer", "description" => "Start line for blame range"},
+        "line_end" => %{"type" => "integer", "description" => "End line for blame range"},
+        "query" => %{"type" => "string", "description" => "Search query (for search operation)"},
+        "search_type" => %{
+          "type" => "string",
+          "enum" => ["grep", "pickaxe", "both"],
+          "description" => "Search type: grep=commit messages, pickaxe=code changes, both=default"
+        },
+        "worktree_action" => %{
+          "type" => "string",
+          "enum" => ["list", "add", "remove"],
+          "description" => "Worktree action (default: list)"
+        },
+        "worktree_path" => %{"type" => "string", "description" => "Path for worktree add/remove"},
+        "bisect_action" => %{
+          "type" => "string",
+          "enum" => ["start", "good", "bad", "reset", "log", "run"],
+          "description" => "Bisect action"
+        },
+        "bisect_command" => %{"type" => "string", "description" => "Test command for bisect run"},
+        "good_ref" => %{"type" => "string", "description" => "Known-good ref for bisect start"},
+        "bad_ref" => %{"type" => "string", "description" => "Known-bad ref for bisect start (default: HEAD)"},
+        "base_branch" => %{"type" => "string", "description" => "Base branch for pr_diff (default: main)"},
+        "no_commit" => %{"type" => "boolean", "description" => "cherry_pick without committing (stage only)"},
         "remote" => %{
           "type" => "string",
           "description" => "Remote name for push/pull (default: origin)"
@@ -429,10 +452,146 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
     end
   end
 
+  defp run_operation("blame", dir, params) do
+    case params["file"] do
+      nil -> {:error, "blame requires a file parameter"}
+      file ->
+        args = case {params["line_start"], params["line_end"]} do
+          {nil, _} -> ["blame", "--", file]
+          {s, nil} -> ["blame", "-L", "#{s},#{s}", "--", file]
+          {s, e}   -> ["blame", "-L", "#{s},#{e}", "--", file]
+        end
+        case git(args, dir) do
+          {:ok, out} -> {:ok, "Blame for #{file}:\n#{out}"}
+          error -> error
+        end
+    end
+  end
+
+  defp run_operation("search", dir, params) do
+    case params["query"] do
+      nil -> {:error, "search requires a query parameter"}
+      query ->
+        type = params["search_type"] || "both"
+        grep_r = if type in ["grep", "both"], do: git(["log", "--all", "--oneline", "--grep=#{query}"], dir), else: nil
+        pick_r = if type in ["pickaxe", "both"], do: git(["log", "--all", "--oneline", "-S", query], dir), else: nil
+        case {grep_r, pick_r} do
+          {nil, {:ok, o}}       -> {:ok, "Pickaxe (code changes):\n#{o}"}
+          {{:ok, o}, nil}       -> {:ok, "Message matches:\n#{o}"}
+          {{:ok, g}, {:ok, p}}  -> {:ok, "Message matches:\n#{g}\n\nCode changes (pickaxe):\n#{p}"}
+          {{:error, e}, _}      -> {:error, e}
+          {_, {:error, e}}      -> {:error, e}
+        end
+    end
+  end
+
+  defp run_operation("cherry_pick", dir, params) do
+    case params["ref"] do
+      nil -> {:error, "cherry_pick requires a ref parameter (commit SHA or space-separated list)"}
+      ref ->
+        shas = String.split(ref, ~r/\s+/, trim: true)
+        base = if params["no_commit"] == true, do: ["cherry-pick", "--no-commit"], else: ["cherry-pick"]
+        case git(base ++ shas, dir) do
+          {:ok, o} -> {:ok, o}
+          {:error, o} ->
+            if String.contains?(o, "CONFLICT"),
+              do: {:error, "Conflict detected. Resolve, then `git cherry-pick --continue`.\n#{o}"},
+              else: {:error, o}
+        end
+    end
+  end
+
+  defp run_operation("worktree", dir, params) do
+    case params["worktree_action"] || "list" do
+      "list" ->
+        git(["worktree", "list"], dir)
+      "add" ->
+        case params["worktree_path"] do
+          nil -> {:error, "worktree add requires worktree_path"}
+          wt_path ->
+            expanded = if Path.type(wt_path) == :relative,
+              do: Path.expand(Path.join("~/.osa/workspace", wt_path)),
+              else: Path.expand(wt_path)
+            args = case params["branch_name"] do
+              nil    -> ["worktree", "add", "-b", Path.basename(expanded), expanded]
+              branch -> ["worktree", "add", expanded, branch]
+            end
+            git(args, dir)
+        end
+      "remove" ->
+        case params["worktree_path"] do
+          nil -> {:error, "worktree remove requires worktree_path"}
+          wt_path -> git(["worktree", "remove", Path.expand(wt_path)], dir)
+        end
+      other -> {:error, "Unknown worktree_action: #{other}. Use list, add, or remove."}
+    end
+  end
+
+  @safe_bisect_executables ~w(mix elixir cargo go npm yarn pytest python python3 ruby bash sh)
+
+  defp run_operation("bisect", dir, params) do
+    case params["bisect_action"] || "log" do
+      "start" ->
+        bad = params["bad_ref"] || "HEAD"
+        with {:ok, _} <- git(["bisect", "start"], dir),
+             {:ok, _} <- git(["bisect", "bad", bad], dir),
+             {:ok, out} <- case params["good_ref"] do
+               nil -> {:ok, "Mark good commits with bisect_action=good"}
+               g   -> git(["bisect", "good", g], dir)
+             end do
+          {:ok, "Bisect started. bad=#{bad}.\n#{out}"}
+        end
+      "good"  -> git(["bisect", "good"], dir)
+      "bad"   -> git(["bisect", "bad"], dir)
+      "reset" -> git(["bisect", "reset"], dir)
+      "log"   ->
+        case git(["bisect", "log"], dir) do
+          {:ok, o} -> {:ok, o}
+          {:error, _} -> {:ok, "No bisect in progress."}
+        end
+      "run" ->
+        case params["bisect_command"] do
+          nil -> {:error, "bisect run requires bisect_command"}
+          cmd ->
+            [exe | rest] = String.split(String.trim(cmd), ~r/\s+/, trim: true)
+            if Path.basename(exe) in @safe_bisect_executables do
+              case System.cmd(exe, rest, cd: dir, stderr_to_stdout: true) do
+                {out, 0}    -> {:ok, "bisect run exit 0:\n#{out}"}
+                {out, code} -> {:error, "bisect run exit #{code}:\n#{out}"}
+              end
+            else
+              {:error, "bisect_command '#{exe}' not allowed. Use: #{Enum.join(@safe_bisect_executables, ", ")}"}
+            end
+        end
+      other -> {:error, "Unknown bisect_action: #{other}"}
+    end
+  end
+
+  defp run_operation("reflog", dir, params) do
+    count = params["count"] || 20
+    ref = params["ref"] || "HEAD"
+    case git(["reflog", "--oneline", "-#{count}", ref], dir) do
+      {:ok, out} -> {:ok, "Reflog for #{ref} (last #{count}):\n#{out}\n\nTo restore: git checkout -b <branch> <sha>"}
+      error -> error
+    end
+  end
+
+  defp run_operation("pr_diff", dir, params) do
+    base = params["base_branch"] || "main"
+    case git(["diff", "#{base}...HEAD"], dir) do
+      {:ok, o} -> {:ok, "PR diff (#{base}...HEAD):\n#{o}"}
+      {:error, _} ->
+        case git(["diff", "origin/#{base}...HEAD"], dir) do
+          {:ok, o} -> {:ok, "PR diff (origin/#{base}...HEAD):\n#{o}"}
+          error -> error
+        end
+    end
+  end
+
   defp run_operation(op, _dir, _params) do
     {:error,
      "Unknown operation: #{op}. Valid: status, diff, log, commit, add, push, pull, clone, " <>
-       "branch, show, stash, reset, remote, tag"}
+       "branch, show, stash, reset, remote, tag, blame, search, cherry_pick, worktree, bisect, reflog, pr_diff"}
   end
 
   # --- Helpers ---
