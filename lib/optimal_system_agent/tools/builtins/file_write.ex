@@ -36,6 +36,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
 
   @impl true
   def execute(%{"path" => path, "content" => content}) do
+    # Relative paths (no leading ~, /, or drive letter) are rooted in the
+    # user workspace so generated apps land in ~/.osa/workspace/ rather than
+    # the Elixir process's CWD (the OSA project root).
     normalized =
       if relative_path?(path) do
         Path.join("~/.osa/workspace", path)
@@ -61,6 +64,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
     end
   end
 
+  # A path is relative when it doesn't begin with ~, /, or a Windows drive letter (C:\, C:/)
   defp relative_path?(path) do
     not (String.starts_with?(path, "~") or
            String.starts_with?(path, "/") or

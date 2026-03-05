@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 ///
 /// Collapsed (default):  ▶ Thinking... (N chars)
 /// Expanded:             Dashed-border block with dim-italic wrapped content,
-///                       capped at 20 visible lines with overflow indicator.
+///                       capped at 10 visible lines with overflow indicator.
 pub struct ThinkingBox {
     content: String,
     expanded: bool,
@@ -47,7 +47,7 @@ impl ThinkingBox {
     /// Compute required height for the given render width.
     ///
     /// - Collapsed: always 1 line.
-    /// - Expanded:  2 (border) + content lines (max 20) + optional overflow line.
+    /// - Expanded:  2 (border) + content lines (max 10) + optional overflow line.
     pub fn height(&self, width: u16) -> u16 {
         if !self.expanded || self.content.is_empty() {
             return 1;
@@ -108,7 +108,7 @@ impl ThinkingBox {
 
         if has_overflow {
             text_lines.push(Line::from(Span::styled(
-                format!("... ({} more lines)", total - 20),
+                format!("... ({} more lines)", total - 10),
                 theme.faint().add_modifier(Modifier::ITALIC),
             )));
         }
