@@ -18,7 +18,7 @@ impl ThinkingBox {
     pub fn new() -> Self {
         Self {
             content: String::new(),
-            expanded: false,
+            expanded: true,
             title: "Thinking".to_string(),
         }
     }
@@ -56,8 +56,8 @@ impl ThinkingBox {
         // Inner width subtracts border (2) and one padding char each side (2).
         let inner_w = (width as usize).saturating_sub(4).max(1);
         let content_lines = self.wrap_lines(inner_w);
-        let visible = content_lines.len().min(20);
-        let overflow_line = if content_lines.len() > 20 { 1 } else { 0 };
+        let visible = content_lines.len().min(10);
+        let overflow_line = if content_lines.len() > 10 { 1 } else { 0 };
 
         // 2 border lines + visible content + optional overflow indicator
         2 + visible as u16 + overflow_line as u16
@@ -92,8 +92,8 @@ impl ThinkingBox {
         let inner_w = (area.width as usize).saturating_sub(4).max(1);
         let all_lines = self.wrap_lines(inner_w);
         let total = all_lines.len();
-        let visible_count = total.min(20);
-        let has_overflow = total > 20;
+        let visible_count = total.min(10);
+        let has_overflow = total > 10;
 
         // Build Text from visible lines.
         let mut text_lines: Vec<Line<'_>> = all_lines[..visible_count]

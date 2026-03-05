@@ -71,6 +71,8 @@ defmodule OptimalSystemAgent.Python.Sidecar do
       mode: :starting,
       # id => {from, timer_ref}
       pending: %{},
+      # Queue of {from, method, params} for calls during startup
+      pending_calls: [],
       python_path: Application.get_env(:optimal_system_agent, :python_path, "python3")
     }
 
@@ -99,6 +101,14 @@ defmodule OptimalSystemAgent.Python.Sidecar do
     {:noreply, %{state | pending: pending}}
   end
 
+  def handle_call({:request, method, params}, from, %{mode: :starting} = state) do
+    # Queue this call to be replayed once ready
+    pending_calls = [
+      {from, method, params} | state.pending_calls
+    ]
+    {:noreply, %{state | pending_calls: pending_calls}}
+  end
+
   def handle_call({:request, _method, _params}, _from, state) do
     {:reply, {:error, :sidecar_not_ready}, state}
   end
@@ -117,12 +127,32 @@ defmodule OptimalSystemAgent.Python.Sidecar do
     case Protocol.decode_response(line) do
       {:ok, id, result} ->
         # Check if this is the ping response during startup
-        state = if state.mode == :starting, do: %{state | mode: :ready}, else: state
-        resolve_pending(state, id, {:ok, result})
+        state =
+          if state.mode == :starting do
+            %{state | mode: :ready}
+          else
+            state
+          end
+
+        {final_state, noreply_or_reply} = resolve_pending(state, id, {:ok, result})
+
+        # If we just transitioned to ready, drain the pending calls queue
+        final_state =
+          if state.mode == :starting and final_state.mode == :ready do
+            drain_pending_calls(final_state)
+          else
+            final_state
+          end
+
+        case noreply_or_reply do
+          {:noreply, _} -> {:noreply, final_state}
+          other -> other
+        end
 
       {:error, id, error} when is_binary(id) ->
         msg = Map.get(error, "message", "unknown error")
-        resolve_pending(state, id, {:error, {:sidecar_error, msg}})
+        {_state, noreply_or_reply} = resolve_pending(state, id, {:error, {:sidecar_error, msg}})
+        noreply_or_reply
 
       {:error, :invalid, reason} ->
         Logger.warning("[Python.Sidecar] Invalid response: #{reason}")
@@ -246,11 +276,36 @@ defmodule OptimalSystemAgent.Python.Sidecar do
       {{from, timer_ref}, pending} ->
         Process.cancel_timer(timer_ref)
         GenServer.reply(from, result)
-        {:noreply, %{state | pending: pending}}
+        {%{state | pending: pending}, {:noreply, state}}
 
       {nil, _} ->
-        {:noreply, state}
+        {state, {:noreply, state}}
     end
+  end
+
+  defp drain_pending_calls(%{mode: :ready, port: port, pending_calls: calls} = state)
+       when calls != [] do
+    # Reverse to maintain FIFO order
+    calls_to_process = Enum.reverse(calls)
+
+    new_pending =
+      Enum.reduce(calls_to_process, state.pending, fn {from, method, params}, pending_acc ->
+        {id, encoded} = Protocol.encode_request(method, params)
+        Port.command(port, encoded)
+
+        timer_ref = Process.send_after(self(), {:request_timeout, id}, @request_timeout)
+        Map.put(pending_acc, id, {from, timer_ref})
+      end)
+
+    Logger.info(
+      "[Python.Sidecar] Drained #{length(calls_to_process)} pending calls from startup queue"
+    )
+
+    %{state | pending: new_pending, pending_calls: []}
+  end
+
+  defp drain_pending_calls(state) do
+    state
   end
 
   defp fail_all_pending(state, reason) do

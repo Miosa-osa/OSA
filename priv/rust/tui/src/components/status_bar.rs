@@ -90,6 +90,35 @@ impl StatusBar {
             n.to_string()
         }
     }
+
+    /// Push signal mode pill + genre label into a span list.
+    /// Renders as: ` · [ Code ] Spec` — mode in a colored pill, genre beside it.
+    fn push_signal_pill<'a>(&'a self, spans: &mut Vec<Span<'a>>, theme: &style::Theme) {
+        if let Some(ref signal) = self.signal {
+            if !signal.mode.is_empty() {
+                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
+                // Mode pill: " Mode " with colored background
+                spans.push(Span::styled(
+                    format!(" {} ", signal.mode),
+                    theme.signal_pill(),
+                ));
+                // Genre label beside the pill
+                if !signal.genre.is_empty() {
+                    spans.push(Span::styled(
+                        format!(" {}", signal.genre),
+                        theme.signal_genre(),
+                    ));
+                }
+                // Type indicator if present
+                if !signal.signal_type.is_empty() {
+                    spans.push(Span::styled(
+                        format!(" \u{00b7} {}", signal.signal_type),
+                        theme.faint(),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 impl Component for StatusBar {
@@ -101,7 +130,7 @@ impl Component for StatusBar {
         let theme = style::theme();
 
         if self.active {
-            // Active: show model · iteration · tokens · context
+            // Active: show model · signal pill · iteration · tokens · context
             let mut spans: Vec<Span<'_>> = Vec::new();
 
             if !self.provider.is_empty() {
@@ -109,6 +138,9 @@ impl Component for StatusBar {
                 spans.push(Span::styled("/", theme.faint()));
                 spans.push(Span::styled(&self.model_name, theme.header_model()));
             }
+
+            // Signal pill — always visible when classified
+            self.push_signal_pill(&mut spans, &theme);
 
             if self.llm_iteration > 1 {
                 spans.push(Span::styled(" \u{00b7} ", theme.faint()));
@@ -142,7 +174,7 @@ impl Component for StatusBar {
             let line = Line::from(spans);
             frame.render_widget(Paragraph::new(line), area);
         } else {
-            // Idle: provider/model + signal + bg count + context bar
+            // Idle: provider/model + signal pill + bg count + context bar
             let mut spans: Vec<Span<'_>> = Vec::new();
 
             if !self.provider.is_empty() {
@@ -151,15 +183,8 @@ impl Component for StatusBar {
                 spans.push(Span::styled(&self.model_name, theme.header_model()));
             }
 
-            if let Some(ref signal) = self.signal {
-                if !signal.mode.is_empty() {
-                    spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                    spans.push(Span::styled(
-                        format!("{}/{}", signal.mode, signal.genre),
-                        theme.status_signal(),
-                    ));
-                }
-            }
+            // Signal pill — always visible when classified
+            self.push_signal_pill(&mut spans, &theme);
 
             if self.bg_count > 0 {
                 spans.push(Span::styled(" \u{00b7} ", theme.faint()));

@@ -136,8 +136,9 @@ defmodule OptimalSystemAgent.Application do
         # After servers initialise, register their tools in Tools.Registry.
         Task.start(fn ->
           OptimalSystemAgent.MCP.Client.start_servers()
-          # Brief pause to let servers complete their JSON-RPC handshake
-          Process.sleep(2_000)
+          # Block on list_tools() — it's a GenServer.call that queues behind initialize.
+          # No sleep needed; we wait for all servers to complete their JSON-RPC handshake.
+          OptimalSystemAgent.MCP.Client.list_tools()
           OptimalSystemAgent.Tools.Registry.register_mcp_tools()
         end)
 

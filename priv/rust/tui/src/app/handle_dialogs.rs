@@ -276,6 +276,81 @@ impl App {
         false
     }
 
+    pub(crate) fn open_file_picker(&mut self) {
+        let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        self.file_picker = Some(crate::dialogs::file_picker::FilePicker::new(start_dir));
+        // File picker is an overlay — don't transition app state; render as overlay on Idle.
+    }
+
+    pub(super) fn handle_file_picker_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if let Some(ref mut picker) = self.file_picker {
+            if let Some(action) = picker.handle_key(key) {
+                match action {
+                    crate::dialogs::file_picker::FilePickerAction::Select(path) => {
+                        // Insert selected path (with @-prefix stripped) into the input field.
+                        self.input.insert_str(&path);
+                        self.file_picker = None;
+                    }
+                    crate::dialogs::file_picker::FilePickerAction::Cancel => {
+                        self.file_picker = None;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn open_reasoning_selector(&mut self) {
+        use crate::dialogs::reasoning::{ReasoningLevel, ReasoningSelector};
+        self.reasoning_selector = Some(ReasoningSelector::new(ReasoningLevel::Off));
+    }
+
+    pub(super) fn handle_reasoning_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if let Some(ref mut selector) = self.reasoning_selector {
+            if let Some(action) = selector.handle_key(key) {
+                match action {
+                    crate::dialogs::reasoning::ReasoningAction::Select(level) => {
+                        let label = match level {
+                            crate::dialogs::reasoning::ReasoningLevel::Off => "off",
+                            crate::dialogs::reasoning::ReasoningLevel::Low => "low",
+                            crate::dialogs::reasoning::ReasoningLevel::Medium => "medium",
+                            crate::dialogs::reasoning::ReasoningLevel::High => "high",
+                        };
+                        self.reasoning_selector = None;
+                        // Send reasoning toggle to backend via command
+                        self.execute_reasoning_command(label);
+                    }
+                    crate::dialogs::reasoning::ReasoningAction::Cancel => {
+                        self.reasoning_selector = None;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn execute_reasoning_command(&mut self, level: &str) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let req = crate::client::types::CommandExecuteRequest {
+            command: "reasoning".to_string(),
+            arg: level.to_string(),
+            session_id: self.session_id.clone(),
+        };
+        tokio::spawn(async move {
+            let result = client.execute_command(&req).await;
+            let event = match result {
+                Ok(resp) => crate::event::backend::BackendEvent::CommandResult(Ok(resp)),
+                Err(e) => crate::event::backend::BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(event));
+        });
+        self.toasts.push(
+            format!("Reasoning: {}", level),
+            crate::components::toast::ToastLevel::Info,
+        );
+    }
+
     pub(super) fn open_command_palette(&mut self) {
         let items: Vec<PaletteItem> = self
             .command_entries

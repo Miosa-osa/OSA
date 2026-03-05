@@ -56,6 +56,8 @@ defmodule OptimalSystemAgent.Agent.Context do
   Returns `%{messages: [system_msg | conversation_messages]}`.
   """
   @spec build(map()) :: %{messages: [map()]}
+  def build(state, _signal), do: build(state)
+
   def build(state) do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)

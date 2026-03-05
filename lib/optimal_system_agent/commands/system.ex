@@ -1,150 +1,15 @@
 defmodule OptimalSystemAgent.Commands.System do
   @moduledoc """
   System-level commands: reload, doctor, setup, reset, logs, completion, docs,
-  update, create-command, exit, clear, login, logout, export, tasks, config,
-  verbose, think, plan, compact, usage, workflow, prime, security, memory,
-  utility, and their formatting/generation helpers.
+  update, create-command, exit, clear, shell, workflow, prime, security, memory,
+  and their formatting/generation helpers.
+
+  Config commands (verbose, plan, think, config, compact, usage) live in
+  `Commands.Config`. Auth commands (login, logout) live in `Commands.Auth`.
+  Data commands (export, tasks) live in `Commands.Data`.
   """
 
   require Logger
-
-  # ── Config Commands ─────────────────────────────────────────────
-
-  @doc "Handle the `/verbose` command."
-  def cmd_verbose(_arg, session_id) do
-    current = OptimalSystemAgent.Commands.get_setting(session_id, :verbose, false)
-    new_value = !current
-    OptimalSystemAgent.Commands.put_setting(session_id, :verbose, new_value)
-    {:command, "Verbose mode: #{if new_value, do: "on", else: "off"}"}
-  end
-
-  @doc "Handle the `/plan` command."
-  def cmd_plan(_arg, session_id) do
-    case GenServer.call(
-           {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}},
-           :toggle_plan_mode
-         ) do
-      {:ok, true} ->
-        {:command, "Plan mode enabled — complex tasks will show plans for approval"}
-
-      {:ok, false} ->
-        {:command, "Plan mode disabled — all tasks execute immediately"}
-    end
-  rescue
-    _ -> {:command, "Plan mode toggle failed — no active session"}
-  end
-
-  @doc "Handle the `/think` command."
-  def cmd_think(arg, session_id) do
-    level = String.trim(arg) |> String.downcase()
-
-    case level do
-      "" ->
-        current = OptimalSystemAgent.Commands.get_setting(session_id, :think_level, "normal")
-        {:command, "Current reasoning depth: #{current}\n\nUsage: /think fast|normal|deep"}
-
-      l when l in ["fast", "normal", "deep"] ->
-        OptimalSystemAgent.Commands.put_setting(session_id, :think_level, l)
-
-        desc =
-          case l do
-            "fast" -> "quick responses, minimal deliberation"
-            "normal" -> "balanced reasoning and speed"
-            "deep" -> "thorough analysis, extended thinking"
-          end
-
-        {:command, "Reasoning depth: #{l} (#{desc})"}
-
-      _ ->
-        {:command, "Unknown level: #{level}\n\nUsage: /think fast|normal|deep"}
-    end
-  end
-
-  @doc "Handle the `/config` command."
-  def cmd_config(_arg, session_id) do
-    verbose = OptimalSystemAgent.Commands.get_setting(session_id, :verbose, false)
-    think = OptimalSystemAgent.Commands.get_setting(session_id, :think_level, "normal")
-    provider = Application.get_env(:optimal_system_agent, :default_provider, "unknown")
-    max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-    max_iter = Application.get_env(:optimal_system_agent, :max_iterations, 30)
-    http_port = Application.get_env(:optimal_system_agent, :http_port, 8089)
-    sandbox = Application.get_env(:optimal_system_agent, :sandbox_enabled, false)
-
-    output =
-      """
-      Runtime Configuration:
-        session:       #{session_id}
-        verbose:       #{verbose}
-        think level:   #{think}
-        provider:      #{provider}
-        max tokens:    #{format_number(max_tokens)}
-        max iterations: #{max_iter}
-        http port:     #{http_port}
-        sandbox:       #{sandbox}
-      """
-      |> String.trim()
-
-    {:command, output}
-  end
-
-  # ── Context Commands ────────────────────────────────────────────
-
-  @doc "Handle the `/compact` command."
-  def cmd_compact(_arg, _session_id) do
-    stats = OptimalSystemAgent.Agent.Compactor.stats()
-
-    output =
-      """
-      Context Compactor:
-        compactions:     #{stats[:compaction_count] || 0}
-        tokens saved:    #{stats[:tokens_saved] || 0}
-        last compacted:  #{OptimalSystemAgent.Commands.Info.format_timestamp(stats[:last_compacted_at])}
-        pipeline steps:  #{OptimalSystemAgent.Commands.Info.format_pipeline_steps(stats[:pipeline_steps_used])}
-      """
-      |> String.trim()
-
-    {:command, output}
-  end
-
-  @doc "Handle the `/usage` command."
-  def cmd_usage(_arg, session_id) do
-    compactor_stats = OptimalSystemAgent.Agent.Compactor.stats()
-    memory_stats = OptimalSystemAgent.Agent.Memory.memory_stats()
-    max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-
-    context_line =
-      try do
-        case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-          [{pid, _}] ->
-            state = :sys.get_state(pid)
-            estimated = OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
-            util = if max_tokens > 0, do: Float.round(estimated / max_tokens * 100, 1), else: 0.0
-            bar = context_utilization_bar(util)
-            "  context now:   #{bar} #{format_number(estimated)}/#{format_number(max_tokens)} (#{util}%)"
-
-          _ ->
-            nil
-        end
-      rescue
-        _ -> nil
-      end
-
-    lines = [
-      "Token Usage:",
-      "  max context:     #{format_number(max_tokens)} tokens",
-      "  tokens saved:    #{format_number(compactor_stats[:tokens_saved] || 0)} (via compaction)",
-      "  compactions:     #{compactor_stats[:compaction_count] || 0}",
-      "  sessions stored: #{memory_stats[:session_count] || 0}",
-      "  memory on disk:  #{format_bytes(memory_stats[:long_term_size] || 0)}"
-    ]
-
-    lines =
-      if context_line,
-        do: [Enum.at(lines, 0)] ++ [context_line] ++ Enum.drop(lines, 1),
-        else: lines
-
-    {:command, Enum.join(lines, "\n")}
-  end
 
   # ── System Commands ─────────────────────────────────────────────
 
@@ -428,132 +293,6 @@ defmodule OptimalSystemAgent.Commands.System do
     {:action, :clear, ""}
   end
 
-  # ── Auth Commands ───────────────────────────────────────────────
-
-  @doc "Handle the `/login` command."
-  def cmd_login(arg, session_id) do
-    user_id = if arg == "", do: "cli_#{session_id}", else: String.trim(arg)
-    token = OptimalSystemAgent.Channels.HTTP.Auth.generate_token(%{"user_id" => user_id})
-    refresh = OptimalSystemAgent.Channels.HTTP.Auth.generate_refresh_token(%{"user_id" => user_id})
-
-    auth_path = Path.expand("~/.osa/auth.json")
-    File.mkdir_p!(Path.dirname(auth_path))
-    auth_data = Jason.encode!(%{token: token, refresh_token: refresh, user_id: user_id})
-    File.write(auth_path, auth_data)
-
-    {:command,
-     """
-     Authenticated as #{user_id}
-       Token expires in 15 minutes
-       Refresh token valid for 7 days
-       Saved to ~/.osa/auth.json
-
-     TUI users: token is auto-loaded. CLI users: export OSA_TOKEN=#{token}
-     """}
-  end
-
-  @doc "Handle the `/logout` command."
-  def cmd_logout(_arg, _session_id) do
-    auth_path = Path.expand("~/.osa/auth.json")
-    File.rm(auth_path)
-    {:command, "Logged out. Token cleared from ~/.osa/auth.json"}
-  end
-
-  # ── Export Command ──────────────────────────────────────────────
-
-  @doc "Handle the `/export` command."
-  def cmd_export(arg, session_id) do
-    trimmed = String.trim(arg)
-
-    filename =
-      if trimmed == "" do
-        timestamp = Calendar.strftime(DateTime.utc_now(), "%Y%m%d_%H%M%S")
-        "osa_session_#{timestamp}.md"
-      else
-        trimmed
-      end
-
-    try do
-      messages = OptimalSystemAgent.Agent.Memory.load_session(session_id)
-
-      if messages == [] or is_nil(messages) do
-        {:command, "No messages in current session to export."}
-      else
-        content =
-          [
-            "# OSA Session Export",
-            "Session: #{session_id}",
-            "Exported: #{Calendar.strftime(DateTime.utc_now(), "%Y-%m-%d %H:%M:%S UTC")}",
-            "Messages: #{length(messages)}",
-            "",
-            "---",
-            ""
-            | Enum.map(messages, fn msg ->
-                role = msg[:role] || msg["role"] || "unknown"
-                text = msg[:content] || msg["content"] || ""
-                "## #{String.capitalize(to_string(role))}\n\n#{text}\n"
-              end)
-          ]
-          |> Enum.join("\n")
-
-        path = Path.expand(filename)
-        File.write!(path, content)
-
-        {:command, "Session exported to: #{path}\n  Messages: #{length(messages)}"}
-      end
-    rescue
-      e -> {:command, "Export failed: #{Exception.message(e)}"}
-    end
-  end
-
-  # ── Task Tracker ────────────────────────────────────────────────
-
-  @doc "Handle the `/tasks` command."
-  def cmd_tasks(arg, session_id) do
-    alias OptimalSystemAgent.Agent.TaskTracker
-    alias OptimalSystemAgent.Channels.CLI.TaskDisplay
-    trimmed = String.trim(arg)
-
-    cond do
-      trimmed == "" ->
-        tasks = TaskTracker.get_tasks(session_id)
-
-        if tasks == [] do
-          {:command, "No tracked tasks. Use /tasks add \"title\" or let OSA auto-detect."}
-        else
-          {:command, TaskDisplay.render(tasks)}
-        end
-
-      trimmed == "clear" ->
-        TaskTracker.clear_tasks(session_id)
-        {:command, "Tasks cleared."}
-
-      trimmed == "compact" ->
-        tasks = TaskTracker.get_tasks(session_id)
-        if tasks == [], do: {:command, "No tasks."}, else: {:command, TaskDisplay.render_compact(tasks)}
-
-      trimmed == "inline" ->
-        tasks = TaskTracker.get_tasks(session_id)
-        if tasks == [], do: {:command, "No tasks."}, else: {:command, TaskDisplay.render_inline(tasks)}
-
-      String.starts_with?(trimmed, "add ") ->
-        title = trimmed |> String.replace_prefix("add ", "") |> String.trim() |> String.trim("\"")
-
-        if title == "" do
-          {:command, "Usage: /tasks add \"title\""}
-        else
-          {:ok, id} = TaskTracker.add_task(session_id, title)
-          {:command, "Added task #{id}: #{title}"}
-        end
-
-      true ->
-        {:command,
-         "Unknown subcommand: #{trimmed}\n\nUsage:\n  /tasks           — show task panel\n  /tasks add \"t\"   — add a task\n  /tasks clear     — clear all tasks\n  /tasks compact   — single-line view\n  /tasks inline    — Claude Code-style view"}
-    end
-  rescue
-    _ -> {:command, "Task tracker not available."}
-  end
-
   # ── Workflow Expansion Commands ─────────────────────────────────
 
   @doc "Handle workflow commands: /commit, /build, /test, /lint, /verify, /create-pr, /fix, /explain."
@@ -827,47 +566,16 @@ defmodule OptimalSystemAgent.Commands.System do
     end
   end
 
-  # ── Formatting Helpers ──────────────────────────────────────────
+  # ── Formatting Helpers (kept for backward compat, delegate to Config) ──
 
   @doc "Format an integer with thousands separators."
-  def format_number(n) when is_integer(n) do
-    n
-    |> Integer.to_string()
-    |> String.reverse()
-    |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
-    |> String.reverse()
-  end
-
-  def format_number(n), do: "#{n}"
+  defdelegate format_number(n), to: OptimalSystemAgent.Commands.Config
 
   @doc "Format a byte count into a human-readable string."
-  def format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
-    "#{Float.round(bytes / 1_048_576, 1)} MB"
-  end
-
-  def format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
-    "#{Float.round(bytes / 1024, 1)} KB"
-  end
-
-  def format_bytes(bytes) when is_integer(bytes), do: "#{bytes} bytes"
-  def format_bytes(_), do: "0 bytes"
+  defdelegate format_bytes(bytes), to: OptimalSystemAgent.Commands.Config
 
   @doc "Render a coloured utilization bar for context window usage."
-  def context_utilization_bar(util) do
-    filled = round(util / 5) |> min(20) |> max(0)
-    empty = 20 - filled
-
-    cond do
-      util >= 90.0 ->
-        "#{IO.ANSI.red()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
-
-      util >= 70.0 ->
-        "#{IO.ANSI.yellow()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
-
-      true ->
-        "#{IO.ANSI.green()}[#{String.duplicate("█", filled)}#{String.duplicate("░", empty)}]#{IO.ANSI.reset()}"
-    end
-  end
+  defdelegate context_utilization_bar(util), to: OptimalSystemAgent.Commands.Config
 
   # ── Shell Command ────────────────────────────────────────────────
 

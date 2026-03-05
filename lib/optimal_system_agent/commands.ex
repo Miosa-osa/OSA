@@ -236,6 +236,7 @@ defmodule OptimalSystemAgent.Commands do
 
   defp builtin_commands do
     alias OptimalSystemAgent.Commands.{Info, Session, Channels, Agents, SchedulerCmd, System}
+    alias OptimalSystemAgent.Commands.{Config, Auth, Data}
     alias OptimalSystemAgent.Commands.Model
 
     [
@@ -261,17 +262,17 @@ defmodule OptimalSystemAgent.Commands do
       {"whatsapp", "WhatsApp Web shortcut", &Channels.cmd_whatsapp/2},
 
       # ── Context & Performance ──
-      {"compact", "Context compaction stats", &System.cmd_compact/2},
-      {"usage", "Token usage breakdown", &System.cmd_usage/2},
+      {"compact", "Context compaction stats", &Config.cmd_compact/2},
+      {"usage", "Token usage breakdown", &Config.cmd_usage/2},
 
       # ── Intelligence ──
       {"cortex", "Cortex bulletin & topics", &Info.cmd_cortex/2},
 
       # ── Configuration ──
-      {"verbose", "Toggle verbose output", &System.cmd_verbose/2},
-      {"think", "Set reasoning depth", &System.cmd_think/2},
-      {"plan", "Toggle autonomous plan mode", &System.cmd_plan/2},
-      {"config", "Show runtime configuration", &System.cmd_config/2},
+      {"verbose", "Toggle verbose output", &Config.cmd_verbose/2},
+      {"think", "Set reasoning depth", &Config.cmd_think/2},
+      {"plan", "Toggle autonomous plan mode", &Config.cmd_plan/2},
+      {"config", "Show runtime configuration", &Config.cmd_config/2},
 
       # ── Agents ──
       {"agents", "List all agents in the roster", &Agents.cmd_agents/2},
@@ -285,7 +286,7 @@ defmodule OptimalSystemAgent.Commands do
       # ── Budget / thinking / machines ──
       {"budget", "Token and cost budget status", &Agents.cmd_budget/2},
       {"thinking", "Toggle extended thinking mode", &Agents.cmd_thinking/2},
-      {"export", "Export session to file", &System.cmd_export/2},
+      {"export", "Export session to file", &Data.cmd_export/2},
       {"machines", "List connected machines", &Agents.cmd_machines/2},
       {"providers", "List available LLM providers", &Model.cmd_providers/2},
 
@@ -338,7 +339,7 @@ defmodule OptimalSystemAgent.Commands do
       {"heartbeat", "Heartbeat tasks", &SchedulerCmd.cmd_heartbeat/2},
 
       # ── Task Tracker ──
-      {"tasks", "Show/manage tracked tasks", &System.cmd_tasks/2},
+      {"tasks", "Show/manage tracked tasks", &Data.cmd_tasks/2},
 
       # ── Analytics ──
       {"analytics", "Usage analytics and metrics", &System.cmd_utility/2},
@@ -351,8 +352,8 @@ defmodule OptimalSystemAgent.Commands do
       {"init", "Initialize project", &System.cmd_utility/2},
 
       # ── Auth ──
-      {"login", "Authenticate with the backend", &System.cmd_login/2},
-      {"logout", "End session and clear token", &System.cmd_logout/2},
+      {"login", "Authenticate with the backend", &Auth.cmd_login/2},
+      {"logout", "End session and clear token", &Auth.cmd_logout/2},
 
       # ── System Management ──
       {"reset", "Reset local config/state", &System.cmd_reset/2},

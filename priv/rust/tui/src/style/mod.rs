@@ -136,6 +136,21 @@ impl Theme {
         Style::default().fg(self.colors.secondary)
     }
 
+    /// Signal mode pill — colored background badge for Signal Theory display.
+    pub fn signal_pill(&self) -> Style {
+        Style::default()
+            .fg(Color::Black)
+            .bg(self.colors.secondary)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Signal genre label — lighter complement to the pill.
+    pub fn signal_genre(&self) -> Style {
+        Style::default()
+            .fg(self.colors.secondary)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn context_bar(&self) -> Style {
         Style::default().fg(self.colors.primary)
     }

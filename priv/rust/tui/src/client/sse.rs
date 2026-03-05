@@ -426,7 +426,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_completed"
         | "hook_blocked"
         | "budget_warning"
-        | "budget_exceeded" => parse_system_event(data),
+        | "budget_exceeded"
+        | "permission_required"
+        | "plan_proposed" => parse_system_event(data),
 
         "" => None,
 
@@ -907,6 +909,45 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             };
             Some(BackendEvent::BudgetExceeded {
                 message: ev.message,
+            })
+        }
+
+        "permission_required" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                tool: String,
+                #[serde(default)]
+                args: String,
+                #[serde(default)]
+                request_id: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("permission_required", e)),
+            };
+            Some(BackendEvent::PermissionRequired {
+                tool: ev.tool,
+                args: ev.args,
+                request_id: ev.request_id,
+            })
+        }
+
+        "plan_proposed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                plan: String,
+                #[serde(default)]
+                request_id: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("plan_proposed", e)),
+            };
+            Some(BackendEvent::PlanProposed {
+                plan: ev.plan,
+                request_id: ev.request_id,
             })
         }
 

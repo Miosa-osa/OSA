@@ -444,7 +444,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # Extract <function name="..." parameters={...}></function> tags with proper
   # balanced-brace JSON parsing (fixes non-greedy regex failure on nested JSON).
-  @xml_fn_pattern ~r/<function\s+name="([^"]+)"\s+parameters=/
+  @xml_fn_pattern ~r/<function\s+name="([^"\s{(]*).*?parameters=/s
 
   defp extract_xml_function_calls(content) do
     @xml_fn_pattern

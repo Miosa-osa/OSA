@@ -48,33 +48,40 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @compat Providers.OpenAICompatProvider
 
   # Canonical provider registry — maps atom → module | {:compat, atom}
-  @providers %{
-    # Local
-    ollama: Providers.Ollama,
+  @providers Map.merge(
+    %{
+      # Local
+      ollama: Providers.Ollama,
 
-    # OpenAI-compatible (consolidated through OpenAICompatProvider)
-    openai: {:compat, :openai},
-    groq: {:compat, :groq},
-    together: {:compat, :together},
-    fireworks: {:compat, :fireworks},
-    deepseek: {:compat, :deepseek},
-    perplexity: {:compat, :perplexity},
-    mistral: {:compat, :mistral},
-    openrouter: {:compat, :openrouter},
+      # OpenAI-compatible (consolidated through OpenAICompatProvider)
+      openai: {:compat, :openai},
+      groq: {:compat, :groq},
+      together: {:compat, :together},
+      fireworks: {:compat, :fireworks},
+      deepseek: {:compat, :deepseek},
+      perplexity: {:compat, :perplexity},
+      mistral: {:compat, :mistral},
+      openrouter: {:compat, :openrouter},
 
-    # Native API providers (custom protocol, not OpenAI-compatible)
-    anthropic: Providers.Anthropic,
-    google: Providers.Google,
-    cohere: Providers.Cohere,
-    replicate: Providers.Replicate,
+      # Native API providers (custom protocol, not OpenAI-compatible)
+      anthropic: Providers.Anthropic,
+      google: Providers.Google,
+      cohere: Providers.Cohere,
+      replicate: Providers.Replicate,
 
-    # Chinese providers (OpenAI-compatible, consolidated)
-    qwen: {:compat, :qwen},
-    moonshot: {:compat, :moonshot},
-    zhipu: {:compat, :zhipu},
-    volcengine: {:compat, :volcengine},
-    baichuan: {:compat, :baichuan}
-  }
+      # Chinese providers (OpenAI-compatible, consolidated)
+      qwen: {:compat, :qwen},
+      moonshot: {:compat, :moonshot},
+      zhipu: {:compat, :zhipu},
+      volcengine: {:compat, :volcengine},
+      baichuan: {:compat, :baichuan}
+    },
+    if Mix.env() == :test do
+      %{mock: OptimalSystemAgent.Test.MockProvider}
+    else
+      %{}
+    end
+  )
 
   # --- Public API ---
 
