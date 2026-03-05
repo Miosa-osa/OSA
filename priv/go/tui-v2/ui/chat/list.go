@@ -544,6 +544,8 @@ func New(width, height int) Model {
 // SetSize resizes the viewport and re-renders all content.
 // Item render caches are width-keyed, so they are automatically invalidated.
 func (m *Model) SetSize(w, h int) {
+	wasAtBottom := m.vp.AtBottom() || m.contentLines == 0
+	prevOffset := m.vp.YOffset()
 	m.width = w
 	m.height = h
 	vp := viewport.New(
@@ -552,7 +554,12 @@ func (m *Model) SetSize(w, h int) {
 	)
 	vp.SetContent("")
 	m.vp = vp
-	m.refresh()
+	if wasAtBottom {
+		m.refreshAtBottom()
+	} else {
+		m.refresh()
+		m.vp.SetYOffset(prevOffset)
+	}
 }
 
 // SetFocused sets the focused state on the chat list. When focused, the
@@ -568,7 +575,7 @@ func (m *Model) SetFocused(focused bool) {
 // AddUserMessage appends a user message and scrolls to bottom.
 func (m *Model) AddUserMessage(text string) {
 	m.items = append(m.items, newUserItem(m.genID(), text))
-	m.refresh()
+	m.refreshAtBottom()
 }
 
 // AddAgentMessage appends an agent message with optional Signal metadata.
@@ -581,7 +588,7 @@ func (m *Model) AddAgentMessage(text string, sig *Signal, durationMs int64, mode
 		m.pendingToolCalls = m.pendingToolCalls[:0]
 	}
 	m.items = append(m.items, item)
-	m.refresh()
+	m.refresh() // smart: don't interrupt if user scrolled up to read
 }
 
 // TrackToolStart records the start of a tool invocation during processing.
@@ -651,7 +658,7 @@ func (m *Model) SetWelcomeData(version, detail, cwd string) {
 	m.welcomeDetail = detail
 	m.welcomeCwd = cwd
 	if len(m.items) == 0 {
-		m.refresh()
+		m.refreshAtBottom()
 	}
 }
 
@@ -684,6 +691,65 @@ func (m *Model) SetThinkingContent(text string) {
 func (m *Model) ToggleThinkingExpanded() {
 	m.thinkingBox.Toggle()
 	m.refresh()
+}
+
+// ThinkingHasContent reports whether the ThinkingBox has any content.
+func (m Model) ThinkingHasContent() bool {
+	return m.thinkingBox.HasContent()
+}
+
+// ThinkingIsExpanded reports whether the ThinkingBox is currently expanded.
+func (m Model) ThinkingIsExpanded() bool {
+	return m.thinkingBox.IsExpanded()
+}
+
+// SetThinkingExpanded sets the ThinkingBox expanded state directly.
+func (m *Model) SetThinkingExpanded(v bool) {
+	m.thinkingBox.expanded = v
+	m.refresh()
+}
+
+// ExpandAllTools sets all tool calls in the last agent message to expanded.
+func (m *Model) ExpandAllTools() {
+	for i := len(m.items) - 1; i >= 0; i-- {
+		if a, ok := m.items[i].(*assistantMessageItem); ok && !a.shouldSkip() {
+			for j := range a.toolCalls {
+				a.toolCalls[j].Expanded = true
+			}
+			a.cache = renderCache{} // invalidate cache
+			break
+		}
+	}
+	m.refresh()
+}
+
+// CollapseAllTools sets all tool calls in the last agent message to collapsed.
+func (m *Model) CollapseAllTools() {
+	for i := len(m.items) - 1; i >= 0; i-- {
+		if a, ok := m.items[i].(*assistantMessageItem); ok && !a.shouldSkip() {
+			for j := range a.toolCalls {
+				a.toolCalls[j].Expanded = false
+			}
+			a.cache = renderCache{} // invalidate cache
+			break
+		}
+	}
+	m.refresh()
+}
+
+// HasExpandedTools reports whether any tool call in the last agent message is expanded.
+func (m Model) HasExpandedTools() bool {
+	for i := len(m.items) - 1; i >= 0; i-- {
+		if a, ok := m.items[i].(*assistantMessageItem); ok && !a.shouldSkip() {
+			for _, tc := range a.toolCalls {
+				if tc.Expanded {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
 }
 
 // HasMessages reports whether any conversation items have been added.
@@ -721,6 +787,53 @@ func (m Model) CopyLastMessage() string {
 		}
 	}
 	return ""
+}
+
+// SearchItems returns the indices of items whose content contains query (case-insensitive).
+func (m Model) SearchItems(query string) []int {
+	if query == "" {
+		return nil
+	}
+	q := strings.ToLower(query)
+	var matches []int
+	for i, item := range m.items {
+		var text string
+		switch v := item.(type) {
+		case *userMessageItem:
+			text = v.content
+		case *assistantMessageItem:
+			text = v.content
+		case *systemMessageItem:
+			text = v.content
+		}
+		if strings.Contains(strings.ToLower(text), q) {
+			matches = append(matches, i)
+		}
+	}
+	return matches
+}
+
+// ScrollToItemIndex scrolls the viewport to show the item at index idx.
+// It computes cumulative height of all preceding items.
+func (m *Model) ScrollToItemIndex(idx int) {
+	cw := m.contentWidth()
+	offset := 0
+	rendered := 0
+	for i, item := range m.items {
+		if i >= idx {
+			break
+		}
+		if a, ok := item.(*assistantMessageItem); ok && a.shouldSkip() {
+			continue
+		}
+		lines := strings.Count(item.Render(cw), "\n") + 1
+		if rendered > 0 {
+			offset += 2 // blank lines between messages
+		}
+		offset += lines
+		rendered++
+	}
+	m.vp.SetYOffset(offset)
 }
 
 // ---------------------------------------------------------------------------
@@ -788,8 +901,19 @@ func (m *Model) contentWidth() int {
 	return cw
 }
 
-// refresh re-renders all content into the viewport and scrolls to bottom.
+// refresh re-renders content. Only scrolls to bottom if already there.
 func (m *Model) refresh() {
+	wasAtBottom := m.vp.AtBottom() || m.contentLines == 0
+	content := m.renderAll()
+	m.contentLines = strings.Count(content, "\n") + 1
+	m.vp.SetContent(content)
+	if wasAtBottom {
+		_ = m.vp.GotoBottom()
+	}
+}
+
+// refreshAtBottom always scrolls to bottom after re-rendering.
+func (m *Model) refreshAtBottom() {
 	content := m.renderAll()
 	m.contentLines = strings.Count(content, "\n") + 1
 	m.vp.SetContent(content)

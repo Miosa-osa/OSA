@@ -112,6 +112,12 @@ type Model struct {
 	forceOnboarding       bool   // true when /setup forces wizard regardless of config
 	config                config.Config
 	refreshToken          string
+
+	// In-chat search (Ctrl+F)
+	searchMode    bool
+	searchQuery   string
+	searchMatches []int
+	searchCursor  int
 }
 
 // New constructs the root Model.  It applies the persisted theme and

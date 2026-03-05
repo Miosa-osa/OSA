@@ -6,16 +6,30 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/miosa/osa-tui/msg"
 	"github.com/miosa/osa-tui/ui/clipboard"
 	"github.com/miosa/osa-tui/ui/dialog"
 	"github.com/miosa/osa-tui/ui/toast"
-	"github.com/miosa/osa-tui/msg"
 )
 
 // -- Key handling -------------------------------------------------------------
 // -- Key handling -------------------------------------------------------------
 
+// updateSearch re-runs the search against current chat items and jumps to the first match.
+func (m *Model) updateSearch() {
+	m.searchMatches = m.chat.SearchItems(m.searchQuery)
+	m.searchCursor = 0
+	if len(m.searchMatches) > 0 {
+		m.chat.ScrollToItemIndex(m.searchMatches[0])
+	}
+}
+
 func (m Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Search mode intercepts all keys before the state switch.
+	if m.searchMode {
+		return m.handleSearchKey(k)
+	}
+
 	switch m.state {
 	case StateIdle:
 		return m.handleIdleKey(k)
@@ -43,6 +57,58 @@ func (m Model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.state = StateIdle
 		return m, m.input.Focus()
 	}
+	return m, nil
+}
+
+// handleSearchKey handles all key events when search mode is active.
+func (m Model) handleSearchKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches[tea.KeyPressMsg](k, m.keys.Search),
+		key.Matches[tea.KeyPressMsg](k, m.keys.Escape):
+		// Close search
+		m.searchMode = false
+		m.searchQuery = ""
+		m.searchMatches = nil
+		m.searchCursor = 0
+		return m, nil
+
+	case key.Matches[tea.KeyPressMsg](k, m.keys.Submit):
+		// Close search on Enter — clear all search state
+		m.searchMode = false
+		m.searchQuery = ""
+		m.searchMatches = nil
+		m.searchCursor = 0
+		return m, nil
+
+	case k.Code == tea.KeyBackspace:
+		if len(m.searchQuery) > 0 {
+			// Remove last rune (handle multi-byte)
+			runes := []rune(m.searchQuery)
+			m.searchQuery = string(runes[:len(runes)-1])
+			m.updateSearch()
+		}
+		return m, nil
+	}
+
+	// n / N — navigate matches only when there are results; otherwise fall
+	// through so the character is appended to the search query normally.
+	if k.Text == "n" && len(m.searchMatches) > 0 {
+		m.searchCursor = (m.searchCursor + 1) % len(m.searchMatches)
+		m.chat.ScrollToItemIndex(m.searchMatches[m.searchCursor])
+		return m, nil
+	}
+	if k.Text == "N" && len(m.searchMatches) > 0 {
+		m.searchCursor = (m.searchCursor - 1 + len(m.searchMatches)) % len(m.searchMatches)
+		m.chat.ScrollToItemIndex(m.searchMatches[m.searchCursor])
+		return m, nil
+	}
+
+	// Printable character — append to query
+	if k.Text != "" && !strings.ContainsRune(k.Text, '\x00') {
+		m.searchQuery += k.Text
+		m.updateSearch()
+	}
+
 	return m, nil
 }
 
@@ -115,6 +181,13 @@ func (m Model) handleIdleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		updated, cmd := m.openPalette()
 		return updated, cmd
 
+	case key.Matches[tea.KeyPressMsg](k, m.keys.Search):
+		m.searchMode = true
+		m.searchQuery = ""
+		m.searchMatches = nil
+		m.searchCursor = 0
+		return m, nil
+
 	case key.Matches[tea.KeyPressMsg](k, m.keys.PageUp),
 		key.Matches[tea.KeyPressMsg](k, m.keys.PageDown):
 		var cmd tea.Cmd
@@ -170,6 +243,19 @@ func (m Model) handleProcessingKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches[tea.KeyPressMsg](k, m.keys.ToggleExpand):
 		m.activity.SetExpanded(!m.activity.IsExpanded())
+		// Cycle through chat expand states:
+		// 1. If thinking has content and is not expanded → expand thinking, collapse tools
+		// 2. Else if tools are not all expanded → expand all tools
+		// 3. Else → collapse everything (thinking + tools)
+		if m.chat.ThinkingHasContent() && !m.chat.ThinkingIsExpanded() {
+			m.chat.SetThinkingExpanded(true)
+			m.chat.CollapseAllTools()
+		} else if !m.chat.HasExpandedTools() {
+			m.chat.ExpandAllTools()
+		} else {
+			m.chat.SetThinkingExpanded(false)
+			m.chat.CollapseAllTools()
+		}
 		return m, nil
 
 	case key.Matches[tea.KeyPressMsg](k, m.keys.ToggleThinking):
@@ -259,7 +345,6 @@ func (m Model) openPalette() (Model, tea.Cmd) {
 	return m, openCmd
 }
 
-
 // -- New dialog key handlers (Wave 4) -----------------------------------------
 
 func (m Model) handlePermissionsKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -294,4 +379,3 @@ func (m Model) handleModelsKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.models, cmd = m.models.Update(k)
 	return m, cmd
 }
-

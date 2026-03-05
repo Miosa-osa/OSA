@@ -12,6 +12,32 @@ import (
 	"github.com/miosa/osa-tui/ui/logo"
 )
 
+// renderSearchBar returns the search bar string when search mode is active,
+// or an empty string otherwise.
+func (m Model) renderSearchBar() string {
+	if !m.searchMode {
+		return ""
+	}
+	count := len(m.searchMatches)
+	var statusStr string
+	if m.searchQuery == "" {
+		statusStr = style.Faint.Render("type to search")
+	} else if count == 0 {
+		statusStr = style.Faint.Render("no matches")
+	} else {
+		statusStr = style.Faint.Render(fmt.Sprintf("%d/%d  n next · N prev", m.searchCursor+1, count))
+	}
+	cursor := lipgloss.NewStyle().Foreground(style.Primary).Render("█")
+	label := lipgloss.NewStyle().Foreground(style.Secondary).Render("/ ") + m.searchQuery + cursor
+	hint := style.Faint.Render("  Esc close")
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderTop(true).
+		BorderForeground(style.Border).
+		Padding(0, 1).
+		Render(label + "  " + statusStr + hint)
+}
+
 // scrollHint returns a one-line indicator when the chat is not at the bottom.
 // Returns an empty string when the user is already at the latest message.
 func (m Model) scrollHint() string {
@@ -100,6 +126,11 @@ func (m Model) renderView() string {
 		// Scroll hint (visible only when scrolled up, hidden at bottom)
 		if hint := m.scrollHint(); hint != "" {
 			sections = append(sections, hint)
+		}
+
+		// Search bar (visible when Ctrl+F is active)
+		if bar := m.renderSearchBar(); bar != "" {
+			sections = append(sections, bar)
 		}
 
 		// Status bar

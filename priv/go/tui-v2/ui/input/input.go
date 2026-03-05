@@ -200,14 +200,29 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		k := msg.Code
 		switch {
-		// History navigation — only in single-line mode and no completions.
-		case k == tea.KeyUp && !m.multiline && !m.completions.IsVisible():
-			m = m.navigateHistory(-1)
-			return m, nil
+		// History navigation — on Up, navigate history when on the first line;
+		// otherwise pass the key through to the textarea for cursor movement.
+		case k == tea.KeyUp && !m.completions.IsVisible():
+			if !m.multiline || m.ta.Line() == 0 {
+				m = m.navigateHistory(-1)
+				return m, nil
+			}
+			// Multi-line and cursor is not on first line: let textarea move up.
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			return m, cmd
 
-		case k == tea.KeyDown && !m.multiline && !m.completions.IsVisible():
-			m = m.navigateHistory(+1)
-			return m, nil
+		// On Down, navigate history when on the last line;
+		// otherwise pass the key through to the textarea for cursor movement.
+		case k == tea.KeyDown && !m.completions.IsVisible():
+			if !m.multiline || m.ta.Line() == m.ta.LineCount()-1 {
+				m = m.navigateHistory(+1)
+				return m, nil
+			}
+			// Multi-line and cursor is not on last line: let textarea move down.
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			return m, cmd
 
 		// Tab-cycle completion (only when completions popup is not visible;
 		// when visible, Tab is handled by the popup via HandlesKey above).

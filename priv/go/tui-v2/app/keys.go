@@ -37,6 +37,9 @@ type KeyMap struct {
 
 	// Copy
 	CopyMessage key.Binding
+
+	// Search
+	Search key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -129,6 +132,10 @@ func DefaultKeyMap() KeyMap {
 		CopyMessage: key.NewBinding(
 			key.WithKeys("y", "c"),
 			key.WithHelp("y/c", "copy message"),
+		),
+		Search: key.NewBinding(
+			key.WithKeys("ctrl+f"),
+			key.WithHelp("ctrl+f", "search chat"),
 		),
 	}
 }

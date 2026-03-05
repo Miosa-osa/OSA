@@ -112,7 +112,7 @@ func (m *Model) setFilter(filter string) {
 		copy(m.filtered, m.items)
 	} else {
 		q := strings.ToLower(filter)
-		m.filtered = m.filtered[:0]
+		m.filtered = nil // reset; append on nil is safe in Go
 		for _, item := range m.items {
 			if strings.Contains(strings.ToLower(item.Name), q) ||
 				strings.Contains(strings.ToLower(item.Description), q) {
@@ -243,6 +243,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// categoryNames maps Category field values to human-readable display labels.
+var categoryNames = map[string]string{
+	"command":  "commands",
+	"file":     "files",
+	"resource": "resources",
+	"session":  "sessions",
+	"config":   "config",
+}
+
 // View renders the completions popup. The list grows upward from the input:
 // items are rendered in normal top-to-bottom order and placed above the input
 // separator by the parent layout. Returns an empty string when not visible.
@@ -279,10 +288,24 @@ func (m Model) View() string {
 	boxWidth := m.optimalWidth()
 
 	// Render each row, using the cache where possible.
+	// Category separators are inserted between groups as visual dividers;
+	// they are not selectable and do not affect the cursor index.
 	var rows []string
+	lastCat := ""
 	for i, item := range window {
 		actualIdx := start + i
 		selected := actualIdx == m.cursor
+
+		// Insert a category separator when the category changes.
+		if item.Category != lastCat && item.Category != "" {
+			catLabel := categoryNames[item.Category]
+			if catLabel == "" {
+				catLabel = item.Category
+			}
+			sep := style.Faint.Render("  ── " + catLabel + " ──")
+			rows = append(rows, sep)
+			lastCat = item.Category
+		}
 
 		// Cache key encodes selection state; selected rows are never cached
 		// because they change on every cursor move.

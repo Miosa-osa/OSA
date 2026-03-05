@@ -10,6 +10,7 @@ import (
 	"github.com/miosa/osa-tui/msg"
 	"github.com/miosa/osa-tui/ui/chat"
 	"github.com/miosa/osa-tui/ui/status"
+	"github.com/miosa/osa-tui/ui/toast"
 )
 
 // -- SSE management ----------------------------------------------------------
@@ -29,7 +30,6 @@ func (m *Model) closeSSE() {
 	}
 	m.sseReconnecting = false
 }
-
 
 // -- Orchestration ------------------------------------------------------------
 
@@ -93,9 +93,14 @@ func (m Model) handleClientAgentResponse(r client.AgentResponseEvent) (Model, te
 	if sig != nil {
 		m.status.SetSignal(&status.Signal{Mode: sig.Mode, Genre: sig.Genre, Type: sig.Type})
 	}
+	// If the user scrolled up to read older messages, notify them that a new
+	// response arrived without yanking them back to the bottom.
+	if !m.chat.AtBottom() {
+		m.toasts.Add("↓ Nova resposta — End para ir", toast.ToastInfo)
+		return m, tea.Batch(focusCmd, m.tickCmd())
+	}
 	return m, focusCmd
 }
-
 
 // -- Orchestrate commands ----------------------------------------------------
 
@@ -122,7 +127,6 @@ func (m Model) orchestrateWithOpts(inputText string, skipPlan bool) tea.Cmd {
 	}
 }
 
-
 // -- Signal conversion helpers ------------------------------------------------
 
 // clientSignalToChat converts a *client.Signal (from SSE) to a *chat.Signal.
@@ -139,4 +143,3 @@ func clientSignalToChat(s *client.Signal) *chat.Signal {
 		Channel: s.Channel,
 	}
 }
-
