@@ -186,6 +186,19 @@ pub enum BackendEvent {
     MachinesLoaded(Result<Vec<MachineInfo>, String>),
     OnboardingComplete(Result<OnboardingSetupResponse, String>),
 
+    // === Dialogs ===
+    /// Backend requesting tool permission approval from the user.
+    PermissionRequired {
+        tool: String,
+        args: String,
+        request_id: String,
+    },
+    /// Backend proposing a plan for the user to review before execution.
+    PlanProposed {
+        plan: String,
+        request_id: String,
+    },
+
     // === Cancel ===
     /// Fired 3s after cancel request if the SSE stream hasn't delivered a response.
     /// Forces the UI back to Idle to prevent getting stuck.

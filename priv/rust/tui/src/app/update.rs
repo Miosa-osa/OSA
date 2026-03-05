@@ -60,6 +60,15 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // File picker and reasoning selector are overlays that take priority
+        // regardless of the current app state.
+        if self.file_picker.is_some() {
+            return self.handle_file_picker_key(key);
+        }
+        if self.reasoning_selector.is_some() {
+            return self.handle_reasoning_key(key);
+        }
+
         match self.state {
             AppState::Quit => self.handle_quit_dialog_key(key),
             AppState::Palette => self.handle_palette_key(key),
@@ -150,6 +159,11 @@ impl App {
             }
             (KeyCode::Char('y'), KeyModifiers::NONE) if input_empty => {
                 self.copy_last_message();
+                false
+            }
+            // @ key: open file picker to insert a file path into input
+            (KeyCode::Char('@'), KeyModifiers::NONE) => {
+                self.open_file_picker();
                 false
             }
             _ => {

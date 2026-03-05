@@ -554,16 +554,16 @@ impl App {
     }
 
     pub(crate) fn create_session(&mut self) {
-        // create_session is a todo! stub in http.rs, so just reset locally
-        self.session_id = super::generate_session_id();
-        self.chat.clear();
-        self.tasks.clear();
-        self.stream_buf.clear();
-        self.thinking_buf.clear();
-        self.toasts.push(
-            "New session created".into(),
-            crate::components::toast::ToastLevel::Info,
-        );
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = client.create_session().await;
+            let event = match result {
+                Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
+                Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
     }
 
     pub(super) fn copy_last_message(&mut self) {

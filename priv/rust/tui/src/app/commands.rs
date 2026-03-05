@@ -207,6 +207,15 @@ impl App {
                     crate::components::toast::ToastLevel::Info,
                 );
             }
+            "/reasoning" => {
+                if arg.is_empty() {
+                    // Open the reasoning level selector dialog
+                    self.open_reasoning_selector();
+                } else {
+                    // Accept direct level: /reasoning off|low|medium|high
+                    self.execute_reasoning_command(arg);
+                }
+            }
             _ => {
                 // Unknown slash command -> send to backend
                 let cmd_name = &cmd[1..]; // strip leading /

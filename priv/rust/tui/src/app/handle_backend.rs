@@ -703,6 +703,24 @@ impl App {
                     );
                 }
             },
+            BackendEvent::PermissionRequired { tool, args, request_id: _ } => {
+                // Show the permission dialog — transition from Processing (or Idle) to Permissions.
+                let mut dialog = crate::dialogs::permissions::Permissions::new();
+                dialog.set_tool(tool, args, String::new());
+                self.permissions = Some(dialog);
+                if self.state.can_transition_to(AppState::Permissions) {
+                    self.transition(AppState::Permissions);
+                }
+            }
+            BackendEvent::PlanProposed { plan, request_id: _ } => {
+                // Show the plan review dialog — backend paused for user approval.
+                let mut review = crate::dialogs::plan_review::PlanReview::new();
+                review.set_plan(plan);
+                self.plan_review = Some(review);
+                if self.state.can_transition_to(AppState::PlanReview) {
+                    self.transition(AppState::PlanReview);
+                }
+            }
             BackendEvent::CancelTimeout => {
                 // Safety net: if the backend cancel response never came via SSE,
                 // force the UI back to idle so the user isn't stuck.

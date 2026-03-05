@@ -59,6 +59,29 @@ Hard-won debugging insights and fixes. Search here before debugging anything.
 
 ---
 
+## SSE-001: Silent Event Drop — Unwrapped System Events (Mar 2026)
+
+**Symptom**: All orchestrator/swarm/task/context SSE events silently became `ParseWarning` with "unknown event type". Tree-view never rendered. No crash, no error — just silent data loss.
+
+**Root cause**: Backend `agent_routes.ex:82` unwraps `system_event` sub-events before emitting SSE frames. The SSE frame header arrives as e.g. `event: orchestrator_agent_started`, NOT `event: system_event`. The Rust `parse_sse_event()` only matched `"system_event"` at the top level, routing to `parse_system_event()`. All 24+ unwrapped event names hit the `other` fallback arm → `ParseWarning`.
+
+**Fix**: Added all unwrapped event names as direct routing arms in `parse_sse_event()`:
+```rust
+"orchestrator_task_started"
+| "orchestrator_agents_spawning"
+| "orchestrator_agent_started"
+// ... 20+ more ...
+| "budget_exceeded"
+| "permission_required"
+| "plan_proposed" => parse_system_event(data),
+```
+
+**Files**: `priv/rust/tui/src/client/sse.rs`, `lib/optimal_system_agent/channels/http/api/agent_routes.ex`
+
+**Lesson**: When backend transforms event envelopes before sending to SSE, the TUI parser must match the UNWRAPPED event names, not the envelope type. Always verify what the SSE frame header actually contains by checking the backend emit/broadcast code, not by guessing.
+
+---
+
 ## Template for New Entries
 
 ```
