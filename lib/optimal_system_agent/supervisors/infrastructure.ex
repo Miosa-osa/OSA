@@ -36,6 +36,9 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # Persistent storage
       OptimalSystemAgent.Store.Repo,
 
+      # SSE event stream for Command Center — must start after PubSub
+      OptimalSystemAgent.EventStream,
+
       # Telemetry — subscribes to Events.Bus; must start after Bus + TaskSupervisor
       OptimalSystemAgent.Telemetry.Metrics,
 
