@@ -417,7 +417,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       {:respond, genre_response} ->
         Memory.append(state.session_id, %{role: "assistant", content: genre_response, channel: state.channel})
         state = %{state | status: :idle}
-        Bus.emit(:agent_response, %{session_id: state.session_id, response: genre_response})
+        Bus.emit(:agent_response, %{session_id: state.session_id, response: genre_response, agent: state.session_id})
         {:reply, {:ok, genre_response}, state}
 
       :execute_tools ->

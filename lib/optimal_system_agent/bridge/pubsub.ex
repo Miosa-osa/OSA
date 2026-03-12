@@ -65,6 +65,10 @@ defmodule OptimalSystemAgent.Bridge.PubSub do
   defp broadcast_event(event) do
     pubsub = OptimalSystemAgent.PubSub
 
+    # Tier 0: Command Center SSE — feed EventStream so /events SSE clients receive live events
+    event_type = Map.get(event, :type, :unknown) |> to_string()
+    OptimalSystemAgent.EventStream.broadcast(event_type, event)
+
     # Tier 1: Firehose — all events
     Phoenix.PubSub.broadcast(pubsub, "osa:events", {:osa_event, event})
 
