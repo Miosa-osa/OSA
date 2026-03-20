@@ -26,6 +26,9 @@ native/osa_nif/target/
 __pycache__/
 *.pyc
 
+# Node modules
+node_modules/
+
 # macOS/iCloud duplicate artifacts
 *" 2"*
 *" 3"*
