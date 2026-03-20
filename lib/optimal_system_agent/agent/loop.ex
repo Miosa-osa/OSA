@@ -838,9 +838,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
         # (if the LLM needed sequential execution, it would return them
         # across separate iterations)
         results =
-          tool_calls
+          OptimalSystemAgent.TaskSupervisor
           |> Task.Supervisor.async_stream_nolink(
-            OptimalSystemAgent.TaskSupervisor,
+            tool_calls,
             fn tool_call -> ToolExecutor.execute_tool_call(tool_call, state) end,
             max_concurrency: 10,
             timeout: 60_000,
