@@ -26,9 +26,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     Logger.info("[Swarm.Patterns] parallel — #{length(configs)} agents")
 
     results =
-      configs
+      OptimalSystemAgent.TaskSupervisor
       |> Task.Supervisor.async_stream_nolink(
-        OptimalSystemAgent.TaskSupervisor,
+        configs,
         fn config -> Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id)) end,
         max_concurrency: length(configs),
         timeout: 600_000,
@@ -96,9 +96,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
       # Run proposers in parallel
       proposer_results =
-        proposers
+        OptimalSystemAgent.TaskSupervisor
         |> Task.Supervisor.async_stream_nolink(
-          OptimalSystemAgent.TaskSupervisor,
+          proposers,
           fn config -> Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id)) end,
           max_concurrency: length(proposers),
           timeout: 600_000,

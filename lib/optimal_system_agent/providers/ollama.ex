@@ -528,12 +528,26 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp parse_tool_calls(%{"tool_calls" => calls}, _model) when is_list(calls) do
-    Enum.map(calls, fn call ->
-      %{
-        id: call["id"] || generate_id(),
-        name: normalize_tool_name(call["function"]["name"]),
-        arguments: call["function"]["arguments"] || %{}
-      }
+    Enum.flat_map(calls, fn call ->
+      case call do
+        %{"function" => %{"name" => name} = func} ->
+          [%{
+            id: call["id"] || generate_id(),
+            name: normalize_tool_name(name),
+            arguments: Map.get(func, "arguments", %{})
+          }]
+
+        %{"name" => name} ->
+          [%{
+            id: call["id"] || generate_id(),
+            name: normalize_tool_name(name),
+            arguments: call["arguments"] || %{}
+          }]
+
+        _ ->
+          Logger.warning("[Ollama] Skipping malformed tool_call: #{inspect(call)}")
+          []
+      end
     end)
   end
 
@@ -589,12 +603,26 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       {:ok, %{"message" => %{"tool_calls" => calls}}} when is_list(calls) ->
         tool_calls =
-          Enum.map(calls, fn call ->
-            %{
-              id: call["id"] || generate_id(),
-              name: normalize_tool_name(call["function"]["name"]),
-              arguments: call["function"]["arguments"] || %{}
-            }
+          Enum.flat_map(calls, fn call ->
+            case call do
+              %{"function" => %{"name" => name} = func} ->
+                [%{
+                  id: call["id"] || generate_id(),
+                  name: normalize_tool_name(name),
+                  arguments: Map.get(func, "arguments", %{})
+                }]
+
+              %{"name" => name} ->
+                [%{
+                  id: call["id"] || generate_id(),
+                  name: normalize_tool_name(name),
+                  arguments: call["arguments"] || %{}
+                }]
+
+              _ ->
+                Logger.warning("[Ollama] Skipping malformed streaming tool_call: #{inspect(call)}")
+                []
+            end
           end)
 
         %{acc | tool_calls: acc.tool_calls ++ tool_calls}
