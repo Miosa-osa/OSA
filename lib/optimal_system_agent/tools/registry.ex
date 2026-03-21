@@ -791,7 +791,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent,
       "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks,
       "message_agent" => OptimalSystemAgent.Tools.Builtins.MessageAgent,
-      "computer_use" => OptimalSystemAgent.Tools.Builtins.ComputerUse
+      "computer_use" => OptimalSystemAgent.Tools.Builtins.ComputerUse,
+      "verify_loop" => OptimalSystemAgent.Verification.Tools.VerifyLoop,
+      "spawn_conversation" => OptimalSystemAgent.Conversations.Tools.SpawnConversation,
+      "start_speculative" => OptimalSystemAgent.Speculative.Tools.StartSpeculative,
+      "peer_review" => OptimalSystemAgent.Tools.Builtins.PeerReview,
+      "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion,
+      "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask,
+      "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery
     }
   end
 

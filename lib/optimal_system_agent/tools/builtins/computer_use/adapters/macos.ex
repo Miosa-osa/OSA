@@ -17,6 +17,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
     text
     |> String.replace("\\", "\\\\")
     |> String.replace("\"", "\\\"")
+    |> String.replace("\n", "\\n")
+    |> String.replace("\r", "\\r")
+    |> String.replace("\0", "")
   end
 
   @doc """
