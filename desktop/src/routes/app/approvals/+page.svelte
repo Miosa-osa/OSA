@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { slide } from 'svelte/transition';
   import { approvalsStore } from '$lib/stores/approvals.svelte';
+  import PageShell from '$lib/components/layout/PageShell.svelte';
   import type { Approval, ApprovalStatus } from '$lib/api/types';
 
   type FilterTab = 'all' | ApprovalStatus;
@@ -103,61 +104,60 @@
   });
 </script>
 
-<div class="approvals-page">
-  <header class="page-header">
-    <div class="header-left">
-      <h1 class="page-title">Approvals</h1>
-      {#if approvalsStore.pendingCount > 0}
-        <span class="pending-badge" aria-label="{approvalsStore.pendingCount} pending">
-          {approvalsStore.pendingCount}
-        </span>
-      {/if}
-    </div>
+<PageShell title="Approvals">
+  {#snippet actions()}
+    <!-- Pending badge (only when there are pending items) -->
+    {#if approvalsStore.pendingCount > 0}
+      <span class="apr-pending-badge" aria-label="{approvalsStore.pendingCount} pending">
+        {approvalsStore.pendingCount}
+      </span>
+    {/if}
 
-    <div class="stats-bar" role="status" aria-label="Approval statistics">
-      <div class="stat stat--pending">
-        <span class="stat-dot stat-dot--pending" aria-hidden="true"></span>
-        <span class="stat-value">{approvalsStore.pendingCount}</span>
-        <span class="stat-label">pending</span>
+    <!-- Stats bar -->
+    <div class="apr-stats-bar" role="status" aria-label="Approval statistics">
+      <div class="apr-stat apr-stat--pending">
+        <span class="apr-stat-dot apr-stat-dot--pending" aria-hidden="true"></span>
+        <span class="apr-stat-value">{approvalsStore.pendingCount}</span>
+        <span class="apr-stat-label">pending</span>
       </div>
-      <div class="stat-divider" aria-hidden="true"></div>
-      <div class="stat">
-        <span class="stat-value">{approvalsStore.approvals.length}</span>
-        <span class="stat-label">total</span>
+      <div class="apr-stat-divider" aria-hidden="true"></div>
+      <div class="apr-stat">
+        <span class="apr-stat-value">{approvalsStore.approvals.length}</span>
+        <span class="apr-stat-label">total</span>
       </div>
       {#if approvalsStore.loading}
-        <span class="loading-spinner" aria-label="Refreshing"></span>
+        <span class="apr-loading-spinner" aria-label="Refreshing"></span>
       {/if}
     </div>
-  </header>
+  {/snippet}
 
-  <div class="filter-tabs" role="tablist" aria-label="Filter approvals">
+  {#snippet tabs()}
     {#each TABS as tab (tab.id)}
       <button
         role="tab"
         aria-selected={activeFilter === tab.id}
-        class="filter-tab"
-        class:filter-tab--active={activeFilter === tab.id}
+        class="apr-filter-tab"
+        class:apr-filter-tab--active={activeFilter === tab.id}
         onclick={() => activeFilter = tab.id}
       >
         {tab.label}
         {#if countFor(tab.id) > 0}
-          <span class="tab-count" class:tab-count--pending={tab.id === 'pending'}>
+          <span class="apr-tab-count" class:apr-tab-count--pending={tab.id === 'pending'}>
             {countFor(tab.id)}
           </span>
         {/if}
       </button>
     {/each}
-  </div>
+  {/snippet}
 
-  <main class="page-content" id="approvals-main">
+  <div id="approvals-main" role="tablist" aria-label="Filter approvals">
     {#if approvalsStore.error}
-      <div class="status-banner" role="alert">
-        <span class="status-banner-dot"></span>
-        <span class="status-banner-text">Backend offline</span>
-        <span class="status-banner-hint">Start OSA backend on port 9089</span>
+      <div class="apr-status-banner" role="alert">
+        <span class="apr-status-banner-dot"></span>
+        <span class="apr-status-banner-text">Backend offline</span>
+        <span class="apr-status-banner-hint">Start OSA backend on port 9089</span>
         <button
-          class="status-banner-btn"
+          class="apr-status-banner-btn"
           onclick={() => approvalsStore.fetchApprovals()}
           aria-label="Retry fetching approvals"
         >
@@ -167,8 +167,8 @@
     {/if}
 
     {#if visibleApprovals.length === 0 && !approvalsStore.loading}
-      <div class="empty-state" role="status">
-        <div class="empty-icon" aria-hidden="true">
+      <div class="apr-empty-state" role="status">
+        <div class="apr-empty-icon" aria-hidden="true">
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
             <rect x="10" y="8" width="28" height="32" rx="4" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.4"/>
             <line x1="16" y1="18" x2="32" y2="18" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
@@ -176,62 +176,62 @@
             <line x1="16" y1="30" x2="24" y2="30" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.15"/>
           </svg>
         </div>
-        <p class="empty-title">No approvals</p>
-        <p class="empty-subtitle">Approval requests from agents will appear here.</p>
+        <p class="apr-empty-title">No approvals</p>
+        <p class="apr-empty-subtitle">Approval requests from agents will appear here.</p>
       </div>
     {:else}
-      <div class="approvals-list" role="list" aria-label="Approval list">
+      <div class="apr-approvals-list" role="list" aria-label="Approval list">
         {#each visibleApprovals as approval (approval.id)}
           <article
-            class="approval-card"
-            class:approval-card--pending={approval.status === 'pending'}
-            class:approval-card--approved={approval.status === 'approved'}
-            class:approval-card--rejected={approval.status === 'rejected'}
-            class:approval-card--revision={approval.status === 'revision_requested'}
+            class="apr-approval-card"
+            class:apr-approval-card--pending={approval.status === 'pending'}
+            class:apr-approval-card--approved={approval.status === 'approved'}
+            class:apr-approval-card--rejected={approval.status === 'rejected'}
+            class:apr-approval-card--revision={approval.status === 'revision_requested'}
             role="listitem"
             transition:slide={{ duration: 180 }}
           >
-            <div class="card-top">
-              <div class="card-top-left">
+            <div class="apr-card-top">
+              <div class="apr-card-top-left">
                 <span
-                  class="status-dot"
-                  class:status-dot--pending={approval.status === 'pending'}
-                  class:status-dot--approved={approval.status === 'approved'}
-                  class:status-dot--rejected={approval.status === 'rejected'}
-                  class:status-dot--revision={approval.status === 'revision_requested'}
+                  class="apr-status-dot"
+                  class:apr-status-dot--pending={approval.status === 'pending'}
+                  class:apr-status-dot--approved={approval.status === 'approved'}
+                  class:apr-status-dot--rejected={approval.status === 'rejected'}
+                  class:apr-status-dot--revision={approval.status === 'revision_requested'}
                   aria-hidden="true"
                 ></span>
-                <span class="type-badge">{typeBadgeLabel(approval.type)}</span>
+                <span class="apr-type-badge">{typeBadgeLabel(approval.type)}</span>
               </div>
-              <time class="card-time" datetime={approval.inserted_at}>
+              <time class="apr-card-time" datetime={approval.inserted_at}>
                 {formatRelative(approval.inserted_at)}
               </time>
             </div>
 
-            <h2 class="card-title">{approval.title}</h2>
+            <h2 class="apr-card-title">{approval.title}</h2>
 
             {#if approval.description}
-              <p class="card-description">{approval.description}</p>
+              <p class="apr-card-description">{approval.description}</p>
             {/if}
 
-            <div class="card-meta">
-              <span class="meta-label">Requested by</span>
-              <span class="meta-value">{approval.requested_by}</span>
+            <div class="apr-card-meta">
+              <span class="apr-meta-label">Requested by</span>
+              <span class="apr-meta-value">{approval.requested_by}</span>
             </div>
 
             {#if approval.status === 'pending'}
-              <div class="card-actions" transition:slide={{ duration: 140 }}>
+              <div class="apr-card-actions" transition:slide={{ duration: 140 }}>
                 <textarea
-                  class="notes-input"
+                  class="apr-notes-input"
                   placeholder="Optional notes..."
                   rows="2"
                   value={getNotes(approval.id)}
                   oninput={(e) => setNotes(approval.id, (e.currentTarget as HTMLTextAreaElement).value)}
                   aria-label="Decision notes for approval {approval.id}"
                 ></textarea>
-                <div class="action-btns">
+                <div class="apr-action-btns">
                   <button
-                    class="action-btn action-btn--approve"
+                    class="apr-action-btn apr-action-btn--approve"
                     onclick={() => handleApprove(approval)}
                     disabled={pendingActions.has(approval.id)}
                     aria-label="Approve: {approval.title}"
@@ -239,7 +239,7 @@
                     Approve
                   </button>
                   <button
-                    class="action-btn action-btn--revision"
+                    class="apr-action-btn apr-action-btn--revision"
                     onclick={() => handleRevision(approval)}
                     disabled={pendingActions.has(approval.id)}
                     aria-label="Request revision for: {approval.title}"
@@ -247,7 +247,7 @@
                     Request Revision
                   </button>
                   <button
-                    class="action-btn action-btn--reject"
+                    class="apr-action-btn apr-action-btn--reject"
                     onclick={() => handleReject(approval)}
                     disabled={pendingActions.has(approval.id)}
                     aria-label="Reject: {approval.title}"
@@ -257,23 +257,23 @@
                 </div>
               </div>
             {:else}
-              <div class="resolution-row">
+              <div class="apr-resolution-row">
                 {#if approval.resolved_by}
-                  <div class="card-meta">
-                    <span class="meta-label">Resolved by</span>
-                    <span class="meta-value">{approval.resolved_by}</span>
+                  <div class="apr-card-meta">
+                    <span class="apr-meta-label">Resolved by</span>
+                    <span class="apr-meta-value">{approval.resolved_by}</span>
                   </div>
                 {/if}
                 {#if approval.resolved_at}
-                  <div class="card-meta">
-                    <span class="meta-label">Resolved</span>
-                    <time class="meta-value" datetime={approval.resolved_at}>
+                  <div class="apr-card-meta">
+                    <span class="apr-meta-label">Resolved</span>
+                    <time class="apr-meta-value" datetime={approval.resolved_at}>
                       {formatRelative(approval.resolved_at)}
                     </time>
                   </div>
                 {/if}
                 {#if approval.decision_notes}
-                  <p class="decision-notes">{approval.decision_notes}</p>
+                  <p class="apr-decision-notes">{approval.decision_notes}</p>
                 {/if}
               </div>
             {/if}
@@ -281,45 +281,13 @@
         {/each}
       </div>
     {/if}
-  </main>
-</div>
+  </div>
+</PageShell>
 
 <style>
-  .approvals-page {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-    background: var(--bg-secondary);
-  }
+  /* ── Pending badge ── */
 
-  /* ── Header ── */
-
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 20px 24px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    flex-shrink: 0;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .page-title {
-    font-size: 1.125rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-  }
-
-  .pending-badge {
+  .apr-pending-badge {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -337,7 +305,7 @@
 
   /* ── Stats bar ── */
 
-  .stats-bar {
+  .apr-stats-bar {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -347,24 +315,24 @@
     padding: 6px 14px;
   }
 
-  .stat {
+  .apr-stat {
     display: flex;
     align-items: center;
     gap: 5px;
   }
 
-  .stat--pending .stat-value {
+  .apr-stat--pending .apr-stat-value {
     color: rgba(251, 191, 36, 0.9);
   }
 
-  .stat-dot {
+  .apr-stat-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--text-tertiary);
   }
 
-  .stat-dot--pending {
+  .apr-stat-dot--pending {
     background: rgba(251, 191, 36, 0.8);
     animation: pulse-dot 2s ease-in-out infinite;
   }
@@ -374,27 +342,27 @@
     50%       { opacity: 0.6; transform: scale(0.8); }
   }
 
-  .stat-value {
+  .apr-stat-value {
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
 
-  .stat-label {
+  .apr-stat-label {
     font-size: 0.6875rem;
     color: var(--text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
 
-  .stat-divider {
+  .apr-stat-divider {
     width: 1px;
     height: 12px;
     background: rgba(255, 255, 255, 0.08);
   }
 
-  .loading-spinner {
+  .apr-loading-spinner {
     width: 12px;
     height: 12px;
     border: 1.5px solid rgba(255, 255, 255, 0.1);
@@ -408,18 +376,9 @@
     to { transform: rotate(360deg); }
   }
 
-  /* ── Filter tabs ── */
+  /* ── Filter tabs (rendered inside ps-tabs-strip) ── */
 
-  .filter-tabs {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 8px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    flex-shrink: 0;
-  }
-
-  .filter-tab {
+  .apr-filter-tab {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -435,17 +394,17 @@
     line-height: 1;
   }
 
-  .filter-tab:hover:not(.filter-tab--active) {
+  .apr-filter-tab:hover:not(.apr-filter-tab--active) {
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-secondary);
   }
 
-  .filter-tab--active {
+  .apr-filter-tab--active {
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-primary);
   }
 
-  .tab-count {
+  .apr-tab-count {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -460,24 +419,14 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .tab-count--pending {
+  .apr-tab-count--pending {
     background: rgba(251, 191, 36, 0.14);
     color: rgba(251, 191, 36, 0.85);
   }
 
-  /* ── Content ── */
-
-  .page-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px 24px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
-  }
-
   /* ── Status banner ── */
 
-  .status-banner {
+  .apr-status-banner {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -490,7 +439,7 @@
     margin-bottom: 16px;
   }
 
-  .status-banner-dot {
+  .apr-status-banner-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
@@ -498,16 +447,16 @@
     flex-shrink: 0;
   }
 
-  .status-banner-text {
+  .apr-status-banner-text {
     color: var(--text-secondary);
   }
 
-  .status-banner-hint {
+  .apr-status-banner-hint {
     margin-left: auto;
     color: var(--text-muted);
   }
 
-  .status-banner-btn {
+  .apr-status-banner-btn {
     padding: 3px 10px;
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -520,7 +469,7 @@
     flex-shrink: 0;
   }
 
-  .status-banner-btn:hover {
+  .apr-status-banner-btn:hover {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.2);
     color: var(--text-primary);
@@ -528,7 +477,7 @@
 
   /* ── Empty state ── */
 
-  .empty-state {
+  .apr-empty-state {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -540,18 +489,18 @@
     padding: 48px 32px;
   }
 
-  .empty-icon {
+  .apr-empty-icon {
     color: rgba(255, 255, 255, 0.12);
     margin-bottom: 4px;
   }
 
-  .empty-title {
+  .apr-empty-title {
     font-size: 0.9375rem;
     font-weight: 500;
     color: var(--text-secondary);
   }
 
-  .empty-subtitle {
+  .apr-empty-subtitle {
     font-size: 0.8125rem;
     color: var(--text-tertiary);
     max-width: 280px;
@@ -560,7 +509,7 @@
 
   /* ── Approvals list ── */
 
-  .approvals-list {
+  .apr-approvals-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -568,7 +517,7 @@
 
   /* ── Approval card ── */
 
-  .approval-card {
+  .apr-approval-card {
     background: rgba(255, 255, 255, 0.04);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
@@ -581,37 +530,37 @@
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
 
-  .approval-card--pending {
+  .apr-approval-card--pending {
     border-color: rgba(251, 191, 36, 0.2);
     box-shadow:
       0 0 0 1px rgba(251, 191, 36, 0.06),
       inset 0 1px 0 rgba(251, 191, 36, 0.04);
   }
 
-  .approval-card--approved {
+  .apr-approval-card--approved {
     border-color: rgba(34, 197, 94, 0.15);
     opacity: 0.8;
   }
 
-  .approval-card--rejected {
+  .apr-approval-card--rejected {
     border-color: rgba(239, 68, 68, 0.15);
     opacity: 0.75;
   }
 
-  .approval-card--revision {
+  .apr-approval-card--revision {
     border-color: rgba(249, 115, 22, 0.2);
   }
 
   /* ── Card top row ── */
 
-  .card-top {
+  .apr-card-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
   }
 
-  .card-top-left {
+  .apr-card-top-left {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -619,7 +568,7 @@
 
   /* ── Status dot ── */
 
-  .status-dot {
+  .apr-status-dot {
     display: block;
     width: 8px;
     height: 8px;
@@ -628,23 +577,23 @@
     flex-shrink: 0;
   }
 
-  .status-dot--pending {
+  .apr-status-dot--pending {
     background: rgba(251, 191, 36, 0.85);
     box-shadow: 0 0 6px rgba(251, 191, 36, 0.4);
     animation: pulse-glow-yellow 2s ease-in-out infinite;
   }
 
-  .status-dot--approved {
+  .apr-status-dot--approved {
     background: var(--accent-success);
     box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
   }
 
-  .status-dot--rejected {
+  .apr-status-dot--rejected {
     background: var(--accent-error);
     box-shadow: 0 0 4px rgba(239, 68, 68, 0.3);
   }
 
-  .status-dot--revision {
+  .apr-status-dot--revision {
     background: rgba(249, 115, 22, 0.85);
     box-shadow: 0 0 6px rgba(249, 115, 22, 0.35);
   }
@@ -656,7 +605,7 @@
 
   /* ── Type badge ── */
 
-  .type-badge {
+  .apr-type-badge {
     display: inline-flex;
     align-items: center;
     padding: 2px 8px;
@@ -670,7 +619,7 @@
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
 
-  .card-time {
+  .apr-card-time {
     font-size: 0.75rem;
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
@@ -679,26 +628,26 @@
 
   /* ── Card body ── */
 
-  .card-title {
+  .apr-card-title {
     font-size: 0.9375rem;
     font-weight: 600;
     color: var(--text-primary);
     line-height: 1.3;
   }
 
-  .card-description {
+  .apr-card-description {
     font-size: 0.8125rem;
     color: var(--text-secondary);
     line-height: 1.5;
   }
 
-  .card-meta {
+  .apr-card-meta {
     display: flex;
     align-items: center;
     gap: 6px;
   }
 
-  .meta-label {
+  .apr-meta-label {
     font-size: 0.6875rem;
     font-weight: 600;
     text-transform: uppercase;
@@ -706,14 +655,14 @@
     color: var(--text-muted);
   }
 
-  .meta-value {
+  .apr-meta-value {
     font-size: 0.8125rem;
     color: var(--text-secondary);
   }
 
   /* ── Pending actions ── */
 
-  .card-actions {
+  .apr-card-actions {
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -721,7 +670,7 @@
     border-top: 1px solid rgba(255, 255, 255, 0.05);
   }
 
-  .notes-input {
+  .apr-notes-input {
     width: 100%;
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -736,21 +685,21 @@
     box-sizing: border-box;
   }
 
-  .notes-input::placeholder {
+  .apr-notes-input::placeholder {
     color: var(--text-muted);
   }
 
-  .notes-input:focus {
+  .apr-notes-input:focus {
     border-color: rgba(255, 255, 255, 0.16);
   }
 
-  .action-btns {
+  .apr-action-btns {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
   }
 
-  .action-btn {
+  .apr-action-btn {
     padding: 6px 14px;
     border-radius: var(--radius-md);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -762,47 +711,47 @@
     transition: all 0.15s;
   }
 
-  .action-btn:disabled {
+  .apr-action-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
   }
 
-  .action-btn--approve {
+  .apr-action-btn--approve {
     background: rgba(34, 197, 94, 0.1);
     border-color: rgba(34, 197, 94, 0.2);
     color: rgba(34, 197, 94, 0.9);
   }
 
-  .action-btn--approve:hover:not(:disabled) {
+  .apr-action-btn--approve:hover:not(:disabled) {
     background: rgba(34, 197, 94, 0.18);
     border-color: rgba(34, 197, 94, 0.35);
   }
 
-  .action-btn--reject {
+  .apr-action-btn--reject {
     background: rgba(239, 68, 68, 0.08);
     border-color: rgba(239, 68, 68, 0.18);
     color: rgba(239, 68, 68, 0.85);
   }
 
-  .action-btn--reject:hover:not(:disabled) {
+  .apr-action-btn--reject:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.15);
     border-color: rgba(239, 68, 68, 0.3);
   }
 
-  .action-btn--revision {
+  .apr-action-btn--revision {
     background: rgba(249, 115, 22, 0.08);
     border-color: rgba(249, 115, 22, 0.18);
     color: rgba(249, 115, 22, 0.85);
   }
 
-  .action-btn--revision:hover:not(:disabled) {
+  .apr-action-btn--revision:hover:not(:disabled) {
     background: rgba(249, 115, 22, 0.15);
     border-color: rgba(249, 115, 22, 0.3);
   }
 
   /* ── Resolution section ── */
 
-  .resolution-row {
+  .apr-resolution-row {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -810,7 +759,7 @@
     border-top: 1px solid rgba(255, 255, 255, 0.05);
   }
 
-  .decision-notes {
+  .apr-decision-notes {
     font-size: 0.8125rem;
     color: var(--text-tertiary);
     line-height: 1.5;

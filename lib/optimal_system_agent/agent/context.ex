@@ -385,7 +385,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         {nil, nil} -> nil
         {nil, add} -> add
         {text, nil} -> text
-        {text, add} -> text <> "\n\n" <> add
+        {text, add} -> text <> "\n\n" <> (add || "")
       end
 
     case combined do

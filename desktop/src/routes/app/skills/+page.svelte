@@ -3,6 +3,7 @@
   import { skillsStore } from '$lib/stores/skills.svelte';
   import SkillsGrid from '$lib/components/skills/SkillsGrid.svelte';
   import SkillDetail from '$lib/components/skills/SkillDetail.svelte';
+  import PageShell from '$lib/components/layout/PageShell.svelte';
 
   let selectedSkillId = $state<string | null>(null);
 
@@ -31,90 +32,86 @@
   }
 </script>
 
-<div class="skills-page">
-  <header class="page-header">
-    <div class="header-left">
-      <h1 class="page-title">Skills</h1>
-      <div class="stats-bar" role="status" aria-label="Skills statistics">
-        <span class="stat-value">{skillsStore.enabledCount}</span>
-        <span class="stat-label">enabled</span>
-        <span class="stat-divider" aria-hidden="true"></span>
-        <span class="stat-value">{skillsStore.totalCount}</span>
-        <span class="stat-label">total</span>
-        {#if skillsStore.loading}
-          <span class="loading-spinner" aria-label="Loading"></span>
-        {/if}
-      </div>
+<PageShell title="Skills">
+  {#snippet actions()}
+    <!-- Stats pill -->
+    <div class="skl-stats-bar" role="status" aria-label="Skills statistics">
+      <span class="skl-stat-value">{skillsStore.enabledCount}</span>
+      <span class="skl-stat-label">enabled</span>
+      <span class="skl-stat-divider" aria-hidden="true"></span>
+      <span class="skl-stat-value">{skillsStore.totalCount}</span>
+      <span class="skl-stat-label">total</span>
+      {#if skillsStore.loading}
+        <span class="skl-loading-spinner" aria-label="Loading"></span>
+      {/if}
     </div>
 
-    <div class="header-actions">
-      <div class="search-wrapper">
-        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <circle cx="11" cy="11" r="8" />
-          <line x1="21" y1="21" x2="16.65" y2="16.65" />
-        </svg>
-        <input
-          type="search"
-          class="search-input"
-          placeholder="Search skills..."
-          value={searchInput}
-          oninput={(e) => handleSearch(e.currentTarget.value)}
-          aria-label="Search skills"
-        />
-      </div>
-
-      <div class="bulk-actions">
-        <button
-          class="bulk-btn"
-          onclick={() => handleBulkAction('enable')}
-          aria-label="Enable all visible skills"
-        >
-          Enable visible
-        </button>
-        <button
-          class="bulk-btn bulk-btn--muted"
-          onclick={() => handleBulkAction('disable')}
-          aria-label="Disable all visible skills"
-        >
-          Disable visible
-        </button>
-      </div>
+    <!-- Search -->
+    <div class="skl-search-wrapper">
+      <svg class="skl-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="8" />
+        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+      <input
+        type="search"
+        class="skl-search-input"
+        placeholder="Search skills..."
+        value={searchInput}
+        oninput={(e) => handleSearch(e.currentTarget.value)}
+        aria-label="Search skills"
+      />
     </div>
-  </header>
 
-  <div class="category-tabs" role="tablist" aria-label="Skill categories">
+    <!-- Bulk actions -->
+    <div class="skl-bulk-actions">
+      <button
+        class="skl-bulk-btn"
+        onclick={() => handleBulkAction('enable')}
+        aria-label="Enable all visible skills"
+      >
+        Enable visible
+      </button>
+      <button
+        class="skl-bulk-btn skl-bulk-btn--muted"
+        onclick={() => handleBulkAction('disable')}
+        aria-label="Disable all visible skills"
+      >
+        Disable visible
+      </button>
+    </div>
+  {/snippet}
+
+  {#snippet tabs()}
     {#each skillsStore.allCategories as cat (cat.name)}
       <button
-        class="tab"
-        class:tab--active={skillsStore.activeCategory === cat.name}
+        class="skl-tab"
+        class:skl-tab--active={skillsStore.activeCategory === cat.name}
         onclick={() => skillsStore.setCategory(cat.name)}
         role="tab"
         aria-selected={skillsStore.activeCategory === cat.name}
       >
         {cat.label}
-        <span class="tab-count">{cat.count}</span>
+        <span class="skl-tab-count">{cat.count}</span>
       </button>
     {/each}
-  </div>
+  {/snippet}
 
-  <main class="page-content">
-    {#if skillsStore.error}
-      <div class="status-banner" role="status">
-        <span class="banner-dot"></span>
-        <span class="banner-text">Failed to load skills</span>
-        <button class="banner-btn" onclick={() => skillsStore.fetchSkills()}>
-          Retry
-        </button>
-      </div>
-    {/if}
+  {#if skillsStore.error}
+    <div class="skl-status-banner" role="status">
+      <span class="skl-banner-dot"></span>
+      <span class="skl-banner-text">Failed to load skills</span>
+      <button class="skl-banner-btn" onclick={() => skillsStore.fetchSkills()}>
+        Retry
+      </button>
+    </div>
+  {/if}
 
-    <SkillsGrid
-      skills={skillsStore.filtered}
-      onToggle={handleToggle}
-      onSelect={(id) => { selectedSkillId = id; }}
-    />
-  </main>
-</div>
+  <SkillsGrid
+    skills={skillsStore.filtered}
+    onToggle={handleToggle}
+    onSelect={(id) => { selectedSkillId = id; }}
+  />
+</PageShell>
 
 {#if selectedSkillId}
   <SkillDetail
@@ -125,39 +122,9 @@
 {/if}
 
 <style>
-  .skills-page {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-    background: var(--bg-secondary);
-  }
+  /* ── Stats pill ── */
 
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 20px 24px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    flex-shrink: 0;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .page-title {
-    font-size: 1.125rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-  }
-
-  .stats-bar {
+  .skl-stats-bar {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -167,28 +134,28 @@
     padding: 4px 12px;
   }
 
-  .stat-value {
+  .skl-stat-value {
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
 
-  .stat-label {
+  .skl-stat-label {
     font-size: 0.6875rem;
     color: var(--text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
 
-  .stat-divider {
+  .skl-stat-divider {
     width: 1px;
     height: 12px;
     background: rgba(255, 255, 255, 0.08);
     margin: 0 4px;
   }
 
-  .loading-spinner {
+  .skl-loading-spinner {
     width: 12px;
     height: 12px;
     border: 1.5px solid rgba(255, 255, 255, 0.1);
@@ -202,26 +169,22 @@
     to { transform: rotate(360deg); }
   }
 
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
+  /* ── Search ── */
 
-  .search-wrapper {
+  .skl-search-wrapper {
     position: relative;
     display: flex;
     align-items: center;
   }
 
-  .search-icon {
+  .skl-search-icon {
     position: absolute;
     left: 10px;
     color: var(--text-muted);
     pointer-events: none;
   }
 
-  .search-input {
+  .skl-search-input {
     width: 220px;
     padding: 6px 10px 6px 32px;
     border-radius: var(--radius-sm);
@@ -233,20 +196,22 @@
     transition: border-color 0.15s;
   }
 
-  .search-input::placeholder {
+  .skl-search-input::placeholder {
     color: var(--text-muted);
   }
 
-  .search-input:focus {
+  .skl-search-input:focus {
     border-color: var(--border-focus);
   }
 
-  .bulk-actions {
+  /* ── Bulk actions ── */
+
+  .skl-bulk-actions {
     display: flex;
     gap: 6px;
   }
 
-  .bulk-btn {
+  .skl-bulk-btn {
     padding: 5px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -258,31 +223,19 @@
     transition: all 0.15s;
   }
 
-  .bulk-btn:hover {
+  .skl-bulk-btn:hover {
     background: rgba(255, 255, 255, 0.1);
     color: var(--text-primary);
   }
 
-  .bulk-btn--muted {
+  .skl-bulk-btn--muted {
     color: var(--text-tertiary);
     border-color: rgba(255, 255, 255, 0.06);
   }
 
-  .category-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 8px 24px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    overflow-x: auto;
-    scrollbar-width: none;
-    flex-shrink: 0;
-  }
+  /* ── Category tabs (rendered inside ps-tabs-strip) ── */
 
-  .category-tabs::-webkit-scrollbar {
-    display: none;
-  }
-
-  .tab {
+  .skl-tab {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -298,17 +251,17 @@
     white-space: nowrap;
   }
 
-  .tab:hover {
+  .skl-tab:hover {
     background: rgba(255, 255, 255, 0.05);
     color: var(--text-secondary);
   }
 
-  .tab--active {
+  .skl-tab--active {
     background: rgba(59, 130, 246, 0.1);
     color: var(--text-primary);
   }
 
-  .tab-count {
+  .skl-tab-count {
     font-size: 0.6875rem;
     font-variant-numeric: tabular-nums;
     color: var(--text-muted);
@@ -316,19 +269,13 @@
     text-align: center;
   }
 
-  .tab--active .tab-count {
+  .skl-tab--active .skl-tab-count {
     color: var(--accent-primary);
   }
 
-  .page-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 24px 24px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
-  }
+  /* ── Error banner ── */
 
-  .status-banner {
+  .skl-status-banner {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -341,7 +288,7 @@
     margin-bottom: 16px;
   }
 
-  .banner-dot {
+  .skl-banner-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
@@ -349,11 +296,11 @@
     flex-shrink: 0;
   }
 
-  .banner-text {
+  .skl-banner-text {
     color: var(--text-secondary);
   }
 
-  .banner-btn {
+  .skl-banner-btn {
     margin-left: auto;
     padding: 3px 10px;
     background: rgba(255, 255, 255, 0.07);
@@ -366,7 +313,7 @@
     transition: background 0.15s;
   }
 
-  .banner-btn:hover {
+  .skl-banner-btn:hover {
     background: rgba(255, 255, 255, 0.12);
     color: var(--text-primary);
   }

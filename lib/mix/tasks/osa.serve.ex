@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Osa.Serve do
       OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
     end
 
-    port = Application.get_env(:optimal_system_agent, :http_port, 8089)
+    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
     safe_puts("OSA backend serving on http://localhost:#{port}")
     safe_puts("Connect with: cd priv/go/tui-v2 && ./osa")
     safe_puts("Or: curl http://localhost:#{port}/health")

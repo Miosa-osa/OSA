@@ -1,82 +1,87 @@
 defmodule OptimalSystemAgent.Channels.CLI do
   @moduledoc """
   Interactive CLI REPL — clean, colored, responsive.
+
   Supports streaming responses, animated spinner with elapsed time/token count,
-  readline-style line editing with arrow keys and history,
-  and markdown rendering.
+  readline-style line editing with arrow keys and history, and markdown rendering.
+
   Start with: mix osa.chat
+
+  Sub-modules:
+    - CLI.Renderer            — banner, response display, status line, formatters
+    - CLI.Session             — history, active request tracking, agent send helpers
+    - CLI.Events              — Bus event handler registration
+    - CLI.ComputerUseDispatch — smart computer-use intent classification and dispatch
+    - CLI.LineEditor          — readline-style line editing
+    - CLI.Spinner             — animated progress spinner
+    - CLI.Markdown            — terminal markdown renderer
+    - CLI.PlanReview          — interactive plan review UI
+    - CLI.TaskDisplay         — inline task list rendering
   """
+
   require Logger
 
-  alias OptimalSystemAgent.Agent.{Loop, Tasks}
-  alias OptimalSystemAgent.Channels.CLI.{LineEditor, Markdown, PlanReview, Spinner, TaskDisplay}
+  alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Channels.CLI.{
+    ComputerUseDispatch,
+    Events,
+    LineEditor,
+    Renderer,
+    Session
+  }
   alias OptimalSystemAgent.Channels.NoiseFilter
-  alias OptimalSystemAgent.Events.Bus
-  alias OptimalSystemAgent.SDK.{Hook, Permission}
-
-  @reset IO.ANSI.reset()
-  @bold IO.ANSI.bright()
-  @dim IO.ANSI.faint()
-  @cyan IO.ANSI.cyan()
-  @yellow IO.ANSI.yellow()
-  @white IO.ANSI.white()
-  @green IO.ANSI.green()
-
-  @max_history 100
 
   def start do
-    # Clear screen and print banner
     IO.write(IO.ANSI.clear() <> IO.ANSI.home())
-    print_banner()
+    Renderer.print_banner()
 
     session_id = "cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-    {:ok, _pid} = DynamicSupervisor.start_child(
-      OptimalSystemAgent.SessionSupervisor,
-      {Loop, session_id: session_id, channel: :cli}
-    )
-    register_permission_hook(session_id)
 
-    # Register event handlers for CLI feedback
-    register_orchestrator_handler()
-    register_task_tracker_handler()
+    {:ok, _pid} =
+      DynamicSupervisor.start_child(
+        OptimalSystemAgent.SessionSupervisor,
+        {Loop, session_id: session_id, channel: :cli}
+      )
 
-    # Initialize history storage in ETS
-    init_history()
-    init_active_request()
+    Session.register_permission_hook(session_id)
 
+    Events.register_orchestrator_handler()
+    Events.register_task_tracker_handler()
 
-    # Register async response handler
-    register_response_handler(session_id)
+    Session.init_history()
+    Session.init_active_request()
 
-    # Proactive mode removed
-    register_proactive_handler(session_id)
+    Events.register_response_handler(session_id, fn result, req_id ->
+      Session.handle_agent_response(session_id, result, req_id)
+    end)
+
+    Events.register_proactive_handler(session_id)
 
     loop(session_id)
   end
 
   defp loop(session_id) do
-    # Check for pending plan from async response
     case :ets.lookup(:cli_active_request, :pending_plan) do
       [{:pending_plan, ^session_id, plan_text, original_input}] ->
         :ets.delete(:cli_active_request, :pending_plan)
-        handle_plan_review(plan_text, original_input, session_id, 0)
+        Session.handle_plan_review(plan_text, original_input, session_id, 0)
 
       _ ->
         :ok
     end
 
-    prompt = build_prompt(session_id)
-    history = get_history(session_id)
+    prompt = Session.build_prompt(session_id)
+    history = Session.get_history(session_id)
 
     case LineEditor.readline(prompt, history) do
       :eof ->
-        print_goodbye()
+        Renderer.print_goodbye()
         System.halt(0)
 
       :interrupt ->
-        if agent_active?(session_id) do
-          cancel_active_request(session_id)
-          IO.puts("\n#{@yellow}  ✗ Cancelled#{@reset}")
+        if Session.agent_active?(session_id) do
+          Session.cancel_active_request(session_id)
+          IO.puts("\n#{IO.ANSI.yellow()}  ✗ Cancelled#{IO.ANSI.reset()}")
         end
 
         loop(session_id)
@@ -92,21 +97,24 @@ defmodule OptimalSystemAgent.Channels.CLI do
         else
           case input do
             x when x in ["exit", "quit"] ->
-              print_goodbye()
+              Renderer.print_goodbye()
               System.halt(0)
 
             "clear" ->
               IO.write(IO.ANSI.clear() <> IO.ANSI.home())
-              print_banner()
+              Renderer.print_banner()
               IO.puts("")
               loop(session_id)
 
             _ ->
-              if agent_active?(session_id) do
-                IO.puts("#{@dim}  (agent is working — Ctrl+C to cancel)#{@reset}")
+              if Session.agent_active?(session_id) do
+                IO.puts(
+                  "#{IO.ANSI.faint()}  (agent is working — Ctrl+C to cancel)#{IO.ANSI.reset()}"
+                )
+
                 loop(session_id)
               else
-                add_to_history(session_id, input)
+                Session.add_to_history(session_id, input)
                 next = process_input(input, session_id)
                 loop(next)
               end
@@ -135,21 +143,18 @@ defmodule OptimalSystemAgent.Channels.CLI do
       cmd = String.trim_leading(input, "/")
       handle_command(cmd, session_id)
     else
-      # Smart dispatch: lightweight LLM call classifies if this is a
-      # simple computer_use action. If so, execute directly (~3s).
-      # Otherwise, full agent loop with all tools.
-      if computer_use_enabled?() and computer_use_intent?(input) do
-        dispatch_computer_use(input, session_id)
+      if computer_use_enabled?() and ComputerUseDispatch.intent?(input) do
+        ComputerUseDispatch.dispatch(input, session_id)
       else
         filtered =
           NoiseFilter.filter_and_reply(input, nil, fn ack ->
             if ack != "" do
-              IO.puts("#{@dim}  #{ack}#{@reset}")
+              IO.puts("#{IO.ANSI.faint()}  #{ack}#{IO.ANSI.reset()}")
             end
           end)
 
         unless filtered do
-          send_to_agent(input, session_id)
+          Session.send_to_agent(input, session_id)
         end
       end
 
@@ -157,1046 +162,20 @@ defmodule OptimalSystemAgent.Channels.CLI do
     end
   end
 
-  # ── Smart Computer Use Dispatch ───────────────────────────────────────
-  #
-  # Lightweight LLM call with ONLY the computer_use tool (~3s on Ollama)
-  # to classify and extract params. No regex — the LLM understands any
-  # language, phrasing, and context naturally.
-
-  defp computer_use_enabled? do
-    Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
-  end
-
-  @cu_keywords ~w(
-    screenshot click type key press scroll move mouse drag
-    tela print captura clica digita aperta scrolla rola mova
-    cursor botão button element tree accessibility árvore elementos
-  )
-
-  defp computer_use_intent?(input) do
-    lower = String.downcase(input)
-    Enum.any?(@cu_keywords, &String.contains?(lower, &1))
-  end
-
-  defp dispatch_computer_use(input, _session_id) do
-    IO.write("#{@dim}  ⚡ scanning screen…#{@reset}")
-
-    # Always get the tree first so the LLM knows what's on screen
-    screen_context = case OptimalSystemAgent.Tools.Builtins.ComputerUse.execute(%{"action" => "get_tree"}) do
-      {:ok, tree} ->
-        tree
-        |> String.split("\n")
-        |> Enum.filter(&String.starts_with?(&1, "[e"))
-        |> Enum.take(30)
-        |> Enum.join("\n")
-      _ -> "(no elements available)"
-    end
-
-    clear_line()
-    IO.write("#{@dim}  ⚡ understanding…#{@reset}")
-
-    case classify_and_dispatch(input, screen_context) do
-      {:ok, tool_calls} when tool_calls != [] ->
-        Enum.each(tool_calls, fn {tool_name, params} ->
-          clear_line()
-          IO.write("#{@dim}  ⚡ #{tool_name}#{format_multi_params(tool_name, params)}#{@reset}")
-          result = execute_multi_tool(tool_name, params)
-          clear_line()
-          IO.puts("#{IO.ANSI.green()}  ✓ #{result}#{@reset}")
-        end)
-
-      {:ok, []} ->
-        clear_line()
-        IO.puts("#{@dim}  ? Couldn't determine actions#{@reset}")
-
-      {:error, reason} ->
-        clear_line()
-        IO.puts("#{IO.ANSI.red()}  ✗ #{reason}#{@reset}")
-    end
-  end
-
-  # Single unified LLM call — classifies AND extracts params for all tools
-  defp classify_and_dispatch(input, screen_context \\ "") do
-    url = cu_api_url()
-    key = cu_api_key()
-    model = cu_model()
-
-    tools = [
-      %{type: "function", function: %{
-        name: "launch_app",
-        description: "Launch/open an application. For URLs pass as args (e.g. app=firefox, args=google.com)",
-        parameters: %{type: "object", properties: %{
-          app: %{type: "string", description: "App name (firefox, nautilus, gnome-text-editor)"},
-          args: %{type: "string", description: "Arguments like a URL"}
-        }, required: ["app"]}
-      }},
-      %{type: "function", function: %{
-        name: "computer_use",
-        description: "Desktop action: screenshot, click, double_click, type, key, scroll, move_mouse, drag, get_tree. Set window param to focus a window first.",
-        parameters: %{type: "object", properties: %{
-          action: %{type: "string", enum: ["screenshot", "click", "double_click", "type", "key", "scroll", "move_mouse", "drag", "get_tree"]},
-          x: %{type: "integer"}, y: %{type: "integer"},
-          text: %{type: "string"}, direction: %{type: "string", enum: ["up", "down", "left", "right"]},
-          target: %{type: "string"}, window: %{type: "string"}
-        }, required: ["action"]}
-      }}
-    ]
-
-    screen_info = if screen_context != "" and screen_context != "(no elements available)",
-      do: "\n\nCurrent screen elements:\n#{screen_context}",
-      else: ""
-
-    messages = [
-      %{role: "system", content: """
-      You control a Linux desktop with two tools.
-      IMPORTANT: "press/type/scroll/click IN app" means use computer_use WITH window="app name". NEVER launch_app for these.
-      - launch_app: ONLY when user says "open" or "launch" an app. Never for press/type/click/scroll.
-      - computer_use actions:
-        type: text="hello", window="Firefox" | key: text="ctrl+t", window="Firefox" | click: target="e5" or x=N,y=N | screenshot | get_tree | scroll: direction="down", window="Firefox"
-      #{screen_info}
-      """},
-      %{role: "user", content: input}
-    ]
-
-    body = Jason.encode!(%{model: model, messages: messages, tools: tools, max_tokens: 8192})
-    headers = [{"authorization", "Bearer #{key}"}, {"content-type", "application/json"}]
-
-    case Req.post(url, body: body, headers: headers, receive_timeout: 60_000) do
-      {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]}}} ->
-        tcs = msg["tool_calls"] || []
-        if tcs != [] do
-          calls = Enum.map(tcs, fn tc ->
-            name = tc["function"]["name"]
-            {:ok, args} = Jason.decode(tc["function"]["arguments"])
-            {name, args}
-          end)
-          {:ok, calls}
-        else
-          {:ok, []}
-        end
-
-      {:ok, %{status: s, body: b}} -> {:error, "LLM returned #{s}: #{inspect(String.slice(inspect(b), 0, 200))}"}
-      {:error, r} -> {:error, inspect(r)}
-    end
-  rescue
-    e -> {:error, Exception.message(e)}
-  end
-
-  defp execute_multi_tool("launch_app", %{"app" => app} = params) do
-    args = params["args"] || ""
-    cmd_args = if args != "", do: String.split(args), else: []
-    spawn(fn -> System.cmd("nohup", [app | cmd_args], stderr_to_stdout: true) end)
-    Process.sleep(2000)
-    "Launched #{app} #{args}"
-  rescue
-    e -> "Error: #{Exception.message(e)}"
-  end
-
-  defp execute_multi_tool("computer_use", params) do
-    case OptimalSystemAgent.Tools.Builtins.ComputerUse.execute(params) do
-      {:ok, {:image, %{path: p}}} -> "Screenshot: #{p}"
-      {:ok, msg} when is_binary(msg) -> msg
-      {:ok, other} -> inspect(other)
-      {:error, reason} -> "Error: #{reason}"
-    end
-  end
-
-  defp execute_multi_tool(name, _params), do: "Unknown tool: #{name}"
-
-  defp format_multi_params("launch_app", %{"app" => app} = p), do: " #{app} #{p["args"] || ""}"
-  defp format_multi_params("computer_use", params), do: format_cu_params(params)
-  defp format_multi_params(_, _), do: ""
-
-  defp cu_api_url do
-    url = Application.get_env(:optimal_system_agent, :ollama_url) || "https://ollama.com"
-    "#{url}/v1/chat/completions"
-  end
-
-  defp cu_api_key do
-    Application.get_env(:optimal_system_agent, :ollama_api_key) || ""
-  end
-
-  defp cu_model do
-    Application.get_env(:optimal_system_agent, :ollama_model) || "nemotron-3-super:cloud"
-  end
-
-  defp clear_line do
-    width = case :io.columns() do
-      {:ok, cols} -> cols
-      _ -> 80
-    end
-    IO.write("\r#{String.duplicate(" ", width)}\r")
-  end
-
-  defp format_cu_params(%{"action" => "click", "x" => x, "y" => y}), do: " (#{x}, #{y})"
-  defp format_cu_params(%{"action" => "double_click", "x" => x, "y" => y}), do: " (#{x}, #{y})"
-  defp format_cu_params(%{"action" => "move_mouse", "x" => x, "y" => y}), do: " → (#{x}, #{y})"
-  defp format_cu_params(%{"action" => "type", "text" => t}), do: " \"#{String.slice(t, 0, 30)}\""
-  defp format_cu_params(%{"action" => "key", "text" => t}), do: " #{t}"
-  defp format_cu_params(%{"action" => "scroll", "direction" => d}), do: " #{d}"
-  defp format_cu_params(%{"action" => "get_tree"}), do: " (accessibility)"
-  defp format_cu_params(_), do: ""
-
-  # ── Event Handlers ──────────────────────────────────────────────────
-
-  defp register_orchestrator_handler do
-    # ETS table for caching context pressure and orchestrator state
-    try do
-      :ets.new(:cli_signal_cache, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> :cli_signal_cache
-    end
-
-    Bus.register_handler(:system_event, fn payload ->
-      # Bus wraps payload in Event struct — original data is in :data field
-      data = payload[:data] || payload
-      case data do
-        %{event: :orchestrator_task_started, task_id: task_id} ->
-          clear_line()
-          IO.puts("#{@bold}#{@cyan}  ▶ Spawning agents...#{@reset}")
-
-          try do
-            :ets.insert(:cli_signal_cache, {:active_task, task_id})
-          rescue
-            _ -> :ok
-          end
-
-        %{event: :orchestrator_agents_spawning, agent_count: count} ->
-          clear_line()
-
-          IO.puts(
-            "#{@cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{@reset}"
-          )
-
-        %{event: :orchestrator_agent_started, agent_name: name, role: role, description: desc} ->
-          task_desc = if is_binary(desc) and desc != "", do: String.slice(desc, 0, 50), else: ""
-          role_str = role || name
-          IO.puts("#{@dim}  ⏺ #{role_str}(#{task_desc})#{@reset}")
-
-        %{event: :orchestrator_agent_started, agent_name: name, role: role} ->
-          role_str = role || name
-          IO.puts("#{@dim}  ⏺ #{role_str}#{@reset}")
-
-        %{event: :orchestrator_agent_progress, agent_name: name, role: role,
-          current_action: action, tool_uses: tools, tokens_used: tokens}
-        when is_binary(action) and action != "" ->
-          clear_line()
-          role_str = role || name
-          tokens_str = if is_number(tokens) and tokens >= 1000, do: "#{Float.round(tokens / 1000, 1)}k", else: "#{tokens || 0}"
-          tc = tools || 0
-          tl = if tc == 1, do: "tool use", else: "tool uses"
-          IO.write("#{@dim}  ⏺ #{role_str}: #{String.slice(action, 0, 50)} (#{tc} #{tl} · #{tokens_str} tokens)#{@reset}")
-
-        %{event: :orchestrator_agent_progress, agent_name: name, current_action: action}
-        when is_binary(action) and action != "" ->
-          clear_line()
-          IO.write("#{@dim}  │  #{name}: #{String.slice(action, 0, 60)}#{@reset}")
-
-        %{event: :orchestrator_agent_completed, agent_name: name, role: role,
-          tool_uses: tools, tokens_used: tokens, duration_ms: dur_ms} ->
-          clear_line()
-          role_str = role || name
-          tokens_str = if is_number(tokens) and tokens >= 1000, do: "#{Float.round(tokens / 1000, 1)}k", else: "#{tokens || 0}"
-          dur_str = format_duration_ms(dur_ms)
-          tool_count = tools || 0
-          tool_label = if tool_count == 1, do: "tool use", else: "tool uses"
-          parts = ["#{tool_count} #{tool_label}", "#{tokens_str} tokens", dur_str] |> Enum.reject(&(&1 == ""))
-          IO.puts("#{@dim}  ⏺ #{role_str}#{@reset}")
-          IO.puts("#{@dim}    ⎿  Done (#{Enum.join(parts, " · ")})#{@reset}")
-
-        %{event: :orchestrator_agent_completed, agent_name: name} ->
-          clear_line()
-          IO.puts("#{@dim}  ⏺ #{name}#{@reset}")
-          IO.puts("#{@dim}    ⎿  Done#{@reset}")
-
-        %{event: :orchestrator_synthesizing} ->
-          clear_line()
-          IO.puts("#{@cyan}  ▶ Synthesizing results...#{@reset}")
-
-        %{event: :orchestrator_task_completed} ->
-          clear_line()
-          IO.puts("#{@cyan}  ▶ All agents completed#{@reset}")
-
-        %{event: :orchestrator_task_failed, reason: reason} ->
-          clear_line()
-          IO.puts("#{@yellow}  ▶ Orchestration failed: #{reason}#{@reset}")
-
-        %{event: :swarm_started, swarm_id: id} ->
-          clear_line()
-          IO.puts("#{@bold}#{@cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... launched#{@reset}")
-
-        %{event: :swarm_completed, swarm_id: id} ->
-          clear_line()
-          IO.puts("#{@cyan}  ◆ Swarm #{String.slice(id, 0, 8)}... completed#{@reset}")
-
-        %{event: :orchestrator_task_appraised, estimated_cost_usd: cost, estimated_hours: hours} ->
-          clear_line()
-          cost_str = if cost < 0.01, do: "<$0.01", else: "$#{Float.round(cost, 2)}"
-          hours_str = if hours < 0.1, do: "<0.1h", else: "#{Float.round(hours, 1)}h"
-          IO.puts("#{@dim}  ⊕ Estimated: #{cost_str} · #{hours_str}#{@reset}")
-
-        %{event: :orchestrator_wave_started, wave_number: num, total_waves: total, agent_count: count} ->
-          clear_line()
-          IO.puts("#{@cyan}  ▶ Wave #{num}/#{total} — #{count} agent#{if count > 1, do: "s", else: ""}#{@reset}")
-
-        %{event: :context_pressure, utilization: util, estimated_tokens: tokens, max_tokens: max_t} ->
-          # Cache for status line readout
-          try do
-            :ets.insert(:cli_signal_cache, {:context_pressure, util})
-          rescue
-            _ -> :ok
-          end
-
-          # Only print the standalone pressure line when elevated (>= 70%)
-          if util >= 70.0 do
-            clear_line()
-            bar = context_pressure_bar(util)
-            tokens_k = Float.round(tokens / 1000, 1)
-            max_k = Float.round(max_t / 1000, 1)
-
-            color = if util >= 85.0, do: IO.ANSI.red(), else: @yellow
-
-            IO.puts(
-              "#{color}  #{bar} context: #{tokens_k}k/#{max_k}k (#{util}%)#{@reset}"
-            )
-          end
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
-
-  defp register_task_tracker_handler do
-    Bus.register_handler(:system_event, fn payload ->
-      case payload do
-        %{event: event, session_id: sid}
-        when event in [
-               :task_tracker_task_added,
-               :task_tracker_task_started,
-               :task_tracker_task_completed,
-               :task_tracker_task_failed,
-               :task_tracker_tasks_cleared
-             ] ->
-          visible = true
-
-          if visible do
-            try do
-              tasks = Tasks.get_tasks(sid)
-
-              if tasks != [] do
-                output = TaskDisplay.render_inline(tasks)
-                clear_line()
-                IO.puts(output)
-              end
-            rescue
-              _ -> :ok
-            end
-          end
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
 
   # ── Command Handling ─────────────────────────────────────────────────
 
-  # Returns the next session_id (may change on /new or /resume)
   defp handle_command(cmd, session_id) do
-    # Commands module removed — unknown command
     cmd_name = String.split(cmd, ~r/\s+/) |> hd()
-    IO.puts("#{@yellow}  error: unknown command '/#{cmd_name}'#{@reset}")
-    IO.puts("#{@dim}  Type /help to see available commands#{@reset}\n")
+    IO.puts("#{IO.ANSI.yellow()}  error: unknown command '/#{cmd_name}'#{IO.ANSI.reset()}")
+    IO.puts("#{IO.ANSI.faint()}  Type /help to see available commands#{IO.ANSI.reset()}\n")
     _ = session_id
     session_id
   end
 
-  # Returns new session_id
-  defp handle_action(:new_session, old_session_id) do
-    stop_session(old_session_id)
+  # ── Helpers ──────────────────────────────────────────────────────────
 
-    new_session_id = "cli_#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
-    {:ok, _pid} = DynamicSupervisor.start_child(
-      OptimalSystemAgent.SessionSupervisor,
-      {Loop, session_id: new_session_id, channel: :cli}
-    )
-    register_permission_hook(new_session_id)
-    IO.puts("#{@dim}  session: #{new_session_id}#{@reset}\n")
-    new_session_id
-  end
-
-  defp handle_action({:resume_session, target_id, messages}, old_session_id) do
-    stop_session(old_session_id)
-
-    {:ok, _pid} = DynamicSupervisor.start_child(
-      OptimalSystemAgent.SessionSupervisor,
-      {Loop, session_id: target_id, channel: :cli, messages: messages}
-    )
-    register_permission_hook(target_id)
-    IO.puts("#{@dim}  resumed: #{target_id} (#{length(messages)} messages restored)#{@reset}\n")
-    target_id
-  end
-
-  defp handle_action(:exit, _session_id) do
-    print_goodbye()
-    System.halt(0)
-  end
-
-  defp handle_action(:clear, session_id) do
-    IO.write(IO.ANSI.clear() <> IO.ANSI.home())
-    print_banner()
-    IO.puts("")
-    session_id
-  end
-
-  defp handle_action({:set_strategy, strategy_name}, session_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{pid, _}] ->
-        GenServer.call(pid, {:set_strategy, strategy_name})
-      _ ->
-        :ok
-    end
-    session_id
-  end
-
-  defp handle_action(_, session_id), do: session_id
-
-  defp stop_session(session_id) do
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{pid, _}] -> GenServer.stop(pid, :normal)
-      _ -> :ok
-    end
-  end
-
-  # Register the default permission hook for a CLI session.
-  # Mirrors what SDK.query/2 does via register_permission_hook/2.
-  # Uses priority 1 so it runs before all other pre_tool_use hooks.
-  # build_hook(:default) always returns a function (only :bypass returns nil).
-  defp register_permission_hook(session_id) do
-    permission_fn = Permission.build_hook(:default)
-
-    # Bridge arity: hooks system calls with 1 arg (payload map),
-    # but Permission.build_hook returns arity-2 fn (tool_name, args).
-    hook_fn = fn %{tool_name: tool_name, arguments: args} = payload ->
-      case permission_fn.(tool_name, args) do
-        :allow -> {:ok, payload}
-        {:deny, reason} -> {:block, reason}
-      end
-    end
-
-    Hook.register(:pre_tool_use, "cli_permission_#{session_id}", hook_fn, priority: 1)
-  end
-
-  # ── Agent Communication ─────────────────────────────────────────────
-
-  defp send_to_agent(input, session_id, opts \\ []) do
-    spinner = Spinner.start()
-
-    tool_ref =
-      Bus.register_handler(:tool_call, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
-            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
-            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
-            _ -> :ok
-          end
-        end
-      end)
-
-    # Immediate feedback for computer_use — print result before waiting for LLM
-    cu_ref =
-      Bus.register_handler(:tool_result, fn payload ->
-        if Process.alive?(spinner) and match?(%{name: "computer_use"}, payload) do
-          case payload do
-            %{result: result, success: true} ->
-              Spinner.update(spinner, {:computer_use_result, result})
-            %{result: result, success: false} ->
-              Spinner.update(spinner, {:computer_use_error, result})
-            _ -> :ok
-          end
-        end
-      end)
-
-    llm_ref =
-      Bus.register_handler(:llm_response, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
-            _ -> :ok
-          end
-        end
-      end)
-
-    request_id = System.unique_integer([:positive, :monotonic])
-
-    :ets.insert(:cli_active_request, {session_id, %{
-      request_id: request_id,
-      spinner: spinner,
-      tool_ref: tool_ref,
-      cu_ref: cu_ref,
-      llm_ref: llm_ref,
-      input: input,
-      opts: opts
-    }})
-
-    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-      result = Loop.process_message(session_id, input, opts)
-
-      Bus.emit(:system_event, %{
-        event: :cli_agent_response_ready,
-        session_id: session_id,
-        request_id: request_id,
-        result: result
-      })
-    end)
-
-    :ok
-  end
-
-  # Synchronous version for plan execution and revision (needs response before continuing)
-  defp send_to_agent_sync(input, session_id, opts) do
-    spinner = Spinner.start()
-
-    tool_ref =
-      Bus.register_handler(:tool_call, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
-            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
-            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
-            _ -> :ok
-          end
-        end
-      end)
-
-    llm_ref =
-      Bus.register_handler(:llm_response, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{usage: u} when is_map(u) and map_size(u) > 0 -> Spinner.update(spinner, {:llm_response, u})
-            _ -> :ok
-          end
-        end
-      end)
-
-    result = Loop.process_message(session_id, input, opts)
-
-    Bus.unregister_handler(:tool_call, tool_ref)
-    Bus.unregister_handler(:llm_response, llm_ref)
-
-    case result do
-      {:ok, response} ->
-        {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-        show_status_line(elapsed_ms, tool_count, total_tokens)
-        print_response(response)
-        print_separator()
-
-      {:plan, plan_text} ->
-        {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-        show_status_line(elapsed_ms, 0, total_tokens)
-        handle_plan_review(plan_text, input, session_id, 0)
-
-      {:error, reason} ->
-        Spinner.stop(spinner)
-        IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
-    end
-  end
-
-  @max_plan_revisions 5
-
-  defp handle_plan_review(_plan_text, _original_input, _session_id, revision)
-       when revision >= @max_plan_revisions do
-    IO.puts("#{@dim}  ✗ Max revisions reached — plan cancelled#{@reset}\n")
-  end
-
-  defp handle_plan_review(plan_text, original_input, session_id, revision) do
-    case PlanReview.review(plan_text) do
-      :approved ->
-        IO.puts("#{@dim}  ▶ Executing plan...#{@reset}\n")
-
-        execute_msg =
-          "Execute the following approved plan. Do not re-plan — proceed directly with implementation.\n\n#{plan_text}\n\nOriginal request: #{original_input}"
-
-        send_to_agent_sync(execute_msg, session_id, skip_plan: true)
-
-      :rejected ->
-        IO.puts("#{@dim}  ✗ Plan rejected#{@reset}\n")
-
-      {:edit, feedback} ->
-        IO.puts("#{@dim}  ↻ Revising plan (#{revision + 1}/#{@max_plan_revisions})...#{@reset}\n")
-
-        revised_msg =
-          "Revise your plan based on this feedback:\n\n#{feedback}\n\nOriginal plan:\n#{plan_text}\n\nOriginal request: #{original_input}"
-
-        # Call send_to_agent_for_plan to get the revised plan directly, then loop
-        revised_result = send_to_agent_for_plan(revised_msg, session_id)
-
-        case revised_result do
-          {:plan, new_plan_text} ->
-            handle_plan_review(new_plan_text, original_input, session_id, revision + 1)
-
-          :executed ->
-            :ok
-        end
-    end
-  end
-
-  # Like send_to_agent but returns the plan result instead of recursing
-  defp send_to_agent_for_plan(input, session_id) do
-    spinner = Spinner.start()
-
-    tool_ref =
-      Bus.register_handler(:tool_call, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{name: n, phase: :start, args: a} ->
-              Spinner.update(spinner, {:tool_start, n, a || ""})
-
-            %{name: n, phase: :start} ->
-              Spinner.update(spinner, {:tool_start, n, ""})
-
-            %{name: n, phase: :end, duration_ms: ms} ->
-              Spinner.update(spinner, {:tool_end, n, ms})
-
-            _ ->
-              :ok
-          end
-        end
-      end)
-
-    llm_ref =
-      Bus.register_handler(:llm_response, fn payload ->
-        if Process.alive?(spinner) do
-          case payload do
-            %{usage: u} when is_map(u) and map_size(u) > 0 ->
-              Spinner.update(spinner, {:llm_response, u})
-
-            _ ->
-              :ok
-          end
-        end
-      end)
-
-    result = Loop.process_message(session_id, input)
-
-    Bus.unregister_handler(:tool_call, tool_ref)
-    Bus.unregister_handler(:llm_response, llm_ref)
-
-    case result do
-      {:plan, plan_text} ->
-        {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-        show_status_line(elapsed_ms, 0, total_tokens)
-        {:plan, plan_text}
-
-      {:ok, response} ->
-        {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-        show_status_line(elapsed_ms, tool_count, total_tokens)
-        print_response(response)
-        print_separator()
-        :executed
-
-      {:error, reason} ->
-        Spinner.stop(spinner)
-        IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
-        :executed
-    end
-  end
-
-  defp show_status_line(elapsed_ms, tool_count, total_tokens) do
-    parts = ["#{@green}✓#{@dim} " <> format_elapsed(elapsed_ms)]
-    parts = if tool_count > 0, do: parts ++ ["#{tool_count} tools"], else: parts
-    parts = if total_tokens > 0, do: parts ++ [format_tokens(total_tokens)], else: parts
-
-    # Append compact context utilization hint from the latest pressure event
-    parts =
-      try do
-        case :ets.lookup(:cli_signal_cache, :context_pressure) do
-          [{:context_pressure, util}] when util >= 50.0 ->
-            label = cond do
-              util >= 95.0 -> "#{IO.ANSI.red()}ctx #{Float.round(util, 0)}%#{@dim}"
-              util >= 85.0 -> "#{IO.ANSI.red()}ctx #{Float.round(util, 0)}%#{@dim}"
-              util >= 70.0 -> "#{@yellow}ctx #{Float.round(util, 0)}%#{@dim}"
-              true -> "ctx #{Float.round(util, 0)}%"
-            end
-            parts ++ [label]
-
-          _ ->
-            parts
-        end
-      rescue
-        _ -> parts
-      end
-
-    IO.puts("#{@dim}  #{Enum.join(parts, " · ")}#{@reset}")
-  end
-
-  defp print_separator do
-    width = terminal_width()
-    IO.puts("\n#{@dim}#{String.duplicate("─", width)}#{@reset}")
-  end
-
-  defp format_elapsed(ms) when ms < 1_000, do: "<1s"
-  defp format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
-
-  defp format_elapsed(ms) do
-    mins = div(ms, 60_000)
-    secs = div(rem(ms, 60_000), 1_000)
-    if secs > 0, do: "#{mins}m #{secs}s", else: "#{mins}m"
-  end
-
-  defp format_duration_ms(nil), do: ""
-  defp format_duration_ms(ms) when is_number(ms), do: format_elapsed(ms)
-  defp format_duration_ms(_), do: ""
-
-  defp format_tokens(0), do: ""
-  defp format_tokens(n) when n < 1_000, do: "↓ #{n}"
-  defp format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
-
-  defp context_pressure_bar(util) when util >= 95.0, do: "█████ CRITICAL"
-  defp context_pressure_bar(util) when util >= 90.0, do: "████░ HIGH"
-  defp context_pressure_bar(util) when util >= 85.0, do: "███░░ ELEVATED"
-  defp context_pressure_bar(util) when util >= 70.0, do: "██░░░ WARM"
-  defp context_pressure_bar(_util), do: "█░░░░"
-
-  # ── Active Request Tracking ────────────────────────────────────────
-
-  defp init_active_request do
-    try do
-      :ets.new(:cli_active_request, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> :cli_active_request
-    end
-  end
-
-  defp agent_active?(session_id) do
-    case :ets.lookup(:cli_active_request, session_id) do
-      [{^session_id, _}] -> true
-      _ -> false
-    end
-  rescue
-    _ -> false
-  end
-
-  defp cancel_active_request(session_id) do
-    case :ets.lookup(:cli_active_request, session_id) do
-      [{^session_id, %{spinner: spinner, tool_ref: tool_ref, llm_ref: llm_ref} = req}] ->
-        Spinner.stop(spinner)
-        Bus.unregister_handler(:tool_call, tool_ref)
-        Bus.unregister_handler(:llm_response, llm_ref)
-        if cu_ref = req[:cu_ref], do: Bus.unregister_handler(:tool_result, cu_ref)
-        :ets.delete(:cli_active_request, session_id)
-
-      _ ->
-        :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp build_prompt(session_id) do
-    if agent_active?(session_id),
-      do: "#{@dim}#{@cyan}◉#{@reset} ",
-      else: "#{@bold}#{@cyan}❯#{@reset} "
-  end
-
-  # ── Proactive Mode Handlers ──────────────────────────────────────────
-
-  defp register_proactive_handler(session_id) do
-    Bus.register_handler(:system_event, fn payload ->
-      # Bus wraps payloads in CloudEvent envelope — data is in payload.data
-      data = Map.get(payload, :data, payload)
-
-      case data do
-        %{event: :proactive_message, session_id: ^session_id, message: msg, message_type: type} ->
-          prefix =
-            case type do
-              :alert -> "#{@yellow}  ⚠ OSA"
-              :work_complete -> "#{@dim}  ✓ OSA"
-              :work_failed -> "#{@yellow}  ✗ OSA"
-              :greeting -> "#{@cyan}  OSA"
-              _ -> "#{@cyan}  OSA"
-            end
-
-          clear_line()
-          IO.puts("\n#{prefix} > #{msg}#{@reset}\n")
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
-
-  defp maybe_greet(_session_id) do
-    :ok
-  rescue
-    _ -> :ok
-  end
-
-  defp register_response_handler(session_id) do
-    Bus.register_handler(:system_event, fn payload ->
-      case payload do
-        %{event: :cli_agent_response_ready, session_id: ^session_id, result: result, request_id: req_id} ->
-          handle_agent_response(session_id, result, req_id)
-
-        _ ->
-          :ok
-      end
-    end)
-  rescue
-    _ -> :ok
-  end
-
-  defp handle_agent_response(session_id, result, req_id) do
-    case :ets.lookup(:cli_active_request, session_id) do
-      [{^session_id, %{request_id: ^req_id, spinner: spinner, tool_ref: tool_ref, llm_ref: llm_ref, input: original_input} = req}] ->
-        Bus.unregister_handler(:tool_call, tool_ref)
-        Bus.unregister_handler(:llm_response, llm_ref)
-        if cu_ref = req[:cu_ref], do: Bus.unregister_handler(:tool_result, cu_ref)
-
-        case result do
-          {:ok, response} ->
-            {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-            show_status_line(elapsed_ms, tool_count, total_tokens)
-            print_response(response)
-            print_separator()
-
-          {:plan, plan_text} ->
-            {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-            show_status_line(elapsed_ms, 0, total_tokens)
-            :ets.insert(:cli_active_request, {:pending_plan, session_id, plan_text, original_input})
-
-          {:error, reason} ->
-            Spinner.stop(spinner)
-            IO.puts("#{@yellow}  error: #{reason}#{@reset}\n")
-        end
-
-        :ets.delete(:cli_active_request, session_id)
-
-      _ ->
-        # Stale request_id or already cancelled — ignore
-        :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  # ── History ──────────────────────────────────────────────────────────
-
-  defp init_history do
-    try do
-      :ets.new(:cli_history, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> :cli_history
-    end
-  end
-
-  defp get_history(session_id) do
-    case :ets.lookup(:cli_history, session_id) do
-      [{^session_id, entries}] -> entries
-      _ -> []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp add_to_history(session_id, input) do
-    current = get_history(session_id)
-
-    # Skip consecutive duplicates
-    updated =
-      case current do
-        [^input | _] -> current
-        _ -> [input | Enum.take(current, @max_history - 1)]
-      end
-
-    try do
-      :ets.insert(:cli_history, {session_id, updated})
-    rescue
-      _ -> :ok
-    end
-  end
-
-  # ── Banner ──────────────────────────────────────────────────────────
-
-  defp print_banner do
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-    model = get_model_name(provider)
-    tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
-    soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
-    version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
-    git_hash = git_short_hash()
-    cwd = prompt_dir()
-    width = terminal_width()
-
-    IO.puts("""
-    #{@bold}#{@cyan}
-     ██████╗ ███████╗ █████╗
-    ██╔═══██╗██╔════╝██╔══██╗
-    ██║   ██║███████╗███████║
-    ██║   ██║╚════██║██╔══██║
-    ╚██████╔╝███████║██║  ██║
-     ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}
-    #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset}
-    #{@dim}#{provider} / #{model} · #{tool_count} tools · soul: #{soul_status}#{@reset}
-    #{@dim}#{cwd}#{@reset}
-    #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
-    #{proactive_banner_line()}#{@dim}#{String.duplicate("─", width)}#{@reset}
-    """)
-  end
-
-  defp proactive_banner_line do
-    ""
-  rescue
-    _ -> ""
-  catch
-    :exit, _ -> ""
-  end
-
-  defp git_short_hash do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
-      {hash, 0} -> String.trim(hash)
-      _ -> "dev"
-    end
-  rescue
-    _ -> "dev"
-  end
-
-  defp get_model_name(:anthropic) do
-    Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  end
-
-  defp get_model_name(:ollama) do
-    Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
-  end
-
-  defp get_model_name(:openai) do
-    Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
-  end
-
-  defp get_model_name(provider) do
-    key = :"#{provider}_model"
-    Application.get_env(:optimal_system_agent, key, to_string(provider))
-  end
-
-  defp print_goodbye do
-    IO.puts("\n#{@dim}  goodbye#{@reset}\n")
-  end
-
-  # ── Response Formatting ─────────────────────────────────────────────
-
-  defp print_response(response) do
-    # Apply markdown rendering, then word-wrap and indent
-    rendered = Markdown.render(response)
-    lines = wrap_text(rendered, terminal_width() - 4)
-
-    IO.puts("")
-
-    Enum.each(lines, fn line ->
-      IO.puts("#{@white}  #{line}#{@reset}")
-    end)
-
-    IO.puts("")
-  end
-
-  # ── Text Wrapping ───────────────────────────────────────────────────
-
-  defp wrap_text(text, width) do
-    text
-    |> String.split("\n")
-    |> Enum.flat_map(fn line ->
-      if String.length(line) <= width do
-        [line]
-      else
-        wrap_line(line, width)
-      end
-    end)
-  end
-
-  defp wrap_line(line, width) do
-    line
-    |> String.split(~r/\s+/)
-    |> Enum.reduce([""], fn word, [current | rest] ->
-      if String.length(current) + String.length(word) + 1 <= width do
-        if current == "" do
-          [word | rest]
-        else
-          [current <> " " <> word | rest]
-        end
-      else
-        [word, current | rest]
-      end
-    end)
-    |> Enum.reverse()
-  end
-
-  # ── Directory Display ──────────────────────────────────────────────
-
-  defp prompt_dir do
-    cwd = File.cwd!()
-    home = System.get_env("HOME") || ""
-
-    shortened =
-      if home != "" and String.starts_with?(cwd, home) do
-        "~" <> String.trim_leading(cwd, home)
-      else
-        cwd
-      end
-
-    # Show abbreviated path: ~/…/ProjectName for deep paths
-    parts = Path.split(shortened)
-
-    case length(parts) do
-      n when n > 3 -> "~/…/" <> List.last(parts)
-      _ -> shortened
-    end
-  rescue
-    _ -> "."
-  end
-
-  # ── Terminal Helpers ────────────────────────────────────────────────
-
-  defp terminal_width do
-    case :io.columns() do
-      {:ok, cols} -> cols
-      _ -> 80
-    end
-  end
-
-  defp clear_line do
-    width = terminal_width()
-    IO.write("\r#{String.duplicate(" ", width)}\r")
-  end
-
-  # ── Fuzzy Command Matching ───────────────────────────────────────
-
-  defp suggest_command(_input), do: nil
-
-  defp levenshtein(a, b) do
-    b_len = String.length(b)
-    a_chars = String.graphemes(a)
-    b_chars = String.graphemes(b)
-
-    row = Enum.to_list(0..b_len)
-
-    Enum.reduce(Enum.with_index(a_chars, 1), row, fn {a_char, i}, prev_row ->
-      Enum.reduce(Enum.with_index(b_chars, 1), {[i], i - 1}, fn {b_char, j}, {curr_row, diag} ->
-        cost = if a_char == b_char, do: 0, else: 1
-        above = Enum.at(prev_row, j)
-        left = hd(curr_row)
-        val = Enum.min([above + 1, left + 1, diag + cost])
-        {[val | curr_row], Enum.at(prev_row, j)}
-      end)
-      |> elem(0)
-      |> Enum.reverse()
-    end)
-    |> List.last()
+  defp computer_use_enabled? do
+    Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
   end
 end

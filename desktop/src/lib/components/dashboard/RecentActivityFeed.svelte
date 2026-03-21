@@ -41,7 +41,7 @@
   </header>
 
   {#if activities.length === 0}
-    <p class="raf-empty">No recent activity</p>
+    <p class="raf-empty">No activity yet — start a chat to see events here</p>
   {:else}
     <ul class="raf-list">
       {#each activities as event, i (i)}

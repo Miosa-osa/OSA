@@ -10,6 +10,7 @@ import type {
   CronPreset,
 } from "$lib/api/types";
 import type { StreamController } from "$lib/api/sse";
+import { toastStore } from "$lib/stores/toasts.svelte";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -378,8 +379,16 @@ class ScheduledTasksStore {
     try {
       const data = await schedulerApi.list<JobsListResponse>();
       this.tasks = (data.jobs ?? []).map(mapJob);
-    } catch {
+    } catch (e) {
       this.tasks = [...MOCK_TASKS];
+      if (
+        e instanceof TypeError ||
+        (e instanceof Error && e.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        toastStore.error("Failed to load scheduled tasks");
+      }
     } finally {
       this.loading = false;
     }
@@ -423,6 +432,7 @@ class ScheduledTasksStore {
       this._replaceTask(mapJob(data.job));
     } catch {
       // Keep the optimistic state
+      toastStore.error("Failed to pause scheduled task");
     }
   }
 
@@ -433,6 +443,7 @@ class ScheduledTasksStore {
       this._replaceTask(mapJob(data.job));
     } catch {
       // Keep the optimistic state
+      toastStore.error("Failed to resume scheduled task");
     }
   }
 
@@ -443,6 +454,7 @@ class ScheduledTasksStore {
       await schedulerApi.delete(id);
     } catch {
       this.tasks = previous;
+      toastStore.error("Failed to delete scheduled task");
     }
   }
 

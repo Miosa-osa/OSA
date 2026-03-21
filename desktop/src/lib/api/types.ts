@@ -169,6 +169,19 @@ export interface Agent {
   created_at: string;
   updated_at: string;
   error?: string;
+  /** Present only on single-agent GET /api/v1/agents/:id */
+  system_prompt?: string;
+}
+
+/** Response shape from GET /api/v1/agents */
+export interface AgentsListResponse {
+  agents: Agent[];
+  count: number;
+}
+
+/** Response shape from GET /api/v1/agents/hierarchy */
+export interface AgentHierarchyResponse {
+  hierarchy: HierarchyNode[];
 }
 
 // ── Agent Hierarchy ──────────────────────────────────────────────────────────
@@ -232,6 +245,11 @@ export interface Settings {
   budget_monthly_usd: number;
   theme: "dark" | "light" | "system";
   telemetry: boolean;
+  // Fields added in API v1 settings endpoint
+  agent_name?: string;
+  yolo_mode?: boolean;
+  log_level?: "debug" | "info" | "warning" | "error";
+  context_window?: number;
 }
 
 // ── Orchestrate ───────────────────────────────────────────────────────────────
@@ -419,6 +437,24 @@ export interface DashboardSystemHealth {
   memory_mb: number;
 }
 
+/**
+ * Flat response shape returned by GET /api/v1/dashboard.
+ * The dashboard store normalizes this into DashboardData.
+ */
+export interface DashboardApiResponse {
+  active_agents: number;
+  active_sessions: number;
+  memory_entries: number;
+  scheduled_tasks: number;
+  provider: string | null;
+  model: string | null;
+  uptime_seconds: number;
+  memory_mb: number;
+  tools_count: number;
+  recent_activity: DashboardActivity[];
+  status: "ok" | "degraded" | "error";
+}
+
 export interface DashboardData {
   kpis: DashboardKpis;
   active_agents: DashboardAgent[];
@@ -570,6 +606,61 @@ export interface QueuedRequest {
   path: string;
   body?: unknown;
   timestamp: number;
+}
+
+// ── Workspaces (Canopy protocol) ──────────────────────────────────────────────
+
+export interface Workspace {
+  id: string;
+  name: string;
+  description: string | null;
+  directory: string;
+  agent_count: number;
+  skill_count: number;
+  status: "active" | "archived";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  agent_count: number;
+  status: "active" | "archived";
+}
+
+export interface CreateWorkspacePayload {
+  name: string;
+  description?: string;
+  /** Local filesystem path for the workspace root */
+  directory: string;
+}
+
+export interface WorkspaceDetail extends Workspace {
+  system_md: string | null;
+  company_md: string | null;
+}
+
+export interface WorkspaceAgent {
+  id: string;
+  name: string;
+  status: AgentStatus;
+  task?: string;
+}
+
+export interface WorkspaceSkill {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  category: SkillCategory;
+}
+
+export interface WorkspaceConfig {
+  system: string | null;
+  company: string | null;
+  has_system: boolean;
+  has_company: boolean;
 }
 
 // ── Approvals ────────────────────────────────────────────────────────────────

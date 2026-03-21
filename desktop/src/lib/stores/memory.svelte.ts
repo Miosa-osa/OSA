@@ -47,56 +47,6 @@ interface RawMemory {
   inserted_at?: string; // Elixir Ecto alias for created_at
 }
 
-// ── Mock Data ──────────────────────────────────────────────────────────────────
-
-const MOCK_ENTRIES: MemoryEntry[] = [
-  {
-    id: "mock-1",
-    key: "user.preferred_language",
-    value: "TypeScript",
-    category: "preference",
-    tags: ["dev", "languages"],
-    created_at: new Date(Date.now() - 86_400_000 * 7).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 2).toISOString(),
-  },
-  {
-    id: "mock-2",
-    key: "project.name",
-    value: "BusinessOS",
-    category: "fact",
-    tags: ["project"],
-    created_at: new Date(Date.now() - 86_400_000 * 14).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 14).toISOString(),
-  },
-  {
-    id: "mock-3",
-    key: "agent.tone",
-    value: "Direct, no pleasantries, no emojis",
-    category: "instruction",
-    tags: ["behavior", "agent"],
-    created_at: new Date(Date.now() - 86_400_000 * 3).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 1).toISOString(),
-  },
-  {
-    id: "mock-4",
-    key: "user.timezone",
-    value: "America/Los_Angeles",
-    category: "fact",
-    tags: ["user"],
-    created_at: new Date(Date.now() - 86_400_000 * 5).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 5).toISOString(),
-  },
-  {
-    id: "mock-5",
-    key: "context.current_focus",
-    value: "Building the Memory Vault UI for the desktop app",
-    category: "context",
-    tags: ["project", "sprint"],
-    created_at: new Date(Date.now() - 3_600_000).toISOString(),
-    updated_at: new Date(Date.now() - 3_600_000).toISOString(),
-  },
-];
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function normalizeCategory(raw: string | undefined): MemoryCategory {
@@ -249,8 +199,8 @@ class MemoryStore {
       const raw = Array.isArray(data.memories) ? data.memories : [];
       this.entries = raw.map(toEntry);
     } catch {
-      // Backend unavailable or memory module not yet active — use mock data
-      this.entries = [...MOCK_ENTRIES];
+      this.entries = [];
+      this.error = "Backend offline";
     } finally {
       this.loading = false;
     }

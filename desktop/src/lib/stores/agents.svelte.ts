@@ -2,8 +2,13 @@
 // Agents store — Svelte 5 class with $state fields.
 // Manages agent list with polling and SSE event integration.
 
-import type { Agent, AgentStatus } from "$lib/api/types";
-import { agents as agentsApi } from "$lib/api/client";
+import type { Agent, AgentStatus, HierarchyNode } from "$lib/api/types";
+import {
+  agents as agentsApi,
+  hierarchy as hierarchyApi,
+  ApiError,
+} from "$lib/api/client";
+import { toastStore } from "$lib/stores/toasts.svelte";
 
 // ── Tree types ─────────────────────────────────────────────────────────────────
 
@@ -21,7 +26,9 @@ export interface AgentTreeNode {
 
 class AgentsStore {
   agents = $state<Agent[]>([]);
+  hierarchy = $state<HierarchyNode[]>([]);
   loading = $state(false);
+  hierarchyLoading = $state(false);
   error = $state<string | null>(null);
   lastUpdated = $state<Date | null>(null);
 
@@ -147,8 +154,100 @@ class AgentsStore {
     } catch (err) {
       this.error =
         err instanceof Error ? err.message : "Failed to fetch agents";
+      if (
+        err instanceof TypeError ||
+        (err instanceof Error && err.message === "Failed to fetch")
+      ) {
+        if (!this.error?.includes("offline"))
+          toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        const status = err instanceof ApiError ? ` (${err.status})` : "";
+        toastStore.error(`Failed to load agents${status}`);
+      }
     } finally {
       this.loading = false;
+    }
+  }
+
+  async fetchHierarchy(): Promise<void> {
+    this.hierarchyLoading = true;
+    try {
+      this.hierarchy = await hierarchyApi.getTree();
+    } catch (err) {
+      if (
+        err instanceof TypeError ||
+        (err instanceof Error && err.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        const status = err instanceof ApiError ? ` (${err.status})` : "";
+        toastStore.error(`Failed to load agent hierarchy${status}`);
+      }
+    } finally {
+      this.hierarchyLoading = false;
+    }
+  }
+
+  async pauseAgent(id: string): Promise<void> {
+    this.setAgentStatus(id, "queued");
+    try {
+      const updated = await agentsApi.pause(id);
+      const idx = this.agents.findIndex((a) => a.id === id);
+      if (idx !== -1) this.agents.splice(idx, 1, updated);
+    } catch (err) {
+      // Revert optimistic update by re-fetching
+      void this.fetchAgents();
+      if (
+        err instanceof TypeError ||
+        (err instanceof Error && err.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        const status = err instanceof ApiError ? ` (${err.status})` : "";
+        toastStore.error(`Failed to pause agent${status}`);
+      }
+    }
+  }
+
+  async resumeAgent(id: string): Promise<void> {
+    this.setAgentStatus(id, "running");
+    try {
+      const updated = await agentsApi.resume(id);
+      const idx = this.agents.findIndex((a) => a.id === id);
+      if (idx !== -1) this.agents.splice(idx, 1, updated);
+    } catch (err) {
+      void this.fetchAgents();
+      if (
+        err instanceof TypeError ||
+        (err instanceof Error && err.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        const status = err instanceof ApiError ? ` (${err.status})` : "";
+        toastStore.error(`Failed to resume agent${status}`);
+      }
+    }
+  }
+
+  async terminateAgent(id: string): Promise<void> {
+    // Optimistic: remove from list immediately
+    const prev = this.agents.find((a) => a.id === id);
+    this.agents = this.agents.filter((a) => a.id !== id);
+    try {
+      await agentsApi.terminate(id);
+      this.lastUpdated = new Date();
+    } catch (err) {
+      // Restore on failure
+      if (prev) this.agents = [...this.agents, prev];
+      if (
+        err instanceof TypeError ||
+        (err instanceof Error && err.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        const status = err instanceof ApiError ? ` (${err.status})` : "";
+        toastStore.error(`Failed to terminate agent${status}`);
+      }
     }
   }
 

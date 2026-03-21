@@ -1,4 +1,17 @@
+import { BASE_URL, API_PREFIX, getToken } from "$lib/api/client";
 import type { Approval } from "$lib/api/types";
+
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  const token = getToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
+}
 
 class ApprovalsStore {
   approvals = $state<Approval[]>([]);
@@ -17,8 +30,10 @@ class ApprovalsStore {
     this.loading = true;
     this.error = null;
     try {
-      const res = await fetch("http://127.0.0.1:9089/api/v1/approvals");
-      if (!res.ok) throw new Error("Failed to fetch");
+      const res = await fetch(`${BASE_URL}${API_PREFIX}/approvals`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: /api/v1/approvals`);
       const data = await res.json();
       this.approvals = data.approvals ?? [];
     } catch (err) {
@@ -30,32 +45,29 @@ class ApprovalsStore {
   }
 
   async approve(id: number, notes: string): Promise<void> {
-    await fetch(`http://127.0.0.1:9089/api/v1/approvals/${id}/approve`, {
+    await fetch(`${BASE_URL}${API_PREFIX}/approvals/${id}/approve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ notes, resolved_by: "operator" }),
     });
     await this.fetchApprovals();
   }
 
   async reject(id: number, notes: string): Promise<void> {
-    await fetch(`http://127.0.0.1:9089/api/v1/approvals/${id}/reject`, {
+    await fetch(`${BASE_URL}${API_PREFIX}/approvals/${id}/reject`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
       body: JSON.stringify({ notes, resolved_by: "operator" }),
     });
     await this.fetchApprovals();
   }
 
   async requestRevision(id: number, notes: string): Promise<void> {
-    await fetch(
-      `http://127.0.0.1:9089/api/v1/approvals/${id}/request-revision`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes, resolved_by: "operator" }),
-      },
-    );
+    await fetch(`${BASE_URL}${API_PREFIX}/approvals/${id}/request-revision`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ notes, resolved_by: "operator" }),
+    });
     await this.fetchApprovals();
   }
 }

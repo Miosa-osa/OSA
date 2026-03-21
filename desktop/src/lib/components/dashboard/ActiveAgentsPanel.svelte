@@ -30,7 +30,7 @@
   </header>
 
   {#if agents.length === 0}
-    <p class="aap-empty">No agents running</p>
+    <p class="aap-empty">No agents running — agents activate when you give them tasks</p>
   {:else}
     <ul class="aap-list">
       {#each agents as agent (agent.name)}

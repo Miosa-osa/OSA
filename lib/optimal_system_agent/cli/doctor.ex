@@ -8,7 +8,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   """
 
   @app :optimal_system_agent
-  @http_port 8089
+  @http_port 9089
   @separator "────────────────────────────────"
 
   @doc "Run all health checks and print the report."

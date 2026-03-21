@@ -181,7 +181,7 @@ defmodule OptimalSystemAgent.ContextMesh.Archiver do
     }
 
     try do
-      OptimalSystemAgent.Events.Bus.publish(:context_mesh, event)
+      OptimalSystemAgent.Events.Bus.emit(:system_event, Map.put(event, :channel, :context_mesh))
     rescue
       _ -> :ok
     catch

@@ -45,7 +45,7 @@ defmodule OptimalSystemAgent.CLI do
     migrate!()
     OptimalSystemAgent.Onboarding.seed_workspace()
 
-    port = Application.get_env(@app, :http_port, 8089)
+    port = Application.get_env(@app, :http_port, 9089)
     safe_puts("OSA serving on :#{port}")
     Process.sleep(:infinity)
   end

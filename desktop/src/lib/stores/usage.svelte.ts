@@ -1,6 +1,6 @@
 // src/lib/stores/usage.svelte.ts
 // Usage & Analytics store — Svelte 5 class with $state fields.
-// Fetches system analytics from GET /api/v1/analytics, falls back to mock data.
+// Fetches system analytics from GET /api/v1/analytics.
 
 import {
   BASE_URL,
@@ -125,51 +125,6 @@ function mapApiResponse(raw: AnalyticsApiResponse): UsageStats {
   };
 }
 
-// ── Mock data ─────────────────────────────────────────────────────────────────
-// Provides a realistic fallback when the backend is unavailable.
-
-function generateMockStats(): UsageStats {
-  const today = new Date();
-  const dailyUsage: DailyUsage[] = Array.from({ length: 30 }, (_, i) => {
-    const d = new Date(today);
-    d.setUTCDate(d.getUTCDate() - (29 - i));
-    const messages = Math.floor(Math.random() * 40 + 5);
-    return {
-      date: d.toISOString().slice(0, 10),
-      messages,
-      tokens: messages * Math.floor(Math.random() * 800 + 400),
-    };
-  });
-
-  const totalMessages = dailyUsage.reduce((s, d) => s + d.messages, 0);
-  const totalTokens = dailyUsage.reduce((s, d) => s + d.tokens, 0);
-
-  return {
-    totalMessages,
-    totalSessions: Math.floor(totalMessages / 6),
-    totalTokens,
-    avgResponseTime: Math.floor(Math.random() * 800 + 400),
-    dailyUsage,
-    modelUsage: [
-      {
-        model: "claude-sonnet-4-6",
-        count: Math.floor(totalMessages * 0.55),
-        tokens: Math.floor(totalTokens * 0.6),
-      },
-      {
-        model: "claude-opus-4-6",
-        count: Math.floor(totalMessages * 0.25),
-        tokens: Math.floor(totalTokens * 0.3),
-      },
-      {
-        model: "claude-haiku-4-5-20251001",
-        count: Math.floor(totalMessages * 0.2),
-        tokens: Math.floor(totalTokens * 0.1),
-      },
-    ],
-  };
-}
-
 // ── UsageStore ────────────────────────────────────────────────────────────────
 
 class UsageStore {
@@ -250,7 +205,7 @@ class UsageStore {
   // ── Actions ──────────────────────────────────────────────────────────────────
 
   /**
-   * Fetch analytics from the backend. Falls back to mock data on any error.
+   * Fetch analytics from the backend.
    * The analytics endpoint is not yet in the shared API client, so we make a
    * raw fetch using the same base URL and auth token.
    */
@@ -279,9 +234,8 @@ class UsageStore {
       const raw = (await response.json()) as AnalyticsApiResponse;
       this.stats = mapApiResponse(raw);
     } catch {
-      // Backend unavailable or endpoint not yet implemented — use mock
-      this.stats = generateMockStats();
-      this.error = null; // Not surfaced as an error; mock data is shown instead
+      this.stats = null;
+      this.error = "Backend offline";
     } finally {
       this.loading = false;
     }

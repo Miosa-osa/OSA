@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Channels.HTTP do
   @moduledoc """
-  HTTP channel adapter — Plug.Router served by Bandit on port 8089.
+  HTTP channel adapter — Plug.Router served by Bandit on port 9089.
 
   This is the API surface that MIOSA SDK clients consume. Symmetrical with
   CLI, Telegram, and other channel adapters — all signals go through the

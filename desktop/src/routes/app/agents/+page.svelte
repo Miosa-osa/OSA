@@ -1,14 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { slide } from 'svelte/transition';
   import { agentsStore } from '$lib/stores/agents.svelte';
   import { agents as agentsApi, hierarchy as hierarchyApi } from '$lib/api/client';
   import { restartBackend } from '$lib/utils/backend';
-  import type { Agent, AgentStatus, HierarchyNode } from '$lib/api/types';
+  import type { Agent, HierarchyNode } from '$lib/api/types';
+  import AgentGrid from '$lib/components/agents/AgentGrid.svelte';
   import AgentTree from '$lib/components/agents/AgentTree.svelte';
   import OrgChart from '$lib/components/agents/OrgChart.svelte';
 
-  // ── View mode (grid | tree | org) ─────────────────────────────────────────────
+  // ── View mode ────────────────────────────────────────────────────────────────
 
   type ViewMode = 'grid' | 'tree' | 'org';
 
@@ -30,7 +30,7 @@
     if (mode === 'org') fetchHierarchy();
   }
 
-  // ── Hierarchy state ────────────────────────────────────────────────────────────
+  // ── Hierarchy ────────────────────────────────────────────────────────────────
 
   let hierarchyTree = $state<HierarchyNode[]>([]);
   let hierarchyLoading = $state(false);
@@ -60,28 +60,12 @@
   onMount(() => {
     agentsStore.fetchAgents();
     if (viewMode === 'org') fetchHierarchy();
-    pollTimer = setInterval(() => {
-      agentsStore.fetchAgents();
-    }, 5000);
+    pollTimer = setInterval(() => agentsStore.fetchAgents(), 5000);
   });
 
   onDestroy(() => {
     if (pollTimer !== null) clearInterval(pollTimer);
   });
-
-  // ── Expand state (per-card) ──────────────────────────────────────────────────
-
-  let expandedIds = $state<Set<string>>(new Set());
-
-  function toggleExpand(id: string) {
-    const next = new Set(expandedIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    expandedIds = next;
-  }
 
   // ── Optimistic actions ───────────────────────────────────────────────────────
 
@@ -92,9 +76,8 @@
     try {
       await agentsApi.pause(agent.id);
       agentsStore.setAgentStatus(agent.id, 'idle');
-    } catch {
-      // silently revert — next poll will correct state
-    } finally {
+    } catch { /* next poll corrects state */ }
+    finally {
       const next = new Set(pendingIds);
       next.delete(agent.id);
       pendingIds = next;
@@ -106,30 +89,15 @@
     try {
       await agentsApi.cancel(agent.id);
       agentsStore.setAgentStatus(agent.id, 'idle');
-    } catch {
-      // silently revert — next poll will correct state
-    } finally {
+    } catch { /* next poll corrects state */ }
+    finally {
       const next = new Set(pendingIds);
       next.delete(agent.id);
       pendingIds = next;
     }
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-
-  function formatDuration(seconds: number | undefined): string {
-    if (seconds === undefined) return '—';
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    const m = Math.floor(seconds / 60);
-    const s = Math.round(seconds % 60);
-    return `${m}m ${s}s`;
-  }
-
-  function formatTokens(tokens: number | undefined): string {
-    if (tokens === undefined) return '—';
-    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-    return String(tokens);
-  }
+  // ── Relative time (header only) ──────────────────────────────────────────────
 
   function formatRelative(iso: string): string {
     const diff = Date.now() - new Date(iso).getTime();
@@ -141,34 +109,9 @@
     if (h < 24) return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
   }
-
-  function statusLabel(status: AgentStatus): string {
-    switch (status) {
-      case 'running': return 'Running';
-      case 'queued':  return 'Queued';
-      case 'done':    return 'Done';
-      case 'error':   return 'Failed';
-      case 'idle':    return 'Idle';
-    }
-  }
-
-  // Sort: running first, then queued, then idle, then done, then error
-  const STATUS_ORDER: Record<AgentStatus, number> = {
-    running: 0,
-    queued:  1,
-    idle:    2,
-    done:    3,
-    error:   4,
-  };
-
-  const sortedAgents = $derived(
-    [...agentsStore.agents].sort(
-      (a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status],
-    ),
-  );
 </script>
 
-<!-- ── Page shell ──────────────────────────────────────────────────────────── -->
+<!-- ── Page shell ── -->
 <div class="agents-page">
 
   <!-- ── Header ── -->
@@ -238,6 +181,7 @@
       </button>
     </div>
 
+    <!-- Stats bar -->
     <div class="stats-bar" role="status" aria-label="Agent statistics">
       <div class="stat stat--running">
         <span class="stat-dot stat-dot--running" aria-hidden="true"></span>
@@ -261,7 +205,6 @@
         <span class="stat-value">{agentsStore.totalCount}</span>
         <span class="stat-label">total</span>
       </div>
-
       {#if agentsStore.loading}
         <span class="loading-spinner" aria-label="Refreshing"></span>
       {/if}
@@ -294,7 +237,6 @@
     {/if}
 
     {#if viewMode === 'org'}
-      <!-- ── Org chart view ── -->
       {#if hierarchyTree.length === 0 && !hierarchyLoading}
         <div class="empty-state" role="status">
           <p class="empty-title">No hierarchy configured</p>
@@ -306,182 +248,15 @@
       {/if}
 
     {:else if viewMode === 'tree'}
-      <!-- ── Tree view ── -->
       <AgentTree />
 
-    {:else if sortedAgents.length === 0 && !agentsStore.loading}
-      <!-- ── Empty state ── -->
-      <div class="empty-state" role="status">
-        <div class="empty-icon" aria-hidden="true">
-          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="8" y="8" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.4"/>
-            <rect x="26" y="8" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.25"/>
-            <rect x="8" y="26" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.25"/>
-            <rect x="26" y="26" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.15"/>
-            <circle cx="15" cy="15" r="2.5" fill="currentColor" opacity="0.5"/>
-          </svg>
-        </div>
-        <p class="empty-title">No agents running</p>
-        <p class="empty-subtitle">Agents will appear here when a task is dispatched from chat.</p>
-      </div>
-
     {:else}
-      <!-- ── Agent grid ── -->
-      <div class="agent-grid" role="list" aria-label="Agent list">
-        {#each sortedAgents as agent (agent.id)}
-          <article
-            class="agent-card"
-            class:agent-card--running={agent.status === 'running'}
-            class:agent-card--queued={agent.status === 'queued'}
-            class:agent-card--done={agent.status === 'done'}
-            class:agent-card--error={agent.status === 'error'}
-            role="listitem"
-          >
-            <!-- ── Card header ── -->
-            <div class="card-header">
-              <div class="card-header-left">
-                <div class="status-indicator" aria-hidden="true">
-                  <span
-                    class="status-dot"
-                    class:status-dot--running={agent.status === 'running'}
-                    class:status-dot--queued={agent.status === 'queued'}
-                    class:status-dot--done={agent.status === 'done'}
-                    class:status-dot--error={agent.status === 'error'}
-                    class:status-dot--idle={agent.status === 'idle'}
-                  ></span>
-                </div>
-                <div class="agent-identity">
-                  <h2 class="agent-name">{agent.name}</h2>
-                  <span
-                    class="status-badge"
-                    class:status-badge--running={agent.status === 'running'}
-                    class:status-badge--queued={agent.status === 'queued'}
-                    class:status-badge--done={agent.status === 'done'}
-                    class:status-badge--error={agent.status === 'error'}
-                  >
-                    {statusLabel(agent.status)}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Card actions -->
-              <div class="card-actions">
-                {#if agent.status === 'running' || agent.status === 'queued'}
-                  <button
-                    class="action-btn action-btn--pause"
-                    onclick={() => handlePause(agent)}
-                    disabled={pendingIds.has(agent.id)}
-                    aria-label="Pause agent {agent.name}"
-                  >
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-                      <rect x="2" y="1.5" width="3" height="9" rx="1"/>
-                      <rect x="7" y="1.5" width="3" height="9" rx="1"/>
-                    </svg>
-                  </button>
-                  <button
-                    class="action-btn action-btn--cancel"
-                    onclick={() => handleCancel(agent)}
-                    disabled={pendingIds.has(agent.id)}
-                    aria-label="Cancel agent {agent.name}"
-                  >
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                      <line x1="1.5" y1="1.5" x2="8.5" y2="8.5"/>
-                      <line x1="8.5" y1="1.5" x2="1.5" y2="8.5"/>
-                    </svg>
-                  </button>
-                {/if}
-
-                <button
-                  class="action-btn action-btn--expand"
-                  onclick={() => toggleExpand(agent.id)}
-                  aria-expanded={expandedIds.has(agent.id)}
-                  aria-controls="agent-log-{agent.id}"
-                  aria-label="{expandedIds.has(agent.id) ? 'Collapse' : 'Expand'} details for {agent.name}"
-                >
-                  <span
-                    class="chevron"
-                    class:chevron--open={expandedIds.has(agent.id)}
-                    aria-hidden="true"
-                  >›</span>
-                </button>
-              </div>
-            </div>
-
-            <!-- ── Current action (if running) ── -->
-            {#if agent.task && (agent.status === 'running' || agent.status === 'queued')}
-              <p class="current-action truncate" title={agent.task}>
-                <span class="current-action-prefix" aria-hidden="true">›</span>
-                {agent.task}
-              </p>
-            {/if}
-
-            <!-- ── Progress bar (running/queued only) ── -->
-            {#if (agent.status === 'running' || agent.status === 'queued') && agent.progress > 0}
-              <div
-                class="progress-track"
-                role="progressbar"
-                aria-valuenow={agent.progress}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label="Agent progress"
-              >
-                <div class="progress-fill" style="width: {agent.progress}%"></div>
-              </div>
-            {/if}
-
-            <!-- ── Metrics row ── -->
-            <div class="metrics-row" aria-label="Agent metrics">
-              <div class="metric">
-                <span class="metric-label">Duration</span>
-                <span class="metric-value">{formatDuration(agent.duration)}</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Tokens</span>
-                <span class="metric-value">{formatTokens(agent.tokens)}</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Started</span>
-                <span class="metric-value">{formatRelative(agent.created_at)}</span>
-              </div>
-            </div>
-
-            <!-- ── Expanded log ── -->
-            {#if expandedIds.has(agent.id)}
-              <div
-                id="agent-log-{agent.id}"
-                class="agent-log"
-                transition:slide={{ duration: 180 }}
-              >
-                <div class="log-divider" aria-hidden="true"></div>
-
-                {#if agent.error}
-                  <div class="log-error" role="alert">
-                    <p class="log-section-label">Error</p>
-                    <pre class="log-text log-text--error">{agent.error}</pre>
-                  </div>
-                {/if}
-
-                {#if agent.task}
-                  <div class="log-task">
-                    <p class="log-section-label">Task</p>
-                    <p class="log-text">{agent.task}</p>
-                  </div>
-                {/if}
-
-                <div class="log-meta">
-                  <p class="log-section-label">Agent ID</p>
-                  <code class="log-id">{agent.id}</code>
-                </div>
-
-                <div class="log-meta">
-                  <p class="log-section-label">Last updated</p>
-                  <span class="log-text">{formatRelative(agent.updated_at)}</span>
-                </div>
-              </div>
-            {/if}
-          </article>
-        {/each}
-      </div>
+      <AgentGrid
+        agents={agentsStore.agents}
+        {pendingIds}
+        onPause={handlePause}
+        onCancel={handleCancel}
+      />
     {/if}
   </main>
 </div>
@@ -553,6 +328,7 @@
     font-weight: 500;
     transition: all 0.15s;
     line-height: 1;
+    cursor: pointer;
   }
 
   .view-btn:hover:not(.view-btn--active) {
@@ -589,13 +365,8 @@
     gap: 5px;
   }
 
-  .stat--running .stat-value {
-    color: var(--accent-success);
-  }
-
-  .stat--error .stat-value {
-    color: var(--accent-error);
-  }
+  .stat--running .stat-value { color: var(--accent-success); }
+  .stat--error .stat-value   { color: var(--accent-error); }
 
   .stat-dot {
     width: 6px;
@@ -658,7 +429,7 @@
     scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
   }
 
-  /* ── Status banner (subtle, not alarming) ── */
+  /* ── Status banner ── */
 
   .status-banner {
     display: flex;
@@ -681,14 +452,8 @@
     flex-shrink: 0;
   }
 
-  .status-banner-text {
-    color: var(--text-secondary);
-  }
-
-  .status-banner-hint {
-    margin-left: auto;
-    color: var(--text-muted);
-  }
+  .status-banner-text  { color: var(--text-secondary); }
+  .status-banner-hint  { margin-left: auto; color: var(--text-muted); }
 
   .status-banner-btn {
     padding: 3px 10px;
@@ -709,7 +474,7 @@
     color: var(--text-primary);
   }
 
-  /* ── Empty state ── */
+  /* ── Empty state (org chart only) ── */
 
   .empty-state {
     display: flex;
@@ -721,11 +486,6 @@
     color: var(--text-tertiary);
     text-align: center;
     padding: 48px 32px;
-  }
-
-  .empty-icon {
-    color: rgba(255, 255, 255, 0.12);
-    margin-bottom: 4px;
   }
 
   .empty-title {
@@ -757,377 +517,5 @@
   .seed-btn:hover {
     background: rgba(59, 130, 246, 0.2);
     border-color: rgba(59, 130, 246, 0.4);
-  }
-
-  /* ── Agent grid ── */
-
-  .agent-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-  }
-
-  @media (max-width: 720px) {
-    .agent-grid {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  /* ── Agent card ── */
-
-  .agent-card {
-    background: rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: var(--radius-xl);
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    transition:
-      border-color 0.2s ease,
-      box-shadow 0.2s ease;
-  }
-
-  .agent-card--running {
-    border-color: rgba(34, 197, 94, 0.2);
-    box-shadow:
-      0 0 0 1px rgba(34, 197, 94, 0.06),
-      inset 0 1px 0 rgba(34, 197, 94, 0.06);
-  }
-
-  .agent-card--queued {
-    border-color: rgba(59, 130, 246, 0.2);
-    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.06);
-  }
-
-  .agent-card--error {
-    border-color: rgba(239, 68, 68, 0.2);
-    box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.06);
-  }
-
-  .agent-card--done {
-    opacity: 0.75;
-  }
-
-  /* ── Card header ── */
-
-  .card-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .card-header-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  /* ── Status dot ── */
-
-  .status-indicator {
-    flex-shrink: 0;
-  }
-
-  .status-dot {
-    display: block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .status-dot--running {
-    background: var(--accent-success);
-    box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
-    animation: pulse-glow 2s ease-in-out infinite;
-  }
-
-  .status-dot--queued {
-    background: var(--accent-primary);
-    box-shadow: 0 0 6px rgba(59, 130, 246, 0.4);
-    animation: pulse-glow-blue 2s ease-in-out infinite;
-  }
-
-  .status-dot--done {
-    background: rgba(255, 255, 255, 0.25);
-  }
-
-  .status-dot--error {
-    background: var(--accent-error);
-    box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
-  }
-
-  .status-dot--idle {
-    background: rgba(255, 255, 255, 0.18);
-  }
-
-  @keyframes pulse-glow {
-    0%, 100% { box-shadow: 0 0 4px rgba(34, 197, 94, 0.4); }
-    50%       { box-shadow: 0 0 10px rgba(34, 197, 94, 0.7); }
-  }
-
-  @keyframes pulse-glow-blue {
-    0%, 100% { box-shadow: 0 0 4px rgba(59, 130, 246, 0.3); }
-    50%       { box-shadow: 0 0 10px rgba(59, 130, 246, 0.6); }
-  }
-
-  /* ── Agent identity ── */
-
-  .agent-identity {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .agent-name {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .status-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 1px 7px;
-    border-radius: var(--radius-full);
-    font-size: 0.625rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    width: fit-content;
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--text-tertiary);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .status-badge--running {
-    background: rgba(34, 197, 94, 0.12);
-    color: rgba(34, 197, 94, 0.9);
-    border-color: rgba(34, 197, 94, 0.2);
-  }
-
-  .status-badge--queued {
-    background: rgba(59, 130, 246, 0.12);
-    color: rgba(59, 130, 246, 0.9);
-    border-color: rgba(59, 130, 246, 0.2);
-  }
-
-  .status-badge--done {
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.4);
-    border-color: rgba(255, 255, 255, 0.06);
-  }
-
-  .status-badge--error {
-    background: rgba(239, 68, 68, 0.12);
-    color: rgba(239, 68, 68, 0.9);
-    border-color: rgba(239, 68, 68, 0.2);
-  }
-
-  /* ── Card actions ── */
-
-  .card-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-
-  .action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    border-radius: var(--radius-sm);
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.4);
-    transition: all 0.15s;
-  }
-
-  .action-btn:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.7);
-    border-color: rgba(255, 255, 255, 0.15);
-  }
-
-  .action-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .action-btn--cancel:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.1);
-    color: rgba(239, 68, 68, 0.8);
-    border-color: rgba(239, 68, 68, 0.2);
-  }
-
-  .action-btn--expand {
-    border-color: transparent;
-  }
-
-  .chevron {
-    font-size: 1rem;
-    color: rgba(255, 255, 255, 0.3);
-    transition: transform 0.18s ease;
-    display: inline-block;
-    line-height: 1;
-  }
-
-  .chevron--open {
-    transform: rotate(90deg);
-  }
-
-  /* ── Current action ── */
-
-  .current-action {
-    font-size: 0.8125rem;
-    color: var(--text-secondary);
-    line-height: 1.4;
-    padding: 0 2px;
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-  }
-
-  .current-action-prefix {
-    color: var(--accent-success);
-    font-weight: 600;
-    flex-shrink: 0;
-    opacity: 0.7;
-  }
-
-  /* ── Progress bar ── */
-
-  .progress-track {
-    height: 2px;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: var(--radius-full);
-    overflow: hidden;
-  }
-
-  .progress-fill {
-    height: 100%;
-    background: linear-gradient(
-      90deg,
-      rgba(34, 197, 94, 0.6),
-      rgba(34, 197, 94, 0.9)
-    );
-    border-radius: var(--radius-full);
-    transition: width 0.4s ease;
-  }
-
-  .agent-card--queued .progress-fill {
-    background: linear-gradient(
-      90deg,
-      rgba(59, 130, 246, 0.6),
-      rgba(59, 130, 246, 0.9)
-    );
-  }
-
-  /* ── Metrics row ── */
-
-  .metrics-row {
-    display: flex;
-    gap: 0;
-    background: rgba(255, 255, 255, 0.025);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-
-  .metric {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 8px 10px;
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  .metric:last-child {
-    border-right: none;
-  }
-
-  .metric-label {
-    font-size: 0.625rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-muted);
-  }
-
-  .metric-value {
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* ── Expanded log ── */
-
-  .log-divider {
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
-    margin-bottom: 10px;
-  }
-
-  .agent-log {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .log-section-label {
-    font-size: 0.625rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.2);
-    margin-bottom: 4px;
-  }
-
-  .log-text {
-    font-size: 0.8125rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-  }
-
-  .log-text--error {
-    color: rgba(239, 68, 68, 0.8);
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    background: rgba(239, 68, 68, 0.05);
-    border: 1px solid rgba(239, 68, 68, 0.1);
-    border-radius: var(--radius-sm);
-    padding: 8px 10px;
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 120px;
-    overflow-y: auto;
-    margin: 0;
-  }
-
-  .log-id {
-    font-family: var(--font-mono);
-    font-size: 0.6875rem;
-    color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.03);
-    padding: 3px 7px;
-    border-radius: var(--radius-xs);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    user-select: text;
   }
 </style>

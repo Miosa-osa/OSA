@@ -6,7 +6,12 @@ import { BASE_URL, API_PREFIX } from "$lib/api/client";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-export type CommandCategory = "navigation" | "actions" | "commands" | "recent";
+export type CommandCategory =
+  | "navigation"
+  | "actions"
+  | "commands"
+  | "recent"
+  | "search";
 
 export interface PaletteCommand {
   id: string;
@@ -14,6 +19,8 @@ export interface PaletteCommand {
   description?: string;
   shortcut?: string;
   icon?: string;
+  /** Badge label shown on search results (e.g. "Agent", "Task", "Project") */
+  searchBadge?: string;
   category: CommandCategory;
   /** Called when the command is executed */
   action: () => void | Promise<void>;
@@ -23,6 +30,19 @@ interface ApiCommand {
   name: string;
   description?: string;
   usage?: string;
+}
+
+// ── Search source types ─────────────────────────────────────────────────────────
+
+export interface SearchSource {
+  type: string;
+  icon: string;
+  items: () => Array<{
+    id: string | number;
+    name: string;
+    description?: string;
+  }>;
+  action: (item: { id: string | number; name: string }) => void;
 }
 
 // ── Fuzzy Match ────────────────────────────────────────────────────────────────
@@ -64,13 +84,15 @@ export interface GroupedResults {
   navigation: PaletteCommand[];
   actions: PaletteCommand[];
   commands: PaletteCommand[];
+  search: PaletteCommand[];
 }
 
 // ── PaletteStore Class ─────────────────────────────────────────────────────────
 
 const RECENT_STORAGE_KEY = "osa-palette-recent";
 const MAX_RECENT = 5;
-const MAX_VISIBLE = 10;
+const MAX_VISIBLE = 14;
+const SEARCH_MIN_CHARS = 3;
 
 class PaletteStore {
   isOpen = $state(false);
@@ -78,6 +100,7 @@ class PaletteStore {
   selectedIndex = $state(0);
   commands = $state<PaletteCommand[]>([]);
   recentIds = $state<string[]>([]);
+  private searchSources = $state<SearchSource[]>([]);
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
@@ -89,6 +112,7 @@ class PaletteStore {
       ...grouped.navigation,
       ...grouped.actions,
       ...grouped.commands,
+      ...grouped.search,
     ].slice(0, MAX_VISIBLE);
   });
 
@@ -118,11 +142,43 @@ class PaletteStore {
       .filter((c): c is PaletteCommand => c !== undefined)
       .filter((c) => !q || matches(c));
 
+    // Search results: only when query is 3+ chars
+    let searchResults: PaletteCommand[] = [];
+    if (q.length >= SEARCH_MIN_CHARS) {
+      for (const source of this.searchSources) {
+        const items = source.items();
+        for (const item of items) {
+          const s = fuzzyScore(`${item.name} ${item.description ?? ""}`, q);
+          if (s !== null && s > 0) {
+            searchResults.push({
+              id: `search-${source.type}-${item.id}`,
+              name: item.name,
+              description: item.description,
+              icon: source.icon,
+              searchBadge: source.type,
+              category: "search",
+              action: () => source.action(item),
+            });
+          }
+        }
+      }
+      // Sort by score descending
+      searchResults = searchResults
+        .map((cmd) => ({
+          cmd,
+          s: fuzzyScore(`${cmd.name} ${cmd.description ?? ""}`, q) ?? 0,
+        }))
+        .sort((a, b) => b.s - a.s)
+        .map(({ cmd }) => cmd)
+        .slice(0, 6);
+    }
+
     return {
       recent: recentCmds,
       navigation: sorted(byCategory("navigation")),
       actions: sorted(byCategory("actions")),
       commands: sorted(byCategory("commands")),
+      search: searchResults,
     };
   });
 
@@ -214,6 +270,17 @@ class PaletteStore {
     }
   }
 
+  // ── Search Sources ─────────────────────────────────────────────────────────────
+
+  /**
+   * Registers live data sources for the search section.
+   * Each source provides a reactive getter for its items.
+   * Call from +layout.svelte after stores are available.
+   */
+  registerSearchSources(sources: SearchSource[]): void {
+    this.searchSources = sources;
+  }
+
   // ── Register Built-in Commands ────────────────────────────────────────────────
 
   /**
@@ -227,6 +294,9 @@ class PaletteStore {
       clearChat: () => void;
       toggleYolo: () => void;
       restartBackend: () => void;
+      newIssue?: () => void;
+      newProject?: () => void;
+      refreshAll?: () => void;
     },
   ): void {
     const navCommands: PaletteCommand[] = [
@@ -240,46 +310,125 @@ class PaletteStore {
         action: () => goto("/app"),
       },
       {
+        id: "nav-chat",
+        name: "Chat",
+        description: "Open the chat interface",
+        shortcut: "⌘2",
+        icon: "chat",
+        category: "navigation",
+        action: () => goto("/app/chat"),
+      },
+      {
         id: "nav-agents",
         name: "Agents",
         description: "Manage running agents",
-        shortcut: "⌘2",
+        shortcut: "⌘3",
         icon: "agents",
         category: "navigation",
         action: () => goto("/app/agents"),
       },
       {
+        id: "nav-tasks",
+        name: "Tasks",
+        description: "View orchestrator tasks",
+        icon: "tasks",
+        category: "navigation",
+        action: () => goto("/app/tasks"),
+      },
+      {
+        id: "nav-issues",
+        name: "Issues",
+        description: "Track issues and bugs",
+        icon: "issues",
+        category: "navigation",
+        action: () => goto("/app/issues"),
+      },
+      {
+        id: "nav-signals",
+        name: "Signals",
+        description: "Monitor signal events",
+        icon: "signals",
+        category: "navigation",
+        action: () => goto("/app/signals"),
+      },
+      {
+        id: "nav-skills",
+        name: "Skills",
+        description: "Browse agent skills",
+        icon: "skills",
+        category: "navigation",
+        action: () => goto("/app/skills"),
+      },
+      {
         id: "nav-models",
         name: "Models",
         description: "Browse and activate models",
-        shortcut: "⌘3",
+        shortcut: "⌘4",
         icon: "models",
         category: "navigation",
         action: () => goto("/app/models"),
       },
       {
-        id: "nav-terminal",
-        name: "Terminal",
-        description: "Open the built-in terminal",
-        shortcut: "⌘4",
-        icon: "terminal",
+        id: "nav-memory",
+        name: "Memory",
+        description: "View agent memory store",
+        icon: "memory",
         category: "navigation",
-        action: () => goto("/app/terminal"),
+        action: () => goto("/app/memory"),
       },
       {
         id: "nav-connectors",
         name: "Connectors",
         description: "Connect OSA to local services",
-        shortcut: "⌘5",
         icon: "link",
         category: "navigation",
         action: () => goto("/app/connectors"),
       },
       {
+        id: "nav-terminal",
+        name: "Terminal",
+        description: "Open the built-in terminal",
+        icon: "terminal",
+        category: "navigation",
+        action: () => goto("/app/terminal"),
+      },
+      {
+        id: "nav-usage",
+        name: "Usage",
+        description: "View token and cost usage",
+        icon: "usage",
+        category: "navigation",
+        action: () => goto("/app/usage"),
+      },
+      {
+        id: "nav-projects",
+        name: "Projects",
+        description: "Manage your projects",
+        icon: "projects",
+        category: "navigation",
+        action: () => goto("/app/projects"),
+      },
+      {
+        id: "nav-approvals",
+        name: "Approvals",
+        description: "Review pending approvals",
+        icon: "approvals",
+        category: "navigation",
+        action: () => goto("/app/approvals"),
+      },
+      {
+        id: "nav-activity",
+        name: "Activity",
+        description: "View activity log",
+        icon: "activity",
+        category: "navigation",
+        action: () => goto("/app/activity"),
+      },
+      {
         id: "nav-settings",
         name: "Settings",
         description: "Configure OSA preferences",
-        shortcut: "⌘6",
+        shortcut: "⌘,",
         icon: "settings",
         category: "navigation",
         action: () => goto("/app/settings"),
@@ -289,12 +438,54 @@ class PaletteStore {
     const actionCommands: PaletteCommand[] = [
       {
         id: "action-new-session",
-        name: "New Session",
+        name: "New Chat Session",
         description: "Start a fresh chat session",
         shortcut: "⌘N",
         icon: "plus",
         category: "actions",
         action: actions.newSession,
+      },
+      {
+        id: "action-new-issue",
+        name: "New Issue",
+        description: "Create a new issue",
+        icon: "issues",
+        category: "actions",
+        action: () => {
+          if (actions.newIssue) {
+            actions.newIssue();
+          } else {
+            goto("/app/issues?new=1");
+          }
+        },
+      },
+      {
+        id: "action-new-project",
+        name: "New Project",
+        description: "Create a new project",
+        icon: "projects",
+        category: "actions",
+        action: () => {
+          if (actions.newProject) {
+            actions.newProject();
+          } else {
+            goto("/app/projects?new=1");
+          }
+        },
+      },
+      {
+        id: "action-refresh",
+        name: "Refresh All",
+        description: "Refresh current page data",
+        icon: "refresh",
+        category: "actions",
+        action: () => {
+          if (actions.refreshAll) {
+            actions.refreshAll();
+          } else if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("osa:refresh"));
+          }
+        },
       },
       {
         id: "action-clear-chat",

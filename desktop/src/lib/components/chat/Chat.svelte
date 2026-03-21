@@ -5,7 +5,8 @@
   import { sessionsStore } from '$lib/stores/sessions.svelte';
   import { modelsStore } from '$lib/stores/models.svelte';
   import { restartBackend } from '$lib/utils/backend';
-  import MessageBubble from './MessageBubble.svelte';
+  import ChatHeader from './ChatHeader.svelte';
+  import MessageList from './MessageList.svelte';
   import ChatInput from './ChatInput.svelte';
   import type { SlashCommandName } from './ChatInput.svelte';
   import type { ToolCallRef } from '$lib/api/types';
@@ -30,7 +31,6 @@
     size: number;
     /** base64 data URL for images, raw text for text files */
     content: string;
-    /** 'image' | 'text' | 'other' */
     category: 'image' | 'text' | 'other';
   }
 
@@ -38,43 +38,13 @@
   let isDragOver = $state(false);
   let dragCounter = $state(0);
 
-  // ── Model selector state ───────────────────────────────────────────────────
-  let showModelMenu = $state(false);
-
-  function toggleModelMenu() {
-    showModelMenu = !showModelMenu;
-  }
-
-  function closeModelMenu() {
-    showModelMenu = false;
-  }
-
-  async function selectModel(name: string) {
-    closeModelMenu();
-    await modelsStore.activateModel(name);
-  }
-
-  // Derive a short display label from the current model name.
-  // e.g. "claude-sonnet-4-6" → "claude-sonnet-4-6" (kept as-is, bar is small)
-  const currentModelLabel = $derived(
-    modelsStore.current?.name ?? 'No model'
-  );
-
-  // Fetch models on mount if the list is empty
-  $effect(() => {
-    if (modelsStore.models.length === 0 && !modelsStore.loading) {
-      modelsStore.fetchModels().catch(() => {});
-    }
-  });
-
   const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml'];
   const TEXT_TYPES = ['text/plain', 'text/markdown', 'text/csv', 'text/html', 'text/css', 'text/javascript', 'application/json', 'application/xml'];
 
   function categorizeFile(type: string, name: string): 'image' | 'text' | 'other' {
-    if (IMAGE_TYPES.some(t => type.startsWith(t.split('/')[0]) && type.includes(t.split('/')[1]))) return 'image';
     if (IMAGE_TYPES.includes(type)) return 'image';
+    if (IMAGE_TYPES.some(t => type.startsWith(t.split('/')[0]) && type.includes(t.split('/')[1]))) return 'image';
     if (TEXT_TYPES.includes(type)) return 'text';
-    // Check extension fallback
     const ext = name.split('.').pop()?.toLowerCase() ?? '';
     if (['png','jpg','jpeg','gif','webp','svg'].includes(ext)) return 'image';
     if (['txt','md','csv','html','css','js','ts','json','xml','yaml','yml','toml','py','go','rs','svelte','tsx','jsx','sh','sql','log'].includes(ext)) return 'text';
@@ -87,16 +57,12 @@
       const category = categorizeFile(file.type, file.name);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      if (category === 'image') {
+      if (category === 'image' || category === 'other') {
         const dataUrl = await readAsDataUrl(file);
         attachedFiles = [...attachedFiles, { id, name: file.name, type: file.type, size: file.size, content: dataUrl, category }];
-      } else if (category === 'text') {
+      } else {
         const text = await file.text();
         attachedFiles = [...attachedFiles, { id, name: file.name, type: file.type, size: file.size, content: text, category }];
-      } else {
-        // For other files, store basic metadata (content will be base64 for potential upload)
-        const dataUrl = await readAsDataUrl(file);
-        attachedFiles = [...attachedFiles, { id, name: file.name, type: file.type, size: file.size, content: dataUrl, category }];
       }
     }
   }
@@ -149,22 +115,14 @@
     }
   }
 
-  // If the route passes a sessionId and the store isn't already on that session,
-  // load it. The route page also does this but Chat guards here for robustness.
+  // ── Session sync ───────────────────────────────────────────────────────────
   $effect(() => {
     if (sessionId && chatStore.currentSession?.id !== sessionId) {
-      chatStore.loadSession(sessionId).catch(() => {
-        // Session not on backend yet — fine, first message will create it.
-      });
+      chatStore.loadSession(sessionId).catch(() => {});
     }
   });
 
-  // Viewport element for scroll management
-  let viewportEl = $state<HTMLDivElement | null>(null);
-  let isAtBottom = $state(true);
-
-  // Whether the streaming assistant bubble should show the typing indicator
-  // (streaming active AND no content yet)
+  // ── Streaming state derived for MessageList ────────────────────────────────
   const showTypingDots = $derived(
     chatStore.isStreaming &&
     chatStore.streaming.textBuffer.length === 0 &&
@@ -172,7 +130,6 @@
     chatStore.streaming.thinkingBuffer.length === 0
   );
 
-  // Build the live streaming tool call states for display
   const streamingToolStates = $derived(
     chatStore.streaming.toolCalls.map((tc) => ({
       tool: tc as unknown as ToolCallRef,
@@ -183,48 +140,12 @@
     }))
   );
 
-  // Reset scroll position to bottom whenever the active session changes
-  $effect(() => {
-    const _sessionId = chatStore.currentSession?.id;
-    void _sessionId;
-    isAtBottom = true;
-    if (viewportEl) {
-      requestAnimationFrame(() => {
-        if (viewportEl) viewportEl.scrollTop = viewportEl.scrollHeight;
-      });
-    }
-  });
+  // ── Voice / orb ────────────────────────────────────────────────────────────
+  let isVoiceListening = $state(false);
+  const orbActive = $derived(chatStore.isStreaming || isVoiceListening);
 
-  // Auto-scroll effect — fires whenever messages or streaming buffer change
-  $effect(() => {
-    // Track reactive dependencies
-    const _msgs = chatStore.messages;
-    const _buf = chatStore.streaming.textBuffer;
-    const _thinking = chatStore.streaming.thinkingBuffer;
-    void _msgs, _buf, _thinking;
-
-    if (isAtBottom && viewportEl) {
-      requestAnimationFrame(() => {
-        if (viewportEl) {
-          viewportEl.scrollTop = viewportEl.scrollHeight;
-        }
-      });
-    }
-  });
-
-  function handleScroll() {
-    if (!viewportEl) return;
-    const { scrollTop, scrollHeight, clientHeight } = viewportEl;
-    isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
-  }
-
-  function scrollToBottom() {
-    isAtBottom = true;
-    viewportEl?.scrollTo({ top: viewportEl.scrollHeight, behavior: 'smooth' });
-  }
-
+  // ── Send ───────────────────────────────────────────────────────────────────
   function handleSend(text: string) {
-    // If files are attached, prepend file context to the message
     if (attachedFiles.length > 0) {
       const fileContext = attachedFiles.map(f => {
         if (f.category === 'text') {
@@ -240,17 +161,9 @@
     }
 
     chatStore.sendMessage(text);
-    isAtBottom = true;
   }
 
-  // ── Orb state: idle vs active ──────────────────────────────────────────────
-  // Active when streaming or voice listening (ChatInput exposes via binding)
-  let isVoiceListening = $state(false);
-  const orbActive = $derived(chatStore.isStreaming || isVoiceListening);
-
-  // ── Slash command execution ────────────────────────────────────────────────
-
-  /** Inject a system message into the local message list (no network call). */
+  // ── Slash commands ─────────────────────────────────────────────────────────
   function injectSystemMessage(content: string): void {
     const msg: Message = {
       id: `system-${Date.now()}`,
@@ -259,13 +172,11 @@
       timestamp: new Date().toISOString(),
     };
     chatStore.messages = [...chatStore.messages, msg];
-    isAtBottom = true;
   }
 
   async function handleCommand(cmd: SlashCommandName): Promise<void> {
     switch (cmd) {
       case 'clear': {
-        // Cancel any active stream, then start a fresh session
         if (chatStore.isStreaming) chatStore.cancelGeneration();
         const newSession = await chatStore.createSession();
         chatStore.currentSession = newSession;
@@ -338,7 +249,6 @@
             .join('\n');
           injectSystemMessage(`**Recent sessions** (${sessions.length} total)\n\n${lines}`);
         }
-        // Also open the sessions panel so the user can click through
         sessionsStore.open();
         break;
       }
@@ -370,27 +280,27 @@
 >
   <!-- Drag overlay -->
   {#if isDragOver}
-    <div class="drop-overlay" transition:fly={{ duration: 150, y: 8 }}>
-      <div class="drop-inner">
+    <div class="chat-drop-overlay" transition:fly={{ duration: 150, y: 8 }}>
+      <div class="chat-drop-inner">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
           <line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <span class="drop-text">Drop files here</span>
-        <span class="drop-hint">Images, text, code, documents</span>
+        <span class="chat-drop-text">Drop files here</span>
+        <span class="chat-drop-hint">Images, text, code, documents</span>
       </div>
     </div>
   {/if}
 
-  <!-- Connection status banner — subtle, not alarming -->
+  <!-- Connection status banner -->
   {#if chatStore.error}
-    <div class="connection-banner" role="status">
-      <span class="connection-dot"></span>
-      <span class="connection-text">Backend offline</span>
-      <span class="connection-hint">Start OSA backend on port 9089</span>
+    <div class="chat-conn-banner" role="status">
+      <span class="chat-conn-dot"></span>
+      <span class="chat-conn-text">Backend offline</span>
+      <span class="chat-conn-hint">Start OSA backend on port 9089</span>
       <button
-        class="restart-btn"
+        class="chat-restart-btn"
         onclick={() => { restartBackend().catch(() => {}); }}
         aria-label="Restart backend"
       >
@@ -399,237 +309,42 @@
     </div>
   {/if}
 
-  <!-- Top toolbar: history toggle + model selector -->
-  <div class="chat-toolbar">
-    <!-- History toggle -->
-    {#if onToggleHistory}
-      <button
-        class="toolbar-btn"
-        class:toolbar-btn--active={historyOpen}
-        onclick={onToggleHistory}
-        aria-label={historyOpen ? 'Hide chat history' : 'Show chat history'}
-        title={historyOpen ? 'Hide history' : 'Show history'}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-          <line x1="9" y1="3" x2="9" y2="21" />
-        </svg>
-      </button>
-    {/if}
+  <!-- Header: history toggle + model selector -->
+  <ChatHeader
+    {onToggleHistory}
+    {historyOpen}
+    isStreaming={chatStore.isStreaming}
+  />
 
-    <div class="toolbar-spacer"></div>
-
-    <!-- Model selector dropdown -->
-    <div class="model-selector">
-      {#if showModelMenu}
-        <div class="model-menu-backdrop" role="presentation" onmousedown={closeModelMenu}></div>
-      {/if}
-
-      <button
-        class="model-btn"
-        onclick={toggleModelMenu}
-        aria-haspopup="listbox"
-        aria-expanded={showModelMenu}
-        aria-label="Select model"
-      >
-        {#if modelsStore.current}
-          {@const providerColor = modelsStore.current.provider === 'anthropic' ? '#7c3aed'
-            : modelsStore.current.provider === 'openai' ? '#16a34a'
-            : modelsStore.current.provider === 'groq' ? '#f97316'
-            : modelsStore.current.provider === 'openrouter' ? '#0ea5e9'
-            : '#64748b'}
-          <span class="model-dot" style="background: {providerColor};"></span>
-        {:else}
-          <span class="model-dot model-dot--none"></span>
-        {/if}
-
-        <span class="model-name">{currentModelLabel}</span>
-
-        {#if modelsStore.switching}
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="model-spin" aria-hidden="true">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-          </svg>
-        {:else}
-          <svg class="model-chevron" class:model-chevron--open={showModelMenu} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        {/if}
-      </button>
-
-      {#if showModelMenu}
-        <div class="model-dropdown" role="listbox" aria-label="Available models">
-          {#if modelsStore.loading}
-            <div class="model-dropdown-empty">Loading models...</div>
-          {:else if modelsStore.models.length === 0}
-            <div class="model-dropdown-empty">No models available</div>
-          {:else}
-            {#each modelsStore.models as model (model.name + model.provider)}
-              {@const providerColor = model.provider === 'anthropic' ? '#7c3aed'
-                : model.provider === 'openai' ? '#16a34a'
-                : model.provider === 'groq' ? '#f97316'
-                : model.provider === 'openrouter' ? '#0ea5e9'
-                : '#64748b'}
-              <button
-                class="model-option"
-                class:model-option--active={model.active}
-                class:model-option--switching={modelsStore.switching === model.name}
-                role="option"
-                aria-selected={model.active}
-                onclick={() => selectModel(model.name)}
-              >
-                <span class="model-option-dot" style="background: {providerColor};"></span>
-                <span class="model-option-name">{model.name}</span>
-                {#if model.active}
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="model-option-check" aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                {/if}
-              </button>
-            {/each}
-          {/if}
-        </div>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Message list viewport -->
-  <div
-    class="message-viewport"
-    bind:this={viewportEl}
-    onscroll={handleScroll}
-    aria-label="Chat messages"
-    aria-live="polite"
-    aria-relevant="additions"
-    role="log"
-  >
-    <!-- Empty state — absolutely centred, does not participate in scroll layout -->
-    {#if chatStore.messages.length === 0 && !chatStore.isStreaming && !chatStore.pendingUserMessage}
-      <div class="empty-state" transition:fly={{ y: 16, duration: 300 }}>
-        <p class="empty-label">Start a conversation</p>
-      </div>
-    {/if}
-
-    <div class="message-list">
-      <!-- Persisted messages -->
-      {#each chatStore.messages as message (message.id)}
-        <div
-          class="message-row message-row--{message.role}"
-          transition:fly={{ y: 12, duration: 220 }}
-        >
-          <MessageBubble {message} />
-        </div>
-      {/each}
-
-      <!-- Optimistic pending user message -->
-      {#if chatStore.pendingUserMessage}
-        {@const pending = chatStore.pendingUserMessage}
-        <div
-          class="message-row message-row--user"
-          transition:fly={{ y: 12, duration: 220 }}
-        >
-          <MessageBubble message={pending} />
-        </div>
-      {/if}
-
-      <!-- Live assistant streaming bubble -->
-      {#if chatStore.isStreaming}
-        <div
-          class="message-row message-row--assistant"
-          transition:fly={{ y: 12, duration: 220 }}
-        >
-          {#if showTypingDots}
-            <!-- No content yet — show typing indicator -->
-            <div class="typing-indicator" aria-label="Agent is typing">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-            </div>
-          {:else}
-            <!-- Live streaming bubble — synthesise a Message-shaped object -->
-            <MessageBubble
-              message={{
-                id: 'streaming',
-                role: 'assistant',
-                content: chatStore.streaming.textBuffer,
-                timestamp: new Date().toISOString(),
-              }}
-              isStreaming={true}
-              streamingToolCalls={streamingToolStates}
-              thinkingText={chatStore.streaming.thinkingBuffer}
-              thinkingStreaming={chatStore.streaming.thinkingBuffer.length > 0 &&
-                chatStore.isStreaming}
-            />
-          {/if}
-        </div>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Scroll-to-bottom FAB -->
-  {#if !isAtBottom}
-    <button
-      class="scroll-btn"
-      aria-label="Scroll to latest message"
-      onclick={scrollToBottom}
-      transition:fly={{ y: 8, duration: 150 }}
-    >
-      <svg
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.5"
-        aria-hidden="true"
-      >
-        <polyline points="6 9 12 15 18 9"></polyline>
-      </svg>
-    </button>
-  {/if}
-
-  <!-- Orb indicator above input (visible during conversations) -->
-  {#if chatStore.messages.length > 0 || chatStore.isStreaming || chatStore.pendingUserMessage}
-    <div class="orb-dock">
-      <div class="orb-container orb-container--small">
-        {#if orbActive}
-          <video
-            class="orb-active"
-            src="/OSLoopingActiveMode.mp4"
-            autoplay
-            loop
-            muted
-            playsinline
-            aria-hidden="true"
-          ></video>
-        {:else}
-          <img
-            src="/OSAIconLogo.png"
-            alt=""
-            class="orb-idle"
-            aria-hidden="true"
-          />
-        {/if}
-      </div>
-    </div>
-  {/if}
+  <!-- Message list (owns scroll, orb, FAB) -->
+  <MessageList
+    messages={chatStore.messages}
+    pendingUserMessage={chatStore.pendingUserMessage}
+    isStreaming={chatStore.isStreaming}
+    streamingText={chatStore.streaming.textBuffer}
+    streamingThinking={chatStore.streaming.thinkingBuffer}
+    {streamingToolStates}
+    {showTypingDots}
+    {orbActive}
+  />
 
   <!-- Attached files bar -->
   {#if attachedFiles.length > 0}
-    <div class="attachments-bar">
+    <div class="chat-attachments">
       {#each attachedFiles as file (file.id)}
-        <div class="attachment-chip" title={file.name}>
+        <div class="chat-chip" title={file.name}>
           {#if file.category === 'image'}
-            <img src={file.content} alt={file.name} class="attachment-thumb" />
+            <img src={file.content} alt={file.name} class="chat-chip-thumb" />
           {:else}
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
               <polyline points="14 2 14 8 20 8"/>
             </svg>
           {/if}
-          <span class="attachment-name">{file.name}</span>
-          <span class="attachment-size">{formatFileSize(file.size)}</span>
+          <span class="chat-chip-name">{file.name}</span>
+          <span class="chat-chip-size">{formatFileSize(file.size)}</span>
           <button
-            class="attachment-remove"
+            class="chat-chip-remove"
             onclick={() => removeFile(file.id)}
             aria-label="Remove {file.name}"
           >
@@ -641,7 +356,7 @@
   {/if}
 
   <!-- Input dock -->
-  <div class="input-dock">
+  <div class="chat-input-dock">
     <ChatInput
       disabled={chatStore.isStreaming}
       onSend={handleSend}
@@ -667,7 +382,7 @@
   }
 
   /* Connection status banner */
-  .connection-banner {
+  .chat-conn-banner {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -679,7 +394,7 @@
     flex-shrink: 0;
   }
 
-  .connection-dot {
+  .chat-conn-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
@@ -687,16 +402,16 @@
     flex-shrink: 0;
   }
 
-  .connection-text {
+  .chat-conn-text {
     color: var(--text-secondary);
   }
 
-  .connection-hint {
+  .chat-conn-hint {
     margin-left: auto;
     color: var(--text-muted);
   }
 
-  .restart-btn {
+  .chat-restart-btn {
     padding: 3px 10px;
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -709,238 +424,14 @@
     flex-shrink: 0;
   }
 
-  .restart-btn:hover {
+  .chat-restart-btn:hover {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.2);
     color: var(--text-primary);
   }
 
-  /* Scrollable message area */
-  .message-viewport {
-    position: relative;
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
-  }
-
-  .message-viewport::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .message-viewport::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 2px;
-  }
-
-  .message-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 20px 16px;
-    min-height: 100%;
-    justify-content: flex-end;
-  }
-
-  .message-row {
-    display: flex;
-  }
-
-  .message-row--user {
-    justify-content: flex-end;
-  }
-
-  .message-row--assistant,
-  .message-row--system,
-  .message-row--tool {
-    justify-content: flex-start;
-  }
-
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    padding: 60px 0;
-    color: rgba(255, 255, 255, 0.3);
-    flex: 1;
-  }
-
-  .empty-label {
-    font-size: 0.875rem;
-    letter-spacing: 0.04em;
-    margin: 0;
-  }
-
-  /* Typing indicator dots */
-  .typing-indicator {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 14px 16px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 14px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-  }
-
-  .dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.4);
-    animation: bounce 1.2s ease-in-out infinite;
-  }
-
-  .dot:nth-child(2) {
-    animation-delay: 0.2s;
-  }
-  .dot:nth-child(3) {
-    animation-delay: 0.4s;
-  }
-
-  @keyframes bounce {
-    0%,
-    80%,
-    100% {
-      transform: translateY(0);
-    }
-    40% {
-      transform: translateY(-6px);
-    }
-  }
-
-  /* Scroll-to-bottom FAB */
-  .scroll-btn {
-    position: absolute;
-    bottom: 80px;
-    right: 16px;
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.7);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition:
-      background 0.15s,
-      transform 0.15s;
-    z-index: 10;
-  }
-
-  .scroll-btn:hover {
-    background: rgba(255, 255, 255, 0.18);
-    transform: translateY(-1px);
-  }
-
-  /* ── Orb system — idle/active crossfade ──────────────────────────── */
-
-  .orb-container {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-    border-radius: 50%;
-    /* Hard circle clip — ensures video edges are perfectly masked */
-    clip-path: circle(50%);
-    -webkit-clip-path: circle(50%);
-    /* GPU compositing for smooth video playback */
-    will-change: clip-path;
-    transform: translateZ(0);
-  }
-
-  .orb-container--large {
-    width: 120px;
-    height: 120px;
-  }
-
-  .orb-container--small {
-    width: 36px;
-    height: 36px;
-  }
-
-  .orb-idle,
-  .orb-active {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    pointer-events: none;
-    transition: opacity 0.5s ease;
-  }
-
-  /* Idle video has WHITE bg — scale aggressively to push anti-aliased edge outside
-     the clip boundary, then multiply blends white away against the dark page bg */
-  .orb-idle {
-    transform: scale(2.1);
-    mix-blend-mode: multiply;
-  }
-
-  /* Active video has BLACK bg — same scale so orb fills clip; screen makes black transparent */
-  .orb-active {
-    transform: scale(2.1);
-    mix-blend-mode: screen;
-  }
-
-  /* Orb dock — sits between message list and input */
-  .orb-dock {
-    display: flex;
-    justify-content: center;
-    padding: 8px 0 4px;
-    flex-shrink: 0;
-  }
-
-  /* ── Drop overlay ───────────────────────────────────────────── */
-
-  .drop-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 50;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-  }
-
-  .drop-inner {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-    padding: 40px 60px;
-    border: 2px dashed rgba(255, 255, 255, 0.25);
-    border-radius: 16px;
-    color: rgba(255, 255, 255, 0.7);
-  }
-
-  .drop-text {
-    font-size: 1rem;
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.85);
-  }
-
-  .drop-hint {
-    font-size: 0.75rem;
-    color: rgba(255, 255, 255, 0.35);
-  }
-
-  /* ── Attachments bar ───────────────────────────────────────── */
-
-  .attachments-bar {
+  /* Attached files bar */
+  .chat-attachments {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -950,7 +441,7 @@
     flex-shrink: 0;
   }
 
-  .attachment-chip {
+  .chat-chip {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -963,7 +454,7 @@
     max-width: 200px;
   }
 
-  .attachment-thumb {
+  .chat-chip-thumb {
     width: 24px;
     height: 24px;
     border-radius: 4px;
@@ -971,7 +462,7 @@
     flex-shrink: 0;
   }
 
-  .attachment-name {
+  .chat-chip-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -979,13 +470,13 @@
     min-width: 0;
   }
 
-  .attachment-size {
+  .chat-chip-size {
     color: rgba(255, 255, 255, 0.3);
     font-size: 0.6875rem;
     flex-shrink: 0;
   }
 
-  .attachment-remove {
+  .chat-chip-remove {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1000,228 +491,50 @@
     transition: color 0.12s, background 0.12s;
   }
 
-  .attachment-remove:hover {
+  .chat-chip-remove:hover {
     color: rgba(255, 255, 255, 0.8);
     background: rgba(255, 255, 255, 0.1);
   }
 
   /* Input dock */
-  .input-dock {
+  .chat-input-dock {
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     padding: 12px 16px 16px;
     flex-shrink: 0;
   }
 
-  /* ── Top toolbar ───────────────────────────────────────────── */
-
-  .chat-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    flex-shrink: 0;
-  }
-
-  .toolbar-btn {
-    width: 28px;
-    height: 28px;
+  /* Drop overlay */
+  .chat-drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    color: rgba(255, 255, 255, 0.3);
-    cursor: pointer;
-    transition: color 150ms, background 150ms, border-color 150ms;
-    flex-shrink: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
 
-  .toolbar-btn:hover {
+  .chat-drop-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 60px;
+    border: 2px dashed rgba(255, 255, 255, 0.25);
+    border-radius: 16px;
     color: rgba(255, 255, 255, 0.7);
-    background: rgba(255, 255, 255, 0.05);
-    border-color: rgba(255, 255, 255, 0.15);
   }
 
-  .toolbar-btn--active {
-    color: rgba(59, 130, 246, 0.7);
-    border-color: rgba(59, 130, 246, 0.25);
+  .chat-drop-text {
+    font-size: 1rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.85);
   }
 
-  .toolbar-btn--active:hover {
-    color: rgba(59, 130, 246, 0.9);
-    background: rgba(59, 130, 246, 0.08);
-    border-color: rgba(59, 130, 246, 0.35);
-  }
-
-  .toolbar-spacer {
-    flex: 1;
-  }
-
-  /* ── Model selector (compact dropdown) ───────────────────── */
-
-  .model-selector {
-    position: relative;
-    flex-shrink: 0;
-  }
-
-  .model-menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 19;
-  }
-
-  .model-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.45);
-    cursor: pointer;
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 6px;
-    text-align: left;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
-    max-width: 220px;
-    height: 28px;
-  }
-
-  .model-btn:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: rgba(255, 255, 255, 0.65);
-    border-color: rgba(255, 255, 255, 0.15);
-  }
-
-  .model-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    opacity: 0.8;
-  }
-
-  .model-dot--none {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .model-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.68rem;
-    letter-spacing: 0.01em;
-  }
-
-  .model-chevron {
-    flex-shrink: 0;
-    transition: transform 0.15s ease;
-    opacity: 0.5;
-  }
-
-  .model-chevron--open {
-    transform: rotate(180deg);
-  }
-
-  .model-spin {
-    animation: model-spin 0.8s linear infinite;
-  }
-
-  @keyframes model-spin {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-  }
-
-  /* Dropdown */
-  .model-dropdown {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    width: 260px;
-    z-index: 20;
-    background: rgba(18, 18, 22, 0.96);
-    backdrop-filter: blur(20px) saturate(160%);
-    -webkit-backdrop-filter: blur(20px) saturate(160%);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 10px;
-    max-height: 300px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-    padding: 4px;
-  }
-
-  .model-dropdown::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .model-dropdown::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 2px;
-  }
-
-  .model-dropdown-empty {
-    padding: 12px 16px;
-    font-size: 0.7rem;
-    color: rgba(255, 255, 255, 0.3);
-    font-style: italic;
-  }
-
-  .model-option {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 10px;
-    background: transparent;
-    border: none;
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 0.7rem;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    text-align: left;
-    cursor: pointer;
-    border-radius: 6px;
-    transition: background 0.1s, color 0.1s;
-  }
-
-  .model-option:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.8);
-  }
-
-  .model-option--active {
-    color: rgba(255, 255, 255, 0.9);
-    background: rgba(59, 130, 246, 0.08);
-  }
-
-  .model-option--switching {
-    opacity: 0.6;
-    pointer-events: none;
-  }
-
-  .model-option-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    opacity: 0.75;
-  }
-
-  .model-option-name {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-
-  .model-option-check {
-    flex-shrink: 0;
-    color: rgba(59, 130, 246, 0.7);
+  .chat-drop-hint {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.35);
   }
 </style>

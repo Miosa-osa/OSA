@@ -1,7 +1,6 @@
 // src/lib/stores/projects.svelte.ts
 // Projects store — Svelte 5 class with $state fields.
-// Manages projects, goal trees, and task links via the OSA backend,
-// with mock fallback when the backend is unreachable.
+// Manages projects, goal trees, and task links via the OSA backend.
 
 import { projects as projectsApi } from "$lib/api/client";
 import type {
@@ -16,107 +15,6 @@ import type {
 // Re-export for convenience so consumers only need one import.
 export type { CreateGoalPayload, CreateProjectPayload };
 export type { Goal, GoalTreeNode, Project, ProjectTask };
-
-// ── Mock data (used when the backend is unreachable) ──────────────────────────
-
-const MOCK_PROJECTS: Project[] = [
-  {
-    id: 1,
-    name: "OSA Desktop App",
-    description: "Tauri + SvelteKit desktop application for OSA",
-    goal: "Ship a polished v1.0 release with full agent orchestration",
-    status: "active",
-    workspace_path: "~/Desktop/OSAMain/OSA/desktop",
-    slug: "osa-desktop-app",
-    metadata: {},
-    inserted_at: new Date(Date.now() - 86_400_000 * 30).toISOString(),
-    updated_at: new Date(Date.now() - 3_600_000).toISOString(),
-  },
-  {
-    id: 2,
-    name: "API Gateway",
-    description: "Elixir Phoenix backend for agent orchestration",
-    goal: "Achieve 99.9% uptime and sub-100ms P99 latency",
-    status: "active",
-    workspace_path: "~/Desktop/OSAMain/OSA/backend",
-    slug: "api-gateway",
-    metadata: {},
-    inserted_at: new Date(Date.now() - 86_400_000 * 60).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 2).toISOString(),
-  },
-  {
-    id: 3,
-    name: "Agent Memory System",
-    description: "Persistent vector-backed memory for OSA agents",
-    goal: "Enable agents to recall context across sessions reliably",
-    status: "completed",
-    workspace_path: "~/Desktop/OSAMain/OSA/memory",
-    slug: "agent-memory-system",
-    metadata: {},
-    inserted_at: new Date(Date.now() - 86_400_000 * 90).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 10).toISOString(),
-  },
-];
-
-const MOCK_GOALS: GoalTreeNode[] = [
-  {
-    id: 1,
-    project_id: 1,
-    parent_id: null,
-    title: "Ship v1.0 release",
-    description: null,
-    status: "in_progress",
-    priority: "high",
-    task_count: 4,
-    metadata: {},
-    inserted_at: new Date(Date.now() - 86_400_000 * 10).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 2).toISOString(),
-    children: [
-      {
-        id: 2,
-        project_id: 1,
-        parent_id: 1,
-        title: "Complete Projects page UI",
-        description: null,
-        status: "in_progress",
-        priority: "high",
-        task_count: 2,
-        metadata: {},
-        inserted_at: new Date(Date.now() - 86_400_000 * 5).toISOString(),
-        updated_at: new Date(Date.now() - 86_400_000).toISOString(),
-        children: [],
-      },
-      {
-        id: 3,
-        project_id: 1,
-        parent_id: 1,
-        title: "Write integration tests",
-        description: null,
-        status: "active",
-        priority: "medium",
-        task_count: 1,
-        metadata: {},
-        inserted_at: new Date(Date.now() - 86_400_000 * 4).toISOString(),
-        updated_at: new Date(Date.now() - 86_400_000).toISOString(),
-        children: [],
-      },
-    ],
-  },
-  {
-    id: 4,
-    project_id: 1,
-    parent_id: null,
-    title: "Improve developer onboarding",
-    description: null,
-    status: "active",
-    priority: "medium",
-    task_count: 3,
-    metadata: {},
-    inserted_at: new Date(Date.now() - 86_400_000 * 7).toISOString(),
-    updated_at: new Date(Date.now() - 86_400_000 * 3).toISOString(),
-    children: [],
-  },
-];
 
 // ── ProjectsStore Class ───────────────────────────────────────────────────────
 
@@ -159,8 +57,9 @@ class ProjectsStore {
     this.error = null;
     try {
       this.projects = await projectsApi.list();
-    } catch {
-      this.projects = [...MOCK_PROJECTS];
+    } catch (e) {
+      this.projects = [];
+      this.error = e instanceof Error ? e.message : "Backend offline";
     } finally {
       this.loading = false;
     }
@@ -239,7 +138,7 @@ class ProjectsStore {
       const raw = await projectsApi.goals(projectId);
       this.goals = mapGoalTree(raw as unknown as ApiGoalTreeNode[]);
     } catch {
-      this.goals = projectId === 1 ? [...MOCK_GOALS] : [];
+      this.goals = [];
     } finally {
       this.goalsLoading = false;
     }

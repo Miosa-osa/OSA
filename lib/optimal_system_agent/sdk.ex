@@ -70,7 +70,7 @@ defmodule OptimalSystemAgent.SDK do
     defstruct provider: :ollama,
               model: nil,
               permission: :accept_edits,
-              http_port: 8089,
+              http_port: 9089,
               session_id: nil
   end
 

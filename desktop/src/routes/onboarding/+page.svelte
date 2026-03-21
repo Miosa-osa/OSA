@@ -3,27 +3,41 @@
   import { goto } from '$app/navigation';
   import { fly } from 'svelte/transition';
   import { cubicOut, cubicIn } from 'svelte/easing';
-  import type { Provider, OnboardingStep, DetectionResult } from '$lib/onboarding/types';
+  import type { Provider, OnboardingStep, DetectionResult, WorkspaceConfig } from '$lib/onboarding/types';
   import { detectLocalProviders } from '$lib/onboarding/detection';
   import { completeOnboarding, getDefaultWorkingDirectory } from '$lib/onboarding/store';
-  import StepProvider from './steps/StepProvider.svelte';
-  import StepApiKey from './steps/StepApiKey.svelte';
-  import StepDirectory from './steps/StepDirectory.svelte';
-  import StepComplete from './steps/StepComplete.svelte';
+  import StepWorkspace from './steps/StepWorkspace.svelte';
+  import StepAgent from './steps/StepAgent.svelte';
+  import StepFirstTask from './steps/StepFirstTask.svelte';
+  import StepLaunch from './steps/StepLaunch.svelte';
 
   // ── State ────────────────────────────────────────────────────────────
   let step = $state<OnboardingStep>(1);
   let direction = $state<1 | -1>(1);
+
+  // Step 1: workspace
+  let workspace = $state<WorkspaceConfig>({ name: '', workingDirectory: '' });
+
+  // Step 2: agent
   let provider = $state<Provider | null>(null);
   let detectedProviders = $state<DetectionResult>({ ollama: false, lmstudio: false });
   let detecting = $state(true);
   let apiKey = $state('');
-  let workingDirectory = $state('');
+  let agentName = $state('OSA Agent');
+
+  // Step 3: first task
+  let firstTask = $state('');
+
   let containerRef = $state<HTMLElement | null>(null);
 
   // ── Derived ──────────────────────────────────────────────────────────
-  let isLocalProvider = $derived(provider === 'ollama' || provider === 'lmstudio');
-  let visualStep = $derived(step === 'complete' ? 3 : step === 1 ? 1 : step === 2 ? 2 : 3);
+  let visualStep = $derived(
+    step === 'complete' ? 4
+    : step === 1 ? 1
+    : step === 2 ? 2
+    : step === 3 ? 3
+    : 4
+  );
 
   // ── Lifecycle ────────────────────────────────────────────────────────
   onMount(async () => {
@@ -33,7 +47,7 @@
     ]);
 
     detectedProviders = detected;
-    workingDirectory = defaultDir;
+    workspace = { ...workspace, workingDirectory: defaultDir };
     detecting = false;
 
     // Auto-select first detected local provider
@@ -41,15 +55,15 @@
     else if (detected.lmstudio) provider = 'lmstudio';
   });
 
-  // Focus first interactive element after transitions
+  // Focus first interactive element after transitions settle
   $effect(() => {
-    step; // reactive dependency — intentional read to track step changes
+    step; // reactive — intentional read to track step changes
     if (!containerRef) return;
     const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const delay = prefersReduced ? 0 : 220;
     const t = setTimeout(() => {
       const first = containerRef?.querySelector<HTMLElement>(
-        'button:not([disabled]), input, [href]'
+        'button:not([disabled]), input, textarea, [href]'
       );
       first?.focus();
     }, delay);
@@ -57,37 +71,51 @@
   });
 
   // ── Navigation ───────────────────────────────────────────────────────
-  function next() {
-    direction = 1;
-    if (step === 1) {
-      step = isLocalProvider ? 3 : 2;
-    } else if (step === 2) {
-      step = 3;
-    } else if (step === 3) {
-      step = 'complete';
-      void finalize();
-    }
-  }
-
   function back() {
     direction = -1;
-    if (step === 3) {
-      step = isLocalProvider ? 1 : 2;
-    } else if (step === 2) {
-      step = 1;
-    }
-  }
-
-  async function finalize() {
-    if (!provider) return;
-    await completeOnboarding({ provider, workingDirectory, apiKey });
-    // StepComplete handles auto-redirect after 1800ms
+    if (step === 2) step = 1;
+    else if (step === 3) step = 2;
+    else if (step === 4) step = 3;
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && step !== 1 && step !== 'complete') {
       back();
     }
+  }
+
+  // ── Step handlers ────────────────────────────────────────────────────
+  function handleWorkspaceDone(ws: WorkspaceConfig) {
+    workspace = ws;
+    direction = 1;
+    step = 2;
+  }
+
+  function handleAgentDone(opts: { provider: Provider; apiKey: string; agentName: string }) {
+    provider = opts.provider;
+    apiKey = opts.apiKey;
+    agentName = opts.agentName;
+    direction = 1;
+    step = 3;
+  }
+
+  function handleFirstTaskDone(task: string) {
+    firstTask = task;
+    direction = 1;
+    step = 4;
+  }
+
+  async function handleLaunch(): Promise<void> {
+    if (!provider) return;
+    await completeOnboarding({
+      workspace,
+      provider,
+      apiKey,
+      agentName,
+      firstTask: firstTask || undefined,
+    });
+    // StepLaunch manages the post-launch success animation + redirect
+    setTimeout(() => goto('/app'), 2000);
   }
 
   // Fly params — zero duration if reduced motion
@@ -116,8 +144,16 @@
     <!-- Header -->
     <header class="ob-header">
       <div class="ob-logo" aria-label="OSA">
-        <div class="ob-logo-mark"></div>
-        <span class="ob-logo-name">OSA</span>
+        <video
+          class="ob-logo-video"
+          src="/OSLoopingActiveMode.mp4"
+          autoplay
+          loop
+          muted
+          playsinline
+          aria-hidden="true"
+        ></video>
+        <span class="ob-logo-name">Canopy</span>
       </div>
     </header>
 
@@ -130,34 +166,42 @@
           class="ob-step"
         >
           {#if step === 1}
-            <StepProvider
+            <StepWorkspace
+              {workspace}
+              onNext={handleWorkspaceDone}
+            />
+          {:else if step === 2}
+            <StepAgent
               {provider}
               {detectedProviders}
               {detecting}
-              onSelect={(p) => { provider = p; }}
-              onNext={next}
-            />
-          {:else if step === 2}
-            <StepApiKey
-              {provider}
               bind:apiKey
-              onNext={next}
+              bind:agentName
+              onSelect={(p) => { provider = p; }}
+              onNext={handleAgentDone}
               onBack={back}
             />
           {:else if step === 3}
-            <StepDirectory
-              bind:workingDirectory
-              onNext={next}
+            <StepFirstTask
+              bind:firstTask
+              onNext={handleFirstTaskDone}
               onBack={back}
             />
-          {:else if step === 'complete'}
-            <StepComplete onDone={() => goto('/')} />
+          {:else if step === 4 && provider}
+            <StepLaunch
+              {workspace}
+              {provider}
+              {agentName}
+              {firstTask}
+              onLaunch={handleLaunch}
+              onBack={back}
+            />
           {/if}
         </div>
       {/key}
     </main>
 
-    <!-- Progress dots -->
+    <!-- Progress dots (hidden on complete) -->
     {#if step !== 'complete'}
       <footer class="ob-footer">
         <div
@@ -166,10 +210,14 @@
           aria-label="Setup progress"
           aria-valuenow={visualStep}
           aria-valuemin={1}
-          aria-valuemax={3}
+          aria-valuemax={4}
         >
-          {#each [1, 2, 3] as dot}
-            <div class="ob-dot" class:ob-dot--active={visualStep === dot} class:ob-dot--done={visualStep > dot}></div>
+          {#each [1, 2, 3, 4] as dot}
+            <div
+              class="ob-dot"
+              class:ob-dot--active={visualStep === dot}
+              class:ob-dot--done={visualStep > dot}
+            ></div>
           {/each}
         </div>
       </footer>
@@ -188,13 +236,13 @@
     overflow: hidden;
   }
 
-  /* Ambient gradient glow in the background */
+  /* Subtle ambient glow */
   .ob-ambient {
     position: absolute;
     inset: 0;
     background:
-      radial-gradient(ellipse 60% 40% at 30% 60%, rgba(59, 130, 246, 0.04) 0%, transparent 70%),
-      radial-gradient(ellipse 50% 50% at 70% 30%, rgba(124, 58, 237, 0.04) 0%, transparent 70%);
+      radial-gradient(ellipse 60% 40% at 30% 60%, rgba(255, 255, 255, 0.015) 0%, transparent 70%),
+      radial-gradient(ellipse 50% 50% at 70% 30%, rgba(255, 255, 255, 0.01) 0%, transparent 70%);
     pointer-events: none;
   }
 
@@ -203,7 +251,7 @@
     position: relative;
     width: 100%;
     max-width: 520px;
-    min-height: 480px;
+    min-height: 500px;
     display: flex;
     flex-direction: column;
     z-index: 1;
@@ -231,11 +279,12 @@
     gap: 8px;
   }
 
-  .ob-logo-mark {
-    width: 24px;
-    height: 24px;
-    border-radius: 7px;
-    background: linear-gradient(135deg, #3b82f6 0%, #6d28d9 100%);
+  .ob-logo-video {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    object-fit: cover;
+    pointer-events: none;
   }
 
   .ob-logo-name {
@@ -243,6 +292,55 @@
     font-weight: 700;
     color: #ffffff;
     letter-spacing: 0.04em;
+  }
+
+  /* ── Shared button styles (used by step components) ── */
+  :global(.ob-btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: background 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
+    user-select: none;
+  }
+
+  :global(.ob-btn:focus-visible) {
+    outline: 2px solid rgba(255, 255, 255, 0.4);
+    outline-offset: 2px;
+  }
+
+  :global(.ob-btn:disabled) {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  :global(.ob-btn--primary) {
+    background: #ffffff;
+    color: #0a0a0a;
+  }
+
+  :global(.ob-btn--primary:hover:not(:disabled)) {
+    opacity: 0.9;
+  }
+
+  :global(.ob-btn--primary:active:not(:disabled)) {
+    transform: scale(0.98);
+  }
+
+  :global(.ob-btn--ghost) {
+    background: transparent;
+    color: #666666;
+    border: 1px solid transparent;
+  }
+
+  :global(.ob-btn--ghost:hover:not(:disabled)) {
+    color: #a0a0a0;
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .ob-content {

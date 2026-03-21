@@ -3,6 +3,7 @@
   import { activityLogsStore } from "$lib/stores/activityLogs.svelte";
   import ActivityFilters from "$lib/components/activity/ActivityFilters.svelte";
   import ActivityTable from "$lib/components/activity/ActivityTable.svelte";
+  import PageShell from "$lib/components/layout/PageShell.svelte";
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
@@ -52,97 +53,87 @@
   });
 </script>
 
-<div class="activity-page">
+<PageShell
+  title="Activity Logs"
+  subtitle="System events and agent activity"
+>
+  {#snippet actions()}
+    <!-- Export JSON -->
+    <button
+      class="act-action-btn act-action-btn--secondary"
+      onclick={handleExport}
+      disabled={exportPending || activityLogsStore.filtered.length === 0}
+      aria-label="Export filtered logs as JSON"
+    >
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.5 1.5v7M4 6.5l2.5 2.5L9 6.5"/>
+        <path d="M2 10.5v.5a1 1 0 001 1h7a1 1 0 001-1v-.5"/>
+      </svg>
+      Export JSON
+    </button>
 
-  <!-- ── Header ── -->
-  <header class="page-header">
-    <div class="header-left">
-      <div class="header-title-group">
-        <h1 class="page-title">Activity Logs</h1>
-        <p class="page-subtitle">System events and agent activity</p>
-      </div>
-    </div>
-
-    <div class="header-actions">
-      <!-- Export JSON -->
-      <button
-        class="action-btn action-btn--secondary"
-        onclick={handleExport}
-        disabled={exportPending || activityLogsStore.filtered.length === 0}
-        aria-label="Export filtered logs as JSON"
-      >
+    <!-- Clear All (double-click to confirm) -->
+    <button
+      class="act-action-btn"
+      class:act-action-btn--danger={clearConfirm}
+      class:act-action-btn--secondary={!clearConfirm}
+      onclick={handleClearAll}
+      disabled={activityLogsStore.logs.length === 0}
+      aria-label={clearConfirm ? "Confirm clear all logs" : "Clear all logs"}
+    >
+      {#if clearConfirm}
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+          <polyline points="1.5,7 4.5,10 11,3"/>
+        </svg>
+        Confirm Clear
+      {:else}
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M6.5 1.5v7M4 6.5l2.5 2.5L9 6.5"/>
-          <path d="M2 10.5v.5a1 1 0 001 1h7a1 1 0 001-1v-.5"/>
+          <polyline points="2,3 11,3"/>
+          <path d="M4.5 3V2a.5.5 0 01.5-.5h3a.5.5 0 01.5.5v1"/>
+          <path d="M3.5 3l.5 8h5.5l.5-8"/>
+          <line x1="6.5" y1="5.5" x2="6.5" y2="8.5"/>
+          <line x1="4.5" y1="5.5" x2="4.75" y2="8.5"/>
+          <line x1="8.5" y1="5.5" x2="8.25" y2="8.5"/>
         </svg>
-        Export JSON
-      </button>
+        Clear All
+      {/if}
+    </button>
 
-      <!-- Clear All (double-click to confirm) -->
-      <button
-        class="action-btn"
-        class:action-btn--danger={clearConfirm}
-        class:action-btn--secondary={!clearConfirm}
-        onclick={handleClearAll}
-        disabled={activityLogsStore.logs.length === 0}
-        aria-label={clearConfirm ? "Confirm clear all logs" : "Clear all logs"}
+    <!-- Refresh -->
+    <button
+      class="act-action-btn act-action-btn--secondary act-action-btn--icon"
+      onclick={() => activityLogsStore.fetchLogs()}
+      disabled={activityLogsStore.loading}
+      aria-label="Refresh logs"
+      title="Refresh logs"
+    >
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 13 13"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        class:spin={activityLogsStore.loading}
       >
-        {#if clearConfirm}
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
-            <polyline points="1.5,7 4.5,10 11,3"/>
-          </svg>
-          Confirm Clear
-        {:else}
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="2,3 11,3"/>
-            <path d="M4.5 3V2a.5.5 0 01.5-.5h3a.5.5 0 01.5.5v1"/>
-            <path d="M3.5 3l.5 8h5.5l.5-8"/>
-            <line x1="6.5" y1="5.5" x2="6.5" y2="8.5"/>
-            <line x1="4.5" y1="5.5" x2="4.75" y2="8.5"/>
-            <line x1="8.5" y1="5.5" x2="8.25" y2="8.5"/>
-          </svg>
-          Clear All
-        {/if}
-      </button>
+        <path d="M11 6.5A4.5 4.5 0 002 6.5"/>
+        <path d="M11 4.5v2H9"/>
+      </svg>
+    </button>
+  {/snippet}
 
-      <!-- Refresh -->
-      <button
-        class="action-btn action-btn--secondary action-btn--icon"
-        onclick={() => activityLogsStore.fetchLogs()}
-        disabled={activityLogsStore.loading}
-        aria-label="Refresh logs"
-        title="Refresh logs"
-      >
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 13 13"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-          class:spin={activityLogsStore.loading}
-        >
-          <path d="M11 6.5A4.5 4.5 0 002 6.5"/>
-          <path d="M11 4.5v2H9"/>
-        </svg>
-      </button>
-    </div>
-  </header>
-
-  <!-- ── Content ── -->
-  <main class="page-content" id="activity-main">
-
+  <div class="act-content" id="activity-main">
     <!-- Error banner (subtle, non-blocking) -->
     {#if activityLogsStore.error}
-      <div class="status-banner" role="status">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span class="status-text">Backend offline — showing cached data</span>
-        <span class="status-hint">Start OSA backend on port 9089</span>
+      <div class="act-status-banner" role="status">
+        <span class="act-status-dot" aria-hidden="true"></span>
+        <span class="act-status-text">Backend offline — showing cached data</span>
+        <span class="act-status-hint">Start OSA backend on port 9089</span>
         <button
-          class="status-action"
+          class="act-status-action"
           onclick={() => activityLogsStore.fetchLogs()}
           aria-label="Retry fetching logs"
         >
@@ -169,70 +160,13 @@
       logs={activityLogsStore.filtered}
       loading={activityLogsStore.loading}
     />
-
-  </main>
-</div>
+  </div>
+</PageShell>
 
 <style>
-  /* ── Page shell ── */
+  /* ── Header action buttons ── */
 
-  .activity-page {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-    background: var(--bg-secondary);
-  }
-
-  /* ── Header ── */
-
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 20px 24px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    flex-shrink: 0;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-  }
-
-  .header-title-group {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .page-title {
-    font-size: 1.125rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-  }
-
-  .page-subtitle {
-    font-size: 0.75rem;
-    color: var(--text-tertiary);
-    line-height: 1;
-  }
-
-  /* ── Header actions ── */
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-
-  .action-btn {
+  .act-action-btn {
     display: flex;
     align-items: center;
     gap: 5px;
@@ -246,35 +180,35 @@
     line-height: 1;
   }
 
-  .action-btn:disabled {
+  .act-action-btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
   }
 
-  .action-btn--secondary {
+  .act-action-btn--secondary {
     background: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.08);
     color: var(--text-secondary);
   }
 
-  .action-btn--secondary:hover:not(:disabled) {
+  .act-action-btn--secondary:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.09);
     border-color: rgba(255, 255, 255, 0.14);
     color: var(--text-primary);
   }
 
-  .action-btn--danger {
+  .act-action-btn--danger {
     background: rgba(239, 68, 68, 0.12);
     border-color: rgba(239, 68, 68, 0.22);
     color: rgba(252, 100, 100, 0.9);
   }
 
-  .action-btn--danger:hover:not(:disabled) {
+  .act-action-btn--danger:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.18);
     border-color: rgba(239, 68, 68, 0.35);
   }
 
-  .action-btn--icon {
+  .act-action-btn--icon {
     padding: 6px 8px;
   }
 
@@ -288,14 +222,9 @@
     to { transform: rotate(360deg); }
   }
 
-  /* ── Content area ── */
+  /* ── Content wrapper ── */
 
-  .page-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 24px 24px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  .act-content {
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -303,7 +232,7 @@
 
   /* ── Status banner ── */
 
-  .status-banner {
+  .act-status-banner {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -313,12 +242,11 @@
     border-radius: var(--radius-md);
     font-size: 0.7rem;
     color: var(--text-tertiary);
-    margin-top: 8px;
     margin-bottom: 4px;
     flex-shrink: 0;
   }
 
-  .status-dot {
+  .act-status-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
@@ -326,17 +254,17 @@
     flex-shrink: 0;
   }
 
-  .status-text {
+  .act-status-text {
     color: var(--text-secondary);
     font-size: 0.7rem;
   }
 
-  .status-hint {
+  .act-status-hint {
     margin-left: auto;
     color: var(--text-muted);
   }
 
-  .status-action {
+  .act-status-action {
     padding: 3px 10px;
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -348,7 +276,7 @@
     flex-shrink: 0;
   }
 
-  .status-action:hover {
+  .act-status-action:hover {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.2);
     color: var(--text-primary);

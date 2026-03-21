@@ -5,11 +5,17 @@ export type Provider =
   | "anthropic"
   | "openai"
   | "groq";
-export type OnboardingStep = 1 | 2 | 3 | "complete";
+export type OnboardingStep = 1 | 2 | 3 | 4 | "complete";
 
 export interface DetectionResult {
   ollama: boolean;
   lmstudio: boolean;
+}
+
+export interface WorkspaceConfig {
+  name: string;
+  description?: string;
+  workingDirectory: string;
 }
 
 export interface OnboardingState {
@@ -19,6 +25,9 @@ export interface OnboardingState {
   detecting: boolean;
   apiKey: string;
   workingDirectory: string;
+  workspace: WorkspaceConfig | null;
+  agentName: string;
+  firstTask: string;
 }
 
 export interface ProviderMeta {

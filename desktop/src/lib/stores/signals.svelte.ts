@@ -3,10 +3,14 @@ import type {
   SignalStats,
   SignalFilters,
   SignalPatterns,
+  SignalMode,
+  SignalGenre,
+  SignalType,
+  SignalFormat,
+  SignalTier,
 } from "$lib/api/types";
 import { BASE_URL, API_PREFIX, getToken } from "$lib/api/client";
-import { connectSSE } from "$lib/api/sse";
-import type { StreamController } from "$lib/api/sse";
+import { toastStore } from "$lib/stores/toasts.svelte";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -20,23 +24,99 @@ function buildHeaders(): Record<string, string> {
   return headers;
 }
 
-function buildQueryString(filters: SignalFilters): string {
-  const params = new URLSearchParams();
-  if (filters.mode) params.set("mode", filters.mode);
-  if (filters.type) params.set("type", filters.type);
-  if (filters.channel) params.set("channel", filters.channel);
-  if (filters.weight_min !== undefined)
-    params.set("weight_min", String(filters.weight_min));
-  if (filters.weight_max !== undefined)
-    params.set("weight_max", String(filters.weight_max));
-  params.set("limit", "50");
-  const qs = params.toString();
-  return qs ? `?${qs}` : "";
+/** Shape returned by POST /api/v1/classify */
+interface ClassifyResponse {
+  mode: string;
+  genre: string;
+  type: string;
+  format: string;
+  weight: number;
+}
+
+// ── Local stat computation ─────────────────────────────────────────────────────
+
+function computeStats(signals: Signal[]): SignalStats {
+  const by_mode: Record<string, number> = {};
+  const by_channel: Record<string, number> = {};
+  const by_type: Record<string, number> = {};
+  let weight_sum = 0;
+  let haiku = 0;
+  let sonnet = 0;
+  let opus = 0;
+
+  for (const s of signals) {
+    by_mode[s.mode] = (by_mode[s.mode] ?? 0) + 1;
+    by_channel[s.channel] = (by_channel[s.channel] ?? 0) + 1;
+    by_type[s.type] = (by_type[s.type] ?? 0) + 1;
+    weight_sum += s.weight;
+    if (s.tier === "haiku") haiku++;
+    else if (s.tier === "sonnet") sonnet++;
+    else if (s.tier === "opus") opus++;
+  }
+
+  return {
+    by_mode,
+    by_channel,
+    by_type,
+    weight_distribution: { haiku, sonnet, opus },
+    total: signals.length,
+    avg_weight: signals.length > 0 ? weight_sum / signals.length : 0,
+  };
+}
+
+function computePatterns(signals: Signal[]): SignalPatterns {
+  // Peak hours: count by hour-of-day
+  const hourCounts: number[] = Array(24).fill(0);
+  const agentCounts: Record<string, number> = {};
+  const dayCounts: Record<string, number> = {};
+  let weight_sum = 0;
+  let escalation_count = 0;
+
+  for (const s of signals) {
+    const d = new Date(s.inserted_at);
+    hourCounts[d.getHours()]++;
+    agentCounts[s.agent_name] = (agentCounts[s.agent_name] ?? 0) + 1;
+    const date = s.inserted_at.slice(0, 10);
+    dayCounts[date] = (dayCounts[date] ?? 0) + 1;
+    weight_sum += s.weight;
+    if (s.weight >= 0.8) escalation_count++;
+  }
+
+  const maxCount = Math.max(...hourCounts, 0);
+  const peak_hours = hourCounts.reduce<number[]>((acc, c, h) => {
+    if (c === maxCount && c > 0) acc.push(h);
+    return acc;
+  }, []);
+
+  const top_agents = Object.entries(agentCounts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5)
+    .map(([name, count]) => ({ name, count }));
+
+  const daily_counts = Object.entries(dayCounts)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }));
+
+  return {
+    peak_hours,
+    avg_weight: signals.length > 0 ? weight_sum / signals.length : 0,
+    top_agents,
+    daily_counts,
+    escalation_count,
+  };
+}
+
+/** Derive a weight-based tier from the classify response weight. */
+function tierFromWeight(weight: number): SignalTier {
+  if (weight >= 0.8) return "opus";
+  if (weight >= 0.5) return "sonnet";
+  return "haiku";
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 const MAX_LIVE_ITEMS = 100;
+let _idCounter = 0;
 
 class SignalsStore {
   signals = $state<Signal[]>([]);
@@ -46,84 +126,85 @@ class SignalsStore {
   loading = $state(false);
   error = $state<string | null>(null);
   liveFeed = $state<Signal[]>([]);
+  // No SSE endpoint exists — always disconnected
   liveConnected = $state(false);
 
-  #sseController: StreamController | null = null;
+  /** Recompute stats and patterns from current signal array. */
+  #recompute(): void {
+    this.stats = computeStats(this.signals);
+    this.patterns = computePatterns(this.signals);
+  }
 
-  async fetchSignals(filters?: SignalFilters): Promise<void> {
-    if (filters) this.filters = filters;
+  /**
+   * Classify a message via POST /api/v1/classify and add the result to the
+   * local signals array. Returns the created Signal or null on error.
+   */
+  async classifyMessage(
+    message: string,
+    opts?: {
+      session_id?: string;
+      channel?: string;
+      agent_name?: string;
+    },
+  ): Promise<Signal | null> {
     this.loading = true;
     this.error = null;
 
     try {
-      const qs = buildQueryString(this.filters);
-      const res = await fetch(`${BASE_URL}${API_PREFIX}/signals${qs}`, {
+      const res = await fetch(`${BASE_URL}${API_PREFIX}/classify`, {
+        method: "POST",
         headers: buildHeaders(),
+        body: JSON.stringify({ message }),
       });
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as { signals: Signal[]; total: number };
-      this.signals = data.signals;
+
+      const data = (await res.json()) as ClassifyResponse;
+
+      const signal: Signal = {
+        id: `local-${++_idCounter}-${Date.now()}`,
+        session_id: opts?.session_id ?? "local",
+        channel: opts?.channel ?? "default",
+        mode: (data.mode as SignalMode) ?? "ASSIST",
+        genre: (data.genre as SignalGenre) ?? "DIRECT",
+        type: (data.type as SignalType) ?? "general",
+        format: (data.format as SignalFormat) ?? "message",
+        weight: data.weight ?? 0.5,
+        tier: tierFromWeight(data.weight ?? 0.5),
+        input_preview: message.slice(0, 120),
+        agent_name: opts?.agent_name ?? "user",
+        confidence: data.weight >= 0.6 ? "high" : "low",
+        metadata: {},
+        inserted_at: new Date().toISOString(),
+      };
+
+      this.signals = [signal, ...this.signals];
+      this.liveFeed = [signal, ...this.liveFeed].slice(0, MAX_LIVE_ITEMS);
+      this.#recompute();
+
+      return signal;
     } catch (err) {
-      this.error =
-        err instanceof Error ? err.message : "Failed to fetch signals.";
+      const msg =
+        err instanceof Error ? err.message : "Failed to classify message.";
+      this.error = msg;
+      toastStore.add({ type: "error", title: "Classify error", message: msg });
+      return null;
     } finally {
       this.loading = false;
     }
   }
 
-  async fetchStats(): Promise<void> {
-    try {
-      const res = await fetch(`${BASE_URL}${API_PREFIX}/signals/stats`, {
-        headers: buildHeaders(),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      this.stats = (await res.json()) as SignalStats;
-    } catch {
-      // Stats are non-critical — silently degrade
-    }
+  /**
+   * Push a pre-built Signal into the store (e.g. from another part of the app).
+   * Recomputes stats/patterns automatically.
+   */
+  addSignal(signal: Signal): void {
+    this.signals = [signal, ...this.signals];
+    this.liveFeed = [signal, ...this.liveFeed].slice(0, MAX_LIVE_ITEMS);
+    this.#recompute();
   }
 
-  async fetchPatterns(): Promise<void> {
-    try {
-      const res = await fetch(`${BASE_URL}${API_PREFIX}/signals/patterns`, {
-        headers: buildHeaders(),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      this.patterns = (await res.json()) as SignalPatterns;
-    } catch {
-      // Patterns are non-critical
-    }
-  }
-
-  subscribeLive(): void {
-    if (this.#sseController) return;
-
-    this.#sseController = connectSSE("/signals/live", {
-      onEvent: (event) => {
-        const raw = event as unknown as { type: string; data?: unknown };
-        if (raw.type === "signal:new") {
-          const signal = raw.data as Signal;
-          this.liveFeed = [signal, ...this.liveFeed].slice(0, MAX_LIVE_ITEMS);
-        }
-        if (raw.type === "signal:stats_update") {
-          this.stats = raw.data as SignalStats;
-        }
-      },
-      onConnect: () => {
-        this.liveConnected = true;
-      },
-      onDisconnect: () => {
-        this.liveConnected = false;
-      },
-    });
-  }
-
-  unsubscribeLive(): void {
-    this.#sseController?.abort();
-    this.#sseController = null;
-    this.liveConnected = false;
-  }
-
+  /** Apply or replace the active filter set. */
   setFilter(
     key: keyof SignalFilters,
     value: string | number | undefined,
@@ -133,6 +214,22 @@ class SignalsStore {
 
   clearFilters(): void {
     this.filters = {};
+  }
+
+  /**
+   * Returns the signals array filtered by the current filter state.
+   * Consumers can use this derived view directly.
+   */
+  get filtered(): Signal[] {
+    const f = this.filters;
+    return this.signals.filter((s) => {
+      if (f.mode && s.mode !== f.mode) return false;
+      if (f.type && s.type !== f.type) return false;
+      if (f.channel && s.channel !== f.channel) return false;
+      if (f.weight_min !== undefined && s.weight < f.weight_min) return false;
+      if (f.weight_max !== undefined && s.weight > f.weight_max) return false;
+      return true;
+    });
   }
 }
 

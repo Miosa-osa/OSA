@@ -31,6 +31,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     /tasks       → ProtocolRoutes    GET /history
     /command-center → CommandCenterRoutes  GET /|/agents|/tiers|/patterns|/metrics|/events, POST /sandboxes
     /workspace   → WorkspaceRoutes    GET / (cwd, git status, git log, directory listing)
+    /workspaces  → CanopyRoutes      GET|POST /, GET|PATCH|DELETE /:id, POST /:id/activate, GET /:id/agents|skills|config
+    /agents      → AgentManagementRoutes  GET /, GET /hierarchy, GET|DELETE /:id, POST /:id/pause|resume
+    /settings    → SettingsRoutes    GET|PATCH /
+    /providers   → ProviderRoutes    GET /, POST /:slug/connect, DELETE /:slug
+    /cost        → CostRoutes        GET /, GET /by-agent, GET /by-model, GET /events, GET /budgets, PUT /budgets/:name
+    /dashboard   → DashboardRoutes   GET /
     /classify    → inline            POST / (signal classification)
     /config      → ConfigRoutes      GET /revisions/:type/:id, GET /revisions/:type/:id/:n, POST /revisions/:type/:id/rollback, GET /revisions/:type/:id/diff
   """
@@ -113,6 +119,34 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   # ── Workspace introspection ───────────────────────────────────────────
   forward "/workspace", to: API.WorkspaceRoutes
+
+  # ── Canopy workspaces (CRUD + .canopy/ init + agent/skill discovery) ─
+  forward "/workspaces", to: API.CanopyRoutes
+
+  # ── Agent management (definitions, hierarchy, lifecycle) ─────────────
+  forward "/agents", to: API.AgentManagementRoutes
+
+  # ── Settings (read/write ~/.osa/config.json) ─────────────────────────
+  forward "/settings", to: API.SettingsRoutes
+
+  # ── Provider management (list, connect, disconnect) ──────────────────
+  forward "/providers", to: API.ProviderRoutes
+
+  # ── Cost / budget summary ─────────────────────────────────────────────
+  forward "/cost", to: API.CostRoutes
+  forward "/costs", to: API.CostRoutes
+
+  # ── Projects / goals ────────────────────────────────────────────────
+  forward "/projects", to: API.ProjectRoutes
+
+  # ── Issues ──────────────────────────────────────────────────────────
+  forward "/issues", to: API.IssueRoutes
+
+  # ── Approvals ──────────────────────────────────────────────────────
+  forward "/approvals", to: API.ApprovalRoutes
+
+  # ── Dashboard (aggregated overview) ──────────────────────────────────
+  forward "/dashboard", to: API.DashboardRoutes
 
   # ── Config revisions ─────────────────────────────────────────────────
   forward "/config", to: API.ConfigRoutes

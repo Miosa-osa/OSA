@@ -3,6 +3,10 @@
   import { browser } from '$app/environment';
   import { fly, fade } from 'svelte/transition';
   import { isTauri, isMacOS } from '$lib/utils/platform';
+  import { approvalsStore } from '$lib/stores/approvals.svelte';
+  import { taskStore } from '$lib/stores/tasks.svelte';
+  import { issuesStore } from '$lib/stores/issues.svelte';
+  import WorkspaceSwitcher from '$lib/components/layout/WorkspaceSwitcher.svelte';
 
   interface NavItem {
     id: string;
@@ -32,7 +36,7 @@
 
   const NAV_SECTIONS: NavSection[] = [
     {
-      id: 'main',
+      id: 'core',
       label: null,
       items: [
         {
@@ -52,8 +56,42 @@
       ],
     },
     {
-      id: 'agents',
-      label: 'Agents',
+      id: 'work',
+      label: 'Work',
+      items: [
+        {
+          id: 'projects',
+          label: 'Projects',
+          href: '/app/projects',
+          shortcut: '',
+          icon: 'M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z',
+        },
+        {
+          id: 'issues',
+          label: 'Issues',
+          href: '/app/issues',
+          shortcut: '',
+          icon: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z',
+        },
+        {
+          id: 'tasks',
+          label: 'Tasks',
+          href: '/app/tasks',
+          shortcut: '',
+          icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+        },
+        {
+          id: 'approvals',
+          label: 'Approvals',
+          href: '/app/approvals',
+          shortcut: '',
+          icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
+        },
+      ],
+    },
+    {
+      id: 'intelligence',
+      label: 'Intelligence',
       items: [
         {
           id: 'agents',
@@ -76,26 +114,19 @@
           shortcut: '',
           icon: 'M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z',
         },
+        {
+          id: 'signals',
+          label: 'Signals',
+          href: '/app/signals',
+          shortcut: '',
+          icon: 'M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5',
+        },
       ],
     },
     {
-      id: 'workspace',
-      label: 'Workspace',
+      id: 'system',
+      label: 'System',
       items: [
-        {
-          id: 'projects',
-          label: 'Projects',
-          href: '/app/projects',
-          shortcut: '',
-          icon: 'M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z',
-        },
-        {
-          id: 'tasks',
-          label: 'Tasks',
-          href: '/app/tasks',
-          shortcut: '',
-          icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
-        },
         {
           id: 'terminal',
           label: 'Terminal',
@@ -103,18 +134,12 @@
           shortcut: '⌘5',
           icon: 'M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z',
         },
-      ],
-    },
-    {
-      id: 'monitor',
-      label: 'Monitor',
-      items: [
         {
-          id: 'signals',
-          label: 'Signals',
-          href: '/app/signals',
+          id: 'memory',
+          label: 'Memory',
+          href: '/app/memory',
           shortcut: '',
-          icon: 'M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5',
+          icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4',
         },
         {
           id: 'activity',
@@ -124,31 +149,11 @@
           icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2',
         },
         {
-          id: 'usage',
-          label: 'Usage',
-          href: '/app/usage',
+          id: 'connectors',
+          label: 'Connectors',
+          href: '/app/connectors',
           shortcut: '',
-          icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z',
-        },
-        {
-          id: 'memory',
-          label: 'Memory',
-          href: '/app/memory',
-          shortcut: '',
-          icon: 'M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4',
-        },
-      ],
-    },
-    {
-      id: 'governance',
-      label: 'Governance',
-      items: [
-        {
-          id: 'approvals',
-          label: 'Approvals',
-          href: '/app/approvals',
-          shortcut: '',
-          icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
+          icon: 'M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.556a4.5 4.5 0 00-6.364-6.364L4.5 8.25l4.5 4.5 4.19-4.062z',
         },
       ],
     },
@@ -160,18 +165,18 @@
   // Bottom utility items (fixed area, not in scrollable nav)
   const BOTTOM_ITEMS: NavItem[] = [
     {
+      id: 'usage',
+      label: 'Usage',
+      href: '/app/usage',
+      shortcut: '',
+      icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       href: '/app/settings',
       shortcut: '',
       icon: 'M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z M15 12a3 3 0 11-6 0 3 3 0 016 0z',
-    },
-    {
-      id: 'connectors',
-      label: 'Connectors',
-      href: '/app/connectors',
-      shortcut: '',
-      icon: 'M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.556a4.5 4.5 0 00-6.364-6.364L4.5 8.25l4.5 4.5 4.19-4.062z',
     },
   ];
 
@@ -205,6 +210,13 @@
   const tooltipItem = $derived(
     [...ALL_NAV_ITEMS, ...BOTTOM_ITEMS].find((n) => n.id === tooltipVisible) ?? null
   );
+
+  // Live badge counts keyed by nav item id
+  const navBadges = $derived<Record<string, number>>({
+    approvals: approvalsStore.pendingCount,
+    tasks: taskStore.pendingTasks.length,
+    issues: issuesStore.openCount,
+  });
 
   const userInitials = $derived(
     user?.name
@@ -261,7 +273,12 @@
     </button>
   </div>
 
-  <!-- Top divider under toggle -->
+  <!-- Workspace switcher -->
+  <div class="workspace-area">
+    <WorkspaceSwitcher {isCollapsed} />
+  </div>
+
+  <!-- Top divider under workspace switcher -->
   <div class="section-divider" aria-hidden="true"></div>
 
   <!-- Navigation -->
@@ -282,6 +299,7 @@
       {/if}
 
       {#each section.items as item (item.id)}
+        {@const badgeCount = navBadges[item.id] ?? 0}
         <a
           href={item.href}
           data-active={isActive(item.href) ? '' : undefined}
@@ -290,22 +308,42 @@
           onmouseenter={(e) => handleNavMouseEnter(item.id, e)}
           onmouseleave={handleNavMouseLeave}
         >
-          <svg
-            class="nav-icon"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-            width="18"
-            height="18"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d={item.icon} />
-          </svg>
+          <!-- Icon wrapper — positions collapsed dot indicator -->
+          <span class="nav-icon-wrap">
+            <svg
+              class="nav-icon"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              width="18"
+              height="18"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d={item.icon} />
+            </svg>
+            {#if isCollapsed && badgeCount > 0}
+              <span
+                class="nav-badge-dot"
+                class:nav-badge-dot--amber={item.id === 'approvals'}
+                aria-hidden="true"
+              ></span>
+            {/if}
+          </span>
+
           {#if !isCollapsed}
             <span class="nav-label" transition:fade={{ duration: 150 }}>
               {item.label}
             </span>
-            {#if item.shortcut}
+            {#if badgeCount > 0}
+              <span
+                class="nav-badge"
+                class:nav-badge--amber={item.id === 'approvals'}
+                aria-label="{badgeCount} pending"
+                transition:fade={{ duration: 150 }}
+              >
+                {badgeCount > 99 ? '99+' : badgeCount}
+              </span>
+            {:else if item.shortcut}
               <span class="nav-shortcut" aria-hidden="true">{item.shortcut}</span>
             {/if}
           {/if}
@@ -457,6 +495,12 @@
     transform: rotate(180deg);
   }
 
+  /* Workspace switcher area */
+  .workspace-area {
+    padding: 4px 8px;
+    flex-shrink: 0;
+  }
+
   /* Section dividers — thin, very subtle */
   .section-divider {
     height: 1px;
@@ -560,6 +604,55 @@
     margin-left: auto;
     opacity: 0.7;
     flex-shrink: 0;
+  }
+
+  /* Nav icon wrapper — needed for dot positioning in collapsed mode */
+  .nav-icon-wrap {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Collapsed mode: small dot indicator in the top-right of the icon */
+  .nav-badge-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.9);
+    border: 1.5px solid rgba(10, 10, 10, 0.85);
+    flex-shrink: 0;
+  }
+
+  .nav-badge-dot--amber {
+    background: rgba(251, 191, 36, 0.9);
+  }
+
+  /* Expanded mode: pill badge */
+  .nav-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9999px;
+    background: rgba(239, 68, 68, 0.15);
+    color: rgba(239, 68, 68, 0.9);
+    font-size: 0.625rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .nav-badge--amber {
+    background: rgba(251, 191, 36, 0.15);
+    color: rgba(251, 191, 36, 0.9);
   }
 
   /* Bottom fixed area */

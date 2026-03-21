@@ -1,5 +1,6 @@
 import { skills as skillsApi } from "$lib/api/client";
 import type { Skill, SkillCategory, SkillCategoryCount } from "$lib/api/types";
+import { toastStore } from "$lib/stores/toasts.svelte";
 
 const ALL_CATEGORIES: SkillCategory[] = [
   "core",
@@ -69,6 +70,14 @@ class SkillsStore {
       this.skills = await skillsApi.list();
     } catch (e) {
       this.error = e instanceof Error ? e.message : "Failed to load skills";
+      if (
+        e instanceof TypeError ||
+        (e instanceof Error && e.message === "Failed to fetch")
+      ) {
+        toastStore.warning("Backend offline — some features unavailable");
+      } else {
+        toastStore.error("Failed to load skills");
+      }
     } finally {
       this.loading = false;
     }
@@ -87,6 +96,7 @@ class SkillsStore {
       this.skills[idx] = { ...this.skills[idx], enabled: result.enabled };
     } catch {
       this.skills[idx] = { ...this.skills[idx], enabled: prev };
+      toastStore.error("Failed to toggle skill");
     }
   }
 

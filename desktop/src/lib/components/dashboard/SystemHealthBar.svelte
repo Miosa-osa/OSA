@@ -4,9 +4,10 @@
   interface Props {
     health: DashboardSystemHealth;
     uptimeSeconds: number;
+    offline?: boolean;
   }
 
-  let { health, uptimeSeconds }: Props = $props();
+  let { health, uptimeSeconds, offline = false }: Props = $props();
 
   const uptime = $derived(formatUptime(uptimeSeconds));
 
@@ -25,34 +26,42 @@
   }
 </script>
 
-<div class="shb" role="status" aria-label="System health">
-  <div class="shb-item">
-    <span class="shb-dot {statusClass(health.backend)}"></span>
-    <span class="shb-label">Backend</span>
-    <span class="shb-val">{health.backend}</span>
-  </div>
+<div class="shb {offline ? 'shb-degraded' : ''}" role="status" aria-label="System health">
+  {#if offline}
+    <div class="shb-item">
+      <span class="shb-dot shb-error shb-pulse"></span>
+      <span class="shb-label">Backend</span>
+      <span class="shb-val shb-val-error">offline</span>
+    </div>
+  {:else}
+    <div class="shb-item">
+      <span class="shb-dot {statusClass(health.backend)}"></span>
+      <span class="shb-label">Backend</span>
+      <span class="shb-val">{health.backend}</span>
+    </div>
 
-  <span class="shb-sep" aria-hidden="true"></span>
+    <span class="shb-sep" aria-hidden="true"></span>
 
-  <div class="shb-item">
-    <span class="shb-dot {statusClass(health.provider_status)}"></span>
-    <span class="shb-label">Provider</span>
-    <span class="shb-val">{health.provider ?? "none"}</span>
-  </div>
+    <div class="shb-item">
+      <span class="shb-dot {statusClass(health.provider_status)}"></span>
+      <span class="shb-label">Provider</span>
+      <span class="shb-val">{health.provider ?? "none"}</span>
+    </div>
 
-  <span class="shb-sep" aria-hidden="true"></span>
+    <span class="shb-sep" aria-hidden="true"></span>
 
-  <div class="shb-item">
-    <span class="shb-label">Uptime</span>
-    <span class="shb-val">{uptime}</span>
-  </div>
+    <div class="shb-item">
+      <span class="shb-label">Uptime</span>
+      <span class="shb-val">{uptime}</span>
+    </div>
 
-  <span class="shb-sep" aria-hidden="true"></span>
+    <span class="shb-sep" aria-hidden="true"></span>
 
-  <div class="shb-item">
-    <span class="shb-label">Memory</span>
-    <span class="shb-val">{health.memory_mb} MB</span>
-  </div>
+    <div class="shb-item">
+      <span class="shb-label">Memory</span>
+      <span class="shb-val">{health.memory_mb} MB</span>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -100,5 +109,24 @@
     height: 14px;
     background: var(--border-default);
     flex-shrink: 0;
+  }
+
+  /* Offline / degraded variant */
+  .shb-degraded {
+    border-color: rgba(239, 68, 68, 0.2);
+    background: rgba(239, 68, 68, 0.04);
+  }
+
+  .shb-val-error {
+    color: var(--accent-error);
+  }
+
+  .shb-pulse {
+    animation: shb-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes shb-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.35; transform: scale(0.7); }
   }
 </style>
