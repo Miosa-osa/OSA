@@ -62,6 +62,24 @@ defmodule OptimalSystemAgent.Application do
     # Team coordination tables (shared task list, messaging, scratchpad)
     OptimalSystemAgent.Team.init_tables()
 
+    # Context Mesh registry table
+    OptimalSystemAgent.ContextMesh.Registry.init_table()
+
+    # Peer protocol tables (handoffs, reviews, negotiations, discovery)
+    OptimalSystemAgent.Peer.Protocol.init_table()
+    OptimalSystemAgent.Peer.Review.init_table()
+    OptimalSystemAgent.Peer.Negotiation.init_table()
+    OptimalSystemAgent.Peer.Discovery.init_tables()
+
+    # File locking intent broadcaster tables
+    OptimalSystemAgent.FileLocking.IntentBroadcaster.init_tables()
+
+    # Workspace session tracking table
+    OptimalSystemAgent.Workspace.Session.init_table()
+
+    # Workspace SQLite tables (workspaces + task_journals)
+    OptimalSystemAgent.Workspace.Store.init()
+
     # Load agent definitions from priv/agents/ and ~/.osa/agents/
     OptimalSystemAgent.Agents.Registry.load()
 
@@ -80,7 +98,7 @@ defmodule OptimalSystemAgent.Application do
         # Deferred channel startup — starts configured channels in handle_continue
         OptimalSystemAgent.Channels.Starter,
 
-        # HTTP channel — Plug/Bandit on port 8089 (SDK API surface)
+        # HTTP channel — Plug/Bandit on configured port (SDK API surface)
         # Started LAST so all agent processes are ready before accepting requests
         {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
       ]
@@ -112,7 +130,7 @@ defmodule OptimalSystemAgent.Application do
 
   defp http_port do
     case System.get_env("OSA_HTTP_PORT") do
-      nil -> Application.get_env(:optimal_system_agent, :http_port, 8089)
+      nil -> Application.get_env(:optimal_system_agent, :http_port, 9089)
       port -> String.to_integer(port)
     end
   end
