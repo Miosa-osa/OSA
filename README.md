@@ -386,3 +386,51 @@ Apache 2.0 — See [LICENSE](LICENSE).
 
 Built by [Roberto H. Luna](https://github.com/robertohluna) and the [MIOSA](https://miosa.ai) team.
 Grounded in [Signal Theory](https://zenodo.org/records/18774174). Powered by the BEAM.
+
+---
+
+## Codebase Visualization
+
+This repository is indexed with [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) — an interactive code graph that maps functions, modules, call chains, and relationships across the entire codebase.
+
+### Quick Start
+
+```bash
+# Install CGC
+uv tool install codegraphcontext
+
+# Index this repository
+cgc index .
+
+# Launch the interactive visualizer (opens in browser)
+cgc visualize
+```
+
+This opens an interactive graph at `http://localhost:8000/playground` where you can:
+
+- **Search** for any function, module, or class
+- **Trace call chains** — who calls what, and how deep
+- **Detect dead code** — unused functions and modules
+- **Analyze complexity** — cyclomatic complexity per function
+- **Inspect relationships** — imports, inheritance, method calls
+
+### CLI Usage
+
+```bash
+# Find callers of a function
+cgc analyze callers function_name
+
+# Find dead code
+cgc analyze dead-code
+
+# Complexity analysis
+cgc analyze complexity
+
+# Raw Cypher query
+cgc query "MATCH (f:Function) RETURN f.name LIMIT 20"
+```
+
+### Requirements
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
