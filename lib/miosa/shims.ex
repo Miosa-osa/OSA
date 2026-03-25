@@ -764,54 +764,83 @@ defmodule MiosaBudget.Treasury do
 end
 
 # ---------------------------------------------------------------------------
-# MiosaKnowledge  (stubs — no OSA equivalent)
+# MiosaKnowledge  (delegates to vaos_knowledge package)
 # ---------------------------------------------------------------------------
+#
+# Previously stubs. Now wired to the real Vaos.Knowledge package which
+# provides an ETS-backed triple store with SPARQL subset parser and
+# OWL 2 RL forward-chaining reasoner.
+#
+# See: https://github.com/jmanhype/vaos-knowledge
+# 11 modules, ~1,100 lines, 108 tests, 1 dep (jason).
 
 defmodule MiosaKnowledge.Registry do
-  @moduledoc "Stub — knowledge store registry."
-  def lookup(_name), do: {:error, :not_implemented}
+  @moduledoc "Delegates to Vaos.Knowledge.Registry."
+  def lookup(name) do
+    case Registry.lookup(Vaos.Knowledge.Registry, name) do
+      [{pid, _}] -> {:ok, pid}
+      [] -> {:error, :not_found}
+    end
+  end
 end
 
 defmodule MiosaKnowledge.Backend.ETS do
-  @moduledoc "Stub ETS backend."
-  def open(_name, _opts \\ []), do: {:ok, :ets_stub}
+  @moduledoc "Delegates to Vaos.Knowledge.Backend.ETS."
+  defdelegate open(name, opts \\ []), to: Vaos.Knowledge.Backend.ETS, as: :init
   def close(_ref), do: :ok
 end
 
 defmodule MiosaKnowledge.Backend.Mnesia do
-  @moduledoc "Stub Mnesia backend."
+  @moduledoc "Stub — Mnesia backend not yet implemented in vaos-knowledge."
   def open(_name, _opts \\ []), do: {:ok, :mnesia_stub}
   def close(_ref), do: :ok
 end
 
 defmodule MiosaKnowledge.Context do
-  @moduledoc "Stub — knowledge context for agent prompts."
-  def for_agent(_store_ref, _opts \\ []), do: %{}
-  def to_prompt(_ctx), do: ""
+  @moduledoc "Delegates to Vaos.Knowledge.Context."
+  if Code.ensure_loaded?(Vaos.Knowledge.Context) do
+    defdelegate for_agent(store_ref, opts \\ []), to: Vaos.Knowledge.Context
+    defdelegate to_prompt(ctx), to: Vaos.Knowledge.Context
+  else
+    def for_agent(_store_ref, _opts \\ []), do: %{}
+    def to_prompt(_ctx), do: ""
+  end
 end
 
 defmodule MiosaKnowledge.Reasoner do
-  @moduledoc "Stub — forward-chaining reasoner."
-  def materialize(_store_ref, _rules \\ []), do: {:ok, []}
+  @moduledoc "Delegates to Vaos.Knowledge.Reasoner (OWL 2 RL forward-chaining)."
+  def materialize(store_name, _rules \\ []) do
+    Vaos.Knowledge.materialize(store_name)
+  end
 end
 
 defmodule MiosaKnowledge.Store do
-  @moduledoc "Stub — knowledge store supervisor entry."
-  def start_link(_opts \\ []), do: {:ok, self()}
+  @moduledoc "Delegates to Vaos.Knowledge store management."
+  def start_link(opts \\ []) do
+    name = Keyword.get(opts, :name, "default")
+    Vaos.Knowledge.open(name, opts)
+  end
   def child_spec(opts) do
     %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}, type: :worker}
   end
 end
 
 defmodule MiosaKnowledge do
-  @moduledoc "Stub — top-level knowledge graph API."
-  def open(_name, _opts \\ []), do: {:ok, :stub}
-  def assert(_store, _triple), do: {:ok, 1}
-  def assert_many(_store, _triples), do: {:ok, 0}
-  def retract(_store, _triple), do: {:ok, 0}
-  def query(_store, _pattern), do: {:ok, []}
-  def count(_store, _pattern \\ nil), do: {:ok, 0}
-  def sparql(_store, _query), do: {:ok, %{results: []}}
+  @moduledoc """
+  Top-level knowledge graph API — delegates to Vaos.Knowledge.
+
+  Provides ETS-backed triple store with 3-way indexing (SPO/POS/OSP),
+  SPARQL subset (SELECT, INSERT DATA, DELETE DATA, ORDER BY, LIMIT),
+  and 4 OWL 2 RL forward-chaining rules (subClassOf transitivity,
+  inverseOf, TransitiveProperty, SymmetricProperty).
+  """
+  defdelegate open(name, opts \\ []), to: Vaos.Knowledge
+  defdelegate assert(store, triple), to: Vaos.Knowledge
+  defdelegate assert_many(store, triples), to: Vaos.Knowledge
+  defdelegate retract(store, triple), to: Vaos.Knowledge
+  defdelegate query(store, pattern), to: Vaos.Knowledge
+  defdelegate count(store), to: Vaos.Knowledge
+  defdelegate sparql(store, query_string), to: Vaos.Knowledge
 end
 
 # ---------------------------------------------------------------------------

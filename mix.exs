@@ -79,6 +79,10 @@ defmodule OptimalSystemAgent.MixProject do
 
       # miosa_* packages are not standalone deps — their implementations live
       # in this repo. Shim modules in lib/miosa/ satisfy all call sites.
+
+      # Knowledge graph — ETS-backed triple store with SPARQL subset + OWL 2 RL
+      # Replaces MiosaKnowledge stubs with real implementation
+      {:vaos_knowledge, github: "jmanhype/vaos-knowledge", branch: "master"}
     ]
   end
 
