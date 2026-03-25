@@ -82,7 +82,11 @@ defmodule OptimalSystemAgent.MixProject do
 
       # Knowledge graph — ETS-backed triple store with SPARQL subset + OWL 2 RL
       # Replaces MiosaKnowledge stubs with real implementation
-      {:vaos_knowledge, github: "jmanhype/vaos-knowledge", branch: "master"}
+      {:vaos_knowledge, github: "jmanhype/vaos-knowledge", branch: "master"},
+
+      # Epistemic governance — claims/evidence/attacks with EIG scoring
+      # Powers the investigate tool's adversarial verification pipeline
+      {:vaos_ledger, github: "jmanhype/vaos-ledger", branch: "master"}
     ]
   end
 
