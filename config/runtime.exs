@@ -335,3 +335,10 @@ config :optimal_system_agent,
   jwt_secret: System.get_env("JWT_SECRET"),
   amqp_url: System.get_env("AMQP_URL"),
   platform_enabled: database_url != nil
+
+# ── Receipt Chain (cryptographic audit trail) ─────────────────────────
+# Set RECEIPT_CHAIN_ENABLED=true to start the Receipt Emitter.
+# Submits Ed25519-signed audit receipts to the kernel for every tool call
+# and investigation. Failed submissions are queued to disk and retried.
+config :optimal_system_agent,
+  receipt_chain_enabled: System.get_env("RECEIPT_CHAIN_ENABLED") == "true"

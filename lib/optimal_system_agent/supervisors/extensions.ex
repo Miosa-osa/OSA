@@ -17,7 +17,8 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
   def init(_init_arg) do
     children =
       treasury_children() ++
-      updater_children()
+      updater_children() ++
+      receipt_children()
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -41,4 +42,15 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
       []
     end
   end
+
+  # Receipt Chain — opt-in via RECEIPT_CHAIN_ENABLED=true
+  defp receipt_children do
+    if Application.get_env(:optimal_system_agent, :receipt_chain_enabled, false) do
+      Logger.info("[Extensions] Receipt Emitter enabled — starting OptimalSystemAgent.Receipt.Emitter")
+      [OptimalSystemAgent.Receipt.Emitter]
+    else
+      []
+    end
+  end
+
 end
