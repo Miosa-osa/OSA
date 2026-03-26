@@ -43,7 +43,7 @@ defmodule OptimalSystemAgent.Receipt.Bundle do
     %__MODULE__{
       action_type: "tool_call",
       action_name: tool_call.name,
-      agent_id: Application.get_env(:daemon, :agent_id, "daemon-agent"),
+      agent_id: Application.get_env(:optimal_system_agent, :agent_id, "osa-agent"),
       timestamp: DateTime.utc_now(),
       action_id: Map.get(tool_call, :id),
       session_id: session_id,
@@ -71,7 +71,7 @@ defmodule OptimalSystemAgent.Receipt.Bundle do
     %__MODULE__{
       action_type: "investigation",
       action_name: "investigate",
-      agent_id: Application.get_env(:daemon, :agent_id, "daemon-agent"),
+      agent_id: Application.get_env(:optimal_system_agent, :agent_id, "osa-agent"),
       timestamp: DateTime.utc_now(),
       action_id: claim_id,
       session_id: session_id,

@@ -161,12 +161,14 @@ defmodule OptimalSystemAgent.Receipt.Emitter do
           path = Path.join(@pending_dir, filename)
 
           with {:ok, body} <- File.read(path),
-               {:ok, %{status: 200, body: %{"confirmed" => true}}} <-
+               {:ok, audit_map} <- Jason.decode(body),
+               {:ok, %{status: 200, body: %{"confirmed" => true} = resp}} <-
                  Req.post("#{kernel_http}/api/audit",
                    body: body,
                    headers: [{"content-type", "application/json"}],
                    receive_timeout: 5_000
                  ) do
+            store_signed_receipt(audit_map, resp)
             File.rm(path)
             Logger.debug("[Receipt.Emitter] Flushed pending receipt: #{filename}")
           else
