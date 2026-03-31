@@ -19,8 +19,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
   # ── GET / — read current settings ──────────────────────────────────
 
   get "/" do
-    settings = build_settings(read_config())
-    json(conn, 200, settings)
+    # Merge file-based config with new Settings cascade
+    file_settings = build_settings(read_config())
+    cascade_settings = OptimalSystemAgent.Settings.all()
+    merged = Map.merge(file_settings, cascade_settings)
+    json(conn, 200, merged)
   end
 
   # ── PATCH / — update settings ───────────────────────────────────────

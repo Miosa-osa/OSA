@@ -77,6 +77,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
           "type" => "boolean",
           "description" => "Fork subagent with full parent conversation context. " <>
             "The child inherits your conversation history for context-aware delegation."
+        },
+        "isolation" => %{
+          "type" => "string",
+          "enum" => ["worktree"],
+          "description" => "Run in an isolated git worktree — the agent gets its own copy " <>
+            "of the repo. Changes are merged back on success, discarded on failure. " <>
+            "Use for parallel agents editing the same files."
         }
       }
     }
@@ -107,6 +114,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
 
       tier = if raw_tier == :utility, do: :specialist, else: raw_tier
 
+      # Resolve isolation mode
+      isolation = case Map.get(args, "isolation") do
+        "worktree" -> :worktree
+        _ -> nil
+      end
+
       # Build orchestrator config
       config = %{
         task: task,
@@ -116,7 +129,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
         system_prompt: agent_def && agent_def[:system_prompt],
         tools_allowed: agent_def && agent_def[:tools_allowed],
         tools_blocked: (agent_def && agent_def[:tools_blocked]) || [],
-        max_iterations: (agent_def && agent_def[:max_iterations]) || Tier.max_iterations(tier)
+        max_iterations: (agent_def && agent_def[:max_iterations]) || Tier.max_iterations(tier),
+        isolation: isolation
       }
 
       # If fork: true, inject parent conversation history into the subagent

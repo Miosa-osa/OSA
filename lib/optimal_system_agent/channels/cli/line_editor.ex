@@ -146,6 +146,12 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
         toggle_task_display(state.tty)
         input_loop(state)
 
+      :ctrl_r ->
+        # Reverse history search
+        state = reverse_search_mode(state)
+        redraw(state)
+        input_loop(state)
+
       :backspace ->
         state = delete_backward(state)
         redraw(state)
@@ -532,6 +538,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       {:ok, <<11>>} -> :ctrl_k
       {:ok, <<21>>} -> :ctrl_u
       {:ok, <<23>>} -> :ctrl_w
+      {:ok, <<18>>} -> :ctrl_r
       {:ok, <<20>>} -> :ctrl_t
       {:ok, <<ch>>} when ch >= 32 -> {:char, <<ch::utf8>>}
       {:ok, bytes} -> maybe_utf8(tty, bytes)
@@ -638,6 +645,54 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       end
     rescue
       _ -> :ok
+    end
+  end
+
+  # --- Reverse Search ---
+
+  defp reverse_search_mode(state) do
+    # Simple reverse search: prompt for search term, find match in history
+    tty = state.tty
+    tty_write(tty, "\r\e[2K\e[2m(reverse-i-search)`': \e[0m")
+
+    search_term = read_search_input(tty, "")
+
+    if search_term == "" do
+      state
+    else
+      # Find the first history entry containing the search term
+      match = Enum.find(state.history, fn entry ->
+        String.contains?(String.downcase(entry), String.downcase(search_term))
+      end)
+
+      case match do
+        nil ->
+          tty_write(tty, "\r\e[2K\e[33mno match: #{search_term}\e[0m")
+          Process.sleep(800)
+          state
+
+        found ->
+          # Set the buffer to the found entry
+          chars = String.graphemes(found)
+          %{state | buffer: chars, cursor: length(chars)}
+      end
+    end
+  end
+
+  defp read_search_input(tty, acc) do
+    case :file.read(tty, 1) do
+      {:ok, <<13>>} -> acc  # Enter — accept
+      {:ok, <<3>>} -> ""    # Ctrl+C — cancel
+      {:ok, <<27>>} -> acc  # Escape — accept
+      {:ok, <<127>>} ->     # Backspace
+        new_acc = String.slice(acc, 0, max(String.length(acc) - 1, 0))
+        tty_write(tty, "\r\e[2K\e[2m(reverse-i-search)`#{new_acc}': \e[0m")
+        read_search_input(tty, new_acc)
+      {:ok, <<ch>>} when ch >= 32 ->
+        new_acc = acc <> <<ch>>
+        tty_write(tty, "\r\e[2K\e[2m(reverse-i-search)`#{new_acc}': \e[0m")
+        read_search_input(tty, new_acc)
+      _ -> acc
     end
   end
 
