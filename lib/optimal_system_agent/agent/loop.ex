@@ -441,6 +441,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     Bus.emit(:agent_response, %{session_id: state.session_id, response: response, agent: state.session_id})
 
+    # Fire post_response hooks (async, non-blocking)
+    try do
+      Hooks.run_async(:post_response, %{
+        session_id: state.session_id,
+        response: response,
+        input: List.last(state.messages) |> Map.get(:content, ""),
+        turn_count: state.turn_count,
+        iteration: state.iteration
+      })
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
       {:osa_event, %{type: :agent_response, session_id: state.session_id, response: response, response_type: "agent"}})
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
