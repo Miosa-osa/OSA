@@ -535,14 +535,22 @@ class PaletteStore {
         ? data
         : (data.commands ?? []);
 
+      const cmdIcons: Record<string, string> = {
+        help: "chat", clear: "trash", new: "plus", compact: "refresh",
+        model: "models", status: "activity", cost: "usage", context: "usage",
+        memory: "memory", tools: "terminal", skills: "skills", agents: "agents",
+        sessions: "chat", tasks: "tasks", plan: "tasks", doctor: "approvals",
+        export: "projects", version: "settings", coordinator: "agents",
+        effort: "bolt", fast: "bolt", login: "link", logout: "link",
+      };
+
       const apiCmds: PaletteCommand[] = raw.map((cmd) => ({
         id: `cmd-${cmd.name}`,
         name: cmd.name,
         description: cmd.description ?? cmd.usage,
-        icon: "/",
+        icon: cmdIcons[cmd.name] ?? "terminal",
         category: "commands" as CommandCategory,
         action: () => {
-          // Slash commands are inserted into the chat input via a custom event
           if (typeof window !== "undefined") {
             window.dispatchEvent(
               new CustomEvent("osa:insert-command", {
