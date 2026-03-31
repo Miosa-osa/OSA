@@ -121,19 +121,33 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   end
 
   defp maybe_add_explore_directive(acc, message) do
-    if Guardrails.complex_coding_task?(message) do
-      directive = %{
-        role: "system",
-        content:
-          "[System: This task involves code changes. MANDATORY explore-first protocol: " <>
-            "Call dir_list and file_read to understand the relevant structure BEFORE " <>
-            "calling file_write, file_edit, or shell_execute. " <>
-            "Never modify a file you haven't read first.]"
-      }
+    cond do
+      # Large/unfamiliar codebase exploration — dispatch explorer agent
+      Guardrails.needs_exploration?(message) ->
+        directive = %{
+          role: "system",
+          content:
+            "[System: This task requires codebase understanding. DISPATCH an explorer agent first: " <>
+              "delegate(task: \"Scan the project — report structure, key files, patterns, and tech stack\", role: \"explorer\") " <>
+              "Wait for the explorer's report before writing any code. " <>
+              "For quick lookups, use thoroughness: \"quick\". For deep analysis, use \"very thorough\".]"
+        }
+        [directive | acc]
 
-      [directive | acc]
-    else
-      acc
+      # Complex coding task — at minimum read before write
+      Guardrails.complex_coding_task?(message) ->
+        directive = %{
+          role: "system",
+          content:
+            "[System: This task involves code changes. Read relevant files BEFORE modifying them. " <>
+              "If the task spans 5+ files or multiple domains, consider dispatching an explorer agent first: " <>
+              "delegate(task: \"<specific question about the codebase>\", role: \"explorer\") " <>
+              "For simpler tasks, use file_read and dir_list directly.]"
+        }
+        [directive | acc]
+
+      true ->
+        acc
     end
   end
 
@@ -142,15 +156,15 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       directive = %{
         role: "system",
         content:
-          "[System: MANDATORY TEAM DISPATCH. This task has multiple independent " <>
-            "deliverables. You MUST assemble a team using the `delegate` tool. " <>
-            "Do NOT write files yourself for this task. " <>
-            "For EACH bullet point or numbered item, call: " <>
-            "delegate(task: \"<full description with file paths>\", role: \"<best role>\") " <>
-            "Choose roles from: architect, backend, frontend, tester, debugger, " <>
+          "[System: TEAM DISPATCH recommended. This task has multiple independent " <>
+            "deliverables. Consider assembling a team using `delegate`: " <>
+            "1. Dispatch `explorer` first if you need codebase context " <>
+            "2. Dispatch `planner` if the architecture is complex " <>
+            "3. Then dispatch implementation agents in parallel " <>
+            "Roles: explorer, planner, architect, backend, frontend, tester, debugger, " <>
             "security-auditor, code-reviewer, researcher, devops, doc-writer, refactorer, performance. " <>
-            "If no role fits, omit the role parameter. " <>
-            "Call delegate IMMEDIATELY — do not call file_write, file_edit, or shell_execute first.]"
+            "Use background: true for research while you implement. " <>
+            "Use fork: true when agents need your conversation context.]"
       }
 
       [directive | acc]
