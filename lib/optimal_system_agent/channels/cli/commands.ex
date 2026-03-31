@@ -43,6 +43,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "export"    => {"Export conversation as markdown", :cmd_export},
     "version"   => {"Show version info", :cmd_version},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
+    "effort"    => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
+    "fast"      => {"Toggle fast mode (low effort)", :cmd_fast},
     "login"     => {"Sign in with your Anthropic account", :cmd_login},
     "logout"    => {"Sign out of Anthropic account", :cmd_logout},
     "exit"      => {"Exit OSA", :cmd_exit}
@@ -50,6 +52,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   @doc "List all command names (for autocomplete)."
   def list, do: Map.keys(@commands) |> Enum.sort()
+
+  @doc "List all commands with their descriptions as `{name, description}` tuples."
+  def list_with_descriptions do
+    @commands
+    |> Enum.map(fn {name, {desc, _handler}} -> {name, desc} end)
+    |> Enum.sort_by(&elem(&1, 0))
+  end
 
   @doc "Dispatch a slash command. Returns the (possibly new) session_id."
   def dispatch(input, session_id) do
@@ -554,6 +563,61 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     e ->
       IO.puts("  #{@yellow}error: #{Exception.message(e)}#{@reset}\n")
       session_id
+  end
+
+  def cmd_effort(args, session_id) do
+    alias OptimalSystemAgent.Agent.Effort
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        current = Effort.current()
+        config = Effort.get(current)
+        IO.puts("  #{@bold}Effort Level: #{current}#{@reset}")
+        IO.puts("  #{@dim}#{config.description}#{@reset}")
+        IO.puts("")
+        IO.puts("  #{@dim}Thinking budget:#{@reset} #{config.thinking_budget} tokens")
+        IO.puts("  #{@dim}Max iterations:#{@reset}  #{config.max_iterations}")
+        IO.puts("  #{@dim}Temperature:#{@reset}     #{config.temperature}")
+        IO.puts("")
+        IO.puts("  #{@dim}Usage: /effort low|medium|high|max#{@reset}")
+
+      level_str ->
+        level = String.to_existing_atom(level_str)
+
+        if level in Effort.levels() do
+          Effort.set(level)
+          config = Effort.get(level)
+          IO.puts("  #{@green}✓#{@reset} Effort set to #{@bold}#{level}#{@reset} — #{config.description}")
+        else
+          IO.puts("  #{@yellow}error: invalid level '#{level_str}'#{@reset}")
+          IO.puts("  #{@dim}Valid levels: low, medium, high, max#{@reset}")
+        end
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: invalid level#{@reset}")
+      IO.puts("  #{@dim}Valid levels: low, medium, high, max#{@reset}\n")
+      session_id
+  end
+
+  def cmd_fast(_args, session_id) do
+    alias OptimalSystemAgent.Agent.Effort
+    IO.puts("")
+
+    Effort.toggle_fast()
+
+    if Effort.fast_mode?() do
+      IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}enabled#{@reset} — low effort, quick responses")
+    else
+      IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}disabled#{@reset} — back to #{Effort.current()} effort")
+    end
+
+    IO.puts("")
+    session_id
   end
 
   def cmd_coordinator(_args, session_id) do
