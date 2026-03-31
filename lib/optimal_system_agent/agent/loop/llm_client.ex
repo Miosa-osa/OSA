@@ -87,6 +87,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
           {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}})
 
+      {:tool_use_block, tool_call} ->
+        # Provider detected a complete tool_use block during streaming.
+        # Notify the caller to start executing this tool immediately.
+        :atomics.add(heartbeat, 1, 1)
+        send(caller, {:streaming_tool_block, tool_call})
+        Bus.emit(:tool_call, %{
+          name: tool_call.name,
+          phase: :streaming_start,
+          args: Map.get(tool_call, :arguments, %{}) |> inspect() |> String.slice(0, 80),
+          session_id: session_id
+        })
+
       _other ->
         :atomics.add(heartbeat, 1, 1)
         :ok
