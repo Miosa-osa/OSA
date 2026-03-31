@@ -1,5 +1,10 @@
 <script module lang="ts">
-  export type SlashCommandName = 'clear' | 'help' | 'model' | 'sessions' | 'memory';
+  export type SlashCommandName =
+    | 'clear' | 'help' | 'model' | 'sessions' | 'memory'
+    | 'login' | 'logout' | 'status' | 'cost' | 'context'
+    | 'tools' | 'agents' | 'tasks' | 'doctor' | 'version'
+    | 'compact' | 'export' | 'plan' | 'coordinator'
+    | 'effort' | 'fast' | 'skills' | 'new';
 </script>
 
 <script lang="ts">
@@ -101,11 +106,29 @@
 
   // ── Slash command autocomplete ─────────────────────────────────────────────
   const SLASH_COMMANDS: { name: SlashCommandName; desc: string }[] = [
-    { name: 'clear',    desc: 'Clear chat — create a new session' },
-    { name: 'help',     desc: 'Show available commands' },
-    { name: 'model',    desc: 'Show current model info' },
-    { name: 'sessions', desc: 'List recent sessions' },
-    { name: 'memory',   desc: 'Save current context to memory' },
+    { name: 'clear',       desc: 'Clear chat — start fresh session' },
+    { name: 'new',         desc: 'Start a new session' },
+    { name: 'help',        desc: 'Show available commands' },
+    { name: 'model',       desc: 'Show or switch current model' },
+    { name: 'sessions',    desc: 'List recent sessions' },
+    { name: 'memory',      desc: 'Show memory entries' },
+    { name: 'login',       desc: 'Sign in with Anthropic account' },
+    { name: 'logout',      desc: 'Sign out of Anthropic' },
+    { name: 'status',      desc: 'Show session status' },
+    { name: 'cost',        desc: 'Show cost breakdown' },
+    { name: 'context',     desc: 'Show context window usage' },
+    { name: 'tools',       desc: 'List available tools' },
+    { name: 'skills',      desc: 'List available skills' },
+    { name: 'agents',      desc: 'List agent roles' },
+    { name: 'tasks',       desc: 'Show current tasks' },
+    { name: 'plan',        desc: 'Toggle plan mode' },
+    { name: 'compact',     desc: 'Force context compaction' },
+    { name: 'doctor',      desc: 'Run health check' },
+    { name: 'version',     desc: 'Show version info' },
+    { name: 'export',      desc: 'Export conversation as markdown' },
+    { name: 'coordinator', desc: 'Toggle coordinator mode' },
+    { name: 'effort',      desc: 'Set thinking effort level' },
+    { name: 'fast',        desc: 'Toggle fast mode' },
   ];
 
   let showSlashMenu = $state(false);
