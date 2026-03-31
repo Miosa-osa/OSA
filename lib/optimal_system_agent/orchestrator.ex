@@ -200,6 +200,27 @@ defmodule OptimalSystemAgent.Orchestrator do
     # If fork_messages provided, pass them as initial conversation history
     fork_messages = Map.get(config, :fork_messages, [])
 
+    # Worktree isolation — create an isolated git worktree for this agent
+    isolation = Map.get(config, :isolation)
+    worktree_info =
+      if isolation == :worktree do
+        case OptimalSystemAgent.Agent.Worktree.create(subagent_id) do
+          {:ok, info} ->
+            Logger.info("[Orchestrator] Worktree created for #{subagent_id} at #{info.path}")
+            info
+          {:error, reason} ->
+            Logger.warning("[Orchestrator] Worktree creation failed: #{reason}, running without isolation")
+            nil
+        end
+      else
+        nil
+      end
+
+    # Set working directory — worktree path if isolated, otherwise default
+    working_dir =
+      if worktree_info, do: worktree_info.path,
+      else: Map.get(config, :working_dir) || Application.get_env(:optimal_system_agent, :working_dir)
+
     # Spawn the subagent Loop
     subagent_opts = [
       session_id: subagent_id,
@@ -212,7 +233,8 @@ defmodule OptimalSystemAgent.Orchestrator do
       allowed_tools: Map.get(config, :tools_allowed),
       blocked_tools: Map.get(config, :tools_blocked, []),
       system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil),
-      messages: fork_messages
+      messages: fork_messages,
+      working_dir: working_dir
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches
@@ -251,6 +273,12 @@ defmodule OptimalSystemAgent.Orchestrator do
         # Cleanup
         stop_event_forwarder(forwarder)
         safely_terminate(pid)
+
+        # Worktree cleanup — merge changes back if successful, otherwise discard
+        if worktree_info do
+          merge = match?({:ok, _}, result)
+          OptimalSystemAgent.Agent.Worktree.cleanup(worktree_info.path, merge: merge)
+        end
 
         result
 

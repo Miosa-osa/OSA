@@ -536,7 +536,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage,
       "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents,
       "repl" => OptimalSystemAgent.Tools.Builtins.REPL,
-      "cron" => OptimalSystemAgent.Tools.Builtins.Cron
+      "cron" => OptimalSystemAgent.Tools.Builtins.Cron,
+      "config" => OptimalSystemAgent.Tools.Builtins.Config,
+      "task_stop" => OptimalSystemAgent.Tools.Builtins.TaskStop,
+      "task_output" => OptimalSystemAgent.Tools.Builtins.TaskOutput
     }
   end
 

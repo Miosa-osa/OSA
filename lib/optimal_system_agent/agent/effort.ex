@@ -49,11 +49,14 @@ defmodule OptimalSystemAgent.Agent.Effort do
 
   @doc "Get the current global effort level."
   def current do
-    Application.get_env(:optimal_system_agent, :effort_level, :medium)
+    # Settings cascade: session → local → project → user → app default
+    OptimalSystemAgent.Settings.get(:effort_level) ||
+      Application.get_env(:optimal_system_agent, :effort_level, :medium)
   end
 
   @doc "Set the global effort level."
   def set(level) when level in [:low, :medium, :high, :max] do
+    OptimalSystemAgent.Settings.set_session(:effort_level, level)
     Application.put_env(:optimal_system_agent, :effort_level, level)
     :ok
   end
