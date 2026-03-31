@@ -40,17 +40,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
     expanded = Path.expand(path)
     replace_all = params["replace_all"] == true
 
+    # Resolve symlinks BEFORE security checks to prevent symlink traversal attacks.
+    # file_edit only operates on existing files, so we always resolve the full path.
+    resolved = resolve_real_path(expanded)
+    symlink_traversal? = resolved != expanded
+
     cond do
-      not read_allowed?(expanded) ->
+      symlink_traversal? and (not read_allowed?(resolved) or not write_allowed?(resolved)) ->
+        {:error, "Access denied: #{path} resolves through a symlink to a protected location"}
+
+      not read_allowed?(resolved) ->
         {:error, "Access denied: #{path} is outside allowed paths or is a sensitive file"}
-      not write_allowed?(expanded) ->
+
+      not write_allowed?(resolved) ->
         {:error, "Access denied: #{path} targets a protected location"}
+
       old == new ->
         {:error, "old_string and new_string are identical"}
+
       old == "" ->
         {:error, "old_string cannot be empty"}
+
       true ->
-        do_edit(expanded, path, old, new, replace_all)
+        do_edit(resolved, path, old, new, replace_all)
     end
   end
   def execute(_), do: {:error, "Missing required parameters: path, old_string, new_string"}
@@ -106,6 +118,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
 
     diff_lines = [header, hunk] ++ context_b ++ removed ++ added ++ context_a
     Enum.join(diff_lines, "\n")
+  end
+
+  # Resolve all symlink components in a path to get the real filesystem path.
+  # Uses :file.read_link_all which follows the full symlink chain (POSIX realpath).
+  # Falls back to the original path if the path doesn't exist or has no symlinks.
+  defp resolve_real_path(path) do
+    case :file.read_link_all(String.to_charlist(path)) do
+      {:ok, real} -> to_string(real)
+      {:error, :einval} -> path
+      {:error, _} -> path
+    end
   end
 
   # Security: copy exact patterns from FileRead and FileWrite

@@ -48,25 +48,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
 
     expanded = Path.expand(normalized)
 
-    if write_allowed?(expanded) do
-      case File.mkdir_p(Path.dirname(expanded)) do
-        :ok ->
-          case File.write(expanded, content) do
-            :ok ->
-              # Reload Soul cache when agent writes to ~/.osa/ identity/personality files
-              maybe_reload_soul(expanded)
+    # Resolve symlinks BEFORE security checks to prevent symlink traversal attacks.
+    # If the target file doesn't exist yet, resolve its parent directory instead,
+    # then reconstruct the full resolved path with the filename appended.
+    {resolved, symlink_traversal?} = resolve_for_write(expanded)
 
-              line_count = content |> String.split("\n") |> length()
-              preview = content |> String.split("\n") |> Enum.take(10) |> Enum.join("\n")
-              {:ok, "#{expanded}\n#{line_count} lines written\n---\n#{preview}"}
-            {:error, reason} -> {:error, "Error writing file: #{reason}"}
-          end
+    cond do
+      symlink_traversal? and not write_allowed?(resolved) ->
+        {:error, "Access denied: #{path} resolves through a symlink to a protected location"}
 
-        {:error, reason} ->
-          {:error, "Cannot create directory: #{:file.format_error(reason)}"}
-      end
-    else
-      {:error, "Access denied: #{path} is outside allowed paths or targets a protected location"}
+      not write_allowed?(resolved) ->
+        {:error, "Access denied: #{path} is outside allowed paths or targets a protected location"}
+
+      true ->
+        case File.mkdir_p(Path.dirname(expanded)) do
+          :ok ->
+            case File.write(expanded, content) do
+              :ok ->
+                # Reload Soul cache when agent writes to ~/.osa/ identity/personality files
+                maybe_reload_soul(expanded)
+
+                line_count = content |> String.split("\n") |> length()
+                preview = content |> String.split("\n") |> Enum.take(10) |> Enum.join("\n")
+                {:ok, "#{expanded}\n#{line_count} lines written\n---\n#{preview}"}
+              {:error, reason} -> {:error, "Error writing file: #{reason}"}
+            end
+
+          {:error, reason} ->
+            {:error, "Cannot create directory: #{:file.format_error(reason)}"}
+        end
     end
   end
 
@@ -74,6 +84,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
     not (String.starts_with?(path, "~") or
            String.starts_with?(path, "/") or
            String.match?(path, ~r/^[A-Za-z]:[\\\/]/))
+  end
+
+  # Resolve symlinks for a write target path.
+  # Returns {resolved_path, symlink_traversal?} where symlink_traversal? is true
+  # when the resolved path differs from the original expanded path.
+  #
+  # For existing files: resolve the full path via :file.read_link_all.
+  # For new files (don't exist yet): resolve the parent directory and reconstruct
+  # the full path, so a symlinked parent directory is caught.
+  defp resolve_for_write(expanded_path) do
+    case resolve_real_path(expanded_path) do
+      ^expanded_path ->
+        # Path resolved to itself — check if parent resolves differently
+        parent = Path.dirname(expanded_path)
+        resolved_parent = resolve_real_path(parent)
+
+        if resolved_parent == parent do
+          {expanded_path, false}
+        else
+          # Parent resolved through a symlink — reconstruct the full path
+          filename = Path.basename(expanded_path)
+          resolved = Path.join(resolved_parent, filename)
+          {resolved, resolved != expanded_path}
+        end
+
+      resolved ->
+        # File itself resolved to a different path (it's a symlink or in a symlinked dir)
+        {resolved, true}
+    end
+  end
+
+  # Resolve all symlink components in a path to get the real filesystem path.
+  # Uses :file.read_link_all which follows the full symlink chain (POSIX realpath).
+  # Falls back to the original path if the path doesn't exist or has no symlinks.
+  defp resolve_real_path(path) do
+    case :file.read_link_all(String.to_charlist(path)) do
+      {:ok, real} -> to_string(real)
+      {:error, :einval} -> path
+      {:error, _} -> path
+    end
   end
 
   defp allowed_write_paths do

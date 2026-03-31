@@ -1,19 +1,41 @@
 defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
-  @moduledoc """
-  Doom loop detection for the agent loop.
-
-  Detects when the same tool+error signature repeats 3+ consecutive times
-  across iterations and halts execution to avoid wasting tokens on a stuck task.
-
-  The detection algorithm:
-  - Builds per-tool failure signatures from each iteration's results
-  - Accumulates signatures in a sliding window of 30 entries
-  - Resets the error-based streak when any tool succeeds cleanly
-  - Fires when any single signature appears 3+ times in the window
-  """
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+
+  @window_size 20
+
+  @max_total_tool_calls Application.compile_env(
+                          :optimal_system_agent,
+                          :doom_loop_max_calls,
+                          100
+                        )
+
+  @warn_threshold_pct 0.80
+
+  @moduledoc """
+  Doom loop detection for the agent loop.
+
+  Two independent safety mechanisms guard against runaway tool execution:
+
+  1. **Signature-based detection** (primary) — detects when the same
+     tool+error signature repeats 3+ consecutive times across iterations
+     and halts execution to avoid wasting tokens on a stuck task.
+
+     - Builds per-tool failure signatures from each iteration's results
+     - Accumulates signatures in a sliding window of #{@window_size} entries
+     - Resets the error-based streak when any tool succeeds cleanly
+     - Fires when any single signature appears 3+ times in the window
+
+  2. **Absolute call cap** (secondary safety net) — independently of the
+     signature check, halts the session once total tool calls in the session
+     exceed `@max_total_tool_calls`. This prevents a pathological worst-case
+     where many *different* failure signatures accumulate without repeating
+     enough to trigger the primary check.
+
+     Configurable via: `config :optimal_system_agent, :doom_loop_max_calls, 100`
+     A warning is logged at 80% of the limit.
+  """
 
   @error_indicators ~w(error Error failed not found command not found
                        No such file Permission denied cannot Could not
@@ -27,6 +49,33 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   @spec check(list(), list(), map()) ::
           {:ok, map()} | {:halt, String.t(), map()}
   def check(results, tool_calls, state) do
+    # --- Absolute call counter (secondary safety net) ---
+    call_count = length(tool_calls)
+    new_total = Map.get(state, :total_tool_calls, 0) + call_count
+    state = %{state | total_tool_calls: new_total}
+
+    warn_at = trunc(@max_total_tool_calls * @warn_threshold_pct)
+
+    cond do
+      new_total >= @max_total_tool_calls ->
+        handle_call_cap_exceeded(new_total, state)
+
+      new_total >= warn_at and new_total - call_count < warn_at ->
+        Logger.warning(
+          "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
+            "(session: #{state.session_id})"
+        )
+
+        check_signatures(results, tool_calls, state)
+
+      true ->
+        check_signatures(results, tool_calls, state)
+    end
+  end
+
+  # --- Private ---
+
+  defp check_signatures(results, tool_calls, state) do
     iteration_signatures = collect_iteration_signatures(results, tool_calls)
 
     any_clean_success =
@@ -49,7 +98,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     updated_failure_signatures =
       (state.recent_failure_signatures ++ new_sigs)
-      |> Enum.take(-30)
+      |> Enum.take(-@window_size)
 
     state = %{state | recent_failure_signatures: updated_failure_signatures}
 
@@ -64,8 +113,6 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       {:ok, state}
     end
   end
-
-  # --- Private ---
 
   defp collect_iteration_signatures(results, _tool_calls) do
     Enum.flat_map(results, fn {tc, {_msg, result_str}} ->
@@ -86,6 +133,41 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
         []
       end
     end)
+  end
+
+  defp handle_call_cap_exceeded(total, state) do
+    cap_message =
+      """
+      I've reached the session tool call limit (#{total}/#{@max_total_tool_calls}) and am stopping to avoid runaway execution.
+
+      This limit exists as a safety net independent of error-pattern detection.
+
+      How to proceed:
+      - If the task is incomplete, start a new session and continue from where you left off.
+      - If you need a higher limit, adjust `doom_loop_max_calls` in your application config.
+      """
+      |> String.trim()
+
+    Logger.warning(
+      "[loop] Tool call cap exceeded: #{total}/#{@max_total_tool_calls} (session: #{state.session_id})"
+    )
+
+    Bus.emit(:system_event, %{
+      event: :tool_call_cap_exceeded,
+      session_id: state.session_id,
+      total_tool_calls: total,
+      max_tool_calls: @max_total_tool_calls
+    })
+
+    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
+      {:osa_event, %{
+        type: :tool_call_cap_exceeded,
+        session_id: state.session_id,
+        total_tool_calls: total,
+        max_tool_calls: @max_total_tool_calls
+      }})
+
+    {:halt, cap_message, state}
   end
 
   defp handle_doom_loop({repeated_sig_key, occurrences}, iteration_signatures, state) do
