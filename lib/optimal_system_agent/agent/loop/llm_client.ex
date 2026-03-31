@@ -145,6 +145,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           {:error, "LLM stream exceeded 1 hour absolute limit"}
       end
 
+    # Record provider telemetry
+    stream_duration = System.monotonic_time(:millisecond) - (Process.get(:osa_stream_start_time) || System.monotonic_time(:millisecond))
+    try do
+      success = match?({:ok, _}, result)
+      OptimalSystemAgent.Telemetry.Metrics.record_provider(provider || :unknown, stream_duration, success)
+      OptimalSystemAgent.Telemetry.Metrics.record_turn()
+    rescue _ -> :ok
+    catch :exit, _ -> :ok
+    end
+
     result
   rescue
     e ->

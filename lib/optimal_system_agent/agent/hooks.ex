@@ -32,6 +32,8 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   @type hook_event ::
           :pre_tool_use
           | :post_tool_use
+          | :post_tool_use_failure
+          | :user_prompt_submit
           | :pre_compact
           | :post_compact
           | :session_start

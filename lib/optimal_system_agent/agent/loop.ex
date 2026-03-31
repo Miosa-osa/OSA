@@ -273,6 +273,28 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Process.delete(:osa_system_msg_cache)
     Process.put(:osa_memory_version, 0)
 
+    # -1. UserPromptSubmit hook — can modify or block the message
+    {message, state} =
+      try do
+        case Hooks.run(:user_prompt_submit, %{
+          message: message,
+          session_id: state.session_id,
+          turn_count: state.turn_count
+        }) do
+          {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
+          {:blocked, reason} -> {nil, %{state | status: :idle}}
+          _ -> {message, state}
+        end
+      rescue
+        _ -> {message, state}
+      catch
+        :exit, _ -> {message, state}
+      end
+
+    if is_nil(message) do
+      {:reply, {:error, "Message blocked by hook"}, state}
+    else
+
     # 0. Prompt injection guard
     if Guardrails.prompt_injection?(message) do
       refusal = Guardrails.prompt_extraction_refusal()
@@ -314,6 +336,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           dispatch_message(state, skip_plan)
       end
     end
+    end # if message not blocked
     end # if limit_error
   end
 

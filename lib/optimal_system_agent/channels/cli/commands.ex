@@ -45,6 +45,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "effort"    => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
     "fast"      => {"Toggle fast mode (low effort)", :cmd_fast},
+    "permissions" => {"View and manage permission rules", :cmd_permissions},
+    "hooks"     => {"View registered hooks", :cmd_hooks},
+    "metrics"   => {"Show telemetry metrics", :cmd_metrics},
     "login"     => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
     "logout"    => {"Disconnect OAuth session for a provider", :cmd_logout},
     "exit"      => {"Exit OSA", :cmd_exit}
@@ -857,5 +860,116 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp get_model_name(provider) do
     key = :"#{provider}_model"
     Application.get_env(:optimal_system_agent, key, to_string(provider))
+  end
+
+  # ── Permission Management ────────────────────────────────────────────
+
+  def cmd_permissions(args, session_id) do
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        rules = OptimalSystemAgent.Permissions.list_rules()
+
+        if map_size(rules) == 0 do
+          IO.puts("  #{@dim}No permission rules configured.#{@reset}")
+          IO.puts("  #{@dim}Rules are saved when you choose 'Allow always' on a permission prompt.#{@reset}")
+        else
+          IO.puts("  #{@bold}Permission Rules#{@reset}")
+          IO.puts("")
+          Enum.each(rules, fn {tool, action} ->
+            icon = if action == "allow", do: "#{IO.ANSI.green()}✓#{@reset}", else: "#{IO.ANSI.red()}✗#{@reset}"
+            IO.puts("  #{icon} #{tool} → #{action}")
+          end)
+        end
+
+        IO.puts("")
+        IO.puts("  #{@dim}Usage: /permissions remove <tool_name>#{@reset}")
+
+      "remove " <> tool_name ->
+        OptimalSystemAgent.Permissions.remove_rule(String.trim(tool_name))
+        IO.puts("  #{IO.ANSI.green()}✓#{@reset} Removed rule for #{String.trim(tool_name)}")
+
+      _ ->
+        IO.puts("  #{@dim}Usage: /permissions [remove <tool>]#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  # ── Hooks Viewer ─────────────────────────────────────────────────────
+
+  def cmd_hooks(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}Registered Hooks#{@reset}")
+    IO.puts("")
+
+    try do
+      hooks = OptimalSystemAgent.Agent.Hooks.list_hooks()
+
+      if is_list(hooks) and length(hooks) > 0 do
+        hooks
+        |> Enum.sort_by(fn h -> {h[:event], h[:priority]} end)
+        |> Enum.each(fn hook ->
+          event = hook[:event] || "?"
+          name = hook[:name] || "?"
+          priority = hook[:priority] || 0
+          IO.puts("  #{@cyan}#{event}#{@reset} #{@dim}p#{priority}#{@reset} #{name}")
+        end)
+
+        IO.puts("")
+        IO.puts("  #{@dim}#{length(hooks)} hooks registered#{@reset}")
+      else
+        IO.puts("  #{@dim}No hooks registered.#{@reset}")
+      end
+    rescue
+      _ -> IO.puts("  #{@dim}Hooks system not available.#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  # ── Metrics Viewer ───────────────────────────────────────────────────
+
+  def cmd_metrics(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}Telemetry Metrics#{@reset}")
+    IO.puts("")
+
+    try do
+      snapshot = OptimalSystemAgent.Telemetry.Metrics.snapshot()
+
+      if map_size(snapshot.tools) > 0 do
+        IO.puts("  #{@bold}Tools#{@reset}")
+        Enum.each(snapshot.tools, fn {name, stats} ->
+          IO.puts("  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
+            " #{stats.count} calls" <>
+            " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
+            " #{@dim}p99 #{stats.p99_ms}ms#{@reset}" <>
+            " #{@dim}#{stats.success}✓ #{stats.fail}✗#{@reset}")
+        end)
+        IO.puts("")
+      end
+
+      if map_size(snapshot.providers) > 0 do
+        IO.puts("  #{@bold}Providers#{@reset}")
+        Enum.each(snapshot.providers, fn {name, stats} ->
+          IO.puts("  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
+            " #{stats.count} calls" <>
+            " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
+            " #{@dim}p99 #{stats.p99_ms}ms#{@reset}")
+        end)
+        IO.puts("")
+      end
+
+      IO.puts("  #{@dim}Total turns: #{snapshot.sessions.total_turns}#{@reset}")
+    rescue
+      _ -> IO.puts("  #{@dim}Metrics not available.#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
   end
 end
