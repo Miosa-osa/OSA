@@ -176,6 +176,24 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
             )
           end
 
+        # Background agent completion/failure notifications
+        %{event: :background_agent_completed, role: role, result: result, duration_ms: dur} ->
+          Renderer.clear_line()
+          duration = Renderer.format_elapsed(dur)
+          preview = String.slice(to_string(result), 0, 120)
+          IO.puts("\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}")
+          IO.puts("#{dim}    #{preview}#{reset}\n")
+
+        %{event: :background_agent_failed, role: role, error: error, duration_ms: dur} ->
+          Renderer.clear_line()
+          duration = Renderer.format_elapsed(dur)
+          IO.puts("\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}")
+          IO.puts("#{dim}    #{error}#{reset}\n")
+
+        %{event: :background_agent_started, role: role, agent_id: aid} ->
+          Renderer.clear_line()
+          IO.puts("#{dim}  ◉ Background agent \"#{role}\" started (#{aid})#{reset}")
+
         _ ->
           :ok
       end
