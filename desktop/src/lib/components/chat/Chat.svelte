@@ -169,6 +169,27 @@
 
   // ── Send ───────────────────────────────────────────────────────────────────
   function handleSend(text: string) {
+    // Intercept slash commands with arguments (e.g. /login anthropic)
+    if (text.startsWith('/')) {
+      const match = text.match(/^\/(\w+)\s*(.*)?$/);
+      if (match) {
+        const [, cmd, args] = match;
+        const arg = (args ?? '').trim();
+
+        // Handle /login <provider> specifically
+        if (cmd === 'login' && arg) {
+          void startProviderOAuth(arg);
+          return;
+        }
+
+        // Handle /logout <provider>
+        if (cmd === 'logout' && arg) {
+          void handleCommand('logout');
+          return;
+        }
+      }
+    }
+
     if (attachedFiles.length > 0) {
       const fileContext = attachedFiles.map(f => {
         if (f.category === 'text') {
@@ -184,6 +205,40 @@
     }
 
     chatStore.sendMessage(text);
+  }
+
+  async function startProviderOAuth(providerSlug: string): Promise<void> {
+    const supported: Record<string, string> = { anthropic: 'Anthropic' };
+    const name = supported[providerSlug.toLowerCase()];
+
+    if (!name) {
+      const available = Object.entries(supported).map(([k, v]) => `\`/login ${k}\` — ${v}`).join('\n');
+      injectSystemMessage(`Unknown provider: \`${providerSlug}\`\n\nAvailable:\n${available}`);
+      return;
+    }
+
+    injectSystemMessage(`Opening ${name} sign-in in your browser...`);
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
+      const data = await res.json() as { authorize_url: string };
+      await openUrl(data.authorize_url);
+
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+          const d = await status.json() as { connected: boolean };
+          if (d.connected) {
+            injectSystemMessage(`**Connected to ${name}** ✓`);
+            return;
+          }
+        } catch { /* keep polling */ }
+      }
+      injectSystemMessage(`OAuth timed out. Try \`/login ${providerSlug}\` again.`);
+    } catch (e) {
+      injectSystemMessage(`Login failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    }
   }
 
   // ── Slash commands ─────────────────────────────────────────────────────────
@@ -268,62 +323,39 @@
       }
 
       case 'login': {
-        // Check if current provider supports OAuth
-        const currentProvider = modelsStore.current?.provider;
-        if (currentProvider && currentProvider !== 'anthropic') {
-          injectSystemMessage(
-            `OAuth sign-in is only available for **Anthropic**.\n\n` +
-            `Current provider: \`${currentProvider}\`\n` +
-            `To use Anthropic, switch your provider in Settings or during onboarding.`
-          );
-          break;
-        }
+        // Show available OAuth providers and their status
+        const OAUTH_PROVIDERS: { slug: string; name: string }[] = [
+          { slug: 'anthropic', name: 'Anthropic' },
+          // Future: { slug: 'openai', name: 'OpenAI' },
+        ];
 
+        // Check status
+        let connected = false;
         try {
           const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
           const data = await res.json() as { connected: boolean };
-          if (data.connected) {
-            injectSystemMessage('Already signed in with Anthropic. Use `/logout` to disconnect.');
-            break;
-          }
-        } catch { /* proceed to login */ }
+          connected = data.connected;
+        } catch { /* offline */ }
 
-        injectSystemMessage('Opening Anthropic sign-in in your browser...');
-        try {
-          const { openUrl } = await import('@tauri-apps/plugin-opener');
-          const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
-          const data = await res.json() as { authorize_url: string };
-          await openUrl(data.authorize_url);
-
-          for (let i = 0; i < 60; i++) {
-            await new Promise(r => setTimeout(r, 2000));
-            try {
-              const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
-              const d = await status.json() as { connected: boolean };
-              if (d.connected) {
-                injectSystemMessage('**Connected to Anthropic** ✓\n\nYour account is now linked.');
-                return;
-              }
-            } catch { /* keep polling */ }
-          }
-          injectSystemMessage('OAuth timed out. Try `/login` again.');
-        } catch (e) {
-          injectSystemMessage(`Login failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+        if (connected) {
+          injectSystemMessage('**Already connected** ✓\n\nUse `/logout` to disconnect.');
+          break;
         }
+
+        // Show available providers
+        const lines = OAUTH_PROVIDERS.map(p =>
+          `\`/login ${p.slug}\` — Sign in with ${p.name}`
+        ).join('\n');
+        injectSystemMessage(`**Sign in with a provider**\n\n${lines}\n\nOr set an API key in Settings.`);
         break;
       }
 
       case 'logout': {
-        const prov = modelsStore.current?.provider;
-        if (prov && prov !== 'anthropic') {
-          injectSystemMessage('OAuth is only available for Anthropic.');
-          break;
-        }
         try {
           await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
-          injectSystemMessage('Signed out of Anthropic.');
+          injectSystemMessage('Disconnected from OAuth provider.');
         } catch {
-          injectSystemMessage('Failed to sign out. Backend may be offline.');
+          injectSystemMessage('Failed to disconnect. Backend may be offline.');
         }
         break;
       }
