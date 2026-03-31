@@ -10,6 +10,33 @@
 import type { StreamEvent } from "./types";
 import { getToken } from "./client";
 
+// ── OS Notifications ─────────────────────────────────────────────────────────
+
+async function maybeNotify(event: StreamEvent): Promise<void> {
+  if (typeof document === "undefined" || document.hasFocus()) return;
+
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } =
+      await import("@tauri-apps/plugin-notification");
+
+    let permitted = await isPermissionGranted();
+    if (!permitted) {
+      const permission = await requestPermission();
+      permitted = permission === "granted";
+    }
+    if (!permitted) return;
+
+    if (event.type === "done") {
+      await sendNotification({
+        title: "OSA Agent",
+        body: "Task completed",
+      });
+    }
+  } catch {
+    // Not in Tauri environment or notification plugin not available
+  }
+}
+
 const BASE_URL = "http://127.0.0.1:9089";
 const API_PREFIX = "/api/v1";
 
@@ -110,6 +137,7 @@ async function consumeStream(
         if (!event) continue;
 
         callbacks.onEvent(event);
+        maybeNotify(event).catch(() => undefined);
 
         if (event.type === "done") {
           callbacks.onDone?.();
