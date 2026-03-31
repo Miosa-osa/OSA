@@ -269,6 +269,66 @@ defmodule OptimalSystemAgent.Orchestrator do
     end
   end
 
+  @doc """
+  Run a subagent in the background — returns immediately with the agent ID.
+
+  The subagent runs asynchronously under TaskSupervisor. On completion,
+  emits `:background_agent_completed` or `:background_agent_failed` on
+  the Events.Bus, which the CLI and SSE consumers can display.
+  """
+  @spec run_background(String.t(), map()) :: {:ok, String.t()}
+  def run_background(parent_id, config) do
+    config = Map.put(config, :parent_session_id, parent_id)
+    role = Map.get(config, :role, "background")
+
+    # Generate the ID upfront so we can return it immediately
+    subagent_num = next_subagent_number(parent_id)
+    subagent_id = "agent:#{parent_id}:#{subagent_num}"
+
+    emit_event(parent_id, %{
+      event: "background_agent_started",
+      agent_id: subagent_id,
+      role: role
+    })
+
+    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      start_time = System.monotonic_time(:millisecond)
+
+      result = run_subagent(config)
+      duration_ms = System.monotonic_time(:millisecond) - start_time
+
+      case result do
+        {:ok, response} ->
+          Bus.emit(:system_event, %{
+            event: :background_agent_completed,
+            session_id: parent_id,
+            agent_id: subagent_id,
+            role: role,
+            result: String.slice(response, 0, 500),
+            duration_ms: duration_ms
+          })
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
+            {:osa_event, %{type: :background_agent_completed, agent_id: subagent_id, role: role,
+              result: String.slice(response, 0, 500), duration_ms: duration_ms}})
+
+        {:error, reason} ->
+          Bus.emit(:system_event, %{
+            event: :background_agent_failed,
+            session_id: parent_id,
+            agent_id: subagent_id,
+            role: role,
+            error: inspect(reason),
+            duration_ms: duration_ms
+          })
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
+            {:osa_event, %{type: :background_agent_failed, agent_id: subagent_id, role: role,
+              error: inspect(reason), duration_ms: duration_ms}})
+      end
+    end)
+
+    {:ok, subagent_id}
+  end
+
   # ---------------------------------------------------------------------------
   # Private
   # ---------------------------------------------------------------------------

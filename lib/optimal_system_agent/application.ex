@@ -58,6 +58,9 @@ defmodule OptimalSystemAgent.Application do
     # ETS table for subagent session counters (Orchestrator.next_subagent_number/1)
     :ets.new(:osa_subagent_counters, [:named_table, :public, :set])
 
+    # ETS table for structured compression state (previous summary persistence)
+    :ets.new(:osa_compactor_state, [:named_table, :public, :set])
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 
