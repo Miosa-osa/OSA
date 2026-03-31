@@ -347,14 +347,6 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   def match_skill_triggers(_), do: []
 
-  @doc "Search existing tools and skills by keyword matching against names and descriptions."
-  @spec search(String.t()) :: list({String.t(), String.t(), float()})
-  def search(query) do
-    builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
-    skills = :persistent_term.get({__MODULE__, :skills}, %{})
-    Search.search(builtin_tools, skills, query)
-  end
-
   @doc "Return a single skill map by name, or nil if not found."
   @spec get_skill(String.t()) :: map() | nil
   def get_skill(name) do

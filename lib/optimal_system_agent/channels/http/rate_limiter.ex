@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
 
   require Logger
 
+  import Bitwise
   import Plug.Conn
 
   @table :osa_rate_limits

@@ -632,7 +632,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   @git_cache_table :osa_git_info_cache
-  @git_cache_ttl 30_000
+  @git_cache_ttl 5_000
 
   defp cached_git_info do
     ensure_git_cache_table()

@@ -382,7 +382,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       %{context | messages: injected}
     rescue
       e ->
-        Logger.debug("[loop] Memory injection skipped: #{inspect(e)}")
+        Logger.warning("[loop] Memory injection failed: #{Exception.message(e)}")
         context
     end
   end

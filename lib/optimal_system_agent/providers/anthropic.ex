@@ -318,8 +318,16 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp finalize_current_tool(%{current_tool: tool} = acc) do
     arguments =
       case Jason.decode(tool.input_json) do
-        {:ok, parsed} -> parsed
-        _ -> %{}
+        {:ok, parsed} ->
+          parsed
+
+        {:error, reason} ->
+          Logger.warning(
+            "[anthropic] Failed to parse tool JSON for #{tool.name}: #{inspect(reason)} — " <>
+              "raw (truncated): #{String.slice(tool.input_json, 0, 200)}"
+          )
+
+          %{}
       end
 
     tool_call = %{id: tool.id, name: tool.name, arguments: arguments}

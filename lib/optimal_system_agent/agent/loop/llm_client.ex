@@ -46,19 +46,38 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     caller = self()
 
+    # Token batching: accumulate small deltas before broadcasting to reduce
+    # PubSub/Bus message volume during high-throughput streams (flush at ≥64 bytes
+    # or when :done arrives). The batch lives in the stream task's Process dict.
+    flush_token_batch = fn ->
+      case Process.get(:osa_token_batch, "") do
+        "" ->
+          :ok
+
+        batch ->
+          Bus.emit(:system_event, %{event: :streaming_token, session_id: session_id, delta: batch})
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
+            {:osa_event, %{type: :streaming_token, session_id: session_id, text: batch}})
+          Process.put(:osa_token_batch, "")
+      end
+    end
+
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
-        Bus.emit(:system_event, %{
-          event: :streaming_token,
-          session_id: session_id,
-          delta: text
-        })
-        # Bridge to PubSub for SSE delivery to TUI
-        Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
-          {:osa_event, %{type: :streaming_token, session_id: session_id, text: text}})
+        batch = Process.get(:osa_token_batch, "") <> text
+        if byte_size(batch) >= 64 do
+          Bus.emit(:system_event, %{event: :streaming_token, session_id: session_id, delta: batch})
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
+            {:osa_event, %{type: :streaming_token, session_id: session_id, text: batch}})
+          Process.put(:osa_token_batch, "")
+        else
+          Process.put(:osa_token_batch, batch)
+        end
 
       {:done, result} ->
+        # Flush any remaining buffered tokens before signalling completion
+        flush_token_batch.()
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
         # Broadcast token usage via PubSub for TUI status bar

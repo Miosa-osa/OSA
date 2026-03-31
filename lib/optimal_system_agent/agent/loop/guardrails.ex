@@ -300,12 +300,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   # the original string (Tier 1 always runs on raw input).
   #
   # Steps:
+  #   0. NFD decompose + strip combining diacritics (U+0300–U+036F) to defeat
+  #      obfuscation like "ìgnörè" (i + combining grave + ... )
   #   1. Strip zero-width and invisible codepoints (U+200B, ZWNJ, BOM, etc.)
   #   2. Fold fullwidth ASCII (U+FF01–U+FF5E) to standard ASCII (U+0021–U+007E)
   #   3. Collapse common Cyrillic/Greek homoglyphs to ASCII equivalents
   #   4. Lowercase
   defp normalize_for_injection_check(input) when is_binary(input) do
     input
+    # Step 0: decompose to NFD then strip combining diacritical marks
+    |> String.normalize(:nfd)
+    |> String.replace(~r/[\x{0300}-\x{036F}]/u, "")
     # Step 1: strip zero-width / invisible codepoints
     |> String.replace(
       ~r/[\x{200B}\x{200C}\x{200D}\x{200E}\x{200F}\x{FEFF}\x{00AD}\x{2028}\x{2029}]/u,
