@@ -211,7 +211,7 @@ config :optimal_system_agent,
   # Defaults to 127.0.0.1 (loopback) — safe with open-access dev mode.
   # Set OSA_HTTP_IP=0.0.0.0 to expose on all interfaces (requires auth).
   http_ip:
-    case System.get_env("OSA_HTTP_IP", "127.0.0.1") do
+    (case System.get_env("OSA_HTTP_IP", "127.0.0.1") do
       "0.0.0.0" -> {0, 0, 0, 0}
       "::1"     -> {0, 0, 0, 0, 0, 0, 0, 1}
       "::"      -> {0, 0, 0, 0, 0, 0, 0, 0}
@@ -224,7 +224,7 @@ config :optimal_system_agent,
         else
           {127, 0, 0, 1}
         end
-    end,
+    end),
 
   # Budget limits (USD)
   daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
