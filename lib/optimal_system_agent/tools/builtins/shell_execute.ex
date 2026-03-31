@@ -10,6 +10,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
   def safety, do: :terminal
 
   @impl true
+  def concurrent?, do: false
+
+  @impl true
   def name, do: "shell_execute"
 
   @impl true

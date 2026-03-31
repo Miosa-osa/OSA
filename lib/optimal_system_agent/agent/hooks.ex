@@ -347,6 +347,21 @@ defmodule OptimalSystemAgent.Agent.Hooks do
         event: :post_response,
         priority: 85,
         handler: &save_transcript/1
+      },
+
+      # Auto-save session state — persist full conversation for resume
+      %{
+        name: "auto_save_session",
+        event: :post_response,
+        priority: 95,
+        handler: fn %{session_id: sid} = payload when is_binary(sid) ->
+          try do
+            OptimalSystemAgent.Agent.SessionPersistence.auto_save(sid)
+          rescue
+            _ -> :ok
+          end
+          {:ok, payload}
+        end
       }
     ]
 

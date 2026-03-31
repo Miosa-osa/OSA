@@ -316,18 +316,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     {already_streaming, need_execution} =
       Enum.split_with(tool_calls, fn tc -> tc.id in streaming_started_ids end)
 
-    # Execute remaining tools in parallel (ones not started during streaming)
-    fresh_results =
-      if need_execution != [] do
+    # Split remaining tools by concurrency safety
+    {concurrent_tools, sequential_tools} =
+      Enum.split_with(need_execution, fn tc ->
+        tool_concurrent?(tc.name)
+      end)
+
+    # Execute concurrent-safe tools in parallel
+    parallel_results =
+      if concurrent_tools != [] do
         OptimalSystemAgent.TaskSupervisor
         |> Task.Supervisor.async_stream_nolink(
-          need_execution,
+          concurrent_tools,
           fn tool_call -> ToolExecutor.execute_tool_call(tool_call, state) end,
           max_concurrency: 10,
           timeout: 60_000,
           on_timeout: :kill_task
         )
-        |> Enum.zip(need_execution)
+        |> Enum.zip(concurrent_tools)
         |> Enum.map(fn
           {{:ok, result}, tool_call} -> {tool_call, result}
           {_, tool_call} ->
@@ -337,6 +343,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       else
         []
       end
+
+    # Execute non-concurrent tools sequentially
+    sequential_results =
+      Enum.map(sequential_tools, fn tool_call ->
+        {tool_call, ToolExecutor.execute_tool_call(tool_call, state)}
+      end)
+
+    fresh_results = parallel_results ++ sequential_results
 
     # Collect streaming tool results (these may already be done)
     streaming_results =
@@ -429,6 +443,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   # Post-tool nudges: explore-first and skill-creation hints.
+  # Check if a tool is safe to run concurrently with others
+  defp tool_concurrent?(tool_name) do
+    builtin_tools = :persistent_term.get({OptimalSystemAgent.Tools.Registry, :builtin_tools}, %{})
+    case Map.get(builtin_tools, tool_name) do
+      nil -> true  # Unknown tools default to concurrent
+      mod ->
+        if function_exported?(mod, :concurrent?, 0) do
+          mod.concurrent?()
+        else
+          true  # Default: concurrent
+        end
+    end
+  rescue
+    _ -> true
+  end
+
   # Run stop hooks — allows hooks to override response or force continuation
   defp run_stop_hooks(content, state) do
     payload = %{
