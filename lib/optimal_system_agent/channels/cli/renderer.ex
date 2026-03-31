@@ -155,7 +155,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     text
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
-      if String.length(line) <= width do
+      if visible_length(line) <= width do
         [line]
       else
         wrap_line(line, width)
@@ -167,7 +167,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     line
     |> String.split(~r/\s+/)
     |> Enum.reduce([""], fn word, [current | rest] ->
-      if String.length(current) + String.length(word) + 1 <= width do
+      if visible_length(current) + visible_length(word) + 1 <= width do
         if current == "" do
           [word | rest]
         else
@@ -178,6 +178,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
       end
     end)
     |> Enum.reverse()
+  end
+
+  # Strip ANSI escape codes before measuring visible character width.
+  # ANSI codes (\e[...m) have zero display width but add to String.length.
+  defp visible_length(str) do
+    str
+    |> String.replace(~r/\e\[[0-9;]*m/, "")
+    |> String.length()
   end
 
   # ── Directory Display ──────────────────────────────────────────────
