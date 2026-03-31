@@ -11,18 +11,54 @@ defmodule OptimalSystemAgent.Permissions do
 
   @permissions_file Path.expand("~/.osa/permissions.json")
 
-  @doc "Check if a tool is pre-approved by saved rules."
-  def check(tool_name, _args \\ %{}) do
+  @doc """
+  Check if a tool call is pre-approved by saved rules.
+
+  Supports two rule formats:
+  - Simple: `"shell_execute" => "allow"` — matches any call to that tool
+  - Pattern: `"shell_execute:git *" => "allow"` — matches only when args match the pattern
+
+  Pattern matching uses glob-style wildcards on the first argument value.
+  Examples:
+  - `"shell_execute:git *"` — allow any git command
+  - `"file_edit:lib/**"` — allow edits to any file under lib/
+  - `"file_write:*.test.*"` — allow writing test files
+  """
+  def check(tool_name, args \\ %{}) do
     rules = load_rules()
 
-    case Map.get(rules, tool_name) do
-      "allow" -> :allow
-      "deny" -> :deny
-      _ -> :ask
+    # Check pattern rules first (most specific wins)
+    pattern_result =
+      rules
+      |> Enum.filter(fn {key, _val} -> String.contains?(key, ":") end)
+      |> Enum.find_value(fn {key, action} ->
+        [rule_tool, pattern] = String.split(key, ":", parts: 2)
+        if rule_tool == tool_name and matches_pattern?(pattern, args) do
+          case action do
+            "allow" -> :allow
+            "deny" -> :deny
+            _ -> nil
+          end
+        end
+      end)
+
+    if pattern_result do
+      pattern_result
+    else
+      # Fall back to simple tool-name rules
+      case Map.get(rules, tool_name) do
+        "allow" -> :allow
+        "deny" -> :deny
+        _ -> :ask
+      end
     end
   end
 
-  @doc "Save a permission rule (allow_always or deny)."
+  @doc """
+  Save a permission rule.
+
+  Supports pattern rules: `save_rule("shell_execute:git *", :allow_always)`
+  """
   def save_rule(tool_name, decision) do
     rules = load_rules()
 
@@ -52,6 +88,43 @@ defmodule OptimalSystemAgent.Permissions do
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  # Match a glob pattern against tool arguments.
+  # Extracts the primary argument (command for shell_execute, path for file ops)
+  # and matches it against the pattern.
+  defp matches_pattern?(pattern, args) when is_map(args) do
+    # Extract the primary value to match against
+    primary = Map.get(args, "command") ||
+              Map.get(args, "path") ||
+              Map.get(args, "query") ||
+              Map.get(args, "task") ||
+              (args |> Map.values() |> List.first())
+
+    if is_binary(primary) do
+      glob_match?(pattern, primary)
+    else
+      false
+    end
+  end
+
+  defp matches_pattern?(_pattern, _args), do: false
+
+  # Simple glob matching: * matches any sequence within a segment, ** matches across segments
+  defp glob_match?(pattern, value) do
+    regex_str =
+      pattern
+      |> String.replace(".", "\\.")
+      |> String.replace("**", "<<<GLOBSTAR>>>")
+      |> String.replace("*", "[^/]*")
+      |> String.replace("<<<GLOBSTAR>>>", ".*")
+
+    case Regex.compile("^#{regex_str}$") do
+      {:ok, regex} -> Regex.match?(regex, value)
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
 
   defp load_rules do
     case File.read(@permissions_file) do
