@@ -49,6 +49,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
           "enum" => ["elite", "specialist", "utility"],
           "description" => "Model tier — elite (strongest, slowest), specialist (balanced), " <>
             "utility (fastest, cheapest). Defaults to the role's configured tier, or 'specialist'."
+        },
+        "background" => %{
+          "type" => "boolean",
+          "description" => "Run in background — returns immediately, notifies on completion. " <>
+            "Use for long-running research or analysis that doesn't block your current work."
         }
       }
     }
@@ -91,12 +96,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
         max_iterations: (agent_def && agent_def[:max_iterations]) || Tier.max_iterations(tier)
       }
 
-      case Orchestrator.run_subagent(config) do
-        {:ok, result} ->
-          {:ok, result}
+      if Map.get(args, "background") == true do
+        # Background execution — returns immediately
+        case Orchestrator.run_background(parent_id, config) do
+          {:ok, agent_id} ->
+            {:ok, "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
+              "You'll be notified when it completes. Continue with other work."}
 
-        {:error, reason} ->
-          {:ok, "Delegation failed: #{inspect(reason)}"}
+          {:error, reason} ->
+            {:ok, "Background delegation failed: #{inspect(reason)}"}
+        end
+      else
+        # Synchronous execution — blocks until complete
+        case Orchestrator.run_subagent(config) do
+          {:ok, result} ->
+            {:ok, result}
+
+          {:error, reason} ->
+            {:ok, "Delegation failed: #{inspect(reason)}"}
+        end
       end
     end
   end
