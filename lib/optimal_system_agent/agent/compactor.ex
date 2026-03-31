@@ -118,6 +118,20 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   @doc """
+  Run micro-compaction independently — clears old tool results without LLM call.
+  Can be called on a timer for lightweight context maintenance.
+  """
+  @spec micro_compact([map()]) :: [map()]
+  def micro_compact(messages) do
+    {system_msgs, non_system} = split_system(messages)
+    annotated = annotate_importance(non_system)
+    {compacted, _, _} = apply_step(:micro_compact, annotated, system_msgs, 0)
+    system_msgs ++ strip_annotations(compacted)
+  rescue
+    _ -> messages
+  end
+
+  @doc """
   Returns context window utilization as a percentage (0.0 — 100.0).
   """
   @spec utilization([map()]) :: float()
@@ -262,8 +276,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     annotated = annotate_importance(non_system)
 
     # Run pipeline steps sequentially, stopping when under budget
+    # Step 0 (micro-compact) is the cheapest — no LLM call, just truncates old tool results
     result =
       {annotated, system_msgs, :none}
+      |> pipeline_step(:micro_compact, target_tokens)
       |> pipeline_step(:strip_tool_args, target_tokens)
       |> pipeline_step(:merge_consecutive, target_tokens)
       |> pipeline_step(:summarize_warm, target_tokens)
@@ -272,6 +288,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
     {final_annotated, final_system, last_step} = result
     final_messages = final_system ++ strip_annotations(final_annotated)
+
+    # Post-compact restore: re-inject working context (files, tasks, workspace)
+    final_messages =
+      case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(nil) do
+        nil -> final_messages
+        restore_msg -> final_messages ++ [restore_msg]
+      end
 
     tokens_after = estimate_tokens(final_messages)
     saved = tokens_before - tokens_after
@@ -312,6 +335,57 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       {annotated, system_msgs, prev_step}
     else
       apply_step(step, annotated, system_msgs, target_tokens)
+    end
+  end
+
+  # Step 0: Micro-compact — truncate old tool results without LLM call.
+  # Keeps the last N tool results intact, truncates older ones.
+  # This is the cheapest possible compaction step.
+  @micro_compact_keep Application.compile_env(:optimal_system_agent, :micro_compact_keep_recent, 5)
+
+  @doc false
+  defp apply_step(:micro_compact, annotated, system_msgs, _target) do
+    total = length(annotated)
+
+    # Find indices of tool result messages (role == "tool")
+    tool_indices =
+      annotated
+      |> Enum.with_index()
+      |> Enum.filter(fn {{msg, _imp}, _idx} ->
+        safe_to_string(Map.get(msg, :role)) == "tool"
+      end)
+      |> Enum.map(fn {_, idx} -> idx end)
+
+    # Keep the last @micro_compact_keep tool results intact
+    truncate_indices =
+      if length(tool_indices) > @micro_compact_keep do
+        Enum.drop(tool_indices, -@micro_compact_keep) |> MapSet.new()
+      else
+        MapSet.new()
+      end
+
+    if MapSet.size(truncate_indices) == 0 do
+      {annotated, system_msgs, :micro_compact}
+    else
+      compacted =
+        annotated
+        |> Enum.with_index()
+        |> Enum.map(fn {{msg, imp}, idx} ->
+          if idx in truncate_indices do
+            content = safe_to_string(Map.get(msg, :content))
+            tool_name = Map.get(msg, :name, Map.get(msg, :tool_call_id, "tool"))
+            preview = String.slice(content, 0, 100)
+
+            truncated_content =
+              "[#{tool_name} result — #{preview}#{if String.length(content) > 100, do: "...", else: ""} (truncated)]"
+
+            {Map.put(msg, :content, truncated_content), imp * 0.5}
+          else
+            {msg, imp}
+          end
+        end)
+
+      {compacted, system_msgs, :micro_compact}
     end
   end
 

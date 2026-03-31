@@ -176,8 +176,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     end
   end
 
-  @doc "Resolve thinking config based on provider, model, and application config."
+  @doc "Resolve thinking config based on provider, model, effort level, and application config."
   def thinking_config(%{provider: provider} = state) do
+    alias OptimalSystemAgent.Agent.Effort
+
     enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
 
     if enabled and provider in [:anthropic, nil] and is_anthropic_provider?() do
@@ -186,7 +188,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       if String.contains?(to_string(model), "opus") do
         %{type: "adaptive"}
       else
-        budget = Application.get_env(:optimal_system_agent, :thinking_budget_tokens, 5_000)
+        # Use effort level's thinking budget instead of flat config
+        budget = Effort.thinking_budget()
         %{type: "enabled", budget_tokens: budget}
       end
     else
