@@ -268,6 +268,17 @@
       }
 
       case 'login': {
+        // Check if current provider supports OAuth
+        const currentProvider = modelsStore.current?.provider;
+        if (currentProvider && currentProvider !== 'anthropic') {
+          injectSystemMessage(
+            `OAuth sign-in is only available for **Anthropic**.\n\n` +
+            `Current provider: \`${currentProvider}\`\n` +
+            `To use Anthropic, switch your provider in Settings or during onboarding.`
+          );
+          break;
+        }
+
         try {
           const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
           const data = await res.json() as { connected: boolean };
@@ -284,14 +295,13 @@
           const data = await res.json() as { authorize_url: string };
           await openUrl(data.authorize_url);
 
-          // Poll for completion
           for (let i = 0; i < 60; i++) {
             await new Promise(r => setTimeout(r, 2000));
             try {
               const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
               const d = await status.json() as { connected: boolean };
               if (d.connected) {
-                injectSystemMessage('**Connected to Anthropic** ✓\n\nYour account is now linked. API calls will use your Anthropic credentials.');
+                injectSystemMessage('**Connected to Anthropic** ✓\n\nYour account is now linked.');
                 return;
               }
             } catch { /* keep polling */ }
@@ -304,6 +314,11 @@
       }
 
       case 'logout': {
+        const prov = modelsStore.current?.provider;
+        if (prov && prov !== 'anthropic') {
+          injectSystemMessage('OAuth is only available for Anthropic.');
+          break;
+        }
         try {
           await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
           injectSystemMessage('Signed out of Anthropic.');
