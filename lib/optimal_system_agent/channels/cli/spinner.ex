@@ -31,6 +31,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     :started_at,
     :parent,
     phase: :thinking,
+    mode: :thinking,
     active_tool: nil,
     tool_count: 0,
     total_tokens: 0,
@@ -106,9 +107,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         state
       end
 
-    render_frame(frame, state)
+    # Skip spinner animation during streaming — tokens print inline
+    if state.mode != :streaming, do: render_frame(frame, state)
 
     receive do
+      {:streaming_mode, :start} ->
+        clear_line()
+        safe_io_write("  ")
+        spinner_loop(rest, %{state | mode: :streaming})
+
+      {:streaming_mode, :stop} ->
+        spinner_loop(rest, %{state | mode: :thinking})
+
       {:stop, caller} ->
         clear_line()
         elapsed_ms = System.monotonic_time(:millisecond) - state.started_at
