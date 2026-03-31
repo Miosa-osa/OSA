@@ -11,6 +11,8 @@
   import type { SlashCommandName } from './ChatInput.svelte';
   import type { ToolCallRef } from '$lib/api/types';
   import type { Message } from '$lib/api/types';
+  import KeyboardShortcuts from '../layout/KeyboardShortcuts.svelte';
+  import SearchPanel from './SearchPanel.svelte';
 
   interface Props {
     /** Session ID — passed from the route page after it resolves/creates one. */
@@ -139,6 +141,26 @@
       isExpanded: false,
     }))
   );
+
+  // ── Keyboard shortcuts overlay ──────────────────────────────────────────────
+  let showShortcuts = $state(false);
+  let showSearch = $state(false);
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.key === '?' && document.activeElement?.tagName !== 'TEXTAREA' && document.activeElement?.tagName !== 'INPUT') {
+      e.preventDefault();
+      showShortcuts = !showShortcuts;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      e.preventDefault();
+      showSearch = !showSearch;
+    }
+  }
+
+  function handleSearchSelectSession(sessionId: string) {
+    showSearch = false;
+    chatStore.loadSession(sessionId);
+  }
 
   // ── Voice / orb ────────────────────────────────────────────────────────────
   let isVoiceListening = $state(false);
@@ -270,6 +292,13 @@
   });
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+{#if showShortcuts}
+  <KeyboardShortcuts onClose={() => showShortcuts = false} />
+{/if}
+
 <div
   class="chat-root"
   ondragenter={handleDragEnter}
@@ -307,6 +336,14 @@
         Restart
       </button>
     </div>
+  {/if}
+
+  <!-- Search panel -->
+  {#if showSearch}
+    <SearchPanel
+      onClose={() => showSearch = false}
+      onSelectSession={handleSearchSelectSession}
+    />
   {/if}
 
   <!-- Header: history toggle + model selector -->
@@ -363,6 +400,8 @@
       onCommand={handleCommand}
       bind:isListening={isVoiceListening}
       onFilesAttach={processFiles}
+      isAgentThinking={chatStore.isStreaming}
+      currentModel={modelsStore.current?.name}
     />
   </div>
 </div>
