@@ -24,7 +24,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
             saved_input: [],
             prompt: "",
             # fd for /dev/tty — used for BOTH raw byte reads AND writes
-            tty: nil
+            tty: nil,
+            rendered_lines: 1
 
   @doc """
   Read a line of input with readline-style editing.
@@ -90,7 +91,18 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   defp input_loop(state) do
     case read_key(state.tty) do
       :enter ->
-        {:ok, Enum.join(state.buffer)}
+        text = Enum.join(state.buffer)
+        # Move cursor to the last rendered line so the caller's \r\n lands below
+        # all content rather than overwriting a middle line.
+        line_count = length(String.split(text, "\n"))
+        {cursor_line, _} = cursor_position(state.buffer, state.cursor)
+        lines_below = line_count - 1 - cursor_line
+
+        if lines_below > 0 do
+          tty_write(state.tty, "\e[#{lines_below}B")
+        end
+
+        {:ok, text}
 
       :ctrl_c ->
         :interrupt
@@ -172,6 +184,17 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       :delete ->
         state = delete_forward(state)
         redraw(state)
+        input_loop(state)
+
+      :ctrl_j ->
+        # Insert a literal newline for multi-line editing
+        {before, after_cursor} = Enum.split(state.buffer, state.cursor)
+        state = %{state | buffer: before ++ ["\n"] ++ after_cursor, cursor: state.cursor + 1, history_index: -1}
+        redraw(state)
+        input_loop(state)
+
+      :tab ->
+        state = handle_tab_completion(state)
         input_loop(state)
 
       {:char, ch} ->
@@ -272,10 +295,120 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp redraw(state) do
     line = Enum.join(state.buffer)
-    tty_write(state.tty, "\r\e[2K#{state.prompt}#{line}")
+    lines = String.split(line, "\n")
+    line_count = length(lines)
 
-    chars_after = length(state.buffer) - state.cursor
-    if chars_after > 0, do: tty_write(state.tty, "\e[#{chars_after}D")
+    # How many lines did we render last time? Use process dict since redraw
+    # is called for side-effects and does not return an updated state.
+    prev_rendered = Process.get(:rendered_lines, 1)
+
+    # Move up to the first rendered line so we can overwrite everything.
+    if prev_rendered > 1 do
+      tty_write(state.tty, "\e[#{prev_rendered - 1}A")
+    end
+
+    # Clear from here to end of screen.
+    tty_write(state.tty, "\r\e[J")
+
+    # Render all lines.
+    [first | rest] = lines
+    tty_write(state.tty, "#{state.prompt}#{first}")
+
+    for continuation <- rest do
+      tty_write(state.tty, "\r\n  #{continuation}")
+    end
+
+    # Position cursor on the correct line and column.
+    {cursor_line, cursor_col} = cursor_position(state.buffer, state.cursor)
+    lines_from_end = line_count - 1 - cursor_line
+
+    if lines_from_end > 0 do
+      tty_write(state.tty, "\e[#{lines_from_end}A")
+    end
+
+    prefix_len = if cursor_line == 0, do: String.length(state.prompt), else: 2
+    tty_write(state.tty, "\r")
+
+    if prefix_len + cursor_col > 0 do
+      tty_write(state.tty, "\e[#{prefix_len + cursor_col}C")
+    end
+
+    # Persist the rendered line count for the next redraw call.
+    Process.put(:rendered_lines, line_count)
+  end
+
+  # Returns {line_number, column} of the cursor within a multi-line buffer.
+  # line_number is 0-based; column is the grapheme offset on that line.
+  defp cursor_position(buffer, cursor) do
+    chars_before = Enum.take(buffer, cursor)
+    text_before = Enum.join(chars_before)
+    lines_before = String.split(text_before, "\n")
+    line_num = length(lines_before) - 1
+    col = String.length(List.last(lines_before) || "")
+    {line_num, col}
+  end
+
+  # --- Tab Completion ---
+
+  @known_commands ~w(
+    help model clear compact context cost exit quit
+    sessions resume status agents tools soul thinking
+    strategy swarm plan permission orchestrate
+  )
+
+  defp handle_tab_completion(state) do
+    text = Enum.join(state.buffer)
+
+    if String.starts_with?(text, "/") do
+      partial = String.slice(text, 1..-1//1)
+      matches = Enum.filter(@known_commands, &String.starts_with?(&1, partial))
+
+      case matches do
+        [single] ->
+          completed = "/" <> single <> " "
+          chars = String.graphemes(completed)
+          state = %{state | buffer: chars, cursor: length(chars)}
+          redraw(state)
+          state
+
+        multiple when length(multiple) > 0 ->
+          tty_write(state.tty, "\r\n")
+
+          for cmd <- multiple do
+            tty_write(state.tty, "  /#{cmd}\r\n")
+          end
+
+          prefix = common_prefix(multiple)
+
+          if String.length(prefix) > String.length(partial) do
+            completed = "/" <> prefix
+            chars = String.graphemes(completed)
+            state = %{state | buffer: chars, cursor: length(chars)}
+            redraw(state)
+            state
+          else
+            redraw(state)
+            state
+          end
+
+        [] ->
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp common_prefix([]), do: ""
+  defp common_prefix([single]), do: single
+
+  defp common_prefix([first | rest]) do
+    Enum.reduce(rest, first, fn str, acc ->
+      Enum.zip(String.graphemes(acc), String.graphemes(str))
+      |> Enum.take_while(fn {a, b} -> a == b end)
+      |> Enum.map(fn {a, _} -> a end)
+      |> Enum.join()
+    end)
   end
 
   # --- Terminal I/O ---
@@ -386,7 +519,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     case :file.read(tty, 1) do
       {:ok, <<27>>} -> read_escape(tty)
       {:ok, <<13>>} -> :enter
-      {:ok, <<10>>} -> :enter
+      {:ok, <<10>>} -> :ctrl_j
+      {:ok, <<9>>} -> :tab
       {:ok, <<127>>} -> :backspace
       {:ok, <<8>>} -> :backspace
       {:ok, <<3>>} -> :ctrl_c
