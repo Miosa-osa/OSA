@@ -139,6 +139,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         other -> inspect(other)
       end
 
+    # Apply tool result budget — persist large results to disk
+    result_str = OptimalSystemAgent.Agent.Loop.ToolResultStorage.apply_budget(
+      result_str, tool_call.name, tool_call.id
+    )
+
     # Run post_tool_use hooks async (cost tracker, telemetry, learning)
     post_payload = %{
       tool_name: tool_call.name,

@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   alias OptimalSystemAgent.Agent.Context
   alias OptimalSystemAgent.Agent.Scratchpad
+  alias OptimalSystemAgent.Agent.Loop.StreamingToolExecutor
   alias OptimalSystemAgent.Events.Bus
 
   alias OptimalSystemAgent.Agent.Loop.Guardrails
@@ -34,7 +35,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @cancel_table :osa_cancel_flags
 
   defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
-  defp max_response_tokens, do: Application.get_env(:optimal_system_agent, :max_response_tokens, 8_192)
+  defp max_response_tokens do
+    # Check for bumped max_tokens from output token recovery
+    Process.get(:osa_bumped_max_tokens) ||
+      Application.get_env(:optimal_system_agent, :max_response_tokens, 8_192)
+  end
 
   @doc """
   Run the agent loop for the given state.
@@ -83,10 +88,36 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp do_iteration(state) do
     Logger.debug("[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}")
 
+    # Start async memory prefetch on iteration 0 (fires search while we build context)
+    memory_task =
+      if state.iteration == 0 do
+        Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
+          try do
+            OptimalSystemAgent.Memory.Synthesis.search_relevant(state.messages)
+          rescue
+            _ -> nil
+          end
+        end)
+      else
+        nil
+      end
+
     context = cached_context(state)
     Logger.debug("[loop] context built, #{length(context.messages)} messages")
 
-    context = maybe_inject_memory(context, state)
+    # Consume prefetched memory (waits max 2s, falls back to sync if timeout)
+    context =
+      if memory_task do
+        case Task.yield(memory_task, 2_000) || Task.shutdown(memory_task, :brutal_kill) do
+          {:ok, memories} when is_list(memories) and memories != [] ->
+            inject_prefetched_memory(context, memories)
+          _ ->
+            maybe_inject_memory(context, state)
+        end
+      else
+        maybe_inject_memory(context, state)
+      end
+
     context = inject_pending_agent_messages(context, state)
     context = inject_iteration_budget(context, state)
 
@@ -101,7 +132,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     llm_opts = [tools: tools_for_call, temperature: LLMClient.temperature(), max_tokens: max_response_tokens()]
     llm_opts = if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
 
+    # Initialize streaming tool executor — tools can start running mid-stream
+    streaming_ctx = StreamingToolExecutor.start(state)
+    Process.put(:osa_streaming_tool_ctx, streaming_ctx)
+
     result = LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+
+    # Collect any streaming tool blocks that arrived during the LLM call
+    streaming_ctx = drain_streaming_tool_blocks(Process.get(:osa_streaming_tool_ctx, streaming_ctx), state)
+    Process.put(:osa_streaming_tool_ctx, streaming_ctx)
+
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
     usage =
@@ -124,6 +164,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
 
     handle_result(result, state, context)
+  end
+
+  # Max tokens recovery — response was truncated, bump limit and retry
+  defp handle_result({:ok, %{stop_reason: "max_tokens"} = resp}, state, context)
+       when state.overflow_retries < 2 do
+    content = Map.get(resp, :content, "")
+    current_max = max_response_tokens()
+    bumped = min(current_max * 2, 16_384)
+
+    Logger.info("[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}")
+
+    # Inject the partial response so the model can continue from where it left off
+    state = %{state |
+      messages: state.messages ++ [
+        %{role: "assistant", content: content},
+        %{role: "system", content: "[Your previous response was truncated due to length. Continue from where you left off.]"}
+      ],
+      overflow_retries: state.overflow_retries + 1,
+      iteration: state.iteration + 1
+    }
+
+    # Store bumped max_tokens for this session
+    Process.put(:osa_bumped_max_tokens, bumped)
+    run(state)
   end
 
   # No tool calls — final response or behavioural nudge
@@ -201,7 +265,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         run(state)
 
       true ->
-        {content, state}
+        # Run stop hooks — hooks can override the response or force continuation
+        case run_stop_hooks(content, state) do
+          {:continue, inject_msg, state} ->
+            # Hook wants the agent to continue with an injected message
+            state = %{state |
+              messages: state.messages ++ [%{role: "assistant", content: content}, inject_msg],
+              iteration: state.iteration + 1
+            }
+            run(state)
+
+          {:override, new_content, state} ->
+            # Hook overrides the final response
+            {new_content, state}
+
+          {:ok, state} ->
+            # No hook intervention — return normally
+            {content, state}
+        end
     end
   end
 
@@ -227,24 +308,51 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     state = %{state | messages: state.messages ++ [assistant_msg]}
 
-    results =
-      OptimalSystemAgent.TaskSupervisor
-      |> Task.Supervisor.async_stream_nolink(
-        tool_calls,
-        fn tool_call -> ToolExecutor.execute_tool_call(tool_call, state) end,
-        max_concurrency: 10,
-        timeout: 60_000,
-        on_timeout: :kill_task
-      )
-      |> Enum.zip(tool_calls)
-      |> Enum.map(fn
-        {{:ok, result}, tool_call} ->
-          {tool_call, result}
+    # Check if any tools were already started via streaming execution
+    streaming_ctx = Process.get(:osa_streaming_tool_ctx)
+    streaming_started_ids = if streaming_ctx, do: MapSet.new(streaming_ctx.order), else: MapSet.new()
 
-        {_, tool_call} ->
-          timeout_msg = %{role: "tool", tool_call_id: tool_call.id, name: tool_call.name, content: "Error: Tool execution timed out"}
-          {tool_call, {timeout_msg, "Error: Tool execution timed out"}}
-      end)
+    # Split: tools already started streaming vs tools that need fresh execution
+    {already_streaming, need_execution} =
+      Enum.split_with(tool_calls, fn tc -> tc.id in streaming_started_ids end)
+
+    # Execute remaining tools in parallel (ones not started during streaming)
+    fresh_results =
+      if need_execution != [] do
+        OptimalSystemAgent.TaskSupervisor
+        |> Task.Supervisor.async_stream_nolink(
+          need_execution,
+          fn tool_call -> ToolExecutor.execute_tool_call(tool_call, state) end,
+          max_concurrency: 10,
+          timeout: 60_000,
+          on_timeout: :kill_task
+        )
+        |> Enum.zip(need_execution)
+        |> Enum.map(fn
+          {{:ok, result}, tool_call} -> {tool_call, result}
+          {_, tool_call} ->
+            timeout_msg = %{role: "tool", tool_call_id: tool_call.id, name: tool_call.name, content: "Error: Tool execution timed out"}
+            {tool_call, {timeout_msg, "Error: Tool execution timed out"}}
+        end)
+      else
+        []
+      end
+
+    # Collect streaming tool results (these may already be done)
+    streaming_results =
+      if streaming_ctx && StreamingToolExecutor.has_in_flight?(streaming_ctx) do
+        collected = StreamingToolExecutor.collect_results(streaming_ctx)
+        Enum.zip(already_streaming, collected) |> Enum.map(fn {tc, result} -> {tc, result} end)
+      else
+        []
+      end
+
+    # Merge results in original tool_call order
+    all_results_map = Map.new(streaming_results ++ fresh_results, fn {tc, result} -> {tc.id, {tc, result}} end)
+    results = Enum.map(tool_calls, fn tc -> Map.get(all_results_map, tc.id, {tc, {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"}, "Error: Tool not executed"}}) end)
+
+    # Clean up streaming context
+    Process.delete(:osa_streaming_tool_ctx)
 
     tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
     state = %{state | messages: state.messages ++ tool_messages}
@@ -321,6 +429,64 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   # Post-tool nudges: explore-first and skill-creation hints.
+  # Run stop hooks — allows hooks to override response or force continuation
+  defp run_stop_hooks(content, state) do
+    payload = %{
+      content: content,
+      session_id: state.session_id,
+      iteration: state.iteration,
+      turn_count: state.turn_count
+    }
+
+    try do
+      case OptimalSystemAgent.Agent.Hooks.run(:stop, payload) do
+        {:ok, %{continue: true, message: msg}} ->
+          inject = %{role: "system", content: msg}
+          {:continue, inject, state}
+
+        {:ok, %{override: new_content}} ->
+          {:override, new_content, state}
+
+        _ ->
+          {:ok, state}
+      end
+    rescue
+      _ -> {:ok, state}
+    catch
+      :exit, _ -> {:ok, state}
+    end
+  end
+
+  # Inject pre-fetched memory results into context (from async prefetch)
+  defp inject_prefetched_memory(context, memories) when is_list(memories) do
+    memory_content = Enum.map(memories, fn m ->
+      key = Map.get(m, :key, Map.get(m, :content, ""))
+      "- #{key}"
+    end) |> Enum.join("\n")
+
+    if memory_content != "" do
+      memory_msg = %{
+        role: "system",
+        content: "[Relevant memories]\n#{memory_content}"
+      }
+      %{context | messages: context.messages ++ [memory_msg]}
+    else
+      context
+    end
+  end
+
+  # Drain any {:streaming_tool_block, tool_call} messages from the process mailbox
+  # that arrived during the LLM streaming call. Each one triggers immediate execution.
+  defp drain_streaming_tool_blocks(ctx, state) do
+    receive do
+      {:streaming_tool_block, tool_call} ->
+        updated = StreamingToolExecutor.tool_block_complete(ctx, tool_call, state)
+        drain_streaming_tool_blocks(updated, state)
+    after
+      0 -> ctx  # No more messages — return
+    end
+  end
+
   defp inject_post_tool_nudges(state, tool_calls) do
     has_edit_tools = Enum.any?(tool_calls, fn tc -> tc.name in ~w(file_edit shell_execute) end)
 
