@@ -11,7 +11,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
   @dim IO.ANSI.faint()
   @cyan IO.ANSI.cyan()
   @yellow IO.ANSI.yellow()
-  @white IO.ANSI.white()
+  # @white IO.ANSI.white()  # reserved
   @green IO.ANSI.green()
   @red IO.ANSI.red()
 

@@ -670,15 +670,6 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   %MESSAGES%
   """
 
-  @key_facts_prompt_fallback """
-  Extract ONLY the essential facts from this conversation history.
-  Output a compact bullet list of: decisions made, user preferences stated,
-  key data/results, and any commitments. Omit pleasantries, meta-discussion,
-  and anything not needed to continue the conversation.
-
-  %MESSAGES%
-  """
-
   @doc false
   defp call_key_facts_llm(messages_to_compress) do
     if not compactor_llm_enabled?() do

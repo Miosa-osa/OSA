@@ -108,43 +108,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           Logger.error("[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})")
           "Blocked: security pipeline unavailable"
 
+        {:ok, %{arguments: modified_args} = _modified_payload} ->
+          # Hook modified the tool arguments — use the modified version
+          enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
+          execute_tool(tool_call.name, enriched_args)
+
+        {:inject_message, content} ->
+          # Hook wants to inject a system message instead of executing the tool.
+          # Store it for the next LLM call via process dict.
+          existing = Process.get(:osa_injected_messages, [])
+          Process.put(:osa_injected_messages, existing ++ [content])
+          # Still execute the tool
+          enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+          execute_tool(tool_call.name, enriched_args)
+
         _ ->
           # Inject session_id so tools like ask_user can register pending state
           enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-
-          case Tools.execute(tool_call.name, enriched_args) do
-            {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-              {:image, mt, b64, p}
-
-            {:ok, content, metadata} when is_map(metadata) ->
-              # Tools can return metadata (e.g. diff data) alongside content.
-              # Store metadata for event emission below.
-              Process.put(:osa_tool_metadata, metadata)
-              content
-
-            {:ok, content} ->
-              content
-
-            {:error, reason} ->
-              case Tools.suggest_fallback_tool(tool_call.name) do
-                {:ok, alt_tool} ->
-                  Logger.info("[loop] Tool '#{tool_call.name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'")
-
-                  case Tools.execute(alt_tool, enriched_args) do
-                    {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-                      {:image, mt, b64, p}
-
-                    {:ok, alt_content} ->
-                      "[used #{alt_tool} as fallback for #{tool_call.name}]\n#{alt_content}"
-
-                    {:error, _alt_reason} ->
-                      "Error: #{reason}"
-                  end
-
-                :no_alternative ->
-                  "Error: #{reason}"
-              end
-          end
+          execute_tool(tool_call.name, enriched_args)
       end
     end
 
@@ -349,6 +330,41 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :exit, reason ->
         Logger.warning("[loop] Hooks GenServer unreachable for async #{event} (#{inspect(reason)})")
         :ok
+    end
+  end
+
+  # Execute a tool with fallback support and metadata capture.
+  defp execute_tool(tool_name, enriched_args) do
+    case Tools.execute(tool_name, enriched_args) do
+      {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+        {:image, mt, b64, p}
+
+      {:ok, content, metadata} when is_map(metadata) ->
+        Process.put(:osa_tool_metadata, metadata)
+        content
+
+      {:ok, content} ->
+        content
+
+      {:error, reason} ->
+        case Tools.suggest_fallback_tool(tool_name) do
+          {:ok, alt_tool} ->
+            Logger.info("[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'")
+
+            case Tools.execute(alt_tool, enriched_args) do
+              {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+                {:image, mt, b64, p}
+
+              {:ok, alt_content} ->
+                "[used #{alt_tool} as fallback for #{tool_name}]\n#{alt_content}"
+
+              {:error, _alt_reason} ->
+                "Error: #{reason}"
+            end
+
+          :no_alternative ->
+            "Error: #{reason}"
+        end
     end
   end
 end

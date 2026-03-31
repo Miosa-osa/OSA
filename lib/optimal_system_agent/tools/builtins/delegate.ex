@@ -54,6 +54,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
           "type" => "boolean",
           "description" => "Run in background — returns immediately, notifies on completion. " <>
             "Use for long-running research or analysis that doesn't block your current work."
+        },
+        "fork" => %{
+          "type" => "boolean",
+          "description" => "Fork subagent with full parent conversation context. " <>
+            "The child inherits your conversation history for context-aware delegation."
         }
       }
     }
@@ -96,25 +101,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
         max_iterations: (agent_def && agent_def[:max_iterations]) || Tier.max_iterations(tier)
       }
 
-      if Map.get(args, "background") == true do
-        # Background execution — returns immediately
-        case Orchestrator.run_background(parent_id, config) do
-          {:ok, agent_id} ->
-            {:ok, "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
-              "You'll be notified when it completes. Continue with other work."}
-
-          {:error, reason} ->
-            {:ok, "Background delegation failed: #{inspect(reason)}"}
+      # If fork: true, inject parent conversation history into the subagent
+      config =
+        if Map.get(args, "fork") == true do
+          parent_messages = get_parent_messages(parent_id)
+          Map.put(config, :fork_messages, parent_messages)
+        else
+          config
         end
-      else
-        # Synchronous execution — blocks until complete
-        case Orchestrator.run_subagent(config) do
-          {:ok, result} ->
-            {:ok, result}
 
-          {:error, reason} ->
-            {:ok, "Delegation failed: #{inspect(reason)}"}
-        end
+      cond do
+        Map.get(args, "background") == true ->
+          case Orchestrator.run_background(parent_id, config) do
+            {:ok, agent_id} ->
+              {:ok, "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
+                "You'll be notified when it completes. Continue with other work."}
+
+            {:error, reason} ->
+              {:ok, "Background delegation failed: #{inspect(reason)}"}
+          end
+
+        true ->
+          case Orchestrator.run_subagent(config) do
+            {:ok, result} ->
+              {:ok, result}
+
+            {:error, reason} ->
+              {:ok, "Delegation failed: #{inspect(reason)}"}
+          end
       end
     end
   end
@@ -123,4 +137,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
   defp parse_tier("specialist"), do: :specialist
   defp parse_tier("utility"), do: :utility
   defp parse_tier(_), do: :specialist
+
+  defp get_parent_messages(parent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, parent_id) do
+      [{pid, _}] ->
+        try do
+          state = :sys.get_state(pid)
+          # Take the conversation history (without system messages)
+          state.messages
+          |> Enum.reject(fn msg ->
+            role = Map.get(msg, :role) || Map.get(msg, "role")
+            role == "system"
+          end)
+          |> Enum.take(-20) # Last 20 messages for context
+        rescue
+          _ -> []
+        end
+      _ -> []
+    end
+  end
 end
