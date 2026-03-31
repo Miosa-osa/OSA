@@ -194,6 +194,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
           Renderer.clear_line()
           IO.puts("#{dim}  ◉ Background agent \"#{role}\" started (#{aid})#{reset}")
 
+        %{event: :budget_limit_reached, current_cost: cost, limit: limit} ->
+          Renderer.clear_line()
+          IO.puts("\n#{yellow}  ⚠ Budget limit reached ($#{Float.round(cost / 1, 4)} / $#{limit})#{reset}\n")
+
+        %{event: :turn_limit_reached, turn_count: count, limit: limit} ->
+          Renderer.clear_line()
+          IO.puts("\n#{yellow}  ⚠ Turn limit reached (#{count}/#{limit})#{reset}\n")
+
         _ ->
           :ok
       end

@@ -289,16 +289,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   # LLM error — compact and retry or surface error
   defp handle_result({:error, reason}, state, _context) do
+    alias OptimalSystemAgent.Agent.Loop.ContextCollapse
+
     reason_str = if is_binary(reason), do: reason, else: inspect(reason)
 
     if context_overflow?(reason_str) and state.overflow_retries < 3 do
-      Logger.warning("Context overflow — compacting and retrying (overflow_retry #{state.overflow_retries + 1}/3, iteration #{state.iteration})")
-      compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
-      state = %{state | messages: compacted, overflow_retries: state.overflow_retries + 1}
+      retry_num = state.overflow_retries + 1
+      Logger.warning("Context overflow — attempting recovery (retry #{retry_num}/3, iteration #{state.iteration})")
+
+      # Try context collapse first (cheap — just withhold large tool results)
+      collapsed_messages =
+        case ContextCollapse.collapse(state.messages, retry_num) do
+          {:ok, collapsed} -> collapsed
+          {:error, _} ->
+            # Collapse failed — fall back to full compaction
+            Logger.info("[loop] Context collapse insufficient, running full compaction")
+            OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+        end
+
+      state = %{state | messages: collapsed_messages, overflow_retries: retry_num}
       run(state)
     else
       if context_overflow?(reason_str) do
-        Logger.error("Context overflow after 3 compaction attempts (iteration #{state.iteration})")
+        Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
         {"I've exceeded the context window. Try breaking your request into smaller parts.", state}
       else
         Logger.error("LLM call failed: #{reason_str}")

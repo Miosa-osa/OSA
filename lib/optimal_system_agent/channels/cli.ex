@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     ComputerUseDispatch,
     Events,
     LineEditor,
+    MessageQueue,
     Renderer,
     Session
   }
@@ -52,8 +53,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
     Session.init_history()
     Session.init_active_request()
 
+    # Start message queue for debounce batching
+    MessageQueue.start_link(session_id)
+
     Events.register_response_handler(session_id, fn result, req_id ->
       Session.handle_agent_response(session_id, result, req_id)
+      # Signal queue that agent is done — dispatch next queued message
+      MessageQueue.agent_finished(session_id)
     end)
 
     Events.register_proactive_handler(session_id)
@@ -155,7 +161,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
           end)
 
         unless filtered do
-          Session.send_to_agent(input, session_id)
+          MessageQueue.enqueue(session_id, input)
         end
       end
 

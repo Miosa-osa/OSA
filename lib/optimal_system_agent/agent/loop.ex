@@ -74,7 +74,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
     started_at: nil,
     last_input_tokens: 0,
     # Coordinator mode — restricts tools to delegation/messaging/management only
-    coordinator: false
+    coordinator: false,
+    # Budget and turn limits — nil = no limit
+    max_budget_usd: nil,
+    max_turns: nil
   ]
 
   @cancel_table :osa_cancel_flags
@@ -218,6 +221,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Keyword.get(opts, :coordinator, false)
       ),
       coordinator: Keyword.get(opts, :coordinator, false),
+      max_budget_usd: Keyword.get(opts, :max_budget_usd) || Application.get_env(:optimal_system_agent, :max_budget_usd),
+      max_turns: Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
       parent_session_id: Keyword.get(opts, :parent_session_id),
@@ -254,6 +259,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     state = apply_overrides(state, opts)
     state = %{state | turn_count: state.turn_count + 1}
+
+    # Budget and turn limit guards — check before any processing
+    limit_error = check_limits(state)
+
+    if limit_error do
+      {:reply, {:error, limit_error}, state}
+    else
 
     # Clear per-message process caches
     Process.delete(:osa_git_info_cache)
@@ -302,6 +314,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           dispatch_message(state, skip_plan)
       end
     end
+    end # if limit_error
   end
 
   @impl true
@@ -490,6 +503,44 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate permission_tier_allows?(tier, tool), to: ToolExecutor
+
+  # Check budget and turn limits. Returns nil if OK, or an error string.
+  defp check_limits(state) do
+    # Budget check
+    budget_error =
+      if state.max_budget_usd do
+        try do
+          budget = OptimalSystemAgent.Budget.get_status()
+          current_cost = (budget[:total_cost_usd] || 0) / 1
+
+          if current_cost >= state.max_budget_usd do
+            Bus.emit(:system_event, %{
+              event: :budget_limit_reached,
+              session_id: state.session_id,
+              current_cost: current_cost,
+              limit: state.max_budget_usd
+            })
+            "Budget limit reached ($#{Float.round(current_cost, 4)} / $#{state.max_budget_usd})"
+          end
+        rescue
+          _ -> nil
+        end
+      end
+
+    # Turn check
+    turn_error =
+      if state.max_turns && state.turn_count > state.max_turns do
+        Bus.emit(:system_event, %{
+          event: :turn_limit_reached,
+          session_id: state.session_id,
+          turn_count: state.turn_count,
+          limit: state.max_turns
+        })
+        "Turn limit reached (#{state.turn_count}/#{state.max_turns})"
+      end
+
+    budget_error || turn_error
+  end
 
   # Coordinator mode restricts tools to delegation, messaging, and management
   @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
