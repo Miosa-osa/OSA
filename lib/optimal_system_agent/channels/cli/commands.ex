@@ -45,8 +45,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "effort"    => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
     "fast"      => {"Toggle fast mode (low effort)", :cmd_fast},
-    "login"     => {"Sign in with Anthropic OAuth (Anthropic only)", :cmd_login},
-    "logout"    => {"Disconnect Anthropic OAuth session", :cmd_logout},
+    "login"     => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
+    "logout"    => {"Disconnect OAuth session for a provider", :cmd_logout},
     "exit"      => {"Exit OSA", :cmd_exit}
   }
 
@@ -666,79 +666,118 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
-  def cmd_login(_args, session_id) do
-    alias OptimalSystemAgent.Auth.OAuth
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+  @oauth_providers %{
+    "anthropic" => %{name: "Anthropic", module: OptimalSystemAgent.Auth.OAuth}
+    # Future: "openai" => %{name: "OpenAI", module: OptimalSystemAgent.Auth.OpenAIOAuth}
+  }
+
+  def cmd_login(args, session_id) do
+    provider_slug = String.trim(args) |> String.downcase()
 
     cond do
-      provider != :anthropic ->
-        IO.puts("#{@yellow}  OAuth sign-in is only available for Anthropic#{@reset}")
-        IO.puts("#{@dim}  Current provider: #{provider}#{@reset}")
-        IO.puts("#{@dim}  Switch to Anthropic with /model or set ANTHROPIC_API_KEY#{@reset}\n")
+      provider_slug == "" ->
+        # No provider specified — show available OAuth providers
+        IO.puts("")
+        IO.puts("  #{@bold}Sign in with a provider#{@reset}")
+        IO.puts("")
 
-      OAuth.oauth_configured?() ->
-        IO.puts("#{@green}  ✓ Already signed in with Anthropic#{@reset}")
-        IO.puts("#{@dim}  Use /logout to disconnect#{@reset}\n")
+        for {slug, meta} <- @oauth_providers do
+          configured = check_oauth_configured(slug)
+          status = if configured, do: "#{@green}✓ connected#{@reset}", else: "#{@dim}not connected#{@reset}"
+          IO.puts("  #{@cyan}/login #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}  #{status}")
+        end
+
+        IO.puts("")
+        IO.puts("#{@dim}  Or set an API key directly: ANTHROPIC_API_KEY=sk-...#{@reset}\n")
+
+      Map.has_key?(@oauth_providers, provider_slug) ->
+        meta = @oauth_providers[provider_slug]
+
+        if check_oauth_configured(provider_slug) do
+          IO.puts("#{@green}  ✓ Already signed in with #{meta.name}#{@reset}")
+          IO.puts("#{@dim}  Use /logout #{provider_slug} to disconnect#{@reset}\n")
+        else
+          start_oauth_flow(meta.name)
+        end
 
       true ->
-        api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
-        if is_binary(api_key) and api_key != "" do
-          IO.puts("#{@green}  ✓ Anthropic API key already configured#{@reset}")
-          IO.puts("#{@dim}  OAuth sign-in is optional when you have an API key#{@reset}")
-          IO.puts("#{@dim}  Continue? (y/n)#{@reset}")
-          # Still allow login if they want to switch to OAuth
-        end
-
-        port = Application.get_env(:optimal_system_agent, :http_port, 9089)
-        redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
-        {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
-
-        try do
-          :ets.new(:oauth_state, [:set, :public, :named_table])
-        rescue
-          ArgumentError -> :oauth_state
-        end
-        :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
-
-        IO.puts("")
-        IO.puts("#{@bold}  Sign in with Anthropic#{@reset}")
-        IO.puts("#{@dim}  Opening your browser...#{@reset}")
-        IO.puts("")
-
-        case :os.type() do
-          {:unix, :darwin} -> System.cmd("open", [authorize_url])
-          {:unix, _} -> System.cmd("xdg-open", [authorize_url])
-          {:win32, _} -> System.cmd("cmd", ["/c", "start", authorize_url])
-        end
-
-        IO.puts("#{@dim}  If the browser didn't open, visit:#{@reset}")
-        IO.puts("#{@cyan}  #{authorize_url}#{@reset}")
-        IO.puts("")
-        IO.puts("#{@dim}  Waiting for authorization...#{@reset}")
-
-        poll_oauth_status(30)
+        IO.puts("#{@yellow}  Unknown provider: #{provider_slug}#{@reset}")
+        available = Map.keys(@oauth_providers) |> Enum.join(", ")
+        IO.puts("#{@dim}  Providers with OAuth: #{available}#{@reset}\n")
     end
 
     session_id
   end
 
-  def cmd_logout(_args, session_id) do
-    alias OptimalSystemAgent.Auth.OAuth
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+  def cmd_logout(args, session_id) do
+    provider_slug = String.trim(args) |> String.downcase()
 
     cond do
-      provider != :anthropic ->
-        IO.puts("#{@dim}  OAuth is only available for Anthropic#{@reset}\n")
+      provider_slug == "" ->
+        # Show what's connected
+        connected = Enum.filter(@oauth_providers, fn {slug, _} -> check_oauth_configured(slug) end)
 
-      OAuth.oauth_configured?() ->
-        OAuth.clear_credentials()
-        IO.puts("#{@dim}  Signed out of Anthropic#{@reset}\n")
+        if connected == [] do
+          IO.puts("#{@dim}  No OAuth sessions active#{@reset}\n")
+        else
+          for {slug, meta} <- connected do
+            IO.puts("#{@dim}  /logout #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}")
+          end
+          IO.puts("")
+        end
+
+      Map.has_key?(@oauth_providers, provider_slug) ->
+        meta = @oauth_providers[provider_slug]
+        if check_oauth_configured(provider_slug) do
+          OptimalSystemAgent.Auth.OAuth.clear_credentials()
+          IO.puts("#{@dim}  Disconnected from #{meta.name}#{@reset}\n")
+        else
+          IO.puts("#{@dim}  Not connected to #{meta.name}#{@reset}\n")
+        end
 
       true ->
-        IO.puts("#{@dim}  Not signed in via OAuth#{@reset}\n")
+        IO.puts("#{@yellow}  Unknown provider: #{provider_slug}#{@reset}\n")
     end
 
     session_id
+  end
+
+  defp check_oauth_configured(_slug) do
+    # Currently all OAuth providers use the same credential store
+    OptimalSystemAgent.Auth.OAuth.oauth_configured?()
+  end
+
+  defp start_oauth_flow(provider_name) do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
+    redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
+    {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
+
+    try do
+      :ets.new(:oauth_state, [:set, :public, :named_table])
+    rescue
+      ArgumentError -> :oauth_state
+    end
+    :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
+
+    IO.puts("")
+    IO.puts("#{@bold}  Sign in with #{provider_name}#{@reset}")
+    IO.puts("#{@dim}  Opening your browser...#{@reset}")
+    IO.puts("")
+
+    case :os.type() do
+      {:unix, :darwin} -> System.cmd("open", [authorize_url])
+      {:unix, _} -> System.cmd("xdg-open", [authorize_url])
+      {:win32, _} -> System.cmd("cmd", ["/c", "start", authorize_url])
+    end
+
+    IO.puts("#{@dim}  If the browser didn't open, visit:#{@reset}")
+    IO.puts("#{@cyan}  #{authorize_url}#{@reset}")
+    IO.puts("")
+    IO.puts("#{@dim}  Waiting for authorization...#{@reset}")
+
+    poll_oauth_status(30)
   end
 
   defp poll_oauth_status(0) do
