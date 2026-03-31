@@ -170,6 +170,36 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── GET /sessions/:id/context ──────────────────────────────────────
+
+  get "/:id/context" do
+    session_id = conn.params["id"]
+
+    case Loop.get_state(session_id) do
+      {:ok, state} ->
+        max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+        total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+        static_tokens = OptimalSystemAgent.Soul.static_token_count()
+        conversation_tokens = max(total_tokens - static_tokens, 0)
+
+        body = Jason.encode!(%{
+          system_tokens: static_tokens,
+          conversation_tokens: conversation_tokens,
+          tool_result_tokens: 0,
+          max_tokens: max_tokens,
+          used_tokens: total_tokens
+        })
+
+        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+      _ ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found or not active")
+    end
+  rescue
+    _ ->
+      json_error(conn, 500, "context_error", "Failed to retrieve context stats")
+  end
+
   # ── GET /sessions/:id/messages ─────────────────────────────────────
 
   get "/:id/messages" do
