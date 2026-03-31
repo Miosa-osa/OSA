@@ -113,7 +113,8 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       try_stream_providers(rest, messages, callback, opts, errors ++ [{provider, Exception.message(e)}])
   end
 
-  defp retryable_error?(reason) when is_binary(reason) do
+  @doc "Check if an error is retryable (rate limit, overloaded, timeout, etc.)"
+  def retryable_error?(reason) when is_binary(reason) do
     reason_down = String.downcase(reason)
     Enum.any?([
       "rate limit", "429", "overloaded", "503", "502", "500",
@@ -121,5 +122,5 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
     ], fn pattern -> String.contains?(reason_down, pattern) end)
   end
 
-  defp retryable_error?(_), do: true
+  def retryable_error?(_), do: true
 end

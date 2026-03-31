@@ -107,9 +107,27 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
 
-    # Run the stream in a linked task so we can kill it on idle timeout
+    Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
+
+    # Run the stream in a linked task so we can kill it on idle timeout.
+    # Uses FallbackChain for automatic provider switching on retryable errors.
     stream_task = Task.async(fn ->
-      Providers.chat_stream(messages, callback, opts)
+      case Providers.chat_stream(messages, callback, opts) do
+        {:ok, _} = success ->
+          success
+
+        {:error, reason} = error ->
+          # Try fallback chain on retryable errors
+          if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+            Logger.warning("[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain")
+            case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(messages, callback, opts) do
+              {:ok, result, _provider} -> {:ok, result}
+              fallback_error -> fallback_error
+            end
+          else
+            error
+          end
+      end
     end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for @idle_timeout_ms
