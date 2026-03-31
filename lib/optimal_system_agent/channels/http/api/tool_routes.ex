@@ -168,21 +168,49 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     |> send_resp(200, body)
   end
 
-  @builtin_commands [
-    %{name: "help", description: "Show available commands and usage", category: "system"},
-    %{name: "status", description: "Show current agent status and active sessions", category: "system"},
-    %{name: "reload", description: "Reload skills and configuration", category: "system"},
-    %{name: "mem-search", description: "Search persistent memory", category: "memory"},
-    %{name: "mem-save", description: "Save a note to persistent memory", category: "memory"},
-    %{name: "mem-recall", description: "Recall recent memory entries", category: "memory"},
-    %{name: "session-list", description: "List active sessions", category: "sessions"},
-    %{name: "session-new", description: "Start a new session", category: "sessions"},
-    %{name: "session-cancel", description: "Cancel the current session loop", category: "sessions"},
-    %{name: "tools-list", description: "List all available tools", category: "tools"},
-    %{name: "skills-list", description: "List all loaded skills", category: "skills"},
-    %{name: "debug", description: "Enable debug logging for the current session", category: "dev"},
-    %{name: "version", description: "Show OSA version information", category: "system"}
-  ]
+  defp build_commands_list do
+    # Pull from the actual CLI Commands module for single source of truth
+    cli_commands =
+      try do
+        OptimalSystemAgent.Channels.CLI.Commands.list_with_descriptions()
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    cli_entries =
+      Enum.map(cli_commands, fn {name, desc} ->
+        category = categorize_command(name)
+        %{name: name, description: desc, category: category}
+      end)
+
+    # Add API-only commands not in the CLI
+    api_only = [
+      %{name: "mem-search", description: "Search persistent memory", category: "memory"},
+      %{name: "mem-save", description: "Save a note to persistent memory", category: "memory"},
+      %{name: "mem-recall", description: "Recall recent memory entries", category: "memory"},
+      %{name: "reload", description: "Reload skills and configuration", category: "system"},
+      %{name: "debug", description: "Enable debug logging for the current session", category: "dev"}
+    ]
+
+    # Merge, dedup by name
+    all = cli_entries ++ api_only
+    all |> Enum.uniq_by(& &1.name)
+  end
+
+  defp categorize_command(name) do
+    cond do
+      name in ~w(help status version doctor exit) -> "system"
+      name in ~w(clear new compact) -> "session"
+      name in ~w(model login logout) -> "config"
+      name in ~w(context cost) -> "info"
+      name in ~w(sessions export) -> "data"
+      name in ~w(agents tools skills memory) -> "browse"
+      name in ~w(tasks plan coordinator effort fast) -> "workflow"
+      true -> "commands"
+    end
+  end
 
   defp handle_list_commands(conn) do
     conn = Plug.Conn.fetch_query_params(conn)
@@ -191,7 +219,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     if is_binary(q) and q != "" do
       handle_command_palette_search(conn, q)
     else
-      body = Jason.encode!(%{commands: @builtin_commands, count: length(@builtin_commands)})
+      commands = build_commands_list()
+      body = Jason.encode!(%{commands: commands, count: length(commands)})
 
       conn
       |> put_resp_content_type("application/json")
@@ -215,7 +244,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     q_lower = String.downcase(q)
 
     command_results =
-      @builtin_commands
+      build_commands_list()
       |> Enum.map(fn cmd ->
         score = fuzzy_score(cmd.name, cmd.description, q_lower)
         Map.put(cmd, :score, score) |> Map.put(:type, "command")
