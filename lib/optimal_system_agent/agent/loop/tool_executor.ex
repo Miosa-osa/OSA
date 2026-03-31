@@ -154,6 +154,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
     run_hooks_async(:post_tool_use, post_payload)
 
+    # Fire distinct failure hook if tool errored
+    tool_failed = String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+    if tool_failed do
+      run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
+    end
+
+    # Record telemetry
+    try do
+      OptimalSystemAgent.Telemetry.Metrics.record_tool(tool_call.name, tool_duration_ms, not tool_failed)
+    rescue _ -> :ok
+    catch :exit, _ -> :ok
+    end
+
     Bus.emit(:tool_call, %{
       name: tool_call.name,
       phase: :end,
