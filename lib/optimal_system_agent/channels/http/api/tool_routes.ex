@@ -64,13 +64,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   post "/execute" do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
-      arg = conn.body_params["arg"] || ""
-      session_id = conn.body_params["session_id"] || "http-#{:erlang.unique_integer([:positive])}"
+      session_id = conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
-      _input = if arg == "", do: command, else: "#{command} #{arg}"
-      _ = session_id
+      # Capture IO by redirecting group_leader to a StringIO process
+      output =
+        try do
+          {:ok, string_io} = StringIO.open("")
+          original_gl = Process.group_leader()
+          Process.group_leader(self(), string_io)
 
-      json_error(conn, 501, "not_implemented", "Commands not available in this build")
+          try do
+            OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+          after
+            Process.group_leader(self(), original_gl)
+          end
+
+          {_, captured} = StringIO.close(string_io)
+          captured
+        rescue
+          e -> "Error: #{Exception.message(e)}"
+        end
+
+      # Strip ANSI codes for clean display
+      clean_output =
+        output
+        |> String.replace(~r/\e\[[0-9;]*m/, "")
+        |> String.trim()
+
+      body = Jason.encode!(%{output: clean_output, command: command})
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, body)
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
     end

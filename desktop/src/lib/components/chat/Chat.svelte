@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
   import { chatStore } from '$lib/stores/chat.svelte';
+  import { BASE_URL, API_PREFIX } from '$lib/api/client';
   import { sessionsStore } from '$lib/stores/sessions.svelte';
   import { modelsStore } from '$lib/stores/models.svelte';
   import { restartBackend } from '$lib/utils/backend';
@@ -198,7 +199,8 @@
 
   async function handleCommand(cmd: SlashCommandName): Promise<void> {
     switch (cmd) {
-      case 'clear': {
+      case 'clear':
+      case 'new': {
         if (chatStore.isStreaming) chatStore.cancelGeneration();
         const newSession = await chatStore.createSession();
         chatStore.currentSession = newSession;
@@ -208,20 +210,22 @@
       }
 
       case 'help': {
+        const cmds = [
+          '/clear', '/new', '/model', '/sessions', '/memory', '/login', '/logout',
+          '/status', '/cost', '/context', '/tools', '/skills', '/agents', '/tasks',
+          '/plan', '/compact', '/doctor', '/version', '/export', '/coordinator',
+          '/effort', '/fast',
+        ];
         injectSystemMessage(
-          '**Available slash commands**\n\n' +
-          '`/clear` — Clear chat and start a new session\n' +
-          '`/help` — Show this help message\n' +
-          '`/model` — Show current model info\n' +
-          '`/sessions` — List recent sessions\n' +
-          '`/memory` — Save current context to memory'
+          '**Available commands**\n\n' +
+          cmds.map(c => `\`${c}\``).join(' · ')
         );
         break;
       }
 
       case 'model': {
         try {
-          const res = await fetch('http://127.0.0.1:9089/health');
+          const res = await fetch(`${BASE_URL}/health`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json() as Record<string, unknown>;
           const active = modelsStore.current;
@@ -230,25 +234,17 @@
           const contextWindow = active?.context_window
             ? `${(active.context_window / 1000).toFixed(0)}K context`
             : '';
-          const status = (data.status as string | undefined) ?? 'ok';
           injectSystemMessage(
-            '**Current model**\n\n' +
-            `Model: \`${modelName}\`\n` +
-            `Provider: ${provider}\n` +
-            (contextWindow ? `Context: ${contextWindow}\n` : '') +
-            `Backend status: ${status}`
+            `**Current model**\n\nModel: \`${modelName}\`\nProvider: ${provider}` +
+            (contextWindow ? `\nContext: ${contextWindow}` : '') +
+            `\nStatus: ${(data.status as string) ?? 'ok'}`
           );
         } catch {
           const active = modelsStore.current;
-          if (active) {
-            injectSystemMessage(
-              '**Current model** (backend unreachable)\n\n' +
-              `Model: \`${active.name}\`\n` +
-              `Provider: ${active.provider}`
-            );
-          } else {
-            injectSystemMessage('Could not reach backend to fetch model info. Is OSA running on port 9089?');
-          }
+          injectSystemMessage(active
+            ? `**Current model** (backend unreachable)\n\nModel: \`${active.name}\`\nProvider: ${active.provider}`
+            : 'Could not reach backend. Is OSA running on port 9089?'
+          );
         }
         break;
       }
@@ -259,29 +255,107 @@
         if (sessions.length === 0) {
           injectSystemMessage('No sessions found.');
         } else {
-          const lines = sessions
-            .slice(0, 10)
-            .map((s, i) => {
-              const label = s.title ?? `Session ${i + 1}`;
-              const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'unknown';
-              const msgs = s.message_count ?? 0;
-              const active = s.id === chatStore.currentSession?.id ? ' (current)' : '';
-              return `${i + 1}. **${label}**${active} — ${msgs} messages — ${date}`;
-            })
-            .join('\n');
+          const lines = sessions.slice(0, 10).map((s, i) => {
+            const label = s.title ?? `Session ${i + 1}`;
+            const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'unknown';
+            const active = s.id === chatStore.currentSession?.id ? ' *(current)*' : '';
+            return `${i + 1}. **${label}**${active} — ${s.message_count ?? 0} messages — ${date}`;
+          }).join('\n');
           injectSystemMessage(`**Recent sessions** (${sessions.length} total)\n\n${lines}`);
         }
         sessionsStore.open();
         break;
       }
 
-      case 'memory': {
-        injectSystemMessage(
-          'Memory save is not yet connected to a backend endpoint. ' +
-          'Use `/mem-save` in a Claude Code session to persist patterns manually.'
-        );
+      case 'login': {
+        try {
+          const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+          const data = await res.json() as { connected: boolean };
+          if (data.connected) {
+            injectSystemMessage('Already signed in with Anthropic. Use `/logout` to disconnect.');
+            break;
+          }
+        } catch { /* proceed to login */ }
+
+        injectSystemMessage('Opening Anthropic sign-in in your browser...');
+        try {
+          const { openUrl } = await import('@tauri-apps/plugin-opener');
+          const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
+          const data = await res.json() as { authorize_url: string };
+          await openUrl(data.authorize_url);
+
+          // Poll for completion
+          for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+              const d = await status.json() as { connected: boolean };
+              if (d.connected) {
+                injectSystemMessage('**Connected to Anthropic** ✓\n\nYour account is now linked. API calls will use your Anthropic credentials.');
+                return;
+              }
+            } catch { /* keep polling */ }
+          }
+          injectSystemMessage('OAuth timed out. Try `/login` again.');
+        } catch (e) {
+          injectSystemMessage(`Login failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+        }
         break;
       }
+
+      case 'logout': {
+        try {
+          await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
+          injectSystemMessage('Signed out of Anthropic.');
+        } catch {
+          injectSystemMessage('Failed to sign out. Backend may be offline.');
+        }
+        break;
+      }
+
+      case 'memory': {
+        await fetchAndShowBackendCommand('memory');
+        break;
+      }
+
+      // These commands fetch data from the backend and show results
+      case 'status':
+      case 'cost':
+      case 'context':
+      case 'tools':
+      case 'skills':
+      case 'agents':
+      case 'tasks':
+      case 'doctor':
+      case 'version':
+      case 'export':
+      case 'compact':
+      case 'plan':
+      case 'coordinator':
+      case 'effort':
+      case 'fast': {
+        await fetchAndShowBackendCommand(cmd);
+        break;
+      }
+    }
+  }
+
+  /** Execute a slash command on the backend and display the result as a system message. */
+  async function fetchAndShowBackendCommand(cmd: string): Promise<void> {
+    try {
+      const res = await fetch(`${BASE_URL}${API_PREFIX}/commands/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, session_id: chatStore.currentSession?.id }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { output?: string; result?: string; error?: string };
+        injectSystemMessage(data.output || data.result || data.error || `/${cmd} executed.`);
+      } else {
+        injectSystemMessage(`/${cmd} failed (HTTP ${res.status})`);
+      }
+    } catch {
+      injectSystemMessage(`/${cmd} — backend unreachable`);
     }
   }
 
@@ -289,14 +363,8 @@
   function handlePaletteCommand(e: Event) {
     const detail = (e as CustomEvent<{ command: string }>).detail;
     if (!detail?.command) return;
-    const cmd = detail.command as SlashCommandName;
-    // If it's a known slash command, execute it
-    if (['clear', 'help', 'model', 'sessions', 'memory'].includes(cmd)) {
-      handleCommand(cmd);
-    } else {
-      // For other commands, send as a slash command message
-      chatStore.sendMessage(`/${detail.command}`);
-    }
+    // All commands route through handleCommand — never send as chat text
+    void handleCommand(detail.command as SlashCommandName);
   }
 
   onMount(() => {

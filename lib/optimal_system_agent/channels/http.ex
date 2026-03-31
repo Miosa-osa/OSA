@@ -410,6 +410,13 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
 
+  # Disconnect OAuth
+  delete "/onboarding/oauth/status" do
+    alias OptimalSystemAgent.Auth.OAuth
+    OAuth.clear_credentials()
+    conn |> put_resp_content_type("application/json") |> send_resp(200, ~s({"disconnected":true}))
+  end
+
   post "/onboarding/setup" do
     # One-time operation: if setup is already complete, require a valid JWT.
     # This prevents any unauthenticated caller from overwriting the existing
