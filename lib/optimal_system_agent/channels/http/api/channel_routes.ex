@@ -73,8 +73,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
         end
 
       {:error, :no_secret} ->
-        Logger.warning("Telegram webhook rejected: telegram_webhook_secret is not configured")
-        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+        # Security: treat a missing secret as a configuration error, not an auth
+        # failure.  401 could mislead callers into thinking they can retry with
+        # different credentials.  503 signals that the endpoint is not ready to
+        # accept requests until the operator sets TELEGRAM_WEBHOOK_SECRET.
+        Logger.error("Telegram webhook is misconfigured: TELEGRAM_WEBHOOK_SECRET is not set. " <>
+          "All webhook requests will be rejected until this is resolved. " <>
+          "Set TELEGRAM_WEBHOOK_SECRET in your environment (see .env.example).")
+        json_error(conn, 503, "configuration_error", "Webhook secret not configured — contact the server operator")
 
       {:error, :invalid_signature} ->
         json_error(conn, 401, "unauthorized", "Invalid signature")

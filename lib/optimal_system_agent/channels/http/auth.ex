@@ -21,8 +21,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
          :ok <- verify_expiration(claims) do
       {:ok, claims}
     else
-      _ -> {:error, :invalid_token}
+      _ ->
+        if ephemeral_secret?() do
+          {:error, :invalid_token_ephemeral}
+        else
+          {:error, :invalid_token}
+        end
     end
+  end
+
+  @doc "Returns true when the server is running with a randomly generated ephemeral JWT secret."
+  def ephemeral_secret? do
+    Application.get_env(:optimal_system_agent, :jwt_secret) == nil and
+      Application.get_env(:optimal_system_agent, :shared_secret) == nil and
+      System.get_env("JWT_SECRET") == nil and
+      System.get_env("OSA_SHARED_SECRET") == nil
   end
 
   @doc "Generate a signed JWT for local use (testing, CLI-to-HTTP bridge)."
@@ -124,7 +137,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
         :persistent_term.put(@dev_secret_key, secret)
 
         Logger.warning(
-          "HTTP Auth: No shared secret configured. Generated ephemeral secret for this session. Set OSA_SHARED_SECRET env var for production."
+          "[AUTH] Using ephemeral JWT secret — all tokens will be invalidated on restart. " <>
+            "Set JWT_SECRET or OSA_SHARED_SECRET in your environment for persistent sessions."
         )
 
         secret
@@ -133,4 +147,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
         secret
     end
   end
+
+  @doc """
+  Returns true when the HTTP server is bound exclusively to a loopback address
+  (127.0.0.1 or ::1).  Used by the login route to decide whether open-access
+  (no-secret) mode is safe.
+  """
+  def loopback_only? do
+    case Application.get_env(:optimal_system_agent, :http_ip) do
+      {127, 0, 0, 1} -> true
+      {0, 0, 0, 0, 0, 0, 0, 1} -> true  # ::1
+      _ -> false
+    end
+  end
+
+  @doc """
+  Emits an ERROR-level log when the server is exposed on a non-loopback address
+  without authentication configured.  Call this once at application startup.
+  """
+  def warn_if_insecure do
+    require_auth = Application.get_env(:optimal_system_agent, :require_auth, false)
+    configured_secret = Application.get_env(:optimal_system_agent, :shared_secret)
+
+    if not require_auth and is_nil(configured_secret) and not loopback_only?() do
+      Logger.error(
+        "[Auth] SECURITY WARNING: HTTP server is bound to a non-loopback address " <>
+          "with no authentication configured. " <>
+          "Any network-reachable process can obtain a valid JWT. " <>
+          "Set OSA_SHARED_SECRET (and optionally OSA_REQUIRE_AUTH=true) or " <>
+          "restrict the bind address to 127.0.0.1 via OSA_HTTP_IP."
+      )
+    else
+      if not require_auth and is_nil(configured_secret) do
+        Logger.info(
+          "[Auth] Running in open-access mode on loopback only — " <>
+            "unauthenticated JWT issuance is permitted for local development."
+        )
+      end
+    end
+  end
+
 end

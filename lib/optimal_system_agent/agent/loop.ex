@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     iteration: 0,
     overflow_retries: 0,
     recent_failure_signatures: [],
+    total_tool_calls: 0,
     auto_continues: 0,
     status: :idle,
     tools: [],

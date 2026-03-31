@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   @impl Plug
   def call(conn, _opts) do
     ensure_table()
-    ip = format_ip(conn.remote_ip)
+    ip = conn.remote_ip |> normalize_ip() |> format_ip()
     limit = limit_for_path(conn.request_path)
 
     case check_and_consume(ip, limit) do
@@ -110,6 +110,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
   defp format_ip({a, b, c, d, e, f, g, h}), do: "#{a}:#{b}:#{c}:#{d}:#{e}:#{f}:#{g}:#{h}"
   defp format_ip(other), do: inspect(other)
+  # Normalize IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to plain IPv4 tuples
+  # so that connections arriving over IPv6 with an IPv4 source are keyed
+  # identically to the same source arriving over a native IPv4 socket.
+  defp normalize_ip({0, 0, 0, 0, 0, 65535, a, b}) do
+    {a >>> 8, a &&& 0xFF, b >>> 8, b &&& 0xFF}
+  end
+
+  defp normalize_ip(ip), do: ip
 
   defp unix_now, do: System.system_time(:second)
 
@@ -131,7 +139,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   end
 
   defp spawn_cleanup_loop do
-    spawn(fn -> cleanup_loop() end)
+    spawn_link(fn -> cleanup_loop() end)
   end
 
   defp cleanup_loop do

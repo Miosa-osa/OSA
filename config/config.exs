@@ -22,6 +22,10 @@ config :optimal_system_agent,
 
   # Agent configuration
   max_iterations: 200,
+
+  # Doom loop hard cap — absolute total tool calls per session before forced halt.
+  # This is a secondary safety net independent of the sliding-window signature check.
+  doom_loop_max_calls: 100,
   temperature: 0.7,
   max_tokens: 4096,
 

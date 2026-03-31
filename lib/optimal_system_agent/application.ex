@@ -20,6 +20,8 @@ defmodule OptimalSystemAgent.Application do
 
   require Logger
 
+  alias OptimalSystemAgent.Channels.HTTP.Auth
+
   @impl true
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
@@ -100,7 +102,7 @@ defmodule OptimalSystemAgent.Application do
 
         # HTTP channel — Plug/Bandit on configured port (SDK API surface)
         # Started LAST so all agent processes are ready before accepting requests
-        {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port()}
+        {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
       ]
 
     opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor]
@@ -109,6 +111,9 @@ defmodule OptimalSystemAgent.Application do
     # starts — agents need identity/soul content from their first LLM call.
     OptimalSystemAgent.Soul.load()
     OptimalSystemAgent.PromptLoader.load()
+
+    # Emit an ERROR-level log if the HTTP server is reachable without auth.
+    Auth.warn_if_insecure()
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
@@ -133,5 +138,14 @@ defmodule OptimalSystemAgent.Application do
       nil -> Application.get_env(:optimal_system_agent, :http_port, 9089)
       port -> String.to_integer(port)
     end
+  end
+
+  # Returns the IP tuple that Bandit should bind to.
+  # Defaults to {127, 0, 0, 1} (loopback) so that an unconfigured server is
+  # never accidentally exposed on the network.
+  # Set OSA_HTTP_IP=0.0.0.0 to bind all interfaces (requires auth to be safe).
+  defp http_ip do
+    ip_tuple = Application.get_env(:optimal_system_agent, :http_ip, {127, 0, 0, 1})
+    ip_tuple
   end
 end
