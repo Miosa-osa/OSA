@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Channels.CLI.{
+    Commands,
     ComputerUseDispatch,
     Events,
     LineEditor,
@@ -166,11 +167,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   # ── Command Handling ─────────────────────────────────────────────────
 
   defp handle_command(cmd, session_id) do
-    cmd_name = String.split(cmd, ~r/\s+/) |> hd()
-    IO.puts("#{IO.ANSI.yellow()}  error: unknown command '/#{cmd_name}'#{IO.ANSI.reset()}")
-    IO.puts("#{IO.ANSI.faint()}  Type /help to see available commands#{IO.ANSI.reset()}\n")
-    _ = session_id
-    session_id
+    Commands.dispatch(cmd, session_id)
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────
