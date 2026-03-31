@@ -55,25 +55,44 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
   # ── Response Formatting ─────────────────────────────────────────────
 
-  def print_response(response) do
-    rendered = Markdown.render(response)
-    lines = wrap_text(rendered, terminal_width() - 4)
+  def print_response(response, opts \\ []) do
+    unless opts[:already_streamed] do
+      rendered = Markdown.render(response)
+      lines = wrap_text(rendered, terminal_width() - 4)
 
-    IO.puts("")
+      IO.puts("")
 
-    Enum.each(lines, fn line ->
-      IO.puts("#{@white}  #{line}#{@reset}")
-    end)
+      Enum.each(lines, fn line ->
+        IO.puts("#{@white}  #{line}#{@reset}")
+      end)
 
-    IO.puts("")
+      IO.puts("")
+    end
+  end
+
+  # ── Thinking Display ────────────────────────────────────────────────
+
+  def print_thinking_start do
+    IO.puts(IO.ANSI.light_magenta() <> "  ◎ Thinking..." <> IO.ANSI.reset())
+  end
+
+  def print_thinking_end(word_count) do
+    IO.puts(IO.ANSI.faint() <> "  ◎ Thought #{word_count} words" <> IO.ANSI.reset())
   end
 
   # ── Status Line ─────────────────────────────────────────────────────
 
-  def show_status_line(elapsed_ms, tool_count, total_tokens) do
+  def show_status_line(elapsed_ms, tool_count, total_tokens, cost_usd \\ nil) do
     parts = ["#{@green}✓#{@dim} " <> format_elapsed(elapsed_ms)]
     parts = if tool_count > 0, do: parts ++ ["#{tool_count} tools"], else: parts
     parts = if total_tokens > 0, do: parts ++ [format_tokens(total_tokens)], else: parts
+
+    parts =
+      if is_number(cost_usd) and cost_usd > 0 do
+        parts ++ ["$#{:erlang.float_to_binary(cost_usd * 1.0, decimals: 4)}"]
+      else
+        parts
+      end
 
     parts =
       try do
