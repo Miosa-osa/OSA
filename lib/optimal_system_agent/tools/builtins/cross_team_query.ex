@@ -25,6 +25,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CrossTeamQuery do
   alias OptimalSystemAgent.Peer.Discovery
 
   @impl true
+  def deferred?, do: true
+
+  @impl true
   def name, do: "cross_team_query"
 
   @impl true

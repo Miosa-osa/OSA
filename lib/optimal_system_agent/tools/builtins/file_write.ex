@@ -61,6 +61,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
         {:error, "Access denied: #{path} is outside allowed paths or targets a protected location"}
 
       true ->
+        # Read existing content for diff generation (if file exists)
+        old_content = case File.read(expanded) do
+          {:ok, existing} -> existing
+          {:error, _} -> nil
+        end
+
         case File.mkdir_p(Path.dirname(expanded)) do
           :ok ->
             case File.write(expanded, content) do
@@ -68,9 +74,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
                 # Reload Soul cache when agent writes to ~/.osa/ identity/personality files
                 maybe_reload_soul(expanded)
 
+                # Emit file_changed hook
+                operation = if old_content, do: :overwrite, else: :create
+                try do
+                  OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
+                    path: expanded, tool: "file_write", operation: operation
+                  })
+                rescue _ -> :ok end
+
                 line_count = content |> String.split("\n") |> length()
                 preview = content |> String.split("\n") |> Enum.take(10) |> Enum.join("\n")
-                {:ok, "#{expanded}\n#{line_count} lines written\n---\n#{preview}"}
+
+                # Generate diff for event payload
+                {diff_text, diff_stats} =
+                  case old_content do
+                    nil ->
+                      OptimalSystemAgent.Utils.Diff.for_new_file(content, path)
+                    old when old == content ->
+                      {"", %{additions: 0, deletions: 0}}
+                    old ->
+                      OptimalSystemAgent.Utils.Diff.unified(old, content, path)
+                  end
+
+                result = "#{expanded}\n#{line_count} lines written\n---\n#{preview}"
+
+                # Attach diff metadata for SSE consumers
+                if diff_text != "" do
+                  {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
+                else
+                  {:ok, result}
+                end
               {:error, reason} -> {:error, "Error writing file: #{reason}"}
             end
 
