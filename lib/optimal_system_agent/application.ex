@@ -110,6 +110,18 @@ defmodule OptimalSystemAgent.Application do
 
     opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor]
 
+    # Eagerly load modules that are tested via function_exported?/3 — without this,
+    # ExUnit's randomised test order can run function_exported? before the module
+    # is loaded, producing spurious failures.
+    for mod <- [
+      OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor,
+      OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor,
+      OptimalSystemAgent.Agent.Scheduler.SQLiteStore,
+      OptimalSystemAgent.Agent.Debate
+    ] do
+      Code.ensure_loaded(mod)
+    end
+
     # Load soul/personality files into persistent_term BEFORE supervision tree
     # starts — agents need identity/soul content from their first LLM call.
     OptimalSystemAgent.Soul.load()

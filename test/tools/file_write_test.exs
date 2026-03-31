@@ -78,7 +78,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWriteTest do
       path = Path.expand("~/.osa/workspace/test_write_#{:rand.uniform(100_000)}.txt")
 
       try do
-        assert {:ok, msg} = FileWrite.execute(%{"path" => path, "content" => "hello"})
+        assert {:ok, msg, _meta} = FileWrite.execute(%{"path" => path, "content" => "hello"})
         assert msg =~ "lines written"
         assert File.read!(path) == "hello"
       after
@@ -90,7 +90,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWriteTest do
       path = "/tmp/osa_test_write_#{:rand.uniform(100_000)}.txt"
 
       try do
-        assert {:ok, _} = FileWrite.execute(%{"path" => path, "content" => "tmp test"})
+        assert {:ok, _, _} = FileWrite.execute(%{"path" => path, "content" => "tmp test"})
         assert File.read!(path) == "tmp test"
       after
         File.rm(path)

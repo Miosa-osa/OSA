@@ -11,7 +11,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "hello world\nfoo bar\nbaz qux\n")
-        assert {:ok, msg} = FileEdit.execute(%{"path" => path, "old_string" => "foo bar", "new_string" => "replaced"})
+        assert {:ok, msg, _meta} = FileEdit.execute(%{"path" => path, "old_string" => "foo bar", "new_string" => "replaced"})
         assert msg =~ "Replaced in"
         assert File.read!(path) == "hello world\nreplaced\nbaz qux\n"
       after
@@ -37,7 +37,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "a\nb\nc\nd\n")
-        assert {:ok, _} = FileEdit.execute(%{"path" => path, "old_string" => "b\nc", "new_string" => "B\nC"})
+        assert {:ok, _, _} = FileEdit.execute(%{"path" => path, "old_string" => "b\nc", "new_string" => "B\nC"})
         assert File.read!(path) == "a\nB\nC\nd\n"
       after
         File.rm(path)

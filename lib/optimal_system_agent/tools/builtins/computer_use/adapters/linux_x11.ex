@@ -198,6 +198,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
     end
   end
 
+  @doc """
+  Safely wraps a string in single quotes for shell usage.
+  Existing single quotes are escaped using the '\\'' idiom so the result
+  is always safe to pass as a shell argument.
+
+  Examples:
+      shell_escape("hello world")  → "'hello world'"
+      shell_escape("it's here")    → "'it'\\''s here'"
+      shell_escape("")             → "''"
+  """
+  def shell_escape(str) when is_binary(str) do
+    escaped = String.replace(str, "'", "'\\''")
+    "'" <> escaped <> "'"
+  end
+
   # ── Private ──────────────────────────────────────────────────────────
 
   defp run_cmd(cmd, args, label) do

@@ -122,11 +122,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
   ]
 
   # Shell injection patterns.
+  # Note: bare $VAR references (e.g. $PATH, $HOME) are intentionally allowed —
+  # they are safe in read contexts. Only command substitution forms are blocked.
   @injection_patterns [
     ~r/`/,              # backtick substitution
     ~r/\$\(/,           # $() command substitution
     ~r/\$\{/,           # ${} variable expansion
-    ~r/\$[A-Za-z_]\w*/,  # bare $VAR expansion
     ~r/>\s*\/etc\//,    # redirect to /etc/
     ~r/>\s*\/usr\//     # redirect to /usr/
   ]

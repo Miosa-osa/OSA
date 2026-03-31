@@ -30,15 +30,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
   def call(%{path_info: ["health"]} = conn, _opts), do: conn
 
   def call(conn, _opts) do
+    # When require_auth is explicitly set to false, skip all HMAC checks —
+    # even if a shared_secret is configured. Auto-enable only fires when
+    # require_auth is absent (nil/unset) and a secret is present.
+    require_auth = Application.get_env(:optimal_system_agent, :require_auth)
+
     cond do
-      Application.get_env(:optimal_system_agent, :require_auth, false) ->
+      require_auth == true ->
         verify_integrity(conn)
 
       Application.get_env(:optimal_system_agent, :require_fleet_integrity, false) and
           fleet_path?(conn) ->
         verify_integrity(conn)
 
-      shared_secret_configured?() ->
+      require_auth != false and shared_secret_configured?() ->
         log_auto_enabled_once()
         verify_integrity(conn)
 

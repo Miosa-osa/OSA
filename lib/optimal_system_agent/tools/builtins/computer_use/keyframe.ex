@@ -66,14 +66,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Keyframe do
   def detect_doom_loop(journal_dir) do
     case read_journal(journal_dir) do
       {:ok, entries} when length(entries) >= 3 ->
-        # Hash the last 3 action+result pairs
+        # Use the stored keyframe_hash field; fall back to hashing action+result
+        # only if the field is absent (backwards compatibility).
         last_3_hashes =
           entries
           |> Enum.take(-3)
           |> Enum.map(fn entry ->
-            action = Map.get(entry, "action", "")
-            result = Map.get(entry, "result", "")
-            :crypto.hash(:sha256, "#{action}:#{result}") |> Base.encode16(case: :lower)
+            case Map.get(entry, "keyframe_hash") || Map.get(entry, :keyframe_hash) do
+              nil ->
+                action = Map.get(entry, "action", "")
+                result = Map.get(entry, "result", "")
+                :crypto.hash(:sha256, "#{action}:#{result}") |> Base.encode16(case: :lower)
+
+              hash ->
+                hash
+            end
           end)
 
         if length(Enum.uniq(last_3_hashes)) == 1 do

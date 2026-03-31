@@ -629,13 +629,21 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       # Final chunk — capture usage stats so context pressure reports correctly.
       # Keys normalised to :input_tokens/:output_tokens to match what loop.ex reads.
+      # Only add usage when at least one token count is present — some done chunks
+      # (e.g. {"done":true,"done_reason":"stop"} with no eval fields) carry no counts.
       {:ok, %{"done" => true} = resp} ->
-        usage = %{
-          input_tokens: resp["prompt_eval_count"] || 0,
-          output_tokens: resp["eval_count"] || 0,
-          total_tokens: (resp["prompt_eval_count"] || 0) + (resp["eval_count"] || 0)
-        }
-        %{acc | usage: usage}
+        input = resp["prompt_eval_count"] || 0
+        output = resp["eval_count"] || 0
+
+        if input > 0 or output > 0 do
+          Map.put(acc, :usage, %{
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output
+          })
+        else
+          acc
+        end
 
       _ ->
         acc
