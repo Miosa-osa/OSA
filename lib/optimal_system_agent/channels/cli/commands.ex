@@ -43,6 +43,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "export"    => {"Export conversation as markdown", :cmd_export},
     "version"   => {"Show version info", :cmd_version},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
+    "login"     => {"Sign in with your Anthropic account", :cmd_login},
+    "logout"    => {"Sign out of Anthropic account", :cmd_logout},
     "exit"      => {"Exit OSA", :cmd_exit}
   }
 
@@ -597,6 +599,78 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@yellow}error: session not found#{@reset}")
         IO.puts("")
         session_id
+    end
+  end
+
+  def cmd_login(_args, session_id) do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    if OAuth.oauth_configured?() do
+      IO.puts("#{@green}  ✓ Already signed in with Anthropic#{@reset}")
+      IO.puts("#{@dim}  Use /logout to disconnect#{@reset}\n")
+    else
+      port = Application.get_env(:optimal_system_agent, :http_port, 9089)
+      redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
+      {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
+
+      # Store PKCE state
+      try do
+        :ets.new(:oauth_state, [:set, :public, :named_table])
+      rescue
+        ArgumentError -> :oauth_state
+      end
+      :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
+
+      IO.puts("")
+      IO.puts("#{@bold}  Sign in with Anthropic#{@reset}")
+      IO.puts("#{@dim}  Opening your browser...#{@reset}")
+      IO.puts("")
+
+      # Open browser
+      case :os.type() do
+        {:unix, :darwin} -> System.cmd("open", [authorize_url])
+        {:unix, _} -> System.cmd("xdg-open", [authorize_url])
+        {:win32, _} -> System.cmd("cmd", ["/c", "start", authorize_url])
+      end
+
+      IO.puts("#{@dim}  If the browser didn't open, visit:#{@reset}")
+      IO.puts("#{@cyan}  #{authorize_url}#{@reset}")
+      IO.puts("")
+      IO.puts("#{@dim}  Waiting for authorization...#{@reset}")
+
+      # Poll for completion
+      poll_oauth_status(30)
+    end
+
+    session_id
+  end
+
+  def cmd_logout(_args, session_id) do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    if OAuth.oauth_configured?() do
+      OAuth.clear_credentials()
+      IO.puts("#{@dim}  Signed out of Anthropic#{@reset}\n")
+    else
+      IO.puts("#{@dim}  Not signed in#{@reset}\n")
+    end
+
+    session_id
+  end
+
+  defp poll_oauth_status(0) do
+    IO.puts("#{@yellow}  Timed out waiting for authorization#{@reset}\n")
+  end
+
+  defp poll_oauth_status(remaining) do
+    Process.sleep(2_000)
+
+    case OptimalSystemAgent.Auth.OAuth.oauth_configured?() do
+      true ->
+        IO.puts("#{@green}  ✓ Connected to Anthropic#{@reset}\n")
+
+      false ->
+        poll_oauth_status(remaining - 1)
     end
   end
 
