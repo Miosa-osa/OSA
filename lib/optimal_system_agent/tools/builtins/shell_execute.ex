@@ -112,6 +112,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
     reboot shutdown halt poweroff mount umount
     iptables systemctl passwd useradd userdel
     nc ncat
+    env printenv export set declare compgen
   )
 
   # Download commands with output flags — matched as patterns.
@@ -125,6 +126,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
     ~r/`/,              # backtick substitution
     ~r/\$\(/,           # $() command substitution
     ~r/\$\{/,           # ${} variable expansion
+    ~r/\$[A-Za-z_]\w*/,  # bare $VAR expansion
     ~r/>\s*\/etc\//,    # redirect to /etc/
     ~r/>\s*\/usr\//     # redirect to /usr/
   ]
@@ -134,7 +136,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
     ~r/\.\.\//,         # ../ traversal
     ~r/\/etc\//,        # /etc/ access
     ~r/\.ssh\//,        # .ssh/ access
-    ~r/\.env\b/         # .env file access
+    ~r/\.env/           # .env file access (including .env.backup, .environment, etc.)
+  ]
+
+  # /proc environ leak patterns — catches attempts to read env vars via procfs.
+  @env_leak_patterns [
+    ~r|/proc/\w+/environ|,
+    ~r|/proc/self/environ|
   ]
 
   # cd restriction — only allow cd within ~/.osa/
@@ -152,6 +160,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
          :ok <- check_download_patterns(command),
          :ok <- check_injection_patterns(command),
          :ok <- check_path_patterns(command),
+         :ok <- check_env_leak_patterns(command),
          :ok <- check_cd_restriction(command) do
       :ok
     end
@@ -160,7 +169,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
   defp check_blocked_commands(segments, _full_command) do
     Enum.reduce_while(segments, :ok, fn segment, :ok ->
       # Extract the first word (the command name) from the segment.
-      first_word = segment |> String.split(~r/\s+/, parts: 2) |> hd()
+      # Strip leading backslashes to catch \rm -rf style bypass attempts.
+      first_word =
+        segment
+        |> String.split(~r/\s+/, parts: 2)
+        |> hd()
+        |> String.replace(~r/^\\+/, "")
+
       # Also check without path prefix (e.g., /usr/bin/rm → rm).
       base_name = Path.basename(first_word)
 
@@ -206,11 +221,37 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
     end
   end
 
+  defp check_env_leak_patterns(command) do
+    matched = Enum.find(@env_leak_patterns, &Regex.match?(&1, command))
+
+    if matched do
+      {:error, "Blocked: blocked pattern matched: /proc environ access"}
+    else
+      :ok
+    end
+  end
+
   defp check_cd_restriction(command) do
+    # Check for attempts to cd outside ~/.osa/ via the pattern.
     if Regex.match?(@cd_pattern, command) do
       {:error, "Blocked: cd outside ~/.osa/ is not allowed"}
     else
-      :ok
+      # Also reject any cd path that contains .. after expansion,
+      # to prevent cd ~/.osa/../../etc style traversal.
+      osa_root = Path.expand("~/.osa")
+
+      traversal_found =
+        Regex.scan(~r/\bcd\s+(\S+)/, command)
+        |> Enum.any?(fn [_full, path] ->
+          expanded = Path.expand(path)
+          not String.starts_with?(expanded, osa_root)
+        end)
+
+      if traversal_found do
+        {:error, "Blocked: cd path traverses outside ~/.osa/"}
+      else
+        :ok
+      end
     end
   end
 end
