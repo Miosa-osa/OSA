@@ -26,6 +26,16 @@ defmodule OptimalSystemAgent.Application do
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
+    # Read provider from environment — OSA_DEFAULT_PROVIDER takes effect at startup
+    provider = case System.get_env("OSA_DEFAULT_PROVIDER") do
+      nil -> Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+      p -> String.to_atom(p)
+    end
+    Application.put_env(:optimal_system_agent, :default_provider, provider)
+
+    # Map provider-specific env vars to application config
+    load_provider_env(provider)
+
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
@@ -150,5 +160,20 @@ defmodule OptimalSystemAgent.Application do
   defp http_ip do
     ip_tuple = Application.get_env(:optimal_system_agent, :http_ip, {127, 0, 0, 1})
     ip_tuple
+  end
+
+  # Map {PROVIDER}_API_KEY, {PROVIDER}_MODEL, {PROVIDER}_BASE_URL env vars
+  # to application config so providers can read them via Application.get_env.
+  @env_mapping [{"_API_KEY", "_api_key"}, {"_MODEL", "_model"}, {"_BASE_URL", "_url"}]
+
+  defp load_provider_env(provider) do
+    prefix = String.upcase(to_string(provider))
+
+    Enum.each(@env_mapping, fn {env_suffix, app_suffix} ->
+      case System.get_env(prefix <> env_suffix) do
+        nil -> :ok
+        value -> Application.put_env(:optimal_system_agent, String.to_atom("#{provider}#{app_suffix}"), value)
+      end
+    end)
   end
 end
