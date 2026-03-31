@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
   import { chatStore } from '$lib/stores/chat.svelte';
   import { sessionsStore } from '$lib/stores/sessions.svelte';
@@ -284,6 +284,25 @@
       }
     }
   }
+
+  // ── Command palette integration ─────────────────────────────────────────────
+  function handlePaletteCommand(e: Event) {
+    const detail = (e as CustomEvent<{ command: string }>).detail;
+    if (!detail?.command) return;
+    const cmd = detail.command as SlashCommandName;
+    // If it's a known slash command, execute it
+    if (['clear', 'help', 'model', 'sessions', 'memory'].includes(cmd)) {
+      handleCommand(cmd);
+    } else {
+      // For other commands, send as a slash command message
+      chatStore.sendMessage(`/${detail.command}`);
+    }
+  }
+
+  onMount(() => {
+    window.addEventListener('osa:insert-command', handlePaletteCommand);
+    return () => window.removeEventListener('osa:insert-command', handlePaletteCommand);
+  });
 
   onDestroy(() => {
     if (chatStore.isStreaming) {
