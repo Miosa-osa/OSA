@@ -11,6 +11,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
   require Logger
 
   @impl true
+  def deferred?, do: true
+
+  @impl true
   def name, do: "create_agent"
 
   @impl true

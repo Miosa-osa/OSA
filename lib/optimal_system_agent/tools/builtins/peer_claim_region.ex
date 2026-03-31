@@ -17,6 +17,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.PeerClaimRegion do
   """
   use OptimalSystemAgent.Tools.Behaviour
 
+  @impl true
+  def deferred?, do: true
+
   alias OptimalSystemAgent.FileLocking.RegionLock
 
   @impl true

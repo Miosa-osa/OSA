@@ -79,11 +79,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
           true ->
             new_content = String.replace(content, old, new, global: replace_all)
             File.write!(expanded, new_content)
-            if replace_all and occurrences > 1 do
-              {:ok, "Replaced #{occurrences} occurrences in #{display_path}"}
+
+            # Emit file_changed hook
+            try do
+              OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
+                path: expanded, tool: "file_edit", operation: :edit
+              })
+            rescue _ -> :ok end
+
+            # Generate unified diff
+            {diff_text, diff_stats} = OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
+
+            result =
+              if replace_all and occurrences > 1 do
+                "Replaced #{occurrences} occurrences in #{display_path}"
+              else
+                "Replaced in #{display_path}\n#{format_diff(old, new, content, display_path)}"
+              end
+
+            # Attach diff metadata for SSE consumers
+            if diff_text != "" do
+              {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
             else
-              diff = format_diff(old, new, content, display_path)
-              {:ok, "Replaced in #{display_path}\n#{diff}"}
+              {:ok, result}
             end
         end
       {:error, :enoent} -> {:error, "File not found: #{display_path}"}

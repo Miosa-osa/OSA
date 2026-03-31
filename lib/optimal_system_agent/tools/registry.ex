@@ -44,6 +44,47 @@ defmodule OptimalSystemAgent.Tools.Registry do
     GenServer.call(__MODULE__, :list_tools)
   end
 
+  @doc "List only non-deferred tools (for system prompt injection). Reduces prompt size."
+  def list_active do
+    list_tools_direct()
+    |> Enum.reject(fn tool ->
+      builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+      case Map.get(builtin_tools, tool.name) do
+        nil -> false
+        mod -> function_exported?(mod, :deferred?, 0) and mod.deferred?()
+      end
+    end)
+  end
+
+  @doc "Search all tools (including deferred) by keyword match on name and description."
+  def search(query, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 5)
+    query_down = String.downcase(query)
+    keywords = String.split(query_down, ~r/\s+/)
+
+    list_tools_direct()
+    |> Enum.map(fn tool ->
+      name_score = if String.contains?(String.downcase(tool.name), query_down), do: 2.0, else: 0.0
+      desc_down = String.downcase(tool.description)
+
+      keyword_score = Enum.reduce(keywords, 0.0, fn kw, acc ->
+        cond do
+          String.contains?(tool.name, kw) -> acc + 1.5
+          String.contains?(desc_down, kw) -> acc + 1.0
+          true -> acc
+        end
+      end)
+
+      jaro_score = String.jaro_distance(query_down, String.downcase(tool.name))
+
+      {tool, name_score + keyword_score + jaro_score}
+    end)
+    |> Enum.filter(fn {_tool, score} -> score > 0.5 end)
+    |> Enum.sort_by(fn {_tool, score} -> score end, :desc)
+    |> Enum.take(limit)
+    |> Enum.map(fn {tool, _score} -> tool end)
+  end
+
   @doc """
   List all available tools without going through the GenServer.
 
@@ -490,7 +531,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "peer_review" => OptimalSystemAgent.Tools.Builtins.PeerReview,
       "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion,
       "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask,
-      "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery
+      "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery,
+      "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch,
+      "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage
     }
   end
 
