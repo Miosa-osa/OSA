@@ -695,13 +695,37 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp runtime_block(state) do
     session_id = Map.get(state, :session_id, "default")
+    effort = OptimalSystemAgent.Agent.Effort.current()
+    effort_config = OptimalSystemAgent.Agent.Effort.get(effort)
+    coordinator = Map.get(state, :coordinator, false)
 
-    """
-    ## Runtime Context
-    - Timestamp: #{DateTime.utc_now() |> DateTime.to_iso8601()}
-    - Channel: #{state.channel}
-    - Session: #{session_id}
-    """
+    lines = [
+      "## Runtime Context",
+      "- Timestamp: #{DateTime.utc_now() |> DateTime.to_iso8601()}",
+      "- Channel: #{state.channel}",
+      "- Session: #{session_id}",
+      "- Effort: #{effort} (#{effort_config.description})",
+      "- Turn: #{state.turn_count}"
+    ]
+
+    lines = if coordinator, do: lines ++ ["- Mode: **coordinator** (delegation/messaging only)"], else: lines
+
+    lines =
+      if state.max_budget_usd do
+        try do
+          budget = OptimalSystemAgent.Budget.get_status()
+          cost = (budget[:total_cost_usd] || 0) / 1
+          lines ++ ["- Budget: $#{Float.round(cost, 4)} / $#{state.max_budget_usd}"]
+        rescue
+          _ -> lines
+        end
+      else
+        lines
+      end
+
+    lines = if state.max_turns, do: lines ++ ["- Turns: #{state.turn_count}/#{state.max_turns}"], else: lines
+
+    Enum.join(lines, "\n")
   end
 
   defp skills_block(state) do
