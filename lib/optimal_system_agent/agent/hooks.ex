@@ -611,6 +611,12 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     try do
       if is_binary(input) and input != "" do
         SessionTranscript.save_turn(sid, "user", input)
+
+        # Auto-extract memories from user messages
+        extractions = OptimalSystemAgent.Memory.AutoExtract.extract(input)
+        if extractions != [] do
+          OptimalSystemAgent.Memory.AutoExtract.save_extracted(extractions, sid)
+        end
       end
 
       if is_binary(response) and response != "" do

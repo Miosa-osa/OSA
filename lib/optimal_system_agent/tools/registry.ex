@@ -534,7 +534,9 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery,
       "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch,
       "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage,
-      "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents
+      "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents,
+      "repl" => OptimalSystemAgent.Tools.Builtins.REPL,
+      "cron" => OptimalSystemAgent.Tools.Builtins.Cron
     }
   end
 
