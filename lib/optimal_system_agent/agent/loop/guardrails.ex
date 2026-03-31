@@ -210,6 +210,21 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   def complex_coding_task?(_), do: false
 
   @doc """
+  Detect messages that need codebase exploration before action.
+
+  Returns true when the user is asking about an unfamiliar codebase,
+  requesting analysis of structure/architecture, or when the task
+  is broad enough to warrant dispatching an explorer agent.
+  """
+  @exploration_patterns ~r/\b(explore|scan|what('s| is) in|show me the|project structure|codebase|architecture|how does .+ work|where is|find (all|the|every)|navigate|overview|map out|understand the|audit|analyze the|trace|call graph|dependency graph|what files)\b/iu
+
+  def needs_exploration?(message) when is_binary(message) do
+    Regex.match?(@exploration_patterns, message) and String.length(message) > 20
+  end
+
+  def needs_exploration?(_), do: false
+
+  @doc """
   Detect messages that should use the delegate tool.
 
   Returns true when the message contains multi-part task indicators
