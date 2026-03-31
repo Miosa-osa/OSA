@@ -70,16 +70,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     end
   end
 
-  # ── Thinking Display ────────────────────────────────────────────────
-
-  def print_thinking_start do
-    IO.puts(IO.ANSI.light_magenta() <> "  ◎ Thinking..." <> IO.ANSI.reset())
-  end
-
-  def print_thinking_end(word_count) do
-    IO.puts(IO.ANSI.faint() <> "  ◎ Thought #{word_count} words" <> IO.ANSI.reset())
-  end
-
   # ── Status Line ─────────────────────────────────────────────────────
 
   def show_status_line(elapsed_ms, tool_count, total_tokens, cost_usd \\ nil) do
