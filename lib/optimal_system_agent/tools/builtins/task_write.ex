@@ -22,8 +22,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite do
   def name, do: "task_write"
 
   @impl true
-  def description,
-    do: "Create and manage structured task lists. Use to track multi-step work."
+  def description do
+    "Create a structured task list for your current session. Tracks progress and shows the user your plan.\n\n" <>
+    "## When to Use\n" <>
+    "- Complex multi-step tasks (3+ distinct steps)\n" <>
+    "- User provides multiple tasks (numbered or comma-separated)\n" <>
+    "- After receiving new instructions — capture requirements as tasks immediately\n" <>
+    "- When starting work — mark task as in_progress BEFORE beginning\n" <>
+    "- After completing work — mark as completed, add follow-up tasks if discovered\n\n" <>
+    "## When NOT to Use\n" <>
+    "- Single straightforward task (just do it)\n" <>
+    "- Trivial tasks (< 3 steps)\n" <>
+    "- Purely conversational messages\n\n" <>
+    "## Tips\n" <>
+    "- Create tasks with clear, specific subjects in imperative form\n" <>
+    "- Check existing tasks first to avoid duplicates\n" <>
+    "- Mark tasks in_progress before starting, completed when done"
+  end
 
   @impl true
   def parameters do
