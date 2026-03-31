@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { providers } from '$lib/api/client';
+  import { providers, BASE_URL } from '$lib/api/client';
   import { PROVIDERS } from '$lib/onboarding/types';
+  import { openUrl } from '@tauri-apps/plugin-opener';
 
   interface Props {
     selectedProvider: string;
@@ -23,6 +24,75 @@
   let testingConnection = $state(false);
   let connectionStatus  = $state<'idle' | 'ok' | 'error'>('idle');
   let connectionMessage = $state('');
+
+  // ── Anthropic OAuth ─────────────────────────────────────────────────
+  let oauthLoading    = $state(false);
+  let oauthConnected  = $state(false);
+  let oauthError      = $state('');
+
+  const isAnthropicSelected = $derived(selectedProvider === 'anthropic');
+
+  // Check OAuth status on load when Anthropic is selected
+  $effect(() => {
+    if (isAnthropicSelected) {
+      checkOAuthStatus();
+    }
+  });
+
+  async function checkOAuthStatus() {
+    try {
+      const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+      if (res.ok) {
+        const data = await res.json() as { connected: boolean };
+        oauthConnected = data.connected;
+      }
+    } catch { /* backend may be offline */ }
+  }
+
+  async function startOAuth() {
+    oauthLoading = true;
+    oauthError = '';
+    try {
+      const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { authorize_url: string };
+      await openUrl(data.authorize_url);
+      pollOAuthStatus();
+    } catch (e) {
+      oauthError = e instanceof Error ? e.message : 'Failed to start OAuth';
+      oauthLoading = false;
+    }
+  }
+
+  async function pollOAuthStatus() {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+        if (res.ok) {
+          const data = await res.json() as { connected: boolean };
+          if (data.connected) {
+            oauthConnected = true;
+            oauthLoading = false;
+            connectionStatus = 'ok';
+            connectionMessage = 'Connected via Anthropic sign-in';
+            await onHealthRefresh();
+            return;
+          }
+        }
+      } catch { /* keep polling */ }
+    }
+    oauthError = 'Timed out waiting for authorization';
+    oauthLoading = false;
+  }
+
+  async function disconnectOAuth() {
+    try {
+      // Clear OAuth credentials on backend
+      await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
+    } catch { /* best effort */ }
+    oauthConnected = false;
+  }
 
   function providerMatchesHealth(metaId: string): boolean {
     if (!liveHealth) return false;
@@ -180,6 +250,43 @@
     </div>
   {/if}
 
+  <!-- Anthropic OAuth sign-in (only for Anthropic) -->
+  {#if isAnthropicSelected}
+    <div class="sp-settings-group" style="margin-top: 16px;">
+      <div class="sp-settings-item sp-settings-item--col">
+        <div class="sp-item-meta">
+          <span class="sp-item-label">Anthropic Sign-In</span>
+          <span class="sp-item-hint">Sign in with your Anthropic account instead of using an API key. Uses your account's token balance.</span>
+        </div>
+        <div style="margin-top: 10px; width: 100%;">
+          {#if oauthConnected}
+            <div class="sp-oauth-connected">
+              <span class="sp-oauth-check">✓</span>
+              <span>Connected via Anthropic account</span>
+              <button class="sp-btn-ghost sp-btn-sm" onclick={disconnectOAuth}>Disconnect</button>
+            </div>
+          {:else}
+            <button
+              class="sp-oauth-btn"
+              onclick={startOAuth}
+              disabled={oauthLoading}
+            >
+              {#if oauthLoading}
+                <span class="sp-spinner sp-spinner--dark" aria-hidden="true"></span>
+                Waiting for authorization...
+              {:else}
+                Sign in with Anthropic
+              {/if}
+            </button>
+            {#if oauthError}
+              <p class="sp-oauth-error">{oauthError}</p>
+            {/if}
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Test connection -->
   <div class="sp-save-row" style="margin-top: 20px;">
     <button
@@ -284,4 +391,13 @@
 
   .sp-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border-width: 0; }
   @media (prefers-reduced-motion: reduce) { .sp-spinner { animation: none; opacity: 0.5; } }
+
+  /* Anthropic OAuth */
+  .sp-oauth-btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 10px 16px; background: rgba(124,58,237,0.12); border: 1px solid rgba(124,58,237,0.25); border-radius: 8px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+  .sp-oauth-btn:hover:not(:disabled) { background: rgba(124,58,237,0.2); border-color: rgba(124,58,237,0.35); }
+  .sp-oauth-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .sp-oauth-connected { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: rgba(74,222,128,0.06); border: 1px solid rgba(74,222,128,0.15); border-radius: 8px; color: rgba(74,222,128,0.8); font-size: 13px; }
+  .sp-oauth-check { font-size: 15px; }
+  .sp-oauth-error { margin: 6px 0 0; font-size: 12px; color: rgba(248,113,113,0.8); }
+  .sp-btn-sm { font-size: 11px; padding: 4px 10px; margin-left: auto; }
 </style>
