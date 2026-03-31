@@ -292,6 +292,124 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     end
   end
 
+  # ── OAuth Flow ───────────────────────────────────────────────────────
+
+  get "/onboarding/oauth/start" do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    # Build the redirect URI from the request's host
+    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
+    redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
+
+    {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
+
+    # Store PKCE state in ETS for the callback
+    try do
+      :ets.new(:oauth_state, [:set, :public, :named_table])
+    rescue
+      ArgumentError -> :oauth_state
+    end
+
+    :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
+
+    body = Jason.encode!(%{
+      authorize_url: authorize_url,
+      state: state
+    })
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  get "/onboarding/oauth/callback" do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    code = params["code"]
+    state = params["state"]
+
+    case :ets.lookup(:oauth_state, :pkce) do
+      [{:pkce, code_verifier, ^state, redirect_uri}] ->
+        :ets.delete(:oauth_state, :pkce)
+
+        case OAuth.exchange_code(code, code_verifier, redirect_uri) do
+          {:ok, tokens} ->
+            # Try to create an API key from the OAuth token (Console users)
+            # If that works, store it as the API key. Otherwise store OAuth tokens.
+            case OAuth.create_api_key(tokens.access_token) do
+              {:ok, api_key} ->
+                # Store as a regular API key — simplest integration
+                Application.put_env(:optimal_system_agent, :anthropic_api_key, api_key)
+                OAuth.save_oauth_credentials(tokens)
+
+                conn
+                |> put_resp_content_type("text/html")
+                |> send_resp(200, """
+                <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                <div style="text-align:center"><h2 style="color:#4ade80">&#10003; Connected</h2><p style="color:#888">You can close this window and return to OSA.</p></div>
+                </body></html>
+                """)
+
+              {:error, _} ->
+                # No API key creation — store OAuth tokens for Bearer auth
+                OAuth.save_oauth_credentials(tokens)
+                Application.put_env(:optimal_system_agent, :anthropic_oauth_token, tokens.access_token)
+
+                conn
+                |> put_resp_content_type("text/html")
+                |> send_resp(200, """
+                <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                <div style="text-align:center"><h2 style="color:#4ade80">&#10003; Connected via OAuth</h2><p style="color:#888">You can close this window and return to OSA.</p></div>
+                </body></html>
+                """)
+            end
+
+          {:error, reason} ->
+            conn
+            |> put_resp_content_type("text/html")
+            |> send_resp(400, """
+            <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            <div style="text-align:center"><h2 style="color:#f87171">&#10007; Auth Failed</h2><p style="color:#888">#{reason}</p></div>
+            </body></html>
+            """)
+        end
+
+      _ ->
+        conn
+        |> put_resp_content_type("text/html")
+        |> send_resp(400, """
+        <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+        <div style="text-align:center"><h2 style="color:#f87171">&#10007; Invalid State</h2><p style="color:#888">OAuth state mismatch. Try again.</p></div>
+        </body></html>
+        """)
+    end
+  end
+
+  # Check OAuth status
+  get "/onboarding/oauth/status" do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    connected = OAuth.oauth_configured?()
+
+    profile =
+      if connected do
+        case OAuth.get_valid_token() do
+          {:ok, token} ->
+            case OAuth.fetch_profile(token) do
+              {:ok, p} -> p
+              _ -> nil
+            end
+          _ -> nil
+        end
+      end
+
+    body = Jason.encode!(%{
+      connected: connected,
+      profile: profile
+    })
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
   post "/onboarding/setup" do
     # One-time operation: if setup is already complete, require a valid JWT.
     # This prevents any unauthenticated caller from overwriting the existing
