@@ -20,11 +20,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
 
   @impl true
   def description do
-    "Delegate a subtask to a specialized subagent. " <>
-      "Each subagent gets its own context window and tool access. " <>
-      "Use when a task has multiple independent parts or when a " <>
-      "specialized role would handle the work better. " <>
-      "The subagent runs to completion and returns its result."
+    "Launch a specialized agent to handle a subtask autonomously.\n\n" <>
+    "Each agent gets its own context window, model selection, and tool access.\n\n" <>
+    "## When to Use\n" <>
+    "- Task has multiple independent parts that can run in parallel\n" <>
+    "- A specialized role (explorer, tester, code-reviewer) would do better work\n" <>
+    "- You need codebase context: dispatch role='explorer' first\n" <>
+    "- You need an implementation plan: dispatch role='planner'\n" <>
+    "- Long-running research: use background=true so you can keep working\n" <>
+    "- Agent needs your conversation context: use fork=true\n\n" <>
+    "## When NOT to Use\n" <>
+    "- Simple single-file tasks (just do it yourself)\n" <>
+    "- Tasks needing user interaction (use ask_user instead)\n" <>
+    "- Quick file reads (use file_read directly)\n\n" <>
+    "## Writing the Prompt\n" <>
+    "Brief the agent like a colleague who just walked in — they haven't seen this conversation.\n" <>
+    "- Explain what you're trying to accomplish and why\n" <>
+    "- Include all file paths, requirements, and constraints\n" <>
+    "- If you need a short response, say so\n" <>
+    "- Terse command-style prompts produce shallow, generic work\n\n" <>
+    "## Roles\n" <>
+    "explorer (fast codebase scan), planner (architecture), architect, backend, frontend,\n" <>
+    "tester, debugger, security-auditor, code-reviewer, researcher, devops, doc-writer,\n" <>
+    "refactorer, performance. Omit role for a generic agent."
   end
 
   @impl true

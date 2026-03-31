@@ -18,7 +18,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep do
   def name, do: "file_grep"
 
   @impl true
-  def description, do: "Search file contents for a regex pattern. Supports case-insensitive, context lines, and output modes."
+  def description do
+    "Search file contents for a regex pattern.\n\n" <>
+    "Usage:\n" <>
+    "- ALWAYS use file_grep for content search. NEVER use shell_execute with grep or rg.\n" <>
+    "- Supports full regex syntax (e.g., \"log.*Error\", \"function\\\\s+\\\\w+\")\n" <>
+    "- Filter files with glob parameter (e.g., \"*.js\", \"**/*.tsx\")\n" <>
+    "- Output modes: 'content' shows matching lines, 'files' shows only file paths (default), 'count' shows match counts\n" <>
+    "- Use context parameter to see surrounding code lines"
+  end
 
   @impl true
   def parameters do

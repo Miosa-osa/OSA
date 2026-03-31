@@ -13,7 +13,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute do
   def name, do: "shell_execute"
 
   @impl true
-  def description, do: "Execute a shell command safely"
+  def description do
+    "Executes a shell command and returns its output.\n\n" <>
+    "IMPORTANT: Avoid using this tool to run cat, head, tail, sed, awk, or echo commands. " <>
+    "Instead use the dedicated tools:\n" <>
+    "- File search: Use file_glob (NOT find or ls)\n" <>
+    "- Content search: Use file_grep (NOT grep or rg)\n" <>
+    "- Read files: Use file_read (NOT cat/head/tail)\n" <>
+    "- Edit files: Use file_edit (NOT sed/awk)\n" <>
+    "- Write files: Use file_write (NOT echo/cat)\n\n" <>
+    "Reserve shell_execute for system commands: git, mix, npm, cargo, docker, make, pip, etc.\n" <>
+    "Always quote file paths with spaces. Try to use absolute paths."
+  end
 
   @impl true
   def parameters do

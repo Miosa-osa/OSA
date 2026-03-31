@@ -23,7 +23,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite do
   def name, do: "file_write"
 
   @impl true
-  def description, do: "Write content to a file. Use relative paths (e.g. 'my-app/server.js') to write into the workspace at ~/.osa/workspace/. Absolute paths and ~ paths are also accepted."
+  def description do
+    "Writes a file to the local filesystem.\n\n" <>
+    "Usage:\n" <>
+    "- This tool will overwrite the existing file if there is one at the provided path.\n" <>
+    "- If this is an existing file, you MUST use file_read first to read the file's contents. This tool will fail if you did not read the file first.\n" <>
+    "- Prefer file_edit for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n" <>
+    "- NEVER create documentation files (*.md) or README files unless explicitly requested by the user.\n" <>
+    "- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\n" <>
+    "- Relative paths resolve to ~/.osa/workspace/. Absolute paths and ~ paths also accepted."
+  end
 
   @impl true
   def parameters do

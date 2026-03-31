@@ -19,7 +19,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit do
   def name, do: "file_edit"
 
   @impl true
-  def description, do: "Make surgical string replacements in a file. old_string must be unique unless replace_all is true."
+  def description do
+    "Performs exact string replacements in files.\n\n" <>
+    "Usage:\n" <>
+    "- You must use file_read at least once before editing. This tool will error if you attempt an edit without reading the file.\n" <>
+    "- When editing text, ensure you preserve the exact indentation (tabs/spaces) as it appears in the file.\n" <>
+    "- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n" <>
+    "- The edit will FAIL if old_string is not unique in the file. Provide a larger string with more surrounding context to make it unique, or use replace_all to change every instance.\n" <>
+    "- Use replace_all for renaming strings across the file (e.g., renaming a variable).\n" <>
+    "- Only use emojis if the user explicitly requests it."
+  end
 
   @impl true
   def parameters do
