@@ -592,4 +592,68 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         end
     end
   end
+
+  # ── Cross-Session Search Routes ─────────────────────────────────────
+
+  get "/search" do
+    query = conn.params["q"] || ""
+    limit = parse_int(conn.params["limit"], 20)
+
+    if query == "" do
+      json(conn, 400, %{error: "Missing required query parameter: q"})
+    else
+      results = OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
+      json(conn, 200, %{results: results, query: query, count: length(results)})
+    end
+  end
+
+  get "/recent" do
+    limit = parse_int(conn.params["limit"], 50)
+    sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
+    json(conn, 200, %{sessions: sessions})
+  end
+
+  get "/:id/transcript" do
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+    json(conn, 200, %{session_id: id, turns: transcript, count: length(transcript)})
+  end
+
+  # ── Permission Decision Route ─────────────────────────────────────
+
+  post "/:id/permission/:perm_id" do
+    decision = conn.body_params["decision"] || "deny"
+
+    atom_decision =
+      case decision do
+        "allow_once" -> :allow_once
+        "allow_always" -> :allow_always
+        "deny" -> :deny
+        _ -> :deny
+      end
+
+    # Broadcast decision to the waiting tool executor
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:permission:#{perm_id}",
+      {:permission_decision, atom_decision}
+    )
+
+    # If allow_always, persist the rule
+    if atom_decision == :allow_always do
+      tool_name = conn.body_params["tool_name"]
+      if tool_name, do: OptimalSystemAgent.Permissions.save_rule(tool_name, :allow_always)
+    end
+
+    json(conn, 200, %{status: "ok", decision: decision})
+  end
+
+  defp parse_int(nil, default), do: default
+  defp parse_int(val, default) when is_binary(val) do
+    case Integer.parse(val) do
+      {n, _} -> n
+      :error -> default
+    end
+  end
+  defp parse_int(val, _default) when is_integer(val), do: val
+  defp parse_int(_, default), do: default
 end

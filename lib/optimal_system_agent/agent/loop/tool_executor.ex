@@ -116,6 +116,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
             {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
               {:image, mt, b64, p}
 
+            {:ok, content, metadata} when is_map(metadata) ->
+              # Tools can return metadata (e.g. diff data) alongside content.
+              # Store metadata for event emission below.
+              Process.put(:osa_tool_metadata, metadata)
+              content
+
             {:ok, content} ->
               content
 
@@ -176,15 +182,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     tool_success = !match?({:error, _}, tool_result)
     result_preview = String.slice(result_str, 0, 2000)
 
-    Bus.emit(:tool_result, %{
+    # Retrieve tool metadata (diff data, etc.) if the tool stored any
+    tool_metadata = Process.delete(:osa_tool_metadata) || %{}
+
+    tool_result_event = %{
       name: tool_call.name,
       result: result_preview,
       success: tool_success,
       session_id: state.session_id,
       agent: state.session_id
-    })
+    } |> Map.merge(tool_metadata)
+
+    Bus.emit(:tool_result, tool_result_event)
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :tool_result, name: tool_call.name, result: result_preview, success: tool_success, session_id: state.session_id}})
+      {:osa_event, Map.merge(%{type: :tool_result, name: tool_call.name, result: result_preview, success: tool_success, session_id: state.session_id}, tool_metadata)})
 
     # Build tool message — images get structured content blocks.
     # Both branches include `name: tool_call.name` so that on iteration 2+

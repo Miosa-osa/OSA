@@ -33,13 +33,24 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           :pre_tool_use
           | :post_tool_use
           | :pre_compact
+          | :post_compact
           | :session_start
           | :session_end
           | :pre_response
           | :post_response
+          | :pre_session_resume
+          | :session_error
           | :subagent_start
           | :subagent_stop
           | :task_completed
+          | :task_failed
+          | :permission_request
+          | :permission_granted
+          | :permission_denied
+          | :file_changed
+          | :file_read
+          | :worktree_create
+          | :worktree_remove
   @type hook_fn :: (map() -> {:ok, map()} | {:block, String.t()} | :skip)
   @type hook_entry :: %{
           name: String.t(),
@@ -328,6 +339,14 @@ defmodule OptimalSystemAgent.Agent.Hooks do
         event: :post_tool_use,
         priority: 90,
         handler: &episodic_recorder/1
+      },
+
+      # Save transcript — persist conversation turns for cross-session search
+      %{
+        name: "save_transcript",
+        event: :post_response,
+        priority: 85,
+        handler: &save_transcript/1
       }
     ]
 
@@ -583,6 +602,28 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   end
 
   defp episodic_recorder(payload), do: {:ok, payload}
+
+  # Save transcript — persist user input and assistant response for cross-session search
+  defp save_transcript(%{session_id: sid, input: input, response: response} = payload)
+       when is_binary(sid) do
+    alias OptimalSystemAgent.Store.SessionTranscript
+
+    try do
+      if is_binary(input) and input != "" do
+        SessionTranscript.save_turn(sid, "user", input)
+      end
+
+      if is_binary(response) and response != "" do
+        SessionTranscript.save_turn(sid, "assistant", response)
+      end
+    rescue
+      _ -> :ok
+    end
+
+    {:ok, payload}
+  end
+
+  defp save_transcript(payload), do: {:ok, payload}
 
   # MCP cache — pre_tool_use: inject cached schema if fresh (< 1 hour)
   defp mcp_cache_pre(%{tool_name: tool_name} = payload) when is_binary(tool_name) do

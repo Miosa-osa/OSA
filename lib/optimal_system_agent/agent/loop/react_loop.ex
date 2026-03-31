@@ -87,6 +87,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     Logger.debug("[loop] context built, #{length(context.messages)} messages")
 
     context = maybe_inject_memory(context, state)
+    context = inject_pending_agent_messages(context, state)
     context = inject_iteration_budget(context, state)
 
     max_iter = max_iterations()
@@ -387,6 +388,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp maybe_inject_memory(context, _state), do: context
+
+  defp inject_pending_agent_messages(context, state) do
+    messages =
+      try do
+        OptimalSystemAgent.Tools.Builtins.SendMessage.drain_pending_messages(state.session_id)
+      rescue
+        _ -> []
+      end
+
+    if messages == [] do
+      context
+    else
+      injections =
+        Enum.map(messages, fn msg ->
+          %{
+            role: "system",
+            content: "[Message from agent #{msg.from}]: #{msg.content}"
+          }
+        end)
+
+      %{context | messages: context.messages ++ injections}
+    end
+  end
 
   defp inject_iteration_budget(context, state) do
     max_iter = max_iterations()
