@@ -57,7 +57,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
   end
 
   @doc "Search all tools (including deferred) by keyword match on name and description."
-  def search(query, opts \\ []) do
+  def search(query, opts) do
     limit = Keyword.get(opts, :limit, 5)
     query_down = String.downcase(query)
     keywords = String.split(query_down, ~r/\s+/)
@@ -533,7 +533,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask,
       "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery,
       "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch,
-      "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage
+      "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage,
+      "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents
     }
   end
 

@@ -197,6 +197,9 @@ defmodule OptimalSystemAgent.Orchestrator do
     base_prompt = Map.get(config, :system_prompt) || ""
     full_prompt = if agent_memory != "", do: base_prompt <> agent_memory, else: base_prompt
 
+    # If fork_messages provided, pass them as initial conversation history
+    fork_messages = Map.get(config, :fork_messages, [])
+
     # Spawn the subagent Loop
     subagent_opts = [
       session_id: subagent_id,
@@ -208,7 +211,8 @@ defmodule OptimalSystemAgent.Orchestrator do
       parent_session_id: parent_id,
       allowed_tools: Map.get(config, :tools_allowed),
       blocked_tools: Map.get(config, :tools_blocked, []),
-      system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil)
+      system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil),
+      messages: fork_messages
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches

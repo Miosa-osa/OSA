@@ -72,7 +72,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Per-call signal weight (0.0–1.0 or nil)
     signal_weight: nil,
     started_at: nil,
-    last_input_tokens: 0
+    last_input_tokens: 0,
+    # Coordinator mode — restricts tools to delegation/messaging/management only
+    coordinator: false
   ]
 
   @cancel_table :osa_cancel_flags
@@ -211,7 +213,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       iteration: iteration,
       plan_mode: plan_mode,
       turn_count: turn_count,
-      tools: Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
+      tools: filter_tools_for_mode(
+        Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
+        Keyword.get(opts, :coordinator, false)
+      ),
+      coordinator: Keyword.get(opts, :coordinator, false),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
       parent_session_id: Keyword.get(opts, :parent_session_id),
@@ -484,4 +490,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate permission_tier_allows?(tier, tool), to: ToolExecutor
+
+  # Coordinator mode restricts tools to delegation, messaging, and management
+  @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
+    task_write list_agents list_skills session_search ask_user)
+  defp filter_tools_for_mode(tools, false), do: tools
+  defp filter_tools_for_mode(tools, true) do
+    Enum.filter(tools, fn tool ->
+      name = tool[:name] || tool.name
+      name in @coordinator_tools
+    end)
+  end
 end

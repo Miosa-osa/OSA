@@ -613,6 +613,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     json(conn, 200, %{sessions: sessions})
   end
 
+  get "/:id/export" do
+    format = conn.params["format"] || "md"
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+
+    case format do
+      "json" ->
+        turns = Enum.map(transcript, fn t ->
+          %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
+        end)
+        json(conn, 200, %{session_id: id, format: "json", turns: turns})
+
+      _ ->
+        # Markdown export
+        md_lines =
+          Enum.map(transcript, fn t ->
+            role_label = String.capitalize(t.role)
+            timestamp = t.inserted_at || ""
+            "### #{role_label} (#{timestamp})\n\n#{t.content}\n"
+          end)
+
+        markdown = "# Session Export: #{id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
+
+        conn
+        |> put_resp_content_type("text/markdown")
+        |> put_resp_header("content-disposition", "attachment; filename=\"#{id}.md\"")
+        |> send_resp(200, markdown)
+    end
+  end
+
   get "/:id/transcript" do
     transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
     json(conn, 200, %{session_id: id, turns: transcript, count: length(transcript)})

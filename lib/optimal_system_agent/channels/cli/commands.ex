@@ -20,7 +20,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   @dim IO.ANSI.faint()
   @cyan IO.ANSI.cyan()
   @yellow IO.ANSI.yellow()
-  @white IO.ANSI.white()
   @green IO.ANSI.green()
   @red IO.ANSI.red()
 
@@ -41,7 +40,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "tasks"     => {"Show current tasks", :cmd_tasks},
     "plan"      => {"Toggle plan mode", :cmd_plan},
     "doctor"    => {"Run health check", :cmd_doctor},
+    "export"    => {"Export conversation as markdown", :cmd_export},
     "version"   => {"Show version info", :cmd_version},
+    "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "exit"      => {"Exit OSA", :cmd_exit}
   }
 
@@ -510,6 +511,93 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
 
     session_id
+  end
+
+  def cmd_export(args, session_id) do
+    IO.puts("")
+
+    export_dir = Path.expand("~/.osa/exports")
+    File.mkdir_p!(export_dir)
+
+    target_id = case String.trim(args) do
+      "" -> session_id
+      id -> id
+    end
+
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(target_id)
+
+    if transcript == [] do
+      IO.puts("  #{@dim}No transcript data for #{target_id}#{@reset}")
+      IO.puts("  #{@dim}(Transcripts are saved after each response)#{@reset}")
+    else
+      md_lines =
+        Enum.map(transcript, fn t ->
+          role = String.capitalize(to_string(t.role))
+          ts = t.inserted_at || ""
+          "### #{role} (#{ts})\n\n#{t.content}\n"
+        end)
+
+      markdown = "# Session Export: #{target_id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
+      filename = "#{target_id}.md"
+      path = Path.join(export_dir, filename)
+      File.write!(path, markdown)
+
+      IO.puts("  #{@green}✓#{@reset} Exported #{length(transcript)} turns to:")
+      IO.puts("  #{@cyan}#{path}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  def cmd_coordinator(_args, session_id) do
+    IO.puts("")
+
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] ->
+        try do
+          state = :sys.get_state(pid)
+          current = state.coordinator || false
+
+          if current do
+            # Restart session without coordinator mode
+            new_id = Session.start_new_session(session_id)
+            IO.puts("  #{@green}✓#{@reset} Coordinator mode #{@bold}disabled#{@reset} — full tool access restored")
+            IO.puts("")
+            new_id
+          else
+            # Restart session in coordinator mode
+            Session.stop_session(session_id)
+            new_id = "cli_#{Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)}"
+
+            {:ok, _pid} =
+              DynamicSupervisor.start_child(
+                OptimalSystemAgent.SessionSupervisor,
+                {OptimalSystemAgent.Agent.Loop, session_id: new_id, channel: :cli, coordinator: true}
+              )
+
+            Session.register_permission_hook(new_id)
+            IO.puts("  #{@green}✓#{@reset} Coordinator mode #{@bold}enabled#{@reset} — tools restricted to delegation and messaging")
+            IO.puts("  #{@dim}  session: #{new_id}#{@reset}")
+            IO.puts("")
+            new_id
+          end
+        rescue
+          _ ->
+            IO.puts("  #{@yellow}error: could not toggle coordinator mode#{@reset}")
+            IO.puts("")
+            session_id
+        end
+
+      _ ->
+        IO.puts("  #{@yellow}error: session not found#{@reset}")
+        IO.puts("")
+        session_id
+    end
   end
 
   def cmd_exit(_args, _session_id) do
