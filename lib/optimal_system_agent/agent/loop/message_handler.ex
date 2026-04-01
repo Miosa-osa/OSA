@@ -115,9 +115,39 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
   defp build_pre_directives(message, state) do
     []
+    |> maybe_add_task_directive(message)
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> Enum.reverse()
+  end
+
+  # Detect multi-step tasks and nudge to create a task list
+  defp maybe_add_task_directive(acc, message) do
+    bullet_count = count_task_indicators(message)
+
+    if bullet_count >= 3 or Guardrails.complex_coding_task?(message) do
+      directive = %{
+        role: "system",
+        content:
+          "[System: This task has multiple steps. Create a task list with task_write BEFORE " <>
+            "starting work. Create one task per step, then mark each in_progress as you start " <>
+            "and completed as you finish. The user sees your progress in real-time.]"
+      }
+
+      [directive | acc]
+    else
+      acc
+    end
+  end
+
+  defp count_task_indicators(message) do
+    message
+    |> String.split("\n")
+    |> Enum.count(fn line ->
+      trimmed = String.trim(line)
+      Regex.match?(~r/^[-*•]\s+\S/, trimmed) or
+        Regex.match?(~r/^\d+[\.\)]\s+\S/, trimmed)
+    end)
   end
 
   defp maybe_add_explore_directive(acc, message) do

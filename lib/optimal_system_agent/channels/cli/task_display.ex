@@ -92,14 +92,15 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   def render_inline([]), do: ""
 
   def render_inline(tasks) do
-    {first, rest} = List.pop_at(tasks, 0)
+    indexed = Enum.with_index(tasks, 1)
+    [{first, idx} | rest] = indexed
 
     first_line =
-      "  #{@dim}⎿#{@reset}  #{icon_str(first)} #{title_str(first)}#{tokens_str(first)}"
+      "  #{@dim}⎿#{@reset}  #{icon_str(first)} #{@dim}##{idx}#{@reset} #{title_str(first)}#{tokens_str(first)}"
 
     rest_lines =
-      Enum.map(rest, fn task ->
-        "     #{icon_str(task)} #{title_str(task)}#{tokens_str(task)}"
+      Enum.map(rest, fn {task, i} ->
+        "     #{icon_str(task)} #{@dim}##{i}#{@reset} #{title_str(task)}#{tokens_str(task)}"
       end)
 
     Enum.join([first_line | rest_lines], "\n")
