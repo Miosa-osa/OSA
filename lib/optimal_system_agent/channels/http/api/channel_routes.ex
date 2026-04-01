@@ -90,7 +90,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   # ── Discord ────────────────────────────────────────────────────────
 
   post "/discord/webhook" do
-    json_error(conn, 501, "not_implemented", "Discord channel not yet available")
+    alias OptimalSystemAgent.Channels.Discord
+
+    if Discord.connected?() do
+      Discord.handle_update(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "Discord adapter not started. Set DISCORD_BOT_TOKEN.")
+    end
   end
 
   # ── Slack ──────────────────────────────────────────────────────────
