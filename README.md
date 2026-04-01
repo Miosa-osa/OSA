@@ -32,57 +32,88 @@ The theoretical foundation is [Signal Theory](https://zenodo.org/records/1877417
 
 ## Architecture
 
+### Execution Flow
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                          Channels                             │
-│   Rust TUI │ Desktop GUI │ HTTP/REST │ Telegram │ Discord │ Slack │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│              Signal Classifier  (LLM-primary)                 │
-│         S = (Mode, Genre, Type, Format, Weight)               │
-│         ETS cache (SHA256, 10-min TTL) │ Deterministic fallback│
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│              Two-Tier Noise Filter                            │
-│       Tier 1: <1ms regex │ Tier 2: weight thresholds         │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│         Events.Bus  (Goldrush compiled BEAM bytecode)         │
-│         PubSub fan-out │ DLQ │ Circuit breakers              │
-└──┬─────────────┬──────────────┬──────────────┬───────────────┘
-   │             │              │              │
-┌──▼────┐  ┌────▼──────┐  ┌───▼────┐  ┌──────▼──────┐
-│ Agent │  │Orchestrat-│  │ Swarm  │  │  Scheduler  │
-│ Loop  │  │   or      │  │        │  │  Cron +     │
-│       │  │           │  │4 modes │  │  Heartbeat  │
-│ ReAct │  │ Sub-agents│  │        │  │             │
-│ cycle │  │ (parallel)│  │ Teams  │  │             │
-└──┬────┘  └────┬──────┘  └───┬────┘  └─────────────┘
-   │            │             │
-┌──▼────────────▼─────────────▼────────────────────────────────┐
-│                   Shared Infrastructure                        │
-│  Context Builder (token-budgeted, 4-tier priority)            │
-│  Compactor (3-zone: HOT / WARM / COLD)                        │
-│  Memory (SQLite + ETS + episodic)                             │
-│  Skills Registry (hot-reload, no restart)                     │
-│  Budget Tracker (per-provider token costs)                    │
-│  Soul System (IDENTITY.md + USER.md + SOUL.md interpolation)  │
-└────────────┬───────────────┬──────────────┬───────────────────┘
-             │               │              │
-      ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼────────┐
-      │ 7 LLM       │ │ 25 Built-in │ │ OS Templates│
-      │ Providers   │ │ Tools       │ │ (priv/)     │
-      └─────────────┘ └─────────────┘ └─────────────┘
+User Input
+  │
+  ├─ Message Queue (300ms debounce batching)
+  │
+  ├─ UserPromptSubmit Hook (can modify/block)
+  │
+  ├─ Budget + Turn Limit Check
+  │
+  ├─ Prompt Injection Guard (3-tier detection)
+  │
+  ├─ Context Compaction Pipeline
+  │   ├─ Micro-compact (no LLM — truncate old tool results)
+  │   ├─ Strip tool args → Merge consecutive → Summarize warm zone
+  │   ├─ Structured 8-section compression (iterative, preserves details)
+  │   ├─ Context collapse (413 recovery — withhold large results)
+  │   └─ Post-compact restore (re-inject files, tasks, workspace)
+  │
+  ├─ Pre-Directives (explore, delegation, task creation nudges)
+  │
+  ├─ Genre Routing (low-signal → short-circuit, skip full loop)
+  │
+  ├─ Context Build (cached static base + dynamic per-request)
+  │   ├─ Async memory prefetch (fires parallel while context builds)
+  │   ├─ Effort-aware thinking config (low/medium/high/max)
+  │   ├─ Agent message injection (inter-agent communication)
+  │   └─ Iteration budget tracking
+  │
+  ├─ LLM Streaming Call
+  │   ├─ Streaming tool execution (tools fire MID-STREAM)
+  │   ├─ Fallback model chain (auto-switch on rate limit/failure)
+  │   └─ Max output token recovery (bump + retry on truncation)
+  │
+  ├─ Tool Execution
+  │   ├─ Concurrency-aware dispatch (parallel safe, sequential unsafe)
+  │   ├─ Permission check (tiers + pattern rules + interactive prompt)
+  │   ├─ Pre-hooks (security, spend guard, MCP cache)
+  │   ├─ Tool result persistence (large → disk with reference)
+  │   ├─ Diff generation (unified diff for file operations)
+  │   ├─ Post-hooks (cost, telemetry, learning, episodic)
+  │   └─ Doom loop detection (halt on repeated failures)
+  │
+  ├─ Behavioral Nudges (read-before-write, code-in-text, verification)
+  │
+  ├─ Stop Hooks (can override response or force continuation)
+  │
+  └─ Post-Response
+      ├─ Output guardrail (scrub system prompt leaks)
+      ├─ Post-response hooks (transcript, auto-memory, session save)
+      ├─ Telemetry recording
+      └─ SSE broadcast to all connected clients
 ```
 
-**Runtime:** Elixir 1.17+ / Erlang OTP 27+
-**HTTP server:** Bandit 1.6
-**Databases:** SQLite (local memory) + PostgreSQL (platform)
-**Event routing:** Goldrush (compiled BEAM bytecode rules)
-**HTTP client:** Req 0.5
+### System Layers
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Channels: Rust TUI │ Desktop (Tauri) │ HTTP/SSE │ Telegram │ ...  │
+├─────────────────────────────────────────────────────────────────────┤
+│  Signal Classifier: S = (Mode, Genre, Type, Format, Weight)        │
+├─────────────────────────────────────────────────────────────────────┤
+│  Events.Bus (Goldrush compiled BEAM bytecode dispatch)              │
+├──────────┬──────────┬───────────┬──────────┬────────────────────────┤
+│  Agent   │ Orchest- │  Swarm    │ Scheduler│  Healing Orchestrator  │
+│  Loop    │ rator    │  (4 modes)│ (cron)   │  (self-repair)         │
+│  (ReAct) │ (14 roles│           │          │                        │
+│          │  bg/fork/│  Teams +  │          │  Speculative Executor  │
+│          │  worktree│  NervSys  │          │                        │
+├──────────┴──────────┴───────────┴──────────┴────────────────────────┤
+│  Context │ Compactor │ Memory  │ Settings │ Hooks   │ Permissions   │
+│  Builder │ (6-step)  │ (SQLite │ Cascade  │ (25     │ (pattern      │
+│          │           │  +ETS   │ (4-layer)│  events,│  rules,       │
+│          │           │  +FTS5) │          │  4 types│  interactive) │
+├──────────┴───────────┴─────────┴──────────┴─────────┴───────────────┤
+│  7 Providers  │  47 Tools  │  Telemetry  │  Credential Pool  │ Soul│
+│  + Fallback   │  (deferred)│  (per-tool) │  (key rotation)   │     │
+└───────────────┴────────────┴─────────────┴───────────────────┴─────┘
+```
+
+**Runtime:** Elixir 1.17+ / Erlang OTP 27+  |  **HTTP:** Bandit  |  **DB:** SQLite + ETS + persistent_term  |  **Events:** Goldrush  |  **HTTP Client:** Req
 
 ---
 
@@ -126,16 +157,17 @@ The classifier is LLM-primary with a deterministic regex fallback. Results are c
 
 ### Autonomous Task Orchestration
 
-Complex tasks are decomposed into parallel sub-agents, each with its own ReAct loop:
+14 specialized agent roles. Explore → Plan → Execute protocol:
 
 ```
 User: "Build a REST API with auth, tests, and docs"
 
-Orchestrator:
-  ├── Research agent  — analyzes existing codebase
-  ├── Builder agent   — writes implementation
-  ├── Tester agent    — writes test suite
-  └── Writer agent    — writes documentation
+OSA:
+  ├── Explorer agent   — scans codebase (read-only, fast)
+  ├── Planner agent    — designs architecture + implementation plan
+  ├── Backend agent    — writes API + auth middleware
+  ├── Tester agent     — writes test suite
+  └── Doc-writer agent — writes documentation
 ```
 
 Sub-agents share a task list and communicate via ETS-backed mailboxes.
@@ -196,16 +228,66 @@ LOW       (remaining)  — Workflow context, environmental metadata
 - **WARM** — older turns, progressively summarized
 - **COLD** — oldest content reduced to key facts only
 
+### Computer Use
+
+Control your desktop directly from the agent. Platform adapters for:
+
+| Platform | Method |
+|---|---|
+| **macOS** | Accessibility API — click, type, screenshot, scroll |
+| **Linux X11** | xdotool + xclip — full desktop control |
+| **Docker** | Container-isolated desktop interaction |
+| **Remote SSH** | Control machines over SSH tunnels |
+
+The agent can take screenshots, click elements, type text, press keys, scroll, and interact with any GUI application.
+
 ### Channels
 
 | Channel | Notes |
 |---|---|
-| **Rust TUI** | Primary interface. Full terminal UI — onboarding wizard, model picker, sessions, command palette. Built with ratatui + crossterm. |
-| **Desktop GUI** | Tauri 2 + SvelteKit 5 native app (`desktop/`). Command Center. |
-| **HTTP/REST** | Port 8089, SSE streaming, JWT auth. |
-| **Telegram** | Long-polling, typing indicators, markdown conversion. |
-| **Discord** | Webhook mode, token validation. |
-| **Slack** | Webhook + HMAC-SHA256 request verification. |
+| **Elixir CLI** | Primary REPL — 25 commands, streaming, task display, diff view, Ctrl+R search, multi-line input |
+| **Rust TUI** | Full terminal UI — onboarding wizard, model picker, sessions, command palette |
+| **Desktop GUI** | Tauri 2 + SvelteKit 5 — chat, agents, tasks, memory, signals, settings, usage tracking |
+| **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
+| **Telegram** | Long-polling, typing indicators, markdown conversion |
+| **Discord** | Webhook mode, token validation |
+| **Slack** | Webhook + HMAC-SHA256 request verification |
+
+### Hooks System
+
+25 lifecycle events. 4 hook types:
+
+| Type | Description |
+|---|---|
+| **Function** | Elixir functions — built-in (security, budget, telemetry, learning) |
+| **HTTP Webhook** | POST JSON to external URLs on any event |
+| **Shell Command** | Run bash commands with payload interpolation |
+| **Agent** | Spawn a subagent in response to an event |
+
+Events: `pre_tool_use`, `post_tool_use`, `post_tool_use_failure`, `user_prompt_submit`, `pre_compact`, `post_compact`, `session_start`, `session_end`, `pre_response`, `post_response`, `subagent_start`, `subagent_stop`, `file_changed`, `permission_request`, `stop`, and more.
+
+Configure via `~/.osa/settings.json`:
+```json
+{
+  "hooks": {
+    "post_tool_use": [
+      {"type": "http", "url": "https://example.com/webhook"},
+      {"type": "shell", "command": "echo '{{tool_name}} done' >> /tmp/osa.log"}
+    ]
+  }
+}
+```
+
+### Effort Levels
+
+Control thinking depth and iteration budget:
+
+| Level | Thinking | Iterations | Use Case |
+|---|---|---|---|
+| `/effort low` | 1K tokens | 10 | Quick answers, fast mode |
+| `/effort medium` | 5K tokens | 30 | Balanced (default) |
+| `/effort high` | 10K tokens | 50 | Deep reasoning |
+| `/effort max` | 32K tokens | 100 | Maximum analysis |
 
 ### Scheduler
 
