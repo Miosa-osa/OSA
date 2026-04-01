@@ -361,7 +361,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
     sessions resume status agents tools soul thinking
     strategy swarm plan permission orchestrate
     login logout new doctor export version tasks
-    skills coordinator memory
+    skills coordinator memory setup channels
+    effort fast
   )
 
   defp handle_tab_completion(state) do

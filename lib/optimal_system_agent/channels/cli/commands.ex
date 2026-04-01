@@ -50,6 +50,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "metrics"   => {"Show telemetry metrics", :cmd_metrics},
     "login"     => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
     "logout"    => {"Disconnect OAuth session for a provider", :cmd_logout},
+    "setup"     => {"Re-run the setup wizard", :cmd_setup},
+    "channels"  => {"Show connected messaging channels", :cmd_channels},
     "exit"      => {"Exit OSA", :cmd_exit}
   }
 
@@ -797,6 +799,43 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       false ->
         poll_oauth_status(remaining - 1)
     end
+  end
+
+  def cmd_setup(_args, session_id) do
+    IO.puts("")
+    OptimalSystemAgent.CLI.Setup.run()
+    IO.puts("")
+    session_id
+  end
+
+  def cmd_channels(_args, session_id) do
+    alias OptimalSystemAgent.Channels.Manager
+
+    channels = Manager.list_channels()
+
+    IO.puts("")
+    IO.puts("  #{@bold}Messaging Channels#{@reset}")
+    IO.puts("")
+
+    if channels == [] do
+      IO.puts("  #{@dim}No channels configured#{@reset}")
+    else
+      for ch <- channels do
+        status = if ch.connected, do: "#{@green}● connected#{@reset}", else: "#{@dim}○ not running#{@reset}"
+        IO.puts("  #{@cyan}#{String.pad_trailing(to_string(ch.name), 12)}#{@reset} #{status}")
+      end
+    end
+
+    IO.puts("")
+    IO.puts("  #{@dim}Configure channels with /setup or set env vars#{@reset}")
+    IO.puts("  #{@dim}Docs: TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, etc.#{@reset}")
+    IO.puts("")
+
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@dim}Channel status unavailable#{@reset}\n")
+      session_id
   end
 
   def cmd_exit(_args, _session_id) do
