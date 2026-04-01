@@ -141,6 +141,34 @@ config :optimal_system_agent,
   lmstudio_model: System.get_env("LMSTUDIO_MODEL"),
   llamacpp_model: System.get_env("LLAMACPP_MODEL"),
 
+  # ── Channel Adapters ────────────────────────────────────────────────
+  # WhatsApp (Baileys bridge sidecar)
+  whatsapp_enabled: System.get_env("WHATSAPP_ENABLED") == "true",
+  whatsapp_bridge_url: System.get_env("WHATSAPP_BRIDGE_URL") || "http://127.0.0.1:3001",
+
+  # Matrix
+  matrix_homeserver: System.get_env("MATRIX_HOMESERVER"),
+  matrix_access_token: System.get_env("MATRIX_ACCESS_TOKEN"),
+  matrix_allowed_users: System.get_env("MATRIX_ALLOWED_USERS"),
+
+  # Email (IMAP + SMTP)
+  email_imap_host: System.get_env("EMAIL_IMAP_HOST"),
+  email_imap_port: String.to_integer(System.get_env("EMAIL_IMAP_PORT") || "993"),
+  email_smtp_host: System.get_env("EMAIL_SMTP_HOST"),
+  email_smtp_port: String.to_integer(System.get_env("EMAIL_SMTP_PORT") || "587"),
+  email_address: System.get_env("EMAIL_ADDRESS"),
+  email_password: System.get_env("EMAIL_PASSWORD"),
+  email_poll_interval: String.to_integer(System.get_env("EMAIL_POLL_INTERVAL") || "15"),
+  email_allowed_senders: System.get_env("EMAIL_ALLOWED_SENDERS"),
+
+  # LINE Messaging API
+  line_channel_token: System.get_env("LINE_CHANNEL_TOKEN"),
+  line_channel_secret: System.get_env("LINE_CHANNEL_SECRET"),
+
+  # Signal (signal-cli REST API)
+  signal_api_url: System.get_env("SIGNAL_API_URL"),
+  signal_phone_number: System.get_env("SIGNAL_PHONE_NUMBER"),
+
   # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
   computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
 

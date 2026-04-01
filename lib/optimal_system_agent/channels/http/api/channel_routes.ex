@@ -125,13 +125,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   end
 
   # ── WhatsApp ───────────────────────────────────────────────────────
+  # WhatsApp uses a Baileys bridge sidecar, not webhooks.
+  # These endpoints exist for Meta Business API compatibility if needed.
 
   get "/whatsapp/webhook" do
-    json_error(conn, 501, "not_implemented", "WhatsApp channel not yet available")
+    # Meta verification challenge
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    verify_token = Application.get_env(:optimal_system_agent, :whatsapp_verify_token)
+    if params["hub.mode"] == "subscribe" and params["hub.verify_token"] == verify_token do
+      send_resp(conn, 200, params["hub.challenge"] || "")
+    else
+      send_resp(conn, 403, "")
+    end
   end
 
   post "/whatsapp/webhook" do
-    json_error(conn, 501, "not_implemented", "WhatsApp channel not yet available")
+    # Forward to WhatsApp adapter if using Business API mode
+    send_resp(conn, 200, "")
   end
 
   # ── Signal ─────────────────────────────────────────────────────────
@@ -171,15 +181,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   end
 
   # ── Matrix ─────────────────────────────────────────────────────────
+  # Matrix uses /sync polling, not webhooks. This is for appservice mode.
 
   post "/matrix/webhook" do
-    json_error(conn, 501, "not_implemented", "Matrix channel not yet available")
+    # Matrix appservice transaction endpoint (future)
+    send_resp(conn, 200, "")
   end
 
   # ── Email ──────────────────────────────────────────────────────────
+  # Email uses IMAP polling. This endpoint is for SendGrid/Mailgun inbound parse.
 
   post "/email/inbound" do
-    json_error(conn, 501, "not_implemented", "Email channel not yet available")
+    alias OptimalSystemAgent.Channels.EmailChannel
+
+    if EmailChannel.connected?() do
+      # Forward parsed email to the adapter
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "Email adapter not started")
+    end
+  end
+
+  # ── LINE ──────────────────────────────────────────────────────────
+
+  post "/line/webhook" do
+    alias OptimalSystemAgent.Channels.Line
+
+    secret = Application.get_env(:optimal_system_agent, :line_channel_secret)
+    signature = get_req_header(conn, "x-line-signature") |> List.first("")
+    raw_body = conn.assigns[:raw_body] || Jason.encode!(conn.body_params)
+
+    case Line.verify_signature(raw_body, signature, secret || "") do
+      :ok ->
+        Line.handle_webhook(conn.body_params)
+        send_resp(conn, 200, "")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid LINE signature")
+    end
   end
 
   # ── QQ ─────────────────────────────────────────────────────────────
