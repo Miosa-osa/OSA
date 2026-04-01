@@ -22,26 +22,63 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
     model = get_model_name(provider)
     tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
-    soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
-    git_hash = git_short_hash()
     cwd = prompt_dir()
-    width = terminal_width()
+    width = min(terminal_width(), 80)
 
-    IO.puts("""
-    #{@bold}#{@cyan}
-     ██████╗ ███████╗ █████╗
-    ██╔═══██╗██╔════╝██╔══██╗
-    ██║   ██║███████╗███████║
-    ██║   ██║╚════██║██╔══██║
-    ╚██████╔╝███████║██║  ██║
-     ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}
-    #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset}
-    #{@dim}#{provider} / #{model} · #{tool_count} tools · soul: #{soul_status}#{@reset}
-    #{@dim}#{cwd}#{@reset}
-    #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
-    #{proactive_banner_line()}#{@dim}#{String.duplicate("─", width)}#{@reset}
-    """)
+    # Border title
+    title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version}#{@reset} "
+    title_visible = "OSA v#{version}"
+
+    # Build the bordered box
+    inner_width = width - 4
+    top_border = "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
+
+    # Left content
+    welcome = "#{@bold}#{@white}Welcome to OSA#{@reset}"
+    model_line = "#{@dim}#{provider} / #{model}#{@reset}"
+    tools_line = "#{@dim}#{tool_count} tools · #{cwd}#{@reset}"
+
+    # Tips
+    tips = [
+      "#{@yellow}Tips#{@reset}",
+      "#{@dim}/help — list commands#{@reset}",
+      "#{@dim}/model — switch model#{@reset}",
+      "#{@dim}/login — connect provider#{@reset}",
+      "#{@dim}/setup — reconfigure#{@reset}"
+    ]
+
+    # Render bordered box
+    IO.puts("")
+    IO.puts("  #{top_border}")
+
+    # Content lines
+    left_lines = [welcome, "", model_line, tools_line]
+    max_lines = max(length(left_lines), length(tips))
+
+    left_width = div(inner_width, 2)
+    right_width = inner_width - left_width - 1
+
+    for i <- 0..(max_lines - 1) do
+      left = Enum.at(left_lines, i, "")
+      right = Enum.at(tips, i, "")
+
+      left_padded = pad_visible(left, left_width)
+      right_padded = pad_visible(right, right_width)
+
+      separator = if i < length(tips), do: "#{@dim}│#{@reset}", else: " "
+      IO.puts("  #{@dim}│#{@reset} #{left_padded}#{separator}#{right_padded} #{@dim}│#{@reset}")
+    end
+
+    bottom_border = "#{@dim}╰#{String.duplicate("─", inner_width + 2)}╯#{@reset}"
+    IO.puts("  #{bottom_border}")
+    IO.puts("")
+  end
+
+  defp pad_visible(str, width) do
+    vis_len = visible_length(str)
+    padding = max(width - vis_len, 0)
+    str <> String.duplicate(" ", padding)
   end
 
   def print_goodbye do
@@ -58,12 +95,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   def print_response(response, opts \\ []) do
     unless opts[:already_streamed] do
       rendered = Markdown.render(response)
-      lines = wrap_text(rendered, terminal_width() - 4)
+      width = terminal_width()
+      # Leave room for the gutter: "  ⎿  " = 5 chars
+      lines = wrap_text(rendered, width - 6)
 
       IO.puts("")
 
-      Enum.each(lines, fn line ->
-        IO.puts("#{@white}  #{line}#{@reset}")
+      Enum.with_index(lines, fn line, idx ->
+        gutter = if idx == 0, do: "#{@dim}  ⎿  #{@reset}", else: "#{@dim}  │  #{@reset}"
+        IO.puts("#{gutter}#{@white}#{line}#{@reset}")
       end)
 
       IO.puts("")

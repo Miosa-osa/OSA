@@ -149,7 +149,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         clear_line()
         hint = tool_hint(state.active_tool)
         duration = format_duration(ms)
-        safe_io_puts("#{@dim}  ├─ #{name}#{hint} #{@cyan}(#{duration})#{@reset}")
+        safe_io_puts("#{@cyan}  ⏺ #{name}#{hint} #{@dim}(#{duration})#{@reset}")
 
         spinner_loop(rest, %{
           state
