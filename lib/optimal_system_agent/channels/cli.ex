@@ -147,6 +147,10 @@ defmodule OptimalSystemAgent.Channels.CLI do
                 loop(session_id)
               else
                 Session.add_to_history(session_id, input)
+                # Echo user message with styled header
+                unless String.starts_with?(input, "/") do
+                  Renderer.print_user_message(input)
+                end
                 next = process_input(input, session_id)
                 loop(next)
               end
