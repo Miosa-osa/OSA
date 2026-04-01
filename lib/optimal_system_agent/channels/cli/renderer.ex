@@ -19,59 +19,110 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   # ── Banner ──────────────────────────────────────────────────────────
 
   def print_banner do
+    # ── Gather live data ──────────────────────────────────────────────
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
     model = get_model_name(provider)
-    tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
+    git_hash = git_short_hash()
     cwd = prompt_dir()
     width = min(terminal_width(), 80)
 
-    # Border title
-    title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version}#{@reset} "
-    title_visible = "OSA v#{version}"
+    tool_count =
+      try do
+        length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
+      rescue
+        _ -> 0
+      end
 
-    # Build the bordered box
+    # Context window size from config
+    ctx_window = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    ctx_display = if ctx_window >= 1_000_000, do: "#{div(ctx_window, 1_000_000)}M context", else: "#{div(ctx_window, 1_000)}K context"
+
+    # Connected channels
+    channels =
+      try do
+        OptimalSystemAgent.Channels.Manager.list_channels()
+        |> Enum.filter(& &1.connected)
+        |> Enum.map(& &1.name)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    channels_str = if channels == [], do: "none", else: Enum.join(channels, ", ")
+
+    # OAuth status
+    oauth_status =
+      try do
+        if OptimalSystemAgent.Auth.OAuth.oauth_configured?(), do: "oauth", else: "api key"
+      rescue
+        _ -> "api key"
+      end
+
+    # Soul/identity status
+    soul_status =
+      try do
+        if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
+      rescue
+        _ -> "default"
+      end
+
+    # Recent session count
+    session_count =
+      try do
+        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:_, :_, :_}, [], [true]}]) |> length()
+      rescue
+        _ -> 0
+      catch
+        :exit, _ -> 0
+      end
+
+    # ── Build bordered box ────────────────────────────────────────────
     inner_width = width - 4
+    title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset} "
+    title_visible = "OSA v#{version} (#{git_hash})"
     top_border = "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
 
-    # Left content
-    welcome = "#{@bold}#{@white}Welcome to OSA#{@reset}"
-    model_line = "#{@dim}#{provider} / #{model}#{@reset}"
-    tools_line = "#{@dim}#{tool_count} tools · #{cwd}#{@reset}"
-
-    # Tips
-    tips = [
-      "#{@yellow}Tips#{@reset}",
-      "#{@dim}/help — list commands#{@reset}",
-      "#{@dim}/model — switch model#{@reset}",
-      "#{@dim}/login — connect provider#{@reset}",
-      "#{@dim}/setup — reconfigure#{@reset}"
+    # Left panel — system status
+    left_lines = [
+      "#{@bold}#{@white}Optimal System Agent#{@reset}",
+      "",
+      "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
+      "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
+      "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
+      "#{@dim}#{cwd}#{@reset}"
     ]
 
-    # Render bordered box
+    # Right panel — live info
+    right_lines = [
+      "#{@yellow}Quick Start#{@reset}",
+      "#{@dim}/help — all commands#{@reset}",
+      "#{@dim}/model — switch model#{@reset}",
+      "#{@dim}/login <provider> — connect#{@reset}",
+      "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
+      "#{@dim}channels: #{channels_str}#{@reset}",
+      if(session_count > 0, do: "#{@dim}sessions: #{session_count} active#{@reset}", else: "#{@dim}sessions: new#{@reset}")
+    ]
+
+    # Render
     IO.puts("")
     IO.puts("  #{top_border}")
 
-    # Content lines
-    left_lines = [welcome, "", model_line, tools_line]
-    max_lines = max(length(left_lines), length(tips))
-
+    max_lines = max(length(left_lines), length(right_lines))
     left_width = div(inner_width, 2)
     right_width = inner_width - left_width - 1
 
     for i <- 0..(max_lines - 1) do
       left = Enum.at(left_lines, i, "")
-      right = Enum.at(tips, i, "")
-
+      right = Enum.at(right_lines, i, "")
       left_padded = pad_visible(left, left_width)
       right_padded = pad_visible(right, right_width)
-
-      separator = if i < length(tips), do: "#{@dim}│#{@reset}", else: " "
-      IO.puts("  #{@dim}│#{@reset} #{left_padded}#{separator}#{right_padded} #{@dim}│#{@reset}")
+      sep = if right != "", do: "#{@dim}│#{@reset}", else: " "
+      IO.puts("  #{@dim}│#{@reset} #{left_padded}#{sep}#{right_padded} #{@dim}│#{@reset}")
     end
 
-    bottom_border = "#{@dim}╰#{String.duplicate("─", inner_width + 2)}╯#{@reset}"
-    IO.puts("  #{bottom_border}")
+    IO.puts("  #{@dim}╰#{String.duplicate("─", inner_width + 2)}╯#{@reset}")
     IO.puts("")
   end
 
