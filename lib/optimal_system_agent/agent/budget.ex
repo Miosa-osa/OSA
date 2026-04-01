@@ -73,6 +73,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
     GenServer.call(__MODULE__, :get_status)
   end
 
+  @doc "Get the full cost ledger (list of entries)."
+  def get_ledger do
+    GenServer.call(__MODULE__, :get_ledger)
+  end
+
   @doc "Manually reset daily spend counter."
   def reset_daily do
     GenServer.cast(__MODULE__, :reset_daily)
@@ -309,6 +314,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
     }
 
     {:reply, {:ok, status}, state}
+  end
+
+  @impl true
+  def handle_call(:get_ledger, _from, state) do
+    {:reply, {:ok, state.ledger}, state}
   end
 
   @impl true

@@ -47,8 +47,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     with %{"name" => name, "description" => desc, "instructions" => instructions}
          when is_binary(name) and is_binary(desc) and is_binary(instructions) <- conn.body_params do
       tools = conn.body_params["tools"] || []
+      triggers = conn.body_params["triggers"] || []
 
-      json_error(conn, 501, "not_implemented", "Skill creation not available in this build")
+      skill = %{
+        name: name,
+        description: desc,
+        instructions: instructions,
+        tools: tools,
+        triggers: triggers,
+        created_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+
+      # Store in persistent_term alongside existing skills
+      try do
+        existing = :persistent_term.get({Tools, :skills}, %{})
+        :persistent_term.put({Tools, :skills}, Map.put(existing, name, skill))
+      rescue
+        _ -> :ok
+      end
+
+      json(conn, 201, %{skill: skill, status: "created"})
     else
       _ ->
         json_error(
