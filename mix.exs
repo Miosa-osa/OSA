@@ -70,6 +70,9 @@ defmodule OptimalSystemAgent.MixProject do
       # AMQP — RabbitMQ publisher for Go worker events (optional)
       {:amqp, "~> 4.1", optional: true},
 
+      # Email — SMTP client for outbound email channel
+      {:gen_smtp, "~> 1.2"},
+
       # Telemetry
       {:telemetry, "~> 1.2"},
       {:telemetry_metrics, "~> 1.0"},

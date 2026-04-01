@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
           try do
             File.ls!(resolved)
             |> Enum.reject(&String.starts_with?(&1, "."))
+            |> Enum.reject(&(&1 in ~w(node_modules _build deps .git .elixir_ls __pycache__ .next .svelte-kit target vendor)))
             |> Enum.map(fn name ->
               full = Path.join(resolved, name)
               rel = Path.relative_to(full, cwd)

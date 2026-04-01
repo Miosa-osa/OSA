@@ -330,6 +330,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
     if new_lines != [] do
       content = if existing == "", do: Enum.join(new_lines, "\n"), else: existing <> "\n" <> Enum.join(new_lines, "\n")
       File.write!(env_path, content <> "\n")
+      # Restrict permissions — file contains API keys
+      File.chmod!(env_path, 0o600)
     end
 
     # Also set in runtime
