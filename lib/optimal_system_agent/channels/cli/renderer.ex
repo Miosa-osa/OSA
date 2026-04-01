@@ -151,7 +151,23 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
   def print_separator do
     width = terminal_width()
-    IO.puts("\n#{@dim}#{String.duplicate("─", width)}#{@reset}")
+    IO.puts("#{@dim}  #{String.duplicate("─", width - 4)}#{@reset}")
+  end
+
+  # ── User Message ────────────────────────────────────────────────────
+
+  def print_user_message(text) do
+    # Show user's message with a header, like a chat bubble
+    IO.puts("")
+    IO.puts("#{@bold}#{@cyan}  ❯  You#{@reset}")
+
+    text
+    |> String.split("\n")
+    |> Enum.each(fn line ->
+      IO.puts("#{@dim}  │  #{@reset}#{@white}#{line}#{@reset}")
+    end)
+
+    IO.puts("")
   end
 
   # ── Response Formatting ─────────────────────────────────────────────
@@ -160,14 +176,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     unless opts[:already_streamed] do
       rendered = Markdown.render(response)
       width = terminal_width()
-      # Leave room for the gutter: "  ⎿  " = 5 chars
       lines = wrap_text(rendered, width - 6)
 
       IO.puts("")
+      IO.puts("#{@bold}#{@cyan}  ◇  OSA#{@reset}")
 
-      Enum.with_index(lines, fn line, idx ->
-        gutter = if idx == 0, do: "#{@dim}  ⎿  #{@reset}", else: "#{@dim}  │  #{@reset}"
-        IO.puts("#{gutter}#{@white}#{line}#{@reset}")
+      Enum.each(lines, fn line ->
+        IO.puts("#{@dim}  │  #{@reset}#{@white}#{line}#{@reset}")
       end)
 
       IO.puts("")
