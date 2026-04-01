@@ -230,6 +230,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
               output = TaskDisplay.render_inline(tasks)
               Renderer.clear_line()
               IO.puts(output)
+
+              # Cache the active task's activeForm for the spinner
+              active = Enum.find(tasks, fn t -> t.status == :in_progress end)
+              if active do
+                form = active.metadata[:active_form] || active.title
+                :ets.insert(:cli_signal_cache, {:active_task_form, form})
+              else
+                :ets.delete(:cli_signal_cache, :active_task_form)
+              end
             end
           rescue
             _ -> :ok

@@ -194,11 +194,25 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
           if args != "", do: "#{name} — #{truncate(args, 50)}", else: "#{name}…"
 
         :thinking ->
-          Enum.at(@status_messages, state.status_index)
+          # Show active task's activeForm if available
+          active_task_form = get_active_task_form()
+          active_task_form || Enum.at(@status_messages, state.status_index)
       end
 
     clear_line()
     safe_io_write("#{@dim}  #{frame} #{status} (#{elapsed}#{tools_str}#{tokens_str})#{@reset}")
+  end
+
+  # Get the activeForm text of the currently in_progress task (if any)
+  defp get_active_task_form do
+    try do
+      case :ets.lookup(:cli_signal_cache, :active_task_form) do
+        [{:active_task_form, form}] when is_binary(form) and form != "" -> form <> "…"
+        _ -> nil
+      end
+    rescue
+      _ -> nil
+    end
   end
 
   # --- Formatting helpers ---

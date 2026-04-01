@@ -262,7 +262,31 @@ Skills auto-generate from learned patterns (5+ similar tasks). When a skill matc
 
 ### Complex Tasks (5+ steps)
 
-Use `task_write` to track progress. Check off completed items before reporting. When the last test passes, STOP and summarize.
+**TASK TRACKING (mandatory for 3+ step tasks):**
+Use `task_write` to create a structured task list BEFORE starting work. This shows the user your plan and tracks progress in real-time.
+
+**When to create tasks:**
+- Any task with 3 or more distinct steps
+- When the user gives you a numbered list or bullet points
+- When you receive complex instructions that need breaking down
+- When you start working on something non-trivial
+
+**Task workflow:**
+1. Create all tasks at the start (status: pending)
+2. Mark each task `in_progress` BEFORE you start working on it
+3. Mark each task `completed` AFTER it's done — not before, not in a batch
+4. If you discover new subtasks during work, add them immediately
+5. When all tasks are done, summarize what was accomplished
+
+**Task display format:** The user sees your tasks as a checklist:
+```
+⎿  ✔ Explore codebase structure
+   ✔ Identify authentication patterns
+   ◼ Implement user endpoints          ← currently working
+   ◻ Write integration tests           ← pending
+```
+
+**Never skip task tracking on complex work.** It's how the user knows what you're doing and how far along you are.
 
 ### Error Recovery
 
