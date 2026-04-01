@@ -3,10 +3,20 @@
 > Signal Theory-optimized proactive AI agent. Local-first. Open source. BEAM-powered.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.3.0-orange.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.4.0-orange.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
-[![Tests](https://img.shields.io/badge/Tests-1730-brightgreen.svg)](#testing)
+[![Tools](https://img.shields.io/badge/Tools-47-blue.svg)](#47-built-in-tools)
+[![Agents](https://img.shields.io/badge/Agents-14_roles-green.svg)](#autonomous-task-orchestration)
+
+## Quick Start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
+osa
+```
+
+One command installs. One command runs. First run walks you through setup.
 
 ---
 
@@ -141,20 +151,22 @@ Sub-agents share a task list and communicate via ETS-backed mailboxes.
 
 Swarms use ETS-backed team coordination: shared task lists, per-agent mailboxes, scratchpads, and configurable iteration limits.
 
-### 25 Built-in Tools
+### 47 Built-in Tools
 
 | Category | Tools |
 |---|---|
 | **File** | `file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`, `dir_list`, `multi_file_edit` |
-| **System** | `shell_execute`, `git`, `download` |
+| **System** | `shell_execute`, `git`, `download`, `repl` (Python/Elixir/Node) |
 | **Web** | `web_search`, `web_fetch` |
-| **Memory** | `memory_save`, `memory_recall`, `session_search` |
-| **Agent** | `delegate`, `message_agent`, `list_agents`, `team_tasks` |
+| **Memory** | `memory_save`, `memory_recall`, `session_search` (FTS5 full-text) |
+| **Agent** | `delegate` (background/fork/worktree), `send_message`, `message_agent`, `list_agents`, `team_tasks`, `task_stop`, `task_output` |
 | **Skills** | `create_skill`, `list_skills` |
-| **Code** | `code_symbols`, `computer_use` |
-| **Other** | `task_write`, `ask_user` |
+| **Code** | `code_symbols`, `computer_use` (macOS/Linux/Docker/SSH) |
+| **Config** | `config`, `cron` (create/list/delete/trigger), `tool_search` |
+| **Advanced** | `mixture_of_agents` (multi-LLM ensemble), `verify_loop`, `spawn_conversation`, `peer_review`, `cross_team_query` |
+| **Other** | `task_write`, `ask_user`, `create_agent` |
 
-All tools are schema-validated at registration time via the Tools Registry.
+Tools support deferred loading — rarely-used tools excluded from prompt, discoverable via `tool_search`. Large results auto-persisted to disk.
 
 ### Identity and Memory
 
@@ -203,36 +215,67 @@ Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) configured 
 
 ## Installation
 
-One command. Handles Elixir, Erlang, and Rust if they are not already installed.
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
 ```
 
-The installer clones the repo, compiles the Elixir backend, builds the Rust TUI, and symlinks `osa` to your PATH.
+Auto-installs Elixir, Erlang, and Rust if missing. Symlinks `osa` to your PATH.
 
-### Docker
+**Homebrew:** `brew tap miosa-osa/tap && brew install osagent`
 
-```bash
-docker compose up -d
-```
+**Docker:** `docker compose up -d`
 
 ---
 
 ## Usage
 
 ```bash
-osa              # Start backend + Rust TUI (primary)
-osa serve        # Headless backend only — HTTP API on :8089
-osa setup        # Re-run the setup wizard
-osa update       # Pull latest, recompile, rebuild TUI
-osa doctor       # Run health checks
-osa version      # Print version
+osa
 ```
 
-**First run:** The TUI launches a 7-step setup wizard. Pick your LLM provider, enter API keys, set your name and agent name. Config saves to `~/.osa/.env` and never asks again.
+First run detects your setup and offers:
 
-When you quit the TUI, the backend shuts down automatically.
+1. **Quick Start** — auto-detect providers and go
+2. **Manual Setup** — choose provider, enter API key or OAuth sign-in, pick model
+3. **Skip** — configure later with `/setup` or `~/.osa/.env`
+
+Supported providers: Ollama (local/free), Anthropic (OAuth or API key), OpenAI, Groq, OpenRouter, Together, DeepSeek.
+
+### Subcommands
+
+```
+osa              Start (backend + TUI)
+osa setup        Re-run setup wizard
+osa serve        Headless backend (HTTP API on :9089)
+osa update       Pull latest + recompile
+osa doctor       Health checks
+osa version      Print version
+```
+
+### CLI Commands (25)
+
+Type `/help` inside the REPL:
+
+```
+/help /clear /compact /model /status /cost /context /memory /tools /skills
+/agents /sessions /tasks /plan /doctor /export /version /coordinator /effort
+/fast /permissions /hooks /metrics /setup /login /logout /channels /exit
+```
+
+### Headless Mode
+
+```bash
+mix osa.run "Fix the auth bug"                          # text output
+mix osa.run --format json "Explain this code"           # structured JSON
+echo "Build an API" | mix osa.run --format stream-json  # streaming NDJSON
+```
+
+### Session Resume
+
+```bash
+mix osa.chat --resume cli_abc123    # Resume specific session
+mix osa.chat --continue             # Resume most recent
+```
 
 ---
 
@@ -248,35 +291,49 @@ OSA_USER_NAME=Roberto
 OSA_AGENT_NAME=OSA
 ```
 
-**Workspace directory:** `~/.osa/`
+**Workspace:** `~/.osa/`
 
 ```
 ~/.osa/
-├── .env             # Provider config (generated by wizard)
-├── IDENTITY.md      # Agent personality and role
-├── USER.md          # User profile (name, preferences, context)
-├── SOUL.md          # Agent values and operating principles
-├── HEARTBEAT.md     # Proactive scheduled checklist
-├── BOOTSTRAP.md     # First-conversation script (auto-deleted after use)
-├── skills/          # Custom skill definitions
-├── CRONS.json       # Scheduled cron jobs
-└── TRIGGERS.json    # Event-driven trigger definitions
+├── .env              # Provider config (generated by wizard)
+├── settings.json     # User settings (effort, permissions, hooks)
+├── permissions.json  # Tool permission rules (allow/deny with glob patterns)
+├── oauth.json        # OAuth credentials (auto-refreshed)
+├── IDENTITY.md       # Agent personality
+├── USER.md           # User profile
+├── SOUL.md           # Agent values
+├── agents/           # Custom agent roles (AGENT.md files)
+├── skills/           # Custom skills (SKILL.md files, hot-reload)
+├── sessions/         # Saved session state (for resume)
+├── exports/          # Exported conversations
+├── workspace/        # Agent file workspace
+├── tool-results/     # Large tool output persistence
+├── worktrees/        # Git worktree isolation
+├── agent-memory/     # Per-agent persistent memory
+└── prompts/          # System prompt overrides
 ```
+
+**Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session
 
 ---
 
 ## Project Structure
 
 ```
-lib/optimal_system_agent/       # 90+ Elixir modules
-  agent/                        # ReAct loop, context builder, memory, strategies, guardrails
-  channels/                     # CLI, HTTP API, Telegram, Discord, Slack handlers
-  events/                       # Bus (Goldrush), PubSub bridge, DLQ, circuit breakers
-  providers/                    # Ollama, Anthropic, OpenAI-compat adapters, router
-  tools/                        # 25 built-in tools, registry, schema validation
-  memory/                       # Store (SQLite + ETS), SICA pattern engine, skill generator
+lib/optimal_system_agent/       # 200+ Elixir modules
+  agent/                        # ReAct loop, context, memory, effort, worktree, compactor, hooks
+  agent/loop/                   # Core loop: react_loop, tool_executor, streaming_tool_executor,
+                                # context_collapse, tool_result_storage, llm_client, guardrails
+  channels/cli/                 # CLI: commands (25), permissions, spinner, renderer, line_editor,
+                                # message_queue, diff_renderer, agent_tree, task_display
+  channels/http/                # HTTP API: 20+ route modules, SSE streaming, auth, rate limiter
+  events/                       # Bus (Goldrush compiled BEAM bytecode), PubSub, DLQ
+  providers/                    # 7 providers + fallback chain + credential pool
+  tools/builtins/               # 47 built-in tools, schema validation, deferred loading
+  memory/                       # Store (SQLite + ETS), auto_extract, SICA learning, FTS5 search
+  telemetry/                    # Per-tool and per-provider execution metrics
   swarm/                        # Parallel, pipeline, debate, review_loop coordinators
-  budget/                       # Per-provider token cost tracking
+  budget/                       # Token cost tracking, treasury
   signal/                       # Signal classifier, noise filter
   store/                        # Ecto repo, schemas, migrations (SQLite + PostgreSQL)
   supervisors/                  # OTP supervision trees
