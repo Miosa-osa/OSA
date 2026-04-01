@@ -185,6 +185,9 @@ defmodule Mix.Tasks.Osa.Chat do
     # Reload config
     OptimalSystemAgent.Application.load_provider_env(provider)
     OptimalSystemAgent.Soul.reload()
+
+    # Tell CLI.start not to clear the screen (our setup wizard output is still showing)
+    Application.put_env(:optimal_system_agent, :skip_banner_clear, true)
   rescue
     e ->
       IO.puts("  #{IO.ANSI.yellow()}Setup error: #{Exception.message(e)}#{IO.ANSI.reset()}")
