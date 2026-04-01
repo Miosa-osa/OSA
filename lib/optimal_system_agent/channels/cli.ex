@@ -35,6 +35,15 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   def start do
     IO.write(IO.ANSI.clear() <> IO.ANSI.home())
+
+    # First-run setup wizard
+    if OptimalSystemAgent.Onboarding.first_run?() do
+      case OptimalSystemAgent.CLI.Setup.run() do
+        :ok -> IO.puts("")
+        :skip -> IO.puts("\n#{IO.ANSI.faint()}  Skipped setup — use /login or set env vars#{IO.ANSI.reset()}\n")
+      end
+    end
+
     Renderer.print_banner()
 
     # Check for session resume
