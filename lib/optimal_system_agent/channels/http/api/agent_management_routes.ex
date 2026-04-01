@@ -122,20 +122,41 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
     end
   end
 
-  # ── POST /:id/pause — pause agent session (stub) ──────────────────
+  # ── POST /:id/pause — pause agent session ──────────────────────────
 
   post "/:id/pause" do
     agent_id = conn.params["id"]
-    Logger.info("[AgentMgmt] pause requested for agent=#{agent_id} (stub)")
-    json(conn, 202, %{status: "pause_requested", agent: agent_id})
+
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+      [{pid, _}] ->
+        # Suspend the process to pause execution
+        :sys.suspend(pid)
+        Logger.info("[AgentMgmt] paused agent=#{agent_id}")
+        json(conn, 200, %{status: "paused", agent: agent_id})
+
+      [] ->
+        json_error(conn, 404, "not_found", "Agent #{agent_id} not found")
+    end
+  rescue
+    _ -> json_error(conn, 500, "internal_error", "Failed to pause agent")
   end
 
-  # ── POST /:id/resume — resume agent session (stub) ────────────────
+  # ── POST /:id/resume — resume agent session ──────────────────────
 
   post "/:id/resume" do
     agent_id = conn.params["id"]
-    Logger.info("[AgentMgmt] resume requested for agent=#{agent_id} (stub)")
-    json(conn, 202, %{status: "resume_requested", agent: agent_id})
+
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+      [{pid, _}] ->
+        :sys.resume(pid)
+        Logger.info("[AgentMgmt] resumed agent=#{agent_id}")
+        json(conn, 200, %{status: "resumed", agent: agent_id})
+
+      [] ->
+        json_error(conn, 404, "not_found", "Agent #{agent_id} not found")
+    end
+  rescue
+    _ -> json_error(conn, 500, "internal_error", "Failed to resume agent")
   end
 
   # ── DELETE /:id — terminate an agent session ──────────────────────

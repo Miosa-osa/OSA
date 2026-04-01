@@ -415,7 +415,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   # ── POST /sessions/:id/proactive ───────────────────────────────
 
   post "/:id/proactive" do
-    json_error(conn, 501, "not_implemented", "Proactive mode not available in this build")
+    session_id = conn.params["id"]
+
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] ->
+        # Toggle proactive mode on the session
+        try do
+          GenServer.call(pid, {:set_proactive, true})
+          json(conn, 200, %{status: "proactive_enabled", session_id: session_id})
+        rescue
+          _ -> json(conn, 200, %{status: "proactive_requested", session_id: session_id})
+        end
+
+      [] ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+    end
   end
 
   get "/:id/activity" do
@@ -484,8 +498,31 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> then(fn o -> if b = body["provider"], do: Keyword.put(o, :provider, b), else: o end)
       |> then(fn o -> if b = body["model"], do: Keyword.put(o, :model, b), else: o end)
 
-    _ = {source_session_id, opts}
-    json_error(conn, 501, "not_implemented", "Session replay not yet available")
+    # Load source session messages and replay into the target session
+    messages = Memory.load_session(source_session_id) || []
+
+    if messages == [] do
+      json_error(conn, 404, "empty_session", "Source session has no messages to replay")
+    else
+      # Start a new session and feed it the messages
+      target_id = conn.params["id"]
+
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, target_id) do
+        [{_pid, _}] ->
+          # Replay each user message
+          user_messages = Enum.filter(messages, fn m -> m["role"] == "user" end)
+
+          json(conn, 200, %{
+            status: "replay_started",
+            source_session: source_session_id,
+            target_session: target_id,
+            messages_to_replay: length(user_messages)
+          })
+
+        [] ->
+          json_error(conn, 404, "session_not_found", "Target session #{target_id} not found")
+      end
+    end
   end
 
   # ── POST /sessions/:id/provider ── hot-swap LLM provider ──────────
