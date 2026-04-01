@@ -92,7 +92,14 @@ export type StreamEventType =
   | "tool_result"
   | "system_event"
   | "done"
-  | "error";
+  | "error"
+  | "background_agent_completed"
+  | "background_agent_failed"
+  | "background_agent_started"
+  | "budget_limit_reached"
+  | "turn_limit_reached"
+  | "context_pressure"
+  | "permission_request";
 
 export interface StreamingTokenEvent {
   type: "streaming_token";
@@ -122,6 +129,12 @@ export interface ToolResultEvent {
   tool_use_id: string;
   result: string;
   is_error: boolean;
+  /** Unified diff text when tool modifies files */
+  diff?: string;
+  /** Diff statistics */
+  stats?: { additions: number; deletions: number };
+  /** File path affected */
+  path?: string;
 }
 
 export interface SystemEvent {
@@ -140,6 +153,43 @@ export interface ErrorEvent {
   type: "error";
   message: string;
   code?: string;
+}
+
+export interface BackgroundAgentEvent {
+  type: "background_agent_completed" | "background_agent_failed" | "background_agent_started";
+  agent_id: string;
+  role: string;
+  result?: string;
+  error?: string;
+  duration_ms?: number;
+}
+
+export interface BudgetLimitEvent {
+  type: "budget_limit_reached";
+  current_cost: number;
+  limit: number;
+}
+
+export interface TurnLimitEvent {
+  type: "turn_limit_reached";
+  turn_count: number;
+  limit: number;
+}
+
+export interface ContextPressureEvent {
+  type: "context_pressure";
+  utilization: number;
+  estimated_tokens: number;
+  max_tokens: number;
+}
+
+export interface PermissionRequestEvent {
+  type: "permission_request";
+  id: string;
+  tool_name: string;
+  args: Record<string, unknown>;
+  description: string;
+  paths?: string[];
 }
 
 export type StreamEvent =

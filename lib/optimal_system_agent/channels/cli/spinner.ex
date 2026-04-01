@@ -15,12 +15,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @rotate_interval 4_000
 
   @status_messages [
-    "Thinking…",
-    "Reasoning…",
-    "Processing…",
-    "Analyzing…",
-    "Composing…",
-    "Synthesizing…"
+    "Thinking…", "Reasoning…", "Processing…", "Analyzing…", "Composing…",
+    "Synthesizing…", "Computing…", "Crafting…", "Architecting…", "Generating…",
+    "Deliberating…", "Pondering…", "Contemplating…", "Orchestrating…", "Forging…",
+    "Brewing…", "Crystallizing…", "Incubating…", "Manifesting…", "Percolating…",
+    "Constructing…", "Weaving…", "Calibrating…", "Resolving…", "Assembling…",
+    "Iterating…", "Formulating…", "Distilling…", "Channeling…", "Converging…"
   ]
 
   @dim IO.ANSI.faint()
