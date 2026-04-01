@@ -229,7 +229,8 @@ defmodule OptimalSystemAgent.Application do
     try do
       repo = OptimalSystemAgent.Store.Repo
       if Process.whereis(repo) do
-        Ecto.Migrator.run(repo, :up, all: true, log: false)
+        migrations_path = Application.app_dir(:optimal_system_agent, "priv/repo/migrations")
+        Ecto.Migrator.run(repo, migrations_path, :up, all: true, log: false)
       end
     rescue
       _ -> :ok
@@ -242,7 +243,7 @@ defmodule OptimalSystemAgent.Application do
   # to application config so providers can read them via Application.get_env.
   @env_mapping [{"_API_KEY", "_api_key"}, {"_MODEL", "_model"}, {"_BASE_URL", "_url"}]
 
-  defp load_provider_env(provider) do
+  def load_provider_env(provider) do
     prefix = String.upcase(to_string(provider))
 
     Enum.each(@env_mapping, fn {env_suffix, app_suffix} ->
