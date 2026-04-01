@@ -169,6 +169,19 @@ config :optimal_system_agent,
   signal_api_url: System.get_env("SIGNAL_API_URL"),
   signal_phone_number: System.get_env("SIGNAL_PHONE_NUMBER"),
 
+  # DingTalk
+  dingtalk_client_id: System.get_env("DINGTALK_CLIENT_ID"),
+  dingtalk_client_secret: System.get_env("DINGTALK_CLIENT_SECRET"),
+
+  # Feishu/Lark
+  feishu_app_id: System.get_env("FEISHU_APP_ID"),
+  feishu_app_secret: System.get_env("FEISHU_APP_SECRET"),
+  feishu_verification_token: System.get_env("FEISHU_VERIFICATION_TOKEN"),
+
+  # WeCom (Enterprise WeChat)
+  wecom_bot_key: System.get_env("WECOM_BOT_KEY"),
+  wecom_webhook_token: System.get_env("WECOM_WEBHOOK_TOKEN"),
+
   # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
   computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
 

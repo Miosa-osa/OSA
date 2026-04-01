@@ -230,13 +230,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   # ── DingTalk ───────────────────────────────────────────────────────
 
   post "/dingtalk/webhook" do
-    json_error(conn, 501, "not_implemented", "DingTalk channel not yet available")
+    alias OptimalSystemAgent.Channels.DingTalk
+
+    if DingTalk.connected?() do
+      DingTalk.handle_webhook(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET.")
+    end
   end
 
   # ── Feishu ─────────────────────────────────────────────────────────
 
   post "/feishu/events" do
-    json_error(conn, 501, "not_implemented", "Feishu channel not yet available")
+    alias OptimalSystemAgent.Channels.Feishu
+
+    # URL verification challenge
+    if conn.body_params["type"] == "url_verification" do
+      challenge = conn.body_params["challenge"]
+      conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(%{challenge: challenge}))
+    else
+      vtoken = Application.get_env(:optimal_system_agent, :feishu_verification_token)
+
+      case Feishu.verify_event(conn.body_params, vtoken || "") do
+        :ok ->
+          Feishu.handle_event(conn.body_params)
+          send_resp(conn, 200, "")
+
+        {:error, :invalid_token} ->
+          json_error(conn, 401, "unauthorized", "Invalid Feishu verification token")
+      end
+    end
+  end
+
+  # ── WeCom ──────────────────────────────────────────────────────────
+
+  post "/wecom/webhook" do
+    alias OptimalSystemAgent.Channels.WeCom
+
+    if WeCom.connected?() do
+      WeCom.handle_webhook(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "WeCom adapter not started. Set WECOM_BOT_KEY.")
+    end
   end
 
   match _ do

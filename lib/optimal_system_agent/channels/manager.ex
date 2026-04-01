@@ -36,7 +36,10 @@ defmodule OptimalSystemAgent.Channels.Manager do
     OptimalSystemAgent.Channels.WhatsApp,
     OptimalSystemAgent.Channels.Matrix,
     OptimalSystemAgent.Channels.EmailChannel,
-    OptimalSystemAgent.Channels.Line
+    OptimalSystemAgent.Channels.Line,
+    OptimalSystemAgent.Channels.DingTalk,
+    OptimalSystemAgent.Channels.Feishu,
+    OptimalSystemAgent.Channels.WeCom
   ]
 
   @doc """
