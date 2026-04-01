@@ -1,6 +1,7 @@
 <script lang="ts">
   import FileTree from '$lib/components/workspace/FileTree.svelte';
   import PageShell from '$lib/components/layout/PageShell.svelte';
+  import { BASE_URL, API_PREFIX } from '$lib/api/client';
 
   let selectedFile = $state<string | null>(null);
   let fileContent = $state<string | null>(null);
@@ -11,7 +12,7 @@
     loadingContent = true;
     try {
       const res = await fetch(
-        `http://127.0.0.1:9089/api/v1/workspace/read?path=${encodeURIComponent(path)}`
+        `${BASE_URL}${API_PREFIX}/workspace/read?path=${encodeURIComponent(path)}`
       );
       if (res.ok) {
         const data = await res.json();
