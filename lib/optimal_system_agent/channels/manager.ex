@@ -32,7 +32,11 @@ defmodule OptimalSystemAgent.Channels.Manager do
     OptimalSystemAgent.Channels.Telegram,
     OptimalSystemAgent.Channels.Discord,
     OptimalSystemAgent.Channels.Slack,
-    OptimalSystemAgent.Channels.Signal
+    OptimalSystemAgent.Channels.Signal,
+    OptimalSystemAgent.Channels.WhatsApp,
+    OptimalSystemAgent.Channels.Matrix,
+    OptimalSystemAgent.Channels.EmailChannel,
+    OptimalSystemAgent.Channels.Line
   ]
 
   @doc """
