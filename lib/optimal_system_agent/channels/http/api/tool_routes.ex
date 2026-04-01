@@ -80,40 +80,45 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   # ── POST /execute (commands) ───────────────────────────────────────
 
+  # Commands that must NOT be executed via HTTP (they kill the process or block)
+  @blocked_http_commands ~w(exit quit setup)
+
   post "/execute" do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
-      session_id = conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+      cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
-      # Capture IO by redirecting group_leader to a StringIO process
-      output =
-        try do
-          {:ok, string_io} = StringIO.open("")
-          original_gl = Process.group_leader()
-          Process.group_leader(self(), string_io)
+      if cmd_name in @blocked_http_commands do
+        body = Jason.encode!(%{output: "Command '#{cmd_name}' is not available via HTTP.", command: command})
+        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+      else
+        session_id = conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
+        output =
           try do
-            OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
-          after
-            Process.group_leader(self(), original_gl)
+            {:ok, string_io} = StringIO.open("")
+            original_gl = Process.group_leader()
+            Process.group_leader(self(), string_io)
+
+            try do
+              OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+            after
+              Process.group_leader(self(), original_gl)
+            end
+
+            {_, captured} = StringIO.close(string_io)
+            captured
+          rescue
+            e -> "Error: #{Exception.message(e)}"
           end
 
-          {_, captured} = StringIO.close(string_io)
-          captured
-        rescue
-          e -> "Error: #{Exception.message(e)}"
-        end
+        clean_output =
+          output
+          |> String.replace(~r/\e\[[0-9;]*m/, "")
+          |> String.trim()
 
-      # Strip ANSI codes for clean display
-      clean_output =
-        output
-        |> String.replace(~r/\e\[[0-9;]*m/, "")
-        |> String.trim()
-
-      body = Jason.encode!(%{output: clean_output, command: command})
-
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(200, body)
+        body = Jason.encode!(%{output: clean_output, command: command})
+        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+      end
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
     end
