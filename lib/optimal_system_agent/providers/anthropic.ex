@@ -299,10 +299,23 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
-  defp process_stream_event(%{"type" => "content_block_stop"}, _callback, acc) do
-    acc
-    |> finalize_current_tool()
-    |> finalize_current_thinking()
+  defp process_stream_event(%{"type" => "content_block_stop"}, callback, acc) do
+    # If a tool block just completed, emit it for streaming tool execution
+    acc =
+      if acc.current_tool do
+        tool = acc.current_tool
+        arguments = case Jason.decode(tool.input_json) do
+          {:ok, parsed} -> parsed
+          _ -> %{}
+        end
+        tool_call = %{id: tool.id, name: tool.name, arguments: arguments}
+        callback.({:tool_use_block, tool_call})
+        %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
+      else
+        finalize_current_tool(acc)
+      end
+
+    finalize_current_thinking(acc)
   end
 
   defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
@@ -560,7 +573,17 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   Returns `{:api_key, key}`, `{:oauth, token}`, or `{:error, reason}`.
   """
   def resolve_auth do
-    api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
+    # Try credential pool first (supports key rotation)
+    pool_key =
+      try do
+        OptimalSystemAgent.Providers.CredentialPool.get_key(:anthropic)
+      rescue
+        _ -> nil
+      catch
+        :exit, _ -> nil
+      end
+
+    api_key = pool_key || Application.get_env(:optimal_system_agent, :anthropic_api_key)
 
     cond do
       is_binary(api_key) and api_key != "" ->

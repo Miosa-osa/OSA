@@ -37,12 +37,28 @@ defmodule OptimalSystemAgent.Channels.CLI do
     IO.write(IO.ANSI.clear() <> IO.ANSI.home())
     Renderer.print_banner()
 
-    session_id = "cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    # Check for session resume
+    {session_id, messages} =
+      case Application.get_env(:optimal_system_agent, :resume_session_id) do
+        nil ->
+          {"cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower), []}
+
+        resume_id ->
+          Application.delete_env(:optimal_system_agent, :resume_session_id)
+          case OptimalSystemAgent.Agent.SessionPersistence.load(resume_id) do
+            {:ok, msgs} ->
+              IO.puts("#{IO.ANSI.faint()}  Resumed session: #{resume_id} (#{length(msgs)} messages)#{IO.ANSI.reset()}\n")
+              {resume_id, msgs}
+            {:error, _} ->
+              IO.puts("#{IO.ANSI.yellow()}  Could not resume #{resume_id} — starting new session#{IO.ANSI.reset()}\n")
+              {"cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower), []}
+          end
+      end
 
     {:ok, _pid} =
       DynamicSupervisor.start_child(
         OptimalSystemAgent.SessionSupervisor,
-        {Loop, session_id: session_id, channel: :cli}
+        {Loop, session_id: session_id, channel: :cli, messages: messages}
       )
 
     Session.register_permission_hook(session_id)

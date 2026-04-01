@@ -2,14 +2,35 @@ defmodule Mix.Tasks.Osa.Chat do
   @moduledoc """
   Start an interactive CLI chat session with the agent.
 
-  Usage: mix osa.chat
+  Usage:
+    mix osa.chat                  Start a new session
+    mix osa.chat --resume ID      Resume a saved session
+    mix osa.chat --continue       Resume the most recent session
   """
   use Mix.Task
 
   @shortdoc "Start interactive CLI chat"
 
   @impl true
-  def run(_args) do
+  def run(args) do
+    {opts, _, _} = OptionParser.parse(args,
+      switches: [resume: :string, continue: :boolean],
+      aliases: [r: :resume, c: :continue]
+    )
+
+    # Store resume opts for CLI.start to pick up
+    if opts[:resume] do
+      Application.put_env(:optimal_system_agent, :resume_session_id, opts[:resume])
+    end
+
+    if opts[:continue] do
+      # Find most recent saved session
+      case OptimalSystemAgent.Agent.SessionPersistence.list(limit: 1) do
+        [%{session_id: sid} | _] ->
+          Application.put_env(:optimal_system_agent, :resume_session_id, sid)
+        _ -> :ok
+      end
+    end
     # Silence all boot logs — the CLI should start clean
     Logger.configure(level: :none)
 
