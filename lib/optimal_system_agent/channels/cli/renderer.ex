@@ -84,9 +84,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     title_visible = "OSA v#{version} (#{git_hash})"
     top_border = "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
 
-    # Left panel — system status
-    left_lines = [
-      "#{@bold}#{@white}Optimal System Agent#{@reset}",
+    # ASCII art logo
+    logo = [
+      "#{@cyan} ██████╗ ███████╗ █████╗#{@reset}",
+      "#{@cyan}██╔═══██╗██╔════╝██╔══██╗#{@reset}",
+      "#{@cyan}██║   ██║███████╗███████║#{@reset}",
+      "#{@cyan}██║   ██║╚════██║██╔══██║#{@reset}",
+      "#{@cyan}╚██████╔╝███████║██║  ██║#{@reset}",
+      "#{@cyan} ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}",
+    ]
+
+    # Left panel — logo + system status
+    left_lines = logo ++ [
       "",
       "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
       "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
@@ -100,9 +109,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
       "#{@dim}/help — all commands#{@reset}",
       "#{@dim}/model — switch model#{@reset}",
       "#{@dim}/login <provider> — connect#{@reset}",
+      "#{@dim}/setup — reconfigure#{@reset}",
       "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
+      "#{@yellow}System#{@reset}",
       "#{@dim}channels: #{channels_str}#{@reset}",
-      if(session_count > 0, do: "#{@dim}sessions: #{session_count} active#{@reset}", else: "#{@dim}sessions: new#{@reset}")
+      if(session_count > 0, do: "#{@dim}sessions: #{session_count} active#{@reset}", else: "#{@dim}sessions: new#{@reset}"),
+      "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
+      "#{@dim}Ctrl+C cancel · Ctrl+J newline#{@reset}",
     ]
 
     # Render
