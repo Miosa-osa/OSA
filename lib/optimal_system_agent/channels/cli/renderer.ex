@@ -116,33 +116,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   def context_pressure_bar(util) when util >= 70.0, do: "██░░░ WARM"
   def context_pressure_bar(_util), do: "█░░░░"
 
-  # ── Time / Token Formatters ─────────────────────────────────────────
+  # ── Time / Token Formatters (delegates to shared Format module) ──────
 
-  def format_elapsed(ms) when ms < 1_000, do: "<1s"
-  def format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
-
-  def format_elapsed(ms) do
-    mins = div(ms, 60_000)
-    secs = div(rem(ms, 60_000), 1_000)
-    if secs > 0, do: "#{mins}m #{secs}s", else: "#{mins}m"
-  end
+  defdelegate format_elapsed(ms), to: OptimalSystemAgent.Channels.CLI.Format
+  defdelegate format_tokens(n), to: OptimalSystemAgent.Channels.CLI.Format, as: :format_tokens_arrow
 
   def format_duration_ms(nil), do: ""
   def format_duration_ms(ms) when is_number(ms), do: format_elapsed(ms)
   def format_duration_ms(_), do: ""
 
-  def format_tokens(0), do: ""
-  def format_tokens(n) when n < 1_000, do: "↓ #{n}"
-  def format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
-
   # ── Terminal Helpers ────────────────────────────────────────────────
 
-  def terminal_width do
-    case :io.columns() do
-      {:ok, cols} -> cols
-      _ -> 80
-    end
-  end
+  defdelegate terminal_width(), to: OptimalSystemAgent.Channels.CLI.Format
 
   def clear_line do
     width = terminal_width()
@@ -230,20 +215,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     _ -> "dev"
   end
 
-  defp get_model_name(:anthropic) do
-    Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  end
-
-  defp get_model_name(:ollama) do
-    Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
-  end
-
-  defp get_model_name(:openai) do
-    Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
-  end
-
   defp get_model_name(provider) do
-    key = :"#{provider}_model"
-    Application.get_env(:optimal_system_agent, key, to_string(provider))
+    OptimalSystemAgent.Channels.CLI.Format.get_model_name(provider)
   end
 end
