@@ -215,31 +215,17 @@ defmodule Mix.Tasks.Osa.Chat do
       _ -> {:ollama, nil}
     end
 
-    if env_var do
-      IO.puts("")
-      key = IO.gets("  #{IO.ANSI.bright()}API Key:#{IO.ANSI.reset()} ") |> String.trim()
+    case {provider, env_var} do
+      {:ollama, nil} ->
+        IO.puts("\n  #{IO.ANSI.faint()}Make sure Ollama is running: ollama serve#{IO.ANSI.reset()}")
 
-      if key != "" do
-        System.put_env(env_var, key)
-        # Mask for display
-        masked = String.slice(key, 0, 4) <> "..." <> String.slice(key, -4, 4)
-        IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Key set (#{masked})")
-      else
-        IO.puts("  #{IO.ANSI.yellow()}No key entered — you can set it later in ~/.osa/.env#{IO.ANSI.reset()}")
-      end
+      {:anthropic, _} ->
+        # Anthropic gets special treatment — offer OAuth or API key
+        setup_anthropic_auth()
 
-      # Ask for model preference
-      IO.puts("")
-      IO.puts("  #{IO.ANSI.faint()}Model (press Enter for default):#{IO.ANSI.reset()}")
-      model = IO.gets("  Model: ") |> String.trim()
-
-      if model != "" do
-        model_env = String.upcase(to_string(provider)) <> "_MODEL"
-        System.put_env(model_env, model)
-        IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Model: #{model}")
-      end
-    else
-      IO.puts("\n  #{IO.ANSI.faint()}Make sure Ollama is running: ollama serve#{IO.ANSI.reset()}")
+      {_, env_var} when is_binary(env_var) ->
+        # Standard API key flow for other providers
+        setup_api_key(provider, env_var)
     end
 
     IO.puts("")
@@ -247,5 +233,136 @@ defmodule Mix.Tasks.Osa.Chat do
     provider
   rescue
     _ -> :ollama
+  end
+
+  defp setup_anthropic_auth do
+    IO.puts("")
+    IO.puts("  #{IO.ANSI.bright()}Anthropic Authentication:#{IO.ANSI.reset()}")
+    IO.puts("")
+    IO.puts("  #{IO.ANSI.cyan()}a#{IO.ANSI.reset()} #{IO.ANSI.bright()}Sign in#{IO.ANSI.reset()} with your Anthropic account #{IO.ANSI.faint()}(OAuth — opens browser)#{IO.ANSI.reset()}")
+    IO.puts("  #{IO.ANSI.cyan()}b#{IO.ANSI.reset()} #{IO.ANSI.bright()}Paste API key#{IO.ANSI.reset()} #{IO.ANSI.faint()}(from console.anthropic.com/settings/keys)#{IO.ANSI.reset()}")
+    IO.puts("")
+
+    auth_choice = IO.gets("  Choose [a/b]: ") |> String.trim() |> String.downcase()
+
+    case auth_choice do
+      "a" ->
+        run_oauth_flow()
+
+      _ ->
+        setup_api_key(:anthropic, "ANTHROPIC_API_KEY")
+    end
+  end
+
+  defp run_oauth_flow do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    IO.puts("")
+    IO.puts("  #{IO.ANSI.faint()}Starting OAuth flow...#{IO.ANSI.reset()}")
+
+    # Start a local HTTP server to receive the callback
+    port = 19725
+    redirect_uri = "http://localhost:#{port}/oauth/callback"
+
+    {auth_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
+
+    IO.puts("")
+    IO.puts("  #{IO.ANSI.bright()}Opening browser for sign-in...#{IO.ANSI.reset()}")
+    IO.puts("  #{IO.ANSI.faint()}If the browser doesn't open, visit:#{IO.ANSI.reset()}")
+    IO.puts("  #{IO.ANSI.cyan()}#{auth_url}#{IO.ANSI.reset()}")
+    IO.puts("")
+
+    # Try to open browser
+    case :os.type() do
+      {:unix, :darwin} -> System.cmd("open", [auth_url])
+      {:unix, _} -> System.cmd("xdg-open", [auth_url])
+      {:win32, _} -> System.cmd("cmd", ["/c", "start", auth_url])
+    end
+
+    IO.puts("  #{IO.ANSI.faint()}Waiting for sign-in... (paste the code if browser redirect fails)#{IO.ANSI.reset()}")
+    IO.puts("")
+
+    # Wait for callback or manual code entry
+    code = IO.gets("  Authorization code (or press Enter if browser worked): ") |> String.trim()
+
+    if code == "" do
+      # TODO: Start a temporary HTTP listener for the callback
+      IO.puts("  #{IO.ANSI.yellow()}Browser callback not implemented yet — please paste the code.#{IO.ANSI.reset()}")
+      code = IO.gets("  Authorization code: ") |> String.trim()
+      complete_oauth(code, code_verifier, redirect_uri)
+    else
+      complete_oauth(code, code_verifier, redirect_uri)
+    end
+  rescue
+    e ->
+      IO.puts("  #{IO.ANSI.yellow()}OAuth error: #{Exception.message(e)}#{IO.ANSI.reset()}")
+      IO.puts("  #{IO.ANSI.faint()}Falling back to API key...#{IO.ANSI.reset()}")
+      setup_api_key(:anthropic, "ANTHROPIC_API_KEY")
+  end
+
+  defp complete_oauth(code, code_verifier, redirect_uri) do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    if code == "" do
+      IO.puts("  #{IO.ANSI.yellow()}No code provided. Use API key instead.#{IO.ANSI.reset()}")
+      setup_api_key(:anthropic, "ANTHROPIC_API_KEY")
+    else
+      IO.puts("  #{IO.ANSI.faint()}Exchanging code for token...#{IO.ANSI.reset()}")
+
+      case OAuth.exchange_code(code, code_verifier, redirect_uri) do
+        {:ok, tokens} ->
+          OAuth.save_oauth_credentials(tokens)
+
+          # Fetch profile
+          case OAuth.fetch_profile(tokens.access_token) do
+            {:ok, profile} ->
+              IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Signed in as #{IO.ANSI.bright()}#{profile.email}#{IO.ANSI.reset()} (#{profile.subscription_type})")
+            _ ->
+              IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Signed in successfully")
+          end
+
+          # Create an API key from the token for standard usage
+          case OAuth.create_api_key(tokens.access_token) do
+            {:ok, api_key} ->
+              System.put_env("ANTHROPIC_API_KEY", api_key)
+              IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} API key created from OAuth session")
+            {:error, _} ->
+              IO.puts("  #{IO.ANSI.faint()}Using OAuth token directly (no API key created)#{IO.ANSI.reset()}")
+          end
+
+        {:error, reason} ->
+          IO.puts("  #{IO.ANSI.yellow()}OAuth failed: #{reason}#{IO.ANSI.reset()}")
+          IO.puts("  #{IO.ANSI.faint()}Falling back to API key...#{IO.ANSI.reset()}")
+          setup_api_key(:anthropic, "ANTHROPIC_API_KEY")
+      end
+    end
+  end
+
+  defp setup_api_key(provider, env_var) do
+    IO.puts("")
+    key = IO.gets("  #{IO.ANSI.bright()}API Key:#{IO.ANSI.reset()} ") |> String.trim()
+
+    if key != "" do
+      System.put_env(env_var, key)
+      masked = if String.length(key) > 8 do
+        String.slice(key, 0, 4) <> "..." <> String.slice(key, -4, 4)
+      else
+        "****"
+      end
+      IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Key set (#{masked})")
+    else
+      IO.puts("  #{IO.ANSI.yellow()}No key entered — set it later in ~/.osa/.env#{IO.ANSI.reset()}")
+    end
+
+    # Model preference
+    IO.puts("")
+    IO.puts("  #{IO.ANSI.faint()}Model (press Enter for default):#{IO.ANSI.reset()}")
+    model = IO.gets("  Model: ") |> String.trim()
+
+    if model != "" do
+      model_env = String.upcase(to_string(provider)) <> "_MODEL"
+      System.put_env(model_env, model)
+      IO.puts("  #{IO.ANSI.green()}✓#{IO.ANSI.reset()} Model: #{model}")
+    end
   end
 end
