@@ -31,7 +31,8 @@ defmodule OptimalSystemAgent.Channels.Manager do
   @channel_modules [
     OptimalSystemAgent.Channels.Telegram,
     OptimalSystemAgent.Channels.Discord,
-    OptimalSystemAgent.Channels.Slack
+    OptimalSystemAgent.Channels.Slack,
+    OptimalSystemAgent.Channels.Signal
   ]
 
   @doc """
