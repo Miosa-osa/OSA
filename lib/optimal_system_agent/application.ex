@@ -26,6 +26,13 @@ defmodule OptimalSystemAgent.Application do
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
+    # ── Phase 0: Environment & Configuration ──────────────────────────
+    # Load .env file FIRST (before anything reads env vars)
+    load_dotenv()
+
+    # Load settings cascade (user → project → local)
+    load_settings_into_app_env()
+
     # Read provider from environment — OSA_DEFAULT_PROVIDER takes effect at startup
     provider = case System.get_env("OSA_DEFAULT_PROVIDER") do
       nil -> Application.get_env(:optimal_system_agent, :default_provider, :ollama)
@@ -36,6 +43,11 @@ defmodule OptimalSystemAgent.Application do
     # Map provider-specific env vars to application config
     load_provider_env(provider)
 
+    # ── Phase 1: Soul & Prompts (before anything needs the system prompt) ──
+    OptimalSystemAgent.Soul.load()
+    OptimalSystemAgent.PromptLoader.load()
+
+    # ── Phase 2: ETS Tables (must exist before GenServers start) ────────
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])
@@ -95,9 +107,7 @@ defmodule OptimalSystemAgent.Application do
     # Workspace SQLite tables (workspaces + task_journals)
     OptimalSystemAgent.Workspace.Store.init()
 
-    # Load agent definitions from priv/agents/ and ~/.osa/agents/
-    OptimalSystemAgent.Agents.Registry.load()
-
+    # ── Phase 3: Supervision Tree ────────────────────────────────────────
     children =
       platform_repo_children() ++
       [
@@ -120,20 +130,29 @@ defmodule OptimalSystemAgent.Application do
 
     opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor]
 
-    # Load soul/personality files into persistent_term BEFORE supervision tree
-    # starts — agents need identity/soul content from their first LLM call.
-    OptimalSystemAgent.Soul.load()
-    OptimalSystemAgent.PromptLoader.load()
-
     # Emit an ERROR-level log if the HTTP server is reachable without auth.
     Auth.warn_if_insecure()
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
-        # Auto-detect best Ollama model + tier assignments SYNCHRONOUSLY at boot
-        # so the banner shows the correct model (not a stale fallback)
-        OptimalSystemAgent.Providers.Ollama.auto_detect_model()
-        OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+        # ── Phase 4: Post-boot initialization ──────────────────────────
+        # These run AFTER the supervision tree is fully up.
+
+        # Run pending Ecto migrations (session_transcripts FTS5, etc.)
+        run_migrations()
+
+        # Load agent definitions (needs Tools.Registry running)
+        OptimalSystemAgent.Agents.Registry.load()
+
+        # Auto-detect best Ollama model + tier assignments
+        if provider == :ollama do
+          OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+          OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+        end
+
+        # Signal boot complete
+        Application.put_env(:optimal_system_agent, :boot_complete, true)
+        Logger.info("OSA boot complete (#{System.system_time(:second) - Application.get_env(:optimal_system_agent, :start_time, 0)}s)")
 
         {:ok, pid}
 
@@ -160,6 +179,63 @@ defmodule OptimalSystemAgent.Application do
   defp http_ip do
     ip_tuple = Application.get_env(:optimal_system_agent, :http_ip, {127, 0, 0, 1})
     ip_tuple
+  end
+
+  # Load ~/.osa/.env file if it exists (key=value pairs)
+  defp load_dotenv do
+    env_file = Path.expand("~/.osa/.env")
+
+    if File.exists?(env_file) do
+      env_file
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.each(fn line ->
+        line = String.trim(line)
+        cond do
+          line == "" -> :ok
+          String.starts_with?(line, "#") -> :ok
+          String.contains?(line, "=") ->
+            [key | rest] = String.split(line, "=", parts: 2)
+            value = Enum.join(rest, "=") |> String.trim() |> String.trim("\"") |> String.trim("'")
+            # Only set if not already set (env vars take precedence)
+            if System.get_env(String.trim(key)) == nil do
+              System.put_env(String.trim(key), value)
+            end
+          true -> :ok
+        end
+      end)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # Load settings from ~/.osa/settings.json into Application env
+  defp load_settings_into_app_env do
+    settings = OptimalSystemAgent.Settings.all()
+
+    Enum.each(settings, fn {key, value} ->
+      atom_key = if is_atom(key), do: key, else: String.to_atom(key)
+      # Only set if not already configured (explicit config takes precedence)
+      if Application.get_env(:optimal_system_agent, atom_key) == nil do
+        Application.put_env(:optimal_system_agent, atom_key, value)
+      end
+    end)
+  rescue
+    _ -> :ok
+  end
+
+  # Run pending Ecto migrations
+  defp run_migrations do
+    try do
+      repo = OptimalSystemAgent.Store.Repo
+      if Process.whereis(repo) do
+        Ecto.Migrator.run(repo, :up, all: true, log: false)
+      end
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
   end
 
   # Map {PROVIDER}_API_KEY, {PROVIDER}_MODEL, {PROVIDER}_BASE_URL env vars
