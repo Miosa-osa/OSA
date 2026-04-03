@@ -128,7 +128,8 @@ defmodule OptimalSystemAgent.Application do
         {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
       ]
 
-    opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor]
+    # max_restarts: 10 in 60s prevents infinite crash loops from burning CPU
+    opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor, max_restarts: 10, max_seconds: 60]
 
     # Emit an ERROR-level log if the HTTP server is reachable without auth.
     Auth.warn_if_insecure()
@@ -145,9 +146,16 @@ defmodule OptimalSystemAgent.Application do
         OptimalSystemAgent.Agents.Registry.load()
 
         # Auto-detect best Ollama model + tier assignments
+        # Guarded — if Ollama is unreachable, log and continue without spinning
         if provider == :ollama do
-          OptimalSystemAgent.Providers.Ollama.auto_detect_model()
-          OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+          try do
+            OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+            OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+          rescue
+            e -> Logger.warning("Ollama auto-detect failed: #{Exception.message(e)}")
+          catch
+            :exit, reason -> Logger.warning("Ollama auto-detect exit: #{inspect(reason)}")
+          end
         end
 
         # Signal boot complete
