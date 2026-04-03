@@ -42,20 +42,20 @@ defmodule Mix.Tasks.Osa.Chat do
     # Ensure ~/.osa/ directory structure exists
     ensure_osa_directory()
 
-    # First-run detection — show setup wizard if needed
-    if OptimalSystemAgent.Onboarding.first_run?() do
-      run_first_time_setup()
-    end
-
     # Seed workspace templates (idempotent)
     OptimalSystemAgent.Onboarding.seed_workspace()
 
     # Re-run Ollama auto-detect if provider is Ollama
     if Application.get_env(:optimal_system_agent, :default_provider) == :ollama do
-      OptimalSystemAgent.Providers.Ollama.auto_detect_model()
-      OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+      try do
+        OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+        OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+      rescue
+        _ -> :ok
+      end
     end
 
+    # CLI.start handles first-run setup wizard + banner
     OptimalSystemAgent.Channels.CLI.start()
   end
 
