@@ -259,8 +259,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
         if was_streamed, do: IO.write("\n")
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         unless was_streamed, do: Renderer.print_response(response)
+        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         Renderer.print_separator()
 
       {:plan, plan_text} ->
@@ -349,16 +349,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
             {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
 
             if was_streamed do
-              # Response already displayed via streaming — just finish the line and show status
               IO.write("\n")
-            end
-
-            Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
-
-            unless was_streamed do
+            else
               Renderer.print_response(response)
             end
 
+            Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
             Renderer.print_separator()
 
           {:plan, plan_text} ->
@@ -404,8 +400,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         Renderer.print_response(response)
+        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         Renderer.print_separator()
         :executed
 
