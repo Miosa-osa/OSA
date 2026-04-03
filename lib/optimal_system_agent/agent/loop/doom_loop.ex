@@ -189,16 +189,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     doom_message =
       """
-      I've hit the same error #{repeat_count} times and I'm stopping to avoid wasting tokens.
+      I hit the same error #{repeat_count} times with #{triggering_tool}: #{triggering_error}
 
-      What I tried:
-      - #{triggering_tool}: called #{repeat_count} times with the same failing result
-
-      Error pattern:
-      - #{triggering_error}
-
-      How to proceed:
-      - #{suggestion}
+      #{suggestion}
       """
       |> String.trim()
 
@@ -223,30 +216,68 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
         consecutive_failures: repeat_count
       }})
 
-    {:halt, doom_message, state}
+    # Track how many times we've tried recovery for this session
+    doom_recovery_count = Process.get(:osa_doom_recovery_count, 0)
+
+    if doom_recovery_count >= 2 do
+      # Already tried recovery twice — hard halt this time
+      {:halt, doom_message, state}
+    else
+      # First or second doom trigger — inject recovery directive and try again
+      Logger.info("[doom] Recovery attempt #{doom_recovery_count + 1}/2 — injecting directive")
+
+      recovery_directive = %{
+        role: "system",
+        content: "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
+          "\"#{triggering_error}\". You MUST change your approach NOW. " <>
+          "Step 1: Call file_read on the target file to see its current state. " <>
+          "Step 2: Based on what you see, decide if the change is still needed. " <>
+          "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
+          "Do NOT call #{triggering_tool} with the same arguments again.]"
+      }
+
+      Process.put(:osa_doom_recovery_count, doom_recovery_count + 1)
+
+      state = %{state |
+        recent_failure_signatures: [],
+        messages: state.messages ++ [recovery_directive]
+      }
+
+      {:ok, state}
+    end
   end
 
   defp build_suggestion(triggering_error) do
     cond do
+      String.contains?(triggering_error, "old_string and new_string are identical") ->
+        "The file already contains the change you're trying to make. " <>
+          "Read the file with file_read to see its current state, then decide if the edit is still needed."
+
+      String.contains?(triggering_error, "old_string not found") ->
+        "The text you're trying to replace doesn't exist in the file. " <>
+          "Read the file with file_read to see the actual content, then use the exact text from the file."
+
+      String.contains?(triggering_error, "old_string found") and String.contains?(triggering_error, "times") ->
+        "The text appears multiple times. Add more surrounding context to make old_string unique, " <>
+          "or use replace_all: true."
+
       String.contains?(triggering_error, ["command not found", "not found"]) ->
-        "The command or binary does not exist in this environment. " <>
-          "Verify the tool is installed or use an alternative approach."
+        "The command or binary does not exist. " <>
+          "Check what's installed with shell_execute(command: \"which <tool>\") or use an alternative."
 
       String.contains?(triggering_error, ["Permission denied", "cannot", "Could not"]) ->
-        "This operation requires elevated permissions or the target path is inaccessible. " <>
-          "Check file permissions or try a different path."
+        "Permission denied. Check file permissions or try a different path."
 
       String.contains?(triggering_error, ["No such file", "No such directory"]) ->
-        "The referenced file or directory does not exist. " <>
-          "Confirm the correct path before retrying."
+        "File or directory does not exist. " <>
+          "Use file_glob or dir_list to find the correct path."
 
       String.contains?(triggering_error, ["Blocked:"]) ->
-        "The tool is blocked by the current permission tier. " <>
-          "Request a permission level change or use an allowed alternative."
+        "Tool blocked by permissions. Use a different tool or approach."
 
       true ->
-        "Review the error above, adjust your approach, and try a different strategy " <>
-          "before retrying the same operation."
+        "Read the relevant files with file_read to understand the current state, " <>
+          "then try a completely different approach. Do NOT retry the same operation."
     end
   end
 end
