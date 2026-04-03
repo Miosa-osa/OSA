@@ -269,6 +269,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     # Clear per-message process caches
     Process.delete(:osa_git_info_cache)
+    Process.delete(:osa_doom_recovery_count)
     Process.delete(:osa_workspace_overview_cache)
     Process.delete(:osa_system_msg_cache)
     Process.put(:osa_memory_version, 0)
@@ -317,7 +318,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
           overflow_retries: 0,
           auto_continues: 0,
           status: :thinking,
-          exploration_done: false
+          exploration_done: false,
+          # Reset doom loop signatures on each new user turn —
+          # the user explicitly wants to try again, don't carry over old failures
+          recent_failure_signatures: []
       }
 
       # Genre routing
