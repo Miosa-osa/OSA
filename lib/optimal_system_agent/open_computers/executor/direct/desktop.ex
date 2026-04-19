@@ -16,7 +16,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   use GenServer, restart: :temporary
   require Logger
 
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{Bridge, MacOS, Relay, X11vnc}
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{Bridge, MacOS, Relay, Windows, X11vnc}
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -35,7 +35,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   @impl true
   def handle_info(:run, %{job: job, reply: reply} = state) do
     cond do
-      linux?() or macos?() ->
+      linux?() or macos?() or windows?() ->
         case start_session(job, reply) do
           {:ok, new_state} ->
             {:noreply, new_state}
@@ -48,7 +48,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
       true ->
         reply.(
           {:job_fail, job.id,
-           %{reason: :unsupported_host_os, message: "stream_native_desktop: Windows not yet supported"}}
+           %{reason: :unsupported_host_os, message: "stream_native_desktop: unsupported OS"}}
         )
 
         {:stop, :normal, state}
@@ -82,19 +82,20 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
 
   defp linux?, do: :os.type() == {:unix, :linux}
   defp macos?, do: :os.type() == {:unix, :darwin}
+  defp windows?, do: :os.type() == {:win32, :nt}
 
   defp spawn_desktop(job) do
-    if macos?() do
-      MacOS.spawn()
-    else
-      display = Map.get(job, :display, ":0")
-      X11vnc.spawn(display)
+    cond do
+      macos?() -> MacOS.spawn()
+      windows?() -> Windows.spawn()
+      true -> X11vnc.spawn(Map.get(job, :display, ":0"))
     end
   end
 
   defp kill_desktop(x11) do
     cond do
       match?(%MacOS{}, x11) -> MacOS.kill(x11)
+      match?(%Windows{}, x11) -> Windows.kill(x11)
       match?(%X11vnc{}, x11) -> X11vnc.kill(x11)
       true -> :ok
     end
