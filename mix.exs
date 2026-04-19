@@ -27,7 +27,7 @@ defmodule OptimalSystemAgent.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :ssl, :os_mon, :public_key],
       mod: {OptimalSystemAgent.Application, []}
     ]
   end
@@ -40,6 +40,12 @@ defmodule OptimalSystemAgent.MixProject do
 
       # HTTP client for LLM APIs
       {:req, "~> 0.5"},
+
+      # Low-level HTTP + WebSocket client — OpenComputers extension speaks
+      # an outbound-only WSS control channel to MIOSA's control plane.
+      {:mint, "~> 1.5"},
+      {:mint_web_socket, "~> 1.0"},
+      {:castore, "~> 1.0"},
 
       # JSON
       {:jason, "~> 1.4"},
