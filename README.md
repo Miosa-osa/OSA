@@ -301,9 +301,11 @@ Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) configured 
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
 ```
 
-Auto-installs Elixir, Erlang, and Rust if missing. Symlinks `osa` to your PATH.
+The installer auto-detects your OS and architecture. On **macOS arm64**, **Linux amd64**, and **Linux arm64** it downloads the pre-built single binary from GitHub Releases — no Elixir, Erlang, or Rust required. On other platforms it falls back to a source build (installs Elixir/Erlang/Rust automatically).
 
 **Homebrew:** `brew tap miosa-osa/tap && brew install osagent`
+
+**Windows:** Download `osa-windows-amd64.exe` from [GitHub Releases](https://github.com/Miosa-osa/OSA/releases/latest) and add it to your PATH.
 
 **Docker:** `docker compose up -d`
 
