@@ -145,6 +145,15 @@ config :optimal_system_agent,
   update_interval: 86_400_000,
 
   # ---------------------------------------------------------------------------
+  # OpenComputers — connects this OSA to MIOSA's control plane so the host
+  # appears in the MIOSA frontend as an orchestrable Computer.
+  # Opt-in via OSA_OPEN_COMPUTERS_ENABLED=true. When enabled, reads the
+  # TOML at ~/.osa/open_computers.toml (or $OSA_OPEN_COMPUTERS_CONFIG) for
+  # control_url + host_key + modes + fingerprint_path.
+  # ---------------------------------------------------------------------------
+  open_computers_enabled: false,
+
+  # ---------------------------------------------------------------------------
   # Quiet Hours — heartbeat suppression windows
   # ---------------------------------------------------------------------------
   quiet_hours: nil,
