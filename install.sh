@@ -19,6 +19,7 @@ REPO="Miosa-osa/OSA"
 INSTALL_DIR="${OSA_HOME:-$HOME/.osa}"
 SRC_DIR="$INSTALL_DIR/src"
 BIN_LINK="/usr/local/bin/osa"
+RELEASES_URL="https://github.com/${REPO}/releases/latest/download"
 
 # Colors
 RED='\033[0;31m'
@@ -60,12 +61,78 @@ case "$(uname -m)" in
   arm64|aarch64) ARCH="arm64" ;;
   x86_64|amd64)  ARCH="amd64" ;;
   *)
-    echo -e "${RED}Unsupported architecture: $(uname -m)${NC}"
-    exit 1
+    echo -e "${YELLOW}Architecture $(uname -m) has no pre-built binary — falling back to source install.${NC}"
+    ARCH="unsupported"
     ;;
 esac
 
 echo -e "${DIM}Platform: ${OS}/${ARCH}${NC}"
+
+# ── Try pre-built binary first ───────────────────────────────────────
+# Maps OS/ARCH to the release asset name produced by the CI workflow.
+#   macos/arm64   → osa-darwin-arm64
+#   linux/amd64   → osa-linux-amd64
+#   linux/arm64   → osa-linux-arm64
+# Windows is not reachable from this script (no bash); fall through to source.
+
+_install_binary() {
+  local asset_name
+  case "${OS}/${ARCH}" in
+    macos/arm64)  asset_name="osa-darwin-arm64" ;;
+    linux/amd64)  asset_name="osa-linux-amd64"  ;;
+    linux/arm64)  asset_name="osa-linux-arm64"  ;;
+    *)            return 1 ;;
+  esac
+
+  local url="${RELEASES_URL}/${asset_name}"
+  echo -e "${BLUE}[1/1]${NC} Downloading pre-built binary from GitHub Releases..."
+  echo -e "${DIM}  ${url}${NC}"
+
+  if ! curl -fsSL --head "$url" -o /dev/null 2>/dev/null; then
+    echo -e "${DIM}  No release available yet — falling back to source install.${NC}"
+    return 1
+  fi
+
+  local tmp_bin
+  tmp_bin="$(mktemp)"
+  if ! curl -fsSL "$url" -o "$tmp_bin"; then
+    echo -e "${YELLOW}  Binary download failed — falling back to source install.${NC}"
+    rm -f "$tmp_bin"
+    return 1
+  fi
+
+  chmod +x "$tmp_bin"
+
+  # Install to /usr/local/bin/osa
+  if [ -w /usr/local/bin ] || [ -w "$(dirname /usr/local/bin)" ]; then
+    mv "$tmp_bin" /usr/local/bin/osa
+  elif [ -n "$SUDO" ]; then
+    $SUDO mv "$tmp_bin" /usr/local/bin/osa
+  else
+    mkdir -p "$HOME/.local/bin"
+    mv "$tmp_bin" "$HOME/.local/bin/osa"
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
+  echo ""
+  echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
+  echo -e "${GREEN}║            Installation Complete!                ║${NC}"
+  echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
+  echo ""
+  echo -e "  Type ${BOLD}osa${NC} to start."
+  echo ""
+  echo -e "  ${DIM}First run launches a setup wizard.${NC}"
+  echo ""
+  return 0
+}
+
+# Attempt binary install; if it succeeds, exit cleanly.
+if [ "$ARCH" != "unsupported" ] && _install_binary; then
+  exit 0
+fi
+
+echo -e "${DIM}Falling back to source-based install (builds from Git)...${NC}"
+echo ""
 
 # ── Package manager detection ───────────────────────────────────────
 

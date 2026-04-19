@@ -34,6 +34,9 @@ defmodule OptimalSystemAgent.MixProject do
 
   defp deps do
     [
+      # Single-binary packaging — wraps a BEAM release into self-contained executables
+      {:burrito, "~> 1.0"},
+
       # Event routing — compiled Erlang bytecode dispatch (BEAM speed)
       # https://github.com/robertohluna/goldrush (fork of extend/goldrush)
       {:goldrush, github: "robertohluna/goldrush", branch: "main", override: true},
@@ -103,11 +106,28 @@ defmodule OptimalSystemAgent.MixProject do
 
   defp releases do
     [
+      # Traditional OTP release — used by Homebrew and local dev builds.
       osagent: [
         include_executables_for: [:unix],
         applications: [runtime_tools: :permanent],
         steps: [:assemble, &copy_go_tokenizer/1, &copy_osagent_wrapper/1],
         rel_templates_path: "rel"
+      ],
+
+      # Burrito single-binary release — `mix release burrito` emits one
+      # self-contained executable per target into burrito_out/.
+      # Build via CI (see .github/workflows/release.yml); cross-compile on
+      # your local machine is not supported.
+      burrito: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_arm64: [os: :darwin, cpu: :aarch64],
+            linux_amd64: [os: :linux, cpu: :x86_64],
+            linux_arm64: [os: :linux, cpu: :aarch64],
+            windows_amd64: [os: :windows, cpu: :x86_64]
+          ]
+        ]
       ]
     ]
   end
