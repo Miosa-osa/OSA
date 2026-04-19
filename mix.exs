@@ -162,10 +162,11 @@ defmodule OptimalSystemAgent.MixProject do
     # osagent — CLI wrapper for the OTP release.
     #
     # Usage:
-    #   osagent              interactive chat (default)
-    #   osagent setup        configure provider + API keys
-    #   osagent version      print version
-    #   osagent serve        headless HTTP API mode
+    #   osagent                        interactive chat (default)
+    #   osagent setup                  configure provider + API keys
+    #   osagent version                print version
+    #   osagent serve                  headless HTTP API mode
+    #   osagent opencomputers <verb>   manage OpenComputers extension
 
     set -e
 
@@ -191,6 +192,13 @@ defmodule OptimalSystemAgent.MixProject do
         ;;
       doctor)
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.doctor()"
+        ;;
+      opencomputers)
+        shift
+        # Pass remaining args as an Elixir list of strings
+        ARGS=$(printf '"%s",' "$@")
+        ARGS="[${ARGS%,}]"
+        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.opencomputers(${ARGS})"
         ;;
       chat|*)
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.chat()"
