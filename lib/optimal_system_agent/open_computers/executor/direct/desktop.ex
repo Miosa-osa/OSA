@@ -16,7 +16,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   use GenServer, restart: :temporary
   require Logger
 
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{Bridge, Relay, X11vnc}
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{Bridge, MacOS, Relay, X11vnc}
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -34,22 +34,24 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
 
   @impl true
   def handle_info(:run, %{job: job, reply: reply} = state) do
-    if not linux?() do
-      reply.(
-        {:job_fail, job.id,
-         %{reason: :unsupported_host_os, message: "stream_native_desktop: Phase 2 (macOS/Windows)"}}
-      )
+    cond do
+      linux?() or macos?() ->
+        case start_session(job, reply) do
+          {:ok, new_state} ->
+            {:noreply, new_state}
 
-      {:stop, :normal, state}
-    else
-      case start_session(job, reply) do
-        {:ok, new_state} ->
-          {:noreply, new_state}
+          {:error, reason, message} ->
+            reply.({:job_fail, job.id, %{reason: reason, message: message}})
+            {:stop, :normal, state}
+        end
 
-        {:error, reason, message} ->
-          reply.({:job_fail, job.id, %{reason: reason, message: message}})
-          {:stop, :normal, state}
-      end
+      true ->
+        reply.(
+          {:job_fail, job.id,
+           %{reason: :unsupported_host_os, message: "stream_native_desktop: Windows not yet supported"}}
+        )
+
+        {:stop, :normal, state}
     end
   end
 
@@ -60,9 +62,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
     {:stop, :normal, state}
   end
 
-  # x11vnc OS process exited (Port message).
+  # Desktop helper OS process exited (Port message).
   def handle_info({port, {:exit_status, status}}, %{x11: %{port: port}} = state) do
-    Logger.warning("[Desktop] x11vnc exited with status #{status}")
+    Logger.warning("[Desktop] helper exited with status #{status}")
     cleanup(state)
     {:stop, :normal, state}
   end
@@ -79,32 +81,50 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   # ── Private ──────────────────────────────────────────────────────────
 
   defp linux?, do: :os.type() == {:unix, :linux}
+  defp macos?, do: :os.type() == {:unix, :darwin}
+
+  defp spawn_desktop(job) do
+    if macos?() do
+      MacOS.spawn()
+    else
+      display = Map.get(job, :display, ":0")
+      X11vnc.spawn(display)
+    end
+  end
+
+  defp kill_desktop(x11) do
+    cond do
+      match?(%MacOS{}, x11) -> MacOS.kill(x11)
+      match?(%X11vnc{}, x11) -> X11vnc.kill(x11)
+      true -> :ok
+    end
+  end
 
   defp start_session(job, reply) do
     relay_url = Map.get(job, :relay_url, "")
-    display = Map.get(job, :display, ":0")
 
-    with {:x11, {:ok, x11}} <- {:x11, X11vnc.spawn(display)},
+    with {:desktop, {:ok, x11}} <- {:desktop, spawn_desktop(job)},
          {:ws, {:ok, ws}} <- {:ws, Relay.open(relay_url)},
          :ok <- reply.({:job_done, job.id, %{status: :streaming}}),
          {:bridge, {:ok, task}} <- {:bridge, Bridge.start(x11.vnc_port, ws, self())} do
       Process.monitor(task.pid)
       {:ok, %{job: job, reply: reply, x11: x11, ws: ws, bridge: task}}
     else
-      {:x11, {:error, {:missing_binary, msg}}} -> {:error, :missing_binary, msg}
-      {:x11, {:error, {:missing_display, msg}}} -> {:error, :missing_display, msg}
-      {:x11, {:error, reason}} -> {:error, :x11vnc_start_failed, inspect(reason)}
+      {:desktop, {:error, {:missing_binary, msg}}} -> {:error, :missing_binary, msg}
+      {:desktop, {:error, {:missing_display, msg}}} -> {:error, :missing_display, msg}
+      {:desktop, {:error, {:missing_helper, msg}}} -> {:error, :missing_helper, msg}
+      {:desktop, {:error, reason}} -> {:error, :desktop_start_failed, inspect(reason)}
       {:ws, {:error, reason}} -> {:error, :ws_connect_failed, inspect(reason)}
       {:bridge, {:error, reason}} -> {:error, :bridge_start_failed, inspect(reason)}
     end
   end
 
   defp cleanup(%{x11: x11, ws: {conn, ref, _ws}}) when not is_nil(x11) do
-    X11vnc.kill(x11)
+    kill_desktop(x11)
     send_ws_close(conn, ref)
   end
 
-  defp cleanup(%{x11: x11}) when not is_nil(x11), do: X11vnc.kill(x11)
+  defp cleanup(%{x11: x11}) when not is_nil(x11), do: kill_desktop(x11)
   defp cleanup(_state), do: :ok
 
   defp send_ws_close(conn, ref) do
