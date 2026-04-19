@@ -54,6 +54,10 @@ defmodule OptimalSystemAgent.CLI do
     OptimalSystemAgent.CLI.Doctor.run()
   end
 
+  def opencomputers(args \\ []) do
+    OptimalSystemAgent.CLI.OpenComputers.dispatch(args)
+  end
+
   def update do
     safe_puts("Updating OSA Agent...")
 
