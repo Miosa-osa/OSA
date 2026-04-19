@@ -1,0 +1,16 @@
+# osa-screen-capture-windows.exe — placeholder
+#
+# The real binary is a native C++/C# application built against the Windows
+# Desktop Duplication API (DXGI IDXGIOutputDuplication).
+# It has not yet been shipped in this release.
+#
+# To install the native helper once available:
+#   osa opencomputers install-helper
+#
+# For a pre-release build, contact MIOSA support or see:
+#   docs/windows-desktop.md
+#
+# This file exists so the Elixir helper-lookup path can be exercised in
+# tests without a real .exe present.  The Windows.find_helper/0 function
+# looks for the .exe extension — this .placeholder file will not match and
+# will correctly return {:error, {:missing_helper, _}}.
