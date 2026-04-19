@@ -1,0 +1,16 @@
+#!/bin/sh
+# osa-screen-capture-darwin — placeholder
+#
+# The real binary is a Swift application built with ScreenCaptureKit.
+# It has not yet been shipped in this release.
+#
+# To install the native helper once available:
+#   osa opencomputers install-helper
+#
+# For a pre-release build, contact MIOSA support or see:
+#   docs/macos-desktop.md
+
+echo "osa-screen-capture-darwin: native helper not yet shipped." >&2
+echo "Run: osa opencomputers install-helper" >&2
+echo "See: docs/macos-desktop.md" >&2
+exit 1
