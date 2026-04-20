@@ -22,6 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Build the native ScreenCaptureKit helper before the Elixir release so
+      # it ends up in priv/helpers/ when Burrito bundles priv/.
+      - name: Build native macOS helper (osa-screen-capture-darwin)
+        run: |
+          chmod +x native/macos/ScreenShare/build.sh
+          cd native/macos/ScreenShare
+          ./build.sh release
+
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
         with:
@@ -136,6 +144,21 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+
+      # Build the native Desktop Duplication helper before the Elixir release.
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build native Windows helper (osa-screen-capture-windows.exe)
+        shell: pwsh
+        run: |
+          cd native/windows/ScreenShare
+          dotnet publish -c Release -r win-x64 --self-contained true -o publish
+          Copy-Item publish/ScreenShare.exe ../../../priv/helpers/osa-screen-capture-windows.exe
+          Write-Host "Deployed to priv/helpers/osa-screen-capture-windows.exe"
+          Get-ChildItem ../../../priv/helpers/ | Select-Object Name, Length
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
