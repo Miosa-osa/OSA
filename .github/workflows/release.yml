@@ -1,0 +1,245 @@
+name: Release
+
+# Triggers on version tags: v1.2.3 or v1.2.3-rc1
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write   # needed to create GitHub Releases and upload assets
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build — runs on each target platform/arch via matrix
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS ARM (Apple Silicon)
+          - os:       macos
+            arch:     arm64
+            runner:   macos-14          # GitHub's M1 runner
+            asset:    osa-macos-arm64
+            ext:      tar.gz
+            burrito_target: macos_arm64
+
+          # macOS x86_64 (Intel)
+          - os:       macos
+            arch:     x86_64
+            runner:   macos-13          # Intel runner
+            asset:    osa-macos-x86_64
+            ext:      tar.gz
+            burrito_target: macos_x86_64
+
+          # Linux x86_64
+          - os:       linux
+            arch:     x86_64
+            runner:   ubuntu-22.04
+            asset:    osa-linux-x86_64
+            ext:      tar.gz
+            burrito_target: linux_x86_64
+
+          # Linux ARM64
+          - os:       linux
+            arch:     arm64
+            runner:   ubuntu-22.04-arm  # GitHub ARM runner (requires billing)
+            asset:    osa-linux-arm64
+            ext:      tar.gz
+            burrito_target: linux_arm64
+
+          # Windows x86_64
+          - os:       windows
+            arch:     x86_64
+            runner:   windows-2022
+            asset:    osa-windows-x86_64
+            ext:      zip
+            burrito_target: windows_x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Toolchain setup ----
+
+      - name: Set up Erlang/OTP + Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27.x'
+          elixir-version: '1.18.x'
+
+      - name: Set up Rust (for Burrito native compilation)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Linux ARM builds may need cross-compilation deps
+      - name: Install Linux build dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential pkg-config \
+            libssl-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libasound2-dev
+
+      # ---- Build ----
+
+      - name: Fetch Elixir dependencies
+        run: mix deps.get
+        env:
+          MIX_ENV: prod
+
+      - name: Compile (prod)
+        run: mix compile
+        env:
+          MIX_ENV: prod
+
+      - name: Build Burrito binary
+        run: mix release
+        env:
+          MIX_ENV: prod
+          BURRITO_TARGET: ${{ matrix.burrito_target }}
+
+      # ---- Package ----
+
+      # Burrito places the built binary under burrito_out/<target>/osa
+      # Adjust the glob below if your Burrito config uses a different output path.
+
+      - name: Locate built binary (Unix)
+        if: matrix.os != 'windows'
+        id: find_bin_unix
+        shell: bash
+        run: |
+          BIN=$(find burrito_out -type f -name "osa" | head -1)
+          if [ -z "$BIN" ]; then
+            echo "Binary not found in burrito_out/. Contents:"
+            find burrito_out || true
+            exit 1
+          fi
+          echo "bin_path=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Locate built binary (Windows)
+        if: matrix.os == 'windows'
+        id: find_bin_win
+        shell: pwsh
+        run: |
+          $bin = Get-ChildItem -Path burrito_out -Recurse -Filter 'osa.exe' | Select-Object -First 1
+          if (-not $bin) {
+            Write-Error "Binary not found in burrito_out/"
+            Get-ChildItem burrito_out -Recurse | Select-Object FullName
+            exit 1
+          }
+          "bin_path=$($bin.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Package as .tar.gz (Unix) or .zip (Windows)
+
+      - name: Package as tar.gz (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          BIN="${{ steps.find_bin_unix.outputs.bin_path }}"
+          ASSET="${{ matrix.asset }}.tar.gz"
+          cp "$BIN" osa
+          tar -czf "$ASSET" osa
+          rm -f osa
+          echo "ASSET_FILE=$ASSET" >> "$GITHUB_ENV"
+
+      - name: Package as zip (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $bin = "${{ steps.find_bin_win.outputs.bin_path }}"
+          $asset = "${{ matrix.asset }}.zip"
+          Copy-Item $bin osa.exe
+          Compress-Archive -Path osa.exe -DestinationPath $asset -Force
+          Remove-Item osa.exe
+          "ASSET_FILE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ---- SHA256 checksum ----
+
+      - name: Generate SHA256 checksum (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          ASSET="${{ matrix.asset }}.${{ matrix.ext }}"
+          # macOS ships shasum; Linux ships sha256sum — handle both
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "${ASSET}.sha256"
+          else
+            shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+          fi
+          echo "--- Checksum ---"
+          cat "${ASSET}.sha256"
+
+      - name: Generate SHA256 checksum (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $asset = "${{ matrix.asset }}.${{ matrix.ext }}"
+          $hash  = (Get-FileHash -Path $asset -Algorithm SHA256).Hash.ToLower()
+          # Match Unix shasum output format: "<hash>  <filename>"
+          "$hash  $asset" | Out-File -FilePath "${asset}.sha256" -Encoding ascii -NoNewline
+          Write-Host "--- Checksum ---"
+          Get-Content "${asset}.sha256"
+
+      # ---- Upload artifacts for the release job ----
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}.${{ matrix.ext }}
+            ${{ matrix.asset }}.${{ matrix.ext }}.sha256
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Release — collects all artifacts and creates the GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (for release notes from CHANGELOG)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          # Merge all per-platform artifacts into dist/
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OSA ${{ github.ref_name }}
+          # Include assets: tarballs, zips, and their .sha256 files
+          files: |
+            dist/osa-macos-arm64.tar.gz
+            dist/osa-macos-arm64.tar.gz.sha256
+            dist/osa-macos-x86_64.tar.gz
+            dist/osa-macos-x86_64.tar.gz.sha256
+            dist/osa-linux-x86_64.tar.gz
+            dist/osa-linux-x86_64.tar.gz.sha256
+            dist/osa-linux-arm64.tar.gz
+            dist/osa-linux-arm64.tar.gz.sha256
+            dist/osa-windows-x86_64.zip
+            dist/osa-windows-x86_64.zip.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
