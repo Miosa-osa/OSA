@@ -65,7 +65,51 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Config do
     end
   end
 
+  @doc """
+  Return the list of allowed root paths for FS operations.
+
+  Priority (first wins):
+    1. Application env `:optimal_system_agent, :oc_fs_allowed_roots`
+    2. `OSA_FS_ALLOWED_ROOTS` env var — colon-separated paths
+    3. Default: `[System.user_home!()]`
+  """
+  @spec fs_allowed_roots() :: [String.t()]
+  def fs_allowed_roots do
+    case Application.get_env(:optimal_system_agent, :oc_fs_allowed_roots) do
+      roots when is_list(roots) and roots != [] ->
+        Enum.map(roots, &Path.expand/1)
+
+      _ ->
+        case System.get_env("OSA_FS_ALLOWED_ROOTS") do
+          nil -> [home()]
+          "" -> [home()]
+          env_val ->
+            env_val
+            |> String.split(":")
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.map(&Path.expand/1)
+        end
+    end
+  end
+
+  @doc "Whether the OSA FS executor is enabled."
+  @spec fs_enabled?() :: boolean()
+  def fs_enabled? do
+    case Application.get_env(:optimal_system_agent, :oc_fs_enabled, true) do
+      false -> false
+      "false" -> false
+      _ -> true
+    end
+  end
+
   # ── Private ──────────────────────────────────────────────────────────────
+
+  defp home do
+    case System.user_home() do
+      nil -> "/tmp"
+      h -> h
+    end
+  end
 
   defp read_exec_config do
     config_dir =
