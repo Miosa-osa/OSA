@@ -153,7 +153,10 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   # osa_update_staged — outbound only (sent by Updater, upstream to control plane).
   # If the control plane echoes it back inbound, ignore.
   def handle_cast({:inbound, {:osa_update_staged, _} = frame}, state) do
-    Logger.debug("[FrameRouter] inbound osa_update_staged echo (ignored): #{inspect(elem(frame, 0))}")
+    Logger.debug(
+      "[FrameRouter] inbound osa_update_staged echo (ignored): #{inspect(elem(frame, 0))}"
+    )
+
     {:noreply, state}
   end
 
@@ -165,7 +168,10 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   # ── Outbound dispatch ──
 
   def handle_cast({:outbound, frame}, %{host_client_pid: nil} = state) do
-    Logger.warning("[FrameRouter] outbound frame dropped — no host_client registered: #{inspect(frame)}")
+    Logger.warning(
+      "[FrameRouter] outbound frame dropped — no host_client registered: #{inspect(frame)}"
+    )
+
     {:noreply, state}
   end
 
@@ -187,7 +193,9 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   defp dispatch_to_desktop(frame) do
     case Process.whereis(DesktopController) do
       nil ->
-        Logger.warning("[FrameRouter] DesktopController not running, dropping #{inspect(elem(frame, 0))}")
+        Logger.warning(
+          "[FrameRouter] DesktopController not running, dropping #{inspect(elem(frame, 0))}"
+        )
 
       _pid ->
         DesktopController.handle_frame(frame)
@@ -197,7 +205,9 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   defp dispatch_to_pty(frame) do
     case Process.whereis(PtyExecutor) do
       nil ->
-        Logger.warning("[FrameRouter] PtyExecutor not running, dropping #{inspect(elem(frame, 0))}")
+        Logger.warning(
+          "[FrameRouter] PtyExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
 
       _pid ->
         PtyExecutor.handle_frame(frame)
@@ -207,7 +217,9 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   defp dispatch_to_tunnel(frame) do
     case Process.whereis(TunnelExecutor) do
       nil ->
-        Logger.warning("[FrameRouter] TunnelExecutor not running, dropping #{inspect(elem(frame, 0))}")
+        Logger.warning(
+          "[FrameRouter] TunnelExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
 
       _pid ->
         TunnelExecutor.handle_frame(frame)
@@ -217,7 +229,9 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   defp dispatch_to_cluster(frame) do
     case Process.whereis(ClusterController) do
       nil ->
-        Logger.warning("[FrameRouter] ClusterController not running, dropping #{inspect(elem(frame, 0))}")
+        Logger.warning(
+          "[FrameRouter] ClusterController not running, dropping #{inspect(elem(frame, 0))}"
+        )
 
       _pid ->
         ClusterController.handle_frame(frame)
