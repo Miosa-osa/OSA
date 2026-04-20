@@ -11,6 +11,9 @@
 #   ARCH=x86_64 ./build.sh       # cross-compile Intel (on Apple Silicon)
 #   ARCH=arm64  ./build.sh       # native arm64 (default on Apple Silicon)
 #
+# Output binary name in priv/helpers/:
+#   osa-screen-capture-darwin    (the name the Elixir MacOS adapter looks for)
+#
 # CI: This script is called by release.yml instead of `swift build -c release`.
 
 set -e
@@ -43,3 +46,13 @@ swiftc \
     -o "${BINARY}"
 
 echo "[build.sh] Done: $(ls -lh "${BINARY}" | awk '{print $5, $NF}')"
+
+# Copy to priv/helpers/ with the OSA release binary name (release mode only).
+# CI uses this path; local dev can also benefit from the auto-copy.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PRIV_HELPERS="${SCRIPT_DIR}/../../../priv/helpers"
+if [ -d "${PRIV_HELPERS}" ] && [ "${MODE}" = "release" ]; then
+    cp "${BINARY}" "${PRIV_HELPERS}/osa-screen-capture-darwin"
+    chmod +x "${PRIV_HELPERS}/osa-screen-capture-darwin"
+    echo "[build.sh] Deployed to ${PRIV_HELPERS}/osa-screen-capture-darwin"
+fi

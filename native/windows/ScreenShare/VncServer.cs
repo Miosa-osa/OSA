@@ -53,6 +53,11 @@ sealed class VncServer : IDisposable
         _listener = new TcpListener(IPAddress.Loopback, _port);
         _listener.Start();
         Console.Error.WriteLine($"[ScreenShare] bound 127.0.0.1:{_port}");
+
+        // Announce port on stdout so the Elixir Windows adapter can discover it
+        // via the PORT= pattern (same contract as x11vnc.ex / MacOS adapter).
+        Console.Out.WriteLine($"PORT={_port}");
+        Console.Out.Flush();
     }
 
     /// Called by Capture with each live frame (BGR24 bytes).

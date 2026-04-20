@@ -66,6 +66,11 @@ final class VncServer {
         let listener = try NWListener(using: params, on: nwPort)
         self.listener = listener
         fputs("[ScreenShare] bound 127.0.0.1:\(port)\n", stderr)
+
+        // Announce port on stdout so the Elixir MacOS adapter can discover it
+        // via the PORT= pattern (same contract as x11vnc.ex).
+        print("PORT=\(port)")
+        fflush(stdout)
     }
 
     func stop() {
