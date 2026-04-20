@@ -12,58 +12,178 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build — runs on each target platform/arch via matrix
+  # Build native helpers — must run BEFORE the OSA release build jobs so their
+  # artifacts can be downloaded and placed in priv/ before Burrito runs.
+  # ---------------------------------------------------------------------------
+
+  build-macos-helper:
+    name: Build macOS ScreenShare helper
+    runs-on: macos-14   # Apple Silicon — matches arm64 OSA release target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build macOS ScreenShare helper
+        run: |
+          cd native/macos/ScreenShare
+          chmod +x build.sh
+          ./build.sh release
+          echo "Build complete. Binary:"
+          ls -lh .build/release/ScreenShare
+
+      - name: Upload macOS helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-screenshare-helper
+          path: native/macos/ScreenShare/.build/release/ScreenShare
+          retention-days: 1
+
+  # Build a second macOS helper for Intel (x86_64) on the macos-13 runner.
+  # The arm64 binary built above is used in both macOS release targets because
+  # Rosetta 2 runs arm64 binaries on Intel without changes. A native x86_64
+  # build is produced separately for correctness.
+  build-macos-helper-x86:
+    name: Build macOS ScreenShare helper (x86_64)
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build macOS ScreenShare helper (x86_64)
+        run: |
+          cd native/macos/ScreenShare
+          chmod +x build.sh
+          ARCH=x86_64 ./build.sh release
+          ls -lh .build/release/ScreenShare
+
+      - name: Upload macOS x86_64 helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-screenshare-helper-x86_64
+          path: native/macos/ScreenShare/.build/release/ScreenShare
+          retention-days: 1
+
+  build-windows-helper:
+    name: Build Windows ScreenShare helper
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build Windows ScreenShare helper
+        shell: pwsh
+        run: |
+          cd native/windows/ScreenShare
+          dotnet publish -c Release -r win-x64 --self-contained true -o publish
+          Write-Host "Build complete. Binary:"
+          Get-ChildItem publish/ScreenShare.exe | Select-Object Name, Length
+
+      - name: Upload Windows helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-screenshare-helper
+          path: native/windows/ScreenShare/publish/ScreenShare.exe
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Build OSA — runs on each target platform/arch via matrix.
+  # Downloads native helper artifacts into priv/ before Burrito runs.
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: [build-macos-helper, build-macos-helper-x86, build-windows-helper]
     strategy:
       fail-fast: false
       matrix:
         include:
           # macOS ARM (Apple Silicon)
-          - os:       macos
-            arch:     arm64
-            runner:   macos-14          # GitHub's M1 runner
-            asset:    osa-macos-arm64
-            ext:      tar.gz
-            burrito_target: macos_arm64
+          - os:              macos
+            arch:            arm64
+            runner:          macos-14          # GitHub's M1 runner
+            asset:           osa-macos-arm64
+            ext:             tar.gz
+            burrito_target:  macos_arm64
+            helper_artifact: macos-screenshare-helper
 
           # macOS x86_64 (Intel)
-          - os:       macos
-            arch:     x86_64
-            runner:   macos-13          # Intel runner
-            asset:    osa-macos-x86_64
-            ext:      tar.gz
-            burrito_target: macos_x86_64
+          - os:              macos
+            arch:            x86_64
+            runner:          macos-13          # Intel runner
+            asset:           osa-macos-x86_64
+            ext:             tar.gz
+            burrito_target:  macos_x86_64
+            helper_artifact: macos-screenshare-helper-x86_64
 
           # Linux x86_64
-          - os:       linux
-            arch:     x86_64
-            runner:   ubuntu-22.04
-            asset:    osa-linux-x86_64
-            ext:      tar.gz
-            burrito_target: linux_x86_64
+          - os:              linux
+            arch:            x86_64
+            runner:          ubuntu-22.04
+            asset:           osa-linux-x86_64
+            ext:             tar.gz
+            burrito_target:  linux_x86_64
+            helper_artifact: ''   # no native helper on Linux (x11vnc path)
 
           # Linux ARM64
-          - os:       linux
-            arch:     arm64
-            runner:   ubuntu-22.04-arm  # GitHub ARM runner (requires billing)
-            asset:    osa-linux-arm64
-            ext:      tar.gz
-            burrito_target: linux_arm64
+          - os:              linux
+            arch:            arm64
+            runner:          ubuntu-22.04-arm  # GitHub ARM runner (requires billing)
+            asset:           osa-linux-arm64
+            ext:             tar.gz
+            burrito_target:  linux_arm64
+            helper_artifact: ''   # no native helper on Linux
 
           # Windows x86_64
-          - os:       windows
-            arch:     x86_64
-            runner:   windows-2022
-            asset:    osa-windows-x86_64
-            ext:      zip
-            burrito_target: windows_x86_64
+          - os:              windows
+            arch:            x86_64
+            runner:          windows-2022
+            asset:           osa-windows-x86_64
+            ext:             zip
+            burrito_target:  windows_x86_64
+            helper_artifact: windows-screenshare-helper
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ---- Download native helper for this platform ----
+
+      - name: Download macOS ScreenShare helper
+        if: matrix.helper_artifact != '' && matrix.os == 'macos'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.helper_artifact }}
+          path: priv/macos/
+
+      - name: Mark macOS helper executable
+        if: matrix.os == 'macos'
+        run: |
+          if [ -f priv/macos/ScreenShare ]; then
+            chmod +x priv/macos/ScreenShare
+            echo "macOS helper:"
+            ls -lh priv/macos/ScreenShare
+          fi
+
+      - name: Download Windows ScreenShare helper
+        if: matrix.helper_artifact != '' && matrix.os == 'windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.helper_artifact }}
+          path: priv/windows/
+
+      - name: Verify Windows helper (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          if (Test-Path priv/windows/ScreenShare.exe) {
+            Write-Host "Windows helper:"
+            Get-ChildItem priv/windows/ScreenShare.exe | Select-Object Name, Length
+          }
 
       # ---- Toolchain setup ----
 

@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   require Logger
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller, as: DesktopController
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -100,6 +101,33 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  def handle_cast({:inbound, {:pty_open_request, _} = frame}, state) do
+    dispatch_to_pty(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:pty_input, _} = frame}, state) do
+    dispatch_to_pty(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:pty_resize, _} = frame}, state) do
+    dispatch_to_pty(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:pty_close, _} = frame}, state) do
+    dispatch_to_pty(frame)
+    {:noreply, state}
+  end
+
+  # osa_update_staged — outbound only (sent by Updater, upstream to control plane).
+  # If the control plane echoes it back inbound, ignore.
+  def handle_cast({:inbound, {:osa_update_staged, _} = frame}, state) do
+    Logger.debug("[FrameRouter] inbound osa_update_staged echo (ignored): #{inspect(elem(frame, 0))}")
+    {:noreply, state}
+  end
+
   def handle_cast({:inbound, frame}, state) do
     Logger.debug("[FrameRouter] unhandled inbound frame: #{inspect(elem(frame, 0))}")
     {:noreply, state}
@@ -134,6 +162,16 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         DesktopController.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_pty(frame) do
+    case Process.whereis(PtyExecutor) do
+      nil ->
+        Logger.warning("[FrameRouter] PtyExecutor not running, dropping #{inspect(elem(frame, 0))}")
+
+      _pid ->
+        PtyExecutor.handle_frame(frame)
     end
   end
 end
