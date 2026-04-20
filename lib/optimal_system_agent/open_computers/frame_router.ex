@@ -38,6 +38,8 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller, as: DesktopController
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel, as: TunnelExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller, as: ClusterController
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -121,6 +123,33 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  # Tunnel frames — route to TunnelExecutor
+  def handle_cast({:inbound, {:tunnel_open_request, _} = frame}, state) do
+    dispatch_to_tunnel(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:tunnel_request_body, _} = frame}, state) do
+    dispatch_to_tunnel(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:tunnel_close, _} = frame}, state) do
+    dispatch_to_tunnel(frame)
+    {:noreply, state}
+  end
+
+  # Cluster frames — route to Cluster.Controller
+  def handle_cast({:inbound, {:cluster_provision_request, _} = frame}, state) do
+    dispatch_to_cluster(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:cluster_stop_request, _} = frame}, state) do
+    dispatch_to_cluster(frame)
+    {:noreply, state}
+  end
+
   # osa_update_staged — outbound only (sent by Updater, upstream to control plane).
   # If the control plane echoes it back inbound, ignore.
   def handle_cast({:inbound, {:osa_update_staged, _} = frame}, state) do
@@ -172,6 +201,26 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         PtyExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_tunnel(frame) do
+    case Process.whereis(TunnelExecutor) do
+      nil ->
+        Logger.warning("[FrameRouter] TunnelExecutor not running, dropping #{inspect(elem(frame, 0))}")
+
+      _pid ->
+        TunnelExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_cluster(frame) do
+    case Process.whereis(ClusterController) do
+      nil ->
+        Logger.warning("[FrameRouter] ClusterController not running, dropping #{inspect(elem(frame, 0))}")
+
+      _pid ->
+        ClusterController.handle_frame(frame)
     end
   end
 end
