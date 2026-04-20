@@ -50,32 +50,74 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
   # ── GET /by-agent — per-agent cost breakdown ────────────────────────
 
   get "/by-agent" do
-    json(conn, 200, %{
-      agents: [],
-      note: "Per-agent cost tracking coming soon"
-    })
+    ledger = fetch_ledger()
+
+    agents =
+      ledger
+      |> Enum.group_by(fn e -> e[:session_id] || "unknown" end)
+      |> Enum.map(fn {session, entries} ->
+        %{
+          agent: session,
+          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> Float.round(6),
+          requests: length(entries),
+          tokens_in: entries |> Enum.map(&(&1[:tokens_in] || 0)) |> Enum.sum(),
+          tokens_out: entries |> Enum.map(&(&1[:tokens_out] || 0)) |> Enum.sum()
+        }
+      end)
+      |> Enum.sort_by(& &1.cost_usd, :desc)
+
+    json(conn, 200, %{agents: agents})
   end
 
   # ── GET /by-model — per-model cost breakdown ────────────────────────
 
   get "/by-model" do
-    json(conn, 200, %{
-      models: [],
-      note: "Per-model cost tracking coming soon"
-    })
+    ledger = fetch_ledger()
+
+    models =
+      ledger
+      |> Enum.group_by(fn e -> e[:model] || "unknown" end)
+      |> Enum.map(fn {model, entries} ->
+        %{
+          model: model,
+          provider: (List.first(entries) || %{})[:provider] || "unknown",
+          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> Float.round(6),
+          requests: length(entries),
+          tokens_in: entries |> Enum.map(&(&1[:tokens_in] || 0)) |> Enum.sum(),
+          tokens_out: entries |> Enum.map(&(&1[:tokens_out] || 0)) |> Enum.sum()
+        }
+      end)
+      |> Enum.sort_by(& &1.cost_usd, :desc)
+
+    json(conn, 200, %{models: models})
   end
 
   # ── GET /events — paginated cost events ─────────────────────────────
 
   get "/events" do
     {page, per_page} = pagination_params(conn)
+    ledger = fetch_ledger()
+    total = length(ledger)
+    offset = (page - 1) * per_page
 
-    json(conn, 200, %{
-      events: [],
-      count: 0,
-      page: page,
-      per_page: per_page
-    })
+    events =
+      ledger
+      |> Enum.drop(offset)
+      |> Enum.take(per_page)
+      |> Enum.map(fn e ->
+        %{
+          id: e[:id],
+          timestamp: if(e[:timestamp], do: DateTime.to_iso8601(e[:timestamp])),
+          provider: e[:provider],
+          model: e[:model],
+          tokens_in: e[:tokens_in],
+          tokens_out: e[:tokens_out],
+          cost_usd: e[:cost_usd],
+          session_id: e[:session_id]
+        }
+      end)
+
+    json(conn, 200, %{events: events, count: total, page: page, per_page: per_page})
   end
 
   # ── GET /budgets — read budget limits from config file ───────────────
@@ -144,6 +186,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
   end
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  defp fetch_ledger do
+    case OptimalSystemAgent.Agent.Budget.get_ledger() do
+      {:ok, ledger} when is_list(ledger) -> ledger
+      _ -> []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
 
   defp fetch_budget_status do
     case OptimalSystemAgent.Budget.get_status() do

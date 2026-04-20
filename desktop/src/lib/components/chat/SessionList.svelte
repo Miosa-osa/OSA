@@ -28,6 +28,19 @@
     chatStore.listSessions();
   });
 
+  // ── Search / Filter ─────────────────────────────────────────────────────────
+  let filterQuery = $state('');
+
+  const filteredSessions = $derived(
+    filterQuery.trim()
+      ? sessions.filter(s => {
+          const q = filterQuery.toLowerCase();
+          const title = (s.title ?? '').toLowerCase();
+          return title.includes(q) || s.id.toLowerCase().includes(q);
+        })
+      : sessions
+  );
+
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
   function formatRelativeTime(isoDate: string | null): string {
@@ -110,10 +123,23 @@
     </button>
   </div>
 
+  <!-- Search filter -->
+  {#if sessions.length > 3}
+    <div class="session-list__search">
+      <input
+        type="text"
+        bind:value={filterQuery}
+        placeholder="Filter sessions..."
+        class="session-filter-input"
+        aria-label="Filter sessions"
+      />
+    </div>
+  {/if}
+
   <!-- Session count label -->
-  {#if sessions.length > 0}
+  {#if filteredSessions.length > 0}
     <div class="session-list__label" aria-hidden="true">
-      Recent — {sessions.length}
+      Recent — {filteredSessions.length}{filterQuery ? ` of ${sessions.length}` : ''}
     </div>
   {/if}
 
@@ -127,7 +153,11 @@
   {/if}
 
   <!-- Empty state -->
-  {#if !chatStore.isLoadingSessions && sessions.length === 0}
+  {#if !chatStore.isLoadingSessions && filteredSessions.length === 0 && filterQuery}
+    <div class="session-list__empty" transition:fade={{ duration: 200 }}>
+      <p>No matching sessions</p>
+    </div>
+  {:else if !chatStore.isLoadingSessions && sessions.length === 0}
     <div class="session-list__empty" transition:fade={{ duration: 200 }}>
       <p>No past sessions</p>
       <p class="session-list__empty-hint">Start a conversation above</p>
@@ -136,7 +166,7 @@
 
   <!-- Sessions -->
   <ul class="session-list__items" role="list">
-    {#each sessions as session, index (session.id)}
+    {#each filteredSessions as session, index (session.id)}
       <li
         class="session-item"
         class:session-item--active={session.id === activeId}
@@ -225,6 +255,32 @@
 </aside>
 
 <style>
+  .session-list__search {
+    padding: 6px 12px;
+    flex-shrink: 0;
+  }
+
+  .session-filter-input {
+    width: 100%;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.75rem;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .session-filter-input::placeholder {
+    color: rgba(255, 255, 255, 0.2);
+  }
+
+  .session-filter-input:focus {
+    border-color: rgba(255, 255, 255, 0.16);
+  }
+
   .session-list {
     width: 280px;
     flex-shrink: 0;

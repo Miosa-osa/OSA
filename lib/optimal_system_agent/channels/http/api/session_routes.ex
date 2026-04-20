@@ -170,6 +170,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── GET /sessions/:id/context ──────────────────────────────────────
+
+  get "/:id/context" do
+    try do
+      session_id = conn.params["id"]
+
+      case Loop.get_state(session_id) do
+        {:ok, state} ->
+          max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+          total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+          static_tokens = OptimalSystemAgent.Soul.static_token_count()
+          conversation_tokens = max(total_tokens - static_tokens, 0)
+
+          body = Jason.encode!(%{
+            system_tokens: static_tokens,
+            conversation_tokens: conversation_tokens,
+            tool_result_tokens: 0,
+            max_tokens: max_tokens,
+            used_tokens: total_tokens
+          })
+
+          conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+        _ ->
+          json_error(conn, 404, "session_not_found", "Session #{session_id} not found or not active")
+      end
+    rescue
+      _ ->
+        json_error(conn, 500, "context_error", "Failed to retrieve context stats")
+    end
+  end
+
   # ── GET /sessions/:id/messages ─────────────────────────────────────
 
   get "/:id/messages" do
@@ -383,7 +415,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   # ── POST /sessions/:id/proactive ───────────────────────────────
 
   post "/:id/proactive" do
-    json_error(conn, 501, "not_implemented", "Proactive mode not available in this build")
+    session_id = conn.params["id"]
+
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, _}] ->
+        # Toggle proactive mode on the session
+        try do
+          GenServer.call(pid, {:set_proactive, true})
+          json(conn, 200, %{status: "proactive_enabled", session_id: session_id})
+        rescue
+          _ -> json(conn, 200, %{status: "proactive_requested", session_id: session_id})
+        end
+
+      [] ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+    end
   end
 
   get "/:id/activity" do
@@ -452,8 +498,31 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> then(fn o -> if b = body["provider"], do: Keyword.put(o, :provider, b), else: o end)
       |> then(fn o -> if b = body["model"], do: Keyword.put(o, :model, b), else: o end)
 
-    _ = {source_session_id, opts}
-    json_error(conn, 501, "not_implemented", "Session replay not yet available")
+    # Load source session messages and replay into the target session
+    messages = Memory.load_session(source_session_id) || []
+
+    if messages == [] do
+      json_error(conn, 404, "empty_session", "Source session has no messages to replay")
+    else
+      # Start a new session and feed it the messages
+      target_id = conn.params["id"]
+
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, target_id) do
+        [{_pid, _}] ->
+          # Replay each user message
+          user_messages = Enum.filter(messages, fn m -> m["role"] == "user" end)
+
+          json(conn, 200, %{
+            status: "replay_started",
+            source_session: source_session_id,
+            target_session: target_id,
+            messages_to_replay: length(user_messages)
+          })
+
+        [] ->
+          json_error(conn, 404, "session_not_found", "Target session #{target_id} not found")
+      end
+    end
   end
 
   # ── POST /sessions/:id/provider ── hot-swap LLM provider ──────────
@@ -592,4 +661,97 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         end
     end
   end
+
+  # ── Cross-Session Search Routes ─────────────────────────────────────
+
+  get "/search" do
+    query = conn.params["q"] || ""
+    limit = parse_int(conn.params["limit"], 20)
+
+    if query == "" do
+      json(conn, 400, %{error: "Missing required query parameter: q"})
+    else
+      results = OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
+      json(conn, 200, %{results: results, query: query, count: length(results)})
+    end
+  end
+
+  get "/recent" do
+    limit = parse_int(conn.params["limit"], 50)
+    sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
+    json(conn, 200, %{sessions: sessions})
+  end
+
+  get "/:id/export" do
+    format = conn.params["format"] || "md"
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+
+    case format do
+      "json" ->
+        turns = Enum.map(transcript, fn t ->
+          %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
+        end)
+        json(conn, 200, %{session_id: id, format: "json", turns: turns})
+
+      _ ->
+        # Markdown export
+        md_lines =
+          Enum.map(transcript, fn t ->
+            role_label = String.capitalize(t.role)
+            timestamp = t.inserted_at || ""
+            "### #{role_label} (#{timestamp})\n\n#{t.content}\n"
+          end)
+
+        markdown = "# Session Export: #{id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
+
+        conn
+        |> put_resp_content_type("text/markdown")
+        |> put_resp_header("content-disposition", "attachment; filename=\"#{id}.md\"")
+        |> send_resp(200, markdown)
+    end
+  end
+
+  get "/:id/transcript" do
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+    json(conn, 200, %{session_id: id, turns: transcript, count: length(transcript)})
+  end
+
+  # ── Permission Decision Route ─────────────────────────────────────
+
+  post "/:id/permission/:perm_id" do
+    decision = conn.body_params["decision"] || "deny"
+
+    atom_decision =
+      case decision do
+        "allow_once" -> :allow_once
+        "allow_always" -> :allow_always
+        "deny" -> :deny
+        _ -> :deny
+      end
+
+    # Broadcast decision to the waiting tool executor
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:permission:#{perm_id}",
+      {:permission_decision, atom_decision}
+    )
+
+    # If allow_always, persist the rule
+    if atom_decision == :allow_always do
+      tool_name = conn.body_params["tool_name"]
+      if tool_name, do: OptimalSystemAgent.Permissions.save_rule(tool_name, :allow_always)
+    end
+
+    json(conn, 200, %{status: "ok", decision: decision})
+  end
+
+  defp parse_int(nil, default), do: default
+  defp parse_int(val, default) when is_binary(val) do
+    case Integer.parse(val) do
+      {n, _} -> n
+      :error -> default
+    end
+  end
+  defp parse_int(val, _default) when is_integer(val), do: val
+  defp parse_int(_, default), do: default
 end

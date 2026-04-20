@@ -3,10 +3,20 @@
 > Signal Theory-optimized proactive AI agent. Local-first. Open source. BEAM-powered.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.3.0-orange.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.4.0-orange.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
-[![Tests](https://img.shields.io/badge/Tests-1730-brightgreen.svg)](#testing)
+[![Tools](https://img.shields.io/badge/Tools-47-blue.svg)](#47-built-in-tools)
+[![Agents](https://img.shields.io/badge/Agents-14_roles-green.svg)](#autonomous-task-orchestration)
+
+## Quick Start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
+osa
+```
+
+One command installs. One command runs. First run walks you through setup.
 
 ---
 
@@ -22,57 +32,88 @@ The theoretical foundation is [Signal Theory](https://zenodo.org/records/1877417
 
 ## Architecture
 
+### Execution Flow
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                          Channels                             │
-│   Rust TUI │ Desktop GUI │ HTTP/REST │ Telegram │ Discord │ Slack │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│              Signal Classifier  (LLM-primary)                 │
-│         S = (Mode, Genre, Type, Format, Weight)               │
-│         ETS cache (SHA256, 10-min TTL) │ Deterministic fallback│
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│              Two-Tier Noise Filter                            │
-│       Tier 1: <1ms regex │ Tier 2: weight thresholds         │
-└───────────────────────────┬──────────────────────────────────┘
-                            │
-┌───────────────────────────▼──────────────────────────────────┐
-│         Events.Bus  (Goldrush compiled BEAM bytecode)         │
-│         PubSub fan-out │ DLQ │ Circuit breakers              │
-└──┬─────────────┬──────────────┬──────────────┬───────────────┘
-   │             │              │              │
-┌──▼────┐  ┌────▼──────┐  ┌───▼────┐  ┌──────▼──────┐
-│ Agent │  │Orchestrat-│  │ Swarm  │  │  Scheduler  │
-│ Loop  │  │   or      │  │        │  │  Cron +     │
-│       │  │           │  │4 modes │  │  Heartbeat  │
-│ ReAct │  │ Sub-agents│  │        │  │             │
-│ cycle │  │ (parallel)│  │ Teams  │  │             │
-└──┬────┘  └────┬──────┘  └───┬────┘  └─────────────┘
-   │            │             │
-┌──▼────────────▼─────────────▼────────────────────────────────┐
-│                   Shared Infrastructure                        │
-│  Context Builder (token-budgeted, 4-tier priority)            │
-│  Compactor (3-zone: HOT / WARM / COLD)                        │
-│  Memory (SQLite + ETS + episodic)                             │
-│  Skills Registry (hot-reload, no restart)                     │
-│  Budget Tracker (per-provider token costs)                    │
-│  Soul System (IDENTITY.md + USER.md + SOUL.md interpolation)  │
-└────────────┬───────────────┬──────────────┬───────────────────┘
-             │               │              │
-      ┌──────▼──────┐ ┌──────▼──────┐ ┌────▼────────┐
-      │ 7 LLM       │ │ 25 Built-in │ │ OS Templates│
-      │ Providers   │ │ Tools       │ │ (priv/)     │
-      └─────────────┘ └─────────────┘ └─────────────┘
+User Input
+  │
+  ├─ Message Queue (300ms debounce batching)
+  │
+  ├─ UserPromptSubmit Hook (can modify/block)
+  │
+  ├─ Budget + Turn Limit Check
+  │
+  ├─ Prompt Injection Guard (3-tier detection)
+  │
+  ├─ Context Compaction Pipeline
+  │   ├─ Micro-compact (no LLM — truncate old tool results)
+  │   ├─ Strip tool args → Merge consecutive → Summarize warm zone
+  │   ├─ Structured 8-section compression (iterative, preserves details)
+  │   ├─ Context collapse (413 recovery — withhold large results)
+  │   └─ Post-compact restore (re-inject files, tasks, workspace)
+  │
+  ├─ Pre-Directives (explore, delegation, task creation nudges)
+  │
+  ├─ Genre Routing (low-signal → short-circuit, skip full loop)
+  │
+  ├─ Context Build (cached static base + dynamic per-request)
+  │   ├─ Async memory prefetch (fires parallel while context builds)
+  │   ├─ Effort-aware thinking config (low/medium/high/max)
+  │   ├─ Agent message injection (inter-agent communication)
+  │   └─ Iteration budget tracking
+  │
+  ├─ LLM Streaming Call
+  │   ├─ Streaming tool execution (tools fire MID-STREAM)
+  │   ├─ Fallback model chain (auto-switch on rate limit/failure)
+  │   └─ Max output token recovery (bump + retry on truncation)
+  │
+  ├─ Tool Execution
+  │   ├─ Concurrency-aware dispatch (parallel safe, sequential unsafe)
+  │   ├─ Permission check (tiers + pattern rules + interactive prompt)
+  │   ├─ Pre-hooks (security, spend guard, MCP cache)
+  │   ├─ Tool result persistence (large → disk with reference)
+  │   ├─ Diff generation (unified diff for file operations)
+  │   ├─ Post-hooks (cost, telemetry, learning, episodic)
+  │   └─ Doom loop detection (halt on repeated failures)
+  │
+  ├─ Behavioral Nudges (read-before-write, code-in-text, verification)
+  │
+  ├─ Stop Hooks (can override response or force continuation)
+  │
+  └─ Post-Response
+      ├─ Output guardrail (scrub system prompt leaks)
+      ├─ Post-response hooks (transcript, auto-memory, session save)
+      ├─ Telemetry recording
+      └─ SSE broadcast to all connected clients
 ```
 
-**Runtime:** Elixir 1.17+ / Erlang OTP 27+
-**HTTP server:** Bandit 1.6
-**Databases:** SQLite (local memory) + PostgreSQL (platform)
-**Event routing:** Goldrush (compiled BEAM bytecode rules)
-**HTTP client:** Req 0.5
+### System Layers
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Channels: Rust TUI │ Desktop (Tauri) │ HTTP/SSE │ Telegram │ ...  │
+├─────────────────────────────────────────────────────────────────────┤
+│  Signal Classifier: S = (Mode, Genre, Type, Format, Weight)        │
+├─────────────────────────────────────────────────────────────────────┤
+│  Events.Bus (Goldrush compiled BEAM bytecode dispatch)              │
+├──────────┬──────────┬───────────┬──────────┬────────────────────────┤
+│  Agent   │ Orchest- │  Swarm    │ Scheduler│  Healing Orchestrator  │
+│  Loop    │ rator    │  (4 modes)│ (cron)   │  (self-repair)         │
+│  (ReAct) │ (14 roles│           │          │                        │
+│          │  bg/fork/│  Teams +  │          │  Speculative Executor  │
+│          │  worktree│  NervSys  │          │                        │
+├──────────┴──────────┴───────────┴──────────┴────────────────────────┤
+│  Context │ Compactor │ Memory  │ Settings │ Hooks   │ Permissions   │
+│  Builder │ (6-step)  │ (SQLite │ Cascade  │ (25     │ (pattern      │
+│          │           │  +ETS   │ (4-layer)│  events,│  rules,       │
+│          │           │  +FTS5) │          │  4 types│  interactive) │
+├──────────┴───────────┴─────────┴──────────┴─────────┴───────────────┤
+│  7 Providers  │  47 Tools  │  Telemetry  │  Credential Pool  │ Soul│
+│  + Fallback   │  (deferred)│  (per-tool) │  (key rotation)   │     │
+└───────────────┴────────────┴─────────────┴───────────────────┴─────┘
+```
+
+**Runtime:** Elixir 1.17+ / Erlang OTP 27+  |  **HTTP:** Bandit  |  **DB:** SQLite + ETS + persistent_term  |  **Events:** Goldrush  |  **HTTP Client:** Req
 
 ---
 
@@ -116,16 +157,17 @@ The classifier is LLM-primary with a deterministic regex fallback. Results are c
 
 ### Autonomous Task Orchestration
 
-Complex tasks are decomposed into parallel sub-agents, each with its own ReAct loop:
+14 specialized agent roles. Explore → Plan → Execute protocol:
 
 ```
 User: "Build a REST API with auth, tests, and docs"
 
-Orchestrator:
-  ├── Research agent  — analyzes existing codebase
-  ├── Builder agent   — writes implementation
-  ├── Tester agent    — writes test suite
-  └── Writer agent    — writes documentation
+OSA:
+  ├── Explorer agent   — scans codebase (read-only, fast)
+  ├── Planner agent    — designs architecture + implementation plan
+  ├── Backend agent    — writes API + auth middleware
+  ├── Tester agent     — writes test suite
+  └── Doc-writer agent — writes documentation
 ```
 
 Sub-agents share a task list and communicate via ETS-backed mailboxes.
@@ -141,20 +183,22 @@ Sub-agents share a task list and communicate via ETS-backed mailboxes.
 
 Swarms use ETS-backed team coordination: shared task lists, per-agent mailboxes, scratchpads, and configurable iteration limits.
 
-### 25 Built-in Tools
+### 47 Built-in Tools
 
 | Category | Tools |
 |---|---|
 | **File** | `file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`, `dir_list`, `multi_file_edit` |
-| **System** | `shell_execute`, `git`, `download` |
+| **System** | `shell_execute`, `git`, `download`, `repl` (Python/Elixir/Node) |
 | **Web** | `web_search`, `web_fetch` |
-| **Memory** | `memory_save`, `memory_recall`, `session_search` |
-| **Agent** | `delegate`, `message_agent`, `list_agents`, `team_tasks` |
+| **Memory** | `memory_save`, `memory_recall`, `session_search` (FTS5 full-text) |
+| **Agent** | `delegate` (background/fork/worktree), `send_message`, `message_agent`, `list_agents`, `team_tasks`, `task_stop`, `task_output` |
 | **Skills** | `create_skill`, `list_skills` |
-| **Code** | `code_symbols`, `computer_use` |
-| **Other** | `task_write`, `ask_user` |
+| **Code** | `code_symbols`, `computer_use` (macOS/Linux/Docker/SSH) |
+| **Config** | `config`, `cron` (create/list/delete/trigger), `tool_search` |
+| **Advanced** | `mixture_of_agents` (multi-LLM ensemble), `verify_loop`, `spawn_conversation`, `peer_review`, `cross_team_query` |
+| **Other** | `task_write`, `ask_user`, `create_agent` |
 
-All tools are schema-validated at registration time via the Tools Registry.
+Tools support deferred loading — rarely-used tools excluded from prompt, discoverable via `tool_search`. Large results auto-persisted to disk.
 
 ### Identity and Memory
 
@@ -184,16 +228,66 @@ LOW       (remaining)  — Workflow context, environmental metadata
 - **WARM** — older turns, progressively summarized
 - **COLD** — oldest content reduced to key facts only
 
+### Computer Use
+
+Control your desktop directly from the agent. Platform adapters for:
+
+| Platform | Method |
+|---|---|
+| **macOS** | Accessibility API — click, type, screenshot, scroll |
+| **Linux X11** | xdotool + xclip — full desktop control |
+| **Docker** | Container-isolated desktop interaction |
+| **Remote SSH** | Control machines over SSH tunnels |
+
+The agent can take screenshots, click elements, type text, press keys, scroll, and interact with any GUI application.
+
 ### Channels
 
 | Channel | Notes |
 |---|---|
-| **Rust TUI** | Primary interface. Full terminal UI — onboarding wizard, model picker, sessions, command palette. Built with ratatui + crossterm. |
-| **Desktop GUI** | Tauri 2 + SvelteKit 5 native app (`desktop/`). Command Center. |
-| **HTTP/REST** | Port 8089, SSE streaming, JWT auth. |
-| **Telegram** | Long-polling, typing indicators, markdown conversion. |
-| **Discord** | Webhook mode, token validation. |
-| **Slack** | Webhook + HMAC-SHA256 request verification. |
+| **Elixir CLI** | Primary REPL — 25 commands, streaming, task display, diff view, Ctrl+R search, multi-line input |
+| **Rust TUI** | Full terminal UI — onboarding wizard, model picker, sessions, command palette |
+| **Desktop GUI** | Tauri 2 + SvelteKit 5 — chat, agents, tasks, memory, signals, settings, usage tracking |
+| **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
+| **Telegram** | Long-polling, typing indicators, markdown conversion |
+| **Discord** | Webhook mode, token validation |
+| **Slack** | Webhook + HMAC-SHA256 request verification |
+
+### Hooks System
+
+25 lifecycle events. 4 hook types:
+
+| Type | Description |
+|---|---|
+| **Function** | Elixir functions — built-in (security, budget, telemetry, learning) |
+| **HTTP Webhook** | POST JSON to external URLs on any event |
+| **Shell Command** | Run bash commands with payload interpolation |
+| **Agent** | Spawn a subagent in response to an event |
+
+Events: `pre_tool_use`, `post_tool_use`, `post_tool_use_failure`, `user_prompt_submit`, `pre_compact`, `post_compact`, `session_start`, `session_end`, `pre_response`, `post_response`, `subagent_start`, `subagent_stop`, `file_changed`, `permission_request`, `stop`, and more.
+
+Configure via `~/.osa/settings.json`:
+```json
+{
+  "hooks": {
+    "post_tool_use": [
+      {"type": "http", "url": "https://example.com/webhook"},
+      {"type": "shell", "command": "echo '{{tool_name}} done' >> /tmp/osa.log"}
+    ]
+  }
+}
+```
+
+### Effort Levels
+
+Control thinking depth and iteration budget:
+
+| Level | Thinking | Iterations | Use Case |
+|---|---|---|---|
+| `/effort low` | 1K tokens | 10 | Quick answers, fast mode |
+| `/effort medium` | 5K tokens | 30 | Balanced (default) |
+| `/effort high` | 10K tokens | 50 | Deep reasoning |
+| `/effort max` | 32K tokens | 100 | Maximum analysis |
 
 ### Scheduler
 
@@ -203,36 +297,69 @@ Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) configured 
 
 ## Installation
 
-One command. Handles Elixir, Erlang, and Rust if they are not already installed.
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
 ```
 
-The installer clones the repo, compiles the Elixir backend, builds the Rust TUI, and symlinks `osa` to your PATH.
+The installer auto-detects your OS and architecture. On **macOS arm64**, **Linux amd64**, and **Linux arm64** it downloads the pre-built single binary from GitHub Releases — no Elixir, Erlang, or Rust required. On other platforms it falls back to a source build (installs Elixir/Erlang/Rust automatically).
 
-### Docker
+**Homebrew:** `brew tap miosa-osa/tap && brew install osagent`
 
-```bash
-docker compose up -d
-```
+**Windows:** Download `osa-windows-amd64.exe` from [GitHub Releases](https://github.com/Miosa-osa/OSA/releases/latest) and add it to your PATH.
+
+**Docker:** `docker compose up -d`
 
 ---
 
 ## Usage
 
 ```bash
-osa              # Start backend + Rust TUI (primary)
-osa serve        # Headless backend only — HTTP API on :8089
-osa setup        # Re-run the setup wizard
-osa update       # Pull latest, recompile, rebuild TUI
-osa doctor       # Run health checks
-osa version      # Print version
+osa
 ```
 
-**First run:** The TUI launches a 7-step setup wizard. Pick your LLM provider, enter API keys, set your name and agent name. Config saves to `~/.osa/.env` and never asks again.
+First run detects your setup and offers:
 
-When you quit the TUI, the backend shuts down automatically.
+1. **Quick Start** — auto-detect providers and go
+2. **Manual Setup** — choose provider, enter API key or OAuth sign-in, pick model
+3. **Skip** — configure later with `/setup` or `~/.osa/.env`
+
+Supported providers: Ollama (local/free), Anthropic (OAuth or API key), OpenAI, Groq, OpenRouter, Together, DeepSeek.
+
+### Subcommands
+
+```
+osa              Start (backend + TUI)
+osa setup        Re-run setup wizard
+osa serve        Headless backend (HTTP API on :9089)
+osa update       Pull latest + recompile
+osa doctor       Health checks
+osa version      Print version
+```
+
+### CLI Commands (25)
+
+Type `/help` inside the REPL:
+
+```
+/help /clear /compact /model /status /cost /context /memory /tools /skills
+/agents /sessions /tasks /plan /doctor /export /version /coordinator /effort
+/fast /permissions /hooks /metrics /setup /login /logout /channels /exit
+```
+
+### Headless Mode
+
+```bash
+mix osa.run "Fix the auth bug"                          # text output
+mix osa.run --format json "Explain this code"           # structured JSON
+echo "Build an API" | mix osa.run --format stream-json  # streaming NDJSON
+```
+
+### Session Resume
+
+```bash
+mix osa.chat --resume cli_abc123    # Resume specific session
+mix osa.chat --continue             # Resume most recent
+```
 
 ---
 
@@ -248,35 +375,49 @@ OSA_USER_NAME=Roberto
 OSA_AGENT_NAME=OSA
 ```
 
-**Workspace directory:** `~/.osa/`
+**Workspace:** `~/.osa/`
 
 ```
 ~/.osa/
-├── .env             # Provider config (generated by wizard)
-├── IDENTITY.md      # Agent personality and role
-├── USER.md          # User profile (name, preferences, context)
-├── SOUL.md          # Agent values and operating principles
-├── HEARTBEAT.md     # Proactive scheduled checklist
-├── BOOTSTRAP.md     # First-conversation script (auto-deleted after use)
-├── skills/          # Custom skill definitions
-├── CRONS.json       # Scheduled cron jobs
-└── TRIGGERS.json    # Event-driven trigger definitions
+├── .env              # Provider config (generated by wizard)
+├── settings.json     # User settings (effort, permissions, hooks)
+├── permissions.json  # Tool permission rules (allow/deny with glob patterns)
+├── oauth.json        # OAuth credentials (auto-refreshed)
+├── IDENTITY.md       # Agent personality
+├── USER.md           # User profile
+├── SOUL.md           # Agent values
+├── agents/           # Custom agent roles (AGENT.md files)
+├── skills/           # Custom skills (SKILL.md files, hot-reload)
+├── sessions/         # Saved session state (for resume)
+├── exports/          # Exported conversations
+├── workspace/        # Agent file workspace
+├── tool-results/     # Large tool output persistence
+├── worktrees/        # Git worktree isolation
+├── agent-memory/     # Per-agent persistent memory
+└── prompts/          # System prompt overrides
 ```
+
+**Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session
 
 ---
 
 ## Project Structure
 
 ```
-lib/optimal_system_agent/       # 90+ Elixir modules
-  agent/                        # ReAct loop, context builder, memory, strategies, guardrails
-  channels/                     # CLI, HTTP API, Telegram, Discord, Slack handlers
-  events/                       # Bus (Goldrush), PubSub bridge, DLQ, circuit breakers
-  providers/                    # Ollama, Anthropic, OpenAI-compat adapters, router
-  tools/                        # 25 built-in tools, registry, schema validation
-  memory/                       # Store (SQLite + ETS), SICA pattern engine, skill generator
+lib/optimal_system_agent/       # 200+ Elixir modules
+  agent/                        # ReAct loop, context, memory, effort, worktree, compactor, hooks
+  agent/loop/                   # Core loop: react_loop, tool_executor, streaming_tool_executor,
+                                # context_collapse, tool_result_storage, llm_client, guardrails
+  channels/cli/                 # CLI: commands (25), permissions, spinner, renderer, line_editor,
+                                # message_queue, diff_renderer, agent_tree, task_display
+  channels/http/                # HTTP API: 20+ route modules, SSE streaming, auth, rate limiter
+  events/                       # Bus (Goldrush compiled BEAM bytecode), PubSub, DLQ
+  providers/                    # 7 providers + fallback chain + credential pool
+  tools/builtins/               # 47 built-in tools, schema validation, deferred loading
+  memory/                       # Store (SQLite + ETS), auto_extract, SICA learning, FTS5 search
+  telemetry/                    # Per-tool and per-provider execution metrics
   swarm/                        # Parallel, pipeline, debate, review_loop coordinators
-  budget/                       # Per-provider token cost tracking
+  budget/                       # Token cost tracking, treasury
   signal/                       # Signal classifier, noise filter
   store/                        # Ecto repo, schemas, migrations (SQLite + PostgreSQL)
   supervisors/                  # OTP supervision trees

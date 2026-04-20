@@ -115,20 +115,23 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
   defp build_pre_directives(message, state) do
     []
+    |> maybe_add_task_directive(message)
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> Enum.reverse()
   end
 
-  defp maybe_add_explore_directive(acc, message) do
-    if Guardrails.complex_coding_task?(message) do
+  # Detect multi-step tasks and nudge to create a task list
+  defp maybe_add_task_directive(acc, message) do
+    bullet_count = count_task_indicators(message)
+
+    if bullet_count >= 3 or Guardrails.complex_coding_task?(message) do
       directive = %{
         role: "system",
         content:
-          "[System: This task involves code changes. MANDATORY explore-first protocol: " <>
-            "Call dir_list and file_read to understand the relevant structure BEFORE " <>
-            "calling file_write, file_edit, or shell_execute. " <>
-            "Never modify a file you haven't read first.]"
+          "[System: This task has multiple steps. Create a task list with task_write BEFORE " <>
+            "starting work. Create one task per step, then mark each in_progress as you start " <>
+            "and completed as you finish. The user sees your progress in real-time.]"
       }
 
       [directive | acc]
@@ -137,20 +140,61 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     end
   end
 
+  defp count_task_indicators(message) do
+    message
+    |> String.split("\n")
+    |> Enum.count(fn line ->
+      trimmed = String.trim(line)
+      Regex.match?(~r/^[-*•]\s+\S/, trimmed) or
+        Regex.match?(~r/^\d+[\.\)]\s+\S/, trimmed)
+    end)
+  end
+
+  defp maybe_add_explore_directive(acc, message) do
+    cond do
+      # Large/unfamiliar codebase exploration — dispatch explorer agent
+      Guardrails.needs_exploration?(message) ->
+        directive = %{
+          role: "system",
+          content:
+            "[System: This task requires codebase understanding. DISPATCH an explorer agent first: " <>
+              "delegate(task: \"Scan the project — report structure, key files, patterns, and tech stack\", role: \"explorer\") " <>
+              "Wait for the explorer's report before writing any code. " <>
+              "For quick lookups, use thoroughness: \"quick\". For deep analysis, use \"very thorough\".]"
+        }
+        [directive | acc]
+
+      # Complex coding task — at minimum read before write
+      Guardrails.complex_coding_task?(message) ->
+        directive = %{
+          role: "system",
+          content:
+            "[System: This task involves code changes. Read relevant files BEFORE modifying them. " <>
+              "If the task spans 5+ files or multiple domains, consider dispatching an explorer agent first: " <>
+              "delegate(task: \"<specific question about the codebase>\", role: \"explorer\") " <>
+              "For simpler tasks, use file_read and dir_list directly.]"
+        }
+        [directive | acc]
+
+      true ->
+        acc
+    end
+  end
+
   defp maybe_add_delegation_directive(acc, message, state) do
     if state.permission_tier == :full and Guardrails.delegation_task?(message) do
       directive = %{
         role: "system",
         content:
-          "[System: MANDATORY TEAM DISPATCH. This task has multiple independent " <>
-            "deliverables. You MUST assemble a team using the `delegate` tool. " <>
-            "Do NOT write files yourself for this task. " <>
-            "For EACH bullet point or numbered item, call: " <>
-            "delegate(task: \"<full description with file paths>\", role: \"<best role>\") " <>
-            "Choose roles from: architect, backend, frontend, tester, debugger, " <>
+          "[System: TEAM DISPATCH recommended. This task has multiple independent " <>
+            "deliverables. Consider assembling a team using `delegate`: " <>
+            "1. Dispatch `explorer` first if you need codebase context " <>
+            "2. Dispatch `planner` if the architecture is complex " <>
+            "3. Then dispatch implementation agents in parallel " <>
+            "Roles: explorer, planner, architect, backend, frontend, tester, debugger, " <>
             "security-auditor, code-reviewer, researcher, devops, doc-writer, refactorer, performance. " <>
-            "If no role fits, omit the role parameter. " <>
-            "Call delegate IMMEDIATELY — do not call file_write, file_edit, or shell_execute first.]"
+            "Use background: true for research while you implement. " <>
+            "Use fork: true when agents need your conversation context.]"
       }
 
       [directive | acc]

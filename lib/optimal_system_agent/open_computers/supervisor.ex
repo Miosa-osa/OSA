@@ -1,19 +1,20 @@
 defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   @moduledoc """
-  Supervises the OpenComputers agent-side processes:
+  Extension supervisor for the OpenComputers subsystem.
 
-    * `FrameRouter`      — routes frames between control plane and executors
-    * `Desktop.Controller` — manages per-session VNC relay
+  Children (all mandatory when the extension is enabled):
 
-  Started under `OptimalSystemAgent.Application` when
-  `config :optimal_system_agent, :open_computers_enabled` is true (default).
+    * `OpenComputers.Config`             — TOML + env loader, cached via GenServer
+    * `OpenComputers.Executor.Supervisor` — `DynamicSupervisor` for per-job processes
+    * `OpenComputers.Session`             — outbound WSS session to MIOSA
+
+  Started by `OptimalSystemAgent.Supervisors.Extensions` only when the
+  `:open_computers_enabled` flag is `true`.
   """
 
   use Supervisor
 
-  alias OptimalSystemAgent.OpenComputers.{FrameRouter, Updater}
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller, as: DesktopController
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
+  alias OptimalSystemAgent.OpenComputers.{Config, Executor, Session}
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -22,12 +23,9 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      FrameRouter,
-      DesktopController,
-      # PTY executor — manages interactive terminal sessions for OpenComputers hosts
-      PtyExecutor,
-      # Self-update poller — checks MIOSA API for new OSA binaries (opt-outable)
-      Updater
+      Config,
+      Executor.Supervisor,
+      Session
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

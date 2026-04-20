@@ -197,6 +197,30 @@ defmodule OptimalSystemAgent.Orchestrator do
     base_prompt = Map.get(config, :system_prompt) || ""
     full_prompt = if agent_memory != "", do: base_prompt <> agent_memory, else: base_prompt
 
+    # If fork_messages provided, pass them as initial conversation history
+    fork_messages = Map.get(config, :fork_messages, [])
+
+    # Worktree isolation — create an isolated git worktree for this agent
+    isolation = Map.get(config, :isolation)
+    worktree_info =
+      if isolation == :worktree do
+        case OptimalSystemAgent.Agent.Worktree.create(subagent_id) do
+          {:ok, info} ->
+            Logger.info("[Orchestrator] Worktree created for #{subagent_id} at #{info.path}")
+            info
+          {:error, reason} ->
+            Logger.warning("[Orchestrator] Worktree creation failed: #{reason}, running without isolation")
+            nil
+        end
+      else
+        nil
+      end
+
+    # Set working directory — worktree path if isolated, otherwise default
+    working_dir =
+      if worktree_info, do: worktree_info.path,
+      else: Map.get(config, :working_dir) || Application.get_env(:optimal_system_agent, :working_dir)
+
     # Spawn the subagent Loop
     subagent_opts = [
       session_id: subagent_id,
@@ -208,7 +232,9 @@ defmodule OptimalSystemAgent.Orchestrator do
       parent_session_id: parent_id,
       allowed_tools: Map.get(config, :tools_allowed),
       blocked_tools: Map.get(config, :tools_blocked, []),
-      system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil)
+      system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil),
+      messages: fork_messages,
+      working_dir: working_dir
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches
@@ -248,6 +274,12 @@ defmodule OptimalSystemAgent.Orchestrator do
         stop_event_forwarder(forwarder)
         safely_terminate(pid)
 
+        # Worktree cleanup — merge changes back if successful, otherwise discard
+        if worktree_info do
+          merge = match?({:ok, _}, result)
+          OptimalSystemAgent.Agent.Worktree.cleanup(worktree_info.path, merge: merge)
+        end
+
         result
 
       {:error, {:already_started, _pid}} ->
@@ -267,6 +299,66 @@ defmodule OptimalSystemAgent.Orchestrator do
         })
         {:error, reason}
     end
+  end
+
+  @doc """
+  Run a subagent in the background — returns immediately with the agent ID.
+
+  The subagent runs asynchronously under TaskSupervisor. On completion,
+  emits `:background_agent_completed` or `:background_agent_failed` on
+  the Events.Bus, which the CLI and SSE consumers can display.
+  """
+  @spec run_background(String.t(), map()) :: {:ok, String.t()}
+  def run_background(parent_id, config) do
+    config = Map.put(config, :parent_session_id, parent_id)
+    role = Map.get(config, :role, "background")
+
+    # Generate the ID upfront so we can return it immediately
+    subagent_num = next_subagent_number(parent_id)
+    subagent_id = "agent:#{parent_id}:#{subagent_num}"
+
+    emit_event(parent_id, %{
+      event: "background_agent_started",
+      agent_id: subagent_id,
+      role: role
+    })
+
+    Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      start_time = System.monotonic_time(:millisecond)
+
+      result = run_subagent(config)
+      duration_ms = System.monotonic_time(:millisecond) - start_time
+
+      case result do
+        {:ok, response} ->
+          Bus.emit(:system_event, %{
+            event: :background_agent_completed,
+            session_id: parent_id,
+            agent_id: subagent_id,
+            role: role,
+            result: String.slice(response, 0, 500),
+            duration_ms: duration_ms
+          })
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
+            {:osa_event, %{type: :background_agent_completed, agent_id: subagent_id, role: role,
+              result: String.slice(response, 0, 500), duration_ms: duration_ms}})
+
+        {:error, reason} ->
+          Bus.emit(:system_event, %{
+            event: :background_agent_failed,
+            session_id: parent_id,
+            agent_id: subagent_id,
+            role: role,
+            error: inspect(reason),
+            duration_ms: duration_ms
+          })
+          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
+            {:osa_event, %{type: :background_agent_failed, agent_id: subagent_id, role: role,
+              error: inspect(reason), duration_ms: duration_ms}})
+      end
+    end)
+
+    {:ok, subagent_id}
   end
 
   # ---------------------------------------------------------------------------

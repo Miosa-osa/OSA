@@ -118,6 +118,20 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   @doc """
+  Run micro-compaction independently — clears old tool results without LLM call.
+  Can be called on a timer for lightweight context maintenance.
+  """
+  @spec micro_compact([map()]) :: [map()]
+  def micro_compact(messages) do
+    {system_msgs, non_system} = split_system(messages)
+    annotated = annotate_importance(non_system)
+    {compacted, _, _} = apply_step(:micro_compact, annotated, system_msgs, 0)
+    system_msgs ++ strip_annotations(compacted)
+  rescue
+    _ -> messages
+  end
+
+  @doc """
   Returns context window utilization as a percentage (0.0 — 100.0).
   """
   @spec utilization([map()]) :: float()
@@ -262,8 +276,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     annotated = annotate_importance(non_system)
 
     # Run pipeline steps sequentially, stopping when under budget
+    # Step 0 (micro-compact) is the cheapest — no LLM call, just truncates old tool results
     result =
       {annotated, system_msgs, :none}
+      |> pipeline_step(:micro_compact, target_tokens)
       |> pipeline_step(:strip_tool_args, target_tokens)
       |> pipeline_step(:merge_consecutive, target_tokens)
       |> pipeline_step(:summarize_warm, target_tokens)
@@ -273,11 +289,31 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     {final_annotated, final_system, last_step} = result
     final_messages = final_system ++ strip_annotations(final_annotated)
 
+    # Post-compact restore: re-inject working context (files, tasks, workspace)
+    final_messages =
+      case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(nil) do
+        nil -> final_messages
+        restore_msg -> final_messages ++ [restore_msg]
+      end
+
     tokens_after = estimate_tokens(final_messages)
     saved = tokens_before - tokens_after
 
     if saved > 0 do
       record_compaction(saved, last_step)
+
+      # Emit post_compact hook event
+      try do
+        OptimalSystemAgent.Agent.Hooks.run_async(:post_compact, %{
+          tokens_before: tokens_before,
+          tokens_after: tokens_after,
+          tokens_saved: saved,
+          severity: severity,
+          last_step: last_step
+        })
+      rescue
+        _ -> :ok
+      end
     end
 
     Logger.info(
@@ -299,6 +335,57 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       {annotated, system_msgs, prev_step}
     else
       apply_step(step, annotated, system_msgs, target_tokens)
+    end
+  end
+
+  # Step 0: Micro-compact — truncate old tool results without LLM call.
+  # Keeps the last N tool results intact, truncates older ones.
+  # This is the cheapest possible compaction step.
+  @micro_compact_keep Application.compile_env(:optimal_system_agent, :micro_compact_keep_recent, 5)
+
+  @doc false
+  defp apply_step(:micro_compact, annotated, system_msgs, _target) do
+    total = length(annotated)
+
+    # Find indices of tool result messages (role == "tool")
+    tool_indices =
+      annotated
+      |> Enum.with_index()
+      |> Enum.filter(fn {{msg, _imp}, _idx} ->
+        safe_to_string(Map.get(msg, :role)) == "tool"
+      end)
+      |> Enum.map(fn {_, idx} -> idx end)
+
+    # Keep the last @micro_compact_keep tool results intact
+    truncate_indices =
+      if length(tool_indices) > @micro_compact_keep do
+        Enum.drop(tool_indices, -@micro_compact_keep) |> MapSet.new()
+      else
+        MapSet.new()
+      end
+
+    if MapSet.size(truncate_indices) == 0 do
+      {annotated, system_msgs, :micro_compact}
+    else
+      compacted =
+        annotated
+        |> Enum.with_index()
+        |> Enum.map(fn {{msg, imp}, idx} ->
+          if idx in truncate_indices do
+            content = safe_to_string(Map.get(msg, :content))
+            tool_name = Map.get(msg, :name, Map.get(msg, :tool_call_id, "tool"))
+            preview = String.slice(content, 0, 100)
+
+            truncated_content =
+              "[#{tool_name} result — #{preview}#{if String.length(content) > 100, do: "...", else: ""} (truncated)]"
+
+            {Map.put(msg, :content, truncated_content), imp * 0.5}
+          else
+            {msg, imp}
+          end
+        end)
+
+      {compacted, system_msgs, :micro_compact}
     end
   end
 
@@ -569,9 +656,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @summary_prompt_fallback """
-  Summarize the following conversation excerpt concisely. Preserve key facts,
-  decisions, tool results, and context needed to continue the conversation.
-  Be terse — use bullet points.
+  Summarize the following conversation excerpt concisely. Preserve:
+  - All file paths and line numbers mentioned
+  - All error messages and their causes
+  - All decisions made and their reasoning
+  - All specific values, variable names, and config settings
+  - Tool names used and their key results
+  Be terse — use bullet points. Never lose concrete details.
 
   %MESSAGES%
   """
@@ -611,12 +702,45 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
-  @key_facts_prompt_fallback """
-  Extract ONLY the essential facts from this conversation history.
-  Output a compact bullet list of: decisions made, user preferences stated,
-  key data/results, and any commitments. Omit pleasantries, meta-discussion,
-  and anything not needed to continue the conversation.
+  @structured_compression_template """
+  You are compressing a conversation to fit within a context window.
+  Maintain a structured summary with these EXACT 8 sections. Output ONLY these sections.
 
+  ## Goal
+  What is the user trying to accomplish? What's the end state?
+
+  ## Constraints
+  Requirements, limitations, rules the user specified.
+
+  ## Progress
+  What has been done so far? Key milestones reached.
+
+  ## Key Decisions
+  Important choices made and WHY they were made.
+
+  ## Relevant Files
+  File paths that have been read, modified, or are important.
+  Include line numbers for specific locations discussed.
+
+  ## Errors & Issues
+  Any errors encountered, their causes, and resolutions.
+
+  ## Next Steps
+  What still needs to be done. Ordered by priority.
+
+  ## Working Memory
+  Specific values, variable names, config settings, URLs, or other
+  concrete details that must be preserved exactly.
+
+  IMPORTANT:
+  - Preserve ALL file paths, error messages, and specific values exactly
+  - Update sections incrementally — do not start over if a previous summary exists
+  - If a previous summary exists, MERGE new info into existing sections
+  - Keep the summary concise but complete
+
+  %PREVIOUS_SUMMARY%
+
+  NEW CONVERSATION TURNS TO INTEGRATE:
   %MESSAGES%
   """
 
@@ -625,20 +749,32 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     if not compactor_llm_enabled?() do
       {:ok, "[Key facts from #{length(messages_to_compress)} messages]"}
     else
-      template = PromptLoader.get(:compactor_key_facts, @key_facts_prompt_fallback)
       formatted = format_for_summary(messages_to_compress)
 
+      # Retrieve previous structured summary for iterative merge
+      previous_summary = get_previous_summary()
+
       prompt =
-        if String.contains?(template, "%MESSAGES%") do
-          String.replace(template, "%MESSAGES%", formatted)
+        if previous_summary do
+          # Use structured template for iterative compression
+          @structured_compression_template
+          |> String.replace("%PREVIOUS_SUMMARY%",
+            "PREVIOUS SUMMARY (merge new info into this):\n#{previous_summary}")
+          |> String.replace("%MESSAGES%", formatted)
         else
-          template <> "\n\n" <> formatted
+          # First compression — use structured template without previous summary
+          @structured_compression_template
+          |> String.replace("%PREVIOUS_SUMMARY%",
+            "PREVIOUS SUMMARY: None — this is the first compression.")
+          |> String.replace("%MESSAGES%", formatted)
         end
 
       try do
-        Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 512)
+        Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
         |> case do
           {:ok, %{content: content}} when is_binary(content) and content != "" ->
+            # Store the structured summary for future compressions
+            store_previous_summary(content)
             {:ok, content}
 
           {:ok, %{content: content}} ->
@@ -651,6 +787,30 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         e ->
           {:error, "LLM call exception: #{Exception.message(e)}"}
       end
+    end
+  end
+
+  # ── Structured Summary Persistence (ETS) ─────────────────────────────
+
+  @doc false
+  defp get_previous_summary do
+    try do
+      case :ets.lookup(:osa_compactor_state, :previous_summary) do
+        [{:previous_summary, summary}] -> summary
+        _ -> nil
+      end
+    rescue
+      _ -> nil
+    end
+  end
+
+  @doc false
+  defp store_previous_summary(summary) do
+    try do
+      :ets.insert(:osa_compactor_state, {:previous_summary, summary})
+      :ets.insert(:osa_compactor_state, {:last_summary_at, DateTime.utc_now()})
+    rescue
+      _ -> :ok
     end
   end
 

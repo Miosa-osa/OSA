@@ -28,6 +28,16 @@ defmodule OptimalSystemAgent.Channels.Starter do
   def handle_continue(:start_channels, state) do
     Logger.info("Channels.Starter: starting configured channel adapters")
     OptimalSystemAgent.Channels.Manager.start_configured_channels()
+
+    # Auto-register HTTP and shell hooks from settings
+    try do
+      OptimalSystemAgent.Agent.Hooks.HttpHook.register_from_settings()
+      OptimalSystemAgent.Agent.Hooks.ShellHook.register_from_settings()
+      Logger.debug("Channels.Starter: hook registration from settings complete")
+    rescue
+      e -> Logger.debug("Channels.Starter: hook registration skipped: #{Exception.message(e)}")
+    end
+
     {:noreply, state}
   end
 end

@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     iteration: 0,
     overflow_retries: 0,
     recent_failure_signatures: [],
+    total_tool_calls: 0,
     auto_continues: 0,
     status: :idle,
     tools: [],
@@ -71,7 +72,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Per-call signal weight (0.0–1.0 or nil)
     signal_weight: nil,
     started_at: nil,
-    last_input_tokens: 0
+    last_input_tokens: 0,
+    # Coordinator mode — restricts tools to delegation/messaging/management only
+    coordinator: false,
+    # Budget and turn limits — nil = no limit
+    max_budget_usd: nil,
+    max_turns: nil
   ]
 
   @cancel_table :osa_cancel_flags
@@ -210,7 +216,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
       iteration: iteration,
       plan_mode: plan_mode,
       turn_count: turn_count,
-      tools: Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
+      tools: filter_tools_for_mode(
+        Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
+        Keyword.get(opts, :coordinator, false)
+      ),
+      coordinator: Keyword.get(opts, :coordinator, false),
+      max_budget_usd: Keyword.get(opts, :max_budget_usd) || Application.get_env(:optimal_system_agent, :max_budget_usd),
+      max_turns: Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
       parent_session_id: Keyword.get(opts, :parent_session_id),
@@ -248,11 +260,41 @@ defmodule OptimalSystemAgent.Agent.Loop do
     state = apply_overrides(state, opts)
     state = %{state | turn_count: state.turn_count + 1}
 
+    # Budget and turn limit guards — check before any processing
+    limit_error = check_limits(state)
+
+    if limit_error do
+      {:reply, {:error, limit_error}, state}
+    else
+
     # Clear per-message process caches
     Process.delete(:osa_git_info_cache)
+    Process.delete(:osa_doom_recovery_count)
     Process.delete(:osa_workspace_overview_cache)
     Process.delete(:osa_system_msg_cache)
     Process.put(:osa_memory_version, 0)
+
+    # -1. UserPromptSubmit hook — can modify or block the message
+    {message, state} =
+      try do
+        case Hooks.run(:user_prompt_submit, %{
+          message: message,
+          session_id: state.session_id,
+          turn_count: state.turn_count
+        }) do
+          {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
+          {:blocked, reason} -> {nil, %{state | status: :idle}}
+          _ -> {message, state}
+        end
+      rescue
+        _ -> {message, state}
+      catch
+        :exit, _ -> {message, state}
+      end
+
+    if is_nil(message) do
+      {:reply, {:error, "Message blocked by hook"}, state}
+    else
 
     # 0. Prompt injection guard
     if Guardrails.prompt_injection?(message) do
@@ -276,7 +318,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
           overflow_retries: 0,
           auto_continues: 0,
           status: :thinking,
-          exploration_done: false
+          exploration_done: false,
+          # Reset doom loop signatures on each new user turn —
+          # the user explicitly wants to try again, don't carry over old failures
+          recent_failure_signatures: []
       }
 
       # Genre routing
@@ -295,6 +340,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
           dispatch_message(state, skip_plan)
       end
     end
+    end # if message not blocked
+    end # if limit_error
   end
 
   @impl true
@@ -421,6 +468,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     Bus.emit(:agent_response, %{session_id: state.session_id, response: response, agent: state.session_id})
 
+    # Fire post_response hooks (async, non-blocking)
+    try do
+      Hooks.run_async(:post_response, %{
+        session_id: state.session_id,
+        response: response,
+        input: List.last(state.messages) |> Map.get(:content, ""),
+        turn_count: state.turn_count,
+        iteration: state.iteration
+      })
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
       {:osa_event, %{type: :agent_response, session_id: state.session_id, response: response, response_type: "agent"}})
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
@@ -483,4 +545,53 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate permission_tier_allows?(tier, tool), to: ToolExecutor
+
+  # Check budget and turn limits. Returns nil if OK, or an error string.
+  defp check_limits(state) do
+    # Budget check
+    budget_error =
+      if state.max_budget_usd do
+        try do
+          budget = OptimalSystemAgent.Budget.get_status()
+          current_cost = (budget[:total_cost_usd] || 0) / 1
+
+          if current_cost >= state.max_budget_usd do
+            Bus.emit(:system_event, %{
+              event: :budget_limit_reached,
+              session_id: state.session_id,
+              current_cost: current_cost,
+              limit: state.max_budget_usd
+            })
+            "Budget limit reached ($#{Float.round(current_cost, 4)} / $#{state.max_budget_usd})"
+          end
+        rescue
+          _ -> nil
+        end
+      end
+
+    # Turn check
+    turn_error =
+      if state.max_turns && state.turn_count > state.max_turns do
+        Bus.emit(:system_event, %{
+          event: :turn_limit_reached,
+          session_id: state.session_id,
+          turn_count: state.turn_count,
+          limit: state.max_turns
+        })
+        "Turn limit reached (#{state.turn_count}/#{state.max_turns})"
+      end
+
+    budget_error || turn_error
+  end
+
+  # Coordinator mode restricts tools to delegation, messaging, and management
+  @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
+    task_write list_agents list_skills session_search ask_user)
+  defp filter_tools_for_mode(tools, false), do: tools
+  defp filter_tools_for_mode(tools, true) do
+    Enum.filter(tools, fn tool ->
+      name = tool[:name] || tool.name
+      name in @coordinator_tools
+    end)
+  end
 end

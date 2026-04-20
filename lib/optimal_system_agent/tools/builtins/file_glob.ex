@@ -18,7 +18,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob do
   def name, do: "file_glob"
 
   @impl true
-  def description, do: "Search for files matching a glob pattern (e.g. '**/*.ex'). Returns matching file paths."
+  def description do
+    "Fast file pattern matching tool that works with any codebase size.\n\n" <>
+    "Usage:\n" <>
+    "- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n" <>
+    "- Returns matching file paths sorted by modification time\n" <>
+    "- Use this tool when you need to find files by name patterns\n" <>
+    "- ALWAYS use file_glob instead of shell_execute with find or ls"
+  end
 
   @impl true
   def parameters do

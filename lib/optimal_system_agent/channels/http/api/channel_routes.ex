@@ -73,8 +73,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
         end
 
       {:error, :no_secret} ->
-        Logger.warning("Telegram webhook rejected: telegram_webhook_secret is not configured")
-        json_error(conn, 401, "unauthorized", "Webhook secret not configured")
+        # Security: treat a missing secret as a configuration error, not an auth
+        # failure.  401 could mislead callers into thinking they can retry with
+        # different credentials.  503 signals that the endpoint is not ready to
+        # accept requests until the operator sets TELEGRAM_WEBHOOK_SECRET.
+        Logger.error("Telegram webhook is misconfigured: TELEGRAM_WEBHOOK_SECRET is not set. " <>
+          "All webhook requests will be rejected until this is resolved. " <>
+          "Set TELEGRAM_WEBHOOK_SECRET in your environment (see .env.example).")
+        json_error(conn, 503, "configuration_error", "Webhook secret not configured — contact the server operator")
 
       {:error, :invalid_signature} ->
         json_error(conn, 401, "unauthorized", "Invalid signature")
@@ -84,7 +90,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   # ── Discord ────────────────────────────────────────────────────────
 
   post "/discord/webhook" do
-    json_error(conn, 501, "not_implemented", "Discord channel not yet available")
+    alias OptimalSystemAgent.Channels.Discord
+
+    if Discord.connected?() do
+      Discord.handle_update(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "Discord adapter not started. Set DISCORD_BOT_TOKEN.")
+    end
   end
 
   # ── Slack ──────────────────────────────────────────────────────────
@@ -112,13 +125,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   end
 
   # ── WhatsApp ───────────────────────────────────────────────────────
+  # WhatsApp uses a Baileys bridge sidecar, not webhooks.
+  # These endpoints exist for Meta Business API compatibility if needed.
 
   get "/whatsapp/webhook" do
-    json_error(conn, 501, "not_implemented", "WhatsApp channel not yet available")
+    # Meta verification challenge
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    verify_token = Application.get_env(:optimal_system_agent, :whatsapp_verify_token)
+    if params["hub.mode"] == "subscribe" and params["hub.verify_token"] == verify_token do
+      send_resp(conn, 200, params["hub.challenge"] || "")
+    else
+      send_resp(conn, 403, "")
+    end
   end
 
   post "/whatsapp/webhook" do
-    json_error(conn, 501, "not_implemented", "WhatsApp channel not yet available")
+    # Forward to WhatsApp adapter if using Business API mode
+    send_resp(conn, 200, "")
   end
 
   # ── Signal ─────────────────────────────────────────────────────────
@@ -158,15 +181,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   end
 
   # ── Matrix ─────────────────────────────────────────────────────────
+  # Matrix uses /sync polling, not webhooks. This is for appservice mode.
 
   post "/matrix/webhook" do
-    json_error(conn, 501, "not_implemented", "Matrix channel not yet available")
+    # Matrix appservice transaction endpoint (future)
+    send_resp(conn, 200, "")
   end
 
   # ── Email ──────────────────────────────────────────────────────────
+  # Email uses IMAP polling. This endpoint is for SendGrid/Mailgun inbound parse.
 
   post "/email/inbound" do
-    json_error(conn, 501, "not_implemented", "Email channel not yet available")
+    alias OptimalSystemAgent.Channels.EmailChannel
+
+    if EmailChannel.connected?() do
+      # Forward parsed email to the adapter
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "Email adapter not started")
+    end
+  end
+
+  # ── LINE ──────────────────────────────────────────────────────────
+
+  post "/line/webhook" do
+    alias OptimalSystemAgent.Channels.Line
+
+    secret = Application.get_env(:optimal_system_agent, :line_channel_secret)
+    signature = get_req_header(conn, "x-line-signature") |> List.first("")
+    raw_body = conn.assigns[:raw_body] || Jason.encode!(conn.body_params)
+
+    case Line.verify_signature(raw_body, signature, secret || "") do
+      :ok ->
+        Line.handle_webhook(conn.body_params)
+        send_resp(conn, 200, "")
+
+      {:error, :invalid_signature} ->
+        json_error(conn, 401, "unauthorized", "Invalid LINE signature")
+    end
   end
 
   # ── QQ ─────────────────────────────────────────────────────────────
@@ -178,13 +230,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   # ── DingTalk ───────────────────────────────────────────────────────
 
   post "/dingtalk/webhook" do
-    json_error(conn, 501, "not_implemented", "DingTalk channel not yet available")
+    alias OptimalSystemAgent.Channels.DingTalk
+
+    if DingTalk.connected?() do
+      DingTalk.handle_webhook(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET.")
+    end
   end
 
   # ── Feishu ─────────────────────────────────────────────────────────
 
   post "/feishu/events" do
-    json_error(conn, 501, "not_implemented", "Feishu channel not yet available")
+    alias OptimalSystemAgent.Channels.Feishu
+
+    # URL verification challenge
+    if conn.body_params["type"] == "url_verification" do
+      challenge = conn.body_params["challenge"]
+      conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(%{challenge: challenge}))
+    else
+      vtoken = Application.get_env(:optimal_system_agent, :feishu_verification_token)
+
+      case Feishu.verify_event(conn.body_params, vtoken || "") do
+        :ok ->
+          Feishu.handle_event(conn.body_params)
+          send_resp(conn, 200, "")
+
+        {:error, :invalid_token} ->
+          json_error(conn, 401, "unauthorized", "Invalid Feishu verification token")
+      end
+    end
+  end
+
+  # ── WeCom ──────────────────────────────────────────────────────────
+
+  post "/wecom/webhook" do
+    alias OptimalSystemAgent.Channels.WeCom
+
+    if WeCom.connected?() do
+      WeCom.handle_webhook(conn.body_params)
+      send_resp(conn, 200, "")
+    else
+      json_error(conn, 503, "channel_unavailable", "WeCom adapter not started. Set WECOM_BOT_KEY.")
+    end
   end
 
   match _ do

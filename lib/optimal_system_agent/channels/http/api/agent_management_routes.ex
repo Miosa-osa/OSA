@@ -122,20 +122,45 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
     end
   end
 
-  # ── POST /:id/pause — pause agent session (stub) ──────────────────
+  # ── POST /:id/pause — pause agent session ──────────────────────────
 
   post "/:id/pause" do
     agent_id = conn.params["id"]
-    Logger.info("[AgentMgmt] pause requested for agent=#{agent_id} (stub)")
-    json(conn, 202, %{status: "pause_requested", agent: agent_id})
+
+    try do
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+        [{pid, _}] ->
+          # Suspend the process to pause execution
+          :sys.suspend(pid)
+          Logger.info("[AgentMgmt] paused agent=#{agent_id}")
+          json(conn, 200, %{status: "paused", agent: agent_id})
+
+        [] ->
+          json_error(conn, 404, "not_found", "Agent #{agent_id} not found")
+      end
+    rescue
+      _ -> json_error(conn, 500, "internal_error", "Failed to pause agent")
+    end
   end
 
-  # ── POST /:id/resume — resume agent session (stub) ────────────────
+  # ── POST /:id/resume — resume agent session ──────────────────────
 
   post "/:id/resume" do
     agent_id = conn.params["id"]
-    Logger.info("[AgentMgmt] resume requested for agent=#{agent_id} (stub)")
-    json(conn, 202, %{status: "resume_requested", agent: agent_id})
+
+    try do
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+        [{pid, _}] ->
+          :sys.resume(pid)
+          Logger.info("[AgentMgmt] resumed agent=#{agent_id}")
+          json(conn, 200, %{status: "resumed", agent: agent_id})
+
+        [] ->
+          json_error(conn, 404, "not_found", "Agent #{agent_id} not found")
+      end
+    rescue
+      _ -> json_error(conn, 500, "internal_error", "Failed to resume agent")
+    end
   end
 
   # ── DELETE /:id — terminate an agent session ──────────────────────
@@ -143,23 +168,27 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
   delete "/:id" do
     agent_id = conn.params["id"]
 
-    case safe_lookup_session(agent_id) do
-      [{pid, _}] ->
-        try do
-          GenServer.stop(pid, :normal)
-          Logger.info("[AgentMgmt] terminated session pid=#{inspect(pid)} agent=#{agent_id}")
-          json(conn, 200, %{status: "terminated", agent: agent_id})
-        rescue
-          _ ->
-            # Process already gone — still a success from the caller's perspective
+    try do
+      case safe_lookup_session(agent_id) do
+        [{pid, _}] ->
+          try do
+            GenServer.stop(pid, :normal)
+            Logger.info("[AgentMgmt] terminated session pid=#{inspect(pid)} agent=#{agent_id}")
             json(conn, 200, %{status: "terminated", agent: agent_id})
-        end
+          rescue
+            _ ->
+              # Process already gone — still a success from the caller's perspective
+              json(conn, 200, %{status: "terminated", agent: agent_id})
+          end
 
-      [] ->
-        json_error(conn, 404, "not_found", "No active session found for agent #{agent_id}")
+        [] ->
+          json_error(conn, 404, "not_found", "No active session found for agent #{agent_id}")
 
-      :error ->
-        json_error(conn, 404, "not_found", "No active session found for agent #{agent_id}")
+        :error ->
+          json_error(conn, 404, "not_found", "No active session found for agent #{agent_id}")
+      end
+    rescue
+      _ -> json_error(conn, 500, "internal_error", "Failed to terminate agent")
     end
   end
 

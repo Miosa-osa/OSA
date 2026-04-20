@@ -19,29 +19,130 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   # ── Banner ──────────────────────────────────────────────────────────
 
   def print_banner do
+    # ── Gather live data ──────────────────────────────────────────────
     provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
     model = get_model_name(provider)
-    tool_count = length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
-    soul_status = if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
     git_hash = git_short_hash()
     cwd = prompt_dir()
-    width = terminal_width()
+    width = min(terminal_width(), 80)
 
-    IO.puts("""
-    #{@bold}#{@cyan}
-     ██████╗ ███████╗ █████╗
-    ██╔═══██╗██╔════╝██╔══██╗
-    ██║   ██║███████╗███████║
-    ██║   ██║╚════██║██╔══██║
-    ╚██████╔╝███████║██║  ██║
-     ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}
-    #{@bold}#{@white}Optimal System Agent#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset}
-    #{@dim}#{provider} / #{model} · #{tool_count} tools · soul: #{soul_status}#{@reset}
-    #{@dim}#{cwd}#{@reset}
-    #{@dim}/help#{@reset} #{@dim}commands  ·  #{@bold}/model#{@reset} #{@dim}switch  ·  #{@bold}exit#{@reset} #{@dim}quit#{@reset}
-    #{proactive_banner_line()}#{@dim}#{String.duplicate("─", width)}#{@reset}
-    """)
+    tool_count =
+      try do
+        length(OptimalSystemAgent.Tools.Registry.list_tools_direct())
+      rescue
+        _ -> 0
+      end
+
+    # Context window size from config
+    ctx_window = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    ctx_display = if ctx_window >= 1_000_000, do: "#{div(ctx_window, 1_000_000)}M context", else: "#{div(ctx_window, 1_000)}K context"
+
+    # Connected channels
+    channels =
+      try do
+        OptimalSystemAgent.Channels.Manager.list_channels()
+        |> Enum.filter(& &1.connected)
+        |> Enum.map(& &1.name)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    channels_str = if channels == [], do: "none", else: Enum.join(channels, ", ")
+
+    # OAuth status
+    oauth_status =
+      try do
+        if OptimalSystemAgent.Auth.OAuth.oauth_configured?(), do: "oauth", else: "api key"
+      rescue
+        _ -> "api key"
+      end
+
+    # Soul/identity status
+    soul_status =
+      try do
+        if OptimalSystemAgent.Soul.identity(), do: "custom", else: "default"
+      rescue
+        _ -> "default"
+      end
+
+    # Recent session count
+    session_count =
+      try do
+        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:_, :_, :_}, [], [true]}]) |> length()
+      rescue
+        _ -> 0
+      catch
+        :exit, _ -> 0
+      end
+
+    # ── Build bordered box ────────────────────────────────────────────
+    inner_width = width - 4
+    title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset} "
+    title_visible = "OSA v#{version} (#{git_hash})"
+    top_border = "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
+
+    # ASCII art logo
+    logo = [
+      "#{@cyan} ██████╗ ███████╗ █████╗#{@reset}",
+      "#{@cyan}██╔═══██╗██╔════╝██╔══██╗#{@reset}",
+      "#{@cyan}██║   ██║███████╗███████║#{@reset}",
+      "#{@cyan}██║   ██║╚════██║██╔══██║#{@reset}",
+      "#{@cyan}╚██████╔╝███████║██║  ██║#{@reset}",
+      "#{@cyan} ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}",
+    ]
+
+    # Left panel — logo + system status
+    left_lines = logo ++ [
+      "",
+      "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
+      "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
+      "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
+      "#{@dim}#{cwd}#{@reset}"
+    ]
+
+    # Right panel — live info
+    right_lines = [
+      "#{@yellow}Quick Start#{@reset}",
+      "#{@dim}/help — all commands#{@reset}",
+      "#{@dim}/model — switch model#{@reset}",
+      "#{@dim}/login <provider> — connect#{@reset}",
+      "#{@dim}/setup — reconfigure#{@reset}",
+      "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
+      "#{@yellow}System#{@reset}",
+      "#{@dim}channels: #{channels_str}#{@reset}",
+      if(session_count > 0, do: "#{@dim}sessions: #{session_count} active#{@reset}", else: "#{@dim}sessions: new#{@reset}"),
+      "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
+      "#{@dim}Ctrl+C cancel · Ctrl+J newline#{@reset}",
+    ]
+
+    # Render
+    IO.puts("")
+    IO.puts("  #{top_border}")
+
+    max_lines = max(length(left_lines), length(right_lines))
+    left_width = div(inner_width, 2)
+    right_width = inner_width - left_width - 1
+
+    for i <- 0..(max_lines - 1) do
+      left = Enum.at(left_lines, i, "")
+      right = Enum.at(right_lines, i, "")
+      left_padded = pad_visible(left, left_width)
+      right_padded = pad_visible(right, right_width)
+      sep = if right != "", do: "#{@dim}│#{@reset}", else: " "
+      IO.puts("  #{@dim}│#{@reset} #{left_padded}#{sep}#{right_padded} #{@dim}│#{@reset}")
+    end
+
+    IO.puts("  #{@dim}╰#{String.duplicate("─", inner_width + 2)}╯#{@reset}")
+    IO.puts("")
+  end
+
+  defp pad_visible(str, width) do
+    vis_len = visible_length(str)
+    padding = max(width - vis_len, 0)
+    str <> String.duplicate(" ", padding)
   end
 
   def print_goodbye do
@@ -50,30 +151,57 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
   def print_separator do
     width = terminal_width()
-    IO.puts("\n#{@dim}#{String.duplicate("─", width)}#{@reset}")
+    IO.puts("#{@dim}  #{String.duplicate("─", width - 4)}#{@reset}")
   end
 
-  # ── Response Formatting ─────────────────────────────────────────────
+  # ── User Message ────────────────────────────────────────────────────
 
-  def print_response(response) do
-    rendered = Markdown.render(response)
-    lines = wrap_text(rendered, terminal_width() - 4)
-
+  def print_user_message(text) do
+    # Show user's message with a header, like a chat bubble
     IO.puts("")
+    IO.puts("#{@bold}#{@cyan}  ❯  You#{@reset}")
 
-    Enum.each(lines, fn line ->
-      IO.puts("#{@white}  #{line}#{@reset}")
+    text
+    |> String.split("\n")
+    |> Enum.each(fn line ->
+      IO.puts("#{@dim}  │  #{@reset}#{@white}#{line}#{@reset}")
     end)
 
     IO.puts("")
   end
 
+  # ── Response Formatting ─────────────────────────────────────────────
+
+  def print_response(response, opts \\ []) do
+    unless opts[:already_streamed] do
+      rendered = Markdown.render(response)
+      width = terminal_width()
+      lines = wrap_text(rendered, width - 6)
+
+      IO.puts("")
+      IO.puts("#{@bold}#{@cyan}  ◇  OSA#{@reset}")
+
+      Enum.each(lines, fn line ->
+        IO.puts("#{@dim}  │  #{@reset}#{@white}#{line}#{@reset}")
+      end)
+
+      IO.puts("")
+    end
+  end
+
   # ── Status Line ─────────────────────────────────────────────────────
 
-  def show_status_line(elapsed_ms, tool_count, total_tokens) do
+  def show_status_line(elapsed_ms, tool_count, total_tokens, cost_usd \\ nil) do
     parts = ["#{@green}✓#{@dim} " <> format_elapsed(elapsed_ms)]
     parts = if tool_count > 0, do: parts ++ ["#{tool_count} tools"], else: parts
     parts = if total_tokens > 0, do: parts ++ [format_tokens(total_tokens)], else: parts
+
+    parts =
+      if is_number(cost_usd) and cost_usd > 0 do
+        parts ++ ["$#{:erlang.float_to_binary(cost_usd * 1.0, decimals: 4)}"]
+      else
+        parts
+      end
 
     parts =
       try do
@@ -107,33 +235,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   def context_pressure_bar(util) when util >= 70.0, do: "██░░░ WARM"
   def context_pressure_bar(_util), do: "█░░░░"
 
-  # ── Time / Token Formatters ─────────────────────────────────────────
+  # ── Time / Token Formatters (delegates to shared Format module) ──────
 
-  def format_elapsed(ms) when ms < 1_000, do: "<1s"
-  def format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
-
-  def format_elapsed(ms) do
-    mins = div(ms, 60_000)
-    secs = div(rem(ms, 60_000), 1_000)
-    if secs > 0, do: "#{mins}m #{secs}s", else: "#{mins}m"
-  end
+  defdelegate format_elapsed(ms), to: OptimalSystemAgent.Channels.CLI.Format
+  defdelegate format_tokens(n), to: OptimalSystemAgent.Channels.CLI.Format, as: :format_tokens_arrow
 
   def format_duration_ms(nil), do: ""
   def format_duration_ms(ms) when is_number(ms), do: format_elapsed(ms)
   def format_duration_ms(_), do: ""
 
-  def format_tokens(0), do: ""
-  def format_tokens(n) when n < 1_000, do: "↓ #{n}"
-  def format_tokens(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
-
   # ── Terminal Helpers ────────────────────────────────────────────────
 
-  def terminal_width do
-    case :io.columns() do
-      {:ok, cols} -> cols
-      _ -> 80
-    end
-  end
+  defdelegate terminal_width(), to: OptimalSystemAgent.Channels.CLI.Format
 
   def clear_line do
     width = terminal_width()
@@ -146,7 +259,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     text
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
-      if String.length(line) <= width do
+      if visible_length(line) <= width do
         [line]
       else
         wrap_line(line, width)
@@ -158,7 +271,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     line
     |> String.split(~r/\s+/)
     |> Enum.reduce([""], fn word, [current | rest] ->
-      if String.length(current) + String.length(word) + 1 <= width do
+      if visible_length(current) + visible_length(word) + 1 <= width do
         if current == "" do
           [word | rest]
         else
@@ -169,6 +282,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
       end
     end)
     |> Enum.reverse()
+  end
+
+  # Strip ANSI escape codes before measuring visible character width.
+  # ANSI codes (\e[...m) have zero display width but add to String.length.
+  defp visible_length(str) do
+    str
+    |> String.replace(~r/\e\[[0-9;]*m/, "")
+    |> String.length()
   end
 
   # ── Directory Display ──────────────────────────────────────────────
@@ -213,20 +334,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     _ -> "dev"
   end
 
-  defp get_model_name(:anthropic) do
-    Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  end
-
-  defp get_model_name(:ollama) do
-    Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
-  end
-
-  defp get_model_name(:openai) do
-    Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
-  end
-
   defp get_model_name(provider) do
-    key = :"#{provider}_model"
-    Application.get_env(:optimal_system_agent, key, to_string(provider))
+    OptimalSystemAgent.Channels.CLI.Format.get_model_name(provider)
   end
 end

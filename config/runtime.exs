@@ -141,6 +141,47 @@ config :optimal_system_agent,
   lmstudio_model: System.get_env("LMSTUDIO_MODEL"),
   llamacpp_model: System.get_env("LLAMACPP_MODEL"),
 
+  # ── Channel Adapters ────────────────────────────────────────────────
+  # WhatsApp (Baileys bridge sidecar)
+  whatsapp_enabled: System.get_env("WHATSAPP_ENABLED") == "true",
+  whatsapp_bridge_url: System.get_env("WHATSAPP_BRIDGE_URL") || "http://127.0.0.1:3001",
+
+  # Matrix
+  matrix_homeserver: System.get_env("MATRIX_HOMESERVER"),
+  matrix_access_token: System.get_env("MATRIX_ACCESS_TOKEN"),
+  matrix_allowed_users: System.get_env("MATRIX_ALLOWED_USERS"),
+
+  # Email (IMAP + SMTP)
+  email_imap_host: System.get_env("EMAIL_IMAP_HOST"),
+  email_imap_port: String.to_integer(System.get_env("EMAIL_IMAP_PORT") || "993"),
+  email_smtp_host: System.get_env("EMAIL_SMTP_HOST"),
+  email_smtp_port: String.to_integer(System.get_env("EMAIL_SMTP_PORT") || "587"),
+  email_address: System.get_env("EMAIL_ADDRESS"),
+  email_password: System.get_env("EMAIL_PASSWORD"),
+  email_poll_interval: String.to_integer(System.get_env("EMAIL_POLL_INTERVAL") || "15"),
+  email_allowed_senders: System.get_env("EMAIL_ALLOWED_SENDERS"),
+
+  # LINE Messaging API
+  line_channel_token: System.get_env("LINE_CHANNEL_TOKEN"),
+  line_channel_secret: System.get_env("LINE_CHANNEL_SECRET"),
+
+  # Signal (signal-cli REST API)
+  signal_api_url: System.get_env("SIGNAL_API_URL"),
+  signal_phone_number: System.get_env("SIGNAL_PHONE_NUMBER"),
+
+  # DingTalk
+  dingtalk_client_id: System.get_env("DINGTALK_CLIENT_ID"),
+  dingtalk_client_secret: System.get_env("DINGTALK_CLIENT_SECRET"),
+
+  # Feishu/Lark
+  feishu_app_id: System.get_env("FEISHU_APP_ID"),
+  feishu_app_secret: System.get_env("FEISHU_APP_SECRET"),
+  feishu_verification_token: System.get_env("FEISHU_VERIFICATION_TOKEN"),
+
+  # WeCom (Enterprise WeChat)
+  wecom_bot_key: System.get_env("WECOM_BOT_KEY"),
+  wecom_webhook_token: System.get_env("WECOM_WEBHOOK_TOKEN"),
+
   # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
   computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
 
@@ -206,6 +247,26 @@ config :optimal_system_agent,
          Application.get_env(:optimal_system_agent, :shared_secret)
        end),
   require_auth: System.get_env("OSA_REQUIRE_AUTH", "false") == "true",
+
+  # Bind address for the HTTP channel.
+  # Defaults to 127.0.0.1 (loopback) — safe with open-access dev mode.
+  # Set OSA_HTTP_IP=0.0.0.0 to expose on all interfaces (requires auth).
+  http_ip: (
+    case System.get_env("OSA_HTTP_IP", "127.0.0.1") do
+      "0.0.0.0" -> {0, 0, 0, 0}
+      "::1"     -> {0, 0, 0, 0, 0, 0, 0, 1}
+      "::"      -> {0, 0, 0, 0, 0, 0, 0, 0}
+      ip_str    ->
+        parts = String.split(ip_str, ".")
+        if length(parts) == 4 do
+          parts
+          |> Enum.map(&String.to_integer/1)
+          |> List.to_tuple()
+        else
+          {127, 0, 0, 1}
+        end
+    end
+  ),
 
   # Budget limits (USD)
   daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),

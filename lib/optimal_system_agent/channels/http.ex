@@ -42,7 +42,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> put_resp_header("x-frame-options", "DENY")
     |> put_resp_header("referrer-policy", "no-referrer")
     |> put_resp_header("x-xss-protection", "1; mode=block")
-    |> put_resp_header("content-security-policy", "default-src 'none'")
+    |> put_resp_header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:")
     |> put_resp_header("strict-transport-security", "max-age=31536000; includeSubDomains")
   end
 
@@ -128,7 +128,24 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> send_resp(200, body)
   end
 
-  # ── Onboarding (no auth) ──────────────────────────────────────
+  # ── Onboarding ─────────────────────────────────────────────────────
+  #
+  # Security model:
+  #   - GET /onboarding/status and GET /onboarding/detect are always open
+  #     (they reveal nothing an attacker couldn't infer, and the TUI needs
+  #     them before a token exists).
+  #   - Once setup is complete (first_run?/0 returns false), ALL write
+  #     endpoints and the model/health-check probing endpoints require a
+  #     valid JWT. This prevents config-overwrite and SSRF attacks after
+  #     the initial installation.
+  #   - POST /onboarding/setup is a one-time operation: if setup is already
+  #     complete and the caller has no valid JWT it is rejected with 409.
+  #   - POST /onboarding/health-check: once setup is complete the `base_url`
+  #     and `api_key` passthrough params are ignored; the endpoint tests only
+  #     the CONFIGURED provider, eliminating the SSRF proxy surface.
+  #   - GET /onboarding/models: once setup is complete arbitrary `api_key`
+  #     and `base_url` query params are stripped; only configured values are
+  #     used.
 
   get "/onboarding/status" do
     alias OptimalSystemAgent.Onboarding
@@ -160,19 +177,43 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   get "/onboarding/models" do
     conn = Plug.Conn.fetch_query_params(conn)
     provider = conn.query_params["provider"] || "ollama_local"
-    base_url = conn.query_params["base_url"]
-    api_key = conn.query_params["api_key"]
 
-    case OptimalSystemAgent.Onboarding.model_list(provider, base_url: base_url, api_key: api_key) do
-      {:ok, models} ->
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(200, Jason.encode!(%{models: models}))
+    # Once setup is complete, strip caller-supplied credentials to prevent
+    # unauthenticated SSRF/key-probing. Authenticated callers may still pass
+    # them through.
+    {base_url, api_key} =
+      if setup_completed?() do
+        case verify_bearer(conn) do
+          {:ok, _claims} ->
+            {conn.query_params["base_url"], conn.query_params["api_key"]}
 
-      {:error, reason} ->
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(502, Jason.encode!(%{error: "model_fetch_failed", message: reason}))
+          {:error, _} ->
+            # Setup done, no valid JWT → reject credential params outright.
+            conn =
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(401, Jason.encode!(%{error: "unauthorized", message: "Authentication required after initial setup."}))
+
+            Plug.Conn.halt(conn)
+            # Unreachable but satisfies the compiler for the tuple match
+            {nil, nil}
+        end
+      else
+        {conn.query_params["base_url"], conn.query_params["api_key"]}
+      end
+
+    unless conn.halted do
+      case OptimalSystemAgent.Onboarding.model_list(provider, base_url: base_url, api_key: api_key) do
+        {:ok, models} ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(%{models: models}))
+
+        {:error, reason} ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(502, Jason.encode!(%{error: "model_fetch_failed", message: reason}))
+      end
     end
   end
 
@@ -181,16 +222,60 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       {:ok, raw, conn} ->
         case Jason.decode(raw) do
           {:ok, params} ->
-            case OptimalSystemAgent.Onboarding.health_check(params) do
-              {:ok, result} ->
-                conn
-                |> put_resp_content_type("application/json")
-                |> send_resp(200, Jason.encode!(result))
+            # Security: once setup is complete, require auth and ignore
+            # caller-supplied base_url / api_key to close the SSRF proxy.
+            params =
+              if setup_completed?() do
+                case verify_bearer(conn) do
+                  {:ok, _claims} ->
+                    # Authenticated: still restrict to known provider names.
+                    # Strip base_url for non-custom providers to prevent
+                    # open-redirect style SSRF.
+                    provider = Map.get(params, "provider", "")
 
-              {:error, result} ->
+                    if provider not in allowed_health_check_providers() do
+                      :reject
+                    else
+                      Map.drop(params, ["base_url", "api_key"])
+                    end
+
+                  {:error, _} ->
+                    :unauthorized
+                end
+              else
+                # First-run: permit params, but only for known providers.
+                provider = Map.get(params, "provider", "")
+
+                if provider not in allowed_health_check_providers() do
+                  :reject
+                else
+                  params
+                end
+              end
+
+            case params do
+              :unauthorized ->
                 conn
                 |> put_resp_content_type("application/json")
-                |> send_resp(200, Jason.encode!(result))
+                |> send_resp(401, Jason.encode!(%{error: "unauthorized", message: "Authentication required after initial setup."}))
+
+              :reject ->
+                conn
+                |> put_resp_content_type("application/json")
+                |> send_resp(400, Jason.encode!(%{error: "invalid_provider", message: "Provider not recognised. Use a supported provider name."}))
+
+              safe_params ->
+                case OptimalSystemAgent.Onboarding.health_check(safe_params) do
+                  {:ok, result} ->
+                    conn
+                    |> put_resp_content_type("application/json")
+                    |> send_resp(200, Jason.encode!(result))
+
+                  {:error, result} ->
+                    conn
+                    |> put_resp_content_type("application/json")
+                    |> send_resp(200, Jason.encode!(result))
+                end
             end
 
           {:error, _} ->
@@ -207,62 +292,214 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     end
   end
 
-  post "/onboarding/setup" do
-    case Plug.Conn.read_body(conn) do
-      {:ok, raw, conn} ->
-        case Jason.decode(raw) do
-          {:ok, params} ->
-            case OptimalSystemAgent.Onboarding.write_setup(params) do
-              :ok ->
-                # Auto-detect Ollama tiers if Ollama-based provider
-                provider = Map.get(params, "provider", "")
+  # ── OAuth Flow ───────────────────────────────────────────────────────
 
-                if provider in ["ollama_cloud", "ollama_local", "ollama"] do
-                  try do
-                    OptimalSystemAgent.Providers.Ollama.auto_detect_model()
-                    OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
-                  rescue
-                    _ -> :ok
-                  end
-                end
+  get "/onboarding/oauth/start" do
+    alias OptimalSystemAgent.Auth.OAuth
 
-                checks =
-                  try do
-                    OptimalSystemAgent.Onboarding.doctor_checks()
-                    |> Enum.map(fn
-                      {:ok, desc} -> %{status: "ok", check: desc}
-                      {:error, desc, reason} -> %{status: "error", check: desc, reason: reason}
-                    end)
-                  rescue
-                    _ -> []
-                  end
+    # Build the redirect URI from the request's host
+    port = Application.get_env(:optimal_system_agent, :http_port, 9089)
+    redirect_uri = "http://127.0.0.1:#{port}/onboarding/oauth/callback"
+
+    {authorize_url, code_verifier, state} = OAuth.authorize_url(redirect_uri)
+
+    # Store PKCE state in ETS for the callback
+    try do
+      :ets.new(:oauth_state, [:set, :public, :named_table])
+    rescue
+      ArgumentError -> :oauth_state
+    end
+
+    :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
+
+    body = Jason.encode!(%{
+      authorize_url: authorize_url,
+      state: state
+    })
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  get "/onboarding/oauth/callback" do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    code = params["code"]
+    state = params["state"]
+
+    case :ets.lookup(:oauth_state, :pkce) do
+      [{:pkce, code_verifier, ^state, redirect_uri}] ->
+        :ets.delete(:oauth_state, :pkce)
+
+        case OAuth.exchange_code(code, code_verifier, redirect_uri) do
+          {:ok, tokens} ->
+            # Try to create an API key from the OAuth token (Console users)
+            # If that works, store it as the API key. Otherwise store OAuth tokens.
+            case OAuth.create_api_key(tokens.access_token) do
+              {:ok, api_key} ->
+                # Store as a regular API key — simplest integration
+                Application.put_env(:optimal_system_agent, :anthropic_api_key, api_key)
+                OAuth.save_oauth_credentials(tokens)
 
                 conn
-                |> put_resp_content_type("application/json")
-                |> send_resp(200, Jason.encode!(%{
-                  status: "ok",
-                  provider: Map.get(params, "provider"),
-                  model: Map.get(params, "model"),
-                  checks: checks
-                }))
+                |> put_resp_content_type("text/html")
+                |> send_resp(200, """
+                <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                <div style="text-align:center"><h2 style="color:#4ade80">&#10003; Connected</h2><p style="color:#888">You can close this window and return to OSA.</p></div>
+                </body></html>
+                """)
 
-              {:error, reason} ->
+              {:error, _} ->
+                # No API key creation — store OAuth tokens for Bearer auth
+                OAuth.save_oauth_credentials(tokens)
+                Application.put_env(:optimal_system_agent, :anthropic_oauth_token, tokens.access_token)
+
                 conn
-                |> put_resp_content_type("application/json")
-                |> send_resp(500, Jason.encode!(%{error: "setup_failed", details: reason}))
+                |> put_resp_content_type("text/html")
+                |> send_resp(200, """
+                <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                <div style="text-align:center"><h2 style="color:#4ade80">&#10003; Connected via OAuth</h2><p style="color:#888">You can close this window and return to OSA.</p></div>
+                </body></html>
+                """)
             end
 
-          {:error, _} ->
+          {:error, reason} ->
             conn
-            |> put_resp_content_type("application/json")
-            |> send_resp(400, ~s({"error":"invalid_json"}))
+            |> put_resp_content_type("text/html")
+            |> send_resp(400, """
+            <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            <div style="text-align:center"><h2 style="color:#f87171">&#10007; Auth Failed</h2><p style="color:#888">#{reason}</p></div>
+            </body></html>
+            """)
         end
 
-      {:more, _partial, conn} ->
-        conn |> put_resp_content_type("application/json") |> send_resp(413, ~s({"error":"payload_too_large"}))
+      _ ->
+        conn
+        |> put_resp_content_type("text/html")
+        |> send_resp(400, """
+        <html><body style="background:#0a0a0a;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+        <div style="text-align:center"><h2 style="color:#f87171">&#10007; Invalid State</h2><p style="color:#888">OAuth state mismatch. Try again.</p></div>
+        </body></html>
+        """)
+    end
+  end
 
-      {:error, _reason} ->
-        conn |> put_resp_content_type("application/json") |> send_resp(400, ~s({"error":"read_failed"}))
+  # Check OAuth status
+  get "/onboarding/oauth/status" do
+    alias OptimalSystemAgent.Auth.OAuth
+
+    connected = OAuth.oauth_configured?()
+
+    profile =
+      if connected do
+        case OAuth.get_valid_token() do
+          {:ok, token} ->
+            case OAuth.fetch_profile(token) do
+              {:ok, p} -> p
+              _ -> nil
+            end
+          _ -> nil
+        end
+      end
+
+    body = Jason.encode!(%{
+      connected: connected,
+      profile: profile
+    })
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  # Disconnect OAuth
+  delete "/onboarding/oauth/status" do
+    alias OptimalSystemAgent.Auth.OAuth
+    OAuth.clear_credentials()
+    conn |> put_resp_content_type("application/json") |> send_resp(200, ~s({"disconnected":true}))
+  end
+
+  post "/onboarding/setup" do
+    # One-time operation: if setup is already complete, require a valid JWT.
+    # This prevents any unauthenticated caller from overwriting the existing
+    # provider config (including API keys) after the first successful setup.
+    auth_result =
+      if setup_completed?() do
+        case verify_bearer(conn) do
+          {:ok, claims} -> {:ok, claims}
+          {:error, _} -> :setup_locked
+        end
+      else
+        :first_run
+      end
+
+    case auth_result do
+      :setup_locked ->
+        Logger.warning("[Onboarding] POST /onboarding/setup blocked: setup already complete and no valid JWT presented (remote_ip=#{inspect(conn.remote_ip)})")
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(409, Jason.encode!(%{
+          error: "setup_already_complete",
+          message: "Initial setup has already been completed. Re-configure via the authenticated API (/api/v1/settings)."
+        }))
+
+      _ ->
+        # :first_run or {:ok, claims} — proceed with write_setup
+        case Plug.Conn.read_body(conn) do
+          {:ok, raw, conn} ->
+            case Jason.decode(raw) do
+              {:ok, params} ->
+                case OptimalSystemAgent.Onboarding.write_setup(params) do
+                  :ok ->
+                    # Auto-detect Ollama tiers if Ollama-based provider
+                    provider = Map.get(params, "provider", "")
+
+                    if provider in ["ollama_cloud", "ollama_local", "ollama"] do
+                      try do
+                        OptimalSystemAgent.Providers.Ollama.auto_detect_model()
+                        OptimalSystemAgent.Agent.Tier.detect_ollama_tiers()
+                      rescue
+                        _ -> :ok
+                      end
+                    end
+
+                    checks =
+                      try do
+                        OptimalSystemAgent.Onboarding.doctor_checks()
+                        |> Enum.map(fn
+                          {:ok, desc} -> %{status: "ok", check: desc}
+                          {:error, desc, reason} -> %{status: "error", check: desc, reason: reason}
+                        end)
+                      rescue
+                        _ -> []
+                      end
+
+                    conn
+                    |> put_resp_content_type("application/json")
+                    |> send_resp(200, Jason.encode!(%{
+                      status: "ok",
+                      provider: Map.get(params, "provider"),
+                      model: Map.get(params, "model"),
+                      checks: checks
+                    }))
+
+                  {:error, reason} ->
+                    conn
+                    |> put_resp_content_type("application/json")
+                    |> send_resp(500, Jason.encode!(%{error: "setup_failed", details: reason}))
+                end
+
+              {:error, _} ->
+                conn
+                |> put_resp_content_type("application/json")
+                |> send_resp(400, ~s({"error":"invalid_json"}))
+            end
+
+          {:more, _partial, conn} ->
+            conn |> put_resp_content_type("application/json") |> send_resp(413, ~s({"error":"payload_too_large"}))
+
+          {:error, _reason} ->
+            conn |> put_resp_content_type("application/json") |> send_resp(400, ~s({"error":"read_failed"}))
+        end
     end
   end
 
@@ -343,4 +580,48 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> put_resp_content_type("application/json")
     |> send_resp(404, Jason.encode!(%{error: "not_found"}))
   end
+
+  # ── Onboarding security helpers ─────────────────────────────────────
+
+  # Returns true when at least one provider has been configured (i.e. ~/.osa/.env
+  # exists with a valid OSA_DEFAULT_PROVIDER entry). The inverse of first_run?/0.
+  defp setup_completed? do
+    not OptimalSystemAgent.Onboarding.first_run?()
+  end
+
+  # Extract and verify the Bearer JWT from the Authorization header.
+  # Returns {:ok, claims} or {:error, reason}.
+  defp verify_bearer(conn) do
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> token | _] ->
+        OptimalSystemAgent.Channels.HTTP.Auth.verify_token(token)
+
+      _ ->
+        {:error, :missing_token}
+    end
+  end
+
+  # The explicit list of provider slugs that may be passed to
+  # POST /onboarding/health-check. Any slug not on this list is rejected,
+  # preventing callers from probing arbitrary URLs through the server.
+  @allowed_health_check_providers ~w(
+    anthropic
+    openai
+    ollama_local
+    ollama_cloud
+    ollama
+    openrouter
+    miosa
+    custom
+    gemini
+    groq
+    mistral
+    xai
+    deepseek
+    cohere
+    azure
+    bedrock
+  )
+
+  defp allowed_health_check_providers, do: @allowed_health_check_providers
 end

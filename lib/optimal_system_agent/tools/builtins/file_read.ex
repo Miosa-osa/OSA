@@ -26,7 +26,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
   def name, do: "file_read"
 
   @impl true
-  def description, do: "Read a file from the filesystem. Supports images (.png, .jpg, .gif, .webp) — returns base64 for vision analysis."
+  def description do
+    "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\n" <>
+    "Usage:\n" <>
+    "- The path parameter must be an absolute path, not a relative path\n" <>
+    "- By default, reads the full file. Use offset and limit for large files.\n" <>
+    "- This tool can read images (PNG, JPG, GIF, WEBP) — returns base64 for vision analysis.\n" <>
+    "- This tool can only read files, not directories. Use dir_list for directories.\n" <>
+    "- If you read a file that exists but has empty contents you will receive a warning.\n" <>
+    "- ALWAYS read a file before editing it with file_edit or file_write."
+  end
 
   @impl true
   def parameters do

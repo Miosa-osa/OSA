@@ -1,10 +1,13 @@
 <script lang="ts">
   import { slide } from 'svelte/transition';
   import type { ToolCallRef } from '$lib/api/types';
+  import DiffView from './DiffView.svelte';
 
   interface Props {
     tool: ToolCallRef;
     result?: string;
+    diff?: string;
+    diffStats?: { additions: number; deletions: number };
     isError?: boolean;
     isRunning?: boolean;
     isExpanded: boolean;
@@ -14,11 +17,18 @@
   let {
     tool,
     result,
+    diff,
+    diffStats,
     isError = false,
     isRunning = false,
     isExpanded,
     onToggle,
   }: Props = $props();
+
+  const hasDiff = $derived(!!diff);
+  const diffFilename = $derived(
+    (tool.input?.path as string) || (tool.input?.file_path as string) || 'file'
+  );
 
   const hasResult = $derived(result !== undefined);
 
@@ -62,11 +72,20 @@
         <pre class="tool-json">{JSON.stringify(tool.input, null, 2)}</pre>
       </div>
 
-      {#if hasResult}
+      {#if hasDiff}
+        <DiffView diff={diff} stats={diffStats} filename={diffFilename} />
+      {/if}
+
+      {#if hasResult && !hasDiff}
         <div class="tool-section tool-section--result" class:tool-section--error={isError}>
           <p class="tool-section-label">{isError ? 'Error' : 'Result'}</p>
           <pre class="tool-json">{result}</pre>
         </div>
+      {:else if hasResult && hasDiff}
+        <details class="tool-raw-result">
+          <summary class="tool-section-label">Raw result</summary>
+          <pre class="tool-json">{result}</pre>
+        </details>
       {/if}
     </div>
   {/if}
@@ -244,5 +263,16 @@
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  }
+
+  .tool-raw-result {
+    padding: 8px 12px 4px;
+  }
+
+  .tool-raw-result > summary {
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 0.6875rem;
+    margin-bottom: 4px;
   }
 </style>

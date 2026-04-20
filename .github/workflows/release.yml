@@ -1,365 +1,216 @@
 name: Release
 
-# Triggers on version tags: v1.2.3 or v1.2.3-rc1
+# Triggers on version tags, e.g. v0.3.0
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+      - "v*.*.*"
 
-permissions:
-  contents: write   # needed to create GitHub Releases and upload assets
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MIX_ENV: prod
+  ELIXIR_VERSION: "1.17.3"
+  OTP_VERSION: "27.1"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Build native helpers — must run BEFORE the OSA release build jobs so their
-  # artifacts can be downloaded and placed in priv/ before Burrito runs.
-  # ---------------------------------------------------------------------------
-
-  build-macos-helper:
-    name: Build macOS ScreenShare helper
-    runs-on: macos-14   # Apple Silicon — matches arm64 OSA release target
+  # ── macOS arm64 (Apple Silicon) ──────────────────────────────────────
+  build-macos-arm64:
+    runs-on: macos-14  # Apple Silicon runner (M1/M2)
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build macOS ScreenShare helper
-        run: |
-          cd native/macos/ScreenShare
-          chmod +x build.sh
-          ./build.sh release
-          echo "Build complete. Binary:"
-          ls -lh .build/release/ScreenShare
-
-      - name: Upload macOS helper artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-screenshare-helper
-          path: native/macos/ScreenShare/.build/release/ScreenShare
-          retention-days: 1
-
-  # Build a second macOS helper for Intel (x86_64) on the macos-13 runner.
-  # The arm64 binary built above is used in both macOS release targets because
-  # Rosetta 2 runs arm64 binaries on Intel without changes. A native x86_64
-  # build is produced separately for correctness.
-  build-macos-helper-x86:
-    name: Build macOS ScreenShare helper (x86_64)
-    runs-on: macos-13
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build macOS ScreenShare helper (x86_64)
-        run: |
-          cd native/macos/ScreenShare
-          chmod +x build.sh
-          ARCH=x86_64 ./build.sh release
-          ls -lh .build/release/ScreenShare
-
-      - name: Upload macOS x86_64 helper artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-screenshare-helper-x86_64
-          path: native/macos/ScreenShare/.build/release/ScreenShare
-          retention-days: 1
-
-  build-windows-helper:
-    name: Build Windows ScreenShare helper
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Build Windows ScreenShare helper
-        shell: pwsh
-        run: |
-          cd native/windows/ScreenShare
-          dotnet publish -c Release -r win-x64 --self-contained true -o publish
-          Write-Host "Build complete. Binary:"
-          Get-ChildItem publish/ScreenShare.exe | Select-Object Name, Length
-
-      - name: Upload Windows helper artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-screenshare-helper
-          path: native/windows/ScreenShare/publish/ScreenShare.exe
-          retention-days: 1
-
-  # ---------------------------------------------------------------------------
-  # Build OSA — runs on each target platform/arch via matrix.
-  # Downloads native helper artifacts into priv/ before Burrito runs.
-  # ---------------------------------------------------------------------------
-  build:
-    name: Build (${{ matrix.os }}/${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    needs: [build-macos-helper, build-macos-helper-x86, build-windows-helper]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macOS ARM (Apple Silicon)
-          - os:              macos
-            arch:            arm64
-            runner:          macos-14          # GitHub's M1 runner
-            asset:           osa-macos-arm64
-            ext:             tar.gz
-            burrito_target:  macos_arm64
-            helper_artifact: macos-screenshare-helper
-
-          # macOS x86_64 (Intel)
-          - os:              macos
-            arch:            x86_64
-            runner:          macos-13          # Intel runner
-            asset:           osa-macos-x86_64
-            ext:             tar.gz
-            burrito_target:  macos_x86_64
-            helper_artifact: macos-screenshare-helper-x86_64
-
-          # Linux x86_64
-          - os:              linux
-            arch:            x86_64
-            runner:          ubuntu-22.04
-            asset:           osa-linux-x86_64
-            ext:             tar.gz
-            burrito_target:  linux_x86_64
-            helper_artifact: ''   # no native helper on Linux (x11vnc path)
-
-          # Linux ARM64
-          - os:              linux
-            arch:            arm64
-            runner:          ubuntu-22.04-arm  # GitHub ARM runner (requires billing)
-            asset:           osa-linux-arm64
-            ext:             tar.gz
-            burrito_target:  linux_arm64
-            helper_artifact: ''   # no native helper on Linux
-
-          # Windows x86_64
-          - os:              windows
-            arch:            x86_64
-            runner:          windows-2022
-            asset:           osa-windows-x86_64
-            ext:             zip
-            burrito_target:  windows_x86_64
-            helper_artifact: windows-screenshare-helper
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ---- Download native helper for this platform ----
-
-      - name: Download macOS ScreenShare helper
-        if: matrix.helper_artifact != '' && matrix.os == 'macos'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ matrix.helper_artifact }}
-          path: priv/macos/
-
-      - name: Mark macOS helper executable
-        if: matrix.os == 'macos'
-        run: |
-          if [ -f priv/macos/ScreenShare ]; then
-            chmod +x priv/macos/ScreenShare
-            echo "macOS helper:"
-            ls -lh priv/macos/ScreenShare
-          fi
-
-      - name: Download Windows ScreenShare helper
-        if: matrix.helper_artifact != '' && matrix.os == 'windows'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ matrix.helper_artifact }}
-          path: priv/windows/
-
-      - name: Verify Windows helper (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          if (Test-Path priv/windows/ScreenShare.exe) {
-            Write-Host "Windows helper:"
-            Get-ChildItem priv/windows/ScreenShare.exe | Select-Object Name, Length
-          }
-
-      # ---- Toolchain setup ----
+      - uses: actions/checkout@v4
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
         with:
-          otp-version: '27.x'
-          elixir-version: '1.18.x'
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
 
-      - name: Set up Rust (for Burrito native compilation)
-        uses: dtolnay/rust-toolchain@stable
-
-      # Linux ARM builds may need cross-compilation deps
-      - name: Install Linux build dependencies
-        if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential pkg-config \
-            libssl-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libasound2-dev
-
-      # ---- Build ----
-
-      - name: Fetch Elixir dependencies
-        run: mix deps.get
-        env:
-          MIX_ENV: prod
-
-      - name: Compile (prod)
-        run: mix compile
-        env:
-          MIX_ENV: prod
-
-      - name: Build Burrito binary
-        run: mix release
-        env:
-          MIX_ENV: prod
-          BURRITO_TARGET: ${{ matrix.burrito_target }}
-
-      # ---- Package ----
-
-      # Burrito places the built binary under burrito_out/<target>/osa
-      # Adjust the glob below if your Burrito config uses a different output path.
-
-      - name: Locate built binary (Unix)
-        if: matrix.os != 'windows'
-        id: find_bin_unix
-        shell: bash
-        run: |
-          BIN=$(find burrito_out -type f -name "osa" | head -1)
-          if [ -z "$BIN" ]; then
-            echo "Binary not found in burrito_out/. Contents:"
-            find burrito_out || true
-            exit 1
-          fi
-          echo "bin_path=$BIN" >> "$GITHUB_OUTPUT"
-
-      - name: Locate built binary (Windows)
-        if: matrix.os == 'windows'
-        id: find_bin_win
-        shell: pwsh
-        run: |
-          $bin = Get-ChildItem -Path burrito_out -Recurse -Filter 'osa.exe' | Select-Object -First 1
-          if (-not $bin) {
-            Write-Error "Binary not found in burrito_out/"
-            Get-ChildItem burrito_out -Recurse | Select-Object FullName
-            exit 1
-          }
-          "bin_path=$($bin.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      # Package as .tar.gz (Unix) or .zip (Windows)
-
-      - name: Package as tar.gz (Unix)
-        if: matrix.os != 'windows'
-        shell: bash
-        run: |
-          BIN="${{ steps.find_bin_unix.outputs.bin_path }}"
-          ASSET="${{ matrix.asset }}.tar.gz"
-          cp "$BIN" osa
-          tar -czf "$ASSET" osa
-          rm -f osa
-          echo "ASSET_FILE=$ASSET" >> "$GITHUB_ENV"
-
-      - name: Package as zip (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $bin = "${{ steps.find_bin_win.outputs.bin_path }}"
-          $asset = "${{ matrix.asset }}.zip"
-          Copy-Item $bin osa.exe
-          Compress-Archive -Path osa.exe -DestinationPath $asset -Force
-          Remove-Item osa.exe
-          "ASSET_FILE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      # ---- SHA256 checksum ----
-
-      - name: Generate SHA256 checksum (Unix)
-        if: matrix.os != 'windows'
-        shell: bash
-        run: |
-          ASSET="${{ matrix.asset }}.${{ matrix.ext }}"
-          # macOS ships shasum; Linux ships sha256sum — handle both
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$ASSET" > "${ASSET}.sha256"
-          else
-            shasum -a 256 "$ASSET" > "${ASSET}.sha256"
-          fi
-          echo "--- Checksum ---"
-          cat "${ASSET}.sha256"
-
-      - name: Generate SHA256 checksum (Windows)
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          $asset = "${{ matrix.asset }}.${{ matrix.ext }}"
-          $hash  = (Get-FileHash -Path $asset -Algorithm SHA256).Hash.ToLower()
-          # Match Unix shasum output format: "<hash>  <filename>"
-          "$hash  $asset" | Out-File -FilePath "${asset}.sha256" -Encoding ascii -NoNewline
-          Write-Host "--- Checksum ---"
-          Get-Content "${asset}.sha256"
-
-      # ---- Upload artifacts for the release job ----
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+      - name: Cache deps
+        uses: actions/cache@v4
         with:
-          name: ${{ matrix.asset }}
           path: |
-            ${{ matrix.asset }}.${{ matrix.ext }}
-            ${{ matrix.asset }}.${{ matrix.ext }}.sha256
-          retention-days: 1
+            deps
+            _build
+          key: macos-arm64-${{ hashFiles('mix.lock') }}
+          restore-keys: macos-arm64-
 
-  # ---------------------------------------------------------------------------
-  # Release — collects all artifacts and creates the GitHub Release
-  # ---------------------------------------------------------------------------
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+      - name: Install deps
+        run: mix deps.get --only prod
 
-    steps:
-      - name: Checkout (for release notes from CHANGELOG)
-        uses: actions/checkout@v4
+      - name: Build Burrito binary (macos_arm64)
+        run: mix release burrito --target macos_arm64
+        env:
+          BURRITO_TARGET: macos_arm64
+
+      - name: Rename binary
+        run: mv burrito_out/macos_arm64 burrito_out/osa-darwin-arm64
+
+      - uses: actions/upload-artifact@v4
         with:
-          fetch-depth: 0
+          name: osa-darwin-arm64
+          path: burrito_out/osa-darwin-arm64
 
-      - name: Download all build artifacts
+  # ── Linux amd64 ──────────────────────────────────────────────────────
+  build-linux-amd64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/OTP + Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: linux-amd64-${{ hashFiles('mix.lock') }}
+          restore-keys: linux-amd64-
+
+      - name: Install deps
+        run: mix deps.get --only prod
+
+      - name: Build Burrito binary (linux_amd64)
+        run: mix release burrito --target linux_amd64
+        env:
+          BURRITO_TARGET: linux_amd64
+
+      - name: Rename binary
+        run: mv burrito_out/linux_amd64 burrito_out/osa-linux-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osa-linux-amd64
+          path: burrito_out/osa-linux-amd64
+
+  # ── Linux arm64 ──────────────────────────────────────────────────────
+  build-linux-arm64:
+    runs-on: ubuntu-22.04-arm  # GitHub-hosted ARM runner (public beta)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/OTP + Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: linux-arm64-${{ hashFiles('mix.lock') }}
+          restore-keys: linux-arm64-
+
+      - name: Install deps
+        run: mix deps.get --only prod
+
+      - name: Build Burrito binary (linux_arm64)
+        run: mix release burrito --target linux_arm64
+        env:
+          BURRITO_TARGET: linux_arm64
+
+      - name: Rename binary
+        run: mv burrito_out/linux_arm64 burrito_out/osa-linux-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osa-linux-arm64
+          path: burrito_out/osa-linux-arm64
+
+  # ── Windows amd64 ────────────────────────────────────────────────────
+  # Burrito on Windows requires:
+  #   - 7-zip (for self-extraction bootstrap) — pre-installed on windows-2022
+  #   - Zig toolchain (Burrito downloads it automatically via Zig.get_zig/0)
+  #   - No vcredist or MSVC required — ERTS ships its own DLLs
+  build-windows-amd64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/OTP + Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: windows-amd64-${{ hashFiles('mix.lock') }}
+          restore-keys: windows-amd64-
+
+      - name: Install deps
+        shell: bash
+        run: mix deps.get --only prod
+
+      # Burrito auto-fetches Zig during the wrap step; pre-warming avoids
+      # network timeouts inside the release task.
+      - name: Warm Zig cache
+        shell: bash
+        run: mix burrito.get_zig || true
+
+      - name: Build Burrito binary (windows_amd64)
+        shell: bash
+        run: mix release burrito --target windows_amd64
+        env:
+          BURRITO_TARGET: windows_amd64
+
+      - name: Rename binary
+        shell: bash
+        run: mv burrito_out/windows_amd64.exe burrito_out/osa-windows-amd64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: osa-windows-amd64
+          path: burrito_out/osa-windows-amd64.exe
+
+  # ── Publish GitHub Release ────────────────────────────────────────────
+  publish:
+    needs:
+      - build-macos-arm64
+      - build-linux-amd64
+      - build-linux-arm64
+      - build-windows-amd64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write  # required to create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binaries
         uses: actions/download-artifact@v4
         with:
-          path: dist/
-          # Merge all per-platform artifacts into dist/
-          merge-multiple: true
+          path: release-assets
 
-      - name: List release assets
-        run: ls -lh dist/
+      - name: Make Linux/macOS binaries executable
+        run: |
+          chmod +x release-assets/osa-darwin-arm64/osa-darwin-arm64
+          chmod +x release-assets/osa-linux-amd64/osa-linux-amd64
+          chmod +x release-assets/osa-linux-arm64/osa-linux-arm64
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          name: OSA ${{ github.ref_name }}
-          # Include assets: tarballs, zips, and their .sha256 files
-          files: |
-            dist/osa-macos-arm64.tar.gz
-            dist/osa-macos-arm64.tar.gz.sha256
-            dist/osa-macos-x86_64.tar.gz
-            dist/osa-macos-x86_64.tar.gz.sha256
-            dist/osa-linux-x86_64.tar.gz
-            dist/osa-linux-x86_64.tar.gz.sha256
-            dist/osa-linux-arm64.tar.gz
-            dist/osa-linux-arm64.tar.gz.sha256
-            dist/osa-windows-x86_64.zip
-            dist/osa-windows-x86_64.zip.sha256
-          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: "OSA ${{ github.ref_name }}"
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+          files: |
+            release-assets/osa-darwin-arm64/osa-darwin-arm64
+            release-assets/osa-linux-amd64/osa-linux-amd64
+            release-assets/osa-linux-arm64/osa-linux-arm64
+            release-assets/osa-windows-amd64/osa-windows-amd64.exe

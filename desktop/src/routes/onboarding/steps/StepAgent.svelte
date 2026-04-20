@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { Provider, DetectionResult } from '$lib/onboarding/types';
+  import type { Provider, DetectionResult, AuthMethod } from '$lib/onboarding/types';
   import { PROVIDERS } from '$lib/onboarding/types';
   import { validateApiKey } from '$lib/onboarding/validation';
   import { openUrl } from '@tauri-apps/plugin-opener';
+  import { BASE_URL } from '$lib/api/client';
 
   interface Props {
     provider: Provider | null;
@@ -10,8 +11,10 @@
     detecting: boolean;
     apiKey: string;
     agentName: string;
+    authMethod: AuthMethod;
+    oauthConnected: boolean;
     onSelect: (p: Provider) => void;
-    onNext: (opts: { provider: Provider; apiKey: string; agentName: string }) => void;
+    onNext: (opts: { provider: Provider; apiKey: string; agentName: string; authMethod: AuthMethod }) => void;
     onBack: () => void;
   }
 
@@ -21,6 +24,8 @@
     detecting,
     apiKey = $bindable(),
     agentName = $bindable(),
+    authMethod = $bindable('api_key'),
+    oauthConnected = $bindable(false),
     onSelect,
     onNext,
     onBack,
@@ -31,13 +36,55 @@
   let validationError = $state('');
   let canBypass = $state(false);
   let slowTimer: ReturnType<typeof setTimeout> | null = null;
+  let oauthLoading = $state(false);
+  let oauthError = $state('');
 
   let meta = $derived(PROVIDERS.find((p) => p.id === provider) ?? null);
-  let needsKey = $derived(meta?.requiresKey ?? false);
+  let supportsOAuth = $derived(meta?.supportsOAuth ?? false);
+  let needsKey = $derived(authMethod === 'api_key' && (meta?.requiresKey ?? false));
   let canSubmit = $derived(
     provider !== null &&
-    (!needsKey || (apiKey.trim().length > 8 && !validating))
+    (authMethod === 'oauth' ? oauthConnected : (!needsKey || (apiKey.trim().length > 8 && !validating)))
   );
+
+  async function startOAuth() {
+    oauthLoading = true;
+    oauthError = '';
+    try {
+      const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { authorize_url: string; state: string };
+
+      // Open browser for OAuth consent
+      await openUrl(data.authorize_url);
+
+      // Poll for completion
+      pollOAuthStatus();
+    } catch (e) {
+      oauthError = e instanceof Error ? e.message : 'Failed to start OAuth';
+      oauthLoading = false;
+    }
+  }
+
+  async function pollOAuthStatus() {
+    const maxAttempts = 60; // 2 minutes
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+        if (res.ok) {
+          const data = await res.json() as { connected: boolean; profile: { email?: string; name?: string } | null };
+          if (data.connected) {
+            oauthConnected = true;
+            oauthLoading = false;
+            return;
+          }
+        }
+      } catch { /* keep polling */ }
+    }
+    oauthError = 'OAuth timed out. Please try again.';
+    oauthLoading = false;
+  }
 
   function isDetected(id: Provider): boolean {
     return (id === 'ollama' && detectedProviders.ollama) ||
@@ -82,14 +129,15 @@
 
     onNext({
       provider,
-      apiKey: apiKey.trim(),
+      apiKey: authMethod === 'oauth' ? '' : apiKey.trim(),
       agentName: agentName.trim() || 'OSA Agent',
+      authMethod,
     });
   }
 
   function handleBypass() {
     if (!provider) return;
-    onNext({ provider, apiKey: apiKey.trim(), agentName: agentName.trim() || 'OSA Agent' });
+    onNext({ provider, apiKey: apiKey.trim(), agentName: agentName.trim() || 'OSA Agent', authMethod });
   }
 
   async function openDocs() {
@@ -157,6 +205,65 @@
       </button>
     {/each}
   </div>
+
+  <!-- Auth method toggle (Anthropic only) -->
+  {#if supportsOAuth && provider === 'anthropic'}
+    <div class="sa-auth-toggle">
+      <button
+        class="sa-auth-btn"
+        class:sa-auth-btn--active={authMethod === 'oauth'}
+        onclick={() => authMethod = 'oauth'}
+        aria-pressed={authMethod === 'oauth'}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+          <polyline points="10 17 15 12 10 7"/>
+          <line x1="15" y1="12" x2="3" y2="12"/>
+        </svg>
+        Sign in with Anthropic
+      </button>
+      <button
+        class="sa-auth-btn"
+        class:sa-auth-btn--active={authMethod === 'api_key'}
+        onclick={() => authMethod = 'api_key'}
+        aria-pressed={authMethod === 'api_key'}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+        </svg>
+        Use API Key
+      </button>
+    </div>
+  {/if}
+
+  <!-- OAuth flow -->
+  {#if authMethod === 'oauth' && supportsOAuth}
+    <div class="sa-oauth-section">
+      {#if oauthConnected}
+        <div class="sa-oauth-connected">
+          <span class="sa-oauth-check" aria-hidden="true">✓</span>
+          <span>Connected to Anthropic</span>
+        </div>
+      {:else}
+        <button
+          class="sa-oauth-btn"
+          onclick={startOAuth}
+          disabled={oauthLoading}
+        >
+          {#if oauthLoading}
+            <span class="sa-spinner" aria-hidden="true"></span>
+            Waiting for authorization...
+          {:else}
+            Authorize with Anthropic
+          {/if}
+        </button>
+        <p class="sa-hint">Opens your browser to sign in. Your account tokens are used for API access.</p>
+        {#if oauthError}
+          <p class="sa-error" role="alert">{oauthError}</p>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   <!-- API key (cloud providers only) -->
   {#if needsKey}
@@ -565,5 +672,92 @@
       opacity: 0.5;
       border-top-color: transparent;
     }
+  }
+
+  /* Auth method toggle */
+  .sa-auth-toggle {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+  }
+
+  .sa-auth-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .sa-auth-btn:hover {
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .sa-auth-btn--active {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  /* OAuth section */
+  .sa-oauth-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .sa-oauth-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: rgba(124, 58, 237, 0.15);
+    border: 1px solid rgba(124, 58, 237, 0.3);
+    border-radius: 10px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .sa-oauth-btn:hover:not(:disabled) {
+    background: rgba(124, 58, 237, 0.25);
+    border-color: rgba(124, 58, 237, 0.4);
+  }
+
+  .sa-oauth-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .sa-oauth-connected {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    border-radius: 10px;
+    color: rgba(74, 222, 128, 0.9);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .sa-oauth-check {
+    font-size: 16px;
   }
 </style>

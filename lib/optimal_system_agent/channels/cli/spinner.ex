@@ -15,12 +15,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @rotate_interval 4_000
 
   @status_messages [
-    "Thinking…",
-    "Reasoning…",
-    "Processing…",
-    "Analyzing…",
-    "Composing…",
-    "Synthesizing…"
+    "Thinking…", "Reasoning…", "Processing…", "Analyzing…", "Composing…",
+    "Synthesizing…", "Computing…", "Crafting…", "Architecting…", "Generating…",
+    "Deliberating…", "Pondering…", "Contemplating…", "Orchestrating…", "Forging…",
+    "Brewing…", "Crystallizing…", "Incubating…", "Manifesting…", "Percolating…",
+    "Constructing…", "Weaving…", "Calibrating…", "Resolving…", "Assembling…",
+    "Iterating…", "Formulating…", "Distilling…", "Channeling…", "Converging…"
   ]
 
   @dim IO.ANSI.faint()
@@ -31,6 +31,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     :started_at,
     :parent,
     phase: :thinking,
+    mode: :thinking,
     active_tool: nil,
     tool_count: 0,
     total_tokens: 0,
@@ -106,9 +107,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         state
       end
 
-    render_frame(frame, state)
+    # Skip spinner animation during streaming — tokens print inline
+    if state.mode != :streaming, do: render_frame(frame, state)
 
     receive do
+      {:streaming_mode, :start} ->
+        clear_line()
+        safe_io_write("  ")
+        spinner_loop(rest, %{state | mode: :streaming})
+
+      {:streaming_mode, :stop} ->
+        spinner_loop(rest, %{state | mode: :thinking})
+
       {:stop, caller} ->
         clear_line()
         elapsed_ms = System.monotonic_time(:millisecond) - state.started_at
@@ -139,7 +149,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
         clear_line()
         hint = tool_hint(state.active_tool)
         duration = format_duration(ms)
-        safe_io_puts("#{@dim}  ├─ #{name}#{hint} #{@cyan}(#{duration})#{@reset}")
+        safe_io_puts("#{@cyan}  ⏺ #{name}#{hint} #{@dim}(#{duration})#{@reset}")
 
         spinner_loop(rest, %{
           state
@@ -184,11 +194,25 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
           if args != "", do: "#{name} — #{truncate(args, 50)}", else: "#{name}…"
 
         :thinking ->
-          Enum.at(@status_messages, state.status_index)
+          # Show active task's activeForm if available
+          active_task_form = get_active_task_form()
+          active_task_form || Enum.at(@status_messages, state.status_index)
       end
 
     clear_line()
     safe_io_write("#{@dim}  #{frame} #{status} (#{elapsed}#{tools_str}#{tokens_str})#{@reset}")
+  end
+
+  # Get the activeForm text of the currently in_progress task (if any)
+  defp get_active_task_form do
+    try do
+      case :ets.lookup(:cli_signal_cache, :active_task_form) do
+        [{:active_task_form, form}] when is_binary(form) and form != "" -> form <> "…"
+        _ -> nil
+      end
+    rescue
+      _ -> nil
+    end
   end
 
   # --- Formatting helpers ---

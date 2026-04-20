@@ -27,8 +27,8 @@ defmodule OptimalSystemAgent.Store.Repo.Migrations.CreateDecisionGraph do
 
     create table(:decision_edges, primary_key: false) do
       add :id, :string, primary_key: true, null: false
-      add :source_id, :string, null: false, references(:decision_nodes, type: :string, on_delete: :delete_all)
-      add :target_id, :string, null: false, references(:decision_nodes, type: :string, on_delete: :delete_all)
+      add :source_id, references(:decision_nodes, type: :string, on_delete: :delete_all), null: false
+      add :target_id, references(:decision_nodes, type: :string, on_delete: :delete_all), null: false
       add :type, :string, null: false
       add :rationale, :text
       add :weight, :float, null: false, default: 1.0

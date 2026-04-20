@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
   import { chatStore } from '$lib/stores/chat.svelte';
+  import { BASE_URL, API_PREFIX } from '$lib/api/client';
   import { sessionsStore } from '$lib/stores/sessions.svelte';
   import { modelsStore } from '$lib/stores/models.svelte';
   import { restartBackend } from '$lib/utils/backend';
@@ -11,6 +12,8 @@
   import type { SlashCommandName } from './ChatInput.svelte';
   import type { ToolCallRef } from '$lib/api/types';
   import type { Message } from '$lib/api/types';
+  import KeyboardShortcuts from '../layout/KeyboardShortcuts.svelte';
+  import SearchPanel from './SearchPanel.svelte';
 
   interface Props {
     /** Session ID — passed from the route page after it resolves/creates one. */
@@ -140,12 +143,53 @@
     }))
   );
 
+  // ── Keyboard shortcuts overlay ──────────────────────────────────────────────
+  let showShortcuts = $state(false);
+  let showSearch = $state(false);
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.key === '?' && document.activeElement?.tagName !== 'TEXTAREA' && document.activeElement?.tagName !== 'INPUT') {
+      e.preventDefault();
+      showShortcuts = !showShortcuts;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      e.preventDefault();
+      showSearch = !showSearch;
+    }
+  }
+
+  function handleSearchSelectSession(sessionId: string) {
+    showSearch = false;
+    chatStore.loadSession(sessionId);
+  }
+
   // ── Voice / orb ────────────────────────────────────────────────────────────
   let isVoiceListening = $state(false);
   const orbActive = $derived(chatStore.isStreaming || isVoiceListening);
 
   // ── Send ───────────────────────────────────────────────────────────────────
   function handleSend(text: string) {
+    // Intercept slash commands with arguments (e.g. /login anthropic)
+    if (text.startsWith('/')) {
+      const match = text.match(/^\/(\w+)\s*(.*)?$/);
+      if (match) {
+        const [, cmd, args] = match;
+        const arg = (args ?? '').trim();
+
+        // Handle /login <provider> specifically
+        if (cmd === 'login' && arg) {
+          void startProviderOAuth(arg);
+          return;
+        }
+
+        // Handle /logout <provider>
+        if (cmd === 'logout' && arg) {
+          void handleCommand('logout');
+          return;
+        }
+      }
+    }
+
     if (attachedFiles.length > 0) {
       const fileContext = attachedFiles.map(f => {
         if (f.category === 'text') {
@@ -163,6 +207,40 @@
     chatStore.sendMessage(text);
   }
 
+  async function startProviderOAuth(providerSlug: string): Promise<void> {
+    const supported: Record<string, string> = { anthropic: 'Anthropic' };
+    const name = supported[providerSlug.toLowerCase()];
+
+    if (!name) {
+      const available = Object.entries(supported).map(([k, v]) => `\`/login ${k}\` — ${v}`).join('\n');
+      injectSystemMessage(`Unknown provider: \`${providerSlug}\`\n\nAvailable:\n${available}`);
+      return;
+    }
+
+    injectSystemMessage(`Opening ${name} sign-in in your browser...`);
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      const res = await fetch(`${BASE_URL}/onboarding/oauth/start`);
+      const data = await res.json() as { authorize_url: string };
+      await openUrl(data.authorize_url);
+
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const status = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+          const d = await status.json() as { connected: boolean };
+          if (d.connected) {
+            injectSystemMessage(`**Connected to ${name}** ✓`);
+            return;
+          }
+        } catch { /* keep polling */ }
+      }
+      injectSystemMessage(`OAuth timed out. Try \`/login ${providerSlug}\` again.`);
+    } catch (e) {
+      injectSystemMessage(`Login failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    }
+  }
+
   // ── Slash commands ─────────────────────────────────────────────────────────
   function injectSystemMessage(content: string): void {
     const msg: Message = {
@@ -176,7 +254,8 @@
 
   async function handleCommand(cmd: SlashCommandName): Promise<void> {
     switch (cmd) {
-      case 'clear': {
+      case 'clear':
+      case 'new': {
         if (chatStore.isStreaming) chatStore.cancelGeneration();
         const newSession = await chatStore.createSession();
         chatStore.currentSession = newSession;
@@ -186,20 +265,22 @@
       }
 
       case 'help': {
+        const cmds = [
+          '/clear', '/new', '/model', '/sessions', '/memory', '/login', '/logout',
+          '/status', '/cost', '/context', '/tools', '/skills', '/agents', '/tasks',
+          '/plan', '/compact', '/doctor', '/version', '/export', '/coordinator',
+          '/effort', '/fast',
+        ];
         injectSystemMessage(
-          '**Available slash commands**\n\n' +
-          '`/clear` — Clear chat and start a new session\n' +
-          '`/help` — Show this help message\n' +
-          '`/model` — Show current model info\n' +
-          '`/sessions` — List recent sessions\n' +
-          '`/memory` — Save current context to memory'
+          '**Available commands**\n\n' +
+          cmds.map(c => `\`${c}\``).join(' · ')
         );
         break;
       }
 
       case 'model': {
         try {
-          const res = await fetch('http://127.0.0.1:9089/health');
+          const res = await fetch(`${BASE_URL}/health`);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json() as Record<string, unknown>;
           const active = modelsStore.current;
@@ -208,25 +289,17 @@
           const contextWindow = active?.context_window
             ? `${(active.context_window / 1000).toFixed(0)}K context`
             : '';
-          const status = (data.status as string | undefined) ?? 'ok';
           injectSystemMessage(
-            '**Current model**\n\n' +
-            `Model: \`${modelName}\`\n` +
-            `Provider: ${provider}\n` +
-            (contextWindow ? `Context: ${contextWindow}\n` : '') +
-            `Backend status: ${status}`
+            `**Current model**\n\nModel: \`${modelName}\`\nProvider: ${provider}` +
+            (contextWindow ? `\nContext: ${contextWindow}` : '') +
+            `\nStatus: ${(data.status as string) ?? 'ok'}`
           );
         } catch {
           const active = modelsStore.current;
-          if (active) {
-            injectSystemMessage(
-              '**Current model** (backend unreachable)\n\n' +
-              `Model: \`${active.name}\`\n` +
-              `Provider: ${active.provider}`
-            );
-          } else {
-            injectSystemMessage('Could not reach backend to fetch model info. Is OSA running on port 9089?');
-          }
+          injectSystemMessage(active
+            ? `**Current model** (backend unreachable)\n\nModel: \`${active.name}\`\nProvider: ${active.provider}`
+            : 'Could not reach backend. Is OSA running on port 9089?'
+          );
         }
         break;
       }
@@ -237,31 +310,114 @@
         if (sessions.length === 0) {
           injectSystemMessage('No sessions found.');
         } else {
-          const lines = sessions
-            .slice(0, 10)
-            .map((s, i) => {
-              const label = s.title ?? `Session ${i + 1}`;
-              const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'unknown';
-              const msgs = s.message_count ?? 0;
-              const active = s.id === chatStore.currentSession?.id ? ' (current)' : '';
-              return `${i + 1}. **${label}**${active} — ${msgs} messages — ${date}`;
-            })
-            .join('\n');
+          const lines = sessions.slice(0, 10).map((s, i) => {
+            const label = s.title ?? `Session ${i + 1}`;
+            const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : 'unknown';
+            const active = s.id === chatStore.currentSession?.id ? ' *(current)*' : '';
+            return `${i + 1}. **${label}**${active} — ${s.message_count ?? 0} messages — ${date}`;
+          }).join('\n');
           injectSystemMessage(`**Recent sessions** (${sessions.length} total)\n\n${lines}`);
         }
         sessionsStore.open();
         break;
       }
 
+      case 'login': {
+        // Show available OAuth providers and their status
+        const OAUTH_PROVIDERS: { slug: string; name: string }[] = [
+          { slug: 'anthropic', name: 'Anthropic' },
+          // Future: { slug: 'openai', name: 'OpenAI' },
+        ];
+
+        // Check status
+        let connected = false;
+        try {
+          const res = await fetch(`${BASE_URL}/onboarding/oauth/status`);
+          const data = await res.json() as { connected: boolean };
+          connected = data.connected;
+        } catch { /* offline */ }
+
+        if (connected) {
+          injectSystemMessage('**Already connected** ✓\n\nUse `/logout` to disconnect.');
+          break;
+        }
+
+        // Show available providers
+        const lines = OAUTH_PROVIDERS.map(p =>
+          `\`/login ${p.slug}\` — Sign in with ${p.name}`
+        ).join('\n');
+        injectSystemMessage(`**Sign in with a provider**\n\n${lines}\n\nOr set an API key in Settings.`);
+        break;
+      }
+
+      case 'logout': {
+        try {
+          await fetch(`${BASE_URL}/onboarding/oauth/status`, { method: 'DELETE' });
+          injectSystemMessage('Disconnected from OAuth provider.');
+        } catch {
+          injectSystemMessage('Failed to disconnect. Backend may be offline.');
+        }
+        break;
+      }
+
       case 'memory': {
-        injectSystemMessage(
-          'Memory save is not yet connected to a backend endpoint. ' +
-          'Use `/mem-save` in a Claude Code session to persist patterns manually.'
-        );
+        await fetchAndShowBackendCommand('memory');
+        break;
+      }
+
+      // These commands fetch data from the backend and show results
+      case 'status':
+      case 'cost':
+      case 'context':
+      case 'tools':
+      case 'skills':
+      case 'agents':
+      case 'tasks':
+      case 'doctor':
+      case 'version':
+      case 'export':
+      case 'compact':
+      case 'plan':
+      case 'coordinator':
+      case 'effort':
+      case 'fast': {
+        await fetchAndShowBackendCommand(cmd);
         break;
       }
     }
   }
+
+  /** Execute a slash command on the backend and display the result as a system message. */
+  async function fetchAndShowBackendCommand(cmd: string): Promise<void> {
+    try {
+      const res = await fetch(`${BASE_URL}${API_PREFIX}/commands/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, session_id: chatStore.currentSession?.id }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { output?: string; result?: string; error?: string };
+        injectSystemMessage(data.output || data.result || data.error || `/${cmd} executed.`);
+      } else {
+        injectSystemMessage(`/${cmd} failed (HTTP ${res.status})`);
+      }
+    } catch {
+      injectSystemMessage(`/${cmd} — backend unreachable`);
+    }
+  }
+
+  // ── Command palette integration ─────────────────────────────────────────────
+  function handlePaletteCommand(e: Event) {
+    const detail = (e as CustomEvent<{ command: string }>).detail;
+    if (!detail?.command) return;
+    // All commands route through handleCommand — never send as chat text
+    void handleCommand(detail.command as SlashCommandName);
+  }
+
+  onMount(() => {
+    window.addEventListener('osa:insert-command', handlePaletteCommand);
+    return () => window.removeEventListener('osa:insert-command', handlePaletteCommand);
+  });
 
   onDestroy(() => {
     if (chatStore.isStreaming) {
@@ -269,6 +425,13 @@
     }
   });
 </script>
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+{#if showShortcuts}
+  <KeyboardShortcuts onClose={() => showShortcuts = false} />
+{/if}
 
 <div
   class="chat-root"
@@ -307,6 +470,14 @@
         Restart
       </button>
     </div>
+  {/if}
+
+  <!-- Search panel -->
+  {#if showSearch}
+    <SearchPanel
+      onClose={() => showSearch = false}
+      onSelectSession={handleSearchSelectSession}
+    />
   {/if}
 
   <!-- Header: history toggle + model selector -->
@@ -363,6 +534,8 @@
       onCommand={handleCommand}
       bind:isListening={isVoiceListening}
       onFilesAttach={processFiles}
+      isAgentThinking={chatStore.isStreaming}
+      currentModel={modelsStore.current?.name}
     />
   </div>
 </div>

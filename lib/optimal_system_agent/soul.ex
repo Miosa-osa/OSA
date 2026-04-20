@@ -209,7 +209,8 @@ defmodule OptimalSystemAgent.Soul do
     alias OptimalSystemAgent.Tools.Registry, as: Tools
 
     skills = try do Tools.list_docs_direct() rescue _ -> [] catch :exit, _ -> [] end
-    tools = try do Tools.list_tools_direct() rescue _ -> [] catch :exit, _ -> [] end
+    # Use list_active to exclude deferred tools from the system prompt
+    tools = try do Tools.list_active() rescue _ -> Tools.list_tools_direct() catch :exit, _ -> [] end
 
     case skills do
       [] ->
@@ -232,7 +233,21 @@ defmodule OptimalSystemAgent.Soul do
             end
           end)
 
-        "## Available Tools\n#{Enum.join(docs, "\n")}"
+        deferred_note =
+          try do
+            all = Tools.list_tools_direct()
+            active = Tools.list_active()
+            deferred_count = length(all) - length(active)
+            if deferred_count > 0 do
+              "\n\n_#{deferred_count} additional specialized tools are available via the `tool_search` tool._"
+            else
+              ""
+            end
+          rescue
+            _ -> ""
+          end
+
+        "## Available Tools\n#{Enum.join(docs, "\n")}#{deferred_note}"
     end
   rescue
     _ -> nil

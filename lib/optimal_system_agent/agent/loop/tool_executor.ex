@@ -108,37 +108,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           Logger.error("[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})")
           "Blocked: security pipeline unavailable"
 
+        {:ok, %{arguments: modified_args} = _modified_payload} ->
+          # Hook modified the tool arguments — use the modified version
+          enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
+          execute_tool(tool_call.name, enriched_args)
+
+        {:inject_message, content} ->
+          # Hook wants to inject a system message instead of executing the tool.
+          # Store it for the next LLM call via process dict.
+          existing = Process.get(:osa_injected_messages, [])
+          Process.put(:osa_injected_messages, existing ++ [content])
+          # Still execute the tool
+          enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+          execute_tool(tool_call.name, enriched_args)
+
         _ ->
           # Inject session_id so tools like ask_user can register pending state
           enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-
-          case Tools.execute(tool_call.name, enriched_args) do
-            {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-              {:image, mt, b64, p}
-
-            {:ok, content} ->
-              content
-
-            {:error, reason} ->
-              case Tools.suggest_fallback_tool(tool_call.name) do
-                {:ok, alt_tool} ->
-                  Logger.info("[loop] Tool '#{tool_call.name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'")
-
-                  case Tools.execute(alt_tool, enriched_args) do
-                    {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-                      {:image, mt, b64, p}
-
-                    {:ok, alt_content} ->
-                      "[used #{alt_tool} as fallback for #{tool_call.name}]\n#{alt_content}"
-
-                    {:error, _alt_reason} ->
-                      "Error: #{reason}"
-                  end
-
-                :no_alternative ->
-                  "Error: #{reason}"
-              end
-          end
+          execute_tool(tool_call.name, enriched_args)
       end
     end
 
@@ -152,6 +139,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         other -> inspect(other)
       end
 
+    # Apply tool result budget — persist large results to disk
+    result_str = OptimalSystemAgent.Agent.Loop.ToolResultStorage.apply_budget(
+      result_str, tool_call.name, tool_call.id
+    )
+
     # Run post_tool_use hooks async (cost tracker, telemetry, learning)
     post_payload = %{
       tool_name: tool_call.name,
@@ -161,6 +153,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     }
 
     run_hooks_async(:post_tool_use, post_payload)
+
+    # Fire distinct failure hook if tool errored
+    tool_failed = String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+    if tool_failed do
+      run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
+    end
+
+    # Record telemetry
+    try do
+      OptimalSystemAgent.Telemetry.Metrics.record_tool(tool_call.name, tool_duration_ms, not tool_failed)
+    rescue _ -> :ok
+    catch :exit, _ -> :ok
+    end
 
     Bus.emit(:tool_call, %{
       name: tool_call.name,
@@ -176,15 +181,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     tool_success = !match?({:error, _}, tool_result)
     result_preview = String.slice(result_str, 0, 2000)
 
-    Bus.emit(:tool_result, %{
+    # Retrieve tool metadata (diff data, etc.) if the tool stored any
+    tool_metadata = Process.delete(:osa_tool_metadata) || %{}
+
+    tool_result_event = %{
       name: tool_call.name,
       result: result_preview,
       success: tool_success,
       session_id: state.session_id,
       agent: state.session_id
-    })
+    } |> Map.merge(tool_metadata)
+
+    Bus.emit(:tool_result, tool_result_event)
     Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :tool_result, name: tool_call.name, result: result_preview, success: tool_success, session_id: state.session_id}})
+      {:osa_event, Map.merge(%{type: :tool_result, name: tool_call.name, result: result_preview, success: tool_success, session_id: state.session_id}, tool_metadata)})
 
     # Build tool message — images get structured content blocks.
     # Both branches include `name: tool_call.name` so that on iteration 2+
@@ -338,6 +348,41 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :exit, reason ->
         Logger.warning("[loop] Hooks GenServer unreachable for async #{event} (#{inspect(reason)})")
         :ok
+    end
+  end
+
+  # Execute a tool with fallback support and metadata capture.
+  defp execute_tool(tool_name, enriched_args) do
+    case Tools.execute(tool_name, enriched_args) do
+      {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+        {:image, mt, b64, p}
+
+      {:ok, content, metadata} when is_map(metadata) ->
+        Process.put(:osa_tool_metadata, metadata)
+        content
+
+      {:ok, content} ->
+        content
+
+      {:error, reason} ->
+        case Tools.suggest_fallback_tool(tool_name) do
+          {:ok, alt_tool} ->
+            Logger.info("[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'")
+
+            case Tools.execute(alt_tool, enriched_args) do
+              {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+                {:image, mt, b64, p}
+
+              {:ok, alt_content} ->
+                "[used #{alt_tool} as fallback for #{tool_name}]\n#{alt_content}"
+
+              {:error, _alt_reason} ->
+                "Error: #{reason}"
+            end
+
+          :no_alternative ->
+            "Error: #{reason}"
+        end
     end
   end
 end
