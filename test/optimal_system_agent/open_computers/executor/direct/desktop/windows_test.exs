@@ -2,10 +2,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.WindowsTest d
   @moduledoc """
   Unit tests for `Desktop.Windows`.
 
-  Tests marked `@moduletag :windows_native` require the compiled ScreenShare.exe.
-  They are excluded on non-Windows runners via `mix test --exclude windows_native`.
+  Tests marked `@tag :windows_native` require the compiled
+  `osa-screen-capture-windows.exe` in `priv/helpers/` or
+  `%USERPROFILE%\\.osa\\helpers\\`. They are skipped on Linux/macOS CI —
+  add `--include windows_native` on Windows runners with the built binary present.
 
-  All other tests run on any platform.
+  All other tests run on any platform and test the missing-binary path.
   """
 
   use ExUnit.Case, async: true
@@ -14,105 +16,74 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.WindowsTest d
 
   @moduletag :open_computers
 
-  # ── available?/0 ─────────────────────────────────────────────────────────────
+  # ── struct ─────────────────────────────────────────────────────────────────
 
-  describe "available?/0" do
-    test "returns false when binary does not exist" do
-      System.put_env("OSA_WINDOWS_HELPER", "/nonexistent/ScreenShare.exe")
-
-      assert Windows.available?() == false
-
-      System.delete_env("OSA_WINDOWS_HELPER")
-    end
-
-    test "returns true when binary exists" do
-      tmp = System.tmp_dir!() |> Path.join("osa_test_screenshare_#{:erlang.unique_integer([:positive])}.exe")
-      File.write!(tmp, "fake binary")
-
-      System.put_env("OSA_WINDOWS_HELPER", tmp)
-
-      assert Windows.available?() == true
-
-      System.delete_env("OSA_WINDOWS_HELPER")
-      File.rm(tmp)
+  describe "Windows struct" do
+    test "can be constructed with expected fields" do
+      ref = struct(Windows, port: :port_ref, os_pid: 9999, vnc_port: 5900)
+      assert ref.os_pid == 9999
+      assert ref.vnc_port == 5900
     end
   end
 
-  # ── start/1 — binary missing ─────────────────────────────────────────────────
+  # ── spawn/0 — binary missing ───────────────────────────────────────────────
 
-  describe "start/1 when binary is missing" do
-    test "returns {:error, :helper_not_installed}" do
-      System.put_env("OSA_WINDOWS_HELPER", "/nonexistent/ScreenShare.exe")
+  describe "spawn/0 when helper binary is missing" do
+    test "returns {:error, {:missing_helper, _}} when neither path exists" do
+      # Only run if the binary is genuinely absent (Linux/macOS CI, or Windows without build).
+      priv_path =
+        Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-windows.exe")
 
-      assert {:error, :helper_not_installed} = Windows.start()
+      user_path =
+        case System.get_env("USERPROFILE") do
+          nil -> nil
+          profile -> Path.join([profile, ".osa", "helpers", "osa-screen-capture-windows.exe"])
+        end
 
-      System.delete_env("OSA_WINDOWS_HELPER")
-    end
+      binary_present =
+        File.exists?(priv_path) or (not is_nil(user_path) and File.exists?(user_path))
 
-    test "returns tagged error even with custom options" do
-      System.put_env("OSA_WINDOWS_HELPER", "/nonexistent/ScreenShare.exe")
-
-      assert {:error, :helper_not_installed} = Windows.start(port: 15_900, stub: true)
-
-      System.delete_env("OSA_WINDOWS_HELPER")
-    end
-  end
-
-  # ── helper_path/0 ─────────────────────────────────────────────────────────────
-
-  describe "helper_path/0" do
-    test "respects OSA_WINDOWS_HELPER env var" do
-      System.put_env("OSA_WINDOWS_HELPER", "C:\\custom\\ScreenShare.exe")
-      assert Windows.helper_path() == "C:\\custom\\ScreenShare.exe"
-      System.delete_env("OSA_WINDOWS_HELPER")
-    end
-
-    test "falls back to priv dir when env var is unset" do
-      System.delete_env("OSA_WINDOWS_HELPER")
-      path = Windows.helper_path()
-      assert String.contains?(path, Path.join(["windows", "ScreenShare.exe"]))
-    end
-  end
-
-  # ── stop/1 ────────────────────────────────────────────────────────────────────
-
-  describe "stop/1" do
-    test "accepts nil without crashing" do
-      assert :ok = Windows.stop(nil)
-    end
-  end
-
-  # ── real binary tests — Windows runners only ──────────────────────────────────
-
-  @moduletag :windows_native
-
-  describe "start/1 with real binary (windows_native)" do
-    @tag :windows_native
-    test "starts the helper in stub mode and TCP port becomes reachable" do
-      helper_bin =
-        [File.cwd!(), "native", "windows", "ScreenShare", "publish", "ScreenShare.exe"]
-        |> Path.join()
-
-      if not File.exists?(helper_bin) do
+      if binary_present do
+        # Binary present — can't test missing path in isolation
         :ok
       else
-        System.put_env("OSA_WINDOWS_HELPER", helper_bin)
+        result = Windows.spawn()
+        assert {:error, {:missing_helper, msg}} = result
+        assert is_binary(msg)
+        assert String.contains?(msg, "osa-screen-capture-windows.exe")
+      end
+    end
+  end
 
-        port = 15_902
-        assert {:ok, port_ref} = Windows.start(port: port, stub: true)
+  # ── real binary tests — Windows runners only ──────────────────────────────
 
-        Process.sleep(500)
+  describe "spawn/0 with real binary (windows_native)" do
+    @tag :windows_native
+    test "spawns helper, receives PORT= announcement, VNC port is reachable" do
+      priv_path =
+        Path.join(
+          :code.priv_dir(:optimal_system_agent),
+          "helpers/osa-screen-capture-windows.exe"
+        )
 
+      if not File.exists?(priv_path) do
+        IO.puts("Skipping windows_native test: binary not found at #{priv_path}")
+        :ok
+      else
+        assert {:ok, %Windows{os_pid: os_pid, vnc_port: vnc_port} = ref} = Windows.spawn()
+
+        assert is_integer(os_pid) and os_pid > 0
+        assert is_integer(vnc_port) and vnc_port > 0
+
+        # Verify RFB handshake
         assert {:ok, sock} =
-                 :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 2_000)
+                 :gen_tcp.connect(~c"127.0.0.1", vnc_port, [:binary, active: false], 2_000)
 
         assert {:ok, version} = :gen_tcp.recv(sock, 12, 2_000)
         assert version == "RFB 003.008\n"
 
         :gen_tcp.close(sock)
-        Windows.stop(port_ref)
-
-        System.delete_env("OSA_WINDOWS_HELPER")
+        Windows.kill(ref)
       end
     end
   end
