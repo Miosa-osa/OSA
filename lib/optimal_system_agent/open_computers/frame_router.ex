@@ -41,6 +41,8 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel, as: TunnelExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller, as: ClusterController
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -172,6 +174,33 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  # Backup frames — route to BackupExecutor
+  def handle_cast({:inbound, {:backup_snapshot_request, _} = frame}, state) do
+    dispatch_to_backup(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:backup_restore_request, _} = frame}, state) do
+    dispatch_to_backup(frame)
+    {:noreply, state}
+  end
+
+  # WireGuard mesh frames — route to WgMeshExecutor
+  def handle_cast({:inbound, {:wg_init_request, _} = frame}, state) do
+    dispatch_to_wg_mesh(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:wg_configure, _} = frame}, state) do
+    dispatch_to_wg_mesh(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:wg_teardown_request, _} = frame}, state) do
+    dispatch_to_wg_mesh(frame)
+    {:noreply, state}
+  end
+
   def handle_cast({:inbound, frame}, state) do
     Logger.debug("[FrameRouter] unhandled inbound frame: #{inspect(elem(frame, 0))}")
     {:noreply, state}
@@ -259,6 +288,30 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         GhaRunnerExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_backup(frame) do
+    case Process.whereis(BackupExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] BackupExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        BackupExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_wg_mesh(frame) do
+    case Process.whereis(WgMeshExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] WgMeshExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        WgMeshExecutor.handle_frame(frame)
     end
   end
 end
