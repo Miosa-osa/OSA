@@ -2,11 +2,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
   @moduledoc """
   Unit tests for `Desktop.MacOS`.
 
-  Tests marked `@moduletag :macos_native` require the compiled ScreenShare
-  binary. They are skipped on Linux/Windows CI automatically — add
-  `--include macos_native` on macOS runners with the built binary present.
+  Tests marked `@tag :macos_native` require the compiled `osa-screen-capture-darwin`
+  binary in `priv/helpers/` or `~/.osa/helpers/`. They are skipped on Linux/Windows
+  CI — add `--include macos_native` on macOS runners with the built binary present.
 
-  All other tests run on any platform.
+  All other tests run on any platform and test the missing-binary path.
   """
 
   use ExUnit.Case, async: true
@@ -15,114 +15,61 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
 
   @moduletag :open_computers
 
-  # ── available?/0 ─────────────────────────────────────────────────────────────
+  # ── struct ─────────────────────────────────────────────────────────────────
 
-  describe "available?/0" do
-    test "returns false when binary does not exist" do
-      System.put_env("OSA_MACOS_HELPER", "/nonexistent/path/ScreenShare")
-
-      assert MacOS.available?() == false
-
-      System.delete_env("OSA_MACOS_HELPER")
-    end
-
-    test "returns true when binary exists" do
-      # Create a temp file to simulate the binary being present
-      tmp = System.tmp_dir!() |> Path.join("osa_test_screenshare_#{:erlang.unique_integer([:positive])}")
-      File.write!(tmp, "fake binary")
-      File.chmod!(tmp, 0o755)
-
-      System.put_env("OSA_MACOS_HELPER", tmp)
-
-      assert MacOS.available?() == true
-
-      System.delete_env("OSA_MACOS_HELPER")
-      File.rm(tmp)
+  describe "MacOS struct" do
+    test "can be constructed with expected fields" do
+      ref = struct(MacOS, port: :port_ref, os_pid: 12345, vnc_port: 5900)
+      assert ref.os_pid == 12345
+      assert ref.vnc_port == 5900
     end
   end
 
-  # ── start/1 — binary missing ─────────────────────────────────────────────────
+  # ── spawn/0 — binary missing ───────────────────────────────────────────────
 
-  describe "start/1 when binary is missing" do
-    test "returns {:error, :helper_not_installed}" do
-      System.put_env("OSA_MACOS_HELPER", "/nonexistent/ScreenShare")
+  describe "spawn/0 when helper binary is missing" do
+    test "returns {:error, {:missing_helper, _}} when neither path exists" do
+      # Only run if the binary is genuinely absent (non-macOS CI, or macOS without build).
+      user_path = Path.expand("~/.osa/helpers/osa-screen-capture-darwin")
+      priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
 
-      assert {:error, :helper_not_installed} = MacOS.start()
-
-      System.delete_env("OSA_MACOS_HELPER")
-    end
-
-    test "returns tagged error even with custom port option" do
-      System.put_env("OSA_MACOS_HELPER", "/nonexistent/ScreenShare")
-
-      assert {:error, :helper_not_installed} = MacOS.start(port: 15_900)
-
-      System.delete_env("OSA_MACOS_HELPER")
-    end
-  end
-
-  # ── helper_path/0 ─────────────────────────────────────────────────────────────
-
-  describe "helper_path/0" do
-    test "respects OSA_MACOS_HELPER env var" do
-      System.put_env("OSA_MACOS_HELPER", "/custom/path/ScreenShare")
-      assert MacOS.helper_path() == "/custom/path/ScreenShare"
-      System.delete_env("OSA_MACOS_HELPER")
-    end
-
-    test "falls back to priv dir when env var is unset" do
-      System.delete_env("OSA_MACOS_HELPER")
-      path = MacOS.helper_path()
-      # Should contain priv/macos/ScreenShare
-      assert String.contains?(path, Path.join(["macos", "ScreenShare"]))
-    end
-  end
-
-  # ── stop/1 ────────────────────────────────────────────────────────────────────
-
-  describe "stop/1" do
-    test "accepts nil without crashing" do
-      assert :ok = MacOS.stop(nil)
-    end
-  end
-
-  # ── real binary tests — macOS runners only ────────────────────────────────────
-
-  @moduletag :macos_native
-
-  describe "start/1 with real binary (macos_native)" do
-    @tag :macos_native
-    test "starts the helper in stub mode and TCP port becomes reachable" do
-      # Locate the built binary relative to the project root.
-      # CI builds it before running tests; local dev: `swift build -c release` first.
-      helper_bin =
-        [File.cwd!(), "native", "macos", "ScreenShare", ".build", "release", "ScreenShare"]
-        |> Path.join()
-
-      if not File.exists?(helper_bin) do
-        ExUnit.configure(exclude: [:macos_native])
+      if File.exists?(user_path) or File.exists?(priv_path) do
+        # Binary present — can't test missing path in isolation
         :ok
       else
-        System.put_env("OSA_MACOS_HELPER", helper_bin)
+        result = MacOS.spawn()
+        assert {:error, {:missing_helper, msg}} = result
+        assert is_binary(msg)
+        assert String.contains?(msg, "osa-screen-capture-darwin")
+      end
+    end
+  end
 
-        port = 15_901
-        assert {:ok, port_ref} = MacOS.start(port: port, stub: true)
+  # ── real binary tests — macOS runners only ─────────────────────────────────
 
-        # Give the binary a moment to bind the port
-        Process.sleep(300)
+  describe "spawn/0 with real binary (macos_native)" do
+    @tag :macos_native
+    test "spawns helper, receives PORT= announcement, VNC port is reachable" do
+      priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
 
-        # Verify TCP port is reachable — proves RFB server bound successfully
+      if not File.exists?(priv_path) do
+        IO.puts("Skipping macos_native test: binary not found at #{priv_path}")
+        :ok
+      else
+        assert {:ok, %MacOS{os_pid: os_pid, vnc_port: vnc_port}} = MacOS.spawn()
+
+        assert is_integer(os_pid) and os_pid > 0
+        assert is_integer(vnc_port) and vnc_port > 0
+
+        # Verify RFB handshake
         assert {:ok, sock} =
-                 :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 2_000)
+                 :gen_tcp.connect(~c"127.0.0.1", vnc_port, [:binary, active: false], 2_000)
 
-        # The first bytes should be the RFB version string "RFB 003.008\n"
         assert {:ok, version} = :gen_tcp.recv(sock, 12, 2_000)
         assert version == "RFB 003.008\n"
 
         :gen_tcp.close(sock)
-        MacOS.stop(port_ref)
-
-        System.delete_env("OSA_MACOS_HELPER")
+        System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
       end
     end
   end
