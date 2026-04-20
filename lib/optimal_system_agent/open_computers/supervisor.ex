@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
     * `OpenComputers.Executor.Direct.Pty`             — long-lived PTY session manager
     * `OpenComputers.Executor.Direct.Desktop.Controller` — long-lived desktop relay manager
     * `OpenComputers.Executor.Direct.GhaRunner`       — GitHub Actions self-hosted runner manager
+    * `OpenComputers.Executor.Direct.WgMesh`          — WireGuard mesh networking manager
     * `OpenComputers.Updater`                         — periodic self-update poller
     * `OpenComputers.Session`                         — outbound WSS session to MIOSA;
                                                         registers itself as host_client in FrameRouter
@@ -26,6 +27,8 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel, as: TunnelExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller, as: ClusterController
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -44,6 +47,10 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
       ClusterController,
       # GitHub Actions self-hosted runner controller
       GhaRunnerExecutor,
+      # Backup executor — handles backup_snapshot_request and backup_restore_request
+      BackupExecutor,
+      # WireGuard mesh networking — manages wg interfaces for tenant mesh networks
+      WgMeshExecutor,
       Updater,
       Session
     ]
