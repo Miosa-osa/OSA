@@ -30,6 +30,7 @@ jobs:
           cd native/macos/ScreenShare
           ./build.sh release
 
+
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
         with:
@@ -159,6 +160,7 @@ jobs:
           Copy-Item publish/ScreenShare.exe ../../../priv/helpers/osa-screen-capture-windows.exe
           Write-Host "Deployed to priv/helpers/osa-screen-capture-windows.exe"
           Get-ChildItem ../../../priv/helpers/ | Select-Object Name, Length
+
 
       - name: Set up Erlang/OTP + Elixir
         uses: erlef/setup-beam@v1
