@@ -89,6 +89,10 @@ defmodule OptimalSystemAgent.MixProject do
       # OTP 28: rustler removed — nif.ex uses pure Elixir fallbacks
       # {:rustler, "~> 0.37", optional: true}
 
+      # PTY spawning — used by OpenComputers.Executor.Direct.Pty to open
+      # real interactive shells with full terminal geometry (cols, rows, resize).
+      {:erlexec, "~> 2.0"},
+
       # miosa_* packages are not standalone deps — their implementations live
       # in this repo. Shim modules in lib/miosa/ satisfy all call sites.
     ]

@@ -19,3 +19,7 @@ config :optimal_system_agent, http_port: 0
 # Per-run test secret — no hardcoded secrets
 config :optimal_system_agent,
   shared_secret: "osa-test-#{:crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)}"
+
+# Disable OpenComputers supervisor in tests — FrameRouter and PtyExecutor are
+# started explicitly per test so named process conflicts are avoided.
+config :optimal_system_agent, open_computers_enabled: false

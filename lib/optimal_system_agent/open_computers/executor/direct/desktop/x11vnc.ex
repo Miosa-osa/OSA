@@ -9,6 +9,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     `{:x11vnc_exited, exit_status}` when x11vnc terminates.
   """
 
+  # Exclude Kernel.spawn/1 so our `spawn/1` (which starts x11vnc) doesn't conflict
+  import Kernel, except: [spawn: 1, spawn: 3]
+
   require Logger
 
   @port_pattern ~r/PORT=(\d+)/
@@ -151,4 +154,44 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
       _, _ -> :ok
     end
   end
+
+  # ── Controller-compatible adapter API ─────────────────────────────────────────
+
+  @doc """
+  Start x11vnc using the default `spawn/1` logic. Returns `{:ok, os_pid}` on
+  success (integer OS pid for use with `stop/1`) or `{:error, reason}`.
+
+  Accepts an optional opts map with `:binary` (path to x11vnc) and `:display`.
+  If `:binary` is given and does not exist on the filesystem, returns
+  `{:error, :unsupported_platform}` immediately.
+  """
+  @spec start(map()) :: {:ok, non_neg_integer()} | {:error, atom() | tuple()}
+  def start(opts \\ %{}) do
+    binary = Map.get(opts, :binary, nil)
+
+    if binary != nil and not File.exists?(binary) do
+      {:error, :unsupported_platform}
+    else
+      display = Map.get(opts, :display, ":0")
+
+      case spawn(display) do
+        {:ok, %__MODULE__{os_pid: os_pid}} -> {:ok, os_pid}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc "Stop an x11vnc process by OS pid (as returned by `start/1`)."
+  @spec stop(non_neg_integer()) :: :ok
+  def stop(os_pid) when is_integer(os_pid) do
+    try do
+      System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
+    rescue
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  def stop(_), do: :ok
 end
