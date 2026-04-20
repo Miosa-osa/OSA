@@ -18,8 +18,8 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
   def init(_init_arg) do
     children =
       treasury_children() ++
-      updater_children() ++
-      open_computers_children()
+        updater_children() ++
+        open_computers_children()
 
     Supervisor.init(children, strategy: :one_for_one)
   end

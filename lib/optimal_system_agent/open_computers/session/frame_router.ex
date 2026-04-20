@@ -43,7 +43,10 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouter do
   end
 
   def handle({:grant_renewed, %{new_token: new_token} = info}, state) do
-    Logger.info("[OpenComputers.Session] grant renewed old_jti=#{inspect(info[:old_jti])} new_jti=#{inspect(info[:new_jti])}")
+    Logger.info(
+      "[OpenComputers.Session] grant renewed old_jti=#{inspect(info[:old_jti])} new_jti=#{inspect(info[:new_jti])}"
+    )
+
     {[], Map.put(state, :grant_token, new_token)}
   end
 
