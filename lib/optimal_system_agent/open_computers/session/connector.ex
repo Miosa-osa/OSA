@@ -22,10 +22,12 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Connector do
     port = uri.port || if scheme == :https, do: 443, else: 80
     path = uri.path || "/"
 
+    transport_opts = if scheme == :https, do: TlsOpts.build(), else: []
+
     with {:ok, conn} <-
            Mint.HTTP.connect(scheme, uri.host, port,
              protocols: [:http1],
-             transport_opts: TlsOpts.build()
+             transport_opts: transport_opts
            ),
          {:ok, conn, ref} <-
            Mint.WebSocket.upgrade(ws_scheme, conn, path, [
