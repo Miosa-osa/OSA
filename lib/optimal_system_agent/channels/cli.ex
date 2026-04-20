@@ -23,9 +23,11 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Channels.CLI.{
+    Commands,
     ComputerUseDispatch,
     Events,
     LineEditor,
+    MessageQueue,
     Renderer,
     Session
   }
@@ -33,14 +35,39 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
   def start do
     IO.write(IO.ANSI.clear() <> IO.ANSI.home())
+
+    # First-run setup wizard
+    if OptimalSystemAgent.Onboarding.first_run?() do
+      case OptimalSystemAgent.CLI.Setup.run() do
+        :ok -> IO.puts("")
+        :skip -> IO.puts("\n#{IO.ANSI.faint()}  Skipped setup — use /login or set env vars#{IO.ANSI.reset()}\n")
+      end
+    end
+
     Renderer.print_banner()
 
-    session_id = "cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    # Check for session resume
+    {session_id, messages} =
+      case Application.get_env(:optimal_system_agent, :resume_session_id) do
+        nil ->
+          {"cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower), []}
+
+        resume_id ->
+          Application.delete_env(:optimal_system_agent, :resume_session_id)
+          case OptimalSystemAgent.Agent.SessionPersistence.load(resume_id) do
+            {:ok, msgs} ->
+              IO.puts("#{IO.ANSI.faint()}  Resumed session: #{resume_id} (#{length(msgs)} messages)#{IO.ANSI.reset()}\n")
+              {resume_id, msgs}
+            {:error, _} ->
+              IO.puts("#{IO.ANSI.yellow()}  Could not resume #{resume_id} — starting new session#{IO.ANSI.reset()}\n")
+              {"cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower), []}
+          end
+      end
 
     {:ok, _pid} =
       DynamicSupervisor.start_child(
         OptimalSystemAgent.SessionSupervisor,
-        {Loop, session_id: session_id, channel: :cli}
+        {Loop, session_id: session_id, channel: :cli, messages: messages}
       )
 
     Session.register_permission_hook(session_id)
@@ -51,8 +78,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
     Session.init_history()
     Session.init_active_request()
 
+    # Start message queue for debounce batching
+    MessageQueue.start_link(session_id)
+
     Events.register_response_handler(session_id, fn result, req_id ->
       Session.handle_agent_response(session_id, result, req_id)
+      # Signal queue that agent is done — dispatch next queued message
+      MessageQueue.agent_finished(session_id)
     end)
 
     Events.register_proactive_handler(session_id)
@@ -115,6 +147,10 @@ defmodule OptimalSystemAgent.Channels.CLI do
                 loop(session_id)
               else
                 Session.add_to_history(session_id, input)
+                # Echo user message with styled header
+                unless String.starts_with?(input, "/") do
+                  Renderer.print_user_message(input)
+                end
                 next = process_input(input, session_id)
                 loop(next)
               end
@@ -154,7 +190,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
           end)
 
         unless filtered do
-          Session.send_to_agent(input, session_id)
+          MessageQueue.enqueue(session_id, input)
         end
       end
 
@@ -166,11 +202,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   # ── Command Handling ─────────────────────────────────────────────────
 
   defp handle_command(cmd, session_id) do
-    cmd_name = String.split(cmd, ~r/\s+/) |> hd()
-    IO.puts("#{IO.ANSI.yellow()}  error: unknown command '/#{cmd_name}'#{IO.ANSI.reset()}")
-    IO.puts("#{IO.ANSI.faint()}  Type /help to see available commands#{IO.ANSI.reset()}\n")
-    _ = session_id
-    session_id
+    Commands.dispatch(cmd, session_id)
   end
 
   # ── Helpers ──────────────────────────────────────────────────────────

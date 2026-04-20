@@ -1,17 +1,23 @@
 <script lang="ts">
+  import { slide } from 'svelte/transition';
   import { modelsStore } from '$lib/stores/models.svelte';
+  import ContextViz from './ContextViz.svelte';
 
   interface Props {
     onToggleHistory?: () => void;
     historyOpen?: boolean;
     isStreaming?: boolean;
+    contextStats?: { system: number; conversation: number; toolResults: number; total: number } | null;
   }
 
   let {
     onToggleHistory,
     historyOpen = true,
     isStreaming = false,
+    contextStats = null,
   }: Props = $props();
+
+  let showContext = $state(false);
 
   let showModelMenu = $state(false);
 
@@ -132,7 +138,37 @@
       </div>
     {/if}
   </div>
+
+  <!-- Context toggle -->
+  <button
+    class="ch-btn"
+    class:ch-btn--active={showContext}
+    onclick={() => showContext = !showContext}
+    aria-label="Toggle context usage"
+    title="Context window usage"
+  >
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 15h18" />
+      <path d="M3 9h18" />
+    </svg>
+  </button>
 </div>
+
+{#if showContext && contextStats}
+  <div transition:slide={{ duration: 150 }}>
+    <ContextViz
+      system={contextStats.system}
+      conversation={contextStats.conversation}
+      toolResults={contextStats.toolResults}
+      total={contextStats.total}
+    />
+  </div>
+{:else if showContext}
+  <div transition:slide={{ duration: 150 }}>
+    <ContextViz />
+  </div>
+{/if}
 
 <style>
   .ch-toolbar {

@@ -18,12 +18,17 @@ export interface WorkspaceConfig {
   workingDirectory: string;
 }
 
+export type AuthMethod = "api_key" | "oauth";
+
 export interface OnboardingState {
   step: OnboardingStep;
   provider: Provider | null;
   detectedProviders: DetectionResult;
   detecting: boolean;
+  authMethod: AuthMethod;
   apiKey: string;
+  oauthConnected: boolean;
+  oauthProfile: { email?: string; name?: string } | null;
   workingDirectory: string;
   workspace: WorkspaceConfig | null;
   agentName: string;
@@ -35,6 +40,7 @@ export interface ProviderMeta {
   name: string;
   tagline: string;
   requiresKey: boolean;
+  supportsOAuth: boolean;
   keyPlaceholder: string;
   keyDocsUrl: string;
 }
@@ -45,6 +51,7 @@ export const PROVIDERS: ProviderMeta[] = [
     name: "Ollama (Local)",
     tagline: "Local · Free · Auto-detected",
     requiresKey: false,
+    supportsOAuth: false,
     keyPlaceholder: "",
     keyDocsUrl: "",
   },
@@ -53,6 +60,7 @@ export const PROVIDERS: ProviderMeta[] = [
     name: "Ollama (Cloud)",
     tagline: "Remote Ollama instance",
     requiresKey: true,
+    supportsOAuth: false,
     keyPlaceholder: "http://your-server:11434",
     keyDocsUrl: "https://github.com/ollama/ollama/blob/main/docs/faq.md",
   },
@@ -61,14 +69,16 @@ export const PROVIDERS: ProviderMeta[] = [
     name: "LM Studio",
     tagline: "Local · Free",
     requiresKey: false,
+    supportsOAuth: false,
     keyPlaceholder: "",
     keyDocsUrl: "",
   },
   {
     id: "anthropic",
     name: "Anthropic",
-    tagline: "Claude models",
+    tagline: "Claude models · Sign in or use API key",
     requiresKey: true,
+    supportsOAuth: true,
     keyPlaceholder: "sk-ant-api03-...",
     keyDocsUrl: "https://console.anthropic.com/settings/keys",
   },
@@ -77,6 +87,7 @@ export const PROVIDERS: ProviderMeta[] = [
     name: "OpenAI",
     tagline: "GPT models",
     requiresKey: true,
+    supportsOAuth: false,
     keyPlaceholder: "sk-...",
     keyDocsUrl: "https://platform.openai.com/api-keys",
   },
@@ -85,6 +96,7 @@ export const PROVIDERS: ProviderMeta[] = [
     name: "Groq",
     tagline: "Fast inference",
     requiresKey: true,
+    supportsOAuth: false,
     keyPlaceholder: "gsk_...",
     keyDocsUrl: "https://console.groq.com/keys",
   },

@@ -91,25 +91,25 @@ defmodule OptimalSystemAgent.Channels.Slack do
 
   @impl true
   def handle_call({:webhook, raw_body, timestamp, signature}, _from, state) do
-    case verify_signature(raw_body, timestamp, signature, state.signing_secret) do
-      :ok ->
-        result =
-          case Jason.decode(raw_body) do
-            {:ok, %{"type" => "url_verification", "challenge" => challenge}} ->
-              {:challenge, challenge}
+    with :ok <- check_timestamp(timestamp),
+         :ok <- verify_signature(raw_body, timestamp, signature, state.signing_secret) do
+      result =
+        case Jason.decode(raw_body) do
+          {:ok, %{"type" => "url_verification", "challenge" => challenge}} ->
+            {:challenge, challenge}
 
-            {:ok, %{"event" => event}} ->
-              dispatch_event(event, state.token)
-              :ok
+          {:ok, %{"event" => event}} ->
+            dispatch_event(event, state.token)
+            :ok
 
-            _ ->
-              :ok
-          end
+          _ ->
+            :ok
+        end
 
-        {:reply, result, state}
-
-      {:error, :invalid_signature} ->
-        {:reply, {:error, :invalid_signature}, state}
+      {:reply, result, state}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -135,6 +135,20 @@ defmodule OptimalSystemAgent.Channels.Slack do
       :ok
     else
       {:error, :invalid_signature}
+    end
+  end
+
+  defp check_timestamp(timestamp_str) do
+    case Integer.parse(timestamp_str) do
+      {ts, ""} ->
+        if abs(System.system_time(:second) - ts) <= 300 do
+          :ok
+        else
+          {:error, :expired}
+        end
+
+      _ ->
+        {:error, :invalid_timestamp}
     end
   end
 

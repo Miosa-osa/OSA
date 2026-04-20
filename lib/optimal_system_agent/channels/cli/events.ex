@@ -176,6 +176,32 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
             )
           end
 
+        # Background agent completion/failure notifications
+        %{event: :background_agent_completed, role: role, result: result, duration_ms: dur} ->
+          Renderer.clear_line()
+          duration = Renderer.format_elapsed(dur)
+          preview = String.slice(to_string(result), 0, 120)
+          IO.puts("\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}")
+          IO.puts("#{dim}    #{preview}#{reset}\n")
+
+        %{event: :background_agent_failed, role: role, error: error, duration_ms: dur} ->
+          Renderer.clear_line()
+          duration = Renderer.format_elapsed(dur)
+          IO.puts("\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}")
+          IO.puts("#{dim}    #{error}#{reset}\n")
+
+        %{event: :background_agent_started, role: role, agent_id: aid} ->
+          Renderer.clear_line()
+          IO.puts("#{dim}  ◉ Background agent \"#{role}\" started (#{aid})#{reset}")
+
+        %{event: :budget_limit_reached, current_cost: cost, limit: limit} ->
+          Renderer.clear_line()
+          IO.puts("\n#{yellow}  ⚠ Budget limit reached ($#{Float.round(cost / 1, 4)} / $#{limit})#{reset}\n")
+
+        %{event: :turn_limit_reached, turn_count: count, limit: limit} ->
+          Renderer.clear_line()
+          IO.puts("\n#{yellow}  ⚠ Turn limit reached (#{count}/#{limit})#{reset}\n")
+
         _ ->
           :ok
       end
@@ -204,6 +230,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
               output = TaskDisplay.render_inline(tasks)
               Renderer.clear_line()
               IO.puts(output)
+
+              # Cache the active task's activeForm for the spinner
+              active = Enum.find(tasks, fn t -> t.status == :in_progress end)
+              if active do
+                form = active.metadata[:active_form] || active.title
+                :ets.insert(:cli_signal_cache, {:active_task_form, form})
+              else
+                :ets.delete(:cli_signal_cache, :active_task_form)
+              end
             end
           rescue
             _ -> :ok

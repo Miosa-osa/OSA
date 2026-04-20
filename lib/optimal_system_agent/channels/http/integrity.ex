@@ -3,9 +3,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
   HMAC-SHA256 request body integrity verification.
 
   Verifies: X-OSA-Signature, X-OSA-Timestamp (5min window), X-OSA-Nonce (ETS dedup).
-  Enabled when `require_auth: true`.
+
+  Integrity checking is enabled when **any** of the following is true:
+  - `require_auth: true` is configured  →  all non-exempt routes are verified.
+  - `require_fleet_integrity: true` is configured  →  `/api/v1/fleet/*` routes are verified.
+  - `OSA_SHARED_SECRET` (`:shared_secret`) is set  →  auto-enabled for all non-exempt routes.
+    A one-time warning is logged so operators know the plug is active.
+
+  In development/local mode (no secret, no flag) the plug is a no-op.
   """
   import Plug.Conn
+  require Logger
   @behaviour Plug
 
   @nonce_table :osa_integrity_nonces
@@ -30,8 +38,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
           fleet_path?(conn) ->
         verify_integrity(conn)
 
+      shared_secret_configured?() ->
+        log_auto_enabled_once()
+        verify_integrity(conn)
+
       true ->
         conn
+    end
+  end
+
+  # Returns true when a non-empty shared secret is present in application config.
+  # This is the case whenever OSA_SHARED_SECRET is set in the environment (see runtime.exs).
+  defp shared_secret_configured? do
+    secret = Application.get_env(:optimal_system_agent, :shared_secret)
+    is_binary(secret) and secret != ""
+  end
+
+  # Emits a single startup-time warning so operators know integrity checking
+  # was auto-enabled via OSA_SHARED_SECRET rather than an explicit flag.
+  # Uses :persistent_term to guarantee the message is logged exactly once per node.
+  defp log_auto_enabled_once do
+    key = {__MODULE__, :auto_enabled_logged}
+
+    unless :persistent_term.get(key, false) do
+      Logger.warning(
+        "[Integrity] HMAC integrity checking auto-enabled because OSA_SHARED_SECRET is " <>
+          "configured. Set OSA_REQUIRE_AUTH=true to silence this notice."
+      )
+
+      :persistent_term.put(key, true)
     end
   end
 

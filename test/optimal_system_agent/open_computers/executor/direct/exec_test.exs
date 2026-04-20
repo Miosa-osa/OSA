@@ -1,212 +1,108 @@
 defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ExecTest do
-  @moduledoc """
-  Tests for the OSA exec RPC executor.
-
-  Runs actual OS processes — skip on Windows via @moduletag :unix.
-  """
-
   use ExUnit.Case, async: true
-
-  @moduletag :unix
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Exec
 
-  defp start_exec(test_pid \\ nil) do
-    session_pid = test_pid || self()
-    {:ok, pid} = Exec.start_link(session_pid: session_pid)
-    pid
-  end
+  defp run_job(job) do
+    test_pid = self()
+    reply = fn frame -> send(test_pid, {:reply, frame}) end
 
-  # Helper: collect all messages for a job until the terminal frame arrives.
-  defp collect(job_id, timeout_ms \\ 5_000) do
-    do_collect(job_id, timeout_ms, [])
-  end
+    child_spec = %{
+      id: make_ref(),
+      start: {Exec, :start_link, [job, reply]},
+      restart: :temporary
+    }
 
-  defp do_collect(job_id, remaining, acc) when remaining > 0 do
+    {:ok, _pid} = start_supervised(child_spec)
+
     receive do
-      {:exec_chunk, %{job_id: ^job_id} = chunk} ->
-        do_collect(job_id, remaining - 10, [{:chunk, chunk} | acc])
-
-      {:exec_result, %{job_id: ^job_id} = result} ->
-        {:done, Enum.reverse([{:result, result} | acc])}
-
-      {:exec_error, %{job_id: ^job_id} = error} ->
-        {:error_terminal, Enum.reverse([{:error, error} | acc])}
+      {:reply, frame} -> frame
     after
-      10 ->
-        do_collect(job_id, remaining - 10, acc)
+      5_000 -> flunk("Exec did not reply within 5s")
     end
   end
 
-  defp do_collect(_job_id, 0, acc) do
-    {:timeout, Enum.reverse(acc)}
+  describe "Exec.start_link/2" do
+    test "starts successfully" do
+      test_pid = self()
+      reply = fn frame -> send(test_pid, {:reply, frame}) end
+      job = %{id: "j-start", kind: :exec_on_host, cmd: "true"}
+
+      child_spec = %{
+        id: :exec_start_test,
+        start: {Exec, :start_link, [job, reply]},
+        restart: :temporary
+      }
+
+      {:ok, pid} = start_supervised(child_spec)
+      assert is_pid(pid)
+    end
   end
 
-  # ── Tests ──────────────────────────────────────────────────────────────────
-
-  describe "echo hello" do
-    test "produces stdout chunk and exit_code 0" do
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
-
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "echo",
-                 args: ["hello"],
-                 env: [],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 5_000
-               })
-
-      {:done, frames} = collect(job_id)
-
-      chunks =
-        frames
-        |> Enum.filter(&match?({:chunk, _}, &1))
-        |> Enum.map(fn {:chunk, %{data: d}} -> d end)
-
-      output = IO.iodata_to_binary(chunks)
-      assert String.contains?(output, "hello")
-
-      [{:result, result}] = Enum.filter(frames, &match?({:result, _}, &1))
+  describe "exec success" do
+    test "runs echo and returns job_done with exit_code 0" do
+      job = %{id: "j-echo", kind: :exec_on_host, cmd: "echo hello"}
+      frame = run_job(job)
+      assert {:job_done, "j-echo", result} = frame
       assert result.exit_code == 0
-      assert result.elapsed_ms >= 0
+      assert String.contains?(result.stdout, "hello")
+    end
+
+    test "captures stdout" do
+      job = %{id: "j-out", kind: :exec_on_host, cmd: "printf 'test output'"}
+      frame = run_job(job)
+      assert {:job_done, "j-out", result} = frame
+      assert result.stdout == "test output"
+    end
+
+    test "returns duration_ms as non-negative integer" do
+      job = %{id: "j-dur", kind: :exec_on_host, cmd: "true"}
+      frame = run_job(job)
+      assert {:job_done, "j-dur", result} = frame
+      assert is_integer(result.duration_ms) and result.duration_ms >= 0
+    end
+
+    test "non-zero exit code is reflected in result" do
+      job = %{id: "j-fail", kind: :exec_on_host, cmd: "exit 2"}
+      frame = run_job(job)
+      assert {:job_done, "j-fail", result} = frame
+      assert result.exit_code == 2
     end
   end
 
-  describe "non-zero exit code" do
-    test "exit code is forwarded in exec_result" do
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
+  describe "empty command" do
+    test "returns job_fail for empty cmd" do
+      job = %{id: "j-empty", kind: :exec_on_host, cmd: ""}
+      frame = run_job(job)
+      assert {:job_fail, "j-empty", %{reason: :exec_error}} = frame
+    end
+  end
 
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "sh",
-                 args: ["-c", "exit 42"],
-                 env: [],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 5_000
-               })
+  describe "output cap" do
+    test "caps output at 1 MB and appends truncation marker" do
+      # Generate >1 MB of output
+      job = %{
+        id: "j-cap",
+        kind: :exec_on_host,
+        cmd: "dd if=/dev/zero bs=1024 count=1200 2>/dev/null | tr '\\0' 'a'"
+      }
 
-      {:done, frames} = collect(job_id)
+      frame = run_job(job)
+      assert {:job_done, "j-cap", result} = frame
+      # Output is either capped or full — never exceeds cap + marker
+      assert byte_size(result.stdout) <= 1_048_576 + byte_size("\n...[output capped]")
 
-      [{:result, result}] = Enum.filter(frames, &match?({:result, _}, &1))
-      assert result.exit_code == 42
+      if byte_size(result.stdout) > 1_048_576 do
+        assert String.ends_with?(result.stdout, "\n...[output capped]")
+      end
     end
   end
 
   describe "timeout" do
-    test "exec_error with reason :timeout when process exceeds timeout_ms" do
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
-
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "sleep",
-                 args: ["10"],
-                 env: [],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 100
-               })
-
-      # Give the timeout a bit of slack
-      result = collect(job_id, 2_000)
-      assert match?({:error_terminal, _}, result)
-
-      {:error_terminal, frames} = result
-      [{:error, error}] = Enum.filter(frames, &match?({:error, _}, &1))
-      assert error.reason == :timeout
-    end
-  end
-
-  describe "cancel" do
-    test "exec_error with reason :canceled when cancel_job/2 is called" do
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
-
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "sleep",
-                 args: ["10"],
-                 env: [],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 30_000
-               })
-
-      # Cancel after a short delay
-      Process.sleep(50)
-      Exec.cancel_job(exec_pid, job_id)
-
-      result = collect(job_id, 2_000)
-      assert match?({:error_terminal, _}, result)
-
-      {:error_terminal, frames} = result
-      [{:error, error}] = Enum.filter(frames, &match?({:error, _}, &1))
-      assert error.reason == :canceled
-    end
-  end
-
-  describe "command_not_allowed" do
-    test "returns exec_error when command is blocked by config" do
-      # Temporarily override to a restricted list
-      original = Application.get_env(:optimal_system_agent, :oc_exec_allowed, nil)
-      Application.put_env(:optimal_system_agent, :oc_exec_allowed, ["ls"])
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:optimal_system_agent, :oc_exec_allowed, original)
-        else
-          Application.delete_env(:optimal_system_agent, :oc_exec_allowed)
-        end
-      end)
-
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
-
-      # We can't easily inject the allowlist into the Config module without
-      # the config file being present. Instead, test the public Config API.
-      # The executor itself will use Config.command_allowed?/1.
-
-      # Just verify that exec_pid handles an unknown/non-existent command gracefully
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "/nonexistent_binary_xyz",
-                 args: [],
-                 env: [],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 1_000
-               })
-
-      result = collect(job_id, 3_000)
-      assert match?({:error_terminal, _}, result)
-    end
-  end
-
-  describe "env passthrough" do
-    test "env vars are visible inside the child process" do
-      exec_pid = start_exec()
-      job_id = Ecto.UUID.generate()
-
-      assert :ok =
-               Exec.start_job(exec_pid, %{
-                 job_id: job_id,
-                 cmd: "sh",
-                 args: ["-c", "echo $OC_TEST_VAR"],
-                 env: [{"OC_TEST_VAR", "hello_from_env"}],
-                 cwd: System.tmp_dir!(),
-                 timeout_ms: 5_000
-               })
-
-      {:done, frames} = collect(job_id)
-
-      chunks = Enum.filter(frames, &match?({:chunk, _}, &1)) |> Enum.map(fn {:chunk, c} -> c.data end)
-      output = IO.iodata_to_binary(chunks)
-      assert String.contains?(output, "hello_from_env")
+    test "returns job_fail with :exec_error after timeout" do
+      job = %{id: "j-timeout", kind: :exec_on_host, cmd: "sleep 60", timeout_ms: 50}
+      frame = run_job(job)
+      assert {:job_fail, "j-timeout", %{reason: :exec_error}} = frame
     end
   end
 end

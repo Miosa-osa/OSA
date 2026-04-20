@@ -65,7 +65,13 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
   @doc "Runtime availability gate. Return `false` to hide the tool from the LLM."
   @callback available?() :: boolean()
 
-  @optional_callbacks safety: 0, available?: 0
+  @doc "Deferred loading gate. Return `true` to exclude from system prompt (discoverable via tool_search)."
+  @callback deferred?() :: boolean()
+
+  @doc "Concurrency safety flag. Return `true` if this tool can safely run in parallel with others. Default: true."
+  @callback concurrent?() :: boolean()
+
+  @optional_callbacks safety: 0, available?: 0, deferred?: 0, concurrent?: 0
 
   defmacro __using__(_opts) do
     quote do

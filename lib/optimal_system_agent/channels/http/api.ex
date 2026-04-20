@@ -263,6 +263,27 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
             |> assign(:workspace_id, claims["workspace_id"])
             |> assign(:claims, claims)
 
+          {:error, :invalid_token_ephemeral} ->
+            if Application.get_env(:optimal_system_agent, :require_auth, false) do
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(
+                401,
+                Jason.encode!(%{
+                  error: "invalid_token",
+                  hint: "Server may have restarted with ephemeral secret. Re-authenticate."
+                })
+              )
+              |> halt()
+            else
+              Logger.warning("Token invalid — ephemeral secret may have rotated after restart")
+
+              conn
+              |> assign(:user_id, "anonymous")
+              |> assign(:workspace_id, nil)
+              |> assign(:claims, %{})
+            end
+
           {:error, reason} ->
             if Application.get_env(:optimal_system_agent, :require_auth, false) do
               conn

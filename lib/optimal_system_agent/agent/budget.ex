@@ -73,6 +73,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
     GenServer.call(__MODULE__, :get_status)
   end
 
+  @doc "Get the full cost ledger (list of entries)."
+  def get_ledger do
+    GenServer.call(__MODULE__, :get_ledger)
+  end
+
   @doc "Manually reset daily spend counter."
   def reset_daily do
     GenServer.cast(__MODULE__, :reset_daily)
@@ -127,12 +132,18 @@ defmodule OptimalSystemAgent.Agent.Budget do
 
     now = DateTime.utc_now()
 
+    # Load persisted ledger from disk
+    persisted_ledger = load_ledger_from_disk()
+    persisted_total = Enum.reduce(persisted_ledger, 0.0, &(&1.cost_usd + &2))
+
     state = %__MODULE__{
       daily_limit: daily_limit,
       monthly_limit: monthly_limit,
       per_call_limit: per_call_limit,
       daily_reset_at: DateTime.add(now, @daily_reset_ms, :millisecond),
-      monthly_reset_at: DateTime.add(now, @monthly_reset_ms, :millisecond)
+      monthly_reset_at: DateTime.add(now, @monthly_reset_ms, :millisecond),
+      ledger: persisted_ledger,
+      monthly_spent: persisted_total
     }
 
     schedule_daily_reset()
@@ -169,6 +180,9 @@ defmodule OptimalSystemAgent.Agent.Budget do
         monthly_spent: new_monthly,
         ledger: Enum.take([entry | state.ledger], 10_000)
     }
+
+    # Persist ledger entry to disk for crash recovery
+    append_ledger_entry(entry)
 
     # Emit warnings at 80% thresholds
     if new_daily > state.daily_limit * 0.8 and new_daily - cost <= state.daily_limit * 0.8 do
@@ -312,6 +326,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
   end
 
   @impl true
+  def handle_call(:get_ledger, _from, state) do
+    {:reply, {:ok, state.ledger}, state}
+  end
+
+  @impl true
   def handle_info(:reset_daily, state) do
     Logger.info(
       "[Agent.Budget] Scheduled daily reset (was $#{Float.round(state.daily_spent, 2)})"
@@ -344,6 +363,58 @@ defmodule OptimalSystemAgent.Agent.Budget do
   end
 
   # ── Private ─────────────────────────────────────────────────────────
+
+  # ── Ledger Persistence ────────────────────────────────────────────
+
+  @ledger_dir Path.join(System.user_home!(), ".osa")
+  @ledger_file Path.join(@ledger_dir, "cost_ledger.jsonl")
+
+  defp append_ledger_entry(entry) do
+    File.mkdir_p!(@ledger_dir)
+    serialized = %{
+      id: entry.id,
+      ts: DateTime.to_iso8601(entry.timestamp),
+      p: entry.provider,
+      m: entry.model,
+      ti: entry.tokens_in,
+      to: entry.tokens_out,
+      c: entry.cost_usd,
+      s: entry.session_id
+    }
+    line = Jason.encode!(serialized) <> "\n"
+    File.write(@ledger_file, line, [:append])
+  rescue
+    _ -> :ok
+  end
+
+  defp load_ledger_from_disk do
+    case File.read(@ledger_file) do
+      {:ok, content} ->
+        content
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(fn line ->
+          case Jason.decode(line) do
+            {:ok, %{"id" => id, "ts" => ts, "p" => p, "m" => m, "ti" => ti, "to" => to_out, "c" => c, "s" => s}} ->
+              [%{
+                id: id,
+                timestamp: case DateTime.from_iso8601(ts) do {:ok, dt, _} -> dt; _ -> DateTime.utc_now() end,
+                provider: p,
+                model: m,
+                tokens_in: ti,
+                tokens_out: to_out,
+                cost_usd: c,
+                session_id: s
+              }]
+            _ -> []
+          end
+        end)
+        |> Enum.take(10_000)
+
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
 
   defp schedule_daily_reset do
     Process.send_after(self(), :reset_daily, @daily_reset_ms)

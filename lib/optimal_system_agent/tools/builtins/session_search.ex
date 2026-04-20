@@ -31,29 +31,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.SessionSearch do
 
   @impl true
   def execute(%{"query" => query} = args) do
-    limit = args["limit"] || 5
+    limit = args["limit"] || 10
 
-    case OptimalSystemAgent.Memory.search_sessions(query, limit: limit) do
-      {:ok, []} ->
-        {:ok, "No past sessions found matching: #{query}"}
+    # Try FTS5-backed search first, fall back to Memory.search_sessions
+    results = try do
+      OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
+    rescue
+      _ -> []
+    end
 
-      {:ok, results} ->
-        formatted =
-          results
-          |> Enum.take(limit)
-          |> Enum.with_index(1)
-          |> Enum.map(fn {result, idx} ->
-            content_preview = String.slice(Map.get(result, :content, ""), 0, 200)
-            session = Map.get(result, :session_id, "unknown")
-            ts = Map.get(result, :inserted_at, "")
-            "#{idx}. [#{session}] #{ts} — #{content_preview}"
-          end)
-          |> Enum.join("\n")
+    results =
+      if results == [] do
+        # Fallback to legacy memory search
+        case OptimalSystemAgent.Memory.search_sessions(query, limit: limit) do
+          {:ok, r} -> r
+          _ -> []
+        end
+      else
+        results
+      end
 
-        {:ok, "Found #{length(results)} matches\n---\n#{formatted}"}
+    if results == [] do
+      {:ok, "No past sessions found matching: #{query}"}
+    else
+      formatted =
+        results
+        |> Enum.with_index(1)
+        |> Enum.map(fn {result, idx} ->
+          highlight = Map.get(result, :highlight)
+          content_preview = highlight || String.slice(Map.get(result, :content, ""), 0, 200)
+          session = Map.get(result, :session_id, "unknown")
+          role = Map.get(result, :role, "?")
+          ts = Map.get(result, :inserted_at, "")
+          "#{idx}. [#{session}] #{role} (#{ts})\n   #{content_preview}"
+        end)
+        |> Enum.join("\n\n")
 
-      {:error, reason} ->
-        {:error, "Session search failed: #{inspect(reason)}"}
+      {:ok, "Found #{length(results)} match(es):\n\n#{formatted}"}
     end
   end
 end

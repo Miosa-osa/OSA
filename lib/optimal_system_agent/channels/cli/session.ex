@@ -9,7 +9,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.{Loop, Tasks}
+  alias OptimalSystemAgent.Agent.{Budget, Loop, Tasks}
   alias OptimalSystemAgent.Channels.CLI.{PlanReview, Renderer, Spinner}
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.SDK.{Hook, Permission}
@@ -80,6 +80,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
         Bus.unregister_handler(:tool_call, tool_ref)
         Bus.unregister_handler(:llm_response, llm_ref)
         if cu_ref = req[:cu_ref], do: Bus.unregister_handler(:tool_result, cu_ref)
+        unregister_stream_and_think_refs(req)
         :ets.delete(:cli_active_request, session_id)
 
       _ ->
@@ -156,13 +157,52 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
     permission_fn = Permission.build_hook(:default)
 
     hook_fn = fn %{tool_name: tool_name, arguments: args} = payload ->
-      case permission_fn.(tool_name, args) do
-        :allow -> {:ok, payload}
-        {:deny, reason} -> {:block, reason}
+      # First check saved permission rules
+      case OptimalSystemAgent.Permissions.check(tool_name, args) do
+        :allow ->
+          {:ok, payload}
+
+        :deny ->
+          {:block, "Permanently denied by saved rule"}
+
+        :ask ->
+          # Check the default policy-based permission
+          case permission_fn.(tool_name, args) do
+            :allow ->
+              {:ok, payload}
+
+            {:deny, reason} ->
+              # For dangerous tools, prompt the user interactively
+              if interactive_permission_enabled?() and dangerous_tool?(tool_name) do
+                alias OptimalSystemAgent.Channels.CLI.Permissions
+
+                case Permissions.prompt_permission(tool_name, args) do
+                  :allow_once ->
+                    {:ok, payload}
+
+                  :allow_always ->
+                    OptimalSystemAgent.Permissions.save_rule(tool_name, :allow_always)
+                    {:ok, payload}
+
+                  :deny ->
+                    {:block, reason}
+                end
+              else
+                {:block, reason}
+              end
+          end
       end
     end
 
     Hook.register(:pre_tool_use, "cli_permission_#{session_id}", hook_fn, priority: 1)
+  end
+
+  defp interactive_permission_enabled? do
+    Application.get_env(:optimal_system_agent, :interactive_permissions, true)
+  end
+
+  defp dangerous_tool?(tool_name) do
+    tool_name in ~w(shell_execute file_delete file_write file_edit delegate)
   end
 
   # ── Agent Communication (Async) ──────────────────────────────────────
@@ -170,6 +210,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   def send_to_agent(input, session_id, opts \\ []) do
     spinner = Spinner.start()
     {tool_ref, cu_ref, llm_ref} = register_spinner_handlers(spinner)
+    {stream_ref, streaming_state} = register_streaming_handlers(spinner, session_id)
 
     request_id = System.unique_integer([:positive, :monotonic])
 
@@ -179,6 +220,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       tool_ref: tool_ref,
       cu_ref: cu_ref,
       llm_ref: llm_ref,
+      stream_ref: stream_ref,
+      streaming_state: streaming_state,
       input: input,
       opts: opts
     }})
@@ -202,22 +245,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   def send_to_agent_sync(input, session_id, opts) do
     spinner = Spinner.start()
     {tool_ref, _cu_ref, llm_ref} = register_spinner_handlers_no_cu(spinner)
+    {stream_ref, streaming_state} = register_streaming_handlers(spinner, session_id)
 
     result = Loop.process_message(session_id, input, opts)
 
     Bus.unregister_handler(:tool_call, tool_ref)
     Bus.unregister_handler(:llm_response, llm_ref)
+    if stream_ref, do: Bus.unregister_handler(:system_event, stream_ref)
+
+    was_streamed = :atomics.get(streaming_state, 1) > 0
 
     case result do
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens)
-        Renderer.print_response(response)
+        if was_streamed, do: IO.write("\n")
+        unless was_streamed, do: Renderer.print_response(response)
+        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         Renderer.print_separator()
 
       {:plan, plan_text} ->
         {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-        Renderer.show_status_line(elapsed_ms, 0, total_tokens)
+        Renderer.show_status_line(elapsed_ms, 0, total_tokens, cost_from_tokens(total_tokens))
         handle_plan_review(plan_text, input, session_id, 0)
 
       {:error, reason} ->
@@ -284,20 +332,34 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
         Bus.unregister_handler(:tool_call, tool_ref)
         Bus.unregister_handler(:llm_response, llm_ref)
         if cu_ref = req[:cu_ref], do: Bus.unregister_handler(:tool_result, cu_ref)
+        unregister_stream_and_think_refs(req)
 
         yellow = IO.ANSI.yellow()
         reset = IO.ANSI.reset()
 
+        # Check if response was streamed to terminal already
+        was_streamed =
+          case req[:streaming_state] do
+            nil -> false
+            atomics_ref -> :atomics.get(atomics_ref, 1) > 0
+          end
+
         case result do
           {:ok, response} ->
             {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-            Renderer.show_status_line(elapsed_ms, tool_count, total_tokens)
-            Renderer.print_response(response)
+
+            if was_streamed do
+              IO.write("\n")
+            else
+              Renderer.print_response(response)
+            end
+
+            Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
             Renderer.print_separator()
 
           {:plan, plan_text} ->
             {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-            Renderer.show_status_line(elapsed_ms, 0, total_tokens)
+            Renderer.show_status_line(elapsed_ms, 0, total_tokens, cost_from_tokens(total_tokens))
             :ets.insert(:cli_active_request, {:pending_plan, session_id, plan_text, original_input})
 
           {:error, reason} ->
@@ -319,11 +381,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   defp send_to_agent_for_plan(input, session_id) do
     spinner = Spinner.start()
     {tool_ref, _cu_ref, llm_ref} = register_spinner_handlers_no_cu(spinner)
+    {stream_ref, _streaming_state} = register_streaming_handlers(spinner, session_id)
 
     result = Loop.process_message(session_id, input)
 
     Bus.unregister_handler(:tool_call, tool_ref)
     Bus.unregister_handler(:llm_response, llm_ref)
+    if stream_ref, do: Bus.unregister_handler(:system_event, stream_ref)
 
     yellow = IO.ANSI.yellow()
     reset = IO.ANSI.reset()
@@ -331,13 +395,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
     case result do
       {:plan, plan_text} ->
         {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
-        Renderer.show_status_line(elapsed_ms, 0, total_tokens)
+        Renderer.show_status_line(elapsed_ms, 0, total_tokens, cost_from_tokens(total_tokens))
         {:plan, plan_text}
 
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens)
         Renderer.print_response(response)
+        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
         Renderer.print_separator()
         :executed
 
@@ -346,6 +410,40 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
         IO.puts("#{yellow}  error: #{reason}#{reset}\n")
         :executed
     end
+  end
+
+  # ── Private: Streaming Handlers ───────────────────────────────────────
+
+  defp register_streaming_handlers(spinner, session_id) do
+    # Track whether we've started streaming (0 = not streaming, 1 = streaming)
+    streaming_state = :atomics.new(1, signed: false)
+
+    stream_ref =
+      Bus.register_handler(:system_event, fn payload ->
+        if Process.alive?(spinner) and Map.get(payload, :session_id) == session_id do
+          case Map.get(payload, :event) do
+            :streaming_token ->
+              delta = Map.get(payload, :delta, "")
+
+              # First token: switch spinner to streaming mode
+              if :atomics.get(streaming_state, 1) == 0 do
+                :atomics.put(streaming_state, 1, 1)
+                Spinner.update(spinner, {:streaming_mode, :start})
+              end
+
+              IO.write(delta)
+
+            :thinking_delta ->
+              delta = Map.get(payload, :delta, "")
+              IO.write(IO.ANSI.light_magenta() <> delta <> IO.ANSI.reset())
+
+            _ ->
+              :ok
+          end
+        end
+      end)
+
+    {stream_ref, streaming_state}
   end
 
   # ── Private: Spinner Bus Handlers ────────────────────────────────────
@@ -422,5 +520,19 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       end)
 
     {tool_ref, nil, llm_ref}
+  end
+
+  defp unregister_stream_and_think_refs(req) do
+    if ref = req[:stream_ref] do
+      Bus.unregister_handler(:system_event, ref)
+    end
+  end
+
+  # ── Private: Cost Estimation ─────────────────────────────────────────
+
+  defp cost_from_tokens(0), do: nil
+  defp cost_from_tokens(total) when total > 0 do
+    provider = Application.get_env(:optimal_system_agent, :default_provider, :anthropic)
+    Budget.calculate_cost(provider, round(total * 0.7), round(total * 0.3))
   end
 end

@@ -16,6 +16,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask do
   """
   use OptimalSystemAgent.Tools.Behaviour
 
+  @impl true
+  def deferred?, do: true
+
   alias OptimalSystemAgent.Peer.Negotiation
 
   @impl true

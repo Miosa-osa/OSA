@@ -11,7 +11,15 @@
     onDeny: () => void;
   }
 
+  import ShellPermission from './ShellPermission.svelte';
+  import FileEditPermission from './FileEditPermission.svelte';
+  import DelegatePermission from './DelegatePermission.svelte';
+
   let { tool, description, paths, onAllow, onAllowAlways, onDeny }: Props = $props();
+
+  const isShellTool = $derived(tool === 'shell_execute' || tool === 'bash');
+  const isFileTool = $derived(tool === 'file_edit' || tool === 'file_write' || tool === 'write_file');
+  const isDelegateTool = $derived(tool === 'delegate' || tool === 'spawn_agent');
 
   // Focus trap refs
   let denyBtn = $state<HTMLButtonElement | null>(null);
@@ -117,9 +125,17 @@
       <code class="pd-tool-name">{tool}</code>
     </div>
 
-    <p class="pd-description">{description}</p>
+    {#if isShellTool}
+      <ShellPermission command={description} {paths} />
+    {:else if isFileTool}
+      <FileEditPermission path={paths[0] || ''} {description} />
+    {:else if isDelegateTool}
+      <DelegatePermission {description} />
+    {:else}
+      <p class="pd-description">{description}</p>
+    {/if}
 
-    {#if paths.length > 0}
+    {#if paths.length > 0 && !isShellTool && !isFileTool}
       <div class="pd-paths" aria-label="Affected paths">
         {#each paths as path (path)}
           <div class="pd-path">

@@ -346,8 +346,10 @@ defmodule OptimalSystemAgent.Verification.Loop do
           confidence: Confidence.score(state.confidence)
         })
 
-        state = %{state | steering_guidance: nil}
-        Process.send_after(self(), :schedule_next_iteration, 100)
+        # Exponential backoff on LLM failure — prevent tight CPU spin
+        backoff = min((Map.get(state, :error_backoff, 1_000)) * 2, 60_000)
+        state = %{state | steering_guidance: nil} |> Map.put(:error_backoff, backoff)
+        Process.send_after(self(), :schedule_next_iteration, backoff)
         state
     end
   end

@@ -27,19 +27,28 @@ defmodule OptimalSystemAgent.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :ssl, :os_mon, :public_key],
       mod: {OptimalSystemAgent.Application, []}
     ]
   end
 
   defp deps do
     [
+      # Single-binary packaging — wraps a BEAM release into self-contained executables
+      {:burrito, "~> 1.0"},
+
       # Event routing — compiled Erlang bytecode dispatch (BEAM speed)
       # https://github.com/robertohluna/goldrush (fork of extend/goldrush)
       {:goldrush, github: "robertohluna/goldrush", branch: "main", override: true},
 
       # HTTP client for LLM APIs
       {:req, "~> 0.5"},
+
+      # Low-level HTTP + WebSocket client — OpenComputers extension speaks
+      # an outbound-only WSS control channel to MIOSA's control plane.
+      {:mint, "~> 1.5"},
+      {:mint_web_socket, "~> 1.0"},
+      {:castore, "~> 1.0"},
 
       # JSON
       {:jason, "~> 1.4"},
@@ -70,9 +79,8 @@ defmodule OptimalSystemAgent.MixProject do
       # AMQP — RabbitMQ publisher for Go worker events (optional)
       {:amqp, "~> 4.1", optional: true},
 
-      # PTY spawning — provides :exec.run/2 with :pty option for interactive shells.
-      # Used by OpenComputers.Executor.Direct.Pty for terminal sessions.
-      {:erlexec, "~> 2.0"},
+      # Email — SMTP client for outbound email channel
+      {:gen_smtp, "~> 1.2"},
 
       # Telemetry
       {:telemetry, "~> 1.2"},
@@ -98,16 +106,28 @@ defmodule OptimalSystemAgent.MixProject do
 
   defp releases do
     [
+      # Traditional OTP release — used by Homebrew and local dev builds.
       osagent: [
         include_executables_for: [:unix],
         applications: [runtime_tools: :permanent],
-        steps: [
-          :assemble,
-          &copy_go_tokenizer/1,
-          &copy_native_helpers/1,
-          &copy_osagent_wrapper/1
-        ],
+        steps: [:assemble, &copy_go_tokenizer/1, &copy_osagent_wrapper/1],
         rel_templates_path: "rel"
+      ],
+
+      # Burrito single-binary release — `mix release burrito` emits one
+      # self-contained executable per target into burrito_out/.
+      # Build via CI (see .github/workflows/release.yml); cross-compile on
+      # your local machine is not supported.
+      burrito: [
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_arm64: [os: :darwin, cpu: :aarch64],
+            linux_amd64: [os: :linux, cpu: :x86_64],
+            linux_arm64: [os: :linux, cpu: :aarch64],
+            windows_amd64: [os: :windows, cpu: :x86_64]
+          ]
+        ]
       ]
     ]
   end
@@ -130,41 +150,6 @@ defmodule OptimalSystemAgent.MixProject do
     if File.exists?(src) do
       File.mkdir_p!(dst_dir)
       File.cp!(src, Path.join(dst_dir, "osa-tokenizer"))
-    end
-
-    release
-  end
-
-  # Copy pre-built native helper binaries (macOS + Windows ScreenShare) into
-  # the release's priv directory so the MacOS/Windows adapters can locate them
-  # via :code.priv_dir(:optimal_system_agent).
-  #
-  # Source locations (built by CI before `mix release`):
-  #   priv/macos/ScreenShare          — Swift binary (macos-14/macos-13 runner)
-  #   priv/windows/ScreenShare.exe    — C# .NET 8 single-file exe (windows runner)
-  #
-  # If the source doesn't exist (e.g., cross-compiling) the step is a no-op.
-  # The adapters gracefully return {:error, :helper_not_installed} at runtime.
-  defp copy_native_helpers(release) do
-    priv_dst_base =
-      Path.join([
-        release.path,
-        "lib",
-        "optimal_system_agent-#{@version}",
-        "priv"
-      ])
-
-    helpers = [
-      {Path.join(["priv", "macos", "ScreenShare"]), Path.join([priv_dst_base, "macos"]), "ScreenShare"},
-      {Path.join(["priv", "windows", "ScreenShare.exe"]), Path.join([priv_dst_base, "windows"]), "ScreenShare.exe"}
-    ]
-
-    for {src, dst_dir, dst_name} <- helpers, File.exists?(src) do
-      File.mkdir_p!(dst_dir)
-      dst = Path.join(dst_dir, dst_name)
-      File.cp!(src, dst)
-      # Ensure the binary is executable (no-op on Windows .exe)
-      unless String.ends_with?(dst_name, ".exe"), do: File.chmod!(dst, 0o755)
     end
 
     release
@@ -197,33 +182,11 @@ defmodule OptimalSystemAgent.MixProject do
     # osagent — CLI wrapper for the OTP release.
     #
     # Usage:
-    #   osagent                   interactive chat (default)
-    #   osagent setup             configure provider + API keys
-    #   osagent version           print version
-    #   osagent serve             headless HTTP API mode
-    #   osagent update check      check for binary update from MIOSA
-    #   osagent update apply      download + stage new binary if available
-    #   osagent update disable    disable automatic update polling
-    #   osagent update enable     re-enable automatic update polling
-
-    # Self-update swap: if osa.new exists in the same directory, apply it
-    # before starting the real binary so the new version is used immediately.
-    OSA_DIR=$(cd "$(dirname "$0")" && pwd)
-    OSA_NEW="$OSA_DIR/osa.new"
-    OSA_BAK="$OSA_DIR/osa.bak"
-    OSA_BIN="$OSA_DIR/osa"
-    UPDATE_LOG="$HOME/.osa/log/update.log"
-
-    if [ -f "$OSA_NEW" ]; then
-      mkdir -p "$(dirname "$UPDATE_LOG")"
-      printf '[%s] Applying staged update: %s -> %s\n' \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$OSA_BAK" "$OSA_BIN" >> "$UPDATE_LOG" 2>/dev/null || true
-      if [ -f "$OSA_BIN" ]; then
-        mv -f "$OSA_BIN" "$OSA_BAK" 2>/dev/null || true
-      fi
-      mv -f "$OSA_NEW" "$OSA_BIN" 2>/dev/null || true
-      printf '[%s] Update applied\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$UPDATE_LOG" 2>/dev/null || true
-    fi
+    #   osagent                        interactive chat (default)
+    #   osagent setup                  configure provider + API keys
+    #   osagent version                print version
+    #   osagent serve                  headless HTTP API mode
+    #   osagent opencomputers <verb>   manage OpenComputers extension
 
     set -e
 
@@ -250,9 +213,12 @@ defmodule OptimalSystemAgent.MixProject do
       doctor)
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.doctor()"
         ;;
-      update)
-        SUBCMD="${2:-check}"
-        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.update(\"$SUBCMD\")"
+      opencomputers)
+        shift
+        # Pass remaining args as an Elixir list of strings
+        ARGS=$(printf '"%s",' "$@")
+        ARGS="[${ARGS%,}]"
+        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.opencomputers(${ARGS})"
         ;;
       chat|*)
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.chat()"

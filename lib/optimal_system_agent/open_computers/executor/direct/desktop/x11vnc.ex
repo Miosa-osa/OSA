@@ -1,121 +1,154 @@
 defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
   @moduledoc """
-  Manages a local x11vnc process on Linux hosts.
+  Manages a single x11vnc process attached to the host X session.
 
-  Starts x11vnc bound to 127.0.0.1:5900 and returns the pid.
-  The VNC socket is opened by the caller (DesktopController) after start
-  so we don't hold the TCP resource here.
-
-  ## Configuration
-
-  The binary path can be overridden in config or at call time (for tests):
-
-      config :optimal_system_agent, :x11vnc_bin, "/usr/bin/x11vnc"
-
-  ## Security
-
-  x11vnc is launched with:
-    * `-localhost`  — only accepts connections from 127.0.0.1
-    * `-nopw`       — no password (tunnel provides auth)
-    * `-display :0` — default display
-    * `-shared`     — allow reconnects without killing the server
-    * `-forever`    — keep running after a client disconnects
-
-  If x11vnc is not installed, `start/1` returns `{:error, :unsupported_platform}`.
+  - Spawns x11vnc via `Port.open/2` with `:spawn_executable`.
+  - Parses the ephemeral port from stdout (`PORT=<n>`).
+  - Exposes `port_number/1` to retrieve it once ready.
+  - Monitors the OS process; the owning process receives
+    `{:x11vnc_exited, exit_status}` when x11vnc terminates.
   """
 
   require Logger
 
-  @default_port 5900
-  @default_display ":0"
+  @port_pattern ~r/PORT=(\d+)/
+  @startup_timeout_ms 5_000
 
-  @type opts :: %{
-          optional(:binary) => String.t(),
-          optional(:port) => pos_integer(),
-          optional(:display) => String.t()
+  @type t :: %__MODULE__{
+          port: port(),
+          os_pid: non_neg_integer(),
+          vnc_port: non_neg_integer()
         }
 
+  defstruct [:port, :os_pid, :vnc_port]
+
   @doc """
-  Start x11vnc. Returns `{:ok, os_pid}` on success or `{:error, reason}`.
+  Spawns x11vnc and blocks until the ephemeral RFB port is announced on stdout.
 
-  `opts` keys:
-    * `:binary`  — path to x11vnc (default from config or `/usr/bin/x11vnc`)
-    * `:port`    — TCP port to listen on (default 5900)
-    * `:display` — X display (default ":0")
+  Returns `{:ok, t()}` or `{:error, reason}`.
   """
-  @spec start(opts()) :: {:ok, pid()} | {:error, :unsupported_platform | :failed_to_start}
-  def start(opts \\ %{}) do
-    bin = opts[:binary] || configured_binary()
-    port = opts[:port] || @default_port
-    display = opts[:display] || @default_display
-
-    unless File.exists?(bin) do
-      Logger.warning("[X11vnc] binary not found at #{bin}")
-      {:error, :unsupported_platform}
-    else
-      args = [
-        "-display", display,
-        "-localhost",
-        "-nopw",
-        "-rfbport", to_string(port),
-        "-shared",
-        "-forever",
-        "-quiet"
-      ]
-
-      Logger.info("[X11vnc] starting: #{bin} #{Enum.join(args, " ")}")
-
-      case :exec.run([bin | args], [:stdout, :stderr, :monitor]) do
-        {:ok, _pid, os_pid} ->
-          Logger.info("[X11vnc] started os_pid=#{os_pid} port=#{port}")
-          {:ok, os_pid}
-
-        {:error, reason} ->
-          Logger.error("[X11vnc] failed to start: #{inspect(reason)}")
-          {:error, :failed_to_start}
-      end
+  @spec spawn(String.t()) :: {:ok, t()} | {:error, term()}
+  def spawn(display \\ ":0") do
+    with :ok <- check_x11vnc_present(),
+         :ok <- check_display(display),
+         {:ok, port} <- open_port(display),
+         {:ok, os_pid} <- fetch_os_pid(port),
+         {:ok, vnc_port} <- await_port_announcement(port) do
+      {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}}
     end
-  rescue
-    _ ->
-      # :exec not available (non-Linux or missing dep) — fall back gracefully
-      Logger.warning("[X11vnc] :exec library not available, trying Port")
-      start_with_port(opts)
   end
 
-  @doc "Stop x11vnc by its OS pid."
-  @spec stop(integer() | nil) :: :ok
-  def stop(nil), do: :ok
-
-  def stop(os_pid) when is_integer(os_pid) do
+  @doc "Kills the x11vnc OS process and closes the Port."
+  @spec kill(t()) :: :ok
+  def kill(%__MODULE__{port: port, os_pid: os_pid}) do
     try do
-      :exec.stop(os_pid)
+      System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
     rescue
-      _ ->
-        System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
+      _ -> :ok
     end
 
+    catch_exit(fn -> Port.close(port) end)
     :ok
   end
 
-  # ── Private ──────────────────────────────────────────────────────────────────
+  # ── Private ──
 
-  defp start_with_port(opts) do
-    bin = opts[:binary] || configured_binary()
-    port = opts[:port] || @default_port
-    display = opts[:display] || @default_display
+  defp check_x11vnc_present do
+    case System.find_executable("x11vnc") do
+      nil ->
+        {:error,
+         {:missing_binary,
+          "x11vnc not found on PATH. Install with: apt install x11vnc / dnf install x11vnc"}}
 
-    unless File.exists?(bin) do
-      {:error, :unsupported_platform}
-    else
-      args = ["-display", display, "-localhost", "-nopw", "-rfbport", to_string(port), "-shared", "-forever", "-quiet"]
-      port_ref = Port.open({:spawn_executable, bin}, [:binary, args: args])
-      os_pid = Port.info(port_ref)[:os_pid]
-      Logger.info("[X11vnc] started via Port os_pid=#{os_pid}")
-      {:ok, os_pid}
+      _path ->
+        :ok
     end
   end
 
-  defp configured_binary do
-    Application.get_env(:optimal_system_agent, :x11vnc_bin, "/usr/bin/x11vnc")
+  defp check_display(display) do
+    case System.get_env("DISPLAY") do
+      nil ->
+        # Also accept an explicit non-empty display arg (rare but valid)
+        if display != "" do
+          :ok
+        else
+          {:error, {:missing_display, "DISPLAY environment variable is not set"}}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp open_port(display) do
+    x11vnc = System.find_executable("x11vnc")
+
+    args = [
+      "-display", display,
+      "-shared",
+      "-forever",
+      "-localhost",
+      "-rfbport", "0",
+      "-quiet"
+    ]
+
+    port =
+      Port.open(
+        {:spawn_executable, x11vnc},
+        [:binary, :exit_status, :stderr_to_stdout, args: args]
+      )
+
+    {:ok, port}
+  rescue
+    e -> {:error, {:spawn_failed, Exception.message(e)}}
+  end
+
+  defp fetch_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} -> {:ok, pid}
+      nil -> {:error, :port_died_before_pid}
+    end
+  end
+
+  defp await_port_announcement(port, acc \\ "", deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @startup_timeout_ms
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
+    else
+      receive do
+        {^port, {:data, chunk}} ->
+          buffer = acc <> chunk
+
+          case Regex.run(@port_pattern, buffer, capture: :all_but_first) do
+            [num] ->
+              case Integer.parse(num) do
+                {vnc_port, ""} when vnc_port > 0 ->
+                  Logger.debug("[X11vnc] announced RFB port #{vnc_port}")
+                  {:ok, vnc_port}
+
+                _ ->
+                  {:error, {:bad_port_value, num}}
+              end
+
+            nil ->
+              await_port_announcement(port, buffer, deadline)
+          end
+
+        {^port, {:exit_status, status}} ->
+          {:error, {:x11vnc_exited_early, status}}
+      after
+        remaining -> {:error, {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
+      end
+    end
+  end
+
+  defp catch_exit(fun) do
+    try do
+      fun.()
+    catch
+      _, _ -> :ok
+    end
   end
 end

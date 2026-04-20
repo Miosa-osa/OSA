@@ -5,6 +5,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateSkill do
   def safety, do: :write_safe
 
   @impl true
+  def deferred?, do: true
+
+  @impl true
   def name, do: "create_skill"
 
   @impl true

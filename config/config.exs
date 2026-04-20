@@ -22,6 +22,10 @@ config :optimal_system_agent,
 
   # Agent configuration
   max_iterations: 200,
+
+  # Doom loop hard cap — absolute total tool calls per session before forced halt.
+  # This is a secondary safety net independent of the sliding-window signature check.
+  doom_loop_max_calls: 100,
   temperature: 0.7,
   max_tokens: 4096,
 
@@ -139,6 +143,15 @@ config :optimal_system_agent,
   update_enabled: false,
   update_url: nil,
   update_interval: 86_400_000,
+
+  # ---------------------------------------------------------------------------
+  # OpenComputers — connects this OSA to MIOSA's control plane so the host
+  # appears in the MIOSA frontend as an orchestrable Computer.
+  # Opt-in via OSA_OPEN_COMPUTERS_ENABLED=true. When enabled, reads the
+  # TOML at ~/.osa/open_computers.toml (or $OSA_OPEN_COMPUTERS_CONFIG) for
+  # control_url + host_key + modes + fingerprint_path.
+  # ---------------------------------------------------------------------------
+  open_computers_enabled: false,
 
   # ---------------------------------------------------------------------------
   # Quiet Hours — heartbeat suppression windows

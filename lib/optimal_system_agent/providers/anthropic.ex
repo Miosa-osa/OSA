@@ -31,39 +31,37 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   @impl true
   def chat(messages, opts \\ []) do
-    api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
+    case resolve_auth() do
+      {:error, reason} ->
+        {:error, reason}
 
-    model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+      auth ->
+        model =
+          Keyword.get(opts, :model) ||
+            Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
 
-    base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
-
-    unless api_key do
-      {:error, "ANTHROPIC_API_KEY not configured"}
-    else
-      do_chat(base_url, api_key, model, messages, Keyword.delete(opts, :model))
+        base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
+        do_chat(base_url, auth, model, messages, Keyword.delete(opts, :model))
     end
   end
 
   @impl true
   def chat_stream(messages, callback, opts \\ []) do
-    api_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
+    case resolve_auth() do
+      {:error, reason} ->
+        {:error, reason}
 
-    model =
-      Keyword.get(opts, :model) ||
-        Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
+      auth ->
+        model =
+          Keyword.get(opts, :model) ||
+            Application.get_env(:optimal_system_agent, :anthropic_model, default_model())
 
-    base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
-
-    unless api_key do
-      {:error, "ANTHROPIC_API_KEY not configured"}
-    else
-      do_chat_stream(base_url, api_key, model, messages, callback, Keyword.delete(opts, :model))
+        base_url = Application.get_env(:optimal_system_agent, :anthropic_url, @default_url)
+        do_chat_stream(base_url, auth, model, messages, callback, Keyword.delete(opts, :model))
     end
   end
 
-  defp do_chat(base_url, api_key, model, messages, opts) do
+  defp do_chat(base_url, auth, model, messages, opts) do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
@@ -79,7 +77,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
 
-    headers = build_headers(api_key, thinking)
+    headers = build_headers(auth, thinking)
     # Extended thinking can take 300+ s before producing output
     timeout = if thinking, do: 600_000, else: 120_000
 
@@ -123,7 +121,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   # --- Streaming ---
 
-  defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
+  defp do_chat_stream(base_url, auth, model, messages, callback, opts) do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
     system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
@@ -140,7 +138,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
 
-    headers = build_headers(api_key, thinking)
+    headers = build_headers(auth, thinking)
     # Extended thinking can take 300+ s before producing the first token
     timeout = if thinking, do: 600_000, else: 120_000
 
@@ -163,12 +161,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
         {:error, reason} ->
           Logger.error("Anthropic stream connection failed: #{inspect(reason)}")
-          fallback_to_sync(base_url, api_key, model, messages, callback, opts)
+          fallback_to_sync(base_url, auth, model, messages, callback, opts)
       end
     rescue
       e ->
         Logger.error("Anthropic stream unexpected error: #{Exception.message(e)}")
-        fallback_to_sync(base_url, api_key, model, messages, callback, opts)
+        fallback_to_sync(base_url, auth, model, messages, callback, opts)
     end
   end
 
@@ -301,10 +299,23 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
-  defp process_stream_event(%{"type" => "content_block_stop"}, _callback, acc) do
-    acc
-    |> finalize_current_tool()
-    |> finalize_current_thinking()
+  defp process_stream_event(%{"type" => "content_block_stop"}, callback, acc) do
+    # If a tool block just completed, emit it for streaming tool execution
+    acc =
+      if acc.current_tool do
+        tool = acc.current_tool
+        arguments = case Jason.decode(tool.input_json) do
+          {:ok, parsed} -> parsed
+          _ -> %{}
+        end
+        tool_call = %{id: tool.id, name: tool.name, arguments: arguments}
+        callback.({:tool_use_block, tool_call})
+        %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
+      else
+        finalize_current_tool(acc)
+      end
+
+    finalize_current_thinking(acc)
   end
 
   defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
@@ -336,10 +347,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   # Handle accumulators without thinking fields (e.g., fallback sync path)
   defp finalize_current_thinking(acc), do: acc
 
-  defp fallback_to_sync(base_url, api_key, model, messages, callback, opts) do
+  defp fallback_to_sync(base_url, auth, model, messages, callback, opts) do
     Logger.warning("Falling back to synchronous Anthropic chat")
 
-    case do_chat(base_url, api_key, model, messages, opts) do
+    case do_chat(base_url, auth, model, messages, opts) do
       {:ok, result} ->
         if result.content != "", do: callback.({:text_delta, result.content})
         callback.({:done, result})
@@ -530,12 +541,20 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @doc """
   Build request headers, adding interleaved-thinking beta when thinking is enabled.
   """
-  def build_headers(api_key, thinking) do
-    base = [
-      {"x-api-key", api_key},
-      {"anthropic-version", @api_version},
-      {"content-type", "application/json"}
-    ]
+  def build_headers(auth, thinking) do
+    auth_header =
+      case auth do
+        {:oauth, token} -> [{"authorization", "Bearer #{token}"}, {"anthropic-beta", "oauth-2025-04-20"}]
+        {:api_key, key} -> [{"x-api-key", key}]
+        key when is_binary(key) -> [{"x-api-key", key}]
+      end
+
+    base =
+      auth_header ++
+        [
+          {"anthropic-version", @api_version},
+          {"content-type", "application/json"}
+        ]
 
     # Collect beta features
     betas = []
@@ -545,6 +564,36 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     case betas do
       [] -> base
       _ -> [{"anthropic-beta", Enum.join(betas, ",")} | base]
+    end
+  end
+
+  @doc """
+  Resolve authentication — checks API key first, falls back to OAuth.
+
+  Returns `{:api_key, key}`, `{:oauth, token}`, or `{:error, reason}`.
+  """
+  def resolve_auth do
+    # Try credential pool first (supports key rotation)
+    pool_key =
+      try do
+        OptimalSystemAgent.Providers.CredentialPool.get_key(:anthropic)
+      rescue
+        _ -> nil
+      catch
+        :exit, _ -> nil
+      end
+
+    api_key = pool_key || Application.get_env(:optimal_system_agent, :anthropic_api_key)
+
+    cond do
+      is_binary(api_key) and api_key != "" ->
+        {:api_key, api_key}
+
+      true ->
+        case OptimalSystemAgent.Auth.OAuth.get_valid_token() do
+          {:ok, token} -> {:oauth, token}
+          {:error, _} -> {:error, "No Anthropic API key or OAuth token configured. Run onboarding or set ANTHROPIC_API_KEY."}
+        end
     end
   end
 

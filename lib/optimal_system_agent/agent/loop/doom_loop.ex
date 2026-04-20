@@ -1,19 +1,41 @@
 defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
-  @moduledoc """
-  Doom loop detection for the agent loop.
-
-  Detects when the same tool+error signature repeats 3+ consecutive times
-  across iterations and halts execution to avoid wasting tokens on a stuck task.
-
-  The detection algorithm:
-  - Builds per-tool failure signatures from each iteration's results
-  - Accumulates signatures in a sliding window of 30 entries
-  - Resets the error-based streak when any tool succeeds cleanly
-  - Fires when any single signature appears 3+ times in the window
-  """
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+
+  @window_size 20
+
+  @max_total_tool_calls Application.compile_env(
+                          :optimal_system_agent,
+                          :doom_loop_max_calls,
+                          100
+                        )
+
+  @warn_threshold_pct 0.80
+
+  @moduledoc """
+  Doom loop detection for the agent loop.
+
+  Two independent safety mechanisms guard against runaway tool execution:
+
+  1. **Signature-based detection** (primary) — detects when the same
+     tool+error signature repeats 3+ consecutive times across iterations
+     and halts execution to avoid wasting tokens on a stuck task.
+
+     - Builds per-tool failure signatures from each iteration's results
+     - Accumulates signatures in a sliding window of #{@window_size} entries
+     - Resets the error-based streak when any tool succeeds cleanly
+     - Fires when any single signature appears 3+ times in the window
+
+  2. **Absolute call cap** (secondary safety net) — independently of the
+     signature check, halts the session once total tool calls in the session
+     exceed `@max_total_tool_calls`. This prevents a pathological worst-case
+     where many *different* failure signatures accumulate without repeating
+     enough to trigger the primary check.
+
+     Configurable via: `config :optimal_system_agent, :doom_loop_max_calls, 100`
+     A warning is logged at 80% of the limit.
+  """
 
   @error_indicators ~w(error Error failed not found command not found
                        No such file Permission denied cannot Could not
@@ -27,6 +49,33 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   @spec check(list(), list(), map()) ::
           {:ok, map()} | {:halt, String.t(), map()}
   def check(results, tool_calls, state) do
+    # --- Absolute call counter (secondary safety net) ---
+    call_count = length(tool_calls)
+    new_total = Map.get(state, :total_tool_calls, 0) + call_count
+    state = %{state | total_tool_calls: new_total}
+
+    warn_at = trunc(@max_total_tool_calls * @warn_threshold_pct)
+
+    cond do
+      new_total >= @max_total_tool_calls ->
+        handle_call_cap_exceeded(new_total, state)
+
+      new_total >= warn_at and new_total - call_count < warn_at ->
+        Logger.warning(
+          "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
+            "(session: #{state.session_id})"
+        )
+
+        check_signatures(results, tool_calls, state)
+
+      true ->
+        check_signatures(results, tool_calls, state)
+    end
+  end
+
+  # --- Private ---
+
+  defp check_signatures(results, tool_calls, state) do
     iteration_signatures = collect_iteration_signatures(results, tool_calls)
 
     any_clean_success =
@@ -49,7 +98,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     updated_failure_signatures =
       (state.recent_failure_signatures ++ new_sigs)
-      |> Enum.take(-30)
+      |> Enum.take(-@window_size)
 
     state = %{state | recent_failure_signatures: updated_failure_signatures}
 
@@ -64,8 +113,6 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       {:ok, state}
     end
   end
-
-  # --- Private ---
 
   defp collect_iteration_signatures(results, _tool_calls) do
     Enum.flat_map(results, fn {tc, {_msg, result_str}} ->
@@ -88,6 +135,41 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     end)
   end
 
+  defp handle_call_cap_exceeded(total, state) do
+    cap_message =
+      """
+      I've reached the session tool call limit (#{total}/#{@max_total_tool_calls}) and am stopping to avoid runaway execution.
+
+      This limit exists as a safety net independent of error-pattern detection.
+
+      How to proceed:
+      - If the task is incomplete, start a new session and continue from where you left off.
+      - If you need a higher limit, adjust `doom_loop_max_calls` in your application config.
+      """
+      |> String.trim()
+
+    Logger.warning(
+      "[loop] Tool call cap exceeded: #{total}/#{@max_total_tool_calls} (session: #{state.session_id})"
+    )
+
+    Bus.emit(:system_event, %{
+      event: :tool_call_cap_exceeded,
+      session_id: state.session_id,
+      total_tool_calls: total,
+      max_tool_calls: @max_total_tool_calls
+    })
+
+    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
+      {:osa_event, %{
+        type: :tool_call_cap_exceeded,
+        session_id: state.session_id,
+        total_tool_calls: total,
+        max_tool_calls: @max_total_tool_calls
+      }})
+
+    {:halt, cap_message, state}
+  end
+
   defp handle_doom_loop({repeated_sig_key, occurrences}, iteration_signatures, state) do
     repeat_count = length(occurrences)
 
@@ -107,16 +189,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     doom_message =
       """
-      I've hit the same error #{repeat_count} times and I'm stopping to avoid wasting tokens.
+      I hit the same error #{repeat_count} times with #{triggering_tool}: #{triggering_error}
 
-      What I tried:
-      - #{triggering_tool}: called #{repeat_count} times with the same failing result
-
-      Error pattern:
-      - #{triggering_error}
-
-      How to proceed:
-      - #{suggestion}
+      #{suggestion}
       """
       |> String.trim()
 
@@ -141,30 +216,68 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
         consecutive_failures: repeat_count
       }})
 
-    {:halt, doom_message, state}
+    # Track how many times we've tried recovery for this session
+    doom_recovery_count = Process.get(:osa_doom_recovery_count, 0)
+
+    if doom_recovery_count >= 2 do
+      # Already tried recovery twice — hard halt this time
+      {:halt, doom_message, state}
+    else
+      # First or second doom trigger — inject recovery directive and try again
+      Logger.info("[doom] Recovery attempt #{doom_recovery_count + 1}/2 — injecting directive")
+
+      recovery_directive = %{
+        role: "system",
+        content: "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
+          "\"#{triggering_error}\". You MUST change your approach NOW. " <>
+          "Step 1: Call file_read on the target file to see its current state. " <>
+          "Step 2: Based on what you see, decide if the change is still needed. " <>
+          "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
+          "Do NOT call #{triggering_tool} with the same arguments again.]"
+      }
+
+      Process.put(:osa_doom_recovery_count, doom_recovery_count + 1)
+
+      state = %{state |
+        recent_failure_signatures: [],
+        messages: state.messages ++ [recovery_directive]
+      }
+
+      {:ok, state}
+    end
   end
 
   defp build_suggestion(triggering_error) do
     cond do
+      String.contains?(triggering_error, "old_string and new_string are identical") ->
+        "The file already contains the change you're trying to make. " <>
+          "Read the file with file_read to see its current state, then decide if the edit is still needed."
+
+      String.contains?(triggering_error, "old_string not found") ->
+        "The text you're trying to replace doesn't exist in the file. " <>
+          "Read the file with file_read to see the actual content, then use the exact text from the file."
+
+      String.contains?(triggering_error, "old_string found") and String.contains?(triggering_error, "times") ->
+        "The text appears multiple times. Add more surrounding context to make old_string unique, " <>
+          "or use replace_all: true."
+
       String.contains?(triggering_error, ["command not found", "not found"]) ->
-        "The command or binary does not exist in this environment. " <>
-          "Verify the tool is installed or use an alternative approach."
+        "The command or binary does not exist. " <>
+          "Check what's installed with shell_execute(command: \"which <tool>\") or use an alternative."
 
       String.contains?(triggering_error, ["Permission denied", "cannot", "Could not"]) ->
-        "This operation requires elevated permissions or the target path is inaccessible. " <>
-          "Check file permissions or try a different path."
+        "Permission denied. Check file permissions or try a different path."
 
       String.contains?(triggering_error, ["No such file", "No such directory"]) ->
-        "The referenced file or directory does not exist. " <>
-          "Confirm the correct path before retrying."
+        "File or directory does not exist. " <>
+          "Use file_glob or dir_list to find the correct path."
 
       String.contains?(triggering_error, ["Blocked:"]) ->
-        "The tool is blocked by the current permission tier. " <>
-          "Request a permission level change or use an allowed alternative."
+        "Tool blocked by permissions. Use a different tool or approach."
 
       true ->
-        "Review the error above, adjust your approach, and try a different strategy " <>
-          "before retrying the same operation."
+        "Read the relevant files with file_read to understand the current state, " <>
+          "then try a completely different approach. Do NOT retry the same operation."
     end
   end
 end

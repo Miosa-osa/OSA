@@ -83,3 +83,6 @@ docs/archive/competitors/
 docs/archive/research-legacy/
 docs/reference/OPENCLAW_*
 desktop/vite.config.ts.timestamp-*
+
+# Competitive intelligence (never push)
+.competitive-intel/

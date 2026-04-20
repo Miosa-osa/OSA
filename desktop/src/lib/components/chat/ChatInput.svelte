@@ -1,5 +1,10 @@
 <script module lang="ts">
-  export type SlashCommandName = 'clear' | 'help' | 'model' | 'sessions' | 'memory';
+  export type SlashCommandName =
+    | 'clear' | 'help' | 'model' | 'sessions' | 'memory'
+    | 'login' | 'logout' | 'status' | 'cost' | 'context'
+    | 'tools' | 'agents' | 'tasks' | 'doctor' | 'version'
+    | 'compact' | 'export' | 'plan' | 'coordinator'
+    | 'effort' | 'fast' | 'skills' | 'new';
 </script>
 
 <script lang="ts">
@@ -12,6 +17,8 @@
     placeholder?: string;
     isListening?: boolean;
     onFilesAttach?: (files: FileList | File[]) => void;
+    isAgentThinking?: boolean;
+    currentModel?: string;
   }
 
   let {
@@ -21,6 +28,8 @@
     placeholder = 'Message OSA… (Enter to send, Shift+Enter for newline)',
     isListening = $bindable(false),
     onFilesAttach,
+    isAgentThinking = false,
+    currentModel,
   }: Props = $props();
 
   let fileInputEl = $state<HTMLInputElement | null>(null);
@@ -97,11 +106,29 @@
 
   // ── Slash command autocomplete ─────────────────────────────────────────────
   const SLASH_COMMANDS: { name: SlashCommandName; desc: string }[] = [
-    { name: 'clear',    desc: 'Clear chat — create a new session' },
-    { name: 'help',     desc: 'Show available commands' },
-    { name: 'model',    desc: 'Show current model info' },
-    { name: 'sessions', desc: 'List recent sessions' },
-    { name: 'memory',   desc: 'Save current context to memory' },
+    { name: 'clear',       desc: 'Clear chat — start fresh session' },
+    { name: 'new',         desc: 'Start a new session' },
+    { name: 'help',        desc: 'Show available commands' },
+    { name: 'model',       desc: 'Show or switch current model' },
+    { name: 'sessions',    desc: 'List recent sessions' },
+    { name: 'memory',      desc: 'Show memory entries' },
+    { name: 'login',       desc: 'Sign in with a provider (e.g. /login anthropic)' },
+    { name: 'logout',      desc: 'Disconnect OAuth session' },
+    { name: 'status',      desc: 'Show session status' },
+    { name: 'cost',        desc: 'Show cost breakdown' },
+    { name: 'context',     desc: 'Show context window usage' },
+    { name: 'tools',       desc: 'List available tools' },
+    { name: 'skills',      desc: 'List available skills' },
+    { name: 'agents',      desc: 'List agent roles' },
+    { name: 'tasks',       desc: 'Show current tasks' },
+    { name: 'plan',        desc: 'Toggle plan mode' },
+    { name: 'compact',     desc: 'Force context compaction' },
+    { name: 'doctor',      desc: 'Run health check' },
+    { name: 'version',     desc: 'Show version info' },
+    { name: 'export',      desc: 'Export conversation as markdown' },
+    { name: 'coordinator', desc: 'Toggle coordinator mode' },
+    { name: 'effort',      desc: 'Set thinking effort level' },
+    { name: 'fast',        desc: 'Toggle fast mode' },
   ];
 
   let showSlashMenu = $state(false);
@@ -213,6 +240,14 @@
           <span class="slash-desc">{cmd.desc}</span>
         </button>
       {/each}
+    </div>
+  {/if}
+
+  <!-- Agent thinking indicator -->
+  {#if isAgentThinking}
+    <div class="thinking-bar" aria-live="polite">
+      <span class="thinking-dot" aria-hidden="true"></span>
+      <span class="thinking-text">Agent is thinking…</span>
     </div>
   {/if}
 
@@ -370,10 +405,20 @@
           </div>
         {/if}
       </div>
+
+      <!-- Current model pill -->
+      {#if currentModel}
+        <span class="model-pill" aria-label="Current model: {currentModel}">{currentModel}</span>
+      {/if}
     </div>
 
     <div class="toolbar-right">
       <span class="shortcut-hint" aria-hidden="true">⌘K clear</span>
+
+      <!-- Character count -->
+      {#if text.length > 0}
+        <span class="char-count" aria-label="{text.length} characters">{text.length}</span>
+      {/if}
       <button
         class="send-btn"
         onclick={send}
@@ -727,5 +772,56 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border-width: 0;
+  }
+
+  /* Character count */
+  .char-count {
+    font-size: 0.6875rem;
+    color: rgba(255, 255, 255, 0.25);
+    font-variant-numeric: tabular-nums;
+    min-width: 24px;
+    text-align: right;
+  }
+
+  /* Model pill */
+  .model-pill {
+    font-size: 0.6875rem;
+    color: rgba(255, 255, 255, 0.4);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 1px 8px;
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Agent thinking indicator */
+  .thinking-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .thinking-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(6, 182, 212, 0.7);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  .thinking-text {
+    font-size: 0.8125rem;
+    color: rgba(255, 255, 255, 0.35);
+    font-style: italic;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.1); }
   }
 </style>

@@ -87,6 +87,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
           {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}})
 
+      {:tool_use_block, tool_call} ->
+        # Provider detected a complete tool_use block during streaming.
+        # Notify the caller to start executing this tool immediately.
+        :atomics.add(heartbeat, 1, 1)
+        send(caller, {:streaming_tool_block, tool_call})
+        Bus.emit(:tool_call, %{
+          name: tool_call.name,
+          phase: :streaming_start,
+          args: Map.get(tool_call, :arguments, %{}) |> inspect() |> String.slice(0, 80),
+          session_id: session_id
+        })
+
       _other ->
         :atomics.add(heartbeat, 1, 1)
         :ok
@@ -95,9 +107,27 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
 
-    # Run the stream in a linked task so we can kill it on idle timeout
+    Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
+
+    # Run the stream in a linked task so we can kill it on idle timeout.
+    # Uses FallbackChain for automatic provider switching on retryable errors.
     stream_task = Task.async(fn ->
-      Providers.chat_stream(messages, callback, opts)
+      case Providers.chat_stream(messages, callback, opts) do
+        {:ok, _} = success ->
+          success
+
+        {:error, reason} = error ->
+          # Try fallback chain on retryable errors
+          if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+            Logger.warning("[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain")
+            case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(messages, callback, opts) do
+              {:ok, result, _provider} -> {:ok, result}
+              fallback_error -> fallback_error
+            end
+          else
+            error
+          end
+      end
     end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for @idle_timeout_ms
@@ -132,6 +162,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           Task.shutdown(stream_task, :brutal_kill)
           {:error, "LLM stream exceeded 1 hour absolute limit"}
       end
+
+    # Record provider telemetry
+    stream_duration = System.monotonic_time(:millisecond) - (Process.get(:osa_stream_start_time) || System.monotonic_time(:millisecond))
+    try do
+      success = match?({:ok, _}, result)
+      OptimalSystemAgent.Telemetry.Metrics.record_provider(provider || :unknown, stream_duration, success)
+      OptimalSystemAgent.Telemetry.Metrics.record_turn()
+    rescue _ -> :ok
+    catch :exit, _ -> :ok
+    end
 
     result
   rescue
@@ -176,8 +216,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     end
   end
 
-  @doc "Resolve thinking config based on provider, model, and application config."
+  @doc "Resolve thinking config based on provider, model, effort level, and application config."
   def thinking_config(%{provider: provider} = state) do
+    alias OptimalSystemAgent.Agent.Effort
+
     enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
 
     if enabled and provider in [:anthropic, nil] and is_anthropic_provider?() do
@@ -186,7 +228,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       if String.contains?(to_string(model), "opus") do
         %{type: "adaptive"}
       else
-        budget = Application.get_env(:optimal_system_agent, :thinking_budget_tokens, 5_000)
+        # Use effort level's thinking budget instead of flat config
+        budget = Effort.thinking_budget()
         %{type: "enabled", budget_tokens: budget}
       end
     else

@@ -124,12 +124,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AuthRoutes do
         {:error, :unauthorized}
       end
     else
-      Logger.warning(
-        "[AuthRoutes] Login without secret verification — " <>
-          "set OSA_SHARED_SECRET or OSA_REQUIRE_AUTH=true to enable auth"
-      )
+      # No auth configured — only allow open-access on loopback bindings.
+      # On non-loopback (0.0.0.0, a LAN/WAN address, etc.) reject the
+      # request so that any process on the network cannot obtain a valid JWT
+      # without providing credentials.
+      if Auth.loopback_only?() do
+        Logger.warning(
+          "[AuthRoutes] Login without secret verification (loopback-only mode) — " <>
+            "set OSA_SHARED_SECRET or OSA_REQUIRE_AUTH=true to enable auth"
+        )
 
-      :ok
+        :ok
+      else
+        Logger.error(
+          "[AuthRoutes] Login rejected — server is bound to a non-loopback address " <>
+            "but no OSA_SHARED_SECRET / OSA_REQUIRE_AUTH is configured. " <>
+            "Set OSA_SHARED_SECRET to enable authenticated logins."
+        )
+
+        {:error, :unauthorized}
+      end
     end
   end
 

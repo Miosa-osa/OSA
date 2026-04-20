@@ -33,6 +33,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
   def safety, do: :write_destructive
 
   @impl true
+  def deferred?, do: true
+
+  @impl true
   def available? do
     Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
   end
