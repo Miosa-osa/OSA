@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
     * `OpenComputers.Executor.Supervisor`             — DynamicSupervisor for per-job processes
     * `OpenComputers.Executor.Direct.Pty`             — long-lived PTY session manager
     * `OpenComputers.Executor.Direct.Desktop.Controller` — long-lived desktop relay manager
+    * `OpenComputers.Executor.Direct.GhaRunner`       — GitHub Actions self-hosted runner manager
     * `OpenComputers.Updater`                         — periodic self-update poller
     * `OpenComputers.Session`                         — outbound WSS session to MIOSA;
                                                         registers itself as host_client in FrameRouter
@@ -24,6 +25,7 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel, as: TunnelExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller, as: ClusterController
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -40,6 +42,8 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
       TunnelExecutor,
       # Inference cluster controller — manages exo/MLX processes on this host
       ClusterController,
+      # GitHub Actions self-hosted runner controller
+      GhaRunnerExecutor,
       Updater,
       Session
     ]

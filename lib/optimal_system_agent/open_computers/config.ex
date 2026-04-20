@@ -88,7 +88,10 @@ defmodule OptimalSystemAgent.OpenComputers.Config do
         ),
       modes: base[:modes] || ["direct"],
       heartbeat_ms: base[:heartbeat_ms] || @default_heartbeat_ms,
-      log_level: base[:log_level] || "info"
+      log_level: base[:log_level] || "info",
+      # GHA runner feature flag — default true. Toggle via ~/.osa/open_computers.toml:
+      #   gha_runner_enabled = false
+      gha_runner_enabled: Map.get(base, :gha_runner_enabled, true)
     }
   end
 

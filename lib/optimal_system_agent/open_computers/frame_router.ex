@@ -40,6 +40,7 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel, as: TunnelExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller, as: ClusterController
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -150,6 +151,17 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  # GHA Runner frames — route to GhaRunner executor
+  def handle_cast({:inbound, {:gha_runner_setup_request, _} = frame}, state) do
+    dispatch_to_gha_runner(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:gha_runner_stop_request, _} = frame}, state) do
+    dispatch_to_gha_runner(frame)
+    {:noreply, state}
+  end
+
   # osa_update_staged — outbound only (sent by Updater, upstream to control plane).
   # If the control plane echoes it back inbound, ignore.
   def handle_cast({:inbound, {:osa_update_staged, _} = frame}, state) do
@@ -235,6 +247,18 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         ClusterController.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_gha_runner(frame) do
+    case Process.whereis(GhaRunnerExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] GhaRunnerExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        GhaRunnerExecutor.handle_frame(frame)
     end
   end
 end
