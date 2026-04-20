@@ -11,8 +11,9 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
 
   use Supervisor
 
-  alias OptimalSystemAgent.OpenComputers.{FrameRouter}
+  alias OptimalSystemAgent.OpenComputers.{FrameRouter, Updater}
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller, as: DesktopController
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Pty, as: PtyExecutor
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -22,7 +23,11 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   def init(_opts) do
     children = [
       FrameRouter,
-      DesktopController
+      DesktopController,
+      # PTY executor — manages interactive terminal sessions for OpenComputers hosts
+      PtyExecutor,
+      # Self-update poller — checks MIOSA API for new OSA binaries (opt-outable)
+      Updater
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

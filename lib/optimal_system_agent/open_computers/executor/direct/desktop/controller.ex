@@ -54,7 +54,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # ── Public API ───────────────────────────────────────────────────────────────
 
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, %{}, Keyword.merge([name: __MODULE__], opts))
+    {gen_opts, init_opts} = Keyword.split(opts, [:name])
+    GenServer.start_link(__MODULE__, init_opts, Keyword.merge([name: __MODULE__], gen_opts))
   end
 
   @doc "Dispatch a `desktop_*` frame to the controller."
@@ -66,9 +67,19 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # ── GenServer ────────────────────────────────────────────────────────────────
 
   @impl true
-  def init(_opts) do
+  def init(opts) when is_list(opts) do
     # sessions: %{session_id => %{vnc_socket, vnc_pid, queued_bytes}}
-    {:ok, %{sessions: %{}}}
+    # vnc_port_override: integer — used in tests to redirect to a fake VNC server
+    # vnc_start_fn: fn() -> {:ok, vnc_pid_or_port} | {:error, reason} — test hook
+    # frame_router_pid: pid — used in tests to capture outbound frames without hijacking the global name
+    state = %{
+      sessions: %{},
+      vnc_port: Keyword.get(opts, :vnc_port_override, @vnc_port),
+      vnc_start_fn: Keyword.get(opts, :vnc_start_fn, nil),
+      frame_router_pid: Keyword.get(opts, :frame_router_pid, nil)
+    }
+
+    {:ok, state}
   end
 
   # ── Frame dispatch ───────────────────────────────────────────────────────────
@@ -80,24 +91,24 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
     Logger.info("[Desktop.Controller] desktop_start_request session=#{session_id} #{width}x#{height}")
 
-    case start_session(session_id, %{width: width, height: height}) do
+    case start_session(session_id, %{width: width, height: height}, state) do
       {:ok, session_state} ->
         new_sessions = Map.put(state.sessions, session_id, session_state)
 
-        FrameRouter.send_frame({:desktop_ready, %{
+        send_frame_via_router({:desktop_ready, %{
           session_id: session_id,
           capabilities: %{mouse: true, keyboard: true, clipboard: false}
-        }})
+        }}, state)
 
         {:noreply, %{state | sessions: new_sessions}}
 
       {:error, reason} ->
         Logger.warning("[Desktop.Controller] failed to start session=#{session_id}: #{reason}")
 
-        FrameRouter.send_frame({:desktop_error, %{
+        send_frame_via_router({:desktop_error, %{
           session_id: session_id,
           reason: reason
-        }})
+        }}, state)
 
         {:noreply, state}
     end
@@ -142,15 +153,15 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
         if queued > @max_queue_bytes do
           Logger.warning("[Desktop.Controller] session=#{session_id} queue cap exceeded, closing")
-          FrameRouter.send_frame({:desktop_error, %{session_id: session_id, reason: :failed_to_start}})
+          send_frame_via_router({:desktop_error, %{session_id: session_id, reason: :failed_to_start}}, state)
           {:noreply, close_session(state, session_id, :queue_overflow)}
         else
           # Forward downstream bytes to the control plane
-          FrameRouter.send_frame({:desktop_data, %{
+          send_frame_via_router({:desktop_data, %{
             session_id: session_id,
             direction: :downstream,
             data: data
-          }})
+          }}, state)
 
           # Re-arm active once for backpressure
           :inet.setopts(socket, active: :once)
@@ -169,7 +180,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     case find_session_by_socket(state.sessions, socket) do
       {session_id, _} ->
         Logger.info("[Desktop.Controller] TCP closed session=#{session_id}")
-        FrameRouter.send_frame({:desktop_stop, %{session_id: session_id}})
+        send_frame_via_router({:desktop_stop, %{session_id: session_id}}, state)
         {:noreply, close_session(state, session_id, :tcp_closed)}
 
       nil ->
@@ -181,7 +192,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     case find_session_by_socket(state.sessions, socket) do
       {session_id, _} ->
         Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{reason}")
-        FrameRouter.send_frame({:desktop_error, %{session_id: session_id, reason: :failed_to_start}})
+        send_frame_via_router({:desktop_error, %{session_id: session_id, reason: :failed_to_start}}, state)
         {:noreply, close_session(state, session_id, :tcp_error)}
 
       nil ->
@@ -193,11 +204,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   # ── Private — session lifecycle ───────────────────────────────────────────────
 
-  defp start_session(session_id, _opts) do
-    with {:ok, vnc_pid} <- start_vnc(),
-         # Give x11vnc a moment to bind its port
-         :ok <- :timer.sleep(500) |> elem(0) |> then(fn _ -> :ok end),
-         {:ok, socket} <- connect_vnc() do
+  defp start_session(session_id, _opts, controller_state) do
+    with {:ok, vnc_pid} <- start_vnc(controller_state),
+         # Give x11vnc a moment to bind its port (skip in tests via vnc_start_fn)
+         :ok <- maybe_sleep(controller_state),
+         {:ok, socket} <- connect_vnc(controller_state) do
       session = %{
         vnc_socket: socket,
         vnc_pid: vnc_pid,
@@ -212,7 +223,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
-  defp start_vnc do
+  defp start_vnc(%{vnc_start_fn: fun}) when is_function(fun, 0), do: fun.()
+
+  defp start_vnc(_controller_state) do
     case os_family() do
       :linux -> X11vnc.start()
       :macos -> MacOS.start()
@@ -221,8 +234,24 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
-  defp connect_vnc do
-    case :gen_tcp.connect(@vnc_host, @vnc_port, [:binary, active: false, packet: :raw, nodelay: true], @connect_timeout_ms) do
+  # Skip the startup sleep when a test hook is provided (fast tests)
+  defp maybe_sleep(%{vnc_start_fn: fun}) when is_function(fun, 0), do: :ok
+  defp maybe_sleep(_), do: :timer.sleep(500) |> elem(0) |> then(fn _ -> :ok end)
+
+  # Stop whichever VNC backend was used — the ref type tells us which adapter.
+  # x11vnc returns an integer OS pid; macOS/Windows return a Port reference.
+  defp stop_vnc(pid_or_port) when is_integer(pid_or_port), do: X11vnc.stop(pid_or_port)
+  defp stop_vnc(port_ref) when is_port(port_ref) do
+    case os_family() do
+      :macos -> MacOS.stop(port_ref)
+      :windows -> Windows.stop(port_ref)
+      _ -> :ok
+    end
+  end
+  defp stop_vnc(_), do: :ok
+
+  defp connect_vnc(%{vnc_port: port}) do
+    case :gen_tcp.connect(@vnc_host, port, [:binary, active: false, packet: :raw, nodelay: true], @connect_timeout_ms) do
       {:ok, socket} -> {:ok, socket}
       {:error, reason} ->
         Logger.error("[Desktop.Controller] TCP connect to VNC failed: #{reason}")
@@ -241,8 +270,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
         # Close TCP socket
         if session.vnc_socket, do: :gen_tcp.close(session.vnc_socket)
 
-        # Stop VNC process if we started it
-        if session.vnc_pid, do: X11vnc.stop(session.vnc_pid)
+        # Stop VNC process if we started it — delegate to the platform adapter
+        if session.vnc_pid, do: stop_vnc(session.vnc_pid)
 
         %{state | sessions: Map.delete(state.sessions, session_id)}
     end
@@ -261,5 +290,15 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       {:win32, _} -> :windows
       _ -> :unknown
     end
+  end
+
+  # Route outbound frames through either a test-injected pid or the global FrameRouter.
+  # The frame_router_pid opt is set in tests to avoid hijacking the global named process.
+  defp send_frame_via_router(frame, %{frame_router_pid: pid}) when is_pid(pid) do
+    GenServer.cast(pid, {:outbound, frame})
+  end
+
+  defp send_frame_via_router(frame, _state) do
+    FrameRouter.send_frame(frame)
   end
 end
