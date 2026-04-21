@@ -30,6 +30,9 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Container, as: ContainerExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Compose, as: ComposeExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.SshKeys, as: SshKeysExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Clipboard, as: ClipboardExecutor
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -54,6 +57,12 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
       WgMeshExecutor,
       # Container orchestration — Docker/Podman lifecycle, log streaming, stats
       ContainerExecutor,
+      # Docker Compose multi-service stacks — up/down/ps/logs wrapping docker compose v2
+      ComposeExecutor,
+      # SSH key management — add/remove authorized_keys entries on this host
+      SshKeysExecutor,
+      # Clipboard sync — bidirectional clipboard relay (pbcopy/xclip/wl-copy)
+      ClipboardExecutor,
       Updater,
       Session
     ]
