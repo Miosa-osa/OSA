@@ -43,6 +43,7 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Container, as: ContainerExecutor
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -201,6 +202,32 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  # Container frames — route to ContainerExecutor
+  def handle_cast({:inbound, {:container_run_request, _} = frame}, state) do
+    dispatch_to_container(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:container_logs_subscribe, _} = frame}, state) do
+    dispatch_to_container(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:container_logs_unsubscribe, _} = frame}, state) do
+    dispatch_to_container(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:container_stop_request, _} = frame}, state) do
+    dispatch_to_container(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:container_remove_request, _} = frame}, state) do
+    dispatch_to_container(frame)
+    {:noreply, state}
+  end
+
   def handle_cast({:inbound, frame}, state) do
     Logger.debug("[FrameRouter] unhandled inbound frame: #{inspect(elem(frame, 0))}")
     {:noreply, state}
@@ -312,6 +339,18 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         WgMeshExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_container(frame) do
+    case Process.whereis(ContainerExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] ContainerExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        ContainerExecutor.handle_frame(frame)
     end
   end
 end
