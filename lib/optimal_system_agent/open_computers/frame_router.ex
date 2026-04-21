@@ -44,6 +44,9 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Container, as: ContainerExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Compose, as: ComposeExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.SshKeys, as: SshKeysExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Clipboard, as: ClipboardExecutor
 
   # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -228,6 +231,54 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
     {:noreply, state}
   end
 
+  # Compose frames — route to ComposeExecutor
+  def handle_cast({:inbound, {:compose_up_request, _} = frame}, state) do
+    dispatch_to_compose(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:compose_down_request, _} = frame}, state) do
+    dispatch_to_compose(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:compose_ps_request, _} = frame}, state) do
+    dispatch_to_compose(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:compose_logs_subscribe, _} = frame}, state) do
+    dispatch_to_compose(frame)
+    {:noreply, state}
+  end
+
+  # SSH key frames — route to SshKeysExecutor
+  def handle_cast({:inbound, {:ssh_key_add_request, _} = frame}, state) do
+    dispatch_to_ssh_keys(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:ssh_key_remove_request, _} = frame}, state) do
+    dispatch_to_ssh_keys(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:ssh_key_list_request, _} = frame}, state) do
+    dispatch_to_ssh_keys(frame)
+    {:noreply, state}
+  end
+
+  # Clipboard frames — route to ClipboardExecutor
+  def handle_cast({:inbound, {:clipboard_copy_to_host, _} = frame}, state) do
+    dispatch_to_clipboard(frame)
+    {:noreply, state}
+  end
+
+  def handle_cast({:inbound, {:clipboard_request_from_host, _} = frame}, state) do
+    dispatch_to_clipboard(frame)
+    {:noreply, state}
+  end
+
   def handle_cast({:inbound, frame}, state) do
     Logger.debug("[FrameRouter] unhandled inbound frame: #{inspect(elem(frame, 0))}")
     {:noreply, state}
@@ -351,6 +402,42 @@ defmodule OptimalSystemAgent.OpenComputers.FrameRouter do
 
       _pid ->
         ContainerExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_compose(frame) do
+    case Process.whereis(ComposeExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] ComposeExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        ComposeExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_ssh_keys(frame) do
+    case Process.whereis(SshKeysExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] SshKeysExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        SshKeysExecutor.handle_frame(frame)
+    end
+  end
+
+  defp dispatch_to_clipboard(frame) do
+    case Process.whereis(ClipboardExecutor) do
+      nil ->
+        Logger.warning(
+          "[FrameRouter] ClipboardExecutor not running, dropping #{inspect(elem(frame, 0))}"
+        )
+
+      _pid ->
+        ClipboardExecutor.handle_frame(frame)
     end
   end
 end
