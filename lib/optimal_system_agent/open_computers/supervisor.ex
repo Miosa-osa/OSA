@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.GhaRunner, as: GhaRunnerExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Backup, as: BackupExecutor
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh, as: WgMeshExecutor
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Container, as: ContainerExecutor
 
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -51,6 +52,8 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
       BackupExecutor,
       # WireGuard mesh networking — manages wg interfaces for tenant mesh networks
       WgMeshExecutor,
+      # Container orchestration — Docker/Podman lifecycle, log streaming, stats
+      ContainerExecutor,
       Updater,
       Session
     ]
