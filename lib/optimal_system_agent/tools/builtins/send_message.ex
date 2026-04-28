@@ -41,12 +41,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage do
       Phoenix.PubSub.broadcast(
         OptimalSystemAgent.PubSub,
         "osa:agent:#{target_id}",
-        {:agent_message, %{
-          from: sender_id,
-          to: target_id,
-          content: message,
-          timestamp: DateTime.utc_now()
-        }}
+        {:agent_message,
+         %{
+           from: sender_id,
+           to: target_id,
+           content: message,
+           timestamp: DateTime.utc_now()
+         }}
       )
 
       # Also store in ETS for agents that aren't actively listening yet
@@ -72,16 +73,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage do
         # Search by role name in registered sessions
         sessions =
           try do
-            Registry.select(OptimalSystemAgent.SessionRegistry,
-              [{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+            Registry.select(
+              OptimalSystemAgent.SessionRegistry,
+              [{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}]
+            )
           rescue
             _ -> []
           end
 
         # Match sessions containing the role name
-        match = Enum.find(sessions, fn {sid, _pid, _meta} ->
-          String.contains?(sid, id_or_name)
-        end)
+        match =
+          Enum.find(sessions, fn {sid, _pid, _meta} ->
+            String.contains?(sid, id_or_name)
+          end)
 
         case match do
           {sid, _, _} -> sid
@@ -103,11 +107,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage do
         ArgumentError -> @pending_table
       end
 
-      :ets.insert(@pending_table, {target_id, %{
-        from: sender_id,
-        content: message,
-        timestamp: System.system_time(:millisecond)
-      }})
+      :ets.insert(
+        @pending_table,
+        {target_id,
+         %{
+           from: sender_id,
+           content: message,
+           timestamp: System.system_time(:millisecond)
+         }}
+      )
     rescue
       _ -> :ok
     end

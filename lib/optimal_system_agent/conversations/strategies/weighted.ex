@@ -128,7 +128,9 @@ defmodule OptimalSystemAgent.Conversations.Strategies.Weighted do
 
     overlap = MapSet.intersection(topic_words, response_words) |> MapSet.size()
     length_score = min(String.length(response) / 800.0, 1.0)
-    keyword_score = if MapSet.size(topic_words) == 0, do: 0.5, else: overlap / MapSet.size(topic_words)
+
+    keyword_score =
+      if MapSet.size(topic_words) == 0, do: 0.5, else: overlap / MapSet.size(topic_words)
 
     # Combined: 60% keyword relevance, 40% substantive length
     keyword_score * 0.60 + length_score * 0.40

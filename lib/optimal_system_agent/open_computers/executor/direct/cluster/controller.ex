@@ -48,10 +48,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller do
     backend = payload.backend
     role = payload.role
 
-    Logger.info("[Cluster.Controller] provision cluster=#{cluster_id} backend=#{backend} role=#{role}")
+    Logger.info(
+      "[Cluster.Controller] provision cluster=#{cluster_id} backend=#{backend} role=#{role}"
+    )
 
     # Spawn provisioning in a supervised Task — do NOT block the GenServer
     controller_pid = self()
+
     task =
       Task.async(fn ->
         result =
@@ -118,11 +121,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Controller do
   end
 
   def handle_info({:provision_result, cluster_id, {:error, reason}}, state) do
-    Logger.error("[Cluster.Controller] provision failed cluster=#{cluster_id} reason=#{inspect(reason)}")
+    Logger.error(
+      "[Cluster.Controller] provision failed cluster=#{cluster_id} reason=#{inspect(reason)}"
+    )
 
     FrameRouter.send_frame(
-      {:cluster_error,
-       %{cluster_id: cluster_id, reason: reason, phase: :provisioning}}
+      {:cluster_error, %{cluster_id: cluster_id, reason: reason, phase: :provisioning}}
     )
 
     {:noreply, update_in(state.clusters, &Map.delete(&1, cluster_id))}

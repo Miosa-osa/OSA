@@ -119,7 +119,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Keyframe do
           if File.dir?(path) do
             case File.stat(path, time: :posix) do
               {:ok, %{mtime: mtime_posix}} ->
-                if (now - mtime_posix) > max_age do
+                if now - mtime_posix > max_age do
                   File.rm_rf!(path)
                   {c + 1, k}
                 else

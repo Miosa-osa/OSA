@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Format do
   @doc "Format milliseconds as human-readable elapsed time."
   def format_elapsed(ms) when ms < 1_000, do: "<1s"
   def format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
+
   def format_elapsed(ms) do
     mins = div(ms, 60_000)
     secs = div(rem(ms, 60_000), 1_000)

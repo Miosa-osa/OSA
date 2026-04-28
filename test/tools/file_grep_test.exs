@@ -77,11 +77,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrepTest do
         File.write!(Path.join(dir, "match.ex"), "target_string\n")
         File.write!(Path.join(dir, "skip.txt"), "target_string\n")
 
-        assert {:ok, result} = FileGrep.execute(%{
-          "pattern" => "target_string",
-          "path" => dir,
-          "glob" => "*.ex"
-        })
+        assert {:ok, result} =
+                 FileGrep.execute(%{
+                   "pattern" => "target_string",
+                   "path" => dir,
+                   "glob" => "*.ex"
+                 })
+
         assert result =~ "match.ex"
         # rg may or may not include the .txt — depends on rg glob behavior
         # The key test is that it doesn't crash and returns results

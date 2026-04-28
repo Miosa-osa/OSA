@@ -1,81 +1,27 @@
 defmodule OptimalSystemAgent.Tools.Builtins.FileGlob do
-  @behaviour OptimalSystemAgent.Tools.Behaviour
+  @moduledoc """
+  Backwards-compat shim — the real implementation lives at
+  `OptimalSystemAgent.Tools.Builtins.FileGlob.Tool` (per-tool directory).
 
-  @default_allowed_paths ["~", "/tmp"]
-  @sensitive_paths [".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_dsa",
-    ".gnupg/", ".aws/credentials", ".env", "/etc/shadow", "/etc/sudoers",
-    "/etc/master.passwd", ".netrc", ".npmrc", ".pypirc"]
+  This shim exists only to keep external callers that imported the
+  flat-module path from breaking during Phase 3b. Phase 5 will remove
+  this module after auditing for direct imports.
+  """
 
-  @max_results 200
+  alias OptimalSystemAgent.Tools.Builtins.FileGlob.Tool
 
-  @impl true
-  def available?, do: true
+  defdelegate name(), to: Tool
+  defdelegate description(), to: Tool
+  defdelegate parameters(), to: Tool
+  defdelegate safety(), to: Tool
+  defdelegate available?(), to: Tool
 
-  @impl true
-  def safety, do: :read_only
-
-  @impl true
-  def name, do: "file_glob"
-
-  @impl true
-  def description do
-    "Fast file pattern matching tool that works with any codebase size.\n\n" <>
-    "Usage:\n" <>
-    "- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n" <>
-    "- Returns matching file paths sorted by modification time\n" <>
-    "- Use this tool when you need to find files by name patterns\n" <>
-    "- ALWAYS use file_glob instead of shell_execute with find or ls"
-  end
-
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "properties" => %{
-        "pattern" => %{"type" => "string", "description" => "Glob pattern (e.g. '**/*.ex', 'lib/**/*.ex')"},
-        "path" => %{"type" => "string", "description" => "Base directory to search in (default: current directory)"}
-      },
-      "required" => ["pattern"]
-    }
-  end
-
-  @impl true
-  def execute(%{"pattern" => pattern} = params) do
-    base = Path.expand(params["path"] || ".")
-
-    if not path_allowed?(base) do
-      {:error, "Access denied: #{base} is outside allowed paths"}
-    else
-      results = Path.wildcard(Path.join(base, pattern))
-        |> Enum.reject(fn p -> Enum.any?(@sensitive_paths, &String.contains?(p, &1)) end)
-        |> Enum.sort()
-        |> Enum.take(@max_results)
-
-      case results do
-        [] -> {:ok, "No files matched pattern: #{pattern}"}
-        files ->
-          count_msg = if length(files) >= @max_results, do: " (showing first #{@max_results})", else: ""
-          {:ok, "#{length(files)} files found#{count_msg}:\n#{Enum.join(files, "\n")}"}
-      end
-    end
-  end
-  def execute(_), do: {:error, "Missing required parameter: pattern"}
-
-  defp path_allowed?(expanded_path) do
-    sensitive = Enum.any?(@sensitive_paths, fn p -> String.contains?(expanded_path, p) end)
-    if sensitive do
-      false
-    else
-      check = if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-      Enum.any?(allowed_paths(), fn a -> String.starts_with?(check, a) end)
-    end
-  end
-
-  defp allowed_paths do
-    Application.get_env(:optimal_system_agent, :allowed_read_paths, @default_allowed_paths)
-    |> Enum.map(fn p ->
-      e = Path.expand(p)
-      if String.ends_with?(e, "/"), do: e, else: e <> "/"
-    end)
+  @doc "v1 entry point — delegates through the v2 tool with an empty UseContext."
+  def execute(input) do
+    OptimalSystemAgent.Tools.LegacyAdapter.execute(
+      Tool,
+      input,
+      OptimalSystemAgent.Tools.UseContext.empty()
+    )
   end
 end

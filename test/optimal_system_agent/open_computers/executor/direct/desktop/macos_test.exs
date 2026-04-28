@@ -31,7 +31,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
     test "returns {:error, {:missing_helper, _}} when neither path exists" do
       # Only run if the binary is genuinely absent (non-macOS CI, or macOS without build).
       user_path = Path.expand("~/.osa/helpers/osa-screen-capture-darwin")
-      priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
+
+      priv_path =
+        Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
 
       if File.exists?(user_path) or File.exists?(priv_path) do
         # Binary present — can't test missing path in isolation
@@ -50,7 +52,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
   describe "spawn/0 with real binary (macos_native)" do
     @tag :macos_native
     test "spawns helper, receives PORT= announcement, VNC port is reachable" do
-      priv_path = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
+      priv_path =
+        Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
 
       if not File.exists?(priv_path) do
         IO.puts("Skipping macos_native test: binary not found at #{priv_path}")

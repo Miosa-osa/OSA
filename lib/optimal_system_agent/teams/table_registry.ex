@@ -39,7 +39,14 @@ defmodule OptimalSystemAgent.Teams.TableRegistry do
   @doc "Idempotently create a single named ETS table with the given type."
   @spec ensure_table(atom(), :set | :bag | :duplicate_bag | :ordered_set) :: :ok
   def ensure_table(name, type \\ :set) do
-    :ets.new(name, [:named_table, :public, type, {:read_concurrency, true}, {:write_concurrency, true}])
+    :ets.new(name, [
+      :named_table,
+      :public,
+      type,
+      {:read_concurrency, true},
+      {:write_concurrency, true}
+    ])
+
     :ok
   rescue
     # ArgumentError is raised when the table already exists — that is fine.

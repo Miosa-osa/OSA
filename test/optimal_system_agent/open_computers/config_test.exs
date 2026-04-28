@@ -4,20 +4,23 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
   alias OptimalSystemAgent.OpenComputers.Config
 
   defp tmp_toml(content) do
-    path = Path.join(System.tmp_dir!(), "oc_config_test_#{System.unique_integer([:positive])}.toml")
+    path =
+      Path.join(System.tmp_dir!(), "oc_config_test_#{System.unique_integer([:positive])}.toml")
+
     File.write!(path, content)
     path
   end
 
   describe "Config GenServer — load from TOML" do
     test "starts successfully with a valid TOML file" do
-      path = tmp_toml("""
-      control_url = "wss://api.example.com/ws"
-      host_key = "oc_host_abc123"
-      fingerprint_path = "~/.osa/test.ed25519"
-      heartbeat_ms = 15000
-      modes = ["direct"]
-      """)
+      path =
+        tmp_toml("""
+        control_url = "wss://api.example.com/ws"
+        host_key = "oc_host_abc123"
+        fingerprint_path = "~/.osa/test.ed25519"
+        heartbeat_ms = 15000
+        modes = ["direct"]
+        """)
 
       on_exit(fn -> File.rm(path) end)
 
@@ -26,10 +29,11 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
     end
 
     test "get/0 returns parsed config" do
-      path = tmp_toml("""
-      control_url = "wss://api.example.com/ws"
-      host_key = "oc_host_abc123"
-      """)
+      path =
+        tmp_toml("""
+        control_url = "wss://api.example.com/ws"
+        host_key = "oc_host_abc123"
+        """)
 
       on_exit(fn -> File.rm(path) end)
 
@@ -40,9 +44,10 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
     end
 
     test "defaults to direct mode when modes not specified" do
-      path = tmp_toml("""
-      host_key = "oc_host_abc"
-      """)
+      path =
+        tmp_toml("""
+        host_key = "oc_host_abc"
+        """)
 
       on_exit(fn -> File.rm(path) end)
       start_supervised!({Config, path: path}, id: :config_test_modes)
@@ -51,9 +56,10 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
     end
 
     test "defaults heartbeat_ms to 30000 when not specified" do
-      path = tmp_toml("""
-      host_key = "oc_host_xyz"
-      """)
+      path =
+        tmp_toml("""
+        host_key = "oc_host_xyz"
+        """)
 
       on_exit(fn -> File.rm(path) end)
       start_supervised!({Config, path: path}, id: :config_test_hb)
@@ -62,9 +68,10 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
     end
 
     test "parses integer heartbeat_ms from TOML" do
-      path = tmp_toml("""
-      heartbeat_ms = 10000
-      """)
+      path =
+        tmp_toml("""
+        heartbeat_ms = 10000
+        """)
 
       on_exit(fn -> File.rm(path) end)
       start_supervised!({Config, path: path}, id: :config_test_hb2)
@@ -93,9 +100,10 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
 
   describe "Config GenServer — reload/0" do
     test "reload/0 re-reads from disk" do
-      path = tmp_toml("""
-      host_key = "oc_host_first"
-      """)
+      path =
+        tmp_toml("""
+        host_key = "oc_host_first"
+        """)
 
       on_exit(fn -> File.rm(path) end)
       start_supervised!({Config, path: path}, id: :config_test_reload)
@@ -109,9 +117,10 @@ defmodule OptimalSystemAgent.OpenComputers.ConfigTest do
 
   describe "Config GenServer — env overrides" do
     test "OSA_OPEN_COMPUTERS_HOST_KEY overrides TOML value" do
-      path = tmp_toml("""
-      host_key = "oc_host_from_file"
-      """)
+      path =
+        tmp_toml("""
+        host_key = "oc_host_from_file"
+        """)
 
       on_exit(fn ->
         File.rm(path)

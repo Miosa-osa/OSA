@@ -77,6 +77,7 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
     Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
       process_webhook(payload, state)
     end)
+
     {:noreply, state}
   end
 
@@ -145,15 +146,27 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
   end
 
   defp chunk_message(text) do
-    if String.length(text) <= @max_message_length, do: [text],
-    else: text |> String.graphemes() |> Enum.chunk_every(@max_message_length) |> Enum.map(&Enum.join/1)
+    if String.length(text) <= @max_message_length,
+      do: [text],
+      else:
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(@max_message_length)
+        |> Enum.map(&Enum.join/1)
   end
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
-      [] -> DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :dingtalk})
+      [{_, _}] ->
+        :ok
+
+      [] ->
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :dingtalk}
+        )
     end
+
     :ok
   rescue
     _ -> :ok

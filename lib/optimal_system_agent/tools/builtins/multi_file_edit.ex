@@ -11,8 +11,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit do
 
   @impl true
   def description,
-    do:
-      "Apply edits across multiple files atomically. All edits succeed or none are applied."
+    do: "Apply edits across multiple files atomically. All edits succeed or none are applied."
 
   @impl true
   def parameters do
@@ -28,8 +27,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit do
             "properties" => %{
               "path" => %{
                 "type" => "string",
-                "description" =>
-                  "Path to the file. Relative paths resolve to ~/.osa/workspace/."
+                "description" => "Path to the file. Relative paths resolve to ~/.osa/workspace/."
               },
               "old_string" => %{
                 "type" => "string",

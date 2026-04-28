@@ -36,7 +36,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
 
     # Context window size from config
     ctx_window = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-    ctx_display = if ctx_window >= 1_000_000, do: "#{div(ctx_window, 1_000_000)}M context", else: "#{div(ctx_window, 1_000)}K context"
+
+    ctx_display =
+      if ctx_window >= 1_000_000,
+        do: "#{div(ctx_window, 1_000_000)}M context",
+        else: "#{div(ctx_window, 1_000)}K context"
 
     # Connected channels
     channels =
@@ -71,7 +75,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     # Recent session count
     session_count =
       try do
-        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:_, :_, :_}, [], [true]}]) |> length()
+        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:_, :_, :_}, [], [true]}])
+        |> length()
       rescue
         _ -> 0
       catch
@@ -82,7 +87,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     inner_width = width - 4
     title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset} "
     title_visible = "OSA v#{version} (#{git_hash})"
-    top_border = "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
+
+    top_border =
+      "#{@dim}╭─#{@reset}#{title}#{@dim}#{String.duplicate("─", max(inner_width - String.length(title_visible) - 3, 0))}╮#{@reset}"
 
     # ASCII art logo
     logo = [
@@ -91,17 +98,19 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
       "#{@cyan}██║   ██║███████╗███████║#{@reset}",
       "#{@cyan}██║   ██║╚════██║██╔══██║#{@reset}",
       "#{@cyan}╚██████╔╝███████║██║  ██║#{@reset}",
-      "#{@cyan} ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}",
+      "#{@cyan} ╚═════╝ ╚══════╝╚═╝  ╚═╝#{@reset}"
     ]
 
     # Left panel — logo + system status
-    left_lines = logo ++ [
-      "",
-      "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
-      "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
-      "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
-      "#{@dim}#{cwd}#{@reset}"
-    ]
+    left_lines =
+      logo ++
+        [
+          "",
+          "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
+          "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
+          "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
+          "#{@dim}#{cwd}#{@reset}"
+        ]
 
     # Right panel — live info
     right_lines = [
@@ -113,9 +122,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
       "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
       "#{@yellow}System#{@reset}",
       "#{@dim}channels: #{channels_str}#{@reset}",
-      if(session_count > 0, do: "#{@dim}sessions: #{session_count} active#{@reset}", else: "#{@dim}sessions: new#{@reset}"),
+      if(session_count > 0,
+        do: "#{@dim}sessions: #{session_count} active#{@reset}",
+        else: "#{@dim}sessions: new#{@reset}"
+      ),
       "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
-      "#{@dim}Ctrl+C cancel · Ctrl+J newline#{@reset}",
+      "#{@dim}Ctrl+C cancel · Ctrl+J newline#{@reset}"
     ]
 
     # Render
@@ -238,7 +250,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   # ── Time / Token Formatters (delegates to shared Format module) ──────
 
   defdelegate format_elapsed(ms), to: OptimalSystemAgent.Channels.CLI.Format
-  defdelegate format_tokens(n), to: OptimalSystemAgent.Channels.CLI.Format, as: :format_tokens_arrow
+
+  defdelegate format_tokens(n),
+    to: OptimalSystemAgent.Channels.CLI.Format,
+    as: :format_tokens_arrow
 
   def format_duration_ms(nil), do: ""
   def format_duration_ms(ms) when is_number(ms), do: format_elapsed(ms)

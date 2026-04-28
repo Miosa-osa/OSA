@@ -12,12 +12,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config do
   @impl true
   def description do
     "Read or write OSA configuration settings.\n\n" <>
-    "Actions:\n" <>
-    "- `get` — read a setting value (resolved through cascade: session → local → project → user)\n" <>
-    "- `set` — write a setting value to a specific layer\n" <>
-    "- `list` — show all settings merged\n\n" <>
-    "Common settings: default_provider, effort_level, max_context_tokens, temperature,\n" <>
-    "plan_mode_enabled, thinking_enabled, interactive_permissions"
+      "Actions:\n" <>
+      "- `get` — read a setting value (resolved through cascade: session → local → project → user)\n" <>
+      "- `set` — write a setting value to a specific layer\n" <>
+      "- `list` — show all settings merged\n\n" <>
+      "Common settings: default_provider, effort_level, max_context_tokens, temperature,\n" <>
+      "plan_mode_enabled, thinking_enabled, interactive_permissions"
   end
 
   @impl true
@@ -76,7 +76,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config do
 
       "project" ->
         Settings.set_project(key, parsed_value)
-        {:ok, "Set #{key} = #{inspect(parsed_value)} (project-level, saved to .osa/settings.json)"}
+
+        {:ok,
+         "Set #{key} = #{inspect(parsed_value)} (project-level, saved to .osa/settings.json)"}
 
       _ ->
         {:error, "Unknown layer: #{layer}. Use session, user, or project."}
@@ -89,9 +91,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config do
     if map_size(all) == 0 do
       {:ok, "No custom settings configured. Using defaults."}
     else
-      formatted = Enum.map(all, fn {k, v} ->
-        "  #{k}: #{inspect(v)}"
-      end) |> Enum.sort() |> Enum.join("\n")
+      formatted =
+        Enum.map(all, fn {k, v} ->
+          "  #{k}: #{inspect(v)}"
+        end)
+        |> Enum.sort()
+        |> Enum.join("\n")
 
       {:ok, "Current settings (merged):\n#{formatted}"}
     end
@@ -105,9 +110,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config do
 
   defp parse_value("true"), do: true
   defp parse_value("false"), do: false
+
   defp parse_value(v) do
     case Integer.parse(v) do
-      {n, ""} -> n
+      {n, ""} ->
+        n
+
       _ ->
         case Float.parse(v) do
           {f, ""} -> f

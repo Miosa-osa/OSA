@@ -59,7 +59,9 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
           :ok
 
         {:error, reason} ->
-          Logger.warning("[NervousSystem:#{team_id}] Could not start #{inspect(mod)}: #{inspect(reason)}")
+          Logger.warning(
+            "[NervousSystem:#{team_id}] Could not start #{inspect(mod)}: #{inspect(reason)}"
+          )
       end
     end)
 
@@ -80,7 +82,8 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
             Logger.debug("[NervousSystem:#{team_id}] Stopped #{inspect(mod)}: #{inspect(result)}")
           end)
 
-        [] -> :ok
+        [] ->
+          :ok
       end
     end)
 
@@ -137,6 +140,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -168,6 +172,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -188,7 +193,8 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
       Phoenix.PubSub.broadcast(
         OptimalSystemAgent.PubSub,
         "osa:team:#{state.team_id}",
-        {:team_event, %{type: event_type, payload: payload, team_id: state.team_id, at: DateTime.utc_now()}}
+        {:team_event,
+         %{type: event_type, payload: payload, team_id: state.team_id, at: DateTime.utc_now()}}
       )
 
       {:noreply, state}
@@ -213,6 +219,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -228,13 +235,15 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
     def handle_info(:check_load, state) do
       alias OptimalSystemAgent.Teams.AgentState
 
-      agents  = AgentState.list(state.team_id)
+      agents = AgentState.list(state.team_id)
       working = Enum.count(agents, &(&1.status == :working))
-      idle    = Enum.count(agents, &(&1.status == :idle))
-      total   = working + idle
+      idle = Enum.count(agents, &(&1.status == :idle))
+      total = working + idle
 
       if total > 1 and idle / total < @skew_threshold do
-        Logger.info("[Rebalancer:#{state.team_id}] Load skew detected (working=#{working} idle=#{idle}) — suggesting rebalance")
+        Logger.info(
+          "[Rebalancer:#{state.team_id}] Load skew detected (working=#{working} idle=#{idle}) — suggesting rebalance"
+        )
 
         OptimalSystemAgent.Teams.NervousSystem.Broadcaster.broadcast(
           state.team_id,
@@ -269,6 +278,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -304,7 +314,9 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
           {:reply, :ok, state}
 
         other_agent ->
-          Logger.warning("[ConflictDetector:#{state.team_id}] File conflict: #{file_path} — #{agent_id} vs #{other_agent}")
+          Logger.warning(
+            "[ConflictDetector:#{state.team_id}] File conflict: #{file_path} — #{agent_id} vs #{other_agent}"
+          )
 
           OptimalSystemAgent.Teams.NervousSystem.Broadcaster.broadcast(
             state.team_id,
@@ -341,6 +353,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -404,6 +417,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -449,7 +463,11 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
         bids ->
           {winner, _} = Enum.max_by(bids, fn {agent_id, conf} -> {conf, agent_id} end)
           new_auctions = Map.delete(state.auctions, task_id)
-          Logger.info("[Negotiation:#{state.team_id}] Task #{task_id} awarded to #{winner} (#{length(bids)} bids)")
+
+          Logger.info(
+            "[Negotiation:#{state.team_id}] Task #{task_id} awarded to #{winner} (#{length(bids)} bids)"
+          )
+
           {:reply, {:ok, winner}, %{state | auctions: new_auctions}}
       end
     end
@@ -475,6 +493,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -533,7 +552,10 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
           if length(arrived) >= updated.expected do
             # All arrived — unblock everyone
-            Logger.info("[Rendezvous:#{state.team_id}] Barrier '#{name}' opened (#{length(arrived)} agents)")
+            Logger.info(
+              "[Rendezvous:#{state.team_id}] Barrier '#{name}' opened (#{length(arrived)} agents)"
+            )
+
             Enum.each(updated.waiters, &GenServer.reply(&1, :go))
             new_barriers = Map.delete(state.barriers, name)
             {:noreply, %{state | barriers: new_barriers}}
@@ -571,6 +593,7 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
 
     def start_link(opts) do
       team_id = Keyword.fetch!(opts, :team_id)
+
       GenServer.start_link(__MODULE__, team_id,
         name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
       )
@@ -620,13 +643,13 @@ defmodule OptimalSystemAgent.Teams.NervousSystem do
       alias OptimalSystemAgent.Teams.AgentState
       alias OptimalSystemAgent.Team
 
-      agents  = AgentState.list(team_id)
-      tasks   = Team.list_tasks(team_id)
+      agents = AgentState.list(team_id)
+      tasks = Team.list_tasks(team_id)
 
       pending_count = Enum.count(tasks, &(&1.status == :pending))
-      failed_count  = Enum.count(tasks, &(&1.status == :failed))
-      idle_count    = Enum.count(agents, &(&1.status == :idle))
-      total_tasks   = length(tasks)
+      failed_count = Enum.count(tasks, &(&1.status == :failed))
+      idle_count = Enum.count(agents, &(&1.status == :idle))
+      total_tasks = length(tasks)
 
       cond do
         pending_count > 0 and idle_count == 0 ->

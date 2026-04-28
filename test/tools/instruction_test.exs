@@ -31,7 +31,8 @@ defmodule OptimalSystemAgent.Tools.InstructionTest do
     test "normalizes tool name with params" do
       input = {"file_read", %{"path" => "/tmp/file.txt"}}
 
-      assert {:ok, %Instruction{tool: "file_read", params: %{"path" => "/tmp/file.txt"}, context: %{}}} =
+      assert {:ok,
+              %Instruction{tool: "file_read", params: %{"path" => "/tmp/file.txt"}, context: %{}}} =
                Instruction.normalize(input)
     end
 

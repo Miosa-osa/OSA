@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Permissions do
       |> Enum.filter(fn {key, _val} -> String.contains?(key, ":") end)
       |> Enum.find_value(fn {key, action} ->
         [rule_tool, pattern] = String.split(key, ":", parts: 2)
+
         if rule_tool == tool_name and matches_pattern?(pattern, args) do
           case action do
             "allow" -> :allow
@@ -94,11 +95,12 @@ defmodule OptimalSystemAgent.Permissions do
   # and matches it against the pattern.
   defp matches_pattern?(pattern, args) when is_map(args) do
     # Extract the primary value to match against
-    primary = Map.get(args, "command") ||
-              Map.get(args, "path") ||
-              Map.get(args, "query") ||
-              Map.get(args, "task") ||
-              (args |> Map.values() |> List.first())
+    primary =
+      Map.get(args, "command") ||
+        Map.get(args, "path") ||
+        Map.get(args, "query") ||
+        Map.get(args, "task") ||
+        args |> Map.values() |> List.first()
 
     if is_binary(primary) do
       glob_match?(pattern, primary)

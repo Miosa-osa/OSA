@@ -166,7 +166,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch do
             end
         end
 
-      {:ok, %Req.Response{status: status, body: body, headers: headers}} when status in 200..299 ->
+      {:ok, %Req.Response{status: status, body: body, headers: headers}}
+      when status in 200..299 ->
         content_type = extract_content_type(headers)
         formatted = format_body(body, content_type, max_length)
         {:ok, "#{url}\n#{content_type}\n---\n#{formatted}"}

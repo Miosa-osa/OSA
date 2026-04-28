@@ -232,17 +232,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ModelsCurrentTest do
 
   describe "POST /current with unknown provider" do
     test "returns 400" do
-      conn = json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+      conn =
+        json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+
       assert conn.status == 400
     end
 
     test "returns application/json on 400 for unknown provider" do
-      conn = json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+      conn =
+        json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+
       assert content_type(conn) =~ "application/json"
     end
 
     test "error body contains error key for unknown provider" do
-      conn = json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+      conn =
+        json_post("/current", %{"provider" => "nonexistent_provider_xyz", "model" => "some-model"})
+
       body = decode(conn)
       assert is_binary(body["error"])
     end

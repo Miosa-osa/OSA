@@ -162,7 +162,10 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
           role: "user",
           content: [
             %{type: "text", text: "What's in this image?"},
-            %{type: "image", source: %{type: "base64", media_type: "image/jpeg", data: "/9j/4..."}}
+            %{
+              type: "image",
+              source: %{type: "base64", media_type: "image/jpeg", data: "/9j/4..."}
+            }
           ]
         }
       ]
@@ -177,7 +180,11 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
     test "handles multiple messages in sequence" do
       messages = [
         %{role: "user", content: "read /tmp/foo"},
-        %{role: "assistant", content: "", tool_calls: [%{id: "tc_a", name: "file_read", arguments: %{"path" => "/tmp/foo"}}]},
+        %{
+          role: "assistant",
+          content: "",
+          tool_calls: [%{id: "tc_a", name: "file_read", arguments: %{"path" => "/tmp/foo"}}]
+        },
         %{role: "tool", tool_call_id: "tc_a", content: "file contents"},
         %{role: "assistant", content: "Here are the contents."}
       ]
@@ -186,7 +193,8 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
       assert length(formatted) == 4
       assert Enum.at(formatted, 0)["role"] == "user"
       assert Enum.at(formatted, 1)["role"] == "assistant"
-      assert Enum.at(formatted, 2)["role"] == "user"  # tool_result → user
+      # tool_result → user
+      assert Enum.at(formatted, 2)["role"] == "user"
       assert Enum.at(formatted, 3)["role"] == "assistant"
     end
   end

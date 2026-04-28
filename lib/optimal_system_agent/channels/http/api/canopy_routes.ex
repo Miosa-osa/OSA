@@ -26,8 +26,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CanopyRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET / — list all workspaces ────────────────────────────────────────────
 
@@ -115,7 +115,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CanopyRoutes do
           allowed = Map.take(params, ["name", "description"])
 
           if map_size(allowed) == 0 do
-            json_error(conn, 400, "invalid_request", "No updatable fields provided (name, description)")
+            json_error(
+              conn,
+              400,
+              "invalid_request",
+              "No updatable fields provided (name, description)"
+            )
           else
             updated_workspaces =
               Enum.map(workspaces, fn ws ->

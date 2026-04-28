@@ -161,39 +161,44 @@ defmodule OptimalSystemAgent.Agents.Registry do
           {:ok, meta} ->
             name =
               meta["name"] ||
-                Path.basename(path, ".md") |> then(fn n ->
+                Path.basename(path, ".md")
+                |> then(fn n ->
                   if n == "AGENT", do: Path.basename(Path.dirname(path)), else: n
                 end)
 
-            {:ok, %{
-              name: to_string(name),
-              description: to_string(meta["description"] || ""),
-              tier: parse_tier(meta["tier"]),
-              triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
-              tools_allowed: parse_tool_list(meta["tools_allowed"]),
-              tools_blocked: parse_tool_list(meta["tools_blocked"]) || [],
-              max_iterations: meta["max_iterations"],
-              system_prompt: String.trim(body),
-              source_path: path
-            }}
+            {:ok,
+             %{
+               name: to_string(name),
+               description: to_string(meta["description"] || ""),
+               tier: parse_tier(meta["tier"]),
+               triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
+               tools_allowed: parse_tool_list(meta["tools_allowed"]),
+               tools_blocked: parse_tool_list(meta["tools_blocked"]) || [],
+               max_iterations: meta["max_iterations"],
+               system_prompt: String.trim(body),
+               source_path: path
+             }}
 
-          _ -> :error
+          _ ->
+            :error
         end
 
       _ ->
         # No frontmatter — treat entire content as system prompt
         name = Path.basename(path, ".md")
-        {:ok, %{
-          name: name,
-          description: "",
-          tier: :specialist,
-          triggers: [],
-          tools_allowed: nil,
-          tools_blocked: [],
-          max_iterations: nil,
-          system_prompt: content,
-          source_path: path
-        }}
+
+        {:ok,
+         %{
+           name: name,
+           description: "",
+           tier: :specialist,
+           triggers: [],
+           tools_allowed: nil,
+           tools_blocked: [],
+           max_iterations: nil,
+           system_prompt: content,
+           source_path: path
+         }}
     end
   rescue
     e ->

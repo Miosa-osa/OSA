@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput do
   @impl true
   def description do
     "Get the output/status of a running or completed agent task.\n\n" <>
-    "Use to check on background agents or retrieve their results."
+      "Use to check on background agents or retrieve their results."
   end
 
   @impl true
@@ -40,10 +40,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput do
             tokens = state[:estimated_tokens] || 0
             status = state[:status] || :unknown
 
-            {:ok, "Agent #{agent_id} is #{status}.\n" <>
-              "- Iterations: #{iter}\n" <>
-              "- Tokens used: #{tokens}\n" <>
-              "- Status: running"}
+            {:ok,
+             "Agent #{agent_id} is #{status}.\n" <>
+               "- Iterations: #{iter}\n" <>
+               "- Tokens used: #{tokens}\n" <>
+               "- Status: running"}
 
           _ ->
             {:ok, "Agent #{agent_id} is running (state unavailable)."}

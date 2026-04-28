@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandPaletteTest do
     test "each command entry has name, description, category" do
       conn = get_commands()
       body = decode(conn)
+
       Enum.each(body["commands"], fn cmd ->
         assert Map.has_key?(cmd, "name")
         assert Map.has_key?(cmd, "description")

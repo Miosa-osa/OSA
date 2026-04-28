@@ -31,7 +31,12 @@ defmodule OptimalSystemAgent.Tools.MiddlewareTest do
         @impl true
         def call(instruction, next, _opts) do
           order = Map.get(instruction.params, :order, [])
-          updated = %{instruction | params: Map.put(instruction.params, :order, order ++ [:first])}
+
+          updated = %{
+            instruction
+            | params: Map.put(instruction.params, :order, order ++ [:first])
+          }
+
           next.(updated)
         end
       end
@@ -42,7 +47,12 @@ defmodule OptimalSystemAgent.Tools.MiddlewareTest do
         @impl true
         def call(instruction, next, _opts) do
           order = Map.get(instruction.params, :order, [])
-          updated = %{instruction | params: Map.put(instruction.params, :order, order ++ [:second])}
+
+          updated = %{
+            instruction
+            | params: Map.put(instruction.params, :order, order ++ [:second])
+          }
+
           next.(updated)
         end
       end

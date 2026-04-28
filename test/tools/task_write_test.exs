@@ -25,6 +25,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWriteTest do
         _pid -> Tasks.clear_tasks(@session)
       end
     end)
+
     :ok
   end
 
@@ -52,7 +53,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWriteTest do
 
   describe "execute/1 — add" do
     test "adds a single task" do
-      assert {:ok, msg} = TaskWrite.execute(%{"action" => "add", "session_id" => @session, "title" => "Set up database"})
+      assert {:ok, msg} =
+               TaskWrite.execute(%{
+                 "action" => "add",
+                 "session_id" => @session,
+                 "title" => "Set up database"
+               })
+
       assert msg =~ "Created task"
       assert msg =~ "Set up database"
     end
@@ -65,16 +72,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWriteTest do
   describe "execute/1 — add_multiple" do
     test "adds multiple tasks" do
       titles = ["Step 1", "Step 2", "Step 3"]
-      assert {:ok, msg} = TaskWrite.execute(%{"action" => "add_multiple", "session_id" => @session, "titles" => titles})
+
+      assert {:ok, msg} =
+               TaskWrite.execute(%{
+                 "action" => "add_multiple",
+                 "session_id" => @session,
+                 "titles" => titles
+               })
+
       assert msg =~ "Created 3 tasks"
     end
 
     test "returns error when titles missing" do
-      assert {:error, _} = TaskWrite.execute(%{"action" => "add_multiple", "session_id" => @session})
+      assert {:error, _} =
+               TaskWrite.execute(%{"action" => "add_multiple", "session_id" => @session})
     end
 
     test "returns error when titles empty" do
-      assert {:error, _} = TaskWrite.execute(%{"action" => "add_multiple", "session_id" => @session, "titles" => []})
+      assert {:error, _} =
+               TaskWrite.execute(%{
+                 "action" => "add_multiple",
+                 "session_id" => @session,
+                 "titles" => []
+               })
     end
   end
 
@@ -85,28 +105,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWriteTest do
     end
 
     test "starts a task", %{task_id: id} do
-      assert {:ok, msg} = TaskWrite.execute(%{"action" => "start", "session_id" => @session, "task_id" => id})
+      assert {:ok, msg} =
+               TaskWrite.execute(%{
+                 "action" => "start",
+                 "session_id" => @session,
+                 "task_id" => id
+               })
+
       assert msg =~ "Started task #{id}"
     end
 
     test "completes a task", %{task_id: id} do
-      assert {:ok, msg} = TaskWrite.execute(%{"action" => "complete", "session_id" => @session, "task_id" => id})
+      assert {:ok, msg} =
+               TaskWrite.execute(%{
+                 "action" => "complete",
+                 "session_id" => @session,
+                 "task_id" => id
+               })
+
       assert msg =~ "Completed task #{id}"
     end
 
     test "fails a task with reason", %{task_id: id} do
-      assert {:ok, msg} = TaskWrite.execute(%{
-        "action" => "fail",
-        "session_id" => @session,
-        "task_id" => id,
-        "reason" => "timeout"
-      })
+      assert {:ok, msg} =
+               TaskWrite.execute(%{
+                 "action" => "fail",
+                 "session_id" => @session,
+                 "task_id" => id,
+                 "reason" => "timeout"
+               })
+
       assert msg =~ "Failed task #{id}"
       assert msg =~ "timeout"
     end
 
     test "returns error for non-existent task" do
-      assert {:error, _} = TaskWrite.execute(%{"action" => "start", "session_id" => @session, "task_id" => "nonexistent"})
+      assert {:error, _} =
+               TaskWrite.execute(%{
+                 "action" => "start",
+                 "session_id" => @session,
+                 "task_id" => "nonexistent"
+               })
     end
 
     test "returns error when task_id missing" do

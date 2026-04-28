@@ -13,7 +13,8 @@ defmodule OptimalSystemAgent.Utils.Diff do
 
   Returns `{diff_text, stats}` where stats is `%{additions: n, deletions: n}`.
   """
-  def unified(old_content, new_content, path) when is_binary(old_content) and is_binary(new_content) do
+  def unified(old_content, new_content, path)
+      when is_binary(old_content) and is_binary(new_content) do
     old_lines = String.split(old_content, "\n")
     new_lines = String.split(new_content, "\n")
 
@@ -48,8 +49,17 @@ defmodule OptimalSystemAgent.Utils.Diff do
   """
   def stats(diff_text) when is_binary(diff_text) do
     lines = String.split(diff_text, "\n")
-    additions = Enum.count(lines, fn l -> String.starts_with?(l, "+") and not String.starts_with?(l, "+++") end)
-    deletions = Enum.count(lines, fn l -> String.starts_with?(l, "-") and not String.starts_with?(l, "---") end)
+
+    additions =
+      Enum.count(lines, fn l ->
+        String.starts_with?(l, "+") and not String.starts_with?(l, "+++")
+      end)
+
+    deletions =
+      Enum.count(lines, fn l ->
+        String.starts_with?(l, "-") and not String.starts_with?(l, "---")
+      end)
+
     %{additions: additions, deletions: deletions}
   end
 
@@ -75,21 +85,30 @@ defmodule OptimalSystemAgent.Utils.Diff do
     {changes, _old_idx, _new_idx} =
       Enum.reduce(edits, {[], 0, 0}, fn
         {:eq, lines}, {acc, oi, ni} ->
-          eq_entries = Enum.with_index(lines) |> Enum.map(fn {l, i} ->
-            {:eq, oi + i, ni + i, l}
-          end)
+          eq_entries =
+            Enum.with_index(lines)
+            |> Enum.map(fn {l, i} ->
+              {:eq, oi + i, ni + i, l}
+            end)
+
           {acc ++ eq_entries, oi + length(lines), ni + length(lines)}
 
         {:del, lines}, {acc, oi, ni} ->
-          del_entries = Enum.with_index(lines) |> Enum.map(fn {l, i} ->
-            {:del, oi + i, nil, l}
-          end)
+          del_entries =
+            Enum.with_index(lines)
+            |> Enum.map(fn {l, i} ->
+              {:del, oi + i, nil, l}
+            end)
+
           {acc ++ del_entries, oi + length(lines), ni}
 
         {:ins, lines}, {acc, oi, ni} ->
-          ins_entries = Enum.with_index(lines) |> Enum.map(fn {l, i} ->
-            {:ins, nil, ni + i, l}
-          end)
+          ins_entries =
+            Enum.with_index(lines)
+            |> Enum.map(fn {l, i} ->
+              {:ins, nil, ni + i, l}
+            end)
+
           {acc ++ ins_entries, oi, ni + length(lines)}
       end)
 
@@ -123,11 +142,12 @@ defmodule OptimalSystemAgent.Utils.Diff do
 
         %{
           header: "@@ -#{first_old + 1},#{old_count} +#{first_new + 1},#{new_count} @@",
-          lines: Enum.map(hunk_entries, fn
-            {:eq, _, _, l} -> " #{l}"
-            {:del, _, _, l} -> "-#{l}"
-            {:ins, _, _, l} -> "+#{l}"
-          end)
+          lines:
+            Enum.map(hunk_entries, fn
+              {:eq, _, _, l} -> " #{l}"
+              {:del, _, _, l} -> "-#{l}"
+              {:ins, _, _, l} -> "+#{l}"
+            end)
         }
       end)
     end
@@ -142,6 +162,7 @@ defmodule OptimalSystemAgent.Utils.Diff do
       case acc do
         [{start, last} | rest] when idx - last <= gap ->
           [{start, idx} | rest]
+
         _ ->
           [{idx, idx} | acc]
       end

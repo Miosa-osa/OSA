@@ -31,18 +31,21 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       try do
         case System.cmd("sh", ["-c", command],
-          stderr_to_stdout: true,
-          env: build_env(payload),
-          timeout: timeout
-        ) do
+               stderr_to_stdout: true,
+               env: build_env(payload),
+               timeout: timeout
+             ) do
           {output, 0} ->
             output = String.trim(output)
+
             if output != "" do
               Logger.debug("[shell_hook] #{command} → #{String.slice(output, 0, 200)}")
             end
 
           {output, code} ->
-            Logger.warning("[shell_hook] #{command} exited #{code}: #{String.slice(output, 0, 200)}")
+            Logger.warning(
+              "[shell_hook] #{command} exited #{code}: #{String.slice(output, 0, 200)}"
+            )
         end
       rescue
         e -> Logger.warning("[shell_hook] Failed: #{Exception.message(e)}")

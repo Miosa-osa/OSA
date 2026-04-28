@@ -57,7 +57,8 @@ defmodule OptimalSystemAgent.Channels.Matrix do
       Logger.info("[Matrix] Not configured — adapter disabled")
       :ignore
     else
-      allowed = parse_allowed(Application.get_env(:optimal_system_agent, :matrix_allowed_users, ""))
+      allowed =
+        parse_allowed(Application.get_env(:optimal_system_agent, :matrix_allowed_users, ""))
 
       state = %__MODULE__{
         homeserver: String.trim_trailing(homeserver, "/"),
@@ -101,7 +102,11 @@ defmodule OptimalSystemAgent.Channels.Matrix do
 
     url = "#{state.homeserver}/_matrix/client/v3/sync"
 
-    case Req.get(url, params: params, headers: auth_headers(state), receive_timeout: @sync_timeout_ms + 5_000) do
+    case Req.get(url,
+           params: params,
+           headers: auth_headers(state),
+           receive_timeout: @sync_timeout_ms + 5_000
+         ) do
       {:ok, %{status: 200, body: body}} ->
         process_sync(body, state)
         %{state | since: body["next_batch"]}
@@ -131,6 +136,7 @@ defmodule OptimalSystemAgent.Channels.Matrix do
         # Skip our own messages
         if sender != state.user_id and allowed?(sender, state.allowed_users) do
           text = get_in(event, ["content", "body"]) || ""
+
           if text != "" do
             Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
               process_message(room_id, sender, text, state)
@@ -162,7 +168,9 @@ defmodule OptimalSystemAgent.Channels.Matrix do
     |> chunk_message()
     |> Enum.each(fn chunk ->
       txn_id = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-      url = "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
+
+      url =
+        "#{state.homeserver}/_matrix/client/v3/rooms/#{URI.encode(room_id)}/send/m.room.message/#{txn_id}"
 
       Req.put(url,
         json: %{msgtype: "m.text", body: chunk},
@@ -181,7 +189,9 @@ defmodule OptimalSystemAgent.Channels.Matrix do
   # ── Helpers ──────────────────────────────────────────────────────────
 
   defp whoami(state) do
-    case Req.get("#{state.homeserver}/_matrix/client/v3/account/whoami", headers: auth_headers(state)) do
+    case Req.get("#{state.homeserver}/_matrix/client/v3/account/whoami",
+           headers: auth_headers(state)
+         ) do
       {:ok, %{status: 200, body: %{"user_id" => id}}} -> {:ok, id}
       {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
       {:error, reason} -> {:error, inspect(reason)}
@@ -192,23 +202,39 @@ defmodule OptimalSystemAgent.Channels.Matrix do
 
   defp parse_allowed(nil), do: MapSet.new()
   defp parse_allowed(""), do: MapSet.new()
+
   defp parse_allowed(str) do
-    str |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> MapSet.new()
+    str
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
   end
 
   defp allowed?(_sender, allowed) when allowed == %MapSet{}, do: true
   defp allowed?(sender, allowed), do: MapSet.member?(allowed, sender)
 
   defp chunk_message(text) do
-    if String.length(text) <= @max_message_length, do: [text],
-    else: text |> String.graphemes() |> Enum.chunk_every(@max_message_length) |> Enum.map(&Enum.join/1)
+    if String.length(text) <= @max_message_length,
+      do: [text],
+      else:
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(@max_message_length)
+        |> Enum.map(&Enum.join/1)
   end
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
+      [{_, _}] ->
+        :ok
+
       [] ->
-        DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :matrix})
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :matrix}
+        )
+
         :ok
     end
   rescue

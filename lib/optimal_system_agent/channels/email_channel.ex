@@ -27,9 +27,15 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
   @default_poll_interval 15_000
 
   defstruct [
-    :imap_host, :imap_port, :smtp_host, :smtp_port,
-    :address, :password, :poll_timer,
-    allowed_senders: MapSet.new(), connected: false
+    :imap_host,
+    :imap_port,
+    :smtp_host,
+    :smtp_port,
+    :address,
+    :password,
+    :poll_timer,
+    allowed_senders: MapSet.new(),
+    connected: false
   ]
 
   @impl OptimalSystemAgent.Channels.Behaviour
@@ -64,8 +70,11 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
       Logger.info("[Email] Not configured — adapter disabled")
       :ignore
     else
-      poll_ms = (Application.get_env(:optimal_system_agent, :email_poll_interval, 15) || 15) * 1_000
-      allowed = parse_allowed(Application.get_env(:optimal_system_agent, :email_allowed_senders, ""))
+      poll_ms =
+        (Application.get_env(:optimal_system_agent, :email_poll_interval, 15) || 15) * 1_000
+
+      allowed =
+        parse_allowed(Application.get_env(:optimal_system_agent, :email_allowed_senders, ""))
 
       state = %__MODULE__{
         imap_host: imap_host,
@@ -127,6 +136,7 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
 
         # Login
         send_imap(socket, "A001 LOGIN #{state.address} #{state.password}")
+
         case recv_imap(socket) do
           {:ok, response} ->
             if String.contains?(response, "OK") do
@@ -151,12 +161,14 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
     recv_imap(socket)
 
     send_imap(socket, "A003 SEARCH UNSEEN")
+
     case recv_imap(socket) do
       {:ok, response} ->
         ids = parse_search_response(response)
 
         for id <- Enum.take(ids, 10) do
           send_imap(socket, "A004 FETCH #{id} (BODY[HEADER.FIELDS (FROM SUBJECT)] BODY[TEXT])")
+
           case recv_imap(socket) do
             {:ok, raw} ->
               {from, subject, body} = parse_email(raw)
@@ -171,11 +183,13 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
                 end)
               end
 
-            _ -> :ok
+            _ ->
+              :ok
           end
         end
 
-      _ -> :ok
+      _ ->
+        :ok
     end
   end
 
@@ -183,15 +197,23 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
     session_id = "email:#{from}"
 
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
-      [] -> DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :email})
+      [{_, _}] ->
+        :ok
+
+      [] ->
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :email}
+        )
     end
 
     text = "Subject: #{subject}\n\n#{body}"
 
     case Loop.process_message(session_id, text, channel: :email, user_id: from) do
       {:ok, response} ->
-        reply_subject = if String.starts_with?(subject, "Re: "), do: subject, else: "Re: #{subject}"
+        reply_subject =
+          if String.starts_with?(subject, "Re: "), do: subject, else: "Re: #{subject}"
+
         send_email(state, from, reply_subject, response)
 
       {:error, reason} ->
@@ -208,15 +230,13 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
 
     case :gen_smtp_client.send_blocking(
            {state.address, [to], message},
-           [
-             relay: to_charlist(state.smtp_host),
-             port: state.smtp_port,
-             username: to_charlist(state.address),
-             password: to_charlist(state.password),
-             tls: :always,
-             auth: :always,
-             ssl_options: [verify: :verify_none]
-           ]
+           relay: to_charlist(state.smtp_host),
+           port: state.smtp_port,
+           username: to_charlist(state.address),
+           password: to_charlist(state.password),
+           tls: :always,
+           auth: :always,
+           ssl_options: [verify: :verify_none]
          ) do
       binary when is_binary(binary) -> :ok
       {:error, reason} -> {:error, reason}
@@ -244,26 +264,32 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
 
   defp parse_search_response(response) do
     case Regex.run(~r/\* SEARCH (.+)/, response) do
-      [_, ids_str] -> String.split(ids_str) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-      _ -> []
+      [_, ids_str] ->
+        String.split(ids_str) |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+      _ ->
+        []
     end
   end
 
   defp parse_email(raw) do
-    from = case Regex.run(~r/From:\s*(.+)/i, raw) do
-      [_, f] -> String.trim(f) |> extract_email_address()
-      _ -> "unknown"
-    end
+    from =
+      case Regex.run(~r/From:\s*(.+)/i, raw) do
+        [_, f] -> String.trim(f) |> extract_email_address()
+        _ -> "unknown"
+      end
 
-    subject = case Regex.run(~r/Subject:\s*(.+)/i, raw) do
-      [_, s] -> String.trim(s)
-      _ -> "(no subject)"
-    end
+    subject =
+      case Regex.run(~r/Subject:\s*(.+)/i, raw) do
+        [_, s] -> String.trim(s)
+        _ -> "(no subject)"
+      end
 
-    body = case String.split(raw, "\r\n\r\n", parts: 2) do
-      [_, b] -> String.trim(b) |> String.replace(~r/\)$/, "")
-      _ -> ""
-    end
+    body =
+      case String.split(raw, "\r\n\r\n", parts: 2) do
+        [_, b] -> String.trim(b) |> String.replace(~r/\)$/, "")
+        _ -> ""
+      end
 
     {from, subject, body}
   end
@@ -277,12 +303,18 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
 
   defp automated_email?(from) do
     lower = String.downcase(from)
-    Enum.any?(~w(noreply no-reply donotreply mailer-daemon postmaster bounce), &String.contains?(lower, &1))
+
+    Enum.any?(
+      ~w(noreply no-reply donotreply mailer-daemon postmaster bounce),
+      &String.contains?(lower, &1)
+    )
   end
 
   defp parse_allowed(nil), do: MapSet.new()
   defp parse_allowed(""), do: MapSet.new()
-  defp parse_allowed(str), do: str |> String.split(",") |> Enum.map(&String.trim/1) |> MapSet.new()
+
+  defp parse_allowed(str),
+    do: str |> String.split(",") |> Enum.map(&String.trim/1) |> MapSet.new()
 
   defp allowed_sender?(_from, allowed) when allowed == %MapSet{}, do: true
   defp allowed_sender?(from, allowed), do: MapSet.member?(allowed, String.downcase(from))

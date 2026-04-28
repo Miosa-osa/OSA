@@ -2,9 +2,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList do
   @behaviour OptimalSystemAgent.Tools.Behaviour
 
   @default_allowed_paths ["~", "/tmp"]
-  @sensitive_paths [".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_dsa",
-    ".gnupg/", ".aws/credentials", ".env", "/etc/shadow", "/etc/sudoers",
-    "/etc/master.passwd", ".netrc", ".npmrc", ".pypirc"]
+  @sensitive_paths [
+    ".ssh/id_rsa",
+    ".ssh/id_ed25519",
+    ".ssh/id_ecdsa",
+    ".ssh/id_dsa",
+    ".gnupg/",
+    ".aws/credentials",
+    ".env",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/master.passwd",
+    ".netrc",
+    ".npmrc",
+    ".pypirc"
+  ]
 
   @impl true
   def available?, do: true
@@ -23,7 +35,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList do
     %{
       "type" => "object",
       "properties" => %{
-        "path" => %{"type" => "string", "description" => "Directory path to list (default: current directory)"}
+        "path" => %{
+          "type" => "string",
+          "description" => "Directory path to list (default: current directory)"
+        }
       },
       "required" => []
     }
@@ -38,21 +53,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList do
     else
       case File.ls(path) do
         {:ok, entries} ->
-          lines = entries
+          lines =
+            entries
             |> Enum.sort()
             |> Enum.map(fn entry ->
               full = Path.join(path, entry)
-              {type, size} = case File.stat(full) do
-                {:ok, %{type: :directory}} -> {"dir", 0}
-                {:ok, %{type: :regular, size: s}} -> {"file", s}
-                {:ok, %{type: t, size: s}} -> {to_string(t), s}
-                _ -> {"?", 0}
-              end
+
+              {type, size} =
+                case File.stat(full) do
+                  {:ok, %{type: :directory}} -> {"dir", 0}
+                  {:ok, %{type: :regular, size: s}} -> {"file", s}
+                  {:ok, %{type: t, size: s}} -> {to_string(t), s}
+                  _ -> {"?", 0}
+                end
+
               "#{type}\t#{format_size(size)}\t#{entry}"
             end)
+
           {:ok, Enum.join(lines, "\n")}
-        {:error, :enoent} -> {:error, "Directory not found: #{path}"}
-        {:error, reason} -> {:error, "Cannot list #{path}: #{reason}"}
+
+        {:error, :enoent} ->
+          {:error, "Directory not found: #{path}"}
+
+        {:error, reason} ->
+          {:error, "Cannot list #{path}: #{reason}"}
       end
     end
   end
@@ -64,10 +88,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList do
 
   defp path_allowed?(expanded_path) do
     sensitive = Enum.any?(@sensitive_paths, fn p -> String.contains?(expanded_path, p) end)
+
     if sensitive do
       false
     else
-      check = if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+      check =
+        if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
+
       Enum.any?(allowed_paths(), fn a -> String.starts_with?(check, a) end)
     end
   end

@@ -19,7 +19,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.{Agent, Desktop, Exec}
   alias OptimalSystemAgent.OpenComputers.Executor.Supervisor, as: ExecSup
 
-  @type job :: %{required(:id) => String.t(), required(:kind) => atom() | String.t(), optional(any()) => any()}
+  @type job :: %{
+          required(:id) => String.t(),
+          required(:kind) => atom() | String.t(),
+          optional(any()) => any()
+        }
   @type reply :: (term() -> :ok)
 
   @spec dispatch(job(), reply()) :: :ok | {:error, term()}

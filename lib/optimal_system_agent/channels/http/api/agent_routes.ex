@@ -12,8 +12,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET /tui_output — TUI SSE output stream (alias) ────────────────
   #
@@ -77,8 +77,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
       [{_pid, owner}] ->
         cond do
-          user_id == "anonymous" -> :ok
-          owner == user_id -> :ok
+          user_id == "anonymous" ->
+            :ok
+
+          owner == user_id ->
+            :ok
+
           true ->
             Logger.warning(
               "[API] Session ownership mismatch: session=#{session_id} owner=#{inspect(owner)} requester=#{inspect(user_id)}"
@@ -112,6 +116,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRoutes do
         case Jason.encode(event) do
           {:ok, data} ->
             Logger.debug("[SSE] sending #{event_type} to #{session_id}")
+
             case chunk(conn, "event: #{event_type}\ndata: #{data}\n\n") do
               {:ok, conn} ->
                 sse_loop(conn, session_id)

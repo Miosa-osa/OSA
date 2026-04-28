@@ -40,6 +40,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
   def adapter_for(:macos), do: {:ok, Adapters.MacOS}
   def adapter_for(:linux_x11), do: {:ok, Adapters.LinuxX11}
   def adapter_for(:linux_wayland), do: {:error, "Wayland adapter not yet implemented"}
+
   def adapter_for(:unknown),
     do:
       {:error,
@@ -58,7 +59,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
         cond do
           System.get_env("WAYLAND_DISPLAY") not in [nil, ""] -> :linux_wayland
           System.get_env("DISPLAY") not in [nil, ""] -> :linux_x11
-          true -> :unknown  # headless — no display server
+          # headless — no display server
+          true -> :unknown
         end
 
       _ ->

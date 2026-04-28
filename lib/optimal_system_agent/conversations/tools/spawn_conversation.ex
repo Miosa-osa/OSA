@@ -108,7 +108,9 @@ defmodule OptimalSystemAgent.Conversations.Tools.SpawnConversation do
         ]
         |> maybe_add_facilitator(facilitator_role)
 
-      Logger.info("[SpawnConversation] starting #{type} conversation: #{inspect(topic)} participants=#{length(participants)}")
+      Logger.info(
+        "[SpawnConversation] starting #{type} conversation: #{inspect(topic)} participants=#{length(participants)}"
+      )
 
       case Server.start_link(opts) do
         {:ok, pid} ->

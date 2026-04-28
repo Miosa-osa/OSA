@@ -81,7 +81,14 @@ defmodule OptimalSystemAgent.PromptLoaderTest do
     test "all 6 known keys are populated after load" do
       PromptLoader.load()
 
-      known = [:SYSTEM, :IDENTITY, :SOUL, :compactor_summary, :compactor_key_facts, :cortex_synthesis]
+      known = [
+        :SYSTEM,
+        :IDENTITY,
+        :SOUL,
+        :compactor_summary,
+        :compactor_key_facts,
+        :cortex_synthesis
+      ]
 
       for key <- known do
         value = PromptLoader.get(key)
@@ -134,6 +141,7 @@ defmodule OptimalSystemAgent.PromptLoaderTest do
   describe "SYSTEM.md content" do
     test "contains signal-aware depth instructions" do
       system = PromptLoader.get(:SYSTEM)
+
       assert String.contains?(system, "Signal-Aware Depth") or
                String.contains?(system, "Signal Theory") or
                String.contains?(system, "signal")
@@ -141,12 +149,14 @@ defmodule OptimalSystemAgent.PromptLoaderTest do
 
     test "contains tool routing section" do
       system = PromptLoader.get(:SYSTEM)
+
       assert String.contains?(system, "Tool Routing") or
                String.contains?(system, "tool routing")
     end
 
     test "contains memory instructions" do
       system = PromptLoader.get(:SYSTEM)
+
       assert String.contains?(system, "memory_save") or
                String.contains?(system, "memory_recall") or
                String.contains?(system, "Memory")
@@ -162,6 +172,7 @@ defmodule OptimalSystemAgent.PromptLoaderTest do
 
     test "contains execution rules" do
       system = PromptLoader.get(:SYSTEM)
+
       assert String.contains?(system, "Execution Rules") or
                String.contains?(system, "execution rules") or
                String.contains?(system, "EXECUTE")

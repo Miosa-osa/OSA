@@ -70,10 +70,33 @@ defmodule OptimalSystemAgent.Signal.Persistence do
     total = Repo.aggregate(Signal, :count)
     avg_weight = Repo.aggregate(Signal, :avg, :weight) || 0.0
 
-    by_mode = Signal |> group_by([s], s.mode) |> select([s], {s.mode, count(s.id)}) |> Repo.all() |> Map.new()
-    by_channel = Signal |> group_by([s], s.channel) |> select([s], {s.channel, count(s.id)}) |> Repo.all() |> Map.new()
-    by_type = Signal |> group_by([s], s.type) |> select([s], {s.type, count(s.id)}) |> Repo.all() |> Map.new()
-    by_tier = Signal |> group_by([s], s.tier) |> select([s], {s.tier, count(s.id)}) |> Repo.all() |> Map.new()
+    by_mode =
+      Signal
+      |> group_by([s], s.mode)
+      |> select([s], {s.mode, count(s.id)})
+      |> Repo.all()
+      |> Map.new()
+
+    by_channel =
+      Signal
+      |> group_by([s], s.channel)
+      |> select([s], {s.channel, count(s.id)})
+      |> Repo.all()
+      |> Map.new()
+
+    by_type =
+      Signal
+      |> group_by([s], s.type)
+      |> select([s], {s.type, count(s.id)})
+      |> Repo.all()
+      |> Map.new()
+
+    by_tier =
+      Signal
+      |> group_by([s], s.tier)
+      |> select([s], {s.tier, count(s.id)})
+      |> Repo.all()
+      |> Map.new()
 
     %{
       total: total,
@@ -104,13 +127,18 @@ defmodule OptimalSystemAgent.Signal.Persistence do
 
     avg_weight =
       case recent do
-        [] -> 0.0
-        list -> list |> Enum.map(& &1.weight) |> Enum.sum() |> Kernel./(length(list)) |> Float.round(3)
+        [] ->
+          0.0
+
+        list ->
+          list |> Enum.map(& &1.weight) |> Enum.sum() |> Kernel./(length(list)) |> Float.round(3)
       end
 
     peak_hours =
       recent
-      |> Enum.frequencies_by(fn s -> s.inserted_at |> NaiveDateTime.to_time() |> Map.get(:hour) end)
+      |> Enum.frequencies_by(fn s ->
+        s.inserted_at |> NaiveDateTime.to_time() |> Map.get(:hour)
+      end)
       |> Enum.sort_by(fn {_, c} -> c end, :desc)
       |> Enum.take(5)
       |> Map.new()

@@ -5,15 +5,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch do
   def name, do: "tool_search"
 
   @impl true
-  def description, do: "Search for available tools by keyword. Use when you need a tool not in your current list."
+  def description,
+    do:
+      "Search for available tools by keyword. Use when you need a tool not in your current list."
 
   @impl true
   def parameters do
     %{
       "type" => "object",
       "properties" => %{
-        "query" => %{"type" => "string", "description" => "Keywords to search for (e.g. 'file edit', 'web search', 'memory')"},
-        "max_results" => %{"type" => "integer", "description" => "Maximum results to return (default: 5)"}
+        "query" => %{
+          "type" => "string",
+          "description" => "Keywords to search for (e.g. 'file edit', 'web search', 'memory')"
+        },
+        "max_results" => %{
+          "type" => "integer",
+          "description" => "Maximum results to return (default: 5)"
+        }
       },
       "required" => ["query"]
     }
@@ -36,7 +44,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch do
             case tool.parameters do
               %{"properties" => props} when map_size(props) > 0 ->
                 props
-                |> Enum.map(fn {k, v} -> "  #{k}: #{v["type"] || "any"} — #{v["description"] || ""}" end)
+                |> Enum.map(fn {k, v} ->
+                  "  #{k}: #{v["type"] || "any"} — #{v["description"] || ""}"
+                end)
                 |> Enum.join("\n")
 
               _ ->

@@ -29,7 +29,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
       OptimalSystemAgent.TaskSupervisor
       |> Task.Supervisor.async_stream_nolink(
         configs,
-        fn config -> Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id)) end,
+        fn config ->
+          Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id))
+        end,
         max_concurrency: length(configs),
         timeout: 600_000,
         on_timeout: :kill_task
@@ -66,10 +68,11 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         config = Map.put(config, :parent_session_id, parent_id) |> Map.put(:task, task)
         result = Orchestrator.run_subagent(config)
 
-        output = case result do
-          {:ok, text} -> text
-          {:error, _} -> nil
-        end
+        output =
+          case result do
+            {:ok, text} -> text
+            {:error, _} -> nil
+          end
 
         {result, output}
       end)
@@ -99,7 +102,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         OptimalSystemAgent.TaskSupervisor
         |> Task.Supervisor.async_stream_nolink(
           proposers,
-          fn config -> Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id)) end,
+          fn config ->
+            Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id))
+          end,
           max_concurrency: length(proposers),
           timeout: 600_000,
           on_timeout: :kill_task
@@ -150,23 +155,29 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     case configs do
       [worker_config, reviewer_config | _] ->
         run_review_loop(parent_id, worker_config, reviewer_config, max_iterations)
+
       [single | _] ->
         Logger.warning("[Swarm.Patterns] review_loop needs ≥2 agents, running single")
         result = Orchestrator.run_subagent(Map.put(single, :parent_session_id, parent_id))
         {:ok, [result]}
+
       [] ->
         {:error, :no_agents}
     end
   end
 
   defp run_review_loop(_parent_id, _worker_cfg, _reviewer_cfg, max_iter) when max_iter < 1 do
-    Logger.warning("[Swarm.Patterns] review_loop max_iterations=#{max_iter} < 1, returning empty result")
+    Logger.warning(
+      "[Swarm.Patterns] review_loop max_iterations=#{max_iter} < 1, returning empty result"
+    )
+
     {:ok, [{:ok, "[no iterations]"}]}
   end
 
   defp run_review_loop(parent_id, worker_cfg, reviewer_cfg, max_iter) do
     {final_output, _iterations, approved} =
-      Enum.reduce_while(1..max_iter, {nil, 0, false}, fn iteration, {prev_output, _iter, _approved} ->
+      Enum.reduce_while(1..max_iter, {nil, 0, false}, fn iteration,
+                                                         {prev_output, _iter, _approved} ->
         # Worker task (with reviewer feedback if this is a revision)
         worker_task =
           if prev_output do
@@ -181,10 +192,11 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           |> Map.put(:task, worker_task)
           |> Orchestrator.run_subagent()
 
-        worker_output = case worker_result do
-          {:ok, text} -> text
-          {:error, reason} -> "[Worker failed: #{inspect(reason)}]"
-        end
+        worker_output =
+          case worker_result do
+            {:ok, text} -> text
+            {:error, reason} -> "[Worker failed: #{inspect(reason)}]"
+          end
 
         # Reviewer evaluates worker output
         reviewer_task =
@@ -196,10 +208,11 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           |> Map.put(:task, reviewer_task)
           |> Orchestrator.run_subagent()
 
-        reviewer_output = case reviewer_result do
-          {:ok, text} -> text
-          {:error, _} -> "[Reviewer failed]"
-        end
+        reviewer_output =
+          case reviewer_result do
+            {:ok, text} -> text
+            {:error, _} -> "[Reviewer failed]"
+          end
 
         # Require "approved:" (with colon) to avoid matching "approves"/"approval"/"approvingly"
         approved? = reviewer_output |> String.downcase() |> String.starts_with?("approved:")
@@ -231,7 +244,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           nil -> {:error, :not_found}
           config -> {:ok, config}
         end
-      {:error, reason} -> {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -258,7 +273,9 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
               {:ok, data} -> {:ok, data}
               _ -> {:error, :invalid_json}
             end
-          _ -> {:error, :not_found}
+
+          _ ->
+            {:error, :not_found}
         end
     end
   end

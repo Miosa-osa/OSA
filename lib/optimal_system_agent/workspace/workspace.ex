@@ -174,7 +174,10 @@ defmodule OptimalSystemAgent.Workspace.Workspace do
           base_state
 
         {:error, reason} ->
-          Logger.warning("[Workspace] Could not restore #{workspace_id}: #{inspect(reason)} — starting fresh")
+          Logger.warning(
+            "[Workspace] Could not restore #{workspace_id}: #{inspect(reason)} — starting fresh"
+          )
+
           base_state
       end
 

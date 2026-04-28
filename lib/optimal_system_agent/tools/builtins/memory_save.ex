@@ -10,16 +10,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemorySave do
   @impl true
   def description do
     "Save important context to persistent long-term memory. Memories persist across sessions.\n\n" <>
-    "## WHEN TO SAVE (immediately, never delay):\n" <>
-    "- User preferences, corrections, decisions\n" <>
-    "- Architectural choices, patterns that worked or failed\n" <>
-    "- Names, project context, technical facts\n" <>
-    "- When user says \"remember\", \"note\", or \"save\" — call it RIGHT THEN\n\n" <>
-    "## The Iron Rule\n" <>
-    "Never make mental notes. If it matters, call memory_save. " <>
-    "Mental notes die when the session ends. Saying \"I'll remember that\" " <>
-    "without calling a tool is LYING — the information is GONE.\n\n" <>
-    "Save as you go. Don't batch. Don't wait for end-of-task. Don't ask permission."
+      "## WHEN TO SAVE (immediately, never delay):\n" <>
+      "- User preferences, corrections, decisions\n" <>
+      "- Architectural choices, patterns that worked or failed\n" <>
+      "- Names, project context, technical facts\n" <>
+      "- When user says \"remember\", \"note\", or \"save\" — call it RIGHT THEN\n\n" <>
+      "## The Iron Rule\n" <>
+      "Never make mental notes. If it matters, call memory_save. " <>
+      "Mental notes die when the session ends. Saying \"I'll remember that\" " <>
+      "without calling a tool is LYING — the information is GONE.\n\n" <>
+      "Save as you go. Don't batch. Don't wait for end-of-task. Don't ask permission."
   end
 
   @impl true

@@ -112,7 +112,10 @@ defmodule OptimalSystemAgent.Channels.Telegram do
         {:noreply, %{state | offset: new_offset, backoff_ms: @backoff_initial_ms}}
 
       {:error, reason} ->
-        Logger.warning("[Telegram] Poll error: #{inspect(reason)} — retrying in #{state.backoff_ms}ms")
+        Logger.warning(
+          "[Telegram] Poll error: #{inspect(reason)} — retrying in #{state.backoff_ms}ms"
+        )
+
         schedule_poll(state.backoff_ms)
         next_backoff = min(state.backoff_ms * 2, @backoff_max_ms)
         {:noreply, %{state | backoff_ms: next_backoff}}
@@ -226,9 +229,14 @@ defmodule OptimalSystemAgent.Channels.Telegram do
                OptimalSystemAgent.SessionSupervisor,
                {Loop, session_id: session_id, channel: :telegram}
              ) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-          {:error, reason} -> Logger.warning("[Telegram] Session start failed: #{inspect(reason)}")
+          {:ok, _pid} ->
+            :ok
+
+          {:error, {:already_started, _pid}} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("[Telegram] Session start failed: #{inspect(reason)}")
         end
     end
   rescue

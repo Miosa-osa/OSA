@@ -77,7 +77,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutesTest do
     end
 
     test "returns 200 with optional category param" do
-      conn = conn(:get, "/search?q=agent&category=patterns") |> Plug.Conn.fetch_query_params() |> call_routes()
+      conn =
+        conn(:get, "/search?q=agent&category=patterns")
+        |> Plug.Conn.fetch_query_params()
+        |> call_routes()
 
       assert conn.status == 200
       body = decode_body(conn)
@@ -85,7 +88,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutesTest do
     end
 
     test "returns 200 with limit param respected" do
-      conn = conn(:get, "/search?q=test&limit=3") |> Plug.Conn.fetch_query_params() |> call_routes()
+      conn =
+        conn(:get, "/search?q=test&limit=3") |> Plug.Conn.fetch_query_params() |> call_routes()
 
       assert conn.status == 200
       body = decode_body(conn)

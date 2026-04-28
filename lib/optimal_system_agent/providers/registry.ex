@@ -50,39 +50,39 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   # Canonical provider registry — maps atom → module | {:compat, atom}
   @providers Map.merge(
-    %{
-      # Local
-      ollama: Providers.Ollama,
+               %{
+                 # Local
+                 ollama: Providers.Ollama,
 
-      # OpenAI-compatible (consolidated through OpenAICompatProvider)
-      openai: {:compat, :openai},
-      groq: {:compat, :groq},
-      together: {:compat, :together},
-      fireworks: {:compat, :fireworks},
-      deepseek: {:compat, :deepseek},
-      perplexity: {:compat, :perplexity},
-      mistral: {:compat, :mistral},
-      openrouter: {:compat, :openrouter},
+                 # OpenAI-compatible (consolidated through OpenAICompatProvider)
+                 openai: {:compat, :openai},
+                 groq: {:compat, :groq},
+                 together: {:compat, :together},
+                 fireworks: {:compat, :fireworks},
+                 deepseek: {:compat, :deepseek},
+                 perplexity: {:compat, :perplexity},
+                 mistral: {:compat, :mistral},
+                 openrouter: {:compat, :openrouter},
 
-      # Native API providers (custom protocol, not OpenAI-compatible)
-      anthropic: Providers.Anthropic,
-      google: Providers.Google,
-      cohere: Providers.Cohere,
-      replicate: Providers.Replicate,
+                 # Native API providers (custom protocol, not OpenAI-compatible)
+                 anthropic: Providers.Anthropic,
+                 google: Providers.Google,
+                 cohere: Providers.Cohere,
+                 replicate: Providers.Replicate,
 
-      # Chinese providers (OpenAI-compatible, consolidated)
-      qwen: {:compat, :qwen},
-      moonshot: {:compat, :moonshot},
-      zhipu: {:compat, :zhipu},
-      volcengine: {:compat, :volcengine},
-      baichuan: {:compat, :baichuan}
-    },
-    if Mix.env() == :test do
-      %{mock: OptimalSystemAgent.Test.MockProvider}
-    else
-      %{}
-    end
-  )
+                 # Chinese providers (OpenAI-compatible, consolidated)
+                 qwen: {:compat, :qwen},
+                 moonshot: {:compat, :moonshot},
+                 zhipu: {:compat, :zhipu},
+                 volcengine: {:compat, :volcengine},
+                 baichuan: {:compat, :baichuan}
+               },
+               if Mix.env() == :test do
+                 %{mock: OptimalSystemAgent.Test.MockProvider}
+               else
+                 %{}
+               end
+             )
 
   # --- Public API ---
 
@@ -133,13 +133,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
         {:error, "Unknown provider: #{provider}"}
 
       {:compat, prov} ->
-        {:ok, %{
-          name: provider,
-          module: @compat,
-          default_model: @compat.default_model(prov),
-          available_models: @compat.available_models(prov),
-          configured?: provider_configured?(provider)
-        }}
+        {:ok,
+         %{
+           name: provider,
+           module: @compat,
+           default_model: @compat.default_model(prov),
+           available_models: @compat.available_models(prov),
+           configured?: provider_configured?(provider)
+         }}
 
       module when is_atom(module) ->
         models =
@@ -149,13 +150,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
             [module.default_model()]
           end
 
-        {:ok, %{
-          name: provider,
-          module: module,
-          default_model: module.default_model(),
-          available_models: models,
-          configured?: provider_configured?(provider)
-        }}
+        {:ok,
+         %{
+           name: provider,
+           module: module,
+           default_model: module.default_model(),
+           available_models: models,
+           configured?: provider_configured?(provider)
+         }}
     end
   end
 
@@ -217,14 +219,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec chat_with_fallback(list(), list(atom()), keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def chat_with_fallback(messages, chain, opts \\ []) do
-    available_chain = Enum.filter(chain, fn provider ->
-      if HealthChecker.is_available?(provider) do
-        true
-      else
-        Logger.warning("Provider #{provider} skipped in fallback chain (circuit open or rate-limited)")
-        false
-      end
-    end)
+    available_chain =
+      Enum.filter(chain, fn provider ->
+        if HealthChecker.is_available?(provider) do
+          true
+        else
+          Logger.warning(
+            "Provider #{provider} skipped in fallback chain (circuit open or rate-limited)"
+          )
+
+          false
+        end
+      end)
 
     Enum.reduce_while(available_chain, {:error, "No providers in chain"}, fn provider, _acc ->
       case chat(messages, Keyword.put(opts, :provider, provider)) do
@@ -264,7 +270,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
     ollama_reachable = ollama_reachable?()
 
     unless ollama_reachable do
-      Logger.info("[Providers.Registry] Ollama not reachable at boot — skipping in fallback chain")
+      Logger.info(
+        "[Providers.Registry] Ollama not reachable at boot — skipping in fallback chain"
+      )
     end
 
     # Stash the boot-time decision in the process dictionary so private
@@ -350,11 +358,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
       Logger.error(
         "Provider #{failed_provider} #{reason}, no available fallback in chain: #{inspect(fallback_chain)}"
       )
+
       {:error, "Provider #{failed_provider} #{reason} and no fallback available"}
     else
       Logger.warning(
         "Provider #{failed_provider} #{reason}, trying next available: #{inspect(remaining_chain)}"
       )
+
       chat_with_fallback(messages, remaining_chain, opts)
     end
   end
@@ -406,7 +416,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
               fb_module ->
                 case try_stream_provider(fb_module, messages, callback, opts) do
-                  :ok -> {:halt, :ok}
+                  :ok ->
+                    {:halt, :ok}
+
                   {:error, r} ->
                     Logger.warning("Fallback stream provider #{fb_provider} failed: #{r}")
                     {:cont, {:error, r}}
@@ -423,7 +435,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
       @compat.chat_stream(provider, messages, callback, opts)
     rescue
       e ->
-        Logger.warning("Compat provider #{provider} streaming failed: #{Exception.message(e)}, falling back to sync")
+        Logger.warning(
+          "Compat provider #{provider} streaming failed: #{Exception.message(e)}, falling back to sync"
+        )
+
         fallback_sync_stream({:compat, provider}, messages, callback, opts)
     end
   end
@@ -432,10 +447,16 @@ defmodule OptimalSystemAgent.Providers.Registry do
     if function_exported?(module, :chat_stream, 3) do
       try do
         Logger.info("[Registry] Calling #{module}.chat_stream/3")
+
         case module.chat_stream(messages, callback, opts) do
-          :ok -> :ok
+          :ok ->
+            :ok
+
           {:error, reason} ->
-            Logger.warning("Provider #{module} chat_stream failed: #{inspect(reason)} — falling back to sync")
+            Logger.warning(
+              "Provider #{module} chat_stream failed: #{inspect(reason)} — falling back to sync"
+            )
+
             fallback_sync_stream(module, messages, callback, opts)
         end
       rescue
@@ -546,7 +567,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "mistral-small-latest" => 128_000,
     # Cohere
     "command-r-plus" => 128_000,
-    "command-r" => 128_000,
+    "command-r" => 128_000
   }
 
   @spec context_window(String.t()) :: pos_integer()
@@ -560,7 +581,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
           end)
 
         case matched do
-          {_key, size} -> size
+          {_key, size} ->
+            size
+
           nil ->
             # Check Ollama model info for num_ctx
             case get_ollama_context(model) do
@@ -574,12 +597,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  def context_window(_), do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+  def context_window(_),
+    do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
   defp get_ollama_context(model) do
     # Check ETS cache first
     case :ets.whereis(:osa_context_cache) do
-      :undefined -> :ok
+      :undefined ->
+        :ok
+
       _ ->
         case :ets.lookup(:osa_context_cache, model) do
           [{^model, cached_ctx}] -> return_cached(cached_ctx)
@@ -605,7 +631,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
           |> Enum.find_value(fn
             {k, v} when is_integer(v) and v > 0 ->
               if String.contains?(k, "context_length"), do: v
-            _ -> nil
+
+            _ ->
+              nil
           end)
 
         if ctx do
@@ -614,6 +642,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
             :undefined -> :ok
             _ -> :ets.insert(:osa_context_cache, {model, ctx})
           end
+
           {:ok, ctx}
         else
           :error

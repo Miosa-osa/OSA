@@ -10,7 +10,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
     %{role: "statictext", name: "Welcome to the app", x: 10, y: 10, width: 300, height: 20},
     %{role: "image", name: "logo.png", x: 10, y: 40, width: 64, height: 64},
     %{role: "checkbox", name: "Remember me", x: 200, y: 200, width: 20, height: 20},
-    %{role: "menuitem", name: "File", x: 0, y: 0, width: 40, height: 20},
+    %{role: "menuitem", name: "File", x: 0, y: 0, width: 40, height: 20}
   ]
 
   # ---------------------------------------------------------------------------
@@ -52,11 +52,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
 
       # button, textfield, link, checkbox, menuitem = 5 interactive
       assert map_size(refs) == 5
-      assert Map.has_key?(refs, "e0")  # button Save
-      assert Map.has_key?(refs, "e1")  # textfield Email
-      assert Map.has_key?(refs, "e2")  # link Help
-      assert Map.has_key?(refs, "e3")  # checkbox Remember me
-      assert Map.has_key?(refs, "e4")  # menuitem File
+      # button Save
+      assert Map.has_key?(refs, "e0")
+      # textfield Email
+      assert Map.has_key?(refs, "e1")
+      # link Help
+      assert Map.has_key?(refs, "e2")
+      # checkbox Remember me
+      assert Map.has_key?(refs, "e3")
+      # menuitem File
+      assert Map.has_key?(refs, "e4")
     end
 
     test "non-interactive elements are excluded from refs" do
@@ -107,9 +112,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
 
     test "20-element tree under 1000 tokens" do
       # Generate 20 elements
-      elements = for i <- 0..19 do
-        %{role: "button", name: "Button #{i}", x: i * 50, y: i * 30, width: 40, height: 20}
-      end
+      elements =
+        for i <- 0..19 do
+          %{role: "button", name: "Button #{i}", x: i * 50, y: i * 30, width: 40, height: 20}
+        end
 
       parsed = Accessibility.parse_tree(elements)
       {text, _refs} = Accessibility.assign_refs(parsed)
@@ -138,6 +144,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
       old = %{
         "e0" => %{role: "button", name: "Save", x: 500, y: 300}
       }
+
       new = %{
         "e0" => %{role: "button", name: "Save", x: 500, y: 300},
         "e1" => %{role: "button", name: "Cancel", x: 600, y: 300}
@@ -153,6 +160,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
         "e0" => %{role: "button", name: "Save", x: 500, y: 300},
         "e1" => %{role: "link", name: "Help", x: 100, y: 50}
       }
+
       new = %{
         "e0" => %{role: "button", name: "Save", x: 500, y: 300}
       }
@@ -166,6 +174,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
       old = %{
         "e0" => %{role: "textfield", name: "Email", x: 200, y: 150}
       }
+
       new = %{
         "e0" => %{role: "textfield", name: "Email", x: 200, y: 180}
       }
@@ -182,6 +191,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
         "e1" => %{role: "textfield", name: "Email", x: 200, y: 150},
         "e2" => %{role: "link", name: "Help", x: 100, y: 50}
       }
+
       new = %{
         "e0" => %{role: "button", name: "Save", x: 500, y: 300},
         "e1" => %{role: "textfield", name: "Email", x: 200, y: 150},

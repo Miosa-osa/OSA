@@ -34,11 +34,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.SessionSearch do
     limit = args["limit"] || 10
 
     # Try FTS5-backed search first, fall back to Memory.search_sessions
-    results = try do
-      OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
-    rescue
-      _ -> []
-    end
+    results =
+      try do
+        OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
+      rescue
+        _ -> []
+      end
 
     results =
       if results == [] do

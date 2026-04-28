@@ -226,5 +226,4 @@ defmodule OptimalSystemAgent.Channels.Signal do
         {:error, reason}
     end
   end
-
 end

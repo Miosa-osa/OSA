@@ -78,7 +78,10 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
           parameters: %{
             type: "object",
             properties: %{
-              app: %{type: "string", description: "App name (firefox, nautilus, gnome-text-editor)"},
+              app: %{
+                type: "string",
+                description: "App name (firefox, nautilus, gnome-text-editor)"
+              },
               args: %{type: "string", description: "Arguments like a URL"}
             },
             required: ["app"]

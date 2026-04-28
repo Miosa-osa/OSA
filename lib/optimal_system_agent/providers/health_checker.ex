@@ -58,9 +58,10 @@ defmodule OptimalSystemAgent.Providers.HealthChecker do
   """
   @spec record_rate_limited(atom(), non_neg_integer() | nil) :: :ok
   def record_rate_limited(provider, retry_after_seconds \\ nil) do
-    wait_ms = if is_integer(retry_after_seconds) and retry_after_seconds > 0,
-      do: retry_after_seconds * 1_000,
-      else: @default_rate_limit_ms
+    wait_ms =
+      if is_integer(retry_after_seconds) and retry_after_seconds > 0,
+        do: retry_after_seconds * 1_000,
+        else: @default_rate_limit_ms
 
     GenServer.cast(__MODULE__, {:rate_limited, provider, wait_ms})
   end
@@ -119,10 +120,11 @@ defmodule OptimalSystemAgent.Providers.HealthChecker do
             "(last reason: #{inspect(reason)})"
         )
 
-        %{entry |
-          circuit: :open,
-          consecutive_failures: new_failures,
-          opened_at: System.monotonic_time(:millisecond)
+        %{
+          entry
+          | circuit: :open,
+            consecutive_failures: new_failures,
+            opened_at: System.monotonic_time(:millisecond)
         }
       else
         %{entry | consecutive_failures: new_failures}
@@ -135,9 +137,7 @@ defmodule OptimalSystemAgent.Providers.HealthChecker do
     entry = Map.get(state, provider, empty_entry())
     until = System.monotonic_time(:millisecond) + wait_ms
 
-    Logger.warning(
-      "[HealthChecker] #{provider}: rate-limited for #{div(wait_ms, 1_000)}s"
-    )
+    Logger.warning("[HealthChecker] #{provider}: rate-limited for #{div(wait_ms, 1_000)}s")
 
     updated = %{entry | rate_limited_until: until}
     {:noreply, Map.put(state, provider, updated)}
@@ -181,9 +181,10 @@ defmodule OptimalSystemAgent.Providers.HealthChecker do
       Logger.debug("[HealthChecker] #{provider}: rate-limited for #{remaining_s}s more")
       {false, entry}
     else
-      entry = if entry.rate_limited_until && now >= entry.rate_limited_until,
-        do: %{entry | rate_limited_until: nil},
-        else: entry
+      entry =
+        if entry.rate_limited_until && now >= entry.rate_limited_until,
+          do: %{entry | rate_limited_until: nil},
+          else: entry
 
       check_circuit(entry, now, provider)
     end

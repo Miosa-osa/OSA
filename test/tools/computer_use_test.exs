@@ -238,7 +238,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
     end
 
     test "key combo rejects injection characters" do
-      assert {:error, msg} = ComputerUse.execute(%{"action" => "key", "text" => "cmd+c; rm -rf /"})
+      assert {:error, msg} =
+               ComputerUse.execute(%{"action" => "key", "text" => "cmd+c; rm -rf /"})
+
       assert msg =~ "invalid characters"
     end
 
@@ -267,6 +269,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
       # These should pass validation (may fail on execution if osascript not available)
       for combo <- ~w(enter tab space cmd+c cmd+shift+v ctrl+alt+delete f1 up down) do
         result = ComputerUse.execute(%{"action" => "key", "text" => combo})
+
         refute match?({:error, "Key combo" <> _}, result),
                "Expected #{combo} to pass validation, got: #{inspect(result)}"
       end

@@ -27,8 +27,8 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
     else
       content =
         "[Post-compaction context restore — the conversation was compacted to save space. " <>
-        "Here is your current working context:]\n\n" <>
-        Enum.join(sections, "\n\n")
+          "Here is your current working context:]\n\n" <>
+          Enum.join(sections, "\n\n")
 
       %{role: "system", content: content}
     end

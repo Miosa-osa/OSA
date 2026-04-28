@@ -200,10 +200,7 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
 
             notify_control_plane(current, latest, platform)
 
-            new_state = %{state |
-              last_check: DateTime.utc_now(),
-              staged_version: latest
-            }
+            new_state = %{state | last_check: DateTime.utc_now(), staged_version: latest}
 
             {{:ok, {:staged, latest}}, new_state}
 
@@ -315,11 +312,13 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
   # ---------------------------------------------------------------------------
 
   defp notify_control_plane(from_version, to_version, platform) do
-    frame = {:osa_update_staged, %{
-      from_version: from_version,
-      to_version: to_version,
-      platform: platform
-    }}
+    frame =
+      {:osa_update_staged,
+       %{
+         from_version: from_version,
+         to_version: to_version,
+         platform: platform
+       }}
 
     try do
       FrameRouter.send_frame(frame)
@@ -338,9 +337,12 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
 
     os =
       case os_family do
-        :win32 -> "windows"
+        :win32 ->
+          "windows"
+
         :unix ->
           uname = System.cmd("uname", ["-s"]) |> elem(0) |> String.trim() |> String.downcase()
+
           case uname do
             "darwin" -> "macos"
             _ -> "linux"

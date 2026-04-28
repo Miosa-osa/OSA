@@ -78,7 +78,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.KeyframeTest do
       {:ok, journal_dir} = Keyframe.init_journal("sess_read", base_dir: dir)
 
       Keyframe.record_entry(journal_dir, %{step: 1, action: "click", params: %{}, result: "ok"})
-      Keyframe.record_entry(journal_dir, %{step: 2, action: "type", params: %{"text" => "hi"}, result: "ok"})
+
+      Keyframe.record_entry(journal_dir, %{
+        step: 2,
+        action: "type",
+        params: %{"text" => "hi"},
+        result: "ok"
+      })
 
       {:ok, entries} = Keyframe.read_journal(journal_dir)
       assert length(entries) == 2
@@ -121,8 +127,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.KeyframeTest do
 
       for i <- 1..3 do
         Keyframe.record_entry(journal_dir, %{
-          step: i, action: "click",
-          params: %{"x" => i * 100}, result: "ok",
+          step: i,
+          action: "click",
+          params: %{"x" => i * 100},
+          result: "ok",
           keyframe_hash: "hash_#{i}"
         })
       end
@@ -135,8 +143,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.KeyframeTest do
 
       for i <- 1..3 do
         Keyframe.record_entry(journal_dir, %{
-          step: i, action: "click",
-          params: %{"x" => 100}, result: "ok",
+          step: i,
+          action: "click",
+          params: %{"x" => 100},
+          result: "ok",
           keyframe_hash: "same_hash"
         })
       end
@@ -147,9 +157,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.KeyframeTest do
     test "no doom loop with only 2 identical hashes", %{base_dir: dir} do
       {:ok, journal_dir} = Keyframe.init_journal("sess_2doom", base_dir: dir)
 
-      Keyframe.record_entry(journal_dir, %{step: 1, action: "click", params: %{}, result: "ok", keyframe_hash: "same"})
-      Keyframe.record_entry(journal_dir, %{step: 2, action: "click", params: %{}, result: "ok", keyframe_hash: "same"})
-      Keyframe.record_entry(journal_dir, %{step: 3, action: "click", params: %{}, result: "ok", keyframe_hash: "diff"})
+      Keyframe.record_entry(journal_dir, %{
+        step: 1,
+        action: "click",
+        params: %{},
+        result: "ok",
+        keyframe_hash: "same"
+      })
+
+      Keyframe.record_entry(journal_dir, %{
+        step: 2,
+        action: "click",
+        params: %{},
+        result: "ok",
+        keyframe_hash: "same"
+      })
+
+      Keyframe.record_entry(journal_dir, %{
+        step: 3,
+        action: "click",
+        params: %{},
+        result: "ok",
+        keyframe_hash: "diff"
+      })
 
       assert Keyframe.detect_doom_loop(journal_dir) == :ok
     end
@@ -170,6 +200,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.KeyframeTest do
         "e0" => %{role: "button", name: "Login"},
         "e1" => %{role: "textfield", name: "Password"}
       }
+
       # textfield named "Password" — skip capture
       assert Keyframe.should_capture?(refs) == false
     end

@@ -2,10 +2,22 @@ defmodule OptimalSystemAgent.Events.Event do
   @moduledoc "CloudEvents v1.0.2 event struct with Signal Theory extensions."
 
   defstruct [
-    :id, :type, :source, :time,
-    :subject, :data, :dataschema,
-    :parent_id, :session_id, :correlation_id,
-    :signal_mode, :signal_genre, :signal_type, :signal_format, :signal_structure, :signal_sn,
+    :id,
+    :type,
+    :source,
+    :time,
+    :subject,
+    :data,
+    :dataschema,
+    :parent_id,
+    :session_id,
+    :correlation_id,
+    :signal_mode,
+    :signal_genre,
+    :signal_type,
+    :signal_format,
+    :signal_structure,
+    :signal_sn,
     specversion: "1.0.2",
     datacontenttype: "application/json",
     extensions: %{}
@@ -19,6 +31,7 @@ defmodule OptimalSystemAgent.Events.Event do
 
   def new(type, source), do: new(type, source, nil, [])
   def new(type, source, data), do: new(type, source, data, [])
+
   def new(type, source, data, opts) do
     %__MODULE__{
       id: Keyword.get(opts, :id, generate_id()),
@@ -43,12 +56,14 @@ defmodule OptimalSystemAgent.Events.Event do
 
   def child(parent, type, source), do: child(parent, type, source, nil, [])
   def child(parent, type, source, data), do: child(parent, type, source, data, [])
+
   def child(%__MODULE__{} = parent, type, source, data, opts) do
     defaults = [
       parent_id: parent.id,
       session_id: parent.session_id,
       correlation_id: parent.correlation_id || parent.id
     ]
+
     new(type, source, data, Keyword.merge(defaults, opts))
   end
 
@@ -92,6 +107,7 @@ defmodule OptimalSystemAgent.Events.Event do
   defp maybe_put_signal(map, key, val), do: Map.put(map, key, to_string(val))
 
   defp merge_extensions(map, ext) when map_size(ext) == 0, do: map
+
   defp merge_extensions(map, ext) do
     string_ext = for {k, v} <- ext, into: %{}, do: {to_string(k), v}
     Map.merge(map, string_ext)

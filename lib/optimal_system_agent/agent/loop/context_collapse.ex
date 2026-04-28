@@ -16,16 +16,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
   def context_overflow_error?({:error, reason}) when is_binary(reason) do
     reason_down = String.downcase(reason)
 
-    Enum.any?([
-      "prompt is too long",
-      "context_length_exceeded",
-      "maximum context length",
-      "context window exceeded",
-      "token limit",
-      "too many tokens",
-      "request too large",
-      "413"
-    ], fn pattern -> String.contains?(reason_down, pattern) end)
+    Enum.any?(
+      [
+        "prompt is too long",
+        "context_length_exceeded",
+        "maximum context length",
+        "context window exceeded",
+        "token limit",
+        "too many tokens",
+        "request too large",
+        "413"
+      ],
+      fn pattern -> String.contains?(reason_down, pattern) end
+    )
   end
 
   def context_overflow_error?(_), do: false
@@ -78,9 +81,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
             tool_name = Map.get(msg, :name) || Map.get(msg, :tool_call_id) || "tool"
             original_size = byte_size(to_string(Map.get(msg, :content) || ""))
 
-            Map.put(msg, :content,
+            Map.put(
+              msg,
+              :content,
               "[Tool result withheld — #{tool_name}, #{original_size} bytes. " <>
-              "Context window overflow recovery, attempt #{attempt}/#{@max_attempts}]"
+                "Context window overflow recovery, attempt #{attempt}/#{@max_attempts}]"
             )
           else
             msg
@@ -89,7 +94,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
 
       Logger.info(
         "[context_collapse] Attempt #{attempt}: withheld #{length(to_withhold)} tool results " <>
-        "(saved ~#{div(total_saved, 1024)}KB)"
+          "(saved ~#{div(total_saved, 1024)}KB)"
       )
 
       {:ok, collapsed}

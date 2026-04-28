@@ -80,6 +80,7 @@ defmodule OptimalSystemAgent.Channels.Line do
         process_event(event, state)
       end)
     end
+
     {:noreply, state}
   end
 
@@ -93,7 +94,15 @@ defmodule OptimalSystemAgent.Channels.Line do
 
   # ── Event Processing ─────────────────────────────────────────────────
 
-  defp process_event(%{"type" => "message", "source" => source, "replyToken" => reply_token, "message" => msg}, state) do
+  defp process_event(
+         %{
+           "type" => "message",
+           "source" => source,
+           "replyToken" => reply_token,
+           "message" => msg
+         },
+         state
+       ) do
     user_id = source["userId"] || source["groupId"] || "unknown"
     text = msg["text"] || ""
     if text == "", do: throw(:skip)
@@ -143,15 +152,27 @@ defmodule OptimalSystemAgent.Channels.Line do
   end
 
   defp chunk_message(text) do
-    if String.length(text) <= @max_message_length, do: [text],
-    else: text |> String.graphemes() |> Enum.chunk_every(@max_message_length) |> Enum.map(&Enum.join/1)
+    if String.length(text) <= @max_message_length,
+      do: [text],
+      else:
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(@max_message_length)
+        |> Enum.map(&Enum.join/1)
   end
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
-      [] -> DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :line})
+      [{_, _}] ->
+        :ok
+
+      [] ->
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :line}
+        )
     end
+
     :ok
   rescue
     _ -> :ok

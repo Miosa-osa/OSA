@@ -16,8 +16,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Events.Bus
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # Valid swarm execution patterns (BUG-015 fix: validate against this list).
   @valid_patterns ~w(parallel pipeline debate review pact)
@@ -43,8 +43,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
       {:ok, _pid} ->
         Logger.info("[OrchestrateRoutes] Started Loop for session #{session_id}")
         :ok
+
       {:error, {:already_started, _pid}} ->
         :ok
+
       {:error, reason} ->
         Logger.error("[OrchestrateRoutes] Failed to start Loop: #{inspect(reason)}")
         {:error, reason}
@@ -61,7 +63,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     if input == "" do
       conn
       |> put_resp_content_type("application/json")
-      |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Missing required field: input"}))
+      |> send_resp(
+        400,
+        Jason.encode!(%{error: "invalid_request", details: "Missing required field: input"})
+      )
     else
       # Set working directory if provided
       if working_dir && working_dir != "" do
@@ -93,6 +98,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
               case result do
                 {:ok, response} when is_binary(response) ->
                   Logger.info("[OrchestrateRoutes] Got response (#{byte_size(response)} bytes)")
+
                   Bus.emit(:system_event, %{
                     type: :orchestrate_complete,
                     session_id: session_id,
@@ -101,6 +107,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
                 {:error, reason} ->
                   Logger.warning("[OrchestrateRoutes] Agent loop error: #{inspect(reason)}")
+
                   Bus.emit(:system_event, %{
                     type: :cli_agent_response_ready,
                     session_id: session_id,
@@ -113,6 +120,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             rescue
               e ->
                 Logger.error("[OrchestrateRoutes] Agent loop crashed: #{Exception.message(e)}")
+
                 Bus.emit(:system_event, %{
                   type: :cli_agent_response_ready,
                   session_id: session_id,
@@ -124,16 +132,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
           # Return 202 Accepted — response comes via SSE stream
           conn
           |> put_resp_content_type("application/json")
-          |> send_resp(202, Jason.encode!(%{
-            status: "processing",
-            session_id: session_id,
-            message: "Message dispatched to agent loop."
-          }))
+          |> send_resp(
+            202,
+            Jason.encode!(%{
+              status: "processing",
+              session_id: session_id,
+              message: "Message dispatched to agent loop."
+            })
+          )
 
         {:error, reason} ->
           conn
           |> put_resp_content_type("application/json")
-          |> send_resp(500, Jason.encode!(%{error: "Failed to start agent loop", details: inspect(reason)}))
+          |> send_resp(
+            500,
+            Jason.encode!(%{error: "Failed to start agent loop", details: inspect(reason)})
+          )
       end
     end
   end
@@ -146,15 +160,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
       is_nil(task) or task == "" ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Missing required field: task"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{error: "invalid_request", details: "Missing required field: task"})
+        )
 
       not is_binary(task) ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Field 'task' must be a string"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{error: "invalid_request", details: "Field 'task' must be a string"})
+        )
 
       true ->
-        session_id = conn.body_params["session_id"] || "complex-#{System.unique_integer([:positive])}"
+        session_id =
+          conn.body_params["session_id"] || "complex-#{System.unique_integer([:positive])}"
+
         user_id = conn.assigns[:user_id] || "anonymous"
 
         case ensure_loop(session_id, user_id) do
@@ -163,18 +185,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
               try do
                 Loop.process_message(session_id, task)
               rescue
-                e -> Logger.error("[OrchestrateRoutes] Complex task crashed: #{Exception.message(e)}")
+                e ->
+                  Logger.error(
+                    "[OrchestrateRoutes] Complex task crashed: #{Exception.message(e)}"
+                  )
               end
             end)
 
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(202, Jason.encode!(%{
-              status: "running",
-              task_id: session_id,
-              session_id: session_id,
-              message: "Complex orchestration dispatched."
-            }))
+            |> send_resp(
+              202,
+              Jason.encode!(%{
+                status: "running",
+                task_id: session_id,
+                session_id: session_id,
+                message: "Complex orchestration dispatched."
+              })
+            )
 
           {:error, reason} ->
             conn
@@ -196,12 +224,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
       is_nil(task) or task == "" ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Missing required field: task"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{error: "invalid_request", details: "Missing required field: task"})
+        )
 
       not is_binary(task) ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Field 'task' must be a string"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{error: "invalid_request", details: "Field 'task' must be a string"})
+        )
 
       true ->
         # Validate pattern only when the caller explicitly supplied one.
@@ -220,13 +254,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             ensure_swarm_table()
 
             started_at = DateTime.utc_now() |> DateTime.to_iso8601()
-            :ets.insert(@swarm_table, {swarm_id, %{
-              status: "running",
-              task: task,
-              pattern: pattern,
-              session_id: session_id,
-              started_at: started_at
-            }})
+
+            :ets.insert(
+              @swarm_table,
+              {swarm_id,
+               %{
+                 status: "running",
+                 task: task,
+                 pattern: pattern,
+                 session_id: session_id,
+                 started_at: started_at
+               }}
+            )
 
             # Launch in background
             Task.start(fn ->
@@ -236,28 +275,40 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
                     Loop.process_message(session_id, task)
 
                     ensure_swarm_table()
+
                     case :ets.lookup(@swarm_table, swarm_id) do
                       [{^swarm_id, info}] ->
                         :ets.insert(@swarm_table, {swarm_id, %{info | status: "completed"}})
-                      _ -> :ok
+
+                      _ ->
+                        :ok
                     end
 
                   {:error, _reason} ->
                     ensure_swarm_table()
+
                     case :ets.lookup(@swarm_table, swarm_id) do
                       [{^swarm_id, info}] ->
                         :ets.insert(@swarm_table, {swarm_id, %{info | status: "failed"}})
-                      _ -> :ok
+
+                      _ ->
+                        :ok
                     end
                 end
               rescue
                 e ->
-                  Logger.error("[OrchestrateRoutes] Swarm #{swarm_id} crashed: #{Exception.message(e)}")
+                  Logger.error(
+                    "[OrchestrateRoutes] Swarm #{swarm_id} crashed: #{Exception.message(e)}"
+                  )
+
                   ensure_swarm_table()
+
                   case :ets.lookup(@swarm_table, swarm_id) do
                     [{^swarm_id, info}] ->
                       :ets.insert(@swarm_table, {swarm_id, %{info | status: "failed"}})
-                    _ -> :ok
+
+                    _ ->
+                      :ok
                   end
               end
             end)
@@ -266,13 +317,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(202, Jason.encode!(%{
-              swarm_id: swarm_id,
-              status: "running",
-              pattern: pattern,
-              session_id: session_id,
-              task: task
-            }))
+            |> send_resp(
+              202,
+              Jason.encode!(%{
+                swarm_id: swarm_id,
+                status: "running",
+                pattern: pattern,
+                session_id: session_id,
+                task: task
+              })
+            )
         end
     end
   end
@@ -292,7 +346,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
       [] ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(404, Jason.encode!(%{error: "not_found", details: "Swarm '#{swarm_id}' not found"}))
+        |> send_resp(
+          404,
+          Jason.encode!(%{error: "not_found", details: "Swarm '#{swarm_id}' not found"})
+        )
     end
   end
 

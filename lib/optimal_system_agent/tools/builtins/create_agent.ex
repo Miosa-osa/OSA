@@ -31,7 +31,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
       "properties" => %{
         "name" => %{
           "type" => "string",
-          "description" => "Agent role name (lowercase, hyphenated). e.g., 'data-analyst', 'api-tester'"
+          "description" =>
+            "Agent role name (lowercase, hyphenated). e.g., 'data-analyst', 'api-tester'"
         },
         "description" => %{
           "type" => "string",
@@ -44,11 +45,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
         },
         "instructions" => %{
           "type" => "string",
-          "description" => "Full system prompt for the agent. Describe its approach, output format, and boundaries."
+          "description" =>
+            "Full system prompt for the agent. Describe its approach, output format, and boundaries."
         },
         "tools_blocked" => %{
           "type" => "string",
-          "description" => "Comma-separated list of tools to block. e.g., 'file_write,shell_execute' for read-only agents."
+          "description" =>
+            "Comma-separated list of tools to block. e.g., 'file_write,shell_execute' for read-only agents."
         }
       }
     }
@@ -56,7 +59,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
 
   @impl true
   def execute(args) do
-    name = Map.get(args, "name", "") |> String.trim() |> String.downcase() |> String.replace(~r/[^a-z0-9-]/, "-")
+    name =
+      Map.get(args, "name", "")
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9-]/, "-")
+
     description = Map.get(args, "description", "")
     tier = Map.get(args, "tier", "specialist")
     instructions = Map.get(args, "instructions", "")
@@ -70,22 +78,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
         if tools_blocked == "" do
           "[]"
         else
-          items = tools_blocked |> String.split(",") |> Enum.map(&("\"#{String.trim(&1)}\"")) |> Enum.join(", ")
+          items =
+            tools_blocked
+            |> String.split(",")
+            |> Enum.map(&"\"#{String.trim(&1)}\"")
+            |> Enum.join(", ")
+
           "[#{items}]"
         end
 
       # Build AGENT.md content
-      content = """
-      ---
-      name: #{name}
-      description: #{description}
-      tier: #{tier}
-      tools_blocked: #{blocked_list}
-      ---
+      content =
+        """
+        ---
+        name: #{name}
+        description: #{description}
+        tier: #{tier}
+        tools_blocked: #{blocked_list}
+        ---
 
-      #{instructions}
-      """
-      |> String.trim()
+        #{instructions}
+        """
+        |> String.trim()
 
       # Write to ~/.osa/agents/
       agents_dir = Path.expand("~/.osa/agents/#{name}")
@@ -99,7 +113,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.CreateAgent do
         AgentRegistry.load()
 
         Logger.info("[CreateAgent] Created agent '#{name}' at #{agent_file}")
-        {:ok, "Created agent '#{name}' (#{tier}). It's now available for delegation with `delegate(role: \"#{name}\", ...)`"}
+
+        {:ok,
+         "Created agent '#{name}' (#{tier}). It's now available for delegation with `delegate(role: \"#{name}\", ...)`"}
       rescue
         e ->
           {:ok, "Failed to create agent: #{Exception.message(e)}"}

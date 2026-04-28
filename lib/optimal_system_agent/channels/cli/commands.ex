@@ -24,35 +24,35 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   @red IO.ANSI.red()
 
   @commands %{
-    "help"      => {"Show available commands", :cmd_help},
-    "clear"     => {"Clear conversation and start fresh session", :cmd_clear},
-    "new"       => {"Start a new session (alias for /clear)", :cmd_clear},
-    "compact"   => {"Force context compaction", :cmd_compact},
-    "model"     => {"Show or switch the current model", :cmd_model},
-    "status"    => {"Show session status", :cmd_status},
-    "cost"      => {"Show cost breakdown", :cmd_cost},
-    "context"   => {"Show context window usage", :cmd_context},
-    "memory"    => {"Show memory entries", :cmd_memory},
-    "tools"     => {"List available tools", :cmd_tools},
-    "skills"    => {"List available skills", :cmd_skills},
-    "agents"    => {"List available agent roles", :cmd_agents},
-    "sessions"  => {"List recent sessions", :cmd_sessions},
-    "tasks"     => {"Show current tasks", :cmd_tasks},
-    "plan"      => {"Toggle plan mode", :cmd_plan},
-    "doctor"    => {"Run health check", :cmd_doctor},
-    "export"    => {"Export conversation as markdown", :cmd_export},
-    "version"   => {"Show version info", :cmd_version},
+    "help" => {"Show available commands", :cmd_help},
+    "clear" => {"Clear conversation and start fresh session", :cmd_clear},
+    "new" => {"Start a new session (alias for /clear)", :cmd_clear},
+    "compact" => {"Force context compaction", :cmd_compact},
+    "model" => {"Show or switch the current model", :cmd_model},
+    "status" => {"Show session status", :cmd_status},
+    "cost" => {"Show cost breakdown", :cmd_cost},
+    "context" => {"Show context window usage", :cmd_context},
+    "memory" => {"Show memory entries", :cmd_memory},
+    "tools" => {"List available tools", :cmd_tools},
+    "skills" => {"List available skills", :cmd_skills},
+    "agents" => {"List available agent roles", :cmd_agents},
+    "sessions" => {"List recent sessions", :cmd_sessions},
+    "tasks" => {"Show current tasks", :cmd_tasks},
+    "plan" => {"Toggle plan mode", :cmd_plan},
+    "doctor" => {"Run health check", :cmd_doctor},
+    "export" => {"Export conversation as markdown", :cmd_export},
+    "version" => {"Show version info", :cmd_version},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
-    "effort"    => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast"      => {"Toggle fast mode (low effort)", :cmd_fast},
+    "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
+    "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
-    "hooks"     => {"View registered hooks", :cmd_hooks},
-    "metrics"   => {"Show telemetry metrics", :cmd_metrics},
-    "login"     => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
-    "logout"    => {"Disconnect OAuth session for a provider", :cmd_logout},
-    "setup"     => {"Re-run the setup wizard", :cmd_setup},
-    "channels"  => {"Show connected messaging channels", :cmd_channels},
-    "exit"      => {"Exit OSA", :cmd_exit}
+    "hooks" => {"View registered hooks", :cmd_hooks},
+    "metrics" => {"Show telemetry metrics", :cmd_metrics},
+    "login" => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
+    "logout" => {"Disconnect OAuth session for a provider", :cmd_logout},
+    "setup" => {"Re-run the setup wizard", :cmd_setup},
+    "channels" => {"Show connected messaging channels", :cmd_channels},
+    "exit" => {"Exit OSA", :cmd_exit}
   }
 
   @doc "List all command names (for autocomplete)."
@@ -120,7 +120,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                 after_tokens = after_state[:estimated_tokens] || 0
                 saved = before_tokens - after_tokens
                 pct = if before_tokens > 0, do: round(saved / before_tokens * 100), else: 0
-                IO.puts("  #{@green}#{@reset} Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} (#{pct}% reduction)")
+
+                IO.puts(
+                  "  #{@green}#{@reset} Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} (#{pct}% reduction)"
+                )
 
               _ ->
                 IO.puts("  #{@green}#{@reset} Compacted successfully")
@@ -201,7 +204,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         pct = if max_tokens > 0, do: round(tokens / max_tokens * 100), else: 0
 
         IO.puts("  #{@dim}Iteration:#{@reset} #{iter}")
-        IO.puts("  #{@dim}Context:#{@reset}   #{pct}% (#{format_tokens(tokens)} / #{format_tokens(max_tokens)})")
+
+        IO.puts(
+          "  #{@dim}Context:#{@reset}   #{pct}% (#{format_tokens(tokens)} / #{format_tokens(max_tokens)})"
+        )
 
       _ ->
         :ok
@@ -248,7 +254,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@dim}├─ Input:#{@reset}    #{format_tokens(input_tokens)} tokens")
       IO.puts("  #{@dim}├─ Output:#{@reset}   #{format_tokens(output_tokens)} tokens")
       IO.puts("  #{@dim}├─ Sessions:#{@reset} #{sessions}")
-      IO.puts("  #{@dim}└─ Total:#{@reset}    $#{:erlang.float_to_binary(total / 1, decimals: 4)}")
+
+      IO.puts(
+        "  #{@dim}└─ Total:#{@reset}    $#{:erlang.float_to_binary(total / 1, decimals: 4)}"
+      )
     rescue
       _ ->
         IO.puts("  #{@dim}  No cost data available#{@reset}")
@@ -286,21 +295,39 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           end
 
         IO.puts("  #{@dim}┌#{String.duplicate("─", bar_width)}┐#{@reset}")
-        IO.puts("  #{@dim}│#{bar_color}#{String.duplicate("█", filled)}#{@dim}#{String.duplicate("░", empty)}#{@reset}#{@dim}│#{@reset}")
+
+        IO.puts(
+          "  #{@dim}│#{bar_color}#{String.duplicate("█", filled)}#{@dim}#{String.duplicate("░", empty)}#{@reset}#{@dim}│#{@reset}"
+        )
+
         IO.puts("  #{@dim}└#{String.duplicate("─", bar_width)}┘#{@reset}")
         IO.puts("")
-        IO.puts("  #{@dim}System prompt:#{@reset}  #{pad_num(static_tokens)} tokens (#{round(static_tokens / max(max_tokens, 1) * 100)}%)")
-        IO.puts("  #{@dim}Conversation:#{@reset}   #{pad_num(conversation_tokens)} tokens (#{round(conversation_tokens / max(max_tokens, 1) * 100)}%)")
-        IO.puts("  #{@dim}Available:#{@reset}      #{pad_num(available)} tokens (#{round(available / max(max_tokens, 1) * 100)}%)")
+
+        IO.puts(
+          "  #{@dim}System prompt:#{@reset}  #{pad_num(static_tokens)} tokens (#{round(static_tokens / max(max_tokens, 1) * 100)}%)"
+        )
+
+        IO.puts(
+          "  #{@dim}Conversation:#{@reset}   #{pad_num(conversation_tokens)} tokens (#{round(conversation_tokens / max(max_tokens, 1) * 100)}%)"
+        )
+
+        IO.puts(
+          "  #{@dim}Available:#{@reset}      #{pad_num(available)} tokens (#{round(available / max(max_tokens, 1) * 100)}%)"
+        )
+
         IO.puts("  #{@dim}Total:#{@reset}          #{pad_num(max_tokens)} tokens")
 
         # Compaction stats
         try do
           comp_stats = Compactor.stats()
+
           if comp_stats[:compaction_count] && comp_stats[:compaction_count] > 0 do
             IO.puts("")
             IO.puts("  #{@dim}Compressions:#{@reset}   #{comp_stats[:compaction_count]}")
-            IO.puts("  #{@dim}Tokens saved:#{@reset}   #{format_tokens(comp_stats[:tokens_saved] || 0)}")
+
+            IO.puts(
+              "  #{@dim}Tokens saved:#{@reset}   #{format_tokens(comp_stats[:tokens_saved] || 0)}"
+            )
           end
         rescue
           _ -> :ok
@@ -330,6 +357,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       case Memory.Store.recent(10) do
         entries when is_list(entries) and length(entries) > 0 ->
           IO.puts("")
+
           Enum.each(entries, fn entry ->
             key = entry[:key] || entry[:content] || "?"
             truncated = String.slice(to_string(key), 0, 60)
@@ -413,7 +441,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           truncated = String.slice(desc, 0, 45)
           tier_label = "#{tier}"
           padded = String.pad_trailing(name, 18)
-          IO.puts("  #{@cyan}#{padded}#{@reset} #{@dim}[#{tier_label}]#{@reset} #{@dim}#{truncated}#{@reset}")
+
+          IO.puts(
+            "  #{@cyan}#{padded}#{@reset} #{@dim}[#{tier_label}]#{@reset} #{@dim}#{truncated}#{@reset}"
+          )
         end)
 
         IO.puts("")
@@ -437,7 +468,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     try do
       sessions =
-        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}])
+        Registry.select(OptimalSystemAgent.SessionRegistry, [
+          {{:"$1", :"$2", :"$3"}, [], [{{:"$1", :"$2", :"$3"}}]}
+        ])
 
       if length(sessions) > 0 do
         Enum.each(sessions, fn {sid, _pid, _meta} ->
@@ -490,7 +523,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
             IO.puts("  #{@green}#{@reset} Plan mode #{@bold}disabled#{@reset}")
           else
             GenServer.call(pid, {:set_plan_mode, true})
-            IO.puts("  #{@green}#{@reset} Plan mode #{@bold}enabled#{@reset} — agent will propose a plan before acting")
+
+            IO.puts(
+              "  #{@green}#{@reset} Plan mode #{@bold}enabled#{@reset} — agent will propose a plan before acting"
+            )
           end
         rescue
           _ ->
@@ -518,6 +554,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   def cmd_version(_args, session_id) do
     version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
+
     try do
       {hash, 0} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
       IO.puts("\n  #{@bold}OSA#{@reset} #{@dim}v#{version} (#{String.trim(hash)})#{@reset}\n")
@@ -535,10 +572,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     export_dir = Path.expand("~/.osa/exports")
     File.mkdir_p!(export_dir)
 
-    target_id = case String.trim(args) do
-      "" -> session_id
-      id -> id
-    end
+    target_id =
+      case String.trim(args) do
+        "" -> session_id
+        id -> id
+      end
 
     transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(target_id)
 
@@ -593,7 +631,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         if level in Effort.levels() do
           Effort.set(level)
           config = Effort.get(level)
-          IO.puts("  #{@green}✓#{@reset} Effort set to #{@bold}#{level}#{@reset} — #{config.description}")
+
+          IO.puts(
+            "  #{@green}✓#{@reset} Effort set to #{@bold}#{level}#{@reset} — #{config.description}"
+          )
         else
           IO.puts("  #{@yellow}error: invalid level '#{level_str}'#{@reset}")
           IO.puts("  #{@dim}Valid levels: low, medium, high, max#{@reset}")
@@ -616,9 +657,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     Effort.toggle_fast()
 
     if Effort.fast_mode?() do
-      IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}enabled#{@reset} — low effort, quick responses")
+      IO.puts(
+        "  #{@green}✓#{@reset} Fast mode #{@bold}enabled#{@reset} — low effort, quick responses"
+      )
     else
-      IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}disabled#{@reset} — back to #{Effort.current()} effort")
+      IO.puts(
+        "  #{@green}✓#{@reset} Fast mode #{@bold}disabled#{@reset} — back to #{Effort.current()} effort"
+      )
     end
 
     IO.puts("")
@@ -637,7 +682,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           if current do
             # Restart session without coordinator mode
             new_id = Session.start_new_session(session_id)
-            IO.puts("  #{@green}✓#{@reset} Coordinator mode #{@bold}disabled#{@reset} — full tool access restored")
+
+            IO.puts(
+              "  #{@green}✓#{@reset} Coordinator mode #{@bold}disabled#{@reset} — full tool access restored"
+            )
+
             IO.puts("")
             new_id
           else
@@ -648,11 +697,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
             {:ok, _pid} =
               DynamicSupervisor.start_child(
                 OptimalSystemAgent.SessionSupervisor,
-                {OptimalSystemAgent.Agent.Loop, session_id: new_id, channel: :cli, coordinator: true}
+                {OptimalSystemAgent.Agent.Loop,
+                 session_id: new_id, channel: :cli, coordinator: true}
               )
 
             Session.register_permission_hook(new_id)
-            IO.puts("  #{@green}✓#{@reset} Coordinator mode #{@bold}enabled#{@reset} — tools restricted to delegation and messaging")
+
+            IO.puts(
+              "  #{@green}✓#{@reset} Coordinator mode #{@bold}enabled#{@reset} — tools restricted to delegation and messaging"
+            )
+
             IO.puts("  #{@dim}  session: #{new_id}#{@reset}")
             IO.puts("")
             new_id
@@ -688,7 +742,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
         for {slug, meta} <- @oauth_providers do
           configured = check_oauth_configured(slug)
-          status = if configured, do: "#{@green}✓ connected#{@reset}", else: "#{@dim}not connected#{@reset}"
+
+          status =
+            if configured,
+              do: "#{@green}✓ connected#{@reset}",
+              else: "#{@dim}not connected#{@reset}"
+
           IO.puts("  #{@cyan}/login #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}  #{status}")
         end
 
@@ -720,7 +779,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     cond do
       provider_slug == "" ->
         # Show what's connected
-        connected = Enum.filter(@oauth_providers, fn {slug, _} -> check_oauth_configured(slug) end)
+        connected =
+          Enum.filter(@oauth_providers, fn {slug, _} -> check_oauth_configured(slug) end)
 
         if connected == [] do
           IO.puts("#{@dim}  No OAuth sessions active#{@reset}\n")
@@ -728,11 +788,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           for {slug, meta} <- connected do
             IO.puts("#{@dim}  /logout #{slug}#{@reset}  #{@dim}—#{@reset}  #{meta.name}")
           end
+
           IO.puts("")
         end
 
       Map.has_key?(@oauth_providers, provider_slug) ->
         meta = @oauth_providers[provider_slug]
+
         if check_oauth_configured(provider_slug) do
           OptimalSystemAgent.Auth.OAuth.clear_credentials()
           IO.puts("#{@dim}  Disconnected from #{meta.name}#{@reset}\n")
@@ -764,6 +826,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     rescue
       ArgumentError -> :oauth_state
     end
+
     :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
 
     IO.puts("")
@@ -821,7 +884,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@dim}No channels configured#{@reset}")
     else
       for ch <- channels do
-        status = if ch.connected, do: "#{@green}● connected#{@reset}", else: "#{@dim}○ not running#{@reset}"
+        status =
+          if ch.connected,
+            do: "#{@green}● connected#{@reset}",
+            else: "#{@dim}○ not running#{@reset}"
+
         IO.puts("  #{@cyan}#{String.pad_trailing(to_string(ch.name), 12)}#{@reset} #{status}")
       end
     end
@@ -895,12 +962,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
         if map_size(rules) == 0 do
           IO.puts("  #{@dim}No permission rules configured.#{@reset}")
-          IO.puts("  #{@dim}Rules are saved when you choose 'Allow always' on a permission prompt.#{@reset}")
+
+          IO.puts(
+            "  #{@dim}Rules are saved when you choose 'Allow always' on a permission prompt.#{@reset}"
+          )
         else
           IO.puts("  #{@bold}Permission Rules#{@reset}")
           IO.puts("")
+
           Enum.each(rules, fn {tool, action} ->
-            icon = if action == "allow", do: "#{IO.ANSI.green()}✓#{@reset}", else: "#{IO.ANSI.red()}✗#{@reset}"
+            icon =
+              if action == "allow",
+                do: "#{IO.ANSI.green()}✓#{@reset}",
+                else: "#{IO.ANSI.red()}✗#{@reset}"
+
             IO.puts("  #{icon} #{tool} → #{action}")
           end)
         end
@@ -965,24 +1040,32 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
       if map_size(snapshot.tools) > 0 do
         IO.puts("  #{@bold}Tools#{@reset}")
+
         Enum.each(snapshot.tools, fn {name, stats} ->
-          IO.puts("  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
-            " #{stats.count} calls" <>
-            " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
-            " #{@dim}p99 #{stats.p99_ms}ms#{@reset}" <>
-            " #{@dim}#{stats.success}✓ #{stats.fail}✗#{@reset}")
+          IO.puts(
+            "  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
+              " #{stats.count} calls" <>
+              " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
+              " #{@dim}p99 #{stats.p99_ms}ms#{@reset}" <>
+              " #{@dim}#{stats.success}✓ #{stats.fail}✗#{@reset}"
+          )
         end)
+
         IO.puts("")
       end
 
       if map_size(snapshot.providers) > 0 do
         IO.puts("  #{@bold}Providers#{@reset}")
+
         Enum.each(snapshot.providers, fn {name, stats} ->
-          IO.puts("  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
-            " #{stats.count} calls" <>
-            " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
-            " #{@dim}p99 #{stats.p99_ms}ms#{@reset}")
+          IO.puts(
+            "  #{@cyan}#{String.pad_trailing(to_string(name), 20)}#{@reset}" <>
+              " #{stats.count} calls" <>
+              " #{@dim}avg #{stats.avg_ms}ms#{@reset}" <>
+              " #{@dim}p99 #{stats.p99_ms}ms#{@reset}"
+          )
         end)
+
         IO.puts("")
       end
 

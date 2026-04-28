@@ -21,7 +21,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser do
   def name, do: "ask_user"
 
   @impl true
-  def description, do: "Ask the user a question to clarify requirements. Use when you need input before proceeding."
+  def description,
+    do:
+      "Ask the user a question to clarify requirements. Use when you need input before proceeding."
 
   @impl true
   def parameters do
@@ -50,12 +52,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser do
     # Register pending question so TUI can poll GET /sessions/:id/pending_questions
     if is_binary(session_id) and session_id != "" do
       try do
-        :ets.insert(:osa_pending_questions, {ref_str, %{
-          session_id: session_id,
-          question: question,
-          options: options,
-          asked_at: DateTime.utc_now() |> DateTime.to_iso8601()
-        }})
+        :ets.insert(
+          :osa_pending_questions,
+          {ref_str,
+           %{
+             session_id: session_id,
+             question: question,
+             options: options,
+             asked_at: DateTime.utc_now() |> DateTime.to_iso8601()
+           }}
+        )
       rescue
         _ -> :ok
       end

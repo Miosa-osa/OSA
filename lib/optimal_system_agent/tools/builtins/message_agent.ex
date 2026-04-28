@@ -28,7 +28,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent do
         "action" => %{
           "type" => "string",
           "enum" => ["send", "read", "broadcast"],
-          "description" => "send: message one agent, read: check your inbox, broadcast: message all teammates"
+          "description" =>
+            "send: message one agent, read: check your inbox, broadcast: message all teammates"
         },
         "team_id" => %{
           "type" => "string",

@@ -316,7 +316,9 @@ defmodule OptimalSystemAgent.Agent.Tasks do
 
   @impl true
   def handle_call({:remove_dependency, session_id, task_id, blocker_id}, _from, state) do
-    {sessions, result} = Tracker.remove_dependency(state.sessions, session_id, task_id, blocker_id)
+    {sessions, result} =
+      Tracker.remove_dependency(state.sessions, session_id, task_id, blocker_id)
+
     {:reply, result, %{state | sessions: sessions}}
   end
 

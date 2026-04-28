@@ -21,7 +21,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListSkills do
 
   @impl true
   def execute(_args) do
-    skills_dir = Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills") |> Path.expand()
+    skills_dir =
+      Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills") |> Path.expand()
 
     case File.ls(skills_dir) do
       {:ok, entries} ->
@@ -48,7 +49,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListSkills do
           end)
 
         if skills == [] do
-          {:ok, "No skills found. Use create_skill to create one, or skills auto-generate as you work."}
+          {:ok,
+           "No skills found. Use create_skill to create one, or skills auto-generate as you work."}
         else
           formatted =
             skills

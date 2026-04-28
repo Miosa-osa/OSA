@@ -101,7 +101,7 @@ defmodule OptimalSystemAgent.Events.Classifier do
 
     cond do
       String.ends_with?(t, "_completed") or String.ends_with?(t, "_done") or
-          String.ends_with?(t, "_started") or String.ends_with?(t, "_response") ->
+        String.ends_with?(t, "_started") or String.ends_with?(t, "_response") ->
         :inform
 
       String.ends_with?(t, "_request") or String.ends_with?(t, "_dispatch") ->

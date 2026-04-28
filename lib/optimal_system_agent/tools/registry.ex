@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     list_tools_direct()
     |> Enum.reject(fn tool ->
       builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+
       case Map.get(builtin_tools, tool.name) do
         nil -> false
         mod -> function_exported?(mod, :deferred?, 0) and mod.deferred?()
@@ -67,13 +68,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
       name_score = if String.contains?(String.downcase(tool.name), query_down), do: 2.0, else: 0.0
       desc_down = String.downcase(tool.description)
 
-      keyword_score = Enum.reduce(keywords, 0.0, fn kw, acc ->
-        cond do
-          String.contains?(tool.name, kw) -> acc + 1.5
-          String.contains?(desc_down, kw) -> acc + 1.0
-          true -> acc
-        end
-      end)
+      keyword_score =
+        Enum.reduce(keywords, 0.0, fn kw, acc ->
+          cond do
+            String.contains?(tool.name, kw) -> acc + 1.5
+            String.contains?(desc_down, kw) -> acc + 1.0
+            true -> acc
+          end
+        end)
 
       jaro_score = String.jaro_distance(query_down, String.downcase(tool.name))
 
@@ -499,7 +501,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   defp load_builtin_tools do
     %{
-      "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead,
+      "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead.Tool,
       "file_write" => OptimalSystemAgent.Tools.Builtins.FileWrite,
       "file_edit" => OptimalSystemAgent.Tools.Builtins.FileEdit,
       "file_glob" => OptimalSystemAgent.Tools.Builtins.FileGlob,

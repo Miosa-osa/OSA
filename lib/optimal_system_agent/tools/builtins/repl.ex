@@ -12,13 +12,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.REPL do
   @impl true
   def description do
     "Execute code in an interactive REPL session.\n\n" <>
-    "Supports Python, Elixir (iex), and Node.js. The session persists across calls —\n" <>
-    "variables and state carry over between executions within the same session.\n\n" <>
-    "Use for:\n" <>
-    "- Quick code validation without creating files\n" <>
-    "- Data processing and exploration\n" <>
-    "- Testing code snippets before writing to files\n" <>
-    "- Mathematical calculations"
+      "Supports Python, Elixir (iex), and Node.js. The session persists across calls —\n" <>
+      "variables and state carry over between executions within the same session.\n\n" <>
+      "Use for:\n" <>
+      "- Quick code validation without creating files\n" <>
+      "- Data processing and exploration\n" <>
+      "- Testing code snippets before writing to files\n" <>
+      "- Mathematical calculations"
   end
 
   @impl true
@@ -84,10 +84,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.REPL do
 
     try do
       case System.cmd(cmd, args,
-        stderr_to_stdout: true,
-        env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
-        timeout: timeout
-      ) do
+             stderr_to_stdout: true,
+             env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
+             timeout: timeout
+           ) do
         {output, 0} ->
           {:ok, format_output(output, language)}
 
@@ -99,6 +99,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.REPL do
         case e do
           %ErlangError{original: :enoent} ->
             {:error, "#{language} runtime not found. Install #{cmd} to use the REPL."}
+
           _ ->
             {:error, "REPL error: #{Exception.message(e)}"}
         end

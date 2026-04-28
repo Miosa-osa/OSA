@@ -93,7 +93,11 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       end
 
     Logger.debug("[doom] Checking #{length(results)} tool results for doom patterns")
-    Logger.debug("[doom] Signatures this iteration: #{inspect(Enum.map(iteration_signatures, fn {sig, _, _} -> sig end))}")
+
+    Logger.debug(
+      "[doom] Signatures this iteration: #{inspect(Enum.map(iteration_signatures, fn {sig, _, _} -> sig end))}"
+    )
+
     Logger.debug("[doom] Total accumulated: #{inspect(state.recent_failure_signatures)}")
 
     updated_failure_signatures =
@@ -159,13 +163,17 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       max_tool_calls: @max_total_tool_calls
     })
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{
-        type: :tool_call_cap_exceeded,
-        session_id: state.session_id,
-        total_tool_calls: total,
-        max_tool_calls: @max_total_tool_calls
-      }})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :tool_call_cap_exceeded,
+         session_id: state.session_id,
+         total_tool_calls: total,
+         max_tool_calls: @max_total_tool_calls
+       }}
+    )
 
     {:halt, cap_message, state}
   end
@@ -195,7 +203,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       """
       |> String.trim()
 
-    Logger.warning("[loop] Doom loop detected: #{repeated_sig_key} repeated #{repeat_count} times (session: #{state.session_id})")
+    Logger.warning(
+      "[loop] Doom loop detected: #{repeated_sig_key} repeated #{repeat_count} times (session: #{state.session_id})"
+    )
 
     Bus.emit(:system_event, %{
       event: :doom_loop_detected,
@@ -206,15 +216,19 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       consecutive_failures: repeat_count
     })
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{
-        type: :doom_loop_detected,
-        session_id: state.session_id,
-        tool_name: triggering_tool,
-        error_prefix: triggering_error,
-        signature: repeated_sig_key,
-        consecutive_failures: repeat_count
-      }})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :doom_loop_detected,
+         session_id: state.session_id,
+         tool_name: triggering_tool,
+         error_prefix: triggering_error,
+         signature: repeated_sig_key,
+         consecutive_failures: repeat_count
+       }}
+    )
 
     # Track how many times we've tried recovery for this session
     doom_recovery_count = Process.get(:osa_doom_recovery_count, 0)
@@ -228,19 +242,21 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
       recovery_directive = %{
         role: "system",
-        content: "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
-          "\"#{triggering_error}\". You MUST change your approach NOW. " <>
-          "Step 1: Call file_read on the target file to see its current state. " <>
-          "Step 2: Based on what you see, decide if the change is still needed. " <>
-          "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
-          "Do NOT call #{triggering_tool} with the same arguments again.]"
+        content:
+          "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
+            "\"#{triggering_error}\". You MUST change your approach NOW. " <>
+            "Step 1: Call file_read on the target file to see its current state. " <>
+            "Step 2: Based on what you see, decide if the change is still needed. " <>
+            "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
+            "Do NOT call #{triggering_tool} with the same arguments again.]"
       }
 
       Process.put(:osa_doom_recovery_count, doom_recovery_count + 1)
 
-      state = %{state |
-        recent_failure_signatures: [],
-        messages: state.messages ++ [recovery_directive]
+      state = %{
+        state
+        | recent_failure_signatures: [],
+          messages: state.messages ++ [recovery_directive]
       }
 
       {:ok, state}
@@ -257,7 +273,8 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
         "The text you're trying to replace doesn't exist in the file. " <>
           "Read the file with file_read to see the actual content, then use the exact text from the file."
 
-      String.contains?(triggering_error, "old_string found") and String.contains?(triggering_error, "times") ->
+      String.contains?(triggering_error, "old_string found") and
+          String.contains?(triggering_error, "times") ->
         "The text appears multiple times. Add more surrounding context to make old_string unique, " <>
           "or use replace_all: true."
 

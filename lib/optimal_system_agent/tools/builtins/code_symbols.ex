@@ -133,7 +133,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols do
           [_ | [name]] = match
           [{line_num, "function", name}]
 
-        match = Regex.run(~r/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()/, line) ->
+        match =
+            Regex.run(
+              ~r/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()/,
+              line
+            ) ->
           [_ | [name]] = match
           [{line_num, "function", name}]
 
@@ -241,11 +245,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols do
     |> Enum.with_index(1)
     |> Enum.flat_map(fn {line, line_num} ->
       cond do
-        match = Regex.run(~r/^\s*(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum)\s+(\w+)/, line) ->
+        match =
+            Regex.run(
+              ~r/^\s*(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum)\s+(\w+)/,
+              line
+            ) ->
           [_ | [name]] = match
           [{line_num, "class", name}]
 
-        match = Regex.run(~r/^\s*(?:public|private|protected|static|final|abstract|\s)+\s+\w+\s+(\w+)\s*\(/, line) ->
+        match =
+            Regex.run(
+              ~r/^\s*(?:public|private|protected|static|final|abstract|\s)+\s+\w+\s+(\w+)\s*\(/,
+              line
+            ) ->
           [_ | [name]] = match
           [{line_num, "function", name}]
 

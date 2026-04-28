@@ -50,7 +50,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemoryRecall do
           entries
           |> Enum.with_index(1)
           |> Enum.map(fn {entry, idx} ->
-            rel = if is_float(entry.relevance), do: Float.round(entry.relevance, 2), else: entry.relevance
+            rel =
+              if is_float(entry.relevance),
+                do: Float.round(entry.relevance, 2),
+                else: entry.relevance
+
             "#{idx}. [#{entry.category}] #{entry.content} (#{entry.scope}, relevance: #{rel})"
           end)
           |> Enum.join("\n")

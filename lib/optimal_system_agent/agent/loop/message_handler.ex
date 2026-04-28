@@ -70,7 +70,11 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       {:ok, %{content: plan_text}} ->
         plan_input_tokens = Map.get(usage, :input_tokens, 0)
         state = %{state | plan_mode: false}
-        state = if plan_input_tokens > 0, do: %{state | last_input_tokens: plan_input_tokens}, else: state
+
+        state =
+          if plan_input_tokens > 0,
+            do: %{state | last_input_tokens: plan_input_tokens},
+            else: state
 
         Bus.emit(:agent_response, %{
           session_id: state.session_id,
@@ -82,18 +86,22 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
         Phoenix.PubSub.broadcast(
           OptimalSystemAgent.PubSub,
           "osa:session:#{state.session_id}",
-          {:osa_event, %{
-            type: :agent_response,
-            session_id: state.session_id,
-            response: plan_text,
-            response_type: "plan"
-          }}
+          {:osa_event,
+           %{
+             type: :agent_response,
+             session_id: state.session_id,
+             response: plan_text,
+             response_type: "plan"
+           }}
         )
 
         {:ok, plan_text, state}
 
       {:error, reason} ->
-        Logger.warning("Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution")
+        Logger.warning(
+          "Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution"
+        )
+
         state = %{state | plan_mode: false}
         {:error, reason, state}
     end
@@ -145,6 +153,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     |> String.split("\n")
     |> Enum.count(fn line ->
       trimmed = String.trim(line)
+
       Regex.match?(~r/^[-*•]\s+\S/, trimmed) or
         Regex.match?(~r/^\d+[\.\)]\s+\S/, trimmed)
     end)
@@ -162,6 +171,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
               "Wait for the explorer's report before writing any code. " <>
               "For quick lookups, use thoroughness: \"quick\". For deep analysis, use \"very thorough\".]"
         }
+
         [directive | acc]
 
       # Complex coding task — at minimum read before write
@@ -174,6 +184,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
               "delegate(task: \"<specific question about the codebase>\", role: \"explorer\") " <>
               "For simpler tasks, use file_read and dir_list directly.]"
         }
+
         [directive | acc]
 
       true ->

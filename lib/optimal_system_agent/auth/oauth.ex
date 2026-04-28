@@ -165,11 +165,12 @@ defmodule OptimalSystemAgent.Auth.OAuth do
 
     case Req.get(@profile_url, headers: headers) do
       {:ok, %{status: 200, body: resp}} ->
-        {:ok, %{
-          email: resp["email"],
-          name: resp["name"],
-          subscription_type: resp["subscription_type"]
-        }}
+        {:ok,
+         %{
+           email: resp["email"],
+           name: resp["name"],
+           subscription_type: resp["subscription_type"]
+         }}
 
       {:ok, %{status: status}} ->
         {:error, "Profile fetch failed (#{status})"}

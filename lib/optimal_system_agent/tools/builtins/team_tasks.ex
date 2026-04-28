@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamTasks do
         "action" => %{
           "type" => "string",
           "enum" => ["list", "claim", "complete", "scratchpad_write", "scratchpad_read"],
-          "description" => "Action: list (view all tasks), claim (take a pending task), complete (mark done), scratchpad_write (save notes), scratchpad_read (read team notes)"
+          "description" =>
+            "Action: list (view all tasks), claim (take a pending task), complete (mark done), scratchpad_write (save notes), scratchpad_read (read team notes)"
         },
         "team_id" => %{
           "type" => "string",
@@ -61,7 +62,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamTasks do
     else
       lines =
         Enum.map_join(tasks, "\n", fn t ->
-          dep_str = if t.dependencies != [], do: " [depends: #{Enum.join(t.dependencies, ", ")}]", else: ""
+          dep_str =
+            if t.dependencies != [],
+              do: " [depends: #{Enum.join(t.dependencies, ", ")}]",
+              else: ""
+
           assignee_str = if t.assignee, do: " → #{t.assignee}", else: ""
           "- [#{t.status}] #{t.id}: #{t.description}#{assignee_str}#{dep_str} (wave #{t.wave})"
         end)
@@ -75,10 +80,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamTasks do
     agent_id = Map.get(args, "__session_id__", "unknown")
 
     case Team.claim_task(team_id, task_id, agent_id) do
-      {:ok, task} -> {:ok, "Claimed task #{task_id}: #{task.description}"}
-      {:error, :not_found} -> {:ok, "Task #{task_id} not found."}
-      {:error, :dependencies_not_met} -> {:ok, "Cannot claim #{task_id} — dependencies not yet completed."}
-      {:error, {:wrong_status, status}} -> {:ok, "Cannot claim #{task_id} — status is #{status}."}
+      {:ok, task} ->
+        {:ok, "Claimed task #{task_id}: #{task.description}"}
+
+      {:error, :not_found} ->
+        {:ok, "Task #{task_id} not found."}
+
+      {:error, :dependencies_not_met} ->
+        {:ok, "Cannot claim #{task_id} — dependencies not yet completed."}
+
+      {:error, {:wrong_status, status}} ->
+        {:ok, "Cannot claim #{task_id} — status is #{status}."}
     end
   end
 
@@ -106,12 +118,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamTasks do
     if pads == [] do
       {:ok, "No scratchpad entries for team #{team_id}."}
     else
-      lines = Enum.map_join(pads, "\n\n", fn {agent, content} ->
-        "### #{agent}\n#{content}"
-      end)
+      lines =
+        Enum.map_join(pads, "\n\n", fn {agent, content} ->
+          "### #{agent}\n#{content}"
+        end)
+
       {:ok, lines}
     end
   end
 
-  def execute(_), do: {:ok, "Invalid action. Use: list, claim, complete, scratchpad_write, scratchpad_read"}
+  def execute(_),
+    do: {:ok, "Invalid action. Use: list, claim, complete, scratchpad_write, scratchpad_read"}
 end

@@ -73,7 +73,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
         },
         "window" => %{
           "type" => "string",
-          "description" => "Window name/title to focus before executing the action (e.g. \"Editor de Texto\", \"Firefox\")"
+          "description" =>
+            "Window name/title to focus before executing the action (e.g. \"Editor de Texto\", \"Firefox\")"
         }
       },
       "required" => ["action"]
@@ -94,7 +95,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
         result = Server.execute(server, action, params)
         record_keyframe(session_id, action, result)
         result
-      {:error, _} = err -> err
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -185,9 +188,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
 
   defp validate_text(%{"text" => text}) when is_binary(text) do
     cond do
-      text == "" -> {:error, "Text must not be empty"}
-      byte_size(text) > @max_text_bytes -> {:error, "Text exceeds maximum length (#{@max_text_bytes} bytes)"}
-      true -> :ok
+      text == "" ->
+        {:error, "Text must not be empty"}
+
+      byte_size(text) > @max_text_bytes ->
+        {:error, "Text exceeds maximum length (#{@max_text_bytes} bytes)"}
+
+      true ->
+        :ok
     end
   end
 
@@ -214,7 +222,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
   defp validate_key_combo(_), do: {:error, "Missing required parameter: text"}
 
   defp validate_scroll(%{"direction" => dir}) when dir in @valid_scroll_directions, do: :ok
-  defp validate_scroll(%{"direction" => dir}) when is_binary(dir), do: {:error, "Invalid direction: #{dir}"}
+
+  defp validate_scroll(%{"direction" => dir}) when is_binary(dir),
+    do: {:error, "Invalid direction: #{dir}"}
+
   defp validate_scroll(_), do: {:error, "Missing required parameter: direction"}
 
   # ---------------------------------------------------------------------------
@@ -245,11 +256,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
 
     case Adapter.adapter_for(platform) do
       {:ok, adapter} ->
-        {:ok, pid} = Server.start_link(
-          adapter: adapter,
-          platform: platform,
-          session_id: session_id
-        )
+        {:ok, pid} =
+          Server.start_link(
+            adapter: adapter,
+            platform: platform,
+            session_id: session_id
+          )
 
         :ets.insert(@server_table, {session_id, pid})
         Keyframe.init_journal(session_id)
@@ -273,12 +285,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
   # ---------------------------------------------------------------------------
 
   defp record_keyframe(session_id, action, result) do
-    result_str = case result do
-      {:ok, {:image, %{path: p}}} -> "image:#{p}"
-      {:ok, msg} when is_binary(msg) -> msg
-      {:ok, other} -> inspect(other)
-      {:error, reason} -> "error:#{reason}"
-    end
+    result_str =
+      case result do
+        {:ok, {:image, %{path: p}}} -> "image:#{p}"
+        {:ok, msg} when is_binary(msg) -> msg
+        {:ok, other} -> inspect(other)
+        {:error, reason} -> "error:#{reason}"
+      end
 
     entry = %{action: action, result: result_str}
 
@@ -286,6 +299,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
     try do
       base = Path.expand("~/.osa/trajectories")
       journal_dir = Path.join(base, session_id)
+
       if File.dir?(journal_dir) do
         Keyframe.record_entry(journal_dir, entry)
 
@@ -293,8 +307,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
         case Keyframe.detect_doom_loop(journal_dir) do
           {:doom_loop, step_count} ->
             require Logger
-            Logger.warning("[CU] Doom loop detected at step #{step_count} for session #{session_id}")
-          :ok -> :ok
+
+            Logger.warning(
+              "[CU] Doom loop detected at step #{step_count} for session #{session_id}"
+            )
+
+          :ok ->
+            :ok
         end
       end
     rescue
@@ -316,9 +335,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse do
         case System.cmd("xdotool", ["search", "--name", window_name], stderr_to_stdout: true) do
           {output, 0} ->
             case output |> String.split("\n", trim: true) |> List.first() do
-              nil -> :ok
+              nil ->
+                :ok
+
               wid ->
-                System.cmd("xdotool", ["windowactivate", "--sync", String.trim(wid)], stderr_to_stdout: true)
+                System.cmd("xdotool", ["windowactivate", "--sync", String.trim(wid)],
+                  stderr_to_stdout: true
+                )
+
                 Process.sleep(200)
             end
 

@@ -201,7 +201,10 @@ defmodule OptimalSystemAgent.Decisions.Pivot do
              }}
 
           {:error, step, reason, changes} ->
-            Logger.warning("[Decisions.Pivot] pivot failed at step #{step}: #{Kernel.inspect(reason)}")
+            Logger.warning(
+              "[Decisions.Pivot] pivot failed at step #{step}: #{Kernel.inspect(reason)}"
+            )
+
             {:error, step, reason, changes}
         end
     end

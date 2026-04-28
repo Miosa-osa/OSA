@@ -11,7 +11,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "hello world\nfoo bar\nbaz qux\n")
-        assert {:ok, msg} = FileEdit.execute(%{"path" => path, "old_string" => "foo bar", "new_string" => "replaced"})
+
+        assert {:ok, msg} =
+                 FileEdit.execute(%{
+                   "path" => path,
+                   "old_string" => "foo bar",
+                   "new_string" => "replaced"
+                 })
+
         assert msg =~ "Replaced in"
         assert File.read!(path) == "hello world\nreplaced\nbaz qux\n"
       after
@@ -37,7 +44,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "a\nb\nc\nd\n")
-        assert {:ok, _} = FileEdit.execute(%{"path" => path, "old_string" => "b\nc", "new_string" => "B\nC"})
+
+        assert {:ok, _} =
+                 FileEdit.execute(%{
+                   "path" => path,
+                   "old_string" => "b\nc",
+                   "new_string" => "B\nC"
+                 })
+
         assert File.read!(path) == "a\nB\nC\nd\n"
       after
         File.rm(path)
@@ -53,7 +67,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "foo\nfoo\nfoo\n")
-        assert {:error, msg} = FileEdit.execute(%{"path" => path, "old_string" => "foo", "new_string" => "bar"})
+
+        assert {:error, msg} =
+                 FileEdit.execute(%{"path" => path, "old_string" => "foo", "new_string" => "bar"})
+
         assert msg =~ "3 times"
         assert msg =~ "must be unique"
       after
@@ -70,7 +87,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
       try do
         File.write!(path, "hello world\n")
-        assert {:error, msg} = FileEdit.execute(%{"path" => path, "old_string" => "not here", "new_string" => "x"})
+
+        assert {:error, msg} =
+                 FileEdit.execute(%{
+                   "path" => path,
+                   "old_string" => "not here",
+                   "new_string" => "x"
+                 })
+
         assert msg =~ "not found"
       after
         File.rm(path)
@@ -82,12 +106,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
   describe "edge cases" do
     test "empty old_string returns error" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "/tmp/anything.txt", "old_string" => "", "new_string" => "x"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "/tmp/anything.txt",
+                 "old_string" => "",
+                 "new_string" => "x"
+               })
+
       assert msg =~ "empty"
     end
 
     test "identical old/new returns error" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "/tmp/anything.txt", "old_string" => "same", "new_string" => "same"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "/tmp/anything.txt",
+                 "old_string" => "same",
+                 "new_string" => "same"
+               })
+
       assert msg =~ "identical"
     end
 
@@ -97,11 +133,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
     end
 
     test "nonexistent file returns error" do
-      assert {:error, msg} = FileEdit.execute(%{
-        "path" => "/tmp/osa_nonexistent_#{:rand.uniform(100_000)}.txt",
-        "old_string" => "x",
-        "new_string" => "y"
-      })
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "/tmp/osa_nonexistent_#{:rand.uniform(100_000)}.txt",
+                 "old_string" => "x",
+                 "new_string" => "y"
+               })
+
       assert msg =~ "not found"
     end
   end
@@ -110,22 +148,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEditTest do
 
   describe "blocked paths" do
     test "editing /etc/shadow is blocked" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "/etc/shadow", "old_string" => "x", "new_string" => "y"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "/etc/shadow",
+                 "old_string" => "x",
+                 "new_string" => "y"
+               })
+
       assert msg =~ "Access denied"
     end
 
     test "editing ~/.ssh/id_rsa is blocked" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "~/.ssh/id_rsa", "old_string" => "x", "new_string" => "y"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "~/.ssh/id_rsa",
+                 "old_string" => "x",
+                 "new_string" => "y"
+               })
+
       assert msg =~ "Access denied"
     end
 
     test "editing /usr/ paths is blocked" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "/usr/local/bin/test", "old_string" => "x", "new_string" => "y"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "/usr/local/bin/test",
+                 "old_string" => "x",
+                 "new_string" => "y"
+               })
+
       assert msg =~ "Access denied"
     end
 
     test "editing ~/.bashrc is blocked (dotfile outside ~/.osa/)" do
-      assert {:error, msg} = FileEdit.execute(%{"path" => "~/.bashrc", "old_string" => "x", "new_string" => "y"})
+      assert {:error, msg} =
+               FileEdit.execute(%{
+                 "path" => "~/.bashrc",
+                 "old_string" => "x",
+                 "new_string" => "y"
+               })
+
       assert msg =~ "Access denied"
     end
   end

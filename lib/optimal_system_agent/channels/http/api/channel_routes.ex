@@ -32,8 +32,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
   alias OptimalSystemAgent.Channels.Slack
   alias OptimalSystemAgent.Channels.Signal, as: SignalChannel
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET / — list channels ──────────────────────────────────────────
 
@@ -77,10 +77,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
         # failure.  401 could mislead callers into thinking they can retry with
         # different credentials.  503 signals that the endpoint is not ready to
         # accept requests until the operator sets TELEGRAM_WEBHOOK_SECRET.
-        Logger.error("Telegram webhook is misconfigured: TELEGRAM_WEBHOOK_SECRET is not set. " <>
-          "All webhook requests will be rejected until this is resolved. " <>
-          "Set TELEGRAM_WEBHOOK_SECRET in your environment (see .env.example).")
-        json_error(conn, 503, "configuration_error", "Webhook secret not configured — contact the server operator")
+        Logger.error(
+          "Telegram webhook is misconfigured: TELEGRAM_WEBHOOK_SECRET is not set. " <>
+            "All webhook requests will be rejected until this is resolved. " <>
+            "Set TELEGRAM_WEBHOOK_SECRET in your environment (see .env.example)."
+        )
+
+        json_error(
+          conn,
+          503,
+          "configuration_error",
+          "Webhook secret not configured — contact the server operator"
+        )
 
       {:error, :invalid_signature} ->
         json_error(conn, 401, "unauthorized", "Invalid signature")
@@ -96,7 +104,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
       Discord.handle_update(conn.body_params)
       send_resp(conn, 200, "")
     else
-      json_error(conn, 503, "channel_unavailable", "Discord adapter not started. Set DISCORD_BOT_TOKEN.")
+      json_error(
+        conn,
+        503,
+        "channel_unavailable",
+        "Discord adapter not started. Set DISCORD_BOT_TOKEN."
+      )
     end
   end
 
@@ -132,6 +145,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
     # Meta verification challenge
     params = Plug.Conn.fetch_query_params(conn).query_params
     verify_token = Application.get_env(:optimal_system_agent, :whatsapp_verify_token)
+
     if params["hub.mode"] == "subscribe" and params["hub.verify_token"] == verify_token do
       send_resp(conn, 200, params["hub.challenge"] || "")
     else
@@ -158,7 +172,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
         {:error, :no_secret} ->
           # Dev mode: no secret configured — warn and allow.
           # In production, set signal_webhook_secret to enforce verification.
-          Logger.warning("Signal webhook: signal_webhook_secret not configured — processing without verification (dev mode)")
+          Logger.warning(
+            "Signal webhook: signal_webhook_secret not configured — processing without verification (dev mode)"
+          )
+
           :ok
 
         {:error, :invalid_signature} ->
@@ -236,7 +253,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
       DingTalk.handle_webhook(conn.body_params)
       send_resp(conn, 200, "")
     else
-      json_error(conn, 503, "channel_unavailable", "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET.")
+      json_error(
+        conn,
+        503,
+        "channel_unavailable",
+        "DingTalk adapter not started. Set DINGTALK_CLIENT_ID and DINGTALK_CLIENT_SECRET."
+      )
     end
   end
 
@@ -248,7 +270,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
     # URL verification challenge
     if conn.body_params["type"] == "url_verification" do
       challenge = conn.body_params["challenge"]
-      conn |> put_resp_content_type("application/json") |> send_resp(200, Jason.encode!(%{challenge: challenge}))
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, Jason.encode!(%{challenge: challenge}))
     else
       vtoken = Application.get_env(:optimal_system_agent, :feishu_verification_token)
 
@@ -272,7 +297,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
       WeCom.handle_webhook(conn.body_params)
       send_resp(conn, 200, "")
     else
-      json_error(conn, 503, "channel_unavailable", "WeCom adapter not started. Set WECOM_BOT_KEY.")
+      json_error(
+        conn,
+        503,
+        "channel_unavailable",
+        "WeCom adapter not started. Set WECOM_BOT_KEY."
+      )
     end
   end
 

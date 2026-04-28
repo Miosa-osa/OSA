@@ -55,10 +55,17 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
     } do
       session_id = Ecto.UUID.generate()
       accept_task = start_accepting(listen_sock)
-      GenServer.cast(controller, {:frame, {:desktop_start_request, %{session_id: session_id, width: 1920, height: 1080}}})
+
+      GenServer.cast(
+        controller,
+        {:frame, {:desktop_start_request, %{session_id: session_id, width: 1920, height: 1080}}}
+      )
+
       vnc_peer = Task.await(accept_task, 5_000)
 
-      assert_receive {:outbound_frame, {:desktop_ready, %{session_id: ^session_id, capabilities: _caps}}}, 3_000
+      assert_receive {:outbound_frame,
+                      {:desktop_ready, %{session_id: ^session_id, capabilities: _caps}}},
+                     3_000
 
       %{sessions: sessions} = :sys.get_state(controller)
       assert Map.has_key?(sessions, session_id)
@@ -73,7 +80,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
     } do
       session_id = Ecto.UUID.generate()
       accept_task = start_accepting(listen_sock)
-      GenServer.cast(controller, {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}})
+
+      GenServer.cast(
+        controller,
+        {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}}
+      )
+
       vnc_peer = Task.await(accept_task, 5_000)
 
       assert_receive {:outbound_frame, {:desktop_ready, %{session_id: ^session_id}}}, 3_000
@@ -97,16 +109,23 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
     } do
       session_id = Ecto.UUID.generate()
       accept_task = start_accepting(listen_sock)
-      GenServer.cast(controller, {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}})
+
+      GenServer.cast(
+        controller,
+        {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}}
+      )
+
       vnc_peer = Task.await(accept_task, 5_000)
 
       assert_receive {:outbound_frame, {:desktop_ready, %{session_id: ^session_id}}}, 3_000
 
       upstream_data = :crypto.strong_rand_bytes(64)
 
-      GenServer.cast(controller, {:frame,
-        {:desktop_data,
-         %{session_id: session_id, direction: :upstream, data: upstream_data}}})
+      GenServer.cast(
+        controller,
+        {:frame,
+         {:desktop_data, %{session_id: session_id, direction: :upstream, data: upstream_data}}}
+      )
 
       {:ok, received} = :gen_tcp.recv(vnc_peer, byte_size(upstream_data), 2_000)
       assert received == upstream_data
@@ -121,7 +140,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
     } do
       session_id = Ecto.UUID.generate()
       accept_task = start_accepting(listen_sock)
-      GenServer.cast(controller, {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}})
+
+      GenServer.cast(
+        controller,
+        {:frame, {:desktop_start_request, %{session_id: session_id, width: 1280, height: 720}}}
+      )
+
       _vnc_peer = Task.await(accept_task, 5_000)
 
       assert_receive {:outbound_frame, {:desktop_ready, %{session_id: ^session_id}}}, 3_000
@@ -159,10 +183,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.ControllerTes
   defmodule FakeRouter do
     use GenServer
     def init(%{test_pid: test_pid}), do: {:ok, %{test_pid: test_pid}}
+
     def handle_cast({:outbound, frame}, state) do
       send(state.test_pid, {:outbound_frame, frame})
       {:noreply, state}
     end
+
     def handle_cast(_msg, state), do: {:noreply, state}
     def handle_info(_msg, state), do: {:noreply, state}
   end

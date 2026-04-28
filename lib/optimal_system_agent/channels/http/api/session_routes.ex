@@ -21,8 +21,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   alias OptimalSystemAgent.SDK.Memory
   alias OptimalSystemAgent.Agent.Loop
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── ETS session tracking ────────────────────────────────────────────
   # HTTP-created sessions are not backed by a Registry process, so we maintain
@@ -34,13 +34,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     case :ets.whereis(@http_sessions_table) do
       :undefined ->
         :ets.new(@http_sessions_table, [:named_table, :set, :public])
-      _ -> :ok
+
+      _ ->
+        :ok
     end
   end
 
   defp track_session(session_id) do
     ensure_session_table()
-    :ets.insert(@http_sessions_table, {session_id, %{created_at: DateTime.utc_now() |> DateTime.to_iso8601()}})
+
+    :ets.insert(
+      @http_sessions_table,
+      {session_id, %{created_at: DateTime.utc_now() |> DateTime.to_iso8601()}}
+    )
   end
 
   defp http_session_exists?(session_id) do
@@ -112,7 +118,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         |> send_resp(201, body)
 
       {:error, _reason} ->
-        json_error(conn, 500, "session_create_failed", "An internal error occurred while creating the session")
+        json_error(
+          conn,
+          500,
+          "session_create_failed",
+          "An internal error occurred while creating the session"
+        )
     end
   end
 
@@ -183,18 +194,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           static_tokens = OptimalSystemAgent.Soul.static_token_count()
           conversation_tokens = max(total_tokens - static_tokens, 0)
 
-          body = Jason.encode!(%{
-            system_tokens: static_tokens,
-            conversation_tokens: conversation_tokens,
-            tool_result_tokens: 0,
-            max_tokens: max_tokens,
-            used_tokens: total_tokens
-          })
+          body =
+            Jason.encode!(%{
+              system_tokens: static_tokens,
+              conversation_tokens: conversation_tokens,
+              tool_result_tokens: 0,
+              max_tokens: max_tokens,
+              used_tokens: total_tokens
+            })
 
           conn |> put_resp_content_type("application/json") |> send_resp(200, body)
 
         _ ->
-          json_error(conn, 404, "session_not_found", "Session #{session_id} not found or not active")
+          json_error(
+            conn,
+            404,
+            "session_not_found",
+            "Session #{session_id} not found or not active"
+          )
       end
     rescue
       _ ->
@@ -291,7 +308,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
 
       {:error, _reason} ->
-        json_error(conn, 500, "delete_failed", "An internal error occurred while deleting the session")
+        json_error(
+          conn,
+          500,
+          "delete_failed",
+          "An internal error occurred while deleting the session"
+        )
     end
   end
 
@@ -615,14 +637,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
                   %{
                     text: q,
                     multi_select: false,
-                    options: Enum.map(opts || [], fn opt ->
-                      %{label: to_string(opt), description: nil}
-                    end),
+                    options:
+                      Enum.map(opts || [], fn opt ->
+                        %{label: to_string(opt), description: nil}
+                      end),
                     skippable: true
                   }
                 ],
                 skippable: true
               }
+
               {"ask_user_question", survey_data}
 
             %{type: :system_event, event: sub} ->
@@ -649,10 +673,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
             end
 
           {:error, reason} ->
-            Logger.warning("[SSE] session=#{session_id} encode failed for #{event_type}: #{inspect(reason)}")
+            Logger.warning(
+              "[SSE] session=#{session_id} encode failed for #{event_type}: #{inspect(reason)}"
+            )
+
             session_sse_loop(conn, session_id)
         end
-
     after
       30_000 ->
         case chunk(conn, ": keepalive\n\n") do
@@ -688,9 +714,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
     case format do
       "json" ->
-        turns = Enum.map(transcript, fn t ->
-          %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
-        end)
+        turns =
+          Enum.map(transcript, fn t ->
+            %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
+          end)
+
         json(conn, 200, %{session_id: id, format: "json", turns: turns})
 
       _ ->
@@ -746,12 +774,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   end
 
   defp parse_int(nil, default), do: default
+
   defp parse_int(val, default) when is_binary(val) do
     case Integer.parse(val) do
       {n, _} -> n
       :error -> default
     end
   end
+
   defp parse_int(val, _default) when is_integer(val), do: val
   defp parse_int(_, default), do: default
 end

@@ -164,7 +164,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
         handle_diagnosis_result(session, result, state)
 
       _ ->
-        Logger.warning("[Healing.Orchestrator] Received :diagnosis with no matching session (pid=#{inspect(from_pid)})")
+        Logger.warning(
+          "[Healing.Orchestrator] Received :diagnosis with no matching session (pid=#{inspect(from_pid)})"
+        )
+
         {:noreply, state}
     end
   end
@@ -179,7 +182,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
         handle_fix_result(session, result, state)
 
       _ ->
-        Logger.warning("[Healing.Orchestrator] Received :fix_applied with no matching session (pid=#{inspect(from_pid)})")
+        Logger.warning(
+          "[Healing.Orchestrator] Received :fix_applied with no matching session (pid=#{inspect(from_pid)})"
+        )
+
         {:noreply, state}
     end
   end
@@ -198,7 +204,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
         handle_phase_failure(session, role, reason, state)
 
       _ ->
-        Logger.warning("[Healing.Orchestrator] Received :ephemeral_error with no matching session (pid=#{inspect(from_pid)})")
+        Logger.warning(
+          "[Healing.Orchestrator] Received :ephemeral_error with no matching session (pid=#{inspect(from_pid)})"
+        )
+
         {:noreply, state}
     end
   end
@@ -303,7 +312,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
         %{state | monitors: monitors, pid_to_session: pid_to_session}
 
       {:error, reason} ->
-        Logger.error("[Healing.Orchestrator] Failed to start diagnostician for #{session.id}: #{inspect(reason)}")
+        Logger.error(
+          "[Healing.Orchestrator] Failed to start diagnostician for #{session.id}: #{inspect(reason)}"
+        )
+
         notify_agent(session, {:healing_failed, {:diagnostician_start_error, reason}})
         escalate_session(session, {:diagnostician_start_error, reason})
         state
@@ -345,7 +357,10 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
         %{state | monitors: monitors, pid_to_session: pid_to_session}
 
       {:error, reason} ->
-        Logger.error("[Healing.Orchestrator] Failed to start fixer for #{session.id}: #{inspect(reason)}")
+        Logger.error(
+          "[Healing.Orchestrator] Failed to start fixer for #{session.id}: #{inspect(reason)}"
+        )
+
         notify_agent(session, {:healing_failed, {:fixer_start_error, reason}})
         escalate_session(session, {:fixer_start_error, reason})
         state
@@ -409,15 +424,19 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
           "(attempt #{failed_session.attempt_count}/#{failed_session.max_attempts})"
       )
 
-      retry_context = rebuild_context(session) |> Map.put(:attempt_count, failed_session.attempt_count)
+      retry_context =
+        rebuild_context(session) |> Map.put(:attempt_count, failed_session.attempt_count)
+
       # Reset to diagnosing for the retry pass
-      retry_session = %{failed_session |
-        status: :diagnosing,
-        attempt_count: failed_session.attempt_count + 1,
-        diagnosis: nil,
-        diagnostician_pid: nil,
-        fixer_pid: nil
+      retry_session = %{
+        failed_session
+        | status: :diagnosing,
+          attempt_count: failed_session.attempt_count + 1,
+          diagnosis: nil,
+          diagnostician_pid: nil,
+          fixer_pid: nil
       }
+
       :ets.insert(@table, {retry_session.id, retry_session})
 
       state = start_diagnosis(retry_session, retry_context, state)
@@ -430,7 +449,8 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
   defp escalate(session, reason, state) do
     escalate_session(session, reason)
 
-    Bus.emit_algedonic(:high,
+    Bus.emit_algedonic(
+      :high,
       "Self-healing exhausted for agent #{session.agent_id}: #{inspect(reason)}",
       metadata: %{
         session_id: session.id,

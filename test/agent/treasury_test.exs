@@ -17,7 +17,9 @@ defmodule OptimalSystemAgent.Agent.TreasuryTest do
           max_single: 50.0,
           min_reserve: 10.0,
           approval_threshold: 10.0
-        ], name: name)
+        ],
+        name: name
+      )
 
     %{pid: pid, name: name}
   end
@@ -79,7 +81,9 @@ defmodule OptimalSystemAgent.Agent.TreasuryTest do
             monthly_limit: 2500.0,
             max_single: 50.0,
             min_reserve: 10.0
-          ], name: :"treasury_low_#{:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)}")
+          ],
+          name: :"treasury_low_#{:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)}"
+        )
 
       result = GenServer.call(low_pid, {:withdraw, 15.0, "Below reserve", nil})
 

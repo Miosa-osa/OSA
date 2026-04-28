@@ -71,17 +71,20 @@ defmodule OptimalSystemAgent.Speculative.Tools.StartSpeculative do
       "properties" => %{
         "predicted_next_task" => %{
           "type" => "string",
-          "description" => "Description of the task predicted to be assigned next. Be specific — this drives what gets worked on."
+          "description" =>
+            "Description of the task predicted to be assigned next. Be specific — this drives what gets worked on."
         },
         "assumptions" => %{
           "type" => "array",
           "items" => %{"type" => "string"},
-          "description" => "List of conditions that must still be true when the real task arrives for this work to be valid. E.g. 'user_intent_unchanged', 'no conflicting PR merged'.",
+          "description" =>
+            "List of conditions that must still be true when the real task arrives for this work to be valid. E.g. 'user_intent_unchanged', 'no conflicting PR merged'.",
           "minItems" => 1
         },
         "agent_id" => %{
           "type" => "string",
-          "description" => "Identifier of the agent performing the speculative work. Optional — defaults to 'unknown'."
+          "description" =>
+            "Identifier of the agent performing the speculative work. Optional — defaults to 'unknown'."
         }
       },
       "required" => ["predicted_next_task", "assumptions"]

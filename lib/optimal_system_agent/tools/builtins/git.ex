@@ -51,8 +51,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
 
     effective_cwd =
       case path do
-        nil -> workspace
-        "" -> workspace
+        nil ->
+          workspace
+
+        "" ->
+          workspace
+
         p ->
           expanded = Path.expand(p)
           if File.dir?(expanded), do: expanded, else: :invalid
@@ -124,7 +128,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git do
 
       # REQUIRE: commit must have -m flag
       command == "commit" and not has_message_flag?(args) ->
-        {:blocked, "commit requires a -m flag with a message. Example: args: \"-m 'My commit message'\""}
+        {:blocked,
+         "commit requires a -m flag with a message. Example: args: \"-m 'My commit message'\""}
 
       true ->
         :ok

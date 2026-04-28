@@ -12,13 +12,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron do
   @impl true
   def description do
     "Manage scheduled recurring tasks.\n\n" <>
-    "Actions:\n" <>
-    "- `create` — schedule a new recurring task with a cron expression\n" <>
-    "- `list` — list all scheduled tasks\n" <>
-    "- `delete` — remove a scheduled task by ID\n" <>
-    "- `trigger` — manually trigger a scheduled task immediately\n\n" <>
-    "Cron expressions: \"0 */6 * * *\" (every 6h), \"*/30 * * * *\" (every 30m),\n" <>
-    "or presets: \"hourly\", \"daily\", \"weekly\""
+      "Actions:\n" <>
+      "- `create` — schedule a new recurring task with a cron expression\n" <>
+      "- `list` — list all scheduled tasks\n" <>
+      "- `delete` — remove a scheduled task by ID\n" <>
+      "- `trigger` — manually trigger a scheduled task immediately\n\n" <>
+      "Cron expressions: \"0 */6 * * *\" (every 6h), \"*/30 * * * *\" (every 30m),\n" <>
+      "or presets: \"hourly\", \"daily\", \"weekly\""
   end
 
   @impl true
@@ -58,7 +58,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron do
     else
       case Scheduler.create_job(%{task: task, schedule: schedule}) do
         {:ok, job} ->
-          {:ok, "Scheduled job created:\n- ID: #{job.id}\n- Schedule: #{schedule}\n- Task: #{task}"}
+          {:ok,
+           "Scheduled job created:\n- ID: #{job.id}\n- Schedule: #{schedule}\n- Task: #{task}"}
+
         {:error, reason} ->
           {:error, "Failed to create job: #{inspect(reason)}"}
       end
@@ -70,10 +72,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron do
   def execute(%{"action" => "list"}) do
     case Scheduler.list_jobs() do
       jobs when is_list(jobs) and length(jobs) > 0 ->
-        formatted = Enum.map(jobs, fn job ->
-          status = Map.get(job, :status, "active")
-          "- #{job.id}: #{job.task} (#{job.schedule}) [#{status}]"
-        end) |> Enum.join("\n")
+        formatted =
+          Enum.map(jobs, fn job ->
+            status = Map.get(job, :status, "active")
+            "- #{job.id}: #{job.task} (#{job.schedule}) [#{status}]"
+          end)
+          |> Enum.join("\n")
 
         {:ok, "Scheduled jobs:\n#{formatted}"}
 

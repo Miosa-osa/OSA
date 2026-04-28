@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents do
         "providers" => %{
           "type" => "array",
           "items" => %{"type" => "string"},
-          "description" => "List of providers to query (e.g., ['anthropic', 'openai', 'groq']). Defaults to all available."
+          "description" =>
+            "List of providers to query (e.g., ['anthropic', 'openai', 'groq']). Defaults to all available."
         }
       }
     }
@@ -48,8 +49,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents do
       end
 
     if length(providers) < 2 do
-      {:ok, "Mixture-of-Agents requires at least 2 providers. Only #{length(providers)} available. " <>
-        "Configure additional providers or use the default model instead."}
+      {:ok,
+       "Mixture-of-Agents requires at least 2 providers. Only #{length(providers)} available. " <>
+         "Configure additional providers or use the default model instead."}
     else
       # Fan out to all providers in parallel
       tasks =
@@ -59,11 +61,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents do
             fn ->
               try do
                 case Providers.chat(
-                  [%{role: "user", content: query}],
-                  provider: provider,
-                  temperature: 0.7,
-                  max_tokens: 2048
-                ) do
+                       [%{role: "user", content: query}],
+                       provider: provider,
+                       temperature: 0.7,
+                       max_tokens: 2048
+                     ) do
                   {:ok, %{content: content}} -> {:ok, provider, content}
                   {:error, reason} -> {:error, provider, reason}
                 end
@@ -122,8 +124,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents do
 
         case Providers.chat([%{role: "user", content: synthesis_prompt}], max_tokens: 4096) do
           {:ok, %{content: synthesis}} ->
-            provider_list = Enum.map(successful, fn {:ok, p, _} -> to_string(p) end) |> Enum.join(", ")
-            {:ok, "**Mixture-of-Agents Synthesis** (#{length(successful)} models: #{provider_list})\n\n#{synthesis}"}
+            provider_list =
+              Enum.map(successful, fn {:ok, p, _} -> to_string(p) end) |> Enum.join(", ")
+
+            {:ok,
+             "**Mixture-of-Agents Synthesis** (#{length(successful)} models: #{provider_list})\n\n#{synthesis}"}
 
           {:error, reason} ->
             # If synthesis fails, return the raw responses
@@ -148,7 +153,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents do
         :openrouter -> System.get_env("OPENROUTER_API_KEY") != nil
         :google -> System.get_env("GOOGLE_API_KEY") != nil
         :cohere -> System.get_env("COHERE_API_KEY") != nil
-        :ollama -> true  # Ollama is always available if running
+        # Ollama is always available if running
+        :ollama -> true
         _ -> false
       end
     end)

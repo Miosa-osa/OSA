@@ -9,7 +9,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   @scroll_buttons %{"up" => "4", "down" => "5", "left" => "6", "right" => "7"}
 
-
   # ── Behaviour Callbacks ──────────────────────────────────────────────
 
   @impl true
@@ -26,6 +25,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
     path = Path.join(dir, filename)
 
     {cmd, args} = screenshot_cmd(Map.put(opts, :path, path))
+
     run_cmd(cmd, args, "Screenshot")
     |> case do
       :ok -> {:ok, path}
@@ -87,7 +87,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
     script = atspi_script_path()
 
     case System.cmd("python3", [script, "--max-depth", "10", "--max-elements", "100"],
-           stderr_to_stdout: true, env: [{"PYTHONDONTWRITEBYTECODE", "1"}]) do
+           stderr_to_stdout: true,
+           env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+         ) do
       {output, 0} ->
         case Jason.decode(output) do
           {:ok, elements} when is_list(elements) -> {:ok, elements}

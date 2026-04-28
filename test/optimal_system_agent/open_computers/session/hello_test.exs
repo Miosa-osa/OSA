@@ -57,11 +57,13 @@ defmodule OptimalSystemAgent.OpenComputers.Session.HelloTest do
   describe "build/1" do
     setup do
       tmp = Path.join(System.tmp_dir!(), "hello_test_fp_#{System.unique_integer([:positive])}")
+
       cfg = %{
         host_key: "oc_host_testkey",
         fingerprint_path: tmp,
         modes: ["direct"]
       }
+
       on_exit(fn -> File.rm(tmp) end)
       {:ok, cfg: cfg}
     end

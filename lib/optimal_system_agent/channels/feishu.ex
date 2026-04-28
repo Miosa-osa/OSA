@@ -24,7 +24,14 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   @api_base "https://open.feishu.cn/open-apis"
   @max_message_length 4_000
 
-  defstruct [:app_id, :app_secret, :verification_token, :tenant_token, :token_expires_at, connected: false]
+  defstruct [
+    :app_id,
+    :app_secret,
+    :verification_token,
+    :tenant_token,
+    :token_expires_at,
+    connected: false
+  ]
 
   @impl OptimalSystemAgent.Channels.Behaviour
   def channel_name, do: :feishu
@@ -116,10 +123,11 @@ defmodule OptimalSystemAgent.Channels.Feishu do
     msg_type = msg["message_type"]
 
     if msg_type == "text" and chat_id do
-      content = case Jason.decode(msg["content"] || "{}") do
-        {:ok, %{"text" => text}} -> String.trim(text) |> String.replace(~r/@_user_\d+\s*/, "")
-        _ -> ""
-      end
+      content =
+        case Jason.decode(msg["content"] || "{}") do
+          {:ok, %{"text" => text}} -> String.trim(text) |> String.replace(~r/@_user_\d+\s*/, "")
+          _ -> ""
+        end
 
       if content != "" do
         session_id = "feishu:#{chat_id}"
@@ -186,7 +194,12 @@ defmodule OptimalSystemAgent.Channels.Feishu do
            receive_timeout: 10_000
          ) do
       {:ok, %{status: 200, body: %{"tenant_access_token" => token, "expire" => expire}}} ->
-        {:ok, %{state | tenant_token: token, token_expires_at: System.system_time(:second) + expire - 300}}
+        {:ok,
+         %{
+           state
+           | tenant_token: token,
+             token_expires_at: System.system_time(:second) + expire - 300
+         }}
 
       {:ok, %{body: body}} ->
         {:error, "Unexpected response: #{inspect(body)}"}
@@ -210,15 +223,27 @@ defmodule OptimalSystemAgent.Channels.Feishu do
   defp auth_headers(state), do: [{"authorization", "Bearer #{state.tenant_token}"}]
 
   defp chunk_message(text) do
-    if String.length(text) <= @max_message_length, do: [text],
-    else: text |> String.graphemes() |> Enum.chunk_every(@max_message_length) |> Enum.map(&Enum.join/1)
+    if String.length(text) <= @max_message_length,
+      do: [text],
+      else:
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(@max_message_length)
+        |> Enum.map(&Enum.join/1)
   end
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
-      [] -> DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :feishu})
+      [{_, _}] ->
+        :ok
+
+      [] ->
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :feishu}
+        )
     end
+
     :ok
   rescue
     _ -> :ok

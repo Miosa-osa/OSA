@@ -24,13 +24,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AuthRoutes do
 
   alias OptimalSystemAgent.Channels.HTTP.Auth
 
-  plug :match
-  plug Plug.Parsers,
+  plug(:match)
+
+  plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
     json_decoder: Jason,
     length: 1_000_000
-  plug :dispatch
+  )
+
+  plug(:dispatch)
 
   # ── POST /login ────────────────────────────────────────────────────
 
@@ -120,7 +123,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AuthRoutes do
       if configured_secret && Plug.Crypto.secure_compare(configured_secret, provided) do
         :ok
       else
-        Logger.warning("[AuthRoutes] Login rejected — secret mismatch from #{format_remote_ip(conn)}")
+        Logger.warning(
+          "[AuthRoutes] Login rejected — secret mismatch from #{format_remote_ip(conn)}"
+        )
+
         {:error, :unauthorized}
       end
     else

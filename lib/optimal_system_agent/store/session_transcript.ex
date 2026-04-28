@@ -12,11 +12,11 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   alias OptimalSystemAgent.Store.Repo
 
   schema "session_transcripts" do
-    field :session_id, :string
-    field :role, :string
-    field :content, :string
-    field :tool_name, :string
-    field :tokens, :integer, default: 0
+    field(:session_id, :string)
+    field(:role, :string)
+    field(:content, :string)
+    field(:tool_name, :string)
+    field(:tokens, :integer, default: 0)
     timestamps()
   end
 

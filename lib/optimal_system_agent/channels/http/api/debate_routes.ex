@@ -18,12 +18,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DebateRoutes do
 
   alias OptimalSystemAgent.Agent.Debate
 
-  plug :match
-  plug Plug.Parsers,
+  plug(:match)
+
+  plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
     json_decoder: Jason
-  plug :dispatch
+  )
+
+  plug(:dispatch)
 
   # POST / — run a debate
   post "/" do
@@ -33,18 +36,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DebateRoutes do
       is_nil(message) or message == "" ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{
-          error: "invalid_request",
-          details: "Required field 'message' is missing or empty"
-        }))
+        |> send_resp(
+          400,
+          Jason.encode!(%{
+            error: "invalid_request",
+            details: "Required field 'message' is missing or empty"
+          })
+        )
 
       not is_binary(message) ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{
-          error: "invalid_request",
-          details: "Field 'message' must be a string"
-        }))
+        |> send_resp(
+          400,
+          Jason.encode!(%{
+            error: "invalid_request",
+            details: "Field 'message' must be a string"
+          })
+        )
 
       true ->
         opts = build_opts(conn.body_params)
@@ -53,7 +62,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DebateRoutes do
           {:ok, result} ->
             body = %{
               synthesis: result.synthesis,
-              debate: Enum.map(result.debate, fn d -> %{provider: d.provider, response: d.response} end),
+              debate:
+                Enum.map(result.debate, fn d -> %{provider: d.provider, response: d.response} end),
               participants: result.participants
             }
 
@@ -64,18 +74,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DebateRoutes do
           {:error, :no_providers} ->
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(400, Jason.encode!(%{
-              error: "no_providers",
-              details: "No providers specified and no default provider configured"
-            }))
+            |> send_resp(
+              400,
+              Jason.encode!(%{
+                error: "no_providers",
+                details: "No providers specified and no default provider configured"
+              })
+            )
 
           {:error, reason} ->
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(500, Jason.encode!(%{
-              error: "debate_failed",
-              details: inspect(reason)
-            }))
+            |> send_resp(
+              500,
+              Jason.encode!(%{
+                error: "debate_failed",
+                details: inspect(reason)
+              })
+            )
         end
     end
   end

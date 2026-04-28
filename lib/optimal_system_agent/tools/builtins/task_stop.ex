@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop do
   @impl true
   def description do
     "Stop a running agent task by session ID.\n\n" <>
-    "Use when a background agent is taking too long, is stuck, or is no longer needed."
+      "Use when a background agent is taking too long, is stuck, or is no longer needed."
   end
 
   @impl true

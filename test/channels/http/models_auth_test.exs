@@ -80,7 +80,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
         |> call_api()
 
       refute resp.status == 401,
-        "Expected non-401 when require_auth=false with expired token, got #{resp.status}"
+             "Expected non-401 when require_auth=false with expired token, got #{resp.status}"
     end
 
     test "succeeds with a garbage token" do
@@ -90,7 +90,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
         |> call_api()
 
       refute resp.status == 401,
-        "Expected non-401 when require_auth=false with garbage token, got #{resp.status}"
+             "Expected non-401 when require_auth=false with garbage token, got #{resp.status}"
     end
 
     test "succeeds with a valid token" do

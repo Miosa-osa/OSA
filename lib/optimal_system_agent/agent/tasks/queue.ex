@@ -91,9 +91,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
           leased_until: leased_until
         }
 
-        state = %{state |
-          tasks: Map.put(state.tasks, task.task_id, updated),
-          leased: Map.put(state.leased, task.task_id, lease_info)
+        state = %{
+          state
+          | tasks: Map.put(state.tasks, task.task_id, updated),
+            leased: Map.put(state.leased, task.task_id, lease_info)
         }
 
         Bus.emit(:system_event, %{event: :task_leased, task_id: task.task_id, agent_id: agent_id})
@@ -112,12 +113,22 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
 
       task ->
         now = DateTime.utc_now()
-        updated = %{task | status: :completed, result: result, completed_at: now, leased_until: nil, leased_by: nil}
+
+        updated = %{
+          task
+          | status: :completed,
+            result: result,
+            completed_at: now,
+            leased_until: nil,
+            leased_by: nil
+        }
+
         state = persist_update(state, updated)
 
-        state = %{state |
-          tasks: Map.put(state.tasks, task_id, updated),
-          leased: Map.delete(state.leased, task_id)
+        state = %{
+          state
+          | tasks: Map.put(state.tasks, task_id, updated),
+            leased: Map.delete(state.leased, task_id)
         }
 
         Bus.emit(:system_event, %{event: :task_completed, task_id: task_id})
@@ -139,16 +150,31 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
 
         updated =
           if new_attempts >= task.max_attempts do
-            %{task | status: :failed, error: error, attempts: new_attempts, leased_until: nil, leased_by: nil}
+            %{
+              task
+              | status: :failed,
+                error: error,
+                attempts: new_attempts,
+                leased_until: nil,
+                leased_by: nil
+            }
           else
-            %{task | status: :pending, error: error, attempts: new_attempts, leased_until: nil, leased_by: nil}
+            %{
+              task
+              | status: :pending,
+                error: error,
+                attempts: new_attempts,
+                leased_until: nil,
+                leased_by: nil
+            }
           end
 
         state = persist_update(state, updated)
 
-        state = %{state |
-          tasks: Map.put(state.tasks, task_id, updated),
-          leased: Map.delete(state.leased, task_id)
+        state = %{
+          state
+          | tasks: Map.put(state.tasks, task_id, updated),
+            leased: Map.delete(state.leased, task_id)
         }
 
         Bus.emit(:system_event, %{
@@ -159,7 +185,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
           final: new_attempts >= task.max_attempts
         })
 
-        Logger.debug("[Tasks.Queue] Task #{task_id} failed (attempt #{new_attempts}/#{task.max_attempts})")
+        Logger.debug(
+          "[Tasks.Queue] Task #{task_id} failed (attempt #{new_attempts}/#{task.max_attempts})"
+        )
+
         state
     end
   end
@@ -181,7 +210,9 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
         try do
           TaskSchema
           |> where([t], t.task_id in ^expired_ids)
-          |> Repo.update_all(set: [status: "pending", leased_until: nil, leased_by: nil, updated_at: now])
+          |> Repo.update_all(
+            set: [status: "pending", leased_until: nil, leased_by: nil, updated_at: now]
+          )
         rescue
           e -> Logger.warning("[Tasks.Queue] DB reap failed: #{inspect(e)}")
         end
@@ -191,12 +222,16 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
     updated_tasks =
       Enum.reduce(expired_ids, state.tasks, fn task_id, tasks ->
         case Map.get(tasks, task_id) do
-          nil -> tasks
-          task -> Map.put(tasks, task_id, %{task | status: :pending, leased_until: nil, leased_by: nil})
+          nil ->
+            tasks
+
+          task ->
+            Map.put(tasks, task_id, %{task | status: :pending, leased_until: nil, leased_by: nil})
         end
       end)
 
-    updated_leased = Enum.reduce(expired_ids, state.leased, fn id, leased -> Map.delete(leased, id) end)
+    updated_leased =
+      Enum.reduce(expired_ids, state.leased, fn id, leased -> Map.delete(leased, id) end)
 
     %{state | tasks: updated_tasks, leased: updated_leased}
   end
@@ -306,7 +341,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Queue do
             %{state | tasks: Map.put(state.tasks, task.task_id, task)}
 
           {:error, changeset} ->
-            Logger.warning("[Tasks.Queue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}")
+            Logger.warning(
+              "[Tasks.Queue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}"
+            )
+
             %{state | tasks: Map.put(state.tasks, task.task_id, task)}
         end
       rescue

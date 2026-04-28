@@ -50,10 +50,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Planner do
   def mark_executed(planner, action, result) do
     entry = %{action: action, result: result, timestamp: System.system_time(:millisecond)}
 
-    %{planner |
-      history: planner.history ++ [entry],
-      phase: :verify
-    }
+    %{planner | history: planner.history ++ [entry], phase: :verify}
   end
 
   @doc "Verification succeeded. If more actions remain, continue executing. Otherwise done."
@@ -67,11 +64,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Planner do
 
   @doc "Verification failed. Re-enter perceive for replan."
   def verify_failure(planner, _reason) do
-    %{planner |
-      phase: :perceive,
-      replan_count: planner.replan_count + 1,
-      actions: []
-    }
+    %{planner | phase: :perceive, replan_count: planner.replan_count + 1, actions: []}
   end
 
   @doc "Is the planner stuck? True after #{@max_replans} consecutive replans."

@@ -300,7 +300,9 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
     test "context_block returns nil when no active workflow exists for session" do
       result =
-        Tasks.workflow_context_block("nonexistent-session-xyz-#{System.unique_integer([:positive])}")
+        Tasks.workflow_context_block(
+          "nonexistent-session-xyz-#{System.unique_integer([:positive])}"
+        )
 
       assert result == nil
     end

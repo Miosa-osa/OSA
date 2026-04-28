@@ -41,7 +41,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents do
     if role && role != "" do
       case AgentRegistry.get(role) do
         nil ->
-          {:ok, "No agent definition found for '#{role}'. You can still delegate to this role — the subagent will run with generic instructions and full tool access."}
+          {:ok,
+           "No agent definition found for '#{role}'. You can still delegate to this role — the subagent will run with generic instructions and full tool access."}
 
         agent ->
           detail = format_agent_detail(agent)
@@ -52,23 +53,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents do
       skills = list_skills()
 
       if agents == [] do
-        {:ok, "No agent definitions loaded. You can still delegate tasks — subagents will run with generic instructions.\n\nAvailable skills: #{skills}"}
+        {:ok,
+         "No agent definitions loaded. You can still delegate tasks — subagents will run with generic instructions.\n\nAvailable skills: #{skills}"}
       else
         lines =
           Enum.map_join(agents, "\n", fn a ->
-            blocked = if a[:tools_blocked] != [], do: " | blocked: #{Enum.join(a.tools_blocked, ", ")}", else: ""
+            blocked =
+              if a[:tools_blocked] != [],
+                do: " | blocked: #{Enum.join(a.tools_blocked, ", ")}",
+                else: ""
+
             "- **#{a.name}** (#{a[:tier] || :specialist}): #{a[:description]}#{blocked}"
           end)
 
-        {:ok, "## Loaded Agent Roles (#{length(agents)})\n\n#{lines}\n\n## Available Skills\n#{skills}\n\nYou can also delegate to roles not in this list — they run as generic subagents with full tool access."}
+        {:ok,
+         "## Loaded Agent Roles (#{length(agents)})\n\n#{lines}\n\n## Available Skills\n#{skills}\n\nYou can also delegate to roles not in this list — they run as generic subagents with full tool access."}
       end
     end
   end
 
   defp format_agent_detail(agent) do
-    blocked = if agent[:tools_blocked] != [], do: "\nBlocked tools: #{Enum.join(agent.tools_blocked, ", ")}", else: "\nBlocked tools: none (full access)"
-    prompt_preview = if agent[:system_prompt], do: "\nPrompt preview: #{String.slice(agent.system_prompt, 0, 200)}...", else: ""
-    triggers = if agent[:triggers] != [], do: "\nTriggers: #{Enum.join(agent.triggers, ", ")}", else: ""
+    blocked =
+      if agent[:tools_blocked] != [],
+        do: "\nBlocked tools: #{Enum.join(agent.tools_blocked, ", ")}",
+        else: "\nBlocked tools: none (full access)"
+
+    prompt_preview =
+      if agent[:system_prompt],
+        do: "\nPrompt preview: #{String.slice(agent.system_prompt, 0, 200)}...",
+        else: ""
+
+    triggers =
+      if agent[:triggers] != [], do: "\nTriggers: #{Enum.join(agent.triggers, ", ")}", else: ""
 
     """
     ## #{agent.name} (#{agent[:tier] || :specialist})
@@ -80,6 +96,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents do
   defp list_skills do
     try do
       skills = OptimalSystemAgent.Tools.Registry.list_skills()
+
       if skills == [] do
         "none loaded"
       else

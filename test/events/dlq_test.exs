@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Events.DLQTest do
     case GenServer.whereis(DLQ) do
       nil ->
         {:ok, pid} = DLQ.start_link([])
+
         on_exit(fn ->
           if Process.alive?(pid), do: GenServer.stop(pid)
         end)

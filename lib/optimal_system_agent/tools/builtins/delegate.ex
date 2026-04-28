@@ -21,28 +21,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
   @impl true
   def description do
     "Launch a specialized agent to handle a subtask autonomously.\n\n" <>
-    "Each agent gets its own context window, model selection, and tool access.\n\n" <>
-    "## When to Use\n" <>
-    "- Task has multiple independent parts that can run in parallel\n" <>
-    "- A specialized role (explorer, tester, code-reviewer) would do better work\n" <>
-    "- You need codebase context: dispatch role='explorer' first\n" <>
-    "- You need an implementation plan: dispatch role='planner'\n" <>
-    "- Long-running research: use background=true so you can keep working\n" <>
-    "- Agent needs your conversation context: use fork=true\n\n" <>
-    "## When NOT to Use\n" <>
-    "- Simple single-file tasks (just do it yourself)\n" <>
-    "- Tasks needing user interaction (use ask_user instead)\n" <>
-    "- Quick file reads (use file_read directly)\n\n" <>
-    "## Writing the Prompt\n" <>
-    "Brief the agent like a colleague who just walked in — they haven't seen this conversation.\n" <>
-    "- Explain what you're trying to accomplish and why\n" <>
-    "- Include all file paths, requirements, and constraints\n" <>
-    "- If you need a short response, say so\n" <>
-    "- Terse command-style prompts produce shallow, generic work\n\n" <>
-    "## Roles\n" <>
-    "explorer (fast codebase scan), planner (architecture), architect, backend, frontend,\n" <>
-    "tester, debugger, security-auditor, code-reviewer, researcher, devops, doc-writer,\n" <>
-    "refactorer, performance. Omit role for a generic agent."
+      "Each agent gets its own context window, model selection, and tool access.\n\n" <>
+      "## When to Use\n" <>
+      "- Task has multiple independent parts that can run in parallel\n" <>
+      "- A specialized role (explorer, tester, code-reviewer) would do better work\n" <>
+      "- You need codebase context: dispatch role='explorer' first\n" <>
+      "- You need an implementation plan: dispatch role='planner'\n" <>
+      "- Long-running research: use background=true so you can keep working\n" <>
+      "- Agent needs your conversation context: use fork=true\n\n" <>
+      "## When NOT to Use\n" <>
+      "- Simple single-file tasks (just do it yourself)\n" <>
+      "- Tasks needing user interaction (use ask_user instead)\n" <>
+      "- Quick file reads (use file_read directly)\n\n" <>
+      "## Writing the Prompt\n" <>
+      "Brief the agent like a colleague who just walked in — they haven't seen this conversation.\n" <>
+      "- Explain what you're trying to accomplish and why\n" <>
+      "- Include all file paths, requirements, and constraints\n" <>
+      "- If you need a short response, say so\n" <>
+      "- Terse command-style prompts produce shallow, generic work\n\n" <>
+      "## Roles\n" <>
+      "explorer (fast codebase scan), planner (architecture), architect, backend, frontend,\n" <>
+      "tester, debugger, security-auditor, code-reviewer, researcher, devops, doc-writer,\n" <>
+      "refactorer, performance. Omit role for a generic agent."
   end
 
   @impl true
@@ -53,37 +53,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
       "properties" => %{
         "task" => %{
           "type" => "string",
-          "description" => "Clear, specific description of the subtask to delegate. " <>
-            "Include all context the subagent needs — file paths, requirements, constraints. " <>
-            "The subagent has NO access to your conversation history."
+          "description" =>
+            "Clear, specific description of the subtask to delegate. " <>
+              "Include all context the subagent needs — file paths, requirements, constraints. " <>
+              "The subagent has NO access to your conversation history."
         },
         "role" => %{
           "type" => "string",
-          "description" => "Agent role name (e.g., 'architect', 'backend', 'frontend', 'tester'). " <>
-            "Must match a loaded agent definition. Omit for a generic subagent."
+          "description" =>
+            "Agent role name (e.g., 'architect', 'backend', 'frontend', 'tester'). " <>
+              "Must match a loaded agent definition. Omit for a generic subagent."
         },
         "tier" => %{
           "type" => "string",
           "enum" => ["elite", "specialist", "utility"],
-          "description" => "Model tier — elite (strongest, slowest), specialist (balanced), " <>
-            "utility (fastest, cheapest). Defaults to the role's configured tier, or 'specialist'."
+          "description" =>
+            "Model tier — elite (strongest, slowest), specialist (balanced), " <>
+              "utility (fastest, cheapest). Defaults to the role's configured tier, or 'specialist'."
         },
         "background" => %{
           "type" => "boolean",
-          "description" => "Run in background — returns immediately, notifies on completion. " <>
-            "Use for long-running research or analysis that doesn't block your current work."
+          "description" =>
+            "Run in background — returns immediately, notifies on completion. " <>
+              "Use for long-running research or analysis that doesn't block your current work."
         },
         "fork" => %{
           "type" => "boolean",
-          "description" => "Fork subagent with full parent conversation context. " <>
-            "The child inherits your conversation history for context-aware delegation."
+          "description" =>
+            "Fork subagent with full parent conversation context. " <>
+              "The child inherits your conversation history for context-aware delegation."
         },
         "isolation" => %{
           "type" => "string",
           "enum" => ["worktree"],
-          "description" => "Run in an isolated git worktree — the agent gets its own copy " <>
-            "of the repo. Changes are merged back on success, discarded on failure. " <>
-            "Use for parallel agents editing the same files."
+          "description" =>
+            "Run in an isolated git worktree — the agent gets its own copy " <>
+              "of the repo. Changes are merged back on success, discarded on failure. " <>
+              "Use for parallel agents editing the same files."
         }
       }
     }
@@ -115,10 +121,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
       tier = if raw_tier == :utility, do: :specialist, else: raw_tier
 
       # Resolve isolation mode
-      isolation = case Map.get(args, "isolation") do
-        "worktree" -> :worktree
-        _ -> nil
-      end
+      isolation =
+        case Map.get(args, "isolation") do
+          "worktree" -> :worktree
+          _ -> nil
+        end
 
       # Build orchestrator config
       config = %{
@@ -146,8 +153,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
         Map.get(args, "background") == true ->
           case Orchestrator.run_background(parent_id, config) do
             {:ok, agent_id} ->
-              {:ok, "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
-                "You'll be notified when it completes. Continue with other work."}
+              {:ok,
+               "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
+                 "You'll be notified when it completes. Continue with other work."}
 
             {:error, reason} ->
               {:ok, "Background delegation failed: #{inspect(reason)}"}
@@ -181,11 +189,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate do
             role = Map.get(msg, :role) || Map.get(msg, "role")
             role == "system"
           end)
-          |> Enum.take(-20) # Last 20 messages for context
+          # Last 20 messages for context
+          |> Enum.take(-20)
         rescue
           _ -> []
         end
-      _ -> []
+
+      _ ->
+        []
     end
   end
 end

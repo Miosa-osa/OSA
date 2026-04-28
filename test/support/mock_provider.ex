@@ -67,7 +67,18 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     case Process.get(:mock_provider_call_count, 0) do
       0 ->
         Process.put(:mock_provider_call_count, 1)
-        result = %{content: "", tool_calls: [%{id: "call_mock_001", name: "memory_recall", arguments: %{"query" => "smoke test context"}}]}
+
+        result = %{
+          content: "",
+          tool_calls: [
+            %{
+              id: "call_mock_001",
+              name: "memory_recall",
+              arguments: %{"query" => "smoke test context"}
+            }
+          ]
+        }
+
         callback.({:done, result})
         :ok
 

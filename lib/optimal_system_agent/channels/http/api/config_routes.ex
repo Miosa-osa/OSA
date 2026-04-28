@@ -5,8 +5,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ConfigRoutes do
   # OptimalSystemAgent.Governance.ConfigRevisions not yet implemented.
   # All revision endpoints return 501 until the governance module is built.
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   get "/revisions/:entity_type/:entity_id" do
     _ = entity_type
