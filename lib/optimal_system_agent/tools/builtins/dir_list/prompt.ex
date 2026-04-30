@@ -4,7 +4,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.DirList.Prompt do
 
   Cross-references `file_read` and `file_glob` by name so renames propagate
   automatically through the `safe_ref/3` helper, mirroring the lazy-require
-  pattern at `src/tools/ToolSearchTool/prompt.ts:9-19`.
   """
 
   @doc """

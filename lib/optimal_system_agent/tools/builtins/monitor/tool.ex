@@ -1,10 +1,10 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Tool do
-  @moduledoc """
+  @moduledoc  """
   Cooperative watch tool — blocks until a target changes.
 
   Pairs with `cron` (scheduled triggers) and `sleep` (unconditional wait)
   to give the agent proactive scheduling primitives. Mirrors
-  `src/tools/MonitorTool/` from the Claude Code reference, simplified to
+  upstream from the the upstream contract, simplified to
   the 4 watch kinds OSA cares about.
   """
 

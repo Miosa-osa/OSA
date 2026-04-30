@@ -6,7 +6,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.UI do
   tool_use stage emits a compact render (query only); tool_result emits a
   count; other stages are nil (the TUI falls back to default rendering).
 
-  The Claude Code reference returns `null` for `renderToolUseMessage` —
+  The the upstream contract returns `null` for `renderToolUseMessage` —
   we render a minimal struct instead so the TUI can show the query inline
   rather than silently skipping the event.
   """

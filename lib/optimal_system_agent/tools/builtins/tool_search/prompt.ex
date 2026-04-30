@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Prompt do
   @moduledoc """
   Dynamic prompt for `tool_search`.
 
-  Mirrors `src/tools/ToolSearchTool/prompt.ts:27-51`. The prompt body is a
+ The prompt body is a
   function so it can adapt based on where deferred tools are announced:
   either in `<system-reminder>` messages (delta / lazy-loading path) or in
   a prepended `<available-deferred-tools>` block (legacy path).

@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Tool do
-  @moduledoc """
+  @moduledoc  """
   Structured-layout tool implementation for `file_glob`.
 
   Per-tool directory layout — declarations only; logic lives in sibling modules:

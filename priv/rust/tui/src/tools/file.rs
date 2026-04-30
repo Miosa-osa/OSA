@@ -228,7 +228,7 @@ impl ToolRenderer for FileEditRenderer {
         )
         .unwrap_or_else(|| "…".to_string());
 
-        // Pick display name — "Update" for edits (matches Claude Code style)
+        // Pick display name — "Update" for edits (matches the upstream agent CLI style)
         let display_name = match name.to_lowercase().as_str() {
             "download" => "Download",
             "multiedit" | "multi_edit" | "multi_file_edit" => "MultiEdit",

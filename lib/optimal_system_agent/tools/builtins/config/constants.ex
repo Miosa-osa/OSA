@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Config.Constants do
   @moduledoc """
   Exported constants for `config`.
 
-  Mirrors `src/tools/ConfigTool/constants.ts`.
+
   """
 
   @tool_name "config"

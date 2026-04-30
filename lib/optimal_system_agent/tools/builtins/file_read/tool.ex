@@ -79,7 +79,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Tool do
   @impl true
   # Set to :infinity because file_read self-bounds via offset/limit. Auto-
   # persisting a Read result would create a circular Read→file→Read loop.
-  # Mirrors the comment at src/Tool.ts:466.
   def max_result_size_chars, do: :infinity
 
   # ── Flat-layout compatibility ─────────────────────────────────────────

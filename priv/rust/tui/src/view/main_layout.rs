@@ -31,7 +31,7 @@ impl LayoutAreas {
     /// Compute layout, optionally shrinking the chat area when content is short.
     /// When `chat_content_height` is Some and smaller than available space,
     /// the status bar and input move up to sit right below the chat content
-    /// (like Claude Code — no empty gap between messages and input).
+    /// (like the upstream agent CLI — no empty gap between messages and input).
     pub fn compute_with_chat_height(
         area: Rect,
         layout: &Layout,

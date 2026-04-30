@@ -4,7 +4,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Sleep.Tool do
   scheduling — when the agent has nothing to do but expects something
   to change, it sleeps cooperatively rather than busy-waiting.
 
-  Mirrors `src/tools/SleepTool/` from the Claude Code reference.
+
   """
 
   use OptimalSystemAgent.Tools.Behaviour

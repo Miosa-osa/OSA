@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Constants do
   @moduledoc """
   Exported constants for cross-tool prompt references.
 
-  Mirrors `src/tools/AskUserQuestionTool/prompt.ts` constants.
+
   Other tools can reference `tool_name/0` so a rename propagates everywhere.
   """
 

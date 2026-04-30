@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Sleep.Prompt do
   @moduledoc """
   Dynamic prompt for the `sleep` tool.
 
-  Mirrors `src/tools/SleepTool/prompt.ts` from the Claude Code reference.
+
   """
 
   alias OptimalSystemAgent.Tools.Builtins.Sleep.Constants

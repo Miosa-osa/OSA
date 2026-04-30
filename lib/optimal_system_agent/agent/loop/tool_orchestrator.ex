@@ -23,10 +23,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     4. **Result-budget enforcement** — large tool results are persisted via
        `ToolResultStorage` based on the tool's `max_result_size_chars/0`.
 
-  Mirrors `src/services/tools/toolOrchestration.ts` and
-  `src/services/tools/StreamingToolExecutor.ts` from Claude Code's
-  reference implementation.
-
   ## Integration
 
   Wired into `ReactLoop.execute_tools/3` (around `react_loop.ex:319-326`)
@@ -173,8 +169,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   defp build_use_context(state) when is_map(state) do
     # Thread an `emit` closure through the context so structured tools can
     # publish progress / intermediate events directly to the Bus without
-    # importing the Events module. Mirrors the `setAppState` / `addNotification`
-    # closures threaded through `ToolUseContext` at `src/Tool.ts:182-214`.
+    # importing the Events module.
     emit_fn = fn topic, payload ->
       try do
         OptimalSystemAgent.Events.Bus.emit(topic, payload)

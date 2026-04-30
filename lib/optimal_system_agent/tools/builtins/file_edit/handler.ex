@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   @moduledoc """
   Validation, permission, and execution logic for `file_edit`.
 
-  Behaviour split mirrors `src/tools/FileEditTool/FileEditTool.ts`:
+  Three-stage pipeline:
     * `validate/2`            — type checks input shape (cheap)
     * `check_permissions/2`   — path allowlist + blocked write-path deny
     * `execute/2`             — actual file edit

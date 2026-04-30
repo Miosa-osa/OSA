@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   @moduledoc """
   Validation, permission, and execution logic for `file_read`.
 
-  Behaviour split mirrors `src/tools/FileReadTool/FileReadTool.ts`:
+  Three-stage pipeline:
     * `validate/2`            — type checks input shape (cheap)
     * `check_permissions/2`   — path allowlist + sensitive-file deny
     * `execute/2`              — actual file read

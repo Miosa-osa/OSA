@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.RemoteTrigger.Prompt do
   @moduledoc """
   Dynamic prompt for `remote_trigger`.
 
-  Mirrors `src/tools/RemoteTriggerTool/` from the Claude Code reference,
+  Mirrors upstream from the the upstream contract,
   adapted to OSA's existing trigger infrastructure in `Agent.Scheduler`.
   """
 

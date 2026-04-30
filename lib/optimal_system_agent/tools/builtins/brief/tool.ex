@@ -6,7 +6,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Brief.Tool do
   task completions, tool calls, decisions, and errors within the
   requested time window into a scannable summary.
 
-  Mirrors the proactive `BriefTool` pattern from the Claude Code reference.
+  Defers by default — the model invokes it on demand via tool_search.
   """
 
   use OptimalSystemAgent.Tools.Behaviour

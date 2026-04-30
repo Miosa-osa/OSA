@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebFetch.Prompt do
   @moduledoc """
   Dynamic prompt for `web_fetch`.
 
-  Mirrors the description from the Claude Code WebFetchTool/prompt.ts reference.
+  Mirrors the description from the the upstream agent CLI WebFetchTool/prompt.ts reference.
   The prompt body is a function (not a static string) so it can reference the
   current `web_search` tool name via `safe_ref/3` — if web_search is renamed,
   the cross-reference updates automatically.

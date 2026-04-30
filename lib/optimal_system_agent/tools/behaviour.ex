@@ -2,10 +2,10 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
   @moduledoc """
   The contract every OSA tool implements.
 
-  Maps to `src/Tool.ts:362-695` in the Claude Code reference. Optional
+Optional
   callbacks have fail-closed defaults injected by
   `use OptimalSystemAgent.Tools.Behaviour`, mirroring `buildTool()` at
-  `src/Tool.ts:757-792`.
+  upstream.
 
   ## Two layouts coexist
 
@@ -134,7 +134,6 @@ defmodule OptimalSystemAgent.Tools.Behaviour do
       def strict?, do: false
 
       # ── Execution semantics — FAIL CLOSED ──────────────────────────
-      # Mirrors src/Tool.ts:757-769 buildTool defaults: assume the
       # worst (writes, destructive, not concurrent-safe) so a sloppy
       # new tool can't accidentally bypass safety.
       def concurrency_safe?(_input, _ctx), do: false

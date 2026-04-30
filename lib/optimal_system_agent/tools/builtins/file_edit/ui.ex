@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.UI do
   @moduledoc """
   Render maps for the Rust TUI.
 
-  The Elixir side of `src/tools/FileEditTool/UI.tsx`. Each `render/3` call
+  The Elixir side of upstream. Each `render/3` call
   returns a structured map that the Rust TUI consumes over the existing
   PubSub event channel — the TUI side maps `kind` to a component.
 

@@ -87,7 +87,7 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   end
 
   @doc """
-  Render inline Claude Code-style task list with `⎿` connector.
+  Render inline the upstream agent CLI-style task list with `⎿` connector.
 
   Example output:
       ⎿  ✔ Explore codebase structure

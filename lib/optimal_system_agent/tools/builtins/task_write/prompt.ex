@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
   @moduledoc """
   Dynamic prompt for `task_write`.
 
-  Mirrors the state machine semantics of Claude Code's `TodoWriteTool/prompt.ts`.
+  Mirrors the state machine semantics of the `TodoWriteTool/prompt.ts`.
   The prose is a function so it can reference live tool names from sibling
   Constants modules via the `safe_ref/3` helper.
   """

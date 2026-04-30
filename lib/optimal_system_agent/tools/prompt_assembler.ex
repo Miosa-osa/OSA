@@ -4,8 +4,7 @@ defmodule OptimalSystemAgent.Tools.PromptAssembler do
   `prompt/1` (with cross-tool references resolved) and partitioning the
   set into loaded vs. deferred (deferred = name only).
 
-  Mirrors the assembly pattern at `src/tools/ToolSearchTool/prompt.ts:62-117`
-  in the Claude Code reference implementation.
+  Mirrors the assembly pattern at upstream
 
   The assembler is byte-deterministic for a fixed input — same tools in,
   same string out. This is the foundation for system-prompt caching
@@ -96,7 +95,7 @@ defmodule OptimalSystemAgent.Tools.PromptAssembler do
   end
 
   # Mirrors the deferred-tool format string at
-  # `src/tools/ToolSearchTool/prompt.ts:115-117`.
+  # upstream.
   defp format_deferred(mod) do
     case LegacyAdapter.normalize(mod) do
       %{search_hint: ""} -> mod.name()

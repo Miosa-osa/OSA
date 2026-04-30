@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.SendUserFile.Tool do
-  @moduledoc """
+  @moduledoc  """
   Send a file to the user by emitting an event on the Events.Bus.
 
   The frontend subscribes to `:system_event` events with subtype
@@ -13,7 +13,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendUserFile.Tool do
   This tool reads the file (read_only? false because it emits a user-side
   event) but does NOT copy or move the file.
 
-  Mirrors the `SendUserFileTool` pattern from the Claude Code reference.
   """
 
   use OptimalSystemAgent.Tools.Behaviour

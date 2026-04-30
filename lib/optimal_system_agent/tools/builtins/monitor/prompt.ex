@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Prompt do
   @moduledoc """
   Dynamic prompt for the `monitor` tool.
 
-  Loosely mirrors `src/tools/MonitorTool/` from the Claude Code reference
+  Loosely mirrors upstream from the the upstream contract
   but adapted to OSA's existing capability surface (file watch, process
   status, URL ping, command exit code).
   """

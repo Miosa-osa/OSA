@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.UI do
   @moduledoc """
   Render maps for the Rust TUI cron panel.
 
-  Mirrors the role of `src/tools/ScheduleCronTool/UI.tsx` but on the Elixir
+  Mirrors the role of upstream but on the Elixir
   side. Each `render/3` returns a structured payload that the TUI consumes via
   PubSub. The `kind` field maps to a TUI component — the cron panel renderer
   is not yet implemented in Rust but the payload shape is forward-locked here

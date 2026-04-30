@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Prompt do
   @moduledoc """
   Dynamic prompt for the `git` tool.
 
-  Encodes the Git Safety Protocol drawn from the Claude Code v2 flow
+  Encodes the Git Safety Protocol drawn from the the prior generation flow
   analysis (docs/archive/flows/claude-code-v2-flow.md, section 6) so that
   the model operating this tool follows the same commit discipline:
 

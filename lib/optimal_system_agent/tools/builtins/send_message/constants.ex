@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Constants do
   @moduledoc """
   Exported constants for `send_message`.
 
-  Mirrors `src/tools/SendMessageTool/` constants. Other modules reference
+ Other modules reference
   `tool_name/0` so a rename propagates automatically.
   """
 

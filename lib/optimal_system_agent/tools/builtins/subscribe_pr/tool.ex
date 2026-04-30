@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Tool do
-  @moduledoc """
+  @moduledoc  """
   Subscribe to GitHub Pull Request events via periodic cron polling.
 
   Registers a named job in the `cron` scheduler (Agent.Scheduler) that
@@ -9,7 +9,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Tool do
   Not concurrency_safe because the Scheduler's job list is stateful and
   concurrent register/remove calls could race. Callers should serialise.
 
-  Mirrors the `SubscribePRTool` pattern from the Claude Code reference.
   """
 
   use OptimalSystemAgent.Tools.Behaviour
