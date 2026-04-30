@@ -22,9 +22,12 @@ defmodule OptimalSystemAgent.Tools.Registry do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Tools.Registry.{Search, SkillLoader}
+  alias OptimalSystemAgent.Tools.Registry.{Search, SkillLoader, SkillUsage}
 
   defstruct builtin_tools: %{}, skills: %{}, tools: []
+
+  @max_triggered_skill_chars 4_000
+  @max_triggered_total_chars 12_000
 
   # ── GenServer Start ──────────────────────────────────────────────────
 
@@ -209,17 +212,17 @@ defmodule OptimalSystemAgent.Tools.Registry do
   Returns `:ok` when arguments conform to the schema, or
   `{:error, message}` with a structured description of all validation failures.
 
-  When the `ex_json_schema` dependency is not compiled, validation is skipped
-  and `:ok` is returned (fail-open).
+  If validation infrastructure is unavailable or crashes, read-only tools remain
+  fail-open for compatibility. Mutating or unknown-safety tools fail closed.
   """
   @spec validate_arguments(module(), map()) :: :ok | {:error, String.t()}
   def validate_arguments(mod, arguments) do
-    unless Code.ensure_loaded?(ExJsonSchema.Schema) do
-      :ok
+    unless Code.ensure_loaded?(ExJsonSchema.Schema) and
+             Code.ensure_loaded?(ExJsonSchema.Validator) do
+      validation_infra_error_result(mod, arguments, :ex_json_schema_unavailable)
     else
-      schema = mod.parameters()
-
       try do
+        schema = mod.parameters()
         resolved = apply(ExJsonSchema.Schema, :resolve, [schema])
 
         case apply(ExJsonSchema.Validator, :validate, [resolved, arguments]) do
@@ -233,10 +236,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
       rescue
         e ->
           Logger.warning(
-            "[Tools.Registry] Schema validation error for #{mod.name()}: #{inspect(e)}"
+            "[Tools.Registry] Schema validation error for #{safe_tool_name(mod)}: #{inspect(e)}"
           )
 
-          :ok
+          validation_infra_error_result(mod, arguments, e)
       end
     end
   end
@@ -318,6 +321,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
     if matched != [] do
       skill_names = Enum.map(matched, fn {name, _} -> name end)
 
+      Enum.each(skill_names, &SkillUsage.record_use/1)
+
       try do
         OptimalSystemAgent.Events.Bus.emit(:system_event, %{
           event: :skills_triggered,
@@ -331,12 +336,43 @@ defmodule OptimalSystemAgent.Tools.Registry do
       end
     end
 
-    injected =
-      Enum.flat_map(matched, fn {_name, skill} ->
-        inst = skill.instructions |> to_string() |> String.trim()
-        if inst != "", do: ["### Active Skill: #{skill.name}\n\n#{inst}"], else: []
+    {injected_parts, _budget_used} =
+      matched
+      |> Enum.sort_by(fn {_name, skill} -> Map.get(skill, :priority, 5) end)
+      |> Enum.reduce({[], 0}, fn {_name, skill}, {acc, used} ->
+        remaining = @max_triggered_total_chars - used
+
+        if remaining <= 0 do
+          {acc, used}
+        else
+          inst = skill[:instructions] |> to_string() |> String.trim()
+
+          if inst == "" do
+            {acc, used}
+          else
+            capped =
+              if String.length(inst) > @max_triggered_skill_chars do
+                String.slice(inst, 0, @max_triggered_skill_chars) <>
+                  "\n\n[Truncated — call `use_skill` with name \"#{skill.name}\" for full instructions]"
+              else
+                inst
+              end
+
+            capped =
+              if String.length(capped) > remaining do
+                String.slice(capped, 0, remaining) <>
+                  "\n\n[Truncated — call `use_skill` with name \"#{skill.name}\" for full instructions]"
+              else
+                capped
+              end
+
+            {acc ++ ["### Active Skill: #{skill.name}\n\n#{capped}"],
+             used + String.length(capped)}
+          end
+        end
       end)
-      |> Enum.join("\n\n")
+
+    injected = Enum.join(injected_parts, "\n\n")
 
     cond do
       is_nil(base) and injected == "" -> nil
@@ -447,6 +483,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "Tools registry: #{map_size(builtin_tools)} tools, #{map_size(skills)} skills, #{length(tools)} LLM tools"
     )
 
+    SkillUsage.init()
+
     {:ok, %__MODULE__{builtin_tools: builtin_tools, skills: skills, tools: tools}}
   end
 
@@ -528,6 +566,17 @@ defmodule OptimalSystemAgent.Tools.Registry do
     {:reply, {:error, :unknown_call}, state}
   end
 
+  @impl true
+  def terminate(_reason, _state) do
+    try do
+      SkillUsage.persist()
+    rescue
+      _ -> :ok
+    end
+
+    :ok
+  end
+
   # ── Private: Built-in Tools ───────────────────────────────────────────
 
   defp load_builtin_tools do
@@ -548,6 +597,11 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch.Tool,
       "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool,
       "cron" => OptimalSystemAgent.Tools.Builtins.Cron.Tool,
+      "enter_plan_mode" => OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Tool,
+      "exit_plan_mode" => OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Tool,
+      "enter_worktree" => OptimalSystemAgent.Tools.Builtins.EnterWorktree.Tool,
+      "exit_worktree" => OptimalSystemAgent.Tools.Builtins.ExitWorktree.Tool,
+      "notebook_edit" => OptimalSystemAgent.Tools.Builtins.NotebookEdit.Tool,
 
       # ── New companion tools (Pillar F: scheduling primitives) ──────────
       "sleep" => OptimalSystemAgent.Tools.Builtins.Sleep.Tool,
@@ -565,6 +619,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "list_agents" => OptimalSystemAgent.Tools.Builtins.ListAgents.Tool,
       "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent.Tool,
       "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks.Tool,
+      "team_create" => OptimalSystemAgent.Tools.Builtins.TeamCreate.Tool,
+      "team_delete" => OptimalSystemAgent.Tools.Builtins.TeamDelete.Tool,
       "message_agent" => OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool,
       "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents.Tool,
 
@@ -589,6 +645,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "code_symbols" => OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool,
       "multi_file_edit" => OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool,
       "download" => OptimalSystemAgent.Tools.Builtins.Download.Tool,
+
+      # ── Filesystem checkpoints ─────────────────────────────────────────
+      "rollback" => OptimalSystemAgent.Tools.Builtins.Rollback.Tool,
+
+      # ── Skills ───────────────────────────────────────────────────────────
+      "use_skill" => OptimalSystemAgent.Tools.Builtins.UseSkill,
+      "skill_manager" => OptimalSystemAgent.Tools.Builtins.SkillManager,
 
       # ── Flat-layout tools (pending migration) ──────────────────────────
       "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
@@ -643,6 +706,43 @@ defmodule OptimalSystemAgent.Tools.Registry do
   end
 
   # ── Private: Validation Error Formatting ─────────────────────────────
+
+  defp validation_infra_error_result(mod, arguments, reason) do
+    ctx = build_minimal_use_context(arguments)
+    adapter = OptimalSystemAgent.Tools.LegacyAdapter
+
+    read_only? = adapter.read_only?(mod, arguments, ctx)
+    destructive? = adapter.destructive?(mod, arguments, ctx)
+
+    if read_only? and not destructive? do
+      :ok
+    else
+      {:error,
+       "Tool '#{safe_tool_name(mod)}' argument validation unavailable: #{validation_reason(reason)}"}
+    end
+  rescue
+    e ->
+      {:error,
+       "Tool '#{safe_tool_name(mod)}' argument validation unavailable: #{validation_reason(e)}"}
+  end
+
+  defp safe_tool_name(mod) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :name, 0) do
+      mod.name()
+    else
+      inspect(mod)
+    end
+  rescue
+    _ -> inspect(mod)
+  end
+
+  defp validation_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp validation_reason(%{__struct__: _} = exception) do
+    if is_exception(exception), do: Exception.message(exception), else: inspect(exception)
+  end
+
+  defp validation_reason(reason), do: inspect(reason)
 
   defp format_validation_errors(tool_name, errors) do
     details =

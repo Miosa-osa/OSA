@@ -199,9 +199,11 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp gather_dynamic_blocks(state) do
     [
       {bootstrap_block(), 0, "bootstrap"},
+      {personality_block(), 0, "personality"},
       {tool_process_block(state), 1, "tool_process"},
       {runtime_block(state), 1, "runtime"},
       {environment_block(state), 1, "environment"},
+      {project_context_block(state), 1, "project_context"},
       {plan_mode_block(state), 1, "plan_mode"},
       {memory_block_relevant(state), 1, "memory"},
       {episodic_block(state), 1, "episodic"},
@@ -212,6 +214,26 @@ defmodule OptimalSystemAgent.Agent.Context do
       {agent_roles_block(state), 2, "agent_roles"}
     ]
     |> Enum.reject(fn {content, _, _} -> is_nil(content) or content == "" end)
+  end
+
+  defp personality_block do
+    try do
+      OptimalSystemAgent.Personality.active_overlay()
+    rescue
+      _ -> nil
+    end
+  end
+
+  defp project_context_block(state) do
+    working_dir = Map.get(state, :working_dir)
+
+    try do
+      OptimalSystemAgent.Agent.ContextDiscovery.discover(working_dir)
+    rescue
+      _ -> nil
+    catch
+      :exit, _ -> nil
+    end
   end
 
   # Inject available agent roles for delegation — only for :full tier (parent agents).

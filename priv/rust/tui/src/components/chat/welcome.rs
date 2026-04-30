@@ -144,7 +144,7 @@ pub fn draw_welcome_with_tools(
 
     // Tips (below the box)
     lines.push(Line::from(Span::styled(
-        "  Type a message  \u{00b7}  /help for commands  \u{00b7}  Ctrl+K palette",
+        "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette",
         theme.welcome_tip(),
     )));
 

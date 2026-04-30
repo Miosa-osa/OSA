@@ -52,6 +52,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "logout" => {"Disconnect OAuth session for a provider", :cmd_logout},
     "setup" => {"Re-run the setup wizard", :cmd_setup},
     "channels" => {"Show connected messaging channels", :cmd_channels},
+    "resume" => {"Resume a previous session", :cmd_resume},
+    "persona" => {"Show or switch persona preset", :cmd_persona},
     "exit" => {"Exit OSA", :cmd_exit}
   }
 
@@ -350,12 +352,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("  #{@bold}Memory#{@reset}")
 
     try do
-      stats = Memory.stats()
+      {:ok, stats} = Memory.stats()
       total = stats[:total] || stats[:count] || 0
       IO.puts("  #{@dim}Entries:#{@reset} #{total}")
 
-      case Memory.Store.recent(10) do
-        entries when is_list(entries) and length(entries) > 0 ->
+      case Memory.recent(10) do
+        {:ok, entries} when is_list(entries) and entries != [] ->
           IO.puts("")
 
           Enum.each(entries, fn entry ->
@@ -512,29 +514,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   def cmd_plan(_args, session_id) do
     IO.puts("")
 
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{pid, _}] ->
-        try do
-          state = :sys.get_state(pid)
-          current = state.plan_mode || false
+    case Loop.toggle_plan_mode(session_id) do
+      {:ok, true} ->
+        IO.puts(
+          "  #{@green}#{@reset} Plan mode #{@bold}enabled#{@reset} — agent will propose a plan before acting"
+        )
 
-          if current do
-            GenServer.call(pid, {:set_plan_mode, false})
-            IO.puts("  #{@green}#{@reset} Plan mode #{@bold}disabled#{@reset}")
-          else
-            GenServer.call(pid, {:set_plan_mode, true})
+      {:ok, false} ->
+        IO.puts("  #{@green}#{@reset} Plan mode #{@bold}disabled#{@reset}")
 
-            IO.puts(
-              "  #{@green}#{@reset} Plan mode #{@bold}enabled#{@reset} — agent will propose a plan before acting"
-            )
-          end
-        rescue
-          _ ->
-            IO.puts("  #{@yellow}error: could not toggle plan mode#{@reset}")
-        end
-
-      _ ->
+      {:error, :no_session} ->
         IO.puts("  #{@yellow}error: session not found#{@reset}")
+
+      {:error, _reason} ->
+        IO.puts("  #{@yellow}error: could not toggle plan mode#{@reset}")
     end
 
     IO.puts("")
@@ -655,16 +648,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     Effort.toggle_fast()
+    config = Effort.get(Effort.current())
 
-    if Effort.fast_mode?() do
-      IO.puts(
-        "  #{@green}✓#{@reset} Fast mode #{@bold}enabled#{@reset} — low effort, quick responses"
-      )
-    else
-      IO.puts(
-        "  #{@green}✓#{@reset} Fast mode #{@bold}disabled#{@reset} — back to #{Effort.current()} effort"
-      )
-    end
+    mode =
+      if Effort.fast_mode?(),
+        do: "enabled",
+        else: "disabled"
+
+    IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
+    IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
+    IO.puts("  #{@dim}Iterations:#{@reset} #{config.max_iterations}")
+    IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
+    IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")
 
     IO.puts("")
     session_id
@@ -902,6 +897,137 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   rescue
     _ ->
       IO.puts("  #{@dim}Channel status unavailable#{@reset}\n")
+      session_id
+  end
+
+  def cmd_resume(args, session_id) do
+    alias OptimalSystemAgent.Agent.SessionPersistence
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        sessions = SessionPersistence.list(limit: 10)
+
+        if sessions == [] do
+          IO.puts("  #{@dim}No saved sessions found.#{@reset}")
+        else
+          IO.puts("  #{@bold}Recent Sessions#{@reset}")
+          IO.puts("")
+
+          Enum.each(sessions, fn session ->
+            id = session.session_id
+            mtime = session.modified_at
+
+            date_str =
+              try do
+                NaiveDateTime.to_string(mtime) |> String.slice(0, 16)
+              rescue
+                _ -> "?"
+              end
+
+            preview =
+              try do
+                case SessionPersistence.load(id) do
+                  {:ok, msgs} when is_list(msgs) ->
+                    first_user =
+                      Enum.find(msgs, fn m ->
+                        (m[:role] || m["role"]) == "user"
+                      end)
+
+                    if first_user do
+                      content = first_user[:content] || first_user["content"] || ""
+                      String.slice(content, 0, 70)
+                    else
+                      ""
+                    end
+
+                  _ ->
+                    ""
+                end
+              rescue
+                _ -> ""
+              end
+
+            IO.puts("  #{@cyan}#{id}#{@reset}  #{@dim}#{date_str}#{@reset}")
+
+            if preview != "" do
+              IO.puts("    #{@dim}#{preview}#{@reset}")
+            end
+          end)
+
+          IO.puts("")
+          IO.puts("  #{@dim}Usage: /resume <session_id>#{@reset}")
+        end
+
+        IO.puts("")
+        session_id
+
+      target_id ->
+        case SessionPersistence.load(target_id) do
+          {:ok, messages} when is_list(messages) and messages != [] ->
+            IO.puts("  #{@green}Resuming session #{target_id}...#{@reset}")
+            Session.resume_session(target_id, messages, session_id)
+
+          {:ok, []} ->
+            IO.puts("  #{@yellow}Session #{target_id} has no messages.#{@reset}\n")
+            session_id
+
+          {:error, :not_found} ->
+            IO.puts("  #{@red}Session '#{target_id}' not found.#{@reset}\n")
+            session_id
+
+          {:error, reason} ->
+            IO.puts("  #{@red}Failed to load session: #{inspect(reason)}#{@reset}\n")
+            session_id
+        end
+    end
+  rescue
+    e ->
+      IO.puts("  #{@red}Resume error: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  def cmd_personality(args, session_id) do
+    alias OptimalSystemAgent.Personality
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        current = Personality.current()
+        presets = Personality.list()
+
+        IO.puts("  #{@bold}Personality Presets#{@reset}")
+        IO.puts("")
+
+        Enum.each(presets, fn preset ->
+          marker = if preset.name == current, do: "#{@green}*#{@reset}", else: " "
+          padded = String.pad_trailing(preset.name, 14)
+          IO.puts("  #{marker} #{@cyan}#{padded}#{@reset} #{@dim}#{preset.description}#{@reset}")
+        end)
+
+        IO.puts("")
+        IO.puts("  #{@dim}Current: #{current}. Usage: /personality <name>#{@reset}")
+
+      name ->
+        case Personality.set(name) do
+          :ok ->
+            preset = Enum.find(Personality.list(), &(&1.name == name))
+            desc = if preset, do: preset.description, else: name
+
+            IO.puts(
+              "  #{@green}Personality set to #{@bold}#{name}#{@reset}#{@green} — #{desc}#{@reset}"
+            )
+
+          {:error, reason} ->
+            IO.puts("  #{@red}#{reason}#{@reset}")
+        end
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: personality switch failed#{@reset}\n")
       session_id
   end
 

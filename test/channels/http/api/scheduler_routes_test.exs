@@ -3,8 +3,34 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutesTest do
   use Plug.Test
 
   alias OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutes
+  alias OptimalSystemAgent.Agent.Scheduler
 
   @opts SchedulerRoutes.init([])
+
+  setup do
+    config_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "osa-scheduler-routes-test-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(config_dir)
+
+    previous = Application.get_env(:optimal_system_agent, :config_dir)
+    Application.put_env(:optimal_system_agent, :config_dir, config_dir)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:optimal_system_agent, :config_dir, previous)
+      else
+        Application.delete_env(:optimal_system_agent, :config_dir)
+      end
+
+      File.rm_rf(config_dir)
+    end)
+
+    :ok
+  end
 
   defp call_routes(conn) do
     SchedulerRoutes.call(conn, @opts)
@@ -39,6 +65,28 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutesTest do
       assert is_binary(preset["id"])
       assert is_binary(preset["cron"])
       assert is_binary(preset["label"])
+    end
+  end
+
+  describe "POST /:id/trigger" do
+    test "runs command jobs through HeartbeatExecutor" do
+      assert {:ok, job} =
+               Scheduler.add_job(%{
+                 "name" => "route command job",
+                 "schedule" => "hourly",
+                 "type" => "command",
+                 "command" => "printf route-ok"
+               })
+
+      conn = json_post("/#{job["id"]}/trigger", %{})
+      assert conn.status == 200
+
+      body = decode_body(conn)
+      assert body["status"] == "ok"
+      assert body["run"]["status"] == "succeeded"
+      assert body["run"]["stdout"] == "route-ok"
+
+      assert :ok = Scheduler.remove_job(job["id"])
     end
   end
 

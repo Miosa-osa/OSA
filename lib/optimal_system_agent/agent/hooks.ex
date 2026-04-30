@@ -367,6 +367,14 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
           {:ok, payload}
         end
+      },
+
+      # Auto skill creator — generate skills from complex tasks (post_response, priority 96)
+      %{
+        name: "auto_skill_creator",
+        event: :post_response,
+        priority: 96,
+        handler: &auto_skill_creator/1
       }
     ]
 
@@ -596,6 +604,39 @@ defmodule OptimalSystemAgent.Agent.Hooks do
   end
 
   defp learning_observer(payload), do: {:ok, payload}
+
+  # Auto skill creator — fire-and-forget skill generation from complex tasks (>=5 tool calls)
+  defp auto_skill_creator(
+         %{tools_used: tools, total_tool_calls: count, input: input, session_id: sid} = payload
+       )
+       when is_list(tools) and is_integer(count) and count >= 5 do
+    if is_binary(sid) and not String.starts_with?(sid, "agent:") do
+      Task.start(fn ->
+        try do
+          tool_names = tools |> Enum.map(&to_string/1) |> Enum.uniq()
+
+          pattern = %{
+            id: "auto:#{sid}:#{count}",
+            description: "Auto-captured: #{String.slice(to_string(input), 0, 80)}",
+            trigger: String.slice(to_string(input), 0, 40),
+            response:
+              "Tools used: #{Enum.join(tool_names, ", ")}\n\nOriginal task: #{String.slice(to_string(input), 0, 200)}",
+            category: "automation",
+            tags: Enum.join(tool_names, ","),
+            occurrences: 5
+          }
+
+          OptimalSystemAgent.Memory.SkillGenerator.generate_from_pattern(pattern)
+        rescue
+          _ -> :ok
+        end
+      end)
+    end
+
+    {:ok, payload}
+  end
+
+  defp auto_skill_creator(payload), do: {:ok, payload}
 
   # Episodic memory recorder — log tool use events into ETS so context.ex can inject them
   defp episodic_recorder(%{tool_name: tool_name, result: result} = payload) do

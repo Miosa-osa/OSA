@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       OptimalSystemAgent.Agent.Progress,
       OptimalSystemAgent.Agent.Hooks,
       OptimalSystemAgent.Agent.Scheduler,
+      OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor,
       OptimalSystemAgent.Agent.Compactor,
       OptimalSystemAgent.Signal.Persistence,
       {DynamicSupervisor,

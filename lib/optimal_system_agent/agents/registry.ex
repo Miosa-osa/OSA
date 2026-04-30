@@ -1,10 +1,12 @@
 defmodule OptimalSystemAgent.Agents.Registry do
   @moduledoc """
-  Agent definition registry — loads AGENT.md files from priv/agents/ and ~/.osa/agents/.
+  Agent definition registry — loads AGENT.md files from built-in, project, and
+  user agent directories.
 
   Agent definitions are markdown files with YAML frontmatter that describe
-  specialized roles for subagent delegation. User agents (~/.osa/agents/)
-  override built-in agents (priv/agents/) with the same name.
+  specialized roles for subagent delegation. Later sources override earlier
+  sources, so user agents can replace project or built-in agents with the same
+  name.
 
   Stores definitions in :persistent_term for lock-free reads — same pattern
   as Tools.Registry for skills.
@@ -76,27 +78,62 @@ defmodule OptimalSystemAgent.Agents.Registry do
   end
 
   @doc """
-  Load all agent definitions from priv/agents/ and ~/.osa/agents/.
+  Load all agent definitions from built-in, project, and user directories.
 
   Called at application boot and can be called again to reload.
-  User agents override built-in agents with the same name.
   """
   @spec load() :: :ok
   def load do
-    priv_agents = load_from_directory(priv_agents_path())
-    user_agents = load_from_directory(user_agents_path())
-
-    # User overrides built-in
-    merged = Map.merge(priv_agents, user_agents)
+    dirs = discover_agent_dirs(File.cwd!())
+    merged = load_from_paths(dirs)
 
     :persistent_term.put(@persistent_key, merged)
 
-    Logger.info(
-      "[AgentRegistry] Loaded #{map_size(merged)} agent definitions " <>
-        "(#{map_size(priv_agents)} built-in, #{map_size(user_agents)} user)"
-    )
+    counts =
+      dirs
+      |> Enum.map(fn {source, dir} -> {source, map_size(load_from_directory(dir, source))} end)
+      |> Enum.map_join(", ", fn {source, count} -> "#{source}: #{count}" end)
+
+    Logger.info("[AgentRegistry] Loaded #{map_size(merged)} agent definitions (#{counts})")
 
     :ok
+  end
+
+  @doc """
+  Load agent definitions from explicit `{source, path}` entries.
+
+  Later entries override earlier entries. This is primarily useful for tests
+  and for callers that want deterministic discovery without relying on cwd.
+  """
+  @spec load_from_paths([{atom(), String.t()}]) :: map()
+  def load_from_paths(paths) when is_list(paths) do
+    Enum.reduce(paths, %{}, fn {source, dir}, acc ->
+      Map.merge(acc, load_from_directory(dir, source))
+    end)
+  end
+
+  @doc """
+  Discover agent directories in load order.
+
+  Precedence is built-in < project `.claude/agents` < project `.osa/agents` <
+  user `~/.osa/agents`. Project directories are walked from repo root down to
+  cwd so nearer files override broader files.
+  """
+  @spec discover_agent_dirs(String.t()) :: [{atom(), String.t()}]
+  def discover_agent_dirs(cwd \\ File.cwd!()) do
+    project_dirs =
+      cwd
+      |> ancestor_dirs()
+      |> Enum.reverse()
+      |> Enum.flat_map(fn dir ->
+        [
+          {:project_claude, Path.join([dir, ".claude", "agents"])},
+          {:project_osa, Path.join([dir, ".osa", "agents"])}
+        ]
+      end)
+      |> Enum.filter(fn {_source, dir} -> File.dir?(dir) end)
+
+    [{:built_in, priv_agents_path()}] ++ project_dirs ++ [{:user, user_agents_path()}]
   end
 
   # ---------------------------------------------------------------------------
@@ -122,7 +159,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
     Path.expand("~/.osa/agents")
   end
 
-  defp load_from_directory(dir) do
+  defp load_from_directory(dir, source \\ :unknown) do
     if File.dir?(dir) do
       # Support both flat files (priv/agents/architect.md) and
       # subdirectories (~/. osa/agents/my-agent/AGENT.md)
@@ -138,7 +175,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
 
       (md_files ++ agent_dirs)
       |> Enum.reduce(%{}, fn path, acc ->
-        case parse_agent_file(path) do
+        case parse_agent_file(path, source) do
           {:ok, agent} -> Map.put(acc, agent.name, agent)
           :error -> acc
         end
@@ -152,32 +189,14 @@ defmodule OptimalSystemAgent.Agents.Registry do
       %{}
   end
 
-  defp parse_agent_file(path) do
+  defp parse_agent_file(path, source) do
     content = File.read!(path)
 
     case String.split(content, "---", parts: 3) do
       ["", frontmatter, body] ->
         case YamlElixir.read_from_string(frontmatter) do
           {:ok, meta} ->
-            name =
-              meta["name"] ||
-                Path.basename(path, ".md")
-                |> then(fn n ->
-                  if n == "AGENT", do: Path.basename(Path.dirname(path)), else: n
-                end)
-
-            {:ok,
-             %{
-               name: to_string(name),
-               description: to_string(meta["description"] || ""),
-               tier: parse_tier(meta["tier"]),
-               triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
-               tools_allowed: parse_tool_list(meta["tools_allowed"]),
-               tools_blocked: parse_tool_list(meta["tools_blocked"]) || [],
-               max_iterations: meta["max_iterations"],
-               system_prompt: String.trim(body),
-               source_path: path
-             }}
+            {:ok, build_agent(path, source, meta, String.trim(body))}
 
           _ ->
             :error
@@ -196,8 +215,10 @@ defmodule OptimalSystemAgent.Agents.Registry do
            tools_allowed: nil,
            tools_blocked: [],
            max_iterations: nil,
+           permission_tier: :subagent,
            system_prompt: content,
-           source_path: path
+           source_path: path,
+           source: source
          }}
     end
   rescue
@@ -209,10 +230,113 @@ defmodule OptimalSystemAgent.Agents.Registry do
   defp parse_tier("elite"), do: :elite
   defp parse_tier("specialist"), do: :specialist
   defp parse_tier("utility"), do: :utility
+  defp parse_tier(tier) when is_atom(tier), do: parse_tier(Atom.to_string(tier))
   defp parse_tier(_), do: :specialist
+
+  defp build_agent(path, source, meta, body) do
+    name =
+      meta["name"] ||
+        Path.basename(path, ".md")
+        |> then(fn n ->
+          if n == "AGENT", do: Path.basename(Path.dirname(path)), else: n
+        end)
+
+    %{
+      name: to_string(name),
+      description: to_string(meta["description"] || ""),
+      tier: parse_tier(meta["tier"]),
+      triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
+      tools_allowed: parse_tool_list(first_present(meta, ["tools_allowed", "tools"])),
+      tools_blocked:
+        parse_tool_list(first_present(meta, ["tools_blocked", "disallowedTools", "disallowed_tools"])) ||
+          [],
+      max_iterations: first_present(meta, ["max_iterations", "maxTurns", "max_turns"]),
+      permission_tier:
+        parse_permission_tier(first_present(meta, ["permission_tier", "permissionMode", "permission_mode"])),
+      model: nullable_string(meta["model"]),
+      provider: nullable_string(meta["provider"]),
+      effort: nullable_string(meta["effort"]),
+      background: parse_bool(meta["background"]),
+      isolation: parse_isolation(meta["isolation"]),
+      skills: List.wrap(first_present(meta, ["skills"]) || []) |> Enum.map(&to_string/1),
+      mcp_servers: first_present(meta, ["mcp_servers", "mcpServers"]),
+      hooks: meta["hooks"],
+      initial_prompt: first_present(meta, ["initial_prompt", "initialPrompt"]),
+      memory: meta["memory"],
+      system_prompt: body,
+      source_path: path,
+      source: source
+    }
+  end
+
+  defp first_present(meta, keys) do
+    Enum.find_value(keys, fn key ->
+      if Map.has_key?(meta, key), do: Map.get(meta, key), else: nil
+    end)
+  end
 
   defp parse_tool_list(nil), do: nil
   defp parse_tool_list("~"), do: nil
+  defp parse_tool_list("*"), do: nil
+  defp parse_tool_list(""), do: []
+
+  defp parse_tool_list(list) when is_binary(list) do
+    list
+    |> String.split([",", " ", "\n"], trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      ["*"] -> nil
+      tools -> tools
+    end
+  end
+
   defp parse_tool_list(list) when is_list(list), do: Enum.map(list, &to_string/1)
   defp parse_tool_list(_), do: nil
+
+  defp parse_permission_tier(nil), do: :subagent
+  defp parse_permission_tier("default"), do: :subagent
+  defp parse_permission_tier("acceptEdits"), do: :workspace
+  defp parse_permission_tier("bypassPermissions"), do: :full
+  defp parse_permission_tier("plan"), do: :read_only
+  defp parse_permission_tier("read_only"), do: :read_only
+  defp parse_permission_tier("read-only"), do: :read_only
+  defp parse_permission_tier("readonly"), do: :read_only
+  defp parse_permission_tier("workspace"), do: :workspace
+  defp parse_permission_tier("subagent"), do: :subagent
+  defp parse_permission_tier("full"), do: :full
+  defp parse_permission_tier(value) when is_atom(value), do: parse_permission_tier(Atom.to_string(value))
+  defp parse_permission_tier(_), do: :subagent
+
+  defp parse_isolation("worktree"), do: :worktree
+  defp parse_isolation(:worktree), do: :worktree
+  defp parse_isolation(_), do: nil
+
+  defp parse_bool(true), do: true
+  defp parse_bool("true"), do: true
+  defp parse_bool(_), do: false
+
+  defp nullable_string(nil), do: nil
+  defp nullable_string(value), do: to_string(value)
+
+  defp ancestor_dirs(cwd) do
+    cwd
+    |> Path.expand()
+    |> do_ancestor_dirs([])
+  end
+
+  defp do_ancestor_dirs(dir, acc) do
+    acc = [dir | acc]
+
+    cond do
+      File.exists?(Path.join(dir, ".git")) ->
+        acc
+
+      Path.dirname(dir) == dir ->
+        acc
+
+      true ->
+        do_ancestor_dirs(Path.dirname(dir), acc)
+    end
+  end
 end

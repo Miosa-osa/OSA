@@ -11,15 +11,19 @@ defmodule OptimalSystemAgent.Agent.Effort do
 
   @levels %{
     low: %{
-      thinking_budget: 1_000,
-      max_iterations: 10,
-      temperature: 0.3,
+      thinking_budget: 0,
+      max_iterations: 5,
+      max_response_tokens: 2_048,
+      tool_budget: 6,
+      temperature: 0.2,
       label: "low",
-      description: "Fast, concise responses"
+      description: "Fast path: minimal thinking, tight tool budget, short responses"
     },
     medium: %{
       thinking_budget: 5_000,
       max_iterations: 30,
+      max_response_tokens: 8_192,
+      tool_budget: 12,
       temperature: 0.7,
       label: "medium",
       description: "Balanced depth and speed"
@@ -27,6 +31,8 @@ defmodule OptimalSystemAgent.Agent.Effort do
     high: %{
       thinking_budget: 10_000,
       max_iterations: 50,
+      max_response_tokens: 16_384,
+      tool_budget: 20,
       temperature: 0.7,
       label: "high",
       description: "Deep reasoning, thorough analysis"
@@ -34,6 +40,8 @@ defmodule OptimalSystemAgent.Agent.Effort do
     max: %{
       thinking_budget: 32_000,
       max_iterations: 100,
+      max_response_tokens: 32_768,
+      tool_budget: 40,
       temperature: 0.8,
       label: "max",
       description: "Maximum thinking, extended reasoning"
@@ -68,6 +76,12 @@ defmodule OptimalSystemAgent.Agent.Effort do
 
   @doc "Get the current max iterations based on effort level."
   def max_iterations, do: get(current()).max_iterations
+
+  @doc "Get the current max response tokens based on effort level."
+  def max_response_tokens, do: get(current()).max_response_tokens
+
+  @doc "Get the current tool budget based on effort level."
+  def tool_budget, do: get(current()).tool_budget
 
   @doc "Get the current temperature based on effort level."
   def temperature, do: get(current()).temperature

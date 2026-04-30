@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Loop.Survey
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Hooks
 
   defstruct [
     :session_id,
@@ -125,6 +126,58 @@ defmodule OptimalSystemAgent.Agent.Loop do
     GenServer.call(via(session_id), :get_metadata)
   rescue
     _ -> %{iteration_count: 0, tools_used: []}
+  end
+
+  @doc """
+  Compact the live session context buffer.
+
+  Returns `:ok` or `{:error, :no_session}`.
+  """
+  @spec compact(String.t()) :: :ok | {:error, :no_session | term()}
+  def compact(session_id) do
+    GenServer.call(via(session_id), :compact)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Toggle plan mode for the session.
+
+  Returns `{:ok, enabled?}` or `{:error, :no_session}`.
+  """
+  @spec toggle_plan_mode(String.t()) :: {:ok, boolean()} | {:error, :no_session | term()}
+  def toggle_plan_mode(session_id) do
+    GenServer.call(via(session_id), :toggle_plan_mode)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Enable plan mode for the session, saving the current `plan_mode_enabled`
+  value so `exit_plan_mode/1` can restore it precisely.
+
+  Returns `{:ok, :entered}`, `{:ok, :already_active}`, or `{:error, :no_session}`.
+  """
+  @spec enter_plan_mode(String.t()) ::
+          {:ok, :entered | :already_active} | {:error, :no_session | term()}
+  def enter_plan_mode(session_id) do
+    GenServer.call(via(session_id), :enter_plan_mode)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Disable plan mode for the session, restoring the permission state captured
+  at `enter_plan_mode/1` time.
+
+  Returns `{:ok, :exited}`, `{:ok, :was_not_active}`, or `{:error, :no_session}`.
+  """
+  @spec exit_plan_mode(String.t()) ::
+          {:ok, :exited | :was_not_active} | {:error, :no_session | term()}
+  def exit_plan_mode(session_id) do
+    GenServer.call(via(session_id), :exit_plan_mode)
+  catch
+    :exit, _ -> {:error, :no_session}
   end
 
   @doc """
@@ -294,7 +347,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
                  turn_count: state.turn_count
                }) do
             {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
-            {:blocked, reason} -> {nil, %{state | status: :idle}}
+            {:blocked, _reason} -> {nil, %{state | status: :idle}}
             _ -> {message, state}
           end
         rescue
@@ -411,6 +464,44 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, {:ok, new_val}, %{state | plan_mode_enabled: new_val}}
   end
 
+  def handle_call(:compact, _from, state) do
+    compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+    {:reply, :ok, %{state | messages: compacted}}
+  end
+
+  def handle_call(:enter_plan_mode, _from, %{plan_mode_enabled: true} = state) do
+    # Already active — idempotent, but refresh the saved pre-entry value.
+    {:reply, {:ok, :already_active}, state}
+  end
+
+  def handle_call(:enter_plan_mode, _from, state) do
+    new_state = %{
+      state
+      | plan_mode_enabled: true,
+        # Capture the pre-entry value so exit can restore it precisely.
+        strategy_state:
+          Map.put(state.strategy_state, :plan_mode_pre_entry, state.plan_mode_enabled)
+    }
+
+    {:reply, {:ok, :entered}, new_state}
+  end
+
+  def handle_call(:exit_plan_mode, _from, %{plan_mode_enabled: false} = state) do
+    {:reply, {:ok, :was_not_active}, state}
+  end
+
+  def handle_call(:exit_plan_mode, _from, state) do
+    pre_entry = Map.get(state.strategy_state, :plan_mode_pre_entry, false)
+
+    new_state = %{
+      state
+      | plan_mode_enabled: pre_entry,
+        strategy_state: Map.delete(state.strategy_state, :plan_mode_pre_entry)
+    }
+
+    {:reply, {:ok, :exited}, new_state}
+  end
+
   def handle_call({:set_permission_tier, tier}, _from, state)
       when tier in [:full, :workspace, :read_only] do
     {:reply, {:ok, tier}, %{state | permission_tier: tier}}
@@ -524,7 +615,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
         response: response,
         input: List.last(state.messages) |> Map.get(:content, ""),
         turn_count: state.turn_count,
-        iteration: state.iteration
+        iteration: state.iteration,
+        tools_used: Map.get(state.last_meta, :tools_used, []),
+        total_tool_calls: state.total_tool_calls
       })
     rescue
       _ -> :ok

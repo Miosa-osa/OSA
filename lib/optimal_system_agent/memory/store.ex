@@ -102,6 +102,12 @@ defmodule OptimalSystemAgent.Memory.Store do
   end
 
   @impl true
+  def handle_call({:recent, limit}, _from, state) do
+    result = do_recent(limit)
+    {:reply, result, state}
+  end
+
+  @impl true
   def handle_call({:delete, id}, _from, state) do
     result = do_delete(id)
     {:reply, result, state}
@@ -321,6 +327,19 @@ defmodule OptimalSystemAgent.Memory.Store do
     bump_access_counts(scored)
 
     {:ok, scored}
+  end
+
+  defp do_recent(limit) do
+    entries =
+      from(m in MemoryEntry, order_by: [desc: m.created_at], limit: ^limit)
+      |> Repo.all()
+      |> Enum.map(&struct_to_map/1)
+
+    {:ok, entries}
+  rescue
+    e ->
+      Logger.warning("[Memory.Store] recent error: #{Exception.message(e)}")
+      {:ok, []}
   end
 
   defp lookup_ets_index(keywords) do

@@ -19,13 +19,16 @@ defmodule OptimalSystemAgent.Sandbox.Host do
     working_dir = Keyword.get(opts, :working_dir)
 
     args = ["-c", command]
-    cmd_opts = [stderr_to_stdout: true, timeout: timeout]
+    cmd_opts = [stderr_to_stdout: true]
     cmd_opts = if working_dir, do: [{:cd, working_dir} | cmd_opts], else: cmd_opts
 
     try do
-      case System.cmd("sh", args, cmd_opts) do
-        {output, 0} -> {:ok, output}
-        {output, code} -> {:error, "Exit code #{code}: #{output}"}
+      task = Task.async(fn -> System.cmd("sh", args, cmd_opts) end)
+
+      case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {output, 0}} -> {:ok, output}
+        {:ok, {output, code}} -> {:error, "Exit code #{code}: #{output}"}
+        nil -> {:error, "Command timed out after #{div(timeout, 1000)}s"}
       end
     rescue
       e -> {:error, Exception.message(e)}

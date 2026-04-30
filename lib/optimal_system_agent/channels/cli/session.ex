@@ -9,7 +9,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.{Budget, Loop, Tasks}
+  alias OptimalSystemAgent.Agent.{Budget, Loop}
   alias OptimalSystemAgent.Channels.CLI.{PlanReview, Renderer, Spinner}
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.SDK.{Hook, Permission}
@@ -154,7 +154,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   # ── Permission Hook ──────────────────────────────────────────────────
 
   def register_permission_hook(session_id) do
-    permission_fn = Permission.build_hook(:default)
+    permission_profile = Application.get_env(:optimal_system_agent, :permission_profile, :default)
+    permission_fn = Permission.build_hook(permission_profile)
 
     hook_fn = fn %{tool_name: tool_name, arguments: args} = payload ->
       # First check saved permission rules

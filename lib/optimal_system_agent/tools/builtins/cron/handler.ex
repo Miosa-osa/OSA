@@ -65,7 +65,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Handler do
       {:error, "Missing required parameter: task"}
     else
       job_map = %{
-        "task" => task,
+        "job" => task,
         "schedule" => schedule,
         "name" => String.slice(task, 0, 60),
         "type" => "agent",

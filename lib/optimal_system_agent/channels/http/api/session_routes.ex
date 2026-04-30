@@ -18,62 +18,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
+  alias OptimalSystemAgent.Runtime.SessionManager
   alias OptimalSystemAgent.SDK.Memory
-  alias OptimalSystemAgent.Agent.Loop
 
   plug(:match)
   plug(:dispatch)
-
-  # ── ETS session tracking ────────────────────────────────────────────
-  # HTTP-created sessions are not backed by a Registry process, so we maintain
-  # a lightweight ETS table to track them within the process lifetime.
-
-  @http_sessions_table :osa_http_sessions
-
-  defp ensure_session_table do
-    case :ets.whereis(@http_sessions_table) do
-      :undefined ->
-        :ets.new(@http_sessions_table, [:named_table, :set, :public])
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp track_session(session_id) do
-    ensure_session_table()
-
-    :ets.insert(
-      @http_sessions_table,
-      {session_id, %{created_at: DateTime.utc_now() |> DateTime.to_iso8601()}}
-    )
-  end
-
-  defp http_session_exists?(session_id) do
-    ensure_session_table()
-    :ets.member(@http_sessions_table, session_id)
-  end
-
-  defp list_http_sessions do
-    ensure_session_table()
-    :ets.tab2list(@http_sessions_table) |> Enum.map(fn {id, _meta} -> id end)
-  end
 
   # ── GET /sessions ──────────────────────────────────────────────────
 
   get "/" do
     {page, per_page} = pagination_params(conn)
 
-    live_ids =
-      try do
-        Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
-      rescue
-        _ -> []
-      end
-
-    http_ids = list_http_sessions()
-
-    all_ids = Enum.uniq(live_ids ++ http_ids)
+    live_ids = SessionManager.live_session_ids()
+    all_ids = SessionManager.list_session_ids()
 
     sessions =
       Enum.map(all_ids, fn sid ->
@@ -108,9 +65,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   post "/" do
     user_id = conn.assigns[:user_id] || "anonymous"
 
-    case OptimalSystemAgent.SDK.Session.create(user_id: user_id, channel: :http) do
+    case SessionManager.create_session(user_id: user_id, channel: :http) do
       {:ok, %{session_id: session_id}} ->
-        track_session(session_id)
         body = Jason.encode!(%{id: session_id, status: "created"})
 
         conn
@@ -127,26 +83,100 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── Cross-Session Search Routes ─────────────────────────────────────
+
+  get "/search" do
+    query = conn.params["q"] || ""
+    limit = parse_int(conn.params["limit"], 20)
+
+    if query == "" do
+      json(conn, 400, %{error: "Missing required query parameter: q"})
+    else
+      results = OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
+      json(conn, 200, %{results: results, query: query, count: length(results)})
+    end
+  end
+
+  get "/recent" do
+    limit = parse_int(conn.params["limit"], 50)
+    sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
+    json(conn, 200, %{sessions: sessions})
+  end
+
+  get "/:id/export" do
+    format = conn.params["format"] || "md"
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+
+    case format do
+      "json" ->
+        turns =
+          Enum.map(transcript, fn t ->
+            %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
+          end)
+
+        json(conn, 200, %{session_id: id, format: "json", turns: turns})
+
+      _ ->
+        # Markdown export
+        md_lines =
+          Enum.map(transcript, fn t ->
+            role_label = String.capitalize(t.role)
+            timestamp = t.inserted_at || ""
+            "### #{role_label} (#{timestamp})\n\n#{t.content}\n"
+          end)
+
+        markdown = "# Session Export: #{id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
+
+        conn
+        |> put_resp_content_type("text/markdown")
+        |> put_resp_header("content-disposition", "attachment; filename=\"#{id}.md\"")
+        |> send_resp(200, markdown)
+    end
+  end
+
+  get "/:id/transcript" do
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
+    json(conn, 200, %{session_id: id, turns: transcript, count: length(transcript)})
+  end
+
+  # ── Permission Decision Route ─────────────────────────────────────
+
+  post "/:id/permission/:perm_id" do
+    decision = conn.body_params["decision"] || "deny"
+
+    atom_decision =
+      case decision do
+        "allow_once" -> :allow_once
+        "allow_always" -> :allow_always
+        "deny" -> :deny
+        _ -> :deny
+      end
+
+    # Broadcast decision to the waiting tool executor
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:permission:#{perm_id}",
+      {:permission_decision, atom_decision}
+    )
+
+    # If allow_always, persist the rule
+    if atom_decision == :allow_always do
+      tool_name = conn.body_params["tool_name"]
+      if tool_name, do: OptimalSystemAgent.Permissions.save_rule(tool_name, :allow_always)
+    end
+
+    json(conn, 200, %{status: "ok", decision: decision})
+  end
+
   # ── GET /sessions/:id ──────────────────────────────────────────────
 
   get "/:id" do
     session_id = conn.params["id"]
 
-    in_registry =
-      try do
-        case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-          [{_pid, _}] -> true
-          [] -> false
-        end
-      rescue
-        _ -> false
-      end
-
-    in_http_store = http_session_exists?(session_id)
     # A session is considered alive if it has an active Registry process OR was
     # created via this HTTP endpoint (no agent loop process yet, but the session
     # is valid and accepting messages).
-    alive = in_registry || in_http_store
+    alive = SessionManager.session_exists?(session_id)
 
     if alive do
       messages = Memory.load_session(session_id) || []
@@ -187,7 +217,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     try do
       session_id = conn.params["id"]
 
-      case Loop.get_state(session_id) do
+      case SessionManager.get_state(session_id) do
         {:ok, state} ->
           max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
           total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
@@ -287,7 +317,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     session_id = conn.params["id"]
 
     # Cancel active loop if running (ignore if already stopped)
-    Loop.cancel(session_id)
+    SessionManager.cancel(session_id)
 
     # Remove the session JSONL file from disk
     sessions_dir =
@@ -322,7 +352,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   post "/:id/cancel" do
     session_id = conn.params["id"]
 
-    case Loop.cancel(session_id) do
+    case SessionManager.cancel(session_id) do
       :ok ->
         body = Jason.encode!(%{status: "cancel_requested", session_id: session_id})
 
@@ -439,18 +469,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   post "/:id/proactive" do
     session_id = conn.params["id"]
 
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{pid, _}] ->
+    case SessionManager.set_proactive(session_id) do
+      :ok ->
         # Toggle proactive mode on the session
-        try do
-          GenServer.call(pid, {:set_proactive, true})
-          json(conn, 200, %{status: "proactive_enabled", session_id: session_id})
-        rescue
-          _ -> json(conn, 200, %{status: "proactive_requested", session_id: session_id})
-        end
+        json(conn, 200, %{status: "proactive_enabled", session_id: session_id})
 
-      [] ->
+      {:error, :not_found} ->
         json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+
+      {:error, _reason} ->
+        json(conn, 200, %{status: "proactive_requested", session_id: session_id})
     end
   end
 
@@ -475,36 +503,30 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
 
     # Check session exists before dispatching async
-    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] ->
-        # Pre-filter noise before dispatching to the agent loop.
-        # Mirrors the same check done in orchestration_routes.ex.
-        case OptimalSystemAgent.Channels.NoiseFilter.check(message, nil) do
-          {:filtered, _ack} ->
-            resp = Jason.encode!(%{status: "filtered", session_id: session_id})
-            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+    if SessionManager.live_session?(session_id) do
+      # Pre-filter noise before dispatching to the agent loop.
+      # Mirrors the same check done in orchestration_routes.ex.
+      case OptimalSystemAgent.Channels.NoiseFilter.check(message, nil) do
+        {:filtered, _ack} ->
+          resp = Jason.encode!(%{status: "filtered", session_id: session_id})
+          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
-          {:clarify, prompt} ->
-            resp = Jason.encode!(%{status: "clarify", prompt: prompt, session_id: session_id})
-            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+        {:clarify, prompt} ->
+          resp = Jason.encode!(%{status: "clarify", prompt: prompt, session_id: session_id})
+          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
-          :pass ->
-            # Fire-and-forget — the loop processes in background.
-            # Client polls GET /sessions/:id/messages for results.
-            # Uses Task.Supervisor to ensure the task survives long LLM calls
-            # (Task.start would create an unsupervised process that may be reaped).
-            Task.Supervisor.start_child(
-              OptimalSystemAgent.TaskSupervisor,
-              fn -> Loop.process_message(session_id, message) end,
-              restart: :temporary
-            )
+        :pass ->
+          # Fire-and-forget — the loop processes in background.
+          # Client polls GET /sessions/:id/messages for results.
+          # Uses Task.Supervisor to ensure the task survives long LLM calls
+          # (Task.start would create an unsupervised process that may be reaped).
+          SessionManager.process_message_async(session_id, message)
 
-            resp = Jason.encode!(%{status: "processing", session_id: session_id})
-            conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
-        end
-
-      [] ->
-        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+          resp = Jason.encode!(%{status: "processing", session_id: session_id})
+          conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
+      end
+    else
+      json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
     end
   end
 
@@ -514,7 +536,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     source_session_id = conn.params["id"]
     body = conn.body_params
 
-    opts =
+    _opts =
       []
       |> then(fn o -> if b = body["session_id"], do: Keyword.put(o, :session_id, b), else: o end)
       |> then(fn o -> if b = body["provider"], do: Keyword.put(o, :provider, b), else: o end)
@@ -529,20 +551,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       # Start a new session and feed it the messages
       target_id = conn.params["id"]
 
-      case Registry.lookup(OptimalSystemAgent.SessionRegistry, target_id) do
-        [{_pid, _}] ->
-          # Replay each user message
-          user_messages = Enum.filter(messages, fn m -> m["role"] == "user" end)
+      if SessionManager.live_session?(target_id) do
+        # Replay each user message
+        user_messages = Enum.filter(messages, fn m -> m["role"] == "user" end)
 
-          json(conn, 200, %{
-            status: "replay_started",
-            source_session: source_session_id,
-            target_session: target_id,
-            messages_to_replay: length(user_messages)
-          })
-
-        [] ->
-          json_error(conn, 404, "session_not_found", "Target session #{target_id} not found")
+        json(conn, 200, %{
+          status: "replay_started",
+          source_session: source_session_id,
+          target_session: target_id,
+          messages_to_replay: length(user_messages)
+        })
+      else
+        json_error(conn, 404, "session_not_found", "Target session #{target_id} not found")
       end
     end
   end
@@ -561,26 +581,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> send_resp(400, Jason.encode!(%{error: "provider is required"}))
       |> halt()
     else
-      case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-        [{pid, _}] ->
-          case GenServer.call(pid, {:swap_provider, provider, model}) do
-            :ok ->
-              resp =
-                Jason.encode!(%{
-                  status: "ok",
-                  session_id: session_id,
-                  provider: provider,
-                  model: model
-                })
+      case SessionManager.swap_provider(session_id, provider, model) do
+        :ok ->
+          resp =
+            Jason.encode!(%{
+              status: "ok",
+              session_id: session_id,
+              provider: provider,
+              model: model
+            })
 
-              conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
-            {:error, reason} ->
-              json_error(conn, 500, "swap_failed", inspect(reason))
+        {:error, reason} ->
+          if reason == :not_found do
+            json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+          else
+            json_error(conn, 500, "swap_failed", inspect(reason))
           end
-
-        [] ->
-          json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
       end
     end
   end
@@ -686,91 +704,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           {:error, _} -> conn
         end
     end
-  end
-
-  # ── Cross-Session Search Routes ─────────────────────────────────────
-
-  get "/search" do
-    query = conn.params["q"] || ""
-    limit = parse_int(conn.params["limit"], 20)
-
-    if query == "" do
-      json(conn, 400, %{error: "Missing required query parameter: q"})
-    else
-      results = OptimalSystemAgent.Store.SessionTranscript.search(query, limit: limit)
-      json(conn, 200, %{results: results, query: query, count: length(results)})
-    end
-  end
-
-  get "/recent" do
-    limit = parse_int(conn.params["limit"], 50)
-    sessions = OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: limit)
-    json(conn, 200, %{sessions: sessions})
-  end
-
-  get "/:id/export" do
-    format = conn.params["format"] || "md"
-    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
-
-    case format do
-      "json" ->
-        turns =
-          Enum.map(transcript, fn t ->
-            %{role: t.role, content: t.content, tool_name: t.tool_name, timestamp: t.inserted_at}
-          end)
-
-        json(conn, 200, %{session_id: id, format: "json", turns: turns})
-
-      _ ->
-        # Markdown export
-        md_lines =
-          Enum.map(transcript, fn t ->
-            role_label = String.capitalize(t.role)
-            timestamp = t.inserted_at || ""
-            "### #{role_label} (#{timestamp})\n\n#{t.content}\n"
-          end)
-
-        markdown = "# Session Export: #{id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
-
-        conn
-        |> put_resp_content_type("text/markdown")
-        |> put_resp_header("content-disposition", "attachment; filename=\"#{id}.md\"")
-        |> send_resp(200, markdown)
-    end
-  end
-
-  get "/:id/transcript" do
-    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(id)
-    json(conn, 200, %{session_id: id, turns: transcript, count: length(transcript)})
-  end
-
-  # ── Permission Decision Route ─────────────────────────────────────
-
-  post "/:id/permission/:perm_id" do
-    decision = conn.body_params["decision"] || "deny"
-
-    atom_decision =
-      case decision do
-        "allow_once" -> :allow_once
-        "allow_always" -> :allow_always
-        "deny" -> :deny
-        _ -> :deny
-      end
-
-    # Broadcast decision to the waiting tool executor
-    Phoenix.PubSub.broadcast(
-      OptimalSystemAgent.PubSub,
-      "osa:permission:#{perm_id}",
-      {:permission_decision, atom_decision}
-    )
-
-    # If allow_always, persist the rule
-    if atom_decision == :allow_always do
-      tool_name = conn.body_params["tool_name"]
-      if tool_name, do: OptimalSystemAgent.Permissions.save_rule(tool_name, :allow_always)
-    end
-
-    json(conn, 200, %{status: "ok", decision: decision})
   end
 
   defp parse_int(nil, default), do: default

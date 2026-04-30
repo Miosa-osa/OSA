@@ -47,7 +47,7 @@ defmodule OptimalSystemAgent.Team do
   end
 
   # ---------------------------------------------------------------------------
-  # Iteration Budget (Hermes pattern — shared counter across parent + children)
+  # Iteration Budget (shared counter across parent + children)
   # ---------------------------------------------------------------------------
 
   @doc "Initialize an iteration budget for a team. Default: 100 iterations."

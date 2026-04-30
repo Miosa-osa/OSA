@@ -97,7 +97,7 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
     content = File.read!(path)
 
     case String.split(content, "---", parts: 3) do
-      ["", frontmatter, _body] ->
+      ["", frontmatter, body] ->
         case YamlElixir.read_from_string(frontmatter) do
           {:ok, meta} ->
             {:ok,
@@ -106,7 +106,8 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
                description: meta["description"] || "",
                triggers: meta["triggers"] || [],
                tools: meta["tools"] || [],
-               path: path
+               path: path,
+               instructions: String.trim(body)
              }}
 
           _ ->
@@ -120,7 +121,8 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
            description: String.slice(content, 0, 100),
            triggers: [],
            tools: [],
-           path: path
+           path: path,
+           instructions: content
          }}
     end
   end

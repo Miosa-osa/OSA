@@ -1,0 +1,264 @@
+defmodule OptimalSystemAgent.Runtime.SessionManager do
+  @moduledoc """
+  Runtime facade for agent session lifecycle.
+
+  This module centralizes the thin but load-bearing glue between channel
+  adapters, `SessionRegistry`, `SessionSupervisor`, and `Agent.Loop`.
+  """
+
+  require Logger
+
+  alias OptimalSystemAgent.Agent.Loop
+
+  @tracked_sessions_table :osa_runtime_sessions
+  @default_retry_delay_ms 50
+
+  @type session_id :: String.t()
+  @type channel :: atom()
+
+  @doc "Create and track a session without necessarily starting its loop yet."
+  @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
+  def create_session(opts \\ []) do
+    try do
+      session_id = Keyword.get(opts, :session_id, default_session_id())
+      user_id = opts |> Keyword.get(:user_id, "anonymous") |> to_string()
+      channel = Keyword.get(opts, :channel, :unknown)
+      created_at = DateTime.utc_now()
+
+      metadata = %{
+        session_id: session_id,
+        user_id: user_id,
+        channel: channel,
+        created_at: DateTime.to_iso8601(created_at)
+      }
+
+      track_session(session_id, metadata)
+      {:ok, Map.put(metadata, :created_at_datetime, created_at)}
+    rescue
+      e -> {:error, e}
+    end
+  end
+
+  @doc "Track a known session ID for channel-level lifecycle before a loop exists."
+  @spec track_session(session_id(), map()) :: :ok
+  def track_session(session_id, metadata \\ %{}) when is_binary(session_id) do
+    ensure_tracked_sessions_table()
+
+    created_at =
+      Map.get_lazy(metadata, :created_at, fn -> DateTime.utc_now() |> DateTime.to_iso8601() end)
+
+    :ets.insert(@tracked_sessions_table, {session_id, Map.put(metadata, :created_at, created_at)})
+    :ok
+  end
+
+  @doc "Return tracked session IDs that may not currently have live loop processes."
+  @spec tracked_session_ids() :: [session_id()]
+  def tracked_session_ids do
+    ensure_tracked_sessions_table()
+    :ets.tab2list(@tracked_sessions_table) |> Enum.map(fn {id, _meta} -> id end)
+  end
+
+  @doc "Return live session IDs registered by running loop processes."
+  @spec live_session_ids() :: [session_id()]
+  def live_session_ids do
+    Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+  rescue
+    _ -> []
+  end
+
+  @doc "Return all known session IDs, including tracked-but-not-running sessions."
+  @spec list_session_ids() :: [session_id()]
+  def list_session_ids do
+    Enum.uniq(live_session_ids() ++ tracked_session_ids())
+  end
+
+  @doc "True when a session is either live or tracked as created/resumable."
+  @spec session_exists?(session_id()) :: boolean()
+  def session_exists?(session_id) when is_binary(session_id) do
+    live_session?(session_id) or tracked_session?(session_id)
+  end
+
+  def session_exists?(_), do: false
+
+  @doc "True when a loop process is registered for this session."
+  @spec live_session?(session_id()) :: boolean()
+  def live_session?(session_id) when is_binary(session_id) do
+    match?([{_pid, _meta}], Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id))
+  rescue
+    _ -> false
+  end
+
+  def live_session?(_), do: false
+
+  @doc "True when a session was created or tracked by a runtime channel."
+  @spec tracked_session?(session_id()) :: boolean()
+  def tracked_session?(session_id) when is_binary(session_id) do
+    ensure_tracked_sessions_table()
+    :ets.member(@tracked_sessions_table, session_id)
+  end
+
+  def tracked_session?(_), do: false
+
+  @doc """
+  Ensure an agent loop exists for a session.
+
+  Accepts `:user_id`, `:channel`, and `:retry_delay_ms`. Races where another
+  caller starts the same loop are treated as success.
+  """
+  @spec ensure_loop(session_id(), keyword()) :: :ok | {:error, term()}
+  def ensure_loop(session_id, opts \\ [])
+
+  def ensure_loop(session_id, opts) when is_binary(session_id) do
+    if live_session?(session_id) do
+      :ok
+    else
+      case start_loop(session_id, opts) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          retry_delay = Keyword.get(opts, :retry_delay_ms, @default_retry_delay_ms)
+          Logger.warning("[SessionManager] Loop start failed (#{inspect(reason)}), retrying once")
+          Process.sleep(retry_delay)
+          start_loop(session_id, opts)
+      end
+    end
+  end
+
+  def ensure_loop(_, _), do: {:error, :invalid_session_id}
+
+  @doc "Compatibility arity for existing channel adapters."
+  @spec ensure_loop(session_id(), String.t(), channel()) :: :ok | {:error, term()}
+  def ensure_loop(session_id, user_id, channel) do
+    ensure_loop(session_id, user_id: user_id, channel: channel)
+  end
+
+  @doc "Process a message synchronously through an existing loop."
+  @spec process_message(session_id(), String.t(), keyword()) :: term()
+  def process_message(session_id, message, opts \\ []) do
+    Loop.process_message(session_id, message, opts)
+  end
+
+  @doc "Process a message in a supervised background task."
+  @spec process_message_async(session_id(), String.t(), keyword()) ::
+          {:ok, pid()} | {:error, term()}
+  def process_message_async(session_id, message, opts \\ []) do
+    task_supervisor = Keyword.get(opts, :task_supervisor, OptimalSystemAgent.TaskSupervisor)
+    loop_opts = Keyword.drop(opts, [:task_supervisor])
+
+    Task.Supervisor.start_child(
+      task_supervisor,
+      fn -> process_message(session_id, message, loop_opts) end,
+      restart: :temporary
+    )
+  end
+
+  @doc "Cancel a running session and its registered sub-agents."
+  @spec cancel(session_id()) :: :ok | {:error, term()}
+  def cancel(session_id), do: Loop.cancel(session_id)
+
+  @doc "Stop a live loop process and forget runtime tracking."
+  @spec stop_session(session_id()) :: :ok | {:error, :not_found} | {:error, term()}
+  def stop_session(session_id) do
+    case lookup_loop(session_id) do
+      {:ok, pid, _owner} ->
+        GenServer.stop(pid, :normal)
+        untrack_session(session_id)
+
+      :error ->
+        {:error, :not_found}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc "Get the current loop state if the loop is active."
+  @spec get_state(session_id()) :: {:ok, map()} | {:error, term()}
+  def get_state(session_id), do: Loop.get_state(session_id)
+
+  @doc "Look up a live loop process."
+  @spec lookup_loop(session_id()) :: {:ok, pid(), term()} | :error
+  def lookup_loop(session_id) when is_binary(session_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{pid, owner}] -> {:ok, pid, owner}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  def lookup_loop(_), do: :error
+
+  @doc "Enable proactive mode on a live loop."
+  @spec set_proactive(session_id()) :: :ok | {:error, :not_found} | {:error, term()}
+  def set_proactive(session_id) do
+    case lookup_loop(session_id) do
+      {:ok, pid, _owner} ->
+        GenServer.call(pid, {:set_proactive, true})
+        :ok
+
+      :error ->
+        {:error, :not_found}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc "Hot-swap the provider/model for a live loop."
+  @spec swap_provider(session_id(), String.t(), String.t() | nil) ::
+          :ok | {:error, :not_found} | {:error, term()}
+  def swap_provider(session_id, provider, model) do
+    case lookup_loop(session_id) do
+      {:ok, pid, _owner} -> GenServer.call(pid, {:swap_provider, provider, model})
+      :error -> {:error, :not_found}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc "Forget runtime tracking for a session."
+  @spec untrack_session(session_id()) :: :ok
+  def untrack_session(session_id) do
+    ensure_tracked_sessions_table()
+    :ets.delete(@tracked_sessions_table, session_id)
+    :ok
+  end
+
+  defp start_loop(session_id, opts) do
+    user_id = opts |> Keyword.get(:user_id, "anonymous") |> to_string()
+    channel = Keyword.get(opts, :channel, :unknown)
+
+    case DynamicSupervisor.start_child(
+           OptimalSystemAgent.SessionSupervisor,
+           {Loop, session_id: session_id, user_id: user_id, channel: channel}
+         ) do
+      {:ok, _pid} ->
+        track_session(session_id, %{user_id: user_id, channel: channel})
+        Logger.info("[SessionManager] Started Loop for session #{session_id}")
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        track_session(session_id, %{user_id: user_id, channel: channel})
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_tracked_sessions_table do
+    case :ets.whereis(@tracked_sessions_table) do
+      :undefined ->
+        try do
+          :ets.new(@tracked_sessions_table, [:named_table, :set, :public])
+        rescue
+          ArgumentError -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp default_session_id, do: "session-#{System.unique_integer([:positive])}"
+end

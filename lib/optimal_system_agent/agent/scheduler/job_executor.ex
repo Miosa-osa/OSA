@@ -9,7 +9,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler.JobExecutor do
   """
   require Logger
 
-  alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Runtime.SessionManager
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute
+  alias OptimalSystemAgent.Tools.UseContext
 
   @max_output_bytes 102_400
   @webhook_timeout_ms 10_000
@@ -110,45 +112,30 @@ defmodule OptimalSystemAgent.Agent.Scheduler.JobExecutor do
   # ── Shell Command Execution ───────────────────────────────────────────
 
   def run_shell_command(command) when is_binary(command) do
-    command =
-      command
-      |> String.replace(~r/\s*&\s*$/, "")
-      |> String.replace(~r/^\s*nohup\s+/, "")
-      |> String.trim()
+    ctx = UseContext.new(%{channel: :scheduler, permission_tier: :full})
 
-    if command == "" do
-      {:error, "Blocked: empty command"}
+    with {:ok, input} <- ShellExecute.Handler.validate(%{"command" => command}, ctx),
+         {:allow, input} <- ShellExecute.Handler.check_permissions(input, ctx),
+         {:ok, output} <- ShellExecute.Handler.execute(input, ctx) do
+      {:ok, truncate_shell_output(output)}
     else
-      case :ok do
-        :ok ->
-          task =
-            Task.async(fn ->
-              System.cmd("sh", ["-c", command], stderr_to_stdout: true)
-            end)
-
-          case Task.yield(task, 30_000) || Task.shutdown(task) do
-            {:ok, {output, 0}} ->
-              truncated =
-                if byte_size(output) > @max_output_bytes do
-                  String.slice(output, 0, @max_output_bytes) <> "\n[output truncated at 100KB]"
-                else
-                  output
-                end
-
-              {:ok, truncated}
-
-            {:ok, {output, code}} ->
-              {:error, "Exit #{code}:\n#{output}"}
-
-            nil ->
-              {:error, "Command timed out after 30 seconds"}
-          end
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, message, _code} -> {:error, message}
+      {:deny, reason} -> {:error, reason}
+      {:ask, _prompt} -> {:error, "Permission ask flow is not available for scheduled commands"}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, "Unexpected shell execution result: #{inspect(other)}"}
     end
   end
+
+  defp truncate_shell_output(output) when is_binary(output) do
+    if byte_size(output) > @max_output_bytes do
+      String.slice(output, 0, @max_output_bytes) <> "\n[output truncated at 100KB]"
+    else
+      output
+    end
+  end
+
+  defp truncate_shell_output(output), do: to_string(output)
 
   # ── Outbound HTTP (webhook type) ──────────────────────────────────────
 
@@ -202,26 +189,20 @@ defmodule OptimalSystemAgent.Agent.Scheduler.JobExecutor do
   # ── Agent Task Execution ──────────────────────────────────────────────
 
   @doc """
-  Start a one-shot agent loop under DynamicSupervisor, run a task through it,
-  then stop the loop process. Returns `{:ok, result}` or `{:error, reason}`.
+  Start or reuse a one-shot agent loop, run a task through it, then stop the
+  loop process. Returns `{:ok, result}` or `{:error, reason}`.
   """
   def execute_task(task_description, session_id) do
-    case DynamicSupervisor.start_child(
-           OptimalSystemAgent.Channels.Supervisor,
-           {Loop, session_id: session_id, channel: :heartbeat}
-         ) do
-      {:ok, _pid} ->
-        result = Loop.process_message(session_id, task_description)
-
-        case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-          [{pid, _}] -> GenServer.stop(pid, :normal)
-          _ -> :ok
-        end
+    case SessionManager.ensure_loop(session_id, user_id: "scheduler", channel: :scheduler) do
+      :ok ->
+        result = SessionManager.process_message(session_id, task_description)
+        SessionManager.stop_session(session_id)
 
         case result do
           {:ok, response} -> {:ok, response}
           {:filtered, _signal} -> {:ok, "filtered"}
           {:error, reason} -> {:error, to_string(reason)}
+          other -> {:ok, inspect(other)}
         end
 
       {:error, reason} ->

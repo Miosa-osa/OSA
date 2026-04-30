@@ -32,10 +32,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Effort
 
   @cancel_table :osa_cancel_flags
 
-  defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
+  defp max_iterations do
+    configured =
+      Application.get_env(:optimal_system_agent, :max_iterations, Effort.max_iterations())
+
+    min(configured, Effort.max_iterations())
+  end
 
   defp max_response_tokens do
     # Check for bumped max_tokens from output token recovery.
@@ -44,7 +50,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     #   config :optimal_system_agent, :max_response_tokens, <int>
     # if a provider's ceiling is tighter (e.g. some Ollama cloud models).
     Process.get(:osa_bumped_max_tokens) ||
-      Application.get_env(:optimal_system_agent, :max_response_tokens, 32_768)
+      min(
+        Application.get_env(:optimal_system_agent, :max_response_tokens, 32_768),
+        Effort.max_response_tokens()
+      )
   end
 
   @doc """
