@@ -67,6 +67,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
             "Agent role name (e.g., 'architect', 'backend', 'frontend', 'tester'). " <>
               "Must match a loaded agent definition. Omit for a generic subagent."
         },
+        "subagent_type" => %{
+          "type" => "string",
+          "description" =>
+            "Claude Code-compatible alias for role. Use the loaded agent name, " <>
+              "for example 'explorer' or 'planner'."
+        },
         "tier" => %{
           "type" => "string",
           "enum" => Constants.tiers(),
@@ -81,6 +87,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
             "Run in background — returns immediately, notifies on completion. " <>
               "Use for long-running research or analysis that doesn't block your current work."
         },
+        "permissionMode" => %{
+          "type" => "string",
+          "enum" => ["default", "acceptEdits", "bypassPermissions", "plan", "read_only"],
+          "description" =>
+            "Claude Code-compatible permission mode override for the subagent. " <>
+              "default uses OSA subagent guardrails; plan/read_only prevents write tools."
+        },
+        "maxTurns" => %{
+          "type" => "integer",
+          "description" => "Claude Code-compatible alias for the subagent max iteration/turn cap."
+        },
+        "model" => %{
+          "type" => "string",
+          "description" => "Optional explicit model override for this subagent."
+        },
+        "provider" => %{
+          "type" => "string",
+          "description" => "Optional provider override for this subagent."
+        },
+        "cwd" => %{
+          "type" => "string",
+          "description" =>
+            "Optional working directory for the subagent. Worktree isolation takes precedence."
+        },
         "fork" => %{
           "type" => "boolean",
           "description" =>
@@ -92,8 +122,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
           "enum" => ["worktree"],
           "description" =>
             "Run in an isolated git worktree — the agent gets its own copy " <>
-              "of the repo. Changes are merged back on success, discarded on failure. " <>
-              "Use for parallel agents editing the same files."
+              "of the repo. Dirty worktrees are preserved for review unless merge_worktree " <>
+              "or discard_worktree is explicitly set."
+        },
+        "merge_worktree" => %{
+          "type" => "boolean",
+          "description" =>
+            "When using worktree isolation, explicitly merge the agent worktree back on success."
+        },
+        "discard_worktree" => %{
+          "type" => "boolean",
+          "description" =>
+            "When using worktree isolation, discard dirty worktree changes instead of preserving them."
         }
       }
     }

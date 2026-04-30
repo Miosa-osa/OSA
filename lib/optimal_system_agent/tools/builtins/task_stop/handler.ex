@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
   """
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
@@ -37,6 +38,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
       [{_pid, _}] ->
         Loop.cancel(agent_id)
+        complete_cancelled(agent_id)
         {:ok, "Agent #{agent_id} cancelled."}
 
       [] ->
@@ -47,4 +49,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
   end
 
   def execute(_input, _ctx), do: {:error, "Missing required parameter: agent_id"}
+
+  defp complete_cancelled(agent_id) do
+    case RunStore.get(agent_id) do
+      nil ->
+        :ok
+
+      run ->
+        RunStore.complete(agent_id, %{
+          agent_id: agent_id,
+          parent_session_id: run.parent_session_id,
+          role: run.role,
+          status: :cancelled,
+          summary: "Agent cancelled by task_stop.",
+          files_changed: [],
+          commands_run: [],
+          tool_count: run.tool_count,
+          tokens_used: run.tokens_used,
+          duration_ms: nil,
+          errors: [],
+          next_actions: [],
+          transcript_path: run.transcript_path,
+          worktree: nil
+        })
+    end
+  end
 end

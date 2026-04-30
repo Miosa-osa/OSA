@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
   """
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
@@ -34,6 +35,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"agent_id" => agent_id}, _ctx) do
+    case RunStore.get(agent_id) do
+      nil -> live_output(agent_id)
+      run -> {:ok, format_run(run)}
+    end
+  rescue
+    e -> {:error, "Failed to get task output: #{Exception.message(e)}"}
+  end
+
+  def execute(_input, _ctx), do: {:error, "Missing required parameter: agent_id"}
+
+  defp live_output(agent_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
       [{_pid, _}] ->
         case Loop.get_state(agent_id) do
@@ -55,9 +67,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
       [] ->
         {:ok, "Agent #{agent_id} is not running. It may have completed or was never started."}
     end
-  rescue
-    e -> {:error, "Failed to get task output: #{Exception.message(e)}"}
   end
 
-  def execute(_input, _ctx), do: {:error, "Missing required parameter: agent_id"}
+  defp format_run(%{result: result} = run) when is_map(result) do
+    RunStore.format_result(result) <>
+      "\n\nStatus: #{run.status}\nStarted: #{DateTime.to_iso8601(run.started_at)}"
+  end
+
+  defp format_run(run) do
+    """
+    Agent #{run.agent_id} is #{run.status}.
+    - Role: #{run.role}
+    - Parent: #{run.parent_session_id}
+    - Tools: #{run.tool_count}
+    - Tokens: #{run.tokens_used}
+    - Transcript: #{run.transcript_path}
+    """
+    |> String.trim()
+  end
 end

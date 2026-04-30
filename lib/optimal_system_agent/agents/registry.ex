@@ -124,7 +124,6 @@ defmodule OptimalSystemAgent.Agents.Registry do
     project_dirs =
       cwd
       |> ancestor_dirs()
-      |> Enum.reverse()
       |> Enum.flat_map(fn dir ->
         [
           {:project_claude, Path.join([dir, ".claude", "agents"])},
@@ -248,11 +247,15 @@ defmodule OptimalSystemAgent.Agents.Registry do
       triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
       tools_allowed: parse_tool_list(first_present(meta, ["tools_allowed", "tools"])),
       tools_blocked:
-        parse_tool_list(first_present(meta, ["tools_blocked", "disallowedTools", "disallowed_tools"])) ||
+        parse_tool_list(
+          first_present(meta, ["tools_blocked", "disallowedTools", "disallowed_tools"])
+        ) ||
           [],
       max_iterations: first_present(meta, ["max_iterations", "maxTurns", "max_turns"]),
       permission_tier:
-        parse_permission_tier(first_present(meta, ["permission_tier", "permissionMode", "permission_mode"])),
+        parse_permission_tier(
+          first_present(meta, ["permission_tier", "permissionMode", "permission_mode"])
+        ),
       model: nullable_string(meta["model"]),
       provider: nullable_string(meta["provider"]),
       effort: nullable_string(meta["effort"]),
@@ -305,7 +308,10 @@ defmodule OptimalSystemAgent.Agents.Registry do
   defp parse_permission_tier("workspace"), do: :workspace
   defp parse_permission_tier("subagent"), do: :subagent
   defp parse_permission_tier("full"), do: :full
-  defp parse_permission_tier(value) when is_atom(value), do: parse_permission_tier(Atom.to_string(value))
+
+  defp parse_permission_tier(value) when is_atom(value),
+    do: parse_permission_tier(Atom.to_string(value))
+
   defp parse_permission_tier(_), do: :subagent
 
   defp parse_isolation("worktree"), do: :worktree

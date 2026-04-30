@@ -7,11 +7,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
      hallucinated tool sequences for messages like "ok" or "lol".
   2. Computer-use focus mode — if the previous iteration used computer_use on a slow
      local provider, trims the tool list to CU-related tools only.
-  3. Tool budget — local/slow providers (Ollama, LM Studio, llama.cpp) choke on large
+  3. Fast path — clear intents get a smaller first-pass tool set with escape hatches;
+     unclear intents keep the full tool surface.
+  4. Tool budget — local/slow providers (Ollama, LM Studio, llama.cpp) choke on large
      tool lists. Caps at 10, prioritising file and shell tools.
   """
   require Logger
-  alias OptimalSystemAgent.Agent.Effort
+  alias OptimalSystemAgent.Agent.FastPath
 
   # Minimum signal weight required to include tools in the LLM call.
   @tool_weight_threshold 0.20
@@ -32,7 +34,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     tools
     |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
-    |> apply_fast_mode_budget(state)
+    |> FastPath.select_tools(state)
     |> apply_local_provider_budget(state)
   end
 
@@ -64,17 +66,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     if last_used_cu and state.provider in @local_providers do
       Logger.debug("[loop] Computer-use focus mode — trimming to CU-related tools only")
       Enum.filter(tools, fn t -> t.name in ~w(computer_use file_read ask_user) end)
-    else
-      tools
-    end
-  end
-
-  defp apply_fast_mode_budget(tools, _state) do
-    budget = Effort.tool_budget()
-
-    if Effort.fast_mode?() and length(tools) > budget do
-      Logger.debug("[loop] Fast mode — trimming tools from #{length(tools)} to #{budget}")
-      take_priority_tools(tools, budget)
     else
       tools
     end

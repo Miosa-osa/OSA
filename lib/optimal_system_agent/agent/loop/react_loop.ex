@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.Telemetry
   alias OptimalSystemAgent.Agent.Effort
+  alias OptimalSystemAgent.Agent.FastPath
 
   @cancel_table :osa_cancel_flags
 
@@ -107,6 +108,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}"
     )
 
+    # Start async prefetches while we build context. In fast mode this also
+    # grabs cheap workspace/git hints so the first model call is less blind.
+    fast_prefetch_task = FastPath.prefetch_async(state)
+
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
       if state.iteration == 0 do
@@ -123,6 +128,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     context = cached_context(state)
     Logger.debug("[loop] context built, #{length(context.messages)} messages")
+    context = FastPath.inject_context(context, FastPath.await_prefetch(fast_prefetch_task))
 
     # Consume prefetched memory (waits max 2s, falls back to sync if timeout)
     context =
@@ -203,7 +209,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   # Max tokens recovery — response was truncated, bump limit and retry
-  defp handle_result({:ok, %{stop_reason: "max_tokens"} = resp}, state, context)
+  defp handle_result({:ok, %{stop_reason: "max_tokens"} = resp}, state, _context)
        when state.overflow_retries < 2 do
     content = Map.get(resp, :content, "")
     current_max = max_response_tokens()
@@ -491,28 +497,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         {"I encountered an error processing your request. Please try again.", state}
       end
     end
-  end
-
-  # Post-tool nudges: explore-first and skill-creation hints.
-  # Check if a tool is safe to run concurrently with others
-  defp tool_concurrent?(tool_name) do
-    builtin_tools = :persistent_term.get({OptimalSystemAgent.Tools.Registry, :builtin_tools}, %{})
-
-    case Map.get(builtin_tools, tool_name) do
-      # Unknown tools default to concurrent
-      nil ->
-        true
-
-      mod ->
-        if function_exported?(mod, :concurrent?, 0) do
-          mod.concurrent?()
-        else
-          # Default: concurrent
-          true
-        end
-    end
-  rescue
-    _ -> true
   end
 
   # Run stop hooks — allows hooks to override response or force continuation

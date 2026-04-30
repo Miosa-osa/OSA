@@ -987,7 +987,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  def cmd_personality(args, session_id) do
+  def cmd_persona(args, session_id) do
     alias OptimalSystemAgent.Personality
     IO.puts("")
 
@@ -996,7 +996,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         current = Personality.current()
         presets = Personality.list()
 
-        IO.puts("  #{@bold}Personality Presets#{@reset}")
+        IO.puts("  #{@bold}Persona Presets#{@reset}")
         IO.puts("")
 
         Enum.each(presets, fn preset ->
@@ -1006,7 +1006,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         end)
 
         IO.puts("")
-        IO.puts("  #{@dim}Current: #{current}. Usage: /personality <name>#{@reset}")
+        IO.puts("  #{@dim}Current: #{current}. Usage: /persona <name>#{@reset}")
 
       name ->
         case Personality.set(name) do
@@ -1015,7 +1015,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
             desc = if preset, do: preset.description, else: name
 
             IO.puts(
-              "  #{@green}Personality set to #{@bold}#{name}#{@reset}#{@green} — #{desc}#{@reset}"
+              "  #{@green}Persona set to #{@bold}#{name}#{@reset}#{@green} — #{desc}#{@reset}"
             )
 
           {:error, reason} ->

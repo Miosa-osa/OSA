@@ -67,33 +67,41 @@ defmodule OptimalSystemAgent.Agent.Worktree do
   Clean up a worktree after agent completion.
 
   If `merge: true`, attempts to merge the worktree branch back to the original branch.
-  Otherwise, just removes the worktree and branch.
+  Otherwise, dirty worktrees are preserved by default for parent review. Pass
+  `discard: true` to remove a dirty worktree without merging.
 
   Returns `:ok` or `{:error, reason}`.
   """
   def cleanup(worktree_path, opts \\ []) do
     merge = Keyword.get(opts, :merge, false)
+    discard = Keyword.get(opts, :discard, false)
     base_dir = Keyword.get(opts, :repo_dir, File.cwd!())
 
     # Check if the worktree has any changes
     has_changes = worktree_has_changes?(worktree_path)
 
     result =
-      if merge and has_changes do
-        merge_worktree(worktree_path, base_dir)
-      else
-        :ok
-      end
+      cond do
+        merge and has_changes ->
+          with :ok <- merge_worktree(worktree_path, base_dir) do
+            remove_worktree(worktree_path, base_dir)
+          end
 
-    # Remove the worktree regardless
-    remove_worktree(worktree_path, base_dir)
+        has_changes and not discard ->
+          Logger.info("[worktree] Preserving dirty worktree #{worktree_path} for review")
+          :ok
+
+        true ->
+          remove_worktree(worktree_path, base_dir)
+      end
 
     # Emit hook event
     try do
       OptimalSystemAgent.Agent.Hooks.run_async(:worktree_remove, %{
         path: worktree_path,
         had_changes: has_changes,
-        merged: merge and has_changes
+        merged: merge and has_changes,
+        preserved: has_changes and not merge and not discard
       })
     rescue
       _ -> :ok

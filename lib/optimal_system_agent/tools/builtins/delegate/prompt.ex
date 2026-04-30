@@ -49,8 +49,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     Brief the agent like a colleague who just walked in — they haven't seen this conversation.
     - Explain what you're trying to accomplish and why
     - Include all file paths, requirements, and constraints
+    - State the expected output structure and stop condition
+    - Ask for commands run, files touched, evidence, and remaining risks when relevant
     - If you need a short response, say so
     - Terse command-style prompts produce shallow, generic work
+
+    ## Handoff Packet
+    For build tasks, include:
+    - Objective
+    - Relevant files/directories
+    - Constraints and forbidden actions
+    - Required verification
+    - Expected result format
+
+    Worktree isolation never merges by default. Use merge_worktree=true only
+    when you explicitly want a successful isolated agent to merge its branch.
 
     ## Roles
     #{roles_list}.
