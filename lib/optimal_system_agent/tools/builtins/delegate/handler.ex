@@ -45,7 +45,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"task" => task} = args, ctx) do
-    role = Map.get(args, "role")
+    role = Map.get(args, "role") || Map.get(args, "subagent_type")
     tier_str = Map.get(args, "tier")
     parent_id = resolve_parent_id(args, ctx)
 
@@ -62,9 +62,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     tier = if raw_tier == :utility, do: Constants.min_subagent_tier(), else: raw_tier
 
     isolation =
-      case Map.get(args, "isolation") do
+      case Map.get(args, "isolation") || (agent_def && agent_def[:isolation]) do
         "worktree" -> :worktree
+        :worktree -> :worktree
         _ -> nil
+      end
+
+    background =
+      case Map.fetch(args, "background") do
+        {:ok, value} -> value == true
+        :error -> (agent_def && agent_def[:background]) || false
       end
 
     config = %{
@@ -72,11 +79,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       parent_session_id: parent_id,
       role: role || "agent",
       tier: tier,
+      model: Map.get(args, "model") || (agent_def && agent_def[:model]),
+      provider: Map.get(args, "provider") || (agent_def && agent_def[:provider]),
+      permission_tier:
+        parse_permission_tier(
+          Map.get(args, "permissionMode") ||
+            Map.get(args, "permission_mode") ||
+            (agent_def && agent_def[:permission_tier])
+        ),
       system_prompt: agent_def && agent_def[:system_prompt],
       tools_allowed: agent_def && agent_def[:tools_allowed],
       tools_blocked: (agent_def && agent_def[:tools_blocked]) || [],
-      max_iterations: (agent_def && agent_def[:max_iterations]) || Tier.max_iterations(tier),
-      isolation: isolation
+      max_iterations:
+        parse_max_iterations(
+          Map.get(args, "maxTurns") ||
+            Map.get(args, "max_turns") ||
+            Map.get(args, "max_iterations") ||
+            (agent_def && agent_def[:max_iterations])
+        ) || Tier.max_iterations(tier),
+      isolation: isolation,
+      merge_worktree: Map.get(args, "merge_worktree") == true,
+      discard_worktree: Map.get(args, "discard_worktree") == true,
+      working_dir: Map.get(args, "cwd") || Map.get(args, "working_dir")
     }
 
     config =
@@ -86,7 +110,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         config
       end
 
-    if Map.get(args, "background") == true do
+    if background do
       dispatch_background(parent_id, config)
     else
       dispatch_foreground(config)
@@ -116,7 +140,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   defp parse_tier("elite"), do: :elite
   defp parse_tier("specialist"), do: :specialist
   defp parse_tier("utility"), do: :utility
+  defp parse_tier(tier) when is_atom(tier), do: tier
   defp parse_tier(_), do: :specialist
+
+  defp parse_permission_tier(nil), do: :subagent
+  defp parse_permission_tier("default"), do: :subagent
+  defp parse_permission_tier("acceptEdits"), do: :workspace
+  defp parse_permission_tier("bypassPermissions"), do: :full
+  defp parse_permission_tier("plan"), do: :read_only
+  defp parse_permission_tier("read_only"), do: :read_only
+  defp parse_permission_tier("read-only"), do: :read_only
+  defp parse_permission_tier("workspace"), do: :workspace
+  defp parse_permission_tier("subagent"), do: :subagent
+  defp parse_permission_tier("full"), do: :full
+
+  defp parse_permission_tier(tier) when tier in [:read_only, :workspace, :subagent, :full],
+    do: tier
+
+  defp parse_permission_tier(_), do: :subagent
+
+  defp parse_max_iterations(value) when is_integer(value), do: value
+
+  defp parse_max_iterations(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_max_iterations(_), do: nil
 
   defp fetch_parent_messages(parent_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, parent_id) do

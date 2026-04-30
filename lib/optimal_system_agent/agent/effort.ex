@@ -12,18 +12,18 @@ defmodule OptimalSystemAgent.Agent.Effort do
   @levels %{
     low: %{
       thinking_budget: 0,
-      max_iterations: 5,
-      max_response_tokens: 2_048,
-      tool_budget: 6,
+      max_iterations: 30,
+      max_response_tokens: 32_768,
+      tool_budget: 18,
       temperature: 0.2,
       label: "low",
-      description: "Fast path: minimal thinking, tight tool budget, short responses"
+      description: "Fast path: full capability with speculative prefetch and lean routing"
     },
     medium: %{
       thinking_budget: 5_000,
       max_iterations: 30,
-      max_response_tokens: 8_192,
-      tool_budget: 12,
+      max_response_tokens: 32_768,
+      tool_budget: 24,
       temperature: 0.7,
       label: "medium",
       description: "Balanced depth and speed"
@@ -31,8 +31,8 @@ defmodule OptimalSystemAgent.Agent.Effort do
     high: %{
       thinking_budget: 10_000,
       max_iterations: 50,
-      max_response_tokens: 16_384,
-      tool_budget: 20,
+      max_response_tokens: 32_768,
+      tool_budget: 32,
       temperature: 0.7,
       label: "high",
       description: "Deep reasoning, thorough analysis"
