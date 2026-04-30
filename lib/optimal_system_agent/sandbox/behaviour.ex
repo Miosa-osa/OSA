@@ -10,9 +10,11 @@ defmodule OptimalSystemAgent.Sandbox.Behaviour do
 
       # config/config.exs or ~/.osa/sandbox.json
       config :optimal_system_agent, :sandbox_backend, :host
+      config :optimal_system_agent, :sandbox_mode, :optional
 
       # Options: :host, :docker, :e2b
       # Or a custom module: MyApp.Sandbox.Custom
+      # Mode options: :optional, :required
   """
 
   @type exec_result :: {:ok, String.t()} | {:error, String.t()}

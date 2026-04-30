@@ -47,7 +47,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
       state = %{state | locks: Map.put(state.locks, agent_name, true)}
       {result, run, state} = do_execute(task, trigger_type, state)
       state = %{state | locks: Map.delete(state.locks, agent_name)}
-      {:reply, {result, run}, state}
+      {:reply, execute_reply(result, run), state}
     end
   end
 
@@ -128,16 +128,17 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
     end
   end
 
-  defp execute_with_timeout(task, run, timeout_ms) do
-    prompt = task["prompt"] || task["job"] || task["name"]
-    session_id = "scheduled_#{task["id"]}_#{System.unique_integer([:positive])}"
+  defp execute_reply({:ok, _}, run), do: {:ok, run}
+  defp execute_reply({:error, reason}, _run), do: {:error, reason}
+  defp execute_reply(other, run), do: {other, run}
 
+  defp execute_with_timeout(task, run, timeout_ms) do
     parent = self()
     ref = make_ref()
 
     pid =
       spawn(fn ->
-        result = JobExecutor.execute_task(prompt, session_id)
+        result = JobExecutor.execute_cron_job(task)
         send(parent, {ref, result})
       end)
 

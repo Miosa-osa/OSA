@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
 
   defp json_get(path) do
     conn(:get, path)
+    |> Plug.Conn.fetch_query_params()
     |> call_routes()
   end
 
@@ -332,6 +333,59 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
       rescue
         ArgumentError -> :ok
       end
+    end
+  end
+
+  # ── Route reachability ───────────────────────────────────────────────
+
+  describe "specific session endpoints" do
+    test "GET /search is not shadowed by GET /:id" do
+      conn = json_get("/search?q=agent&limit=1")
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["query"] == "agent"
+      assert is_list(body["results"])
+      assert is_integer(body["count"])
+    end
+
+    test "GET /recent is not shadowed by GET /:id" do
+      conn = json_get("/recent?limit=1")
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert is_list(body["sessions"])
+    end
+
+    test "GET /:id/export is not shadowed by catch-all" do
+      session_id = "export-session-#{System.unique_integer([:positive])}"
+      conn = json_get("/#{session_id}/export?format=json")
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["session_id"] == session_id
+      assert body["format"] == "json"
+      assert is_list(body["turns"])
+    end
+
+    test "GET /:id/transcript is not shadowed by catch-all" do
+      session_id = "transcript-session-#{System.unique_integer([:positive])}"
+      conn = json_get("/#{session_id}/transcript")
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["session_id"] == session_id
+      assert is_list(body["turns"])
+      assert is_integer(body["count"])
+    end
+
+    test "POST /:id/permission/:perm_id is not shadowed by catch-all" do
+      conn = json_post("/session-1/permission/perm-1", %{"decision" => "deny"})
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["status"] == "ok"
+      assert body["decision"] == "deny"
     end
   end
 

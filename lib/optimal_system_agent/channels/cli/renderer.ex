@@ -83,6 +83,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
         :exit, _ -> 0
       end
 
+    scheduler_str = scheduler_status()
+
     # ── Build bordered box ────────────────────────────────────────────
     inner_width = width - 4
     title = " #{@bold}#{@cyan}OSA#{@reset} #{@dim}v#{version} (#{git_hash})#{@reset} "
@@ -109,15 +111,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
           "#{@cyan}#{provider}#{@reset}#{@dim} / #{model}#{@reset}",
           "#{@dim}#{ctx_display} · #{tool_count} tools#{@reset}",
           "#{@dim}auth: #{oauth_status} · soul: #{soul_status}#{@reset}",
+          "#{@dim}scheduler: #{scheduler_str}#{@reset}",
           "#{@dim}#{cwd}#{@reset}"
         ]
 
     # Right panel — live info
     right_lines = [
-      "#{@yellow}Quick Start#{@reset}",
-      "#{@dim}/help — all commands#{@reset}",
+      "#{@yellow}Ready#{@reset}",
+      "#{@dim}Ask, code, schedule, delegate#{@reset}",
+      "#{@dim}/help — commands#{@reset}",
       "#{@dim}/model — switch model#{@reset}",
-      "#{@dim}/login <provider> — connect#{@reset}",
       "#{@dim}/setup — reconfigure#{@reset}",
       "#{@dim}#{String.duplicate("─", 28)}#{@reset}",
       "#{@yellow}System#{@reset}",
@@ -155,6 +158,20 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
     vis_len = visible_length(str)
     padding = max(width - vis_len, 0)
     str <> String.duplicate(" ", padding)
+  end
+
+  defp scheduler_status do
+    case OptimalSystemAgent.Agent.Scheduler.status() do
+      %{cron_active: active, cron_total: total, heartbeat_pending: pending} ->
+        "#{active}/#{total} active · #{pending} heartbeat"
+
+      _ ->
+        "ready"
+    end
+  rescue
+    _ -> "starting"
+  catch
+    :exit, _ -> "starting"
   end
 
   def print_goodbye do
@@ -331,14 +348,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   end
 
   # ── Private Helpers ─────────────────────────────────────────────────
-
-  defp proactive_banner_line do
-    ""
-  rescue
-    _ -> ""
-  catch
-    :exit, _ -> ""
-  end
 
   defp git_short_hash do
     case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do

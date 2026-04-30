@@ -39,6 +39,21 @@ defmodule OptimalSystemAgent.Agent.Scheduler.CronPresetsTest do
     end
   end
 
+  describe "resolve/1" do
+    test "resolves preset ids to cron expressions" do
+      assert {:ok, "0 * * * *"} = CronPresets.resolve("hourly")
+      assert {:ok, "*/5 * * * *"} = CronPresets.resolve("every_5_minutes")
+    end
+
+    test "accepts raw cron expressions" do
+      assert {:ok, "15 9 * * 1"} = CronPresets.resolve("15 9 * * 1")
+    end
+
+    test "rejects invalid schedules" do
+      assert {:error, _reason} = CronPresets.resolve("definitely-not-a-schedule")
+    end
+  end
+
   describe "next_run/1" do
     test "returns a DateTime for valid expressions" do
       result = CronPresets.next_run("* * * * *")

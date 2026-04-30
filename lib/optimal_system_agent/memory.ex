@@ -96,6 +96,16 @@ defmodule OptimalSystemAgent.Memory do
   end
 
   @doc """
+  Return the most recent memory entries, newest first.
+
+  Returns `{:ok, [entry, ...]}`.
+  """
+  @spec recent(pos_integer()) :: {:ok, [map()]}
+  def recent(limit \\ 10) when is_integer(limit) and limit > 0 do
+    GenServer.call(Store, {:recent, limit}, :infinity)
+  end
+
+  @doc """
   Delete a memory entry by ID.
 
   Removes from both SQLite and the ETS index.

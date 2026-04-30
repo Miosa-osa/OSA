@@ -74,12 +74,12 @@ defmodule OptimalSystemAgent.Memory.AutoExtract do
       key = "[#{type}] #{String.slice(content, 0, 200)}"
 
       try do
-        Memory.Store.remember(key, %{
-          type: type,
-          source: "auto_extract",
+        Memory.save(key,
+          category: category_for(type),
+          source: :agent,
           session_id: session_id,
-          extracted_at: DateTime.utc_now()
-        })
+          tags: ["auto_extract", to_string(type)]
+        )
       rescue
         _ -> :ok
       end
@@ -87,4 +87,11 @@ defmodule OptimalSystemAgent.Memory.AutoExtract do
 
     length(extractions)
   end
+
+  defp category_for(:preference), do: :preference
+  defp category_for(:decision), do: :decision
+  defp category_for(:correction), do: :lesson
+  defp category_for(:fact), do: :context
+  defp category_for(:identity), do: :context
+  defp category_for(_type), do: :context
 end

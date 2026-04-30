@@ -1,0 +1,155 @@
+defmodule OptimalSystemAgent.Agent.ContextDiscovery do
+  @moduledoc """
+  Auto-discovers project context files from the working directory.
+
+  Scans for context files in priority order (first match wins):
+    1. .osa/context.md (project-level OSA config)
+    2. AGENTS.md (agent instructions)
+    3. CLAUDE.md (Claude Code instructions)
+    4. .cursorrules / .cursor/rules/*.mdc (Cursor rules)
+
+  Content is truncated at 20,000 chars with a 70/20 head/tail ratio
+  to keep the system prompt manageable.
+  """
+  require Logger
+
+  @max_chars 20_000
+  @head_ratio 0.7
+  @tail_ratio 0.2
+
+  @context_files [
+    ".osa/context.md",
+    ".osa/CONTEXT.md",
+    "AGENTS.md",
+    "agents.md",
+    "CLAUDE.md",
+    "claude.md",
+    ".cursorrules"
+  ]
+
+  @spec discover(String.t() | nil) :: String.t() | nil
+  def discover(working_dir) do
+    dir = working_dir || File.cwd!()
+    git_root = find_git_root(dir)
+    search_dirs = Enum.uniq([dir | if(git_root && git_root != dir, do: [git_root], else: [])])
+
+    result =
+      Enum.find_value(search_dirs, fn search_dir ->
+        Enum.find_value(@context_files, fn filename ->
+          path = Path.join(search_dir, filename)
+
+          if File.regular?(path) do
+            case File.read(path) do
+              {:ok, content} when byte_size(content) > 0 ->
+                Logger.debug("[ContextDiscovery] Found project context: #{path}")
+                {path, content}
+
+              _ ->
+                nil
+            end
+          end
+        end)
+      end)
+
+    result = result || find_cursor_rules(search_dirs)
+
+    case result do
+      {path, content} ->
+        case scan_for_injection(content) do
+          :clean ->
+            truncated = truncate_smart(content, @max_chars)
+            "## Project Context (#{Path.basename(path)})\n\n#{truncated}"
+
+          {:blocked, reason} ->
+            Logger.warning(
+              "[ContextDiscovery] BLOCKED #{path} — prompt injection detected: #{reason}"
+            )
+
+            nil
+        end
+
+      nil ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp find_git_root(dir) do
+    case System.cmd("git", ["rev-parse", "--show-toplevel"],
+           cd: dir,
+           stderr_to_stdout: true
+         ) do
+      {root, 0} -> String.trim(root)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp find_cursor_rules(dirs) do
+    Enum.find_value(dirs, fn dir ->
+      rules_dir = Path.join(dir, ".cursor/rules")
+
+      if File.dir?(rules_dir) do
+        case Path.wildcard(Path.join(rules_dir, "*.mdc")) do
+          [first | _] = files ->
+            content =
+              Enum.map_join(files, "\n\n---\n\n", fn f ->
+                case File.read(f) do
+                  {:ok, c} -> "### #{Path.basename(f)}\n\n#{c}"
+                  _ -> ""
+                end
+              end)
+
+            if content != "", do: {first, content}
+
+          [] ->
+            nil
+        end
+      end
+    end)
+  end
+
+  # Injection scanning for context files before loading into system prompt.
+  @injection_patterns [
+    ~r/ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompt|context|rules?)/i,
+    ~r/ignore\s+all\s+(instructions?|rules?|guidelines?)/i,
+    ~r/disregard\s+(your\s+)?(previous\s+)?(instructions?|guidelines?|rules?)/i,
+    ~r/forget\s+(everything|all)\s+(you\s+)?(were\s+)?(told|instructed)/i,
+    ~r/(override|bypass|circumvent|disable)\s+.{0,30}(instructions?|restrictions?|safety)/i,
+    ~r/you\s+are\s+now\s+(a|an|the)\s+/i,
+    ~r/(jailbreak|do\s+anything\s+now|developer\s+mode|prompt\s+injection)/i,
+    ~r/(pretend|act\s+as\s+if|imagine)\s+.{0,40}(no\s+restrictions?|unrestricted|without\s+limits?)/i,
+    ~r/\byou\s+(are|were|become)\s+DAN\b/i,
+    ~r/(output|print|repeat|reveal)\s+(everything|all|your)\s+(above|before|system|prompt|instructions?)/i
+  ]
+
+  @invisible_chars ~r/[\x{200B}\x{200C}\x{200D}\x{200E}\x{200F}\x{FEFF}\x{00AD}\x{2060}\x{2061}\x{2062}\x{2063}\x{2064}]/u
+
+  defp scan_for_injection(content) do
+    has_invisible = Regex.match?(@invisible_chars, content)
+
+    if has_invisible do
+      {:blocked, "invisible Unicode characters detected (possible obfuscation)"}
+    else
+      case Enum.find(@injection_patterns, &Regex.match?(&1, content)) do
+        nil -> :clean
+        pattern -> {:blocked, "matched pattern: #{inspect(pattern.source)}"}
+      end
+    end
+  end
+
+  defp truncate_smart(content, max) when byte_size(content) <= max, do: content
+
+  defp truncate_smart(content, max) do
+    head_size = trunc(max * @head_ratio)
+    tail_size = trunc(max * @tail_ratio)
+
+    head = String.slice(content, 0, head_size)
+    tail = String.slice(content, -tail_size, tail_size)
+    omitted = String.length(content) - head_size - tail_size
+
+    head <> "\n\n[... #{omitted} chars omitted ...]\n\n" <> tail
+  end
+end

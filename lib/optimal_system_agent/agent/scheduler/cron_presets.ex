@@ -18,6 +18,25 @@ defmodule OptimalSystemAgent.Agent.Scheduler.CronPresets do
 
   def list_presets, do: @presets
 
+  @doc "Resolve a preset id or cron expression to a cron expression."
+  @spec resolve(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def resolve(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    case Enum.find(@presets, &(&1.id == trimmed or &1.cron == trimmed)) do
+      %{cron: cron} ->
+        {:ok, cron}
+
+      nil ->
+        case CronEngine.parse(trimmed) do
+          {:ok, _} -> {:ok, trimmed}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  def resolve(_), do: {:error, "schedule must be a string"}
+
   def describe(cron) do
     case Enum.find(@presets, &(&1.cron == cron)) do
       %{label: label} -> label

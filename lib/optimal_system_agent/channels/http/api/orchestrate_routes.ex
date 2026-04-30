@@ -13,8 +13,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   # Shared helpers not needed — using Jason.encode! directly
   require Logger
 
-  alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Runtime.SessionManager
 
   plug(:match)
   plug(:dispatch)
@@ -32,25 +32,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     :ets.new(@swarm_table, [:named_table, :public, :set])
   rescue
     ArgumentError -> :ok
-  end
-
-  # Ensure a Loop GenServer exists for this session, start one if not.
-  defp ensure_loop(session_id, user_id \\ "anonymous", channel \\ :http) do
-    case DynamicSupervisor.start_child(
-           OptimalSystemAgent.SessionSupervisor,
-           {Loop, session_id: session_id, user_id: user_id, channel: channel}
-         ) do
-      {:ok, _pid} ->
-        Logger.info("[OrchestrateRoutes] Started Loop for session #{session_id}")
-        :ok
-
-      {:error, {:already_started, _pid}} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("[OrchestrateRoutes] Failed to start Loop: #{inspect(reason)}")
-        {:error, reason}
-    end
   end
 
   # POST /api/v1/orchestrate — direct agent loop invocation
@@ -74,7 +55,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
       end
 
       # Ensure a Loop GenServer is running for this session
-      case ensure_loop(session_id, user_id) do
+      case SessionManager.ensure_loop(session_id, user_id, :http) do
         :ok ->
           # Register Bus handlers that bridge events to PubSub for SSE delivery.
           # The SSE stream (agent_routes.ex) listens on "osa:session:{id}" for {:osa_event, event}.
@@ -93,7 +74,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
           # Process the message asynchronously through the agent loop
           Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
             try do
-              result = Loop.process_message(session_id, input)
+              result = SessionManager.process_message(session_id, input)
 
               case result do
                 {:ok, response} when is_binary(response) ->
@@ -179,11 +160,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
         user_id = conn.assigns[:user_id] || "anonymous"
 
-        case ensure_loop(session_id, user_id) do
+        case SessionManager.ensure_loop(session_id, user_id, :http) do
           :ok ->
             Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
               try do
-                Loop.process_message(session_id, task)
+                SessionManager.process_message(session_id, task)
               rescue
                 e ->
                   Logger.error(
@@ -270,9 +251,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             # Launch in background
             Task.start(fn ->
               try do
-                case ensure_loop(session_id, user_id) do
+                case SessionManager.ensure_loop(session_id, user_id, :http) do
                   :ok ->
-                    Loop.process_message(session_id, task)
+                    SessionManager.process_message(session_id, task)
 
                     ensure_swarm_table()
 

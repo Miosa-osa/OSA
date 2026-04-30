@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
      tool lists. Caps at 10, prioritising file and shell tools.
   """
   require Logger
+  alias OptimalSystemAgent.Agent.Effort
 
   # Minimum signal weight required to include tools in the LLM call.
   @tool_weight_threshold 0.20
@@ -31,6 +32,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     tools
     |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
+    |> apply_fast_mode_budget(state)
     |> apply_local_provider_budget(state)
   end
 
@@ -67,14 +69,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     end
   end
 
-  defp apply_local_provider_budget(tools, state) do
-    if state.provider in @local_providers and length(tools) > 10 do
-      Logger.debug("[loop] Trimming tools from #{length(tools)} to 10 for #{state.provider}")
-      {priority, rest} = Enum.split_with(tools, fn t -> t.name in @priority_tools end)
-      budget = max(10 - length(priority), 0)
-      priority ++ Enum.take(rest, budget)
+  defp apply_fast_mode_budget(tools, _state) do
+    budget = Effort.tool_budget()
+
+    if Effort.fast_mode?() and length(tools) > budget do
+      Logger.debug("[loop] Fast mode — trimming tools from #{length(tools)} to #{budget}")
+      take_priority_tools(tools, budget)
     else
       tools
     end
+  end
+
+  defp apply_local_provider_budget(tools, state) do
+    if state.provider in @local_providers and length(tools) > 10 do
+      Logger.debug("[loop] Trimming tools from #{length(tools)} to 10 for #{state.provider}")
+      take_priority_tools(tools, 10)
+    else
+      tools
+    end
+  end
+
+  defp take_priority_tools(tools, budget) do
+    {priority, rest} = Enum.split_with(tools, fn t -> t.name in @priority_tools end)
+    priority = Enum.take(priority, budget)
+    remaining = max(budget - length(priority), 0)
+    priority ++ Enum.take(rest, remaining)
   end
 end

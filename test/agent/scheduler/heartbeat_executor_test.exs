@@ -49,6 +49,37 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutorTest do
       result = GenServer.call(name, {:execute, task, :manual})
       assert result == {:error, :locked}
     end
+
+    test "executes command tasks through the scheduler executor" do
+      {_, name} = start_executor()
+
+      task = %{
+        "id" => "cmd-task",
+        "name" => "command task",
+        "type" => "command",
+        "command" => "printf scheduled-ok"
+      }
+
+      assert {:ok, run} = GenServer.call(name, {:execute, task, :manual})
+      assert run.status == "succeeded"
+      assert run.stdout == "scheduled-ok"
+      assert run.scheduled_task_id == "cmd-task"
+    end
+
+    test "fails blocked command tasks without executing them" do
+      {_, name} = start_executor()
+
+      task = %{
+        "id" => "blocked-command-task",
+        "name" => "blocked command task",
+        "type" => "command",
+        "command" => "rm -rf /"
+      }
+
+      assert {:error, run} = GenServer.call(name, {:execute, task, :manual})
+      assert run.status == "failed"
+      assert run.error_message =~ "Blocked"
+    end
   end
 
   describe "module definition" do

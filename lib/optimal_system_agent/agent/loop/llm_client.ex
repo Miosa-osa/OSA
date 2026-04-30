@@ -297,7 +297,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
 
-    if enabled and provider in [:anthropic, nil] and is_anthropic_provider?() do
+    if enabled and not Effort.fast_mode?() and provider in [:anthropic, nil] and
+         is_anthropic_provider?() do
       model =
         state.model ||
           Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")

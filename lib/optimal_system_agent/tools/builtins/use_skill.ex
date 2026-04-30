@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
 
   require Logger
 
+  alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Tools.Registry, as: Tools
 
   @impl true
@@ -54,7 +55,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
   end
 
   @impl true
-  def execute(%{"skill_name" => skill_name, "task" => task}) do
+  def execute(%{"skill_name" => skill_name, "task" => task} = args) do
+    if sid = args["__session_id__"], do: Process.put(:osa_session_id, sid)
+
     case Tools.get_skill(skill_name) do
       nil ->
         {:error, "Skill '#{skill_name}' not found. Use list_skills to see available skills."}
@@ -73,13 +76,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
       case File.read(path) do
         {:ok, content} ->
           instructions = extract_body(content)
-          prompt = build_prompt(skill.name, instructions, task)
+          prompt = build_prompt(skill[:name] || skill.name, instructions, task)
 
           Logger.info(
-            "[UseSkill] Invoking skill '#{skill.name}' for task: #{String.slice(task, 0, 80)}"
+            "[UseSkill] Invoking skill '#{skill[:name]}' as subagent for task: #{String.slice(task, 0, 80)}"
           )
 
-          run_with_llm(prompt, skill)
+          run_as_subagent(prompt, skill, task)
 
         {:error, reason} ->
           {:error, "Could not read skill file at #{path}: #{inspect(reason)}"}
@@ -124,20 +127,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.UseSkill do
     """
   end
 
-  defp run_with_llm(prompt, _skill) do
-    # Attempt to run via the LLM service; fall back to returning the prompt
-    # as an instruction string if the LLM service is unavailable.
-    llm_mod = Application.get_env(:optimal_system_agent, :llm_module, nil)
+  defp run_as_subagent(prompt, skill, task) do
+    session_id =
+      Process.get(:osa_session_id, "use_skill:#{System.unique_integer([:positive])}")
 
-    if llm_mod && Code.ensure_loaded?(llm_mod) && function_exported?(llm_mod, :complete, 1) do
-      case apply(llm_mod, :complete, [%{system: prompt, user: "Execute the skill now."}]) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, "Skill execution failed: #{inspect(reason)}"}
+    tools_allowed =
+      case Map.get(skill, :tools, []) do
+        list when is_list(list) and list != [] -> list
+        _ -> nil
       end
-    else
-      # LLM not wired up — return the compiled instruction prompt so the
-      # calling agent can use it directly in its own next turn.
-      {:ok, "Skill instructions loaded. Apply the following to your task:\n\n#{prompt}"}
+
+    config = %{
+      task: task,
+      parent_session_id: session_id,
+      role: "skill:#{skill[:name] || "unknown"}",
+      tier: :specialist,
+      system_prompt: prompt,
+      tools_allowed: tools_allowed,
+      tools_blocked: ["delegate", "use_skill"],
+      max_iterations: 15
+    }
+
+    case Orchestrator.run_subagent(config) do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, "Skill execution failed: #{inspect(reason)}"}
     end
   end
 end

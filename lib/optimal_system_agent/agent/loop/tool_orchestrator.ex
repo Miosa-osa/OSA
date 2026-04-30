@@ -3,9 +3,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   Per-input concurrency-aware tool dispatch.
 
   Replaces the inline parallel/sequential split in `ReactLoop.execute_tools/3`
-  (currently around `react_loop.ex:320-353`). The orchestrator partitions
-  tool calls by `LegacyAdapter.concurrency_safe?/3` — which checks the
-  structured callback first, then falls back to the flat `concurrent?/0`.
+  (currently around `react_loop.ex:320-353`). The orchestrator groups
+  consecutive tool calls where `LegacyAdapter.concurrency_safe?/3` returns
+  true into parallel batches, while any unsafe call is a serial barrier that
+  runs in its original position.
 
   Key differences from the inline implementation:
 
@@ -26,7 +27,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   ## Integration
 
   Wired into `ReactLoop.execute_tools/3` (around `react_loop.ex:319-326`)
-  as the single dispatch point for the parallel/sequential split. The
+  as the single dispatch point for ordered parallel/serial execution. The
   inline `Task.Supervisor.async_stream_nolink/4` previously inlined in
   the loop is now encapsulated here.
   """
@@ -51,10 +52,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   @doc """
   Dispatch a list of tool calls.
 
-  Partitions the list by per-input concurrency safety, runs the safe set
-  in parallel via `Task.Supervisor.async_stream_nolink/4`, and runs the
-  unsafe set serially. Returns results in the **original order** of
-  `tool_calls`.
+  Executes consecutive concurrency-safe calls in parallel batches via
+  `Task.Supervisor.async_stream_nolink/4`. Any unsafe call is treated as a
+  barrier and executed serially in original order before later calls begin.
+  Returns results in the **original order** of `tool_calls`.
 
   Options:
 
@@ -70,12 +71,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   @spec dispatch([tool_call()], map(), keyword()) :: [{tool_call(), result()}]
   def dispatch(tool_calls, state, opts \\ []) when is_list(tool_calls) do
     ctx = build_use_context(state)
-    {concurrent, serial} = partition(tool_calls, ctx)
 
-    parallel_results = run_parallel(concurrent, state, opts)
-    serial_results = run_serial(serial, state, opts)
-
-    fresh = parallel_results ++ serial_results
+    fresh =
+      tool_calls
+      |> execution_batches(ctx)
+      |> Enum.flat_map(fn
+        {:parallel, batch} -> run_parallel(batch, state, opts)
+        {:serial, tc} -> run_serial([tc], state, opts)
+      end)
 
     # Restore original input order — model expects results in submission order
     by_id = Map.new(fresh, fn {tc, r} -> {tc.id, {tc, r}} end)
@@ -94,18 +97,39 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   """
   @spec partition([tool_call()], UseContext.t()) :: {[tool_call()], [tool_call()]}
   def partition(tool_calls, %UseContext{} = ctx) do
-    Enum.split_with(tool_calls, fn tc ->
-      mod = lookup_module(tc.name)
-      input = decode_arguments(tc)
-
-      cond do
-        is_nil(mod) -> false
-        true -> LegacyAdapter.concurrency_safe?(mod, input, ctx)
-      end
-    end)
+    Enum.split_with(tool_calls, &concurrency_safe?(&1, ctx))
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  defp execution_batches(tool_calls, %UseContext{} = ctx) do
+    {batches, safe_acc} =
+      Enum.reduce(tool_calls, {[], []}, fn tc, {batches, safe_acc} ->
+        if concurrency_safe?(tc, ctx) do
+          {batches, [tc | safe_acc]}
+        else
+          batches = flush_safe_batch(batches, safe_acc)
+          {[{:serial, tc} | batches], []}
+        end
+      end)
+
+    batches
+    |> flush_safe_batch(safe_acc)
+    |> Enum.reverse()
+  end
+
+  defp flush_safe_batch(batches, []), do: batches
+  defp flush_safe_batch(batches, safe_acc), do: [{:parallel, Enum.reverse(safe_acc)} | batches]
+
+  defp concurrency_safe?(tc, %UseContext{} = ctx) do
+    mod = lookup_module(tc.name)
+    input = decode_arguments(tc)
+
+    cond do
+      is_nil(mod) -> false
+      true -> LegacyAdapter.concurrency_safe?(mod, input, ctx)
+    end
+  end
 
   defp run_parallel([], _state, _opts), do: []
 
@@ -126,8 +150,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     |> Enum.zip(tool_calls)
     |> Enum.map(&parallel_result/1)
   end
-
-  defp run_serial([], _state, _opts), do: []
 
   defp run_serial(tool_calls, state, opts) do
     executor = Keyword.get(opts, :executor, ToolExecutor)

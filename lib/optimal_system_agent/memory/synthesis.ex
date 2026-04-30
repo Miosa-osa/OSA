@@ -65,6 +65,26 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
   end
 
   @doc """
+  Return relevant memories for a message list without injecting them.
+
+  This is used by the agent loop to prefetch memory while context is being
+  built. Returns an empty list when there is no queryable user content or the
+  memory store is unavailable.
+  """
+  @spec search_relevant([map()], keyword()) :: [map()]
+  def search_relevant(messages, opts \\ []) when is_list(messages) do
+    limit = Keyword.get(opts, :limit, @default_inject_limit)
+    query_text = last_user_content(messages)
+
+    if query_text == "" do
+      []
+    else
+      query_keywords = Scoring.extract_keywords(query_text)
+      fetch_and_score(query_text, query_keywords, nil, limit)
+    end
+  end
+
+  @doc """
   Compact a message list when it approaches the token limit.
 
   Checks the ratio `current_tokens / max_tokens` against three thresholds

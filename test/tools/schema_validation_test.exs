@@ -62,6 +62,41 @@ defmodule OptimalSystemAgent.Tools.SchemaValidationTest do
     def execute(_args), do: {:ok, "ok"}
   end
 
+  defmodule BrokenReadOnlyTool do
+    def name, do: "broken_read_only"
+    def description, do: "Read-only tool with broken schema"
+    def safety, do: :read_only
+    def parameters, do: raise("schema unavailable")
+    def execute(_args), do: {:ok, "ok"}
+  end
+
+  defmodule BrokenWriteTool do
+    def name, do: "broken_write"
+    def description, do: "Mutating tool with broken schema"
+    def safety, do: :write_safe
+    def parameters, do: raise("schema unavailable")
+    def execute(_args), do: {:ok, "ok"}
+  end
+
+  defmodule BrokenTerminalTool do
+    def name, do: "broken_terminal"
+    def description, do: "Terminal tool with broken schema"
+    def safety, do: :terminal
+    def parameters, do: raise("schema unavailable")
+    def execute(_args), do: {:ok, "ok"}
+  end
+
+  defmodule BrokenActionTool do
+    def name, do: "broken_action"
+    def description, do: "Action-classified tool with broken schema"
+    def parameters, do: raise("schema unavailable")
+    def read_only?(%{"action" => "list"}, _ctx), do: true
+    def read_only?(_input, _ctx), do: false
+    def destructive?(%{"action" => "delete"}, _ctx), do: true
+    def destructive?(_input, _ctx), do: false
+    def execute(_args), do: {:ok, "ok"}
+  end
+
   # ---------------------------------------------------------------------------
   # validate_arguments/2 — valid args
   # ---------------------------------------------------------------------------
@@ -179,6 +214,36 @@ defmodule OptimalSystemAgent.Tools.SchemaValidationTest do
       mod = OptimalSystemAgent.Tools.Builtins.ShellExecute
       assert {:error, msg} = Registry.validate_arguments(mod, %{"command" => 42})
       assert msg =~ "validation failed"
+    end
+  end
+
+  describe "validate_arguments/2 when validation infrastructure fails" do
+    test "fails open for confidently read-only tools" do
+      assert :ok = Registry.validate_arguments(BrokenReadOnlyTool, %{"query" => "safe"})
+    end
+
+    test "fails closed for mutating tools" do
+      assert {:error, message} = Registry.validate_arguments(BrokenWriteTool, %{"path" => "x"})
+      assert message =~ "broken_write"
+      assert message =~ "validation unavailable"
+    end
+
+    test "fails closed for terminal or destructive tools" do
+      assert {:error, message} =
+               Registry.validate_arguments(BrokenTerminalTool, %{"command" => "echo ok"})
+
+      assert message =~ "broken_terminal"
+      assert message =~ "validation unavailable"
+    end
+
+    test "uses per-input read_only?/destructive? classification" do
+      assert :ok = Registry.validate_arguments(BrokenActionTool, %{"action" => "list"})
+
+      assert {:error, message} =
+               Registry.validate_arguments(BrokenActionTool, %{"action" => "delete"})
+
+      assert message =~ "broken_action"
+      assert message =~ "validation unavailable"
     end
   end
 end

@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     /oscp        → ProtocolRoutes    POST /
     /tasks       → ProtocolRoutes    GET /history
     /command-center → CommandCenterRoutes  GET /|/agents|/tiers|/patterns|/metrics|/events, POST /sandboxes
+    /skin        → SkinRoutes         GET / (active skin), GET /list, PUT / (set active), POST /reload
     /workspace   → WorkspaceRoutes    GET / (cwd, git status, git log, directory listing)
     /workspaces  → CanopyRoutes      GET|POST /, GET|PATCH|DELETE /:id, POST /:id/activate, GET /:id/agents|skills|config
     /agents      → AgentManagementRoutes  GET /, GET /hierarchy, GET|DELETE /:id, POST /:id/pause|resume
@@ -117,6 +118,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   forward("/analytics", to: API.DataRoutes)
   forward("/scheduler", to: API.DataRoutes)
   forward("/machines", to: API.DataRoutes)
+
+  # ── Skin / theme engine ───────────────────────────────────────────────
+  forward("/skin", to: API.SkinRoutes)
 
   # ── Workspace introspection ───────────────────────────────────────────
   forward("/workspace", to: API.WorkspaceRoutes)

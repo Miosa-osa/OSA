@@ -19,8 +19,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
-  alias OptimalSystemAgent.Channels.Session
-  alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Runtime.SessionManager
 
   plug(:match)
   plug(:dispatch)
@@ -60,7 +59,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
       user_id = conn.assigns[:user_id] || "anonymous"
       session_id = conn.body_params["session_id"] || generate_session_id()
 
-      case Session.ensure_loop(session_id, user_id, :tui) do
+      case SessionManager.ensure_loop(session_id, user_id, :tui) do
         {:error, reason} ->
           Logger.warning("[TUI] Failed to ensure session loop: #{inspect(reason)}")
 
@@ -73,7 +72,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
 
         _ ->
           opts = [channel: :tui]
-          Task.start(fn -> Loop.process_message(session_id, input, opts) end)
+          Task.start(fn -> SessionManager.process_message(session_id, input, opts) end)
 
           Logger.debug("[TUI] Input dispatched: session=#{session_id} user=#{user_id}")
 

@@ -55,6 +55,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   require Logger
 
   alias OptimalSystemAgent.Agent.Scheduler.{CronEngine, Persistence, JobExecutor, Heartbeat}
+  alias OptimalSystemAgent.Agent.Scheduler.CronPresets
   alias OptimalSystemAgent.Events.Bus
 
   defp heartbeat_interval,
@@ -222,6 +223,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   def handle_call({:add_job, job_map}, _from, state) do
     job =
       job_map
+      |> normalize_job_schedule()
       |> Map.put_new("id", generate_id())
       |> Map.put_new("enabled", true)
 
@@ -630,6 +632,15 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   defp atomic_update_triggers(state, update_fn), do: Persistence.update_triggers(state, update_fn)
   defp validate_job(job), do: Persistence.validate_job(job)
   defp validate_trigger(trigger), do: Persistence.validate_trigger(trigger)
+
+  defp normalize_job_schedule(%{"schedule" => schedule} = job) do
+    case CronPresets.resolve(schedule) do
+      {:ok, cron} -> Map.put(job, "schedule", cron)
+      {:error, _reason} -> job
+    end
+  end
+
+  defp normalize_job_schedule(job), do: job
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()
