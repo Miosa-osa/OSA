@@ -89,26 +89,36 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     width = Map.get(payload, :width, 1920)
     height = Map.get(payload, :height, 1080)
 
-    Logger.info("[Desktop.Controller] desktop_start_request session=#{session_id} #{width}x#{height}")
+    Logger.info(
+      "[Desktop.Controller] desktop_start_request session=#{session_id} #{width}x#{height}"
+    )
 
     case start_session(session_id, %{width: width, height: height}, state) do
       {:ok, session_state} ->
         new_sessions = Map.put(state.sessions, session_id, session_state)
 
-        send_frame_via_router({:desktop_ready, %{
-          session_id: session_id,
-          capabilities: %{mouse: true, keyboard: true, clipboard: false}
-        }}, state)
+        send_frame_via_router(
+          {:desktop_ready,
+           %{
+             session_id: session_id,
+             capabilities: %{mouse: true, keyboard: true, clipboard: false}
+           }},
+          state
+        )
 
         {:noreply, %{state | sessions: new_sessions}}
 
       {:error, reason} ->
         Logger.warning("[Desktop.Controller] failed to start session=#{session_id}: #{reason}")
 
-        send_frame_via_router({:desktop_error, %{
-          session_id: session_id,
-          reason: reason
-        }}, state)
+        send_frame_via_router(
+          {:desktop_error,
+           %{
+             session_id: session_id,
+             reason: reason
+           }},
+          state
+        )
 
         {:noreply, state}
     end
@@ -120,7 +130,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       ) do
     case get_in(state.sessions, [session_id, :vnc_socket]) do
       nil ->
-        Logger.debug("[Desktop.Controller] upstream data for unknown session=#{session_id}, ignoring")
+        Logger.debug(
+          "[Desktop.Controller] upstream data for unknown session=#{session_id}, ignoring"
+        )
+
         {:noreply, state}
 
       socket ->
@@ -129,7 +142,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
             {:noreply, state}
 
           {:error, reason} ->
-            Logger.warning("[Desktop.Controller] TCP send failed session=#{session_id}: #{reason}")
+            Logger.warning(
+              "[Desktop.Controller] TCP send failed session=#{session_id}: #{reason}"
+            )
+
             {:noreply, close_session(state, session_id, :tcp_error)}
         end
     end
@@ -153,15 +169,24 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
         if queued > @max_queue_bytes do
           Logger.warning("[Desktop.Controller] session=#{session_id} queue cap exceeded, closing")
-          send_frame_via_router({:desktop_error, %{session_id: session_id, reason: :failed_to_start}}, state)
+
+          send_frame_via_router(
+            {:desktop_error, %{session_id: session_id, reason: :failed_to_start}},
+            state
+          )
+
           {:noreply, close_session(state, session_id, :queue_overflow)}
         else
           # Forward downstream bytes to the control plane
-          send_frame_via_router({:desktop_data, %{
-            session_id: session_id,
-            direction: :downstream,
-            data: data
-          }}, state)
+          send_frame_via_router(
+            {:desktop_data,
+             %{
+               session_id: session_id,
+               direction: :downstream,
+               data: data
+             }},
+            state
+          )
 
           # Re-arm active once for backpressure
           :inet.setopts(socket, active: :once)
@@ -192,7 +217,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     case find_session_by_socket(state.sessions, socket) do
       {session_id, _} ->
         Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{reason}")
-        send_frame_via_router({:desktop_error, %{session_id: session_id, reason: :failed_to_start}}, state)
+
+        send_frame_via_router(
+          {:desktop_error, %{session_id: session_id, reason: :failed_to_start}},
+          state
+        )
+
         {:noreply, close_session(state, session_id, :tcp_error)}
 
       nil ->
@@ -241,6 +271,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # Stop whichever VNC backend was used — the ref type tells us which adapter.
   # x11vnc returns an integer OS pid; macOS/Windows return a Port reference.
   defp stop_vnc(pid_or_port) when is_integer(pid_or_port), do: X11vnc.stop(pid_or_port)
+
   defp stop_vnc(port_ref) when is_port(port_ref) do
     case os_family() do
       :macos -> MacOS.stop(port_ref)
@@ -248,11 +279,19 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       _ -> :ok
     end
   end
+
   defp stop_vnc(_), do: :ok
 
   defp connect_vnc(%{vnc_port: port}) do
-    case :gen_tcp.connect(@vnc_host, port, [:binary, active: false, packet: :raw, nodelay: true], @connect_timeout_ms) do
-      {:ok, socket} -> {:ok, socket}
+    case :gen_tcp.connect(
+           @vnc_host,
+           port,
+           [:binary, active: false, packet: :raw, nodelay: true],
+           @connect_timeout_ms
+         ) do
+      {:ok, socket} ->
+        {:ok, socket}
+
       {:error, reason} ->
         Logger.error("[Desktop.Controller] TCP connect to VNC failed: #{reason}")
         {:error, :failed_to_start}

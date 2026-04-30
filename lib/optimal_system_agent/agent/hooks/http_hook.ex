@@ -29,19 +29,20 @@ defmodule OptimalSystemAgent.Agent.Hooks.HttpHook do
 
     body = Jason.encode!(payload)
 
-    all_headers = Map.merge(
-      %{"content-type" => "application/json", "user-agent" => "OSA-Webhook/1.0"},
-      headers
-    )
+    all_headers =
+      Map.merge(
+        %{"content-type" => "application/json", "user-agent" => "OSA-Webhook/1.0"},
+        headers
+      )
 
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       try do
         case Req.post(url,
-          body: body,
-          headers: all_headers,
-          receive_timeout: timeout,
-          connect_options: [timeout: timeout]
-        ) do
+               body: body,
+               headers: all_headers,
+               receive_timeout: timeout,
+               connect_options: [timeout: timeout]
+             ) do
           {:ok, %{status: status}} when status in 200..299 ->
             Logger.debug("[http_hook] POST #{url} → #{status}")
 

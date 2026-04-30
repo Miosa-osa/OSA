@@ -18,7 +18,16 @@ defmodule OptimalSystemAgent.Signal.MessageClassifier do
   @type signal_mode :: :execute | :build | :analyze | :maintain | :assist
   @type signal_genre :: :direct | :inform | :commit | :decide | :express
   @type signal_type :: String.t()
-  @type signal_format :: :text | :code | :json | :markdown | :binary | :command | :message | :notification | :document
+  @type signal_format ::
+          :text
+          | :code
+          | :json
+          | :markdown
+          | :binary
+          | :command
+          | :message
+          | :notification
+          | :document
   @type confidence :: :high | :medium | :low
 
   @type t :: %__MODULE__{

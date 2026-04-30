@@ -93,7 +93,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Exo do
 
     emit_progress(cluster_id, :installing_deps, 15, "Cloning exo from GitHub...")
 
-    with {:ok, _} <- run_cmd("git", ["clone", "--depth=1", "https://github.com/exo-explore/exo.git", exo_dir], timeout: 120_000),
+    with {:ok, _} <-
+           run_cmd(
+             "git",
+             ["clone", "--depth=1", "https://github.com/exo-explore/exo.git", exo_dir],
+             timeout: 120_000
+           ),
          _ = emit_progress(cluster_id, :installing_deps, 20, "Installing exo from source..."),
          {:ok, _} <- run_cmd("pip3", ["install", "-e", "."], cwd: exo_dir, timeout: 300_000) do
       emit_progress(cluster_id, :installing_deps, 25, "exo installed from source")
@@ -105,7 +110,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Exo do
   end
 
   defp start_exo_process(cluster_id, model, role, peers, leader) do
-    emit_progress(cluster_id, :downloading_model, 30, "Starting exo — model download may take hours for large models...")
+    emit_progress(
+      cluster_id,
+      :downloading_model,
+      30,
+      "Starting exo — model download may take hours for large models..."
+    )
 
     args = build_exo_args(model, role, peers, leader)
     Logger.info("[Exo] starting exo cluster=#{cluster_id} args=#{inspect(args)}")
@@ -145,8 +155,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Exo do
       pct = min(30 + div(attempt * 60, @ready_check_max_attempts), 90)
 
       if rem(attempt, 6) == 0 do
-        emit_progress(cluster_id, :downloading_model, pct,
-          "Waiting for exo to be ready (attempt #{attempt + 1}/#{@ready_check_max_attempts})...")
+        emit_progress(
+          cluster_id,
+          :downloading_model,
+          pct,
+          "Waiting for exo to be ready (attempt #{attempt + 1}/#{@ready_check_max_attempts})..."
+        )
       end
 
       case http_get("http://localhost:#{@exo_port}/v1/models") do

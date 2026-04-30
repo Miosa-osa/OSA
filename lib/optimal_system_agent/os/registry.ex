@@ -193,7 +193,8 @@ defmodule OptimalSystemAgent.OS.Registry do
 
   # --- Persistence ---
 
-  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+  defp config_dir,
+    do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   defp os_dir, do: Path.join(config_dir(), "os")
 

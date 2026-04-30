@@ -91,7 +91,9 @@ defmodule OptimalSystemAgent.Conversations.Debate do
       convergence_history: []
     }
 
-    Logger.info("[Debate] starting — proposition: #{inspect(proposition)} rounds=#{max_rounds} critics=#{length(critics)} voters=#{length(voters)}")
+    Logger.info(
+      "[Debate] starting — proposition: #{inspect(proposition)} rounds=#{max_rounds} critics=#{length(critics)} voters=#{length(voters)}"
+    )
 
     run_debate(initial_state)
   rescue
@@ -136,7 +138,9 @@ defmodule OptimalSystemAgent.Conversations.Debate do
     convergence_delta = compute_convergence(state.average_scores, round_avg)
     state = %{state | convergence_history: state.convergence_history ++ [convergence_delta]}
 
-    Logger.debug("[Debate] round #{round} avg_score=#{Float.round(round_avg, 2)} delta=#{Float.round(convergence_delta, 3)}")
+    Logger.debug(
+      "[Debate] round #{round} avg_score=#{Float.round(round_avg, 2)} delta=#{Float.round(convergence_delta, 3)}"
+    )
 
     cond do
       consensus_met?(state) ->
@@ -144,7 +148,10 @@ defmodule OptimalSystemAgent.Conversations.Debate do
         finish(state)
 
       round > 1 and convergence_delta < @convergence_threshold ->
-        Logger.info("[Debate] converged at round #{round} (delta #{convergence_delta} < #{@convergence_threshold})")
+        Logger.info(
+          "[Debate] converged at round #{round} (delta #{convergence_delta} < #{@convergence_threshold})"
+        )
+
         finish(state)
 
       true ->

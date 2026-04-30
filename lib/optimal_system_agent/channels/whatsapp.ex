@@ -206,15 +206,22 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_pid, _}] -> :ok
+      [{_pid, _}] ->
+        :ok
+
       [] ->
         case DynamicSupervisor.start_child(
                OptimalSystemAgent.SessionSupervisor,
                {Loop, session_id: session_id, channel: :whatsapp}
              ) do
-          {:ok, _} -> :ok
-          {:error, {:already_started, _}} -> :ok
-          {:error, reason} -> Logger.warning("[WhatsApp] Session start failed: #{inspect(reason)}")
+          {:ok, _} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("[WhatsApp] Session start failed: #{inspect(reason)}")
         end
     end
   rescue

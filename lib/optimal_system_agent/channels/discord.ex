@@ -78,7 +78,11 @@ defmodule OptimalSystemAgent.Channels.Discord do
         case validate_token(token) do
           {:ok, bot_info} ->
             username = bot_info["username"] || "unknown"
-            Logger.info("[Discord] Bot connected: #{username}##{bot_info["discriminator"] || "0"} (webhook mode)")
+
+            Logger.info(
+              "[Discord] Bot connected: #{username}##{bot_info["discriminator"] || "0"} (webhook mode)"
+            )
+
             Bus.emit(:channel_connected, %{channel: :discord, username: username})
 
             state = %{
@@ -138,7 +142,8 @@ defmodule OptimalSystemAgent.Channels.Discord do
   defp dispatch_update(update, token) do
     # Support both direct message events and interaction payloads.
     # Webhook message event shape: %{"channel_id" => ..., "content" => ..., "author" => ...}
-    with %{"channel_id" => channel_id, "content" => text} when is_binary(text) and text != "" <- update do
+    with %{"channel_id" => channel_id, "content" => text} when is_binary(text) and text != "" <-
+           update do
       author = update["author"] || %{}
       user_id = author["id"] || channel_id
       # Skip messages from bots (including ourselves) to avoid loops.

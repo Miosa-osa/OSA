@@ -36,17 +36,18 @@ defmodule OptimalSystemAgent.Sandbox.Host do
   def run_file(path, opts \\ []) do
     ext = Path.extname(path)
 
-    command = case ext do
-      ".py" -> "python3 #{path}"
-      ".js" -> "node #{path}"
-      ".ts" -> "npx tsx #{path}"
-      ".rb" -> "ruby #{path}"
-      ".sh" -> "bash #{path}"
-      ".exs" -> "elixir #{path}"
-      ".go" -> "go run #{path}"
-      ".rs" -> "cargo script #{path}"
-      _ -> "sh #{path}"
-    end
+    command =
+      case ext do
+        ".py" -> "python3 #{path}"
+        ".js" -> "node #{path}"
+        ".ts" -> "npx tsx #{path}"
+        ".rb" -> "ruby #{path}"
+        ".sh" -> "bash #{path}"
+        ".exs" -> "elixir #{path}"
+        ".go" -> "go run #{path}"
+        ".rs" -> "cargo script #{path}"
+        _ -> "sh #{path}"
+      end
 
     execute(command, opts)
   end

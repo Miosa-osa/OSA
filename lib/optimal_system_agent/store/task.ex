@@ -12,23 +12,32 @@ defmodule OptimalSystemAgent.Store.Task do
   @valid_statuses ~w(pending leased completed failed)
 
   schema "task_queue" do
-    field :task_id, :string
-    field :agent_id, :string
-    field :payload, :map, default: %{}
-    field :status, :string, default: "pending"
-    field :leased_until, :utc_datetime_usec
-    field :leased_by, :string
-    field :result, :map
-    field :error, :string
-    field :attempts, :integer, default: 0
-    field :max_attempts, :integer, default: 3
-    field :completed_at, :utc_datetime_usec
+    field(:task_id, :string)
+    field(:agent_id, :string)
+    field(:payload, :map, default: %{})
+    field(:status, :string, default: "pending")
+    field(:leased_until, :utc_datetime_usec)
+    field(:leased_by, :string)
+    field(:result, :map)
+    field(:error, :string)
+    field(:attempts, :integer, default: 0)
+    field(:max_attempts, :integer, default: 3)
+    field(:completed_at, :utc_datetime_usec)
     timestamps()
   end
 
   @required [:task_id, :agent_id]
-  @optional [:payload, :status, :leased_until, :leased_by, :result, :error,
-             :attempts, :max_attempts, :completed_at]
+  @optional [
+    :payload,
+    :status,
+    :leased_until,
+    :leased_by,
+    :result,
+    :error,
+    :attempts,
+    :max_attempts,
+    :completed_at
+  ]
 
   @doc "Build a changeset for inserting or updating a task."
   def changeset(task \\ %__MODULE__{}, attrs) do

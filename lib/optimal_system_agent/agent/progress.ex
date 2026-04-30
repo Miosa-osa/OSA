@@ -456,8 +456,10 @@ defmodule OptimalSystemAgent.Agent.Progress do
   defp format_tokens(_), do: "0"
 
   defp agent_status_text(%AgentProgress{status: :completed}), do: "Done"
+
   defp agent_status_text(%AgentProgress{status: :failed, current_action: action})
        when is_binary(action) and action != "", do: "Failed: #{action}"
+
   defp agent_status_text(%AgentProgress{status: :failed}), do: "Failed"
 
   defp agent_status_text(%AgentProgress{current_action: action})

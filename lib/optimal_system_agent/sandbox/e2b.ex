@@ -62,11 +62,17 @@ defmodule OptimalSystemAgent.Sandbox.E2B do
     content = File.read!(path)
     ext = Path.extname(path)
 
-    command = case ext do
-      ".py" -> "cat << 'SCRIPT_EOF' > /tmp/script.py\n#{content}\nSCRIPT_EOF\npython3 /tmp/script.py"
-      ".js" -> "cat << 'SCRIPT_EOF' > /tmp/script.js\n#{content}\nSCRIPT_EOF\nnode /tmp/script.js"
-      _ -> "cat << 'SCRIPT_EOF' > /tmp/script#{ext}\n#{content}\nSCRIPT_EOF\nsh /tmp/script#{ext}"
-    end
+    command =
+      case ext do
+        ".py" ->
+          "cat << 'SCRIPT_EOF' > /tmp/script.py\n#{content}\nSCRIPT_EOF\npython3 /tmp/script.py"
+
+        ".js" ->
+          "cat << 'SCRIPT_EOF' > /tmp/script.js\n#{content}\nSCRIPT_EOF\nnode /tmp/script.js"
+
+        _ ->
+          "cat << 'SCRIPT_EOF' > /tmp/script#{ext}\n#{content}\nSCRIPT_EOF\nsh /tmp/script#{ext}"
+      end
 
     execute(command, opts)
   rescue
@@ -86,7 +92,8 @@ defmodule OptimalSystemAgent.Sandbox.E2B do
     case Req.post("#{@api_url}/sandboxes",
            body: body,
            headers: [{"Authorization", "Bearer #{key}"}, {"Content-Type", "application/json"}],
-           receive_timeout: 30_000) do
+           receive_timeout: 30_000
+         ) do
       {:ok, %{status: s, body: %{"id" => id}}} when s in 200..299 -> {:ok, id}
       {:ok, %{body: body}} -> {:error, "Create sandbox failed: #{inspect(body)}"}
       {:error, e} -> {:error, inspect(e)}
@@ -99,7 +106,8 @@ defmodule OptimalSystemAgent.Sandbox.E2B do
     case Req.post("#{@api_url}/sandboxes/#{sandbox_id}/execute",
            body: body,
            headers: [{"Authorization", "Bearer #{key}"}, {"Content-Type", "application/json"}],
-           receive_timeout: timeout + 5_000) do
+           receive_timeout: timeout + 5_000
+         ) do
       {:ok, %{status: s, body: %{"stdout" => out}}} when s in 200..299 -> {:ok, out}
       {:ok, %{body: body}} -> {:error, "Execute failed: #{inspect(body)}"}
       {:error, e} -> {:error, inspect(e)}
@@ -109,7 +117,9 @@ defmodule OptimalSystemAgent.Sandbox.E2B do
   defp destroy_sandbox(key, sandbox_id) do
     Req.delete("#{@api_url}/sandboxes/#{sandbox_id}",
       headers: [{"Authorization", "Bearer #{key}"}],
-      receive_timeout: 5_000)
+      receive_timeout: 5_000
+    )
+
     :ok
   rescue
     _ -> :ok

@@ -72,7 +72,12 @@ defmodule OptimalSystemAgent.Speculative.Assumption do
   """
   @spec invalidate(t(), String.t()) :: t()
   def invalidate(%__MODULE__{} = assumption, reason \\ "invalidated") do
-    %{assumption | status: :invalidated, checked_at: DateTime.utc_now(), invalidation_reason: reason}
+    %{
+      assumption
+      | status: :invalidated,
+        checked_at: DateTime.utc_now(),
+        invalidation_reason: reason
+    }
   end
 
   # ── Bulk Operations ────────────────────────────────────────────────────────

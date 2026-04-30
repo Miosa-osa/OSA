@@ -51,7 +51,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Agent do
     timeout = Map.get(job, :timeout_ms, @default_timeout_ms)
 
     unless is_binary(prompt) and prompt != "" do
-      reply.({:job_fail, job_id, %{reason: :invalid_prompt, message: "job[:prompt] must be a non-empty string"}})
+      reply.(
+        {:job_fail, job_id,
+         %{reason: :invalid_prompt, message: "job[:prompt] must be a non-empty string"}}
+      )
+
       return()
     end
 
@@ -59,7 +63,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Agent do
 
     opts =
       []
-      |> maybe_put(:working_dir, Map.get(context, :working_dir) || Map.get(context, "working_dir"))
+      |> maybe_put(
+        :working_dir,
+        Map.get(context, :working_dir) || Map.get(context, "working_dir")
+      )
       |> maybe_put(:provider, Map.get(context, :provider) || Map.get(context, "provider"))
       |> maybe_put(:model, Map.get(context, :model) || Map.get(context, "model"))
 

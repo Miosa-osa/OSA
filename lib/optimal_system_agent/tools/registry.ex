@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     list_tools_direct()
     |> Enum.reject(fn tool ->
       builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+
       case Map.get(builtin_tools, tool.name) do
         nil -> false
         mod -> function_exported?(mod, :deferred?, 0) and mod.deferred?()
@@ -67,13 +68,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
       name_score = if String.contains?(String.downcase(tool.name), query_down), do: 2.0, else: 0.0
       desc_down = String.downcase(tool.description)
 
-      keyword_score = Enum.reduce(keywords, 0.0, fn kw, acc ->
-        cond do
-          String.contains?(tool.name, kw) -> acc + 1.5
-          String.contains?(desc_down, kw) -> acc + 1.0
-          true -> acc
-        end
-      end)
+      keyword_score =
+        Enum.reduce(keywords, 0.0, fn kw, acc ->
+          cond do
+            String.contains?(tool.name, kw) -> acc + 1.5
+            String.contains?(desc_down, kw) -> acc + 1.0
+            true -> acc
+          end
+        end)
 
       jaro_score = String.jaro_distance(query_down, String.downcase(tool.name))
 
@@ -167,13 +169,38 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
       mod ->
         case validate_arguments(mod, arguments) do
-          :ok -> mod.execute(arguments)
+          :ok -> dispatch(mod, arguments)
           {:error, _reason} = error -> error
         end
     end
   rescue
     e ->
       {:error, "Tool execution error: #{Exception.message(e)}"}
+  end
+
+  # Routes a tool call through the appropriate execution path. Structured
+  # tools (those exporting `execute/2`) go through `LegacyAdapter.execute/3`,
+  # which runs the full `validate_input → check_permissions → execute`
+  # pipeline with a `UseContext` built from the tool arguments. Flat tools
+  # (only `execute/1`) call directly.
+  defp dispatch(mod, arguments) do
+    if OptimalSystemAgent.Tools.LegacyAdapter.structured?(mod) do
+      ctx = build_minimal_use_context(arguments)
+      OptimalSystemAgent.Tools.LegacyAdapter.execute(mod, arguments, ctx)
+    else
+      mod.execute(arguments)
+    end
+  end
+
+  # Builds a minimal `UseContext` from injected tool arguments. The agent
+  # loop's `ToolExecutor.execute_tool_call/2` injects `__session_id__` into
+  # every call (see `tool_executor.ex:113`); this carries through to the
+  # context so structured tools can identify the session without the agent
+  # loop having to thread an explicit context through every callsite.
+  defp build_minimal_use_context(arguments) do
+    OptimalSystemAgent.Tools.UseContext.new(%{
+      session_id: arguments["__session_id__"] || arguments[:__session_id__]
+    })
   end
 
   @doc """
@@ -377,7 +404,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
   """
   @spec filter_applicable_tools(map()) :: [map()]
   def filter_applicable_tools(context \\ %{}) do
-    Search.filter_applicable_tools(context, list_tools_direct())
+    # Phase 3a: route through `list_active/0` so tools with
+    # `should_defer?/0 == true` (or flat-layout `deferred?/0 == true`)
+    # are excluded from the initial system prompt. Deferred tools are
+    # discoverable mid-turn via the `tool_search` tool, which loads
+    # their full schemas on demand. Mirrors the lazy-loading pattern at
+    # `src/tools/ToolSearchTool/prompt.ts:62-117` in Claude Code.
+    Search.filter_applicable_tools(context, list_active())
   end
 
   @doc """
@@ -499,47 +532,71 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   defp load_builtin_tools do
     %{
-      "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead,
-      "file_write" => OptimalSystemAgent.Tools.Builtins.FileWrite,
-      "file_edit" => OptimalSystemAgent.Tools.Builtins.FileEdit,
-      "file_glob" => OptimalSystemAgent.Tools.Builtins.FileGlob,
-      "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep,
-      "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList,
-      "shell_execute" => OptimalSystemAgent.Tools.Builtins.ShellExecute,
-      "task_write" => OptimalSystemAgent.Tools.Builtins.TaskWrite,
-      "ask_user" => OptimalSystemAgent.Tools.Builtins.AskUser,
-      "memory_save" => OptimalSystemAgent.Tools.Builtins.MemorySave,
-      "memory_recall" => OptimalSystemAgent.Tools.Builtins.MemoryRecall,
-      "session_search" => OptimalSystemAgent.Tools.Builtins.SessionSearch,
-      "git" => OptimalSystemAgent.Tools.Builtins.Git,
-      "multi_file_edit" => OptimalSystemAgent.Tools.Builtins.MultiFileEdit,
-      "web_fetch" => OptimalSystemAgent.Tools.Builtins.WebFetch,
-      "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch,
-      "download" => OptimalSystemAgent.Tools.Builtins.Download,
-      "code_symbols" => OptimalSystemAgent.Tools.Builtins.CodeSymbols,
+      # ── Structured-layout tools (per-tool directory) ───────────────────
+      "file_read" => OptimalSystemAgent.Tools.Builtins.FileRead.Tool,
+      "file_write" => OptimalSystemAgent.Tools.Builtins.FileWrite.Tool,
+      "file_edit" => OptimalSystemAgent.Tools.Builtins.FileEdit.Tool,
+      "file_glob" => OptimalSystemAgent.Tools.Builtins.FileGlob.Tool,
+      "file_grep" => OptimalSystemAgent.Tools.Builtins.FileGrep.Tool,
+      "dir_list" => OptimalSystemAgent.Tools.Builtins.DirList.Tool,
+      "shell_execute" => OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool,
+      "task_write" => OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool,
+      "memory_save" => OptimalSystemAgent.Tools.Builtins.MemorySave.Tool,
+      "memory_recall" => OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool,
+      "git" => OptimalSystemAgent.Tools.Builtins.Git.Tool,
+      "web_fetch" => OptimalSystemAgent.Tools.Builtins.WebFetch.Tool,
+      "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch.Tool,
+      "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool,
+      "cron" => OptimalSystemAgent.Tools.Builtins.Cron.Tool,
+
+      # ── New companion tools (Pillar F: scheduling primitives) ──────────
+      "sleep" => OptimalSystemAgent.Tools.Builtins.Sleep.Tool,
+      "monitor" => OptimalSystemAgent.Tools.Builtins.Monitor.Tool,
+      "remote_trigger" => OptimalSystemAgent.Tools.Builtins.RemoteTrigger.Tool,
+
+      # ── Kairos proactive tools ─────────────────────────────────────────
+      "brief" => OptimalSystemAgent.Tools.Builtins.Brief.Tool,
+      "push_notification" => OptimalSystemAgent.Tools.Builtins.PushNotification.Tool,
+      "subscribe_pr" => OptimalSystemAgent.Tools.Builtins.SubscribePr.Tool,
+      "send_user_file" => OptimalSystemAgent.Tools.Builtins.SendUserFile.Tool,
+
+      # ── Multi-agent + orchestration ────────────────────────────────────
+      "delegate" => OptimalSystemAgent.Tools.Builtins.Delegate.Tool,
+      "list_agents" => OptimalSystemAgent.Tools.Builtins.ListAgents.Tool,
+      "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent.Tool,
+      "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks.Tool,
+      "message_agent" => OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool,
+      "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents.Tool,
+
+      # ── Peer / cross-team coordination ─────────────────────────────────
+      "peer_review" => OptimalSystemAgent.Tools.Builtins.PeerReview.Tool,
+      "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion.Tool,
+      "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask.Tool,
+      "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery.Tool,
+
+      # ── Comms / interaction ────────────────────────────────────────────
+      "ask_user" => OptimalSystemAgent.Tools.Builtins.AskUser.Tool,
+      "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage.Tool,
+      "config" => OptimalSystemAgent.Tools.Builtins.Config.Tool,
+
+      # ── Task management ────────────────────────────────────────────────
+      "task_stop" => OptimalSystemAgent.Tools.Builtins.TaskStop.Tool,
+      "task_output" => OptimalSystemAgent.Tools.Builtins.TaskOutput.Tool,
+      "session_search" => OptimalSystemAgent.Tools.Builtins.SessionSearch.Tool,
+
+      # ── Code / utility ─────────────────────────────────────────────────
+      "repl" => OptimalSystemAgent.Tools.Builtins.REPL.Tool,
+      "code_symbols" => OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool,
+      "multi_file_edit" => OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool,
+      "download" => OptimalSystemAgent.Tools.Builtins.Download.Tool,
+
+      # ── Flat-layout tools (pending migration) ──────────────────────────
       "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
       "list_skills" => OptimalSystemAgent.Tools.Builtins.ListSkills,
-      "delegate" => OptimalSystemAgent.Tools.Builtins.Delegate,
-      "list_agents" => OptimalSystemAgent.Tools.Builtins.ListAgents,
-      "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent,
-      "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks,
-      "message_agent" => OptimalSystemAgent.Tools.Builtins.MessageAgent,
       "computer_use" => OptimalSystemAgent.Tools.Builtins.ComputerUse,
       "verify_loop" => OptimalSystemAgent.Verification.Tools.VerifyLoop,
       "spawn_conversation" => OptimalSystemAgent.Conversations.Tools.SpawnConversation,
-      "start_speculative" => OptimalSystemAgent.Speculative.Tools.StartSpeculative,
-      "peer_review" => OptimalSystemAgent.Tools.Builtins.PeerReview,
-      "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion,
-      "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask,
-      "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery,
-      "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch,
-      "send_message" => OptimalSystemAgent.Tools.Builtins.SendMessage,
-      "mixture_of_agents" => OptimalSystemAgent.Tools.Builtins.MixtureOfAgents,
-      "repl" => OptimalSystemAgent.Tools.Builtins.REPL,
-      "cron" => OptimalSystemAgent.Tools.Builtins.Cron,
-      "config" => OptimalSystemAgent.Tools.Builtins.Config,
-      "task_stop" => OptimalSystemAgent.Tools.Builtins.TaskStop,
-      "task_output" => OptimalSystemAgent.Tools.Builtins.TaskOutput
+      "start_speculative" => OptimalSystemAgent.Speculative.Tools.StartSpeculative
     }
   end
 

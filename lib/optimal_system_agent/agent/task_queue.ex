@@ -136,7 +136,11 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
       end
 
     count = map_size(state.tasks)
-    Logger.info("[Agent.TaskQueue] Started — #{count} task(s) recovered, reap interval #{div(@reap_interval, 1000)}s")
+
+    Logger.info(
+      "[Agent.TaskQueue] Started — #{count} task(s) recovered, reap interval #{div(@reap_interval, 1000)}s"
+    )
+
     {:ok, state}
   end
 
@@ -420,7 +424,10 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             %{state | tasks: Map.put(state.tasks, task.task_id, task)}
 
           {:error, changeset} ->
-            Logger.warning("[Agent.TaskQueue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}")
+            Logger.warning(
+              "[Agent.TaskQueue] DB insert failed for #{task.task_id}: #{inspect(changeset.errors)}"
+            )
+
             %{state | tasks: Map.put(state.tasks, task.task_id, task)}
         end
       rescue
@@ -460,7 +467,10 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
           state
       catch
         :exit, reason ->
-          Logger.warning("[Agent.TaskQueue] DB update exit for #{task.task_id}: #{inspect(reason)}")
+          Logger.warning(
+            "[Agent.TaskQueue] DB update exit for #{task.task_id}: #{inspect(reason)}"
+          )
+
           state
       end
     else

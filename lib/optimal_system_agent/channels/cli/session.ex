@@ -214,17 +214,21 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
     request_id = System.unique_integer([:positive, :monotonic])
 
-    :ets.insert(:cli_active_request, {session_id, %{
-      request_id: request_id,
-      spinner: spinner,
-      tool_ref: tool_ref,
-      cu_ref: cu_ref,
-      llm_ref: llm_ref,
-      stream_ref: stream_ref,
-      streaming_state: streaming_state,
-      input: input,
-      opts: opts
-    }})
+    :ets.insert(
+      :cli_active_request,
+      {session_id,
+       %{
+         request_id: request_id,
+         spinner: spinner,
+         tool_ref: tool_ref,
+         cu_ref: cu_ref,
+         llm_ref: llm_ref,
+         stream_ref: stream_ref,
+         streaming_state: streaming_state,
+         input: input,
+         opts: opts
+       }}
+    )
 
     Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
       result = Loop.process_message(session_id, input, opts)
@@ -260,7 +264,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
         if was_streamed, do: IO.write("\n")
         unless was_streamed, do: Renderer.print_response(response)
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
+
+        Renderer.show_status_line(
+          elapsed_ms,
+          tool_count,
+          total_tokens,
+          cost_from_tokens(total_tokens)
+        )
+
         Renderer.print_separator()
 
       {:plan, plan_text} ->
@@ -321,14 +332,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
 
   def handle_agent_response(session_id, result, req_id) do
     case :ets.lookup(:cli_active_request, session_id) do
-      [{^session_id,
-        %{
-          request_id: ^req_id,
-          spinner: spinner,
-          tool_ref: tool_ref,
-          llm_ref: llm_ref,
-          input: original_input
-        } = req}] ->
+      [
+        {^session_id,
+         %{
+           request_id: ^req_id,
+           spinner: spinner,
+           tool_ref: tool_ref,
+           llm_ref: llm_ref,
+           input: original_input
+         } = req}
+      ] ->
         Bus.unregister_handler(:tool_call, tool_ref)
         Bus.unregister_handler(:llm_response, llm_ref)
         if cu_ref = req[:cu_ref], do: Bus.unregister_handler(:tool_result, cu_ref)
@@ -354,13 +367,23 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
               Renderer.print_response(response)
             end
 
-            Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
+            Renderer.show_status_line(
+              elapsed_ms,
+              tool_count,
+              total_tokens,
+              cost_from_tokens(total_tokens)
+            )
+
             Renderer.print_separator()
 
           {:plan, plan_text} ->
             {elapsed_ms, _tool_count, total_tokens} = Spinner.stop(spinner)
             Renderer.show_status_line(elapsed_ms, 0, total_tokens, cost_from_tokens(total_tokens))
-            :ets.insert(:cli_active_request, {:pending_plan, session_id, plan_text, original_input})
+
+            :ets.insert(
+              :cli_active_request,
+              {:pending_plan, session_id, plan_text, original_input}
+            )
 
           {:error, reason} ->
             Spinner.stop(spinner)
@@ -401,7 +424,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       {:ok, response} ->
         {elapsed_ms, tool_count, total_tokens} = Spinner.stop(spinner)
         Renderer.print_response(response)
-        Renderer.show_status_line(elapsed_ms, tool_count, total_tokens, cost_from_tokens(total_tokens))
+
+        Renderer.show_status_line(
+          elapsed_ms,
+          tool_count,
+          total_tokens,
+          cost_from_tokens(total_tokens)
+        )
+
         Renderer.print_separator()
         :executed
 
@@ -453,10 +483,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       Bus.register_handler(:tool_call, fn payload ->
         if Process.alive?(spinner) do
           case payload do
-            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
-            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
-            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
-            _ -> :ok
+            %{name: n, phase: :start, args: a} ->
+              Spinner.update(spinner, {:tool_start, n, a || ""})
+
+            %{name: n, phase: :start} ->
+              Spinner.update(spinner, {:tool_start, n, ""})
+
+            %{name: n, phase: :end, duration_ms: ms} ->
+              Spinner.update(spinner, {:tool_end, n, ms})
+
+            _ ->
+              :ok
           end
         end
       end)
@@ -498,10 +535,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       Bus.register_handler(:tool_call, fn payload ->
         if Process.alive?(spinner) do
           case payload do
-            %{name: n, phase: :start, args: a} -> Spinner.update(spinner, {:tool_start, n, a || ""})
-            %{name: n, phase: :start} -> Spinner.update(spinner, {:tool_start, n, ""})
-            %{name: n, phase: :end, duration_ms: ms} -> Spinner.update(spinner, {:tool_end, n, ms})
-            _ -> :ok
+            %{name: n, phase: :start, args: a} ->
+              Spinner.update(spinner, {:tool_start, n, a || ""})
+
+            %{name: n, phase: :start} ->
+              Spinner.update(spinner, {:tool_start, n, ""})
+
+            %{name: n, phase: :end, duration_ms: ms} ->
+              Spinner.update(spinner, {:tool_end, n, ms})
+
+            _ ->
+              :ok
           end
         end
       end)
@@ -531,6 +575,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
   # ── Private: Cost Estimation ─────────────────────────────────────────
 
   defp cost_from_tokens(0), do: nil
+
   defp cost_from_tokens(total) when total > 0 do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :anthropic)
     Budget.calculate_cost(provider, round(total * 0.7), round(total * 0.3))

@@ -58,7 +58,10 @@ defmodule OptimalSystemAgent.Workspace.TaskJournal do
         :ok
 
       {:error, reason} ->
-        Logger.warning("[TaskJournal] Failed to append #{action} for task #{record.task_id}: #{inspect(reason)}")
+        Logger.warning(
+          "[TaskJournal] Failed to append #{action} for task #{record.task_id}: #{inspect(reason)}"
+        )
+
         {:error, reason}
     end
   end
@@ -66,8 +69,11 @@ defmodule OptimalSystemAgent.Workspace.TaskJournal do
   def append(workspace_id, %{action: action} = entry) do
     # Try to coerce string actions to atoms for forward-compat
     case safe_to_action_atom(action) do
-      {:ok, atom} -> append(workspace_id, %{entry | action: atom})
-      :error -> {:error, "Unknown journal action: #{inspect(action)}. Valid: #{inspect(@valid_actions)}"}
+      {:ok, atom} ->
+        append(workspace_id, %{entry | action: atom})
+
+      :error ->
+        {:error, "Unknown journal action: #{inspect(action)}. Valid: #{inspect(@valid_actions)}"}
     end
   end
 

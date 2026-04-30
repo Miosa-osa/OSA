@@ -120,10 +120,14 @@ defmodule OptimalSystemAgent.Memory.Learning do
 
   @impl true
   def handle_cast({:correction, wrong, right}, state) do
-    case Observation.new(%{type: :correction, tool_name: "correction",
-                           context: %{what_was_wrong: wrong, what_is_right: right}}) do
+    case Observation.new(%{
+           type: :correction,
+           tool_name: "correction",
+           context: %{what_was_wrong: wrong, what_is_right: right}
+         }) do
       {:ok, obs} ->
         append_to_ets(obs)
+
         Consolidator.upsert(%{
           description: "Correction: #{String.slice(wrong, 0, 80)}",
           trigger: "correction:#{trigger_key(wrong)}",
@@ -143,12 +147,16 @@ defmodule OptimalSystemAgent.Memory.Learning do
   def handle_cast({:error, tool_name, error_message, context}, state) do
     {category, subcategory, suggestion} = VIGIL.classify(error_message)
 
-    case Observation.new(%{type: :failure, tool_name: tool_name,
-                           error_message: error_message,
-                           context: Map.merge(context, %{
-                             vigil_category: category,
-                             vigil_subcategory: subcategory
-                           })}) do
+    case Observation.new(%{
+           type: :failure,
+           tool_name: tool_name,
+           error_message: error_message,
+           context:
+             Map.merge(context, %{
+               vigil_category: category,
+               vigil_subcategory: subcategory
+             })
+         }) do
       {:ok, obs} ->
         append_to_ets(obs)
         capture_error_pattern(tool_name, category, subcategory, suggestion)

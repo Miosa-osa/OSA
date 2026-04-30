@@ -262,7 +262,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
     |> String.split("\n")
     |> Enum.count(fn line ->
       trimmed = String.trim(line)
-      is_bullet = Regex.match?(~r/^[-*•]\s+\S/, trimmed) or Regex.match?(~r/^\d+[\.\)]\s+\S/, trimmed)
+
+      is_bullet =
+        Regex.match?(~r/^[-*•]\s+\S/, trimmed) or Regex.match?(~r/^\d+[\.\)]\s+\S/, trimmed)
+
       is_substantial = String.length(trimmed) >= 15
       not_indented = not Regex.match?(~r/^\s{2,}[-*•]/, line)
       is_bullet and is_substantial and not_indented
@@ -288,8 +291,13 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
     messages
     |> Enum.any?(fn
       %{role: "user", content: content} when is_binary(content) ->
-        Regex.match?(~r/\b(fix|create|build|implement|add|update|change|write|deploy|test|debug|refactor|delete|remove|find|search|check|run|install|configure)\b/i, content)
-      _ -> false
+        Regex.match?(
+          ~r/\b(fix|create|build|implement|add|update|change|write|deploy|test|debug|refactor|delete|remove|find|search|check|run|install|configure)\b/i,
+          content
+        )
+
+      _ ->
+        false
     end)
   end
 
@@ -374,8 +382,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
 
   # Compiled case-insensitive regex for each dead phrase, paired with its replacement.
   @dead_phrase_patterns Enum.map(@dead_phrases, fn {phrase, replacement} ->
-    {Regex.compile!("\\b" <> Regex.escape(phrase) <> "\\b", "i"), replacement}
-  end)
+                          {Regex.compile!("\\b" <> Regex.escape(phrase) <> "\\b", "i"),
+                           replacement}
+                        end)
 
   @doc """
   Returns true if the response contains any of the banned dead phrases

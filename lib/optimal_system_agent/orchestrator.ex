@@ -76,6 +76,7 @@ defmodule OptimalSystemAgent.Orchestrator do
         tasks =
           Enum.map(indexed_configs, fn {config, original_idx} ->
             config = Map.put(config, :parent_session_id, parent_id)
+
             {original_idx,
              Task.Supervisor.async_nolink(
                OptimalSystemAgent.TaskSupervisor,
@@ -92,6 +93,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               catch
                 :exit, {:timeout, _} ->
                   {:ok, "[Agent timed out after 10 minutes]"}
+
                 :exit, reason ->
                   {:ok, "[Agent crashed: #{inspect(reason)}]"}
               end
@@ -107,6 +109,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Emit synthesizing
     completed_count = Enum.count(all_results, fn r -> match?({:ok, _}, r) end)
+
     emit_event(parent_id, %{
       event: "orchestrator_synthesizing",
       agent_count: completed_count
@@ -132,8 +135,10 @@ defmodule OptimalSystemAgent.Orchestrator do
     tier = Map.get(config, :tier, :specialist)
 
     # Resolve model
-    provider = Map.get(config, :provider) ||
-      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    provider =
+      Map.get(config, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
     model = Map.get(config, :model) || Tier.model_for(tier, provider)
     max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier)
 
@@ -142,7 +147,9 @@ defmodule OptimalSystemAgent.Orchestrator do
     subagent_id = "agent:#{parent_id}:#{subagent_num}"
     task_preview = String.slice(task, 0, 80)
 
-    Logger.info("[Orchestrator] Spawning subagent #{subagent_id} role=#{role} tier=#{tier} model=#{model}")
+    Logger.info(
+      "[Orchestrator] Spawning subagent #{subagent_id} role=#{role} tier=#{tier} model=#{model}"
+    )
 
     # Fire subagent_start hook (can block spawning)
     hook_payload = %{
@@ -153,6 +160,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       model: model,
       task_preview: task_preview
     }
+
     try do
       Hooks.run(:subagent_start, hook_payload)
     rescue
@@ -175,7 +183,9 @@ defmodule OptimalSystemAgent.Orchestrator do
       [{old_pid, _}] ->
         Logger.warning("[Orchestrator] Cleaning up stale subagent #{subagent_id}")
         safely_terminate(old_pid)
-      [] -> :ok
+
+      [] ->
+        :ok
     end
 
     # Ensure per-agent memory directory exists (persistent across sessions)
@@ -190,7 +200,9 @@ defmodule OptimalSystemAgent.Orchestrator do
         {:ok, content} ->
           lines = String.split(content, "\n") |> Enum.take(200) |> Enum.join("\n")
           "\n\n## Agent Memory (#{role})\n#{lines}"
-        {:error, _} -> ""
+
+        {:error, _} ->
+          ""
       end
 
     # Build system prompt with agent memory appended
@@ -202,14 +214,19 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Worktree isolation — create an isolated git worktree for this agent
     isolation = Map.get(config, :isolation)
+
     worktree_info =
       if isolation == :worktree do
         case OptimalSystemAgent.Agent.Worktree.create(subagent_id) do
           {:ok, info} ->
             Logger.info("[Orchestrator] Worktree created for #{subagent_id} at #{info.path}")
             info
+
           {:error, reason} ->
-            Logger.warning("[Orchestrator] Worktree creation failed: #{reason}, running without isolation")
+            Logger.warning(
+              "[Orchestrator] Worktree creation failed: #{reason}, running without isolation"
+            )
+
             nil
         end
       else
@@ -218,8 +235,11 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Set working directory — worktree path if isolated, otherwise default
     working_dir =
-      if worktree_info, do: worktree_info.path,
-      else: Map.get(config, :working_dir) || Application.get_env(:optimal_system_agent, :working_dir)
+      if worktree_info,
+        do: worktree_info.path,
+        else:
+          Map.get(config, :working_dir) ||
+            Application.get_env(:optimal_system_agent, :working_dir)
 
     # Spawn the subagent Loop
     subagent_opts = [
@@ -251,10 +271,13 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         # Fire subagent_stop hook (learning capture, telemetry)
         {tool_uses_final, tokens_final} = get_subagent_stats(subagent_id)
-        hook_result = case result do
-          {_, v} -> v
-          other -> inspect(other)
-        end
+
+        hook_result =
+          case result do
+            {_, v} -> v
+            other -> inspect(other)
+          end
+
         try do
           Hooks.run(:subagent_stop, %{
             subagent_id: subagent_id,
@@ -289,6 +312,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       {:error, reason} ->
         stop_event_forwarder(forwarder)
         Logger.error("[Orchestrator] Failed to start subagent #{subagent_id}: #{inspect(reason)}")
+
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
@@ -297,6 +321,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: 0,
           tokens_used: 0
         })
+
         {:error, reason}
     end
   end
@@ -339,9 +364,19 @@ defmodule OptimalSystemAgent.Orchestrator do
             result: String.slice(response, 0, 500),
             duration_ms: duration_ms
           })
-          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
-            {:osa_event, %{type: :background_agent_completed, agent_id: subagent_id, role: role,
-              result: String.slice(response, 0, 500), duration_ms: duration_ms}})
+
+          Phoenix.PubSub.broadcast(
+            OptimalSystemAgent.PubSub,
+            "osa:session:#{parent_id}",
+            {:osa_event,
+             %{
+               type: :background_agent_completed,
+               agent_id: subagent_id,
+               role: role,
+               result: String.slice(response, 0, 500),
+               duration_ms: duration_ms
+             }}
+          )
 
         {:error, reason} ->
           Bus.emit(:system_event, %{
@@ -352,9 +387,19 @@ defmodule OptimalSystemAgent.Orchestrator do
             error: inspect(reason),
             duration_ms: duration_ms
           })
-          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{parent_id}",
-            {:osa_event, %{type: :background_agent_failed, agent_id: subagent_id, role: role,
-              error: inspect(reason), duration_ms: duration_ms}})
+
+          Phoenix.PubSub.broadcast(
+            OptimalSystemAgent.PubSub,
+            "osa:session:#{parent_id}",
+            {:osa_event,
+             %{
+               type: :background_agent_failed,
+               agent_id: subagent_id,
+               role: role,
+               error: inspect(reason),
+               duration_ms: duration_ms
+             }}
+          )
       end
     end)
 
@@ -388,7 +433,10 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     case result do
       {:ok, response} when is_binary(response) ->
-        Logger.info("[Orchestrator] Subagent #{subagent_id} completed in #{duration_ms}ms (#{tool_uses} tools, #{tokens_used} tokens)")
+        Logger.info(
+          "[Orchestrator] Subagent #{subagent_id} completed in #{duration_ms}ms (#{tool_uses} tools, #{tokens_used} tokens)"
+        )
+
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
@@ -396,6 +444,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: tool_uses,
           tokens_used: tokens_used
         })
+
         {:ok, response}
 
       {:error, reason} ->
@@ -407,6 +456,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: tool_uses,
           tokens_used: tokens_used
         })
+
         {:ok, "[Subagent #{role} failed: #{reason}]"}
 
       other ->
@@ -418,6 +468,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: tool_uses,
           tokens_used: tokens_used
         })
+
         {:ok, inspect(other)}
     end
   end
@@ -459,8 +510,9 @@ defmodule OptimalSystemAgent.Orchestrator do
     receive do
       # Tool call START — update action line with what the tool is doing
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase, args: args}}
-          when phase in ["start", :start] ->
+      when phase in ["start", :start] ->
         action = format_action(tool_name, args)
+
         emit_event(parent_id, %{
           event: "orchestrator_agent_progress",
           agent_name: subagent_id,
@@ -469,12 +521,14 @@ defmodule OptimalSystemAgent.Orchestrator do
           tokens_used: tool_count * 500,
           description: ""
         })
+
         forwarder_loop(subagent_id, parent_id, role, tool_count)
 
       # Tool call END — increment counter
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase}}
-          when phase in ["end", :end] ->
+      when phase in ["end", :end] ->
         new_count = tool_count + 1
+
         emit_event(parent_id, %{
           event: "orchestrator_agent_progress",
           agent_name: subagent_id,
@@ -483,6 +537,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tokens_used: new_count * 500,
           description: ""
         })
+
         forwarder_loop(subagent_id, parent_id, role, new_count)
 
       _ ->
@@ -497,17 +552,20 @@ defmodule OptimalSystemAgent.Orchestrator do
   # e.g., "file_read /Users/roberto/..." or "web_search Rust TUI frameworks"
   defp format_action(tool_name, args) when is_binary(args) do
     hint = String.slice(args, 0, 60)
+
     if hint == "" or hint == "{}" do
       to_string(tool_name)
     else
       "#{tool_name}: #{hint}"
     end
   end
+
   defp format_action(tool_name, _), do: to_string(tool_name)
 
   defp stop_event_forwarder({:ok, pid}) when is_pid(pid) do
     Process.exit(pid, :normal)
   end
+
   defp stop_event_forwarder(_), do: :ok
 
   defp safely_terminate(pid) do

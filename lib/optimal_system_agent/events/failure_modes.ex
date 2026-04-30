@@ -14,7 +14,13 @@ defmodule OptimalSystemAgent.Events.FailureModes do
           | :feedback_failure
           | :adversarial_noise
 
-  @signal_dimensions [:signal_mode, :signal_genre, :signal_type, :signal_format, :signal_structure]
+  @signal_dimensions [
+    :signal_mode,
+    :signal_genre,
+    :signal_type,
+    :signal_format,
+    :signal_structure
+  ]
 
   @doc "Detect all Signal Theory failure modes present in the event. Returns a list of {mode_atom, description} tuples."
   @spec detect(struct()) :: [{failure_mode(), String.t()}]
@@ -56,16 +62,18 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     size = byte_size(inspect(event.data, limit: :infinity, printable_limit: :infinity))
 
     if size > 100_000 do
-      [{:bandwidth_overload,
-        "Event data exceeds bandwidth limit: #{size} bytes (limit: 100,000)"} | acc]
+      [
+        {:bandwidth_overload,
+         "Event data exceeds bandwidth limit: #{size} bytes (limit: 100,000)"}
+        | acc
+      ]
     else
       acc
     end
   end
 
   defp check_fidelity_failure(acc, %{signal_sn: sn}) when is_number(sn) and sn < 0.3 do
-    [{:fidelity_failure,
-      "Signal S/N ratio #{sn} is below acceptable threshold of 0.3"} | acc]
+    [{:fidelity_failure, "Signal S/N ratio #{sn} is below acceptable threshold of 0.3"} | acc]
   end
 
   defp check_fidelity_failure(acc, _event), do: acc
@@ -76,8 +84,7 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     set_count = Enum.count(@signal_dimensions, &(Map.get(event, &1) != nil))
 
     if set_count == 0 do
-      [{:variety_failure,
-        "No signal dimensions are classified — Signal variety is zero"} | acc]
+      [{:variety_failure, "No signal dimensions are classified — Signal variety is zero"} | acc]
     else
       acc
     end
@@ -87,8 +94,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     set_count = Enum.count(@signal_dimensions, &(Map.get(event, &1) != nil))
 
     if set_count > 0 and set_count < length(@signal_dimensions) do
-      [{:structure_failure,
-        "Partial signal classification: #{set_count}/#{length(@signal_dimensions)} dimensions set"} | acc]
+      [
+        {:structure_failure,
+         "Partial signal classification: #{set_count}/#{length(@signal_dimensions)} dimensions set"}
+        | acc
+      ]
     else
       acc
     end
@@ -100,8 +110,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     inferred = infer_genre(event.type)
 
     if inferred != :chat and event.signal_genre != inferred do
-      [{:genre_mismatch,
-        "Declared genre :#{event.signal_genre} contradicts inferred genre :#{inferred} from event type #{inspect(event.type)}"} | acc]
+      [
+        {:genre_mismatch,
+         "Declared genre :#{event.signal_genre} contradicts inferred genre :#{inferred} from event type #{inspect(event.type)}"}
+        | acc
+      ]
     else
       acc
     end
@@ -123,8 +136,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
 
   defp check_herniation_failure(acc, %{parent_id: parent_id, correlation_id: nil})
        when not is_nil(parent_id) do
-    [{:herniation_failure,
-      "Event has parent_id #{inspect(parent_id)} but no correlation_id — structural context is broken"} | acc]
+    [
+      {:herniation_failure,
+       "Event has parent_id #{inspect(parent_id)} but no correlation_id — structural context is broken"}
+      | acc
+    ]
   end
 
   defp check_herniation_failure(acc, _event), do: acc
@@ -133,8 +149,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     ext_count = map_size(event.extensions || %{})
 
     if ext_count > 20 do
-      [{:bridge_failure,
-        "Extensions map has #{ext_count} keys (limit: 20) — shared context exceeds channel capacity"} | acc]
+      [
+        {:bridge_failure,
+         "Extensions map has #{ext_count} keys (limit: 20) — shared context exceeds channel capacity"}
+        | acc
+      ]
     else
       acc
     end
@@ -144,8 +163,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     age_seconds = DateTime.diff(DateTime.utc_now(), event.time, :second)
 
     if age_seconds > 86_400 do
-      [{:decay_failure,
-        "Event is #{age_seconds}s old (limit: 86,400s / 24h) — Signal has decayed"} | acc]
+      [
+        {:decay_failure,
+         "Event is #{age_seconds}s old (limit: 86,400s / 24h) — Signal has decayed"}
+        | acc
+      ]
     else
       acc
     end
@@ -154,8 +176,10 @@ defmodule OptimalSystemAgent.Events.FailureModes do
   # Wiener violations
 
   defp check_feedback_failure(acc, %{signal_type: :direct, correlation_id: nil}) do
-    [{:feedback_failure,
-      "Direct signal has no correlation_id — feedback loop cannot close"} | acc]
+    [
+      {:feedback_failure, "Direct signal has no correlation_id — feedback loop cannot close"}
+      | acc
+    ]
   end
 
   defp check_feedback_failure(acc, _event), do: acc
@@ -166,8 +190,11 @@ defmodule OptimalSystemAgent.Events.FailureModes do
     ext_count = map_size(event.extensions || %{})
 
     if ext_count > 50 do
-      [{:adversarial_noise,
-        "Extensions map has #{ext_count} keys (threshold: 50) — possible adversarial noise injection"} | acc]
+      [
+        {:adversarial_noise,
+         "Extensions map has #{ext_count} keys (threshold: 50) — possible adversarial noise injection"}
+        | acc
+      ]
     else
       acc
     end

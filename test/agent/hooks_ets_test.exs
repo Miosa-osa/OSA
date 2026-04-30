@@ -28,8 +28,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       if not available, do: flunk("Hooks GenServer not running")
 
       table = Hooks.hooks_table_name()
+
       assert :ets.whereis(table) != :undefined,
-        "ETS table #{inspect(table)} should exist"
+             "ETS table #{inspect(table)} should exist"
     end
 
     @tag :hooks_ets
@@ -40,9 +41,10 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       info = :ets.info(table)
 
       assert Keyword.get(info, :type) == :bag,
-        "ETS table should be of type :bag"
+             "ETS table should be of type :bag"
+
       assert Keyword.get(info, :read_concurrency) == true,
-        "ETS table should have read_concurrency enabled"
+             "ETS table should have read_concurrency enabled"
     end
 
     @tag :hooks_ets
@@ -53,7 +55,7 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       info = :ets.info(table)
 
       assert Keyword.get(info, :protection) == :public,
-        "ETS table should be public for caller-process reads"
+             "ETS table should be public for caller-process reads"
     end
   end
 
@@ -75,8 +77,9 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       entries = :ets.lookup(table, :post_response)
 
       names = Enum.map(entries, fn {_event, name, _priority, _handler} -> name end)
+
       assert hook_name in names,
-        "Hook #{hook_name} should appear in ETS after registration"
+             "Hook #{hook_name} should appear in ETS after registration"
     end
 
     @tag :hooks_ets
@@ -104,7 +107,12 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
     test "run/2 returns {:ok, payload} for passthrough hooks", %{available: available} do
       if not available, do: flunk("Hooks GenServer not running")
 
-      payload = %{tool_name: "file_read", arguments: %{"path" => "/tmp/test.txt"}, session_id: "ets_test"}
+      payload = %{
+        tool_name: "file_read",
+        arguments: %{"path" => "/tmp/test.txt"},
+        session_id: "ets_test"
+      }
+
       result = Hooks.run(:pre_tool_use, payload)
 
       assert {:ok, returned} = result
@@ -112,17 +120,23 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
     end
 
     @tag :hooks_ets
-    test "run/2 does not go through GenServer call (caller PID executes hooks)", %{available: available} do
+    test "run/2 does not go through GenServer call (caller PID executes hooks)", %{
+      available: available
+    } do
       if not available, do: flunk("Hooks GenServer not running")
 
       # Register a hook that records the executing process PID
       hook_name = "pid_tracker_#{System.unique_integer([:positive])}"
       test_pid = self()
 
-      :ok = Hooks.register(:pre_compact, hook_name, fn payload ->
-        send(test_pid, {:hook_executed_in, self()})
-        {:ok, payload}
-      end, priority: 50)
+      :ok =
+        Hooks.register(
+          :pre_compact,
+          hook_name,
+          fn payload ->
+            send(test_pid, {:hook_executed_in, self()})
+            {:ok, payload}
+          end, priority: 50)
 
       Process.sleep(50)
 
@@ -131,7 +145,7 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       assert_receive {:hook_executed_in, executing_pid}, 1000
       # The hook should execute in the CALLER's process (self()), not the GenServer
       assert executing_pid == self(),
-        "Hook should execute in caller process #{inspect(self())}, but ran in #{inspect(executing_pid)}"
+             "Hook should execute in caller process #{inspect(self())}, but ran in #{inspect(executing_pid)}"
     end
   end
 
@@ -149,12 +163,16 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       for {priority, label} <- [{10, "first"}, {50, "second"}, {90, "third"}] do
         hook_name = "order_test_#{label}_#{System.unique_integer([:positive])}"
 
-        :ok = Hooks.register(:pre_response, hook_name, fn payload ->
-          idx = :counters.get(counter, 1)
-          :counters.add(counter, 1, 1)
-          :ets.insert(execution_order, {idx, label})
-          {:ok, payload}
-        end, priority: priority)
+        :ok =
+          Hooks.register(
+            :pre_response,
+            hook_name,
+            fn payload ->
+              idx = :counters.get(counter, 1)
+              :counters.add(counter, 1, 1)
+              :ets.insert(execution_order, {idx, label})
+              {:ok, payload}
+            end, priority: priority)
       end
 
       Process.sleep(50)
@@ -176,13 +194,17 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
 
       hook_name = "ets_blocker_#{System.unique_integer([:positive])}"
 
-      :ok = Hooks.register(:pre_tool_use, hook_name, fn payload ->
-        if payload.tool_name == "ets_blocked_tool" do
-          {:block, "ETS test block"}
-        else
-          {:ok, payload}
-        end
-      end, priority: 1)
+      :ok =
+        Hooks.register(
+          :pre_tool_use,
+          hook_name,
+          fn payload ->
+            if payload.tool_name == "ets_blocked_tool" do
+              {:block, "ETS test block"}
+            else
+              {:ok, payload}
+            end
+          end, priority: 1)
 
       Process.sleep(50)
 
@@ -198,9 +220,13 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
 
       hook_name = "ets_crasher_#{System.unique_integer([:positive])}"
 
-      :ok = Hooks.register(:post_tool_use, hook_name, fn _payload ->
-        raise "ETS crash test"
-      end, priority: 1)
+      :ok =
+        Hooks.register(
+          :post_tool_use,
+          hook_name,
+          fn _payload ->
+            raise "ETS crash test"
+          end, priority: 1)
 
       Process.sleep(50)
 
@@ -216,9 +242,13 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
 
       hook_name = "ets_skipper_#{System.unique_integer([:positive])}"
 
-      :ok = Hooks.register(:pre_response, hook_name, fn _payload ->
-        :skip
-      end, priority: 1)
+      :ok =
+        Hooks.register(
+          :pre_response,
+          hook_name,
+          fn _payload ->
+            :skip
+          end, priority: 1)
 
       Process.sleep(50)
 
@@ -247,7 +277,11 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       if not available, do: flunk("Hooks GenServer not running")
 
       # Run a hook to generate metrics
-      Hooks.run(:pre_tool_use, %{tool_name: "file_read", arguments: %{}, session_id: "metrics_ets_test"})
+      Hooks.run(:pre_tool_use, %{
+        tool_name: "file_read",
+        arguments: %{},
+        session_id: "metrics_ets_test"
+      })
 
       # Metrics update is async (cast), give it a moment
       Process.sleep(100)
@@ -256,6 +290,7 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       assert is_map(metrics)
 
       pre_metrics = Map.get(metrics, :pre_tool_use)
+
       if pre_metrics do
         assert pre_metrics.calls > 0
         assert Map.has_key?(pre_metrics, :avg_us)

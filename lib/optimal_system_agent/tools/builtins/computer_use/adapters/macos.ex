@@ -86,7 +86,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
   def key_press(_combo), do: {:error, "macOS key_press not yet implemented (Phase 7)"}
   def scroll(_direction, _amount), do: {:error, "macOS scroll not yet implemented (Phase 7)"}
   def move_mouse(_x, _y), do: {:error, "macOS move_mouse not yet implemented (Phase 7)"}
-  def drag(_from_x, _from_y, _to_x, _to_y), do: {:error, "macOS drag not yet implemented (Phase 7)"}
+
+  def drag(_from_x, _from_y, _to_x, _to_y),
+    do: {:error, "macOS drag not yet implemented (Phase 7)"}
+
   def get_tree, do: {:error, "macOS accessibility tree not yet implemented (Phase 7)"}
 
   defp screenshots_dir do

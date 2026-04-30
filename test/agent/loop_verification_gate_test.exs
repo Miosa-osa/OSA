@@ -109,13 +109,15 @@ defmodule OptimalSystemAgent.Agent.LoopVerificationGateTest do
 
   describe "task context detection via action verbs" do
     test "detects common action verbs" do
-      action_words = ~w(fix create build implement add update change write deploy test debug refactor delete remove find search check run install configure)
+      action_words =
+        ~w(fix create build implement add update change write deploy test debug refactor delete remove find search check run install configure)
 
       for word <- action_words do
         messages = [%{role: "user", content: "#{word} the module"}]
         state = gate_state(3, messages)
+
         assert Loop.needs_verification_gate?(state),
-          "Expected verification gate to trigger for action verb '#{word}'"
+               "Expected verification gate to trigger for action verb '#{word}'"
       end
     end
 
@@ -132,8 +134,9 @@ defmodule OptimalSystemAgent.Agent.LoopVerificationGateTest do
       for msg <- non_action do
         messages = [%{role: "user", content: msg}]
         state = gate_state(3, messages)
+
         refute Loop.needs_verification_gate?(state),
-          "Expected verification gate NOT to trigger for '#{msg}'"
+               "Expected verification gate NOT to trigger for '#{msg}'"
       end
     end
 

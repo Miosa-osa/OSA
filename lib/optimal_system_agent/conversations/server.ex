@@ -143,7 +143,9 @@ defmodule OptimalSystemAgent.Conversations.Server do
       strategy_state: strategy_state
     }
 
-    Logger.info("[Conversation] started #{id} type=#{type} topic=#{inspect(topic)} participants=#{length(participants)}")
+    Logger.info(
+      "[Conversation] started #{id} type=#{type} topic=#{inspect(topic)} participants=#{length(participants)}"
+    )
 
     {:ok, state}
   end
@@ -201,7 +203,10 @@ defmodule OptimalSystemAgent.Conversations.Server do
 
     case find_participant(state, speaker_name) do
       nil ->
-        Logger.warning("[Conversation] #{state.id} strategy returned unknown speaker #{speaker_name} — skipping turn")
+        Logger.warning(
+          "[Conversation] #{state.id} strategy returned unknown speaker #{speaker_name} — skipping turn"
+        )
+
         %{state | turn_count: state.turn_count + 1}
 
       persona ->
@@ -216,14 +221,22 @@ defmodule OptimalSystemAgent.Conversations.Server do
             new_strategy_state = advance_strategy(state.strategy_mod, new_state)
             new_state = %{new_state | strategy_state: new_strategy_state}
 
-            broadcast(new_state, {:turn_taken, new_state.id, persona.name, response, new_state.turn_count})
+            broadcast(
+              new_state,
+              {:turn_taken, new_state.id, persona.name, response, new_state.turn_count}
+            )
 
-            Logger.debug("[Conversation] #{state.id} turn #{new_state.turn_count} — #{persona.name} spoke (#{String.length(response)} chars)")
+            Logger.debug(
+              "[Conversation] #{state.id} turn #{new_state.turn_count} — #{persona.name} spoke (#{String.length(response)} chars)"
+            )
 
             new_state
 
           {:error, reason} ->
-            Logger.warning("[Conversation] #{state.id} participant #{persona.name} failed: #{inspect(reason)}")
+            Logger.warning(
+              "[Conversation] #{state.id} participant #{persona.name} failed: #{inspect(reason)}"
+            )
+
             %{state | turn_count: state.turn_count + 1}
         end
     end
@@ -248,7 +261,10 @@ defmodule OptimalSystemAgent.Conversations.Server do
     end
   rescue
     e ->
-      Logger.warning("[Conversation] call_participant error for #{persona.name}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Conversation] call_participant error for #{persona.name}: #{Exception.message(e)}"
+      )
+
       {:error, Exception.message(e)}
   end
 
@@ -269,9 +285,16 @@ defmodule OptimalSystemAgent.Conversations.Server do
       end)
 
     if transcript_msgs == [] do
-      [%{role: "user", content: context_intro <> "\n\nPlease begin — share your initial perspective on the topic."}]
+      [
+        %{
+          role: "user",
+          content:
+            context_intro <> "\n\nPlease begin — share your initial perspective on the topic."
+        }
+      ]
     else
-      [%{role: "user", content: context_intro}] ++ transcript_msgs ++
+      [%{role: "user", content: context_intro}] ++
+        transcript_msgs ++
         [%{role: "user", content: "Please respond now as #{name}."}]
     end
   end
@@ -307,7 +330,10 @@ defmodule OptimalSystemAgent.Conversations.Server do
   end
 
   defp init_strategy(unknown, _participants, _topic, _opts, _strategy_opts) do
-    Logger.warning("[Conversation] Unknown strategy #{inspect(unknown)}, defaulting to round_robin")
+    Logger.warning(
+      "[Conversation] Unknown strategy #{inspect(unknown)}, defaulting to round_robin"
+    )
+
     {RoundRobin, RoundRobin.init([])}
   end
 
@@ -382,8 +408,7 @@ defmodule OptimalSystemAgent.Conversations.Server do
   end
 
   defp event_to_bus({:conversation_ended, id, summary}) do
-    {:system_event,
-     %{event: :conversation_ended, conversation_id: id, topic: summary[:topic]}}
+    {:system_event, %{event: :conversation_ended, conversation_id: id, topic: summary[:topic]}}
   end
 
   defp state_snapshot(state) do

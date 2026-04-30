@@ -19,8 +19,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET / ─────────────────────────────────────────────────────────
   # Handles GET /models, GET /analytics, GET /machines after prefix strip.
@@ -42,8 +42,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
     # Normalise to a binary (for downstream consumers) or nil when empty.
     content =
       cond do
-        is_binary(raw) -> raw
-        is_list(raw) and raw == [] -> nil
+        is_binary(raw) ->
+          raw
+
+        is_list(raw) and raw == [] ->
+          nil
+
         is_list(raw) ->
           raw
           |> Enum.map(fn
@@ -52,7 +56,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
             other -> inspect(other)
           end)
           |> Enum.join("\n\n")
-        true -> nil
+
+        true ->
+          nil
       end
 
     body = Jason.encode!(%{content: content})
@@ -160,7 +166,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       Logger.info("[Models] Switched to #{prov_str}/#{model_name}")
 
       context_window = OptimalSystemAgent.Providers.Registry.context_window(model_name)
-      body = Jason.encode!(%{provider: prov_str, model: model_name, status: "ok", context_window: context_window})
+
+      body =
+        Jason.encode!(%{
+          provider: prov_str,
+          model: model_name,
+          status: "ok",
+          context_window: context_window
+        })
 
       conn
       |> put_resp_content_type("application/json")
@@ -257,12 +270,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       false ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "unknown_provider", details: "Provider not registered"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{error: "unknown_provider", details: "Provider not registered"})
+        )
 
       _ ->
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(%{error: "invalid_request", details: "Missing or invalid provider/model fields"}))
+        |> send_resp(
+          400,
+          Jason.encode!(%{
+            error: "invalid_request",
+            details: "Missing or invalid provider/model fields"
+          })
+        )
     end
   end
 
@@ -318,7 +340,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
         case OptimalSystemAgent.Providers.Ollama.list_models() do
           {:ok, models} ->
             Enum.map(models, fn m ->
-              ctx = try do OptimalSystemAgent.Providers.Registry.context_window(m.name) rescue _ -> 128_000 end
+              ctx =
+                try do
+                  OptimalSystemAgent.Providers.Registry.context_window(m.name)
+                rescue
+                  _ -> 128_000
+                end
+
               %{
                 name: m.name,
                 provider: "ollama",
@@ -344,7 +372,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
           case OptimalSystemAgent.Providers.Registry.provider_info(p) do
             {:ok, info} ->
               Enum.map(info.available_models, fn model_name ->
-                ctx = try do OptimalSystemAgent.Providers.Registry.context_window(model_name) rescue _ -> 128_000 end
+                ctx =
+                  try do
+                    OptimalSystemAgent.Providers.Registry.context_window(model_name)
+                  rescue
+                    _ -> 128_000
+                  end
+
                 %{
                   name: model_name,
                   provider: to_string(p),

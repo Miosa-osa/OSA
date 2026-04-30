@@ -95,6 +95,7 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
     test "adds overhead for tool_calls in a message" do
       plain_msg = asst("normal response")
+
       tool_msg = %{
         role: "assistant",
         content: "",
@@ -194,7 +195,12 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       tool_msg = %{
         role: "assistant",
         content: "",
-        tool_calls: [%{name: "shell_execute", arguments: "very long argument string with lots of content here"}]
+        tool_calls: [
+          %{
+            name: "shell_execute",
+            arguments: "very long argument string with lots of content here"
+          }
+        ]
       }
 
       messages = [tool_msg, user("follow up"), asst("response")]
@@ -221,6 +227,7 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       Application.put_env(:optimal_system_agent, :compaction_emergency, 1.1)
 
       long_args = String.duplicate("argument data ", 200)
+
       tool_msg = %{
         role: "assistant",
         content: "running tool",
@@ -239,8 +246,9 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
 
       assert length(tool_msgs) > 0, "Expected tool message to survive compaction"
       call = hd(hd(tool_msgs).tool_calls)
+
       assert Map.get(call, :arguments) == "[args stripped]",
-        "Expected tool call args to be replaced with '[args stripped]'"
+             "Expected tool call args to be replaced with '[args stripped]'"
     after
       Application.delete_env(:optimal_system_agent, :max_context_tokens)
       Application.delete_env(:optimal_system_agent, :compaction_warn)
@@ -253,7 +261,8 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       Application.put_env(:optimal_system_agent, :compaction_warn, 0.0)
 
       # Build a conversation larger than the hot zone
-      messages = build_conversation(15, 5)  # 30 messages
+      # 30 messages
+      messages = build_conversation(15, 5)
       last_content = List.last(messages).content
 
       result = Compactor.maybe_compact(messages)
@@ -371,11 +380,14 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
         Enum.any?(result, fn msg ->
           role = Map.get(msg, :role, "")
           content = Map.get(msg, :content, "")
-          role == "system" and (String.contains?(content, "CRITICAL") or String.contains?(content, "Context truncated"))
+
+          role == "system" and
+            (String.contains?(content, "CRITICAL") or
+               String.contains?(content, "Context truncated"))
         end)
 
       assert has_system_content,
-        "System messages should be preserved or replaced with a context notice"
+             "System messages should be preserved or replaced with a context notice"
     after
       Application.delete_env(:optimal_system_agent, :max_context_tokens)
       Application.delete_env(:optimal_system_agent, :compaction_warn)

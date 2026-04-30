@@ -136,7 +136,8 @@ defmodule OptimalSystemAgent.CLI.Update do
           trimmed == "[update]" ->
             {[line | acc], true, key_set}
 
-          in_section and String.starts_with?(trimmed, "enabled") and String.contains?(trimmed, "=") ->
+          in_section and String.starts_with?(trimmed, "enabled") and
+              String.contains?(trimmed, "=") ->
             {["enabled = #{enabled_str}" | acc], in_section, true}
 
           in_section and String.starts_with?(trimmed, "[") and trimmed != "[update]" ->

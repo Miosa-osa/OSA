@@ -10,8 +10,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutes do
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Agent.Scheduler.{HeartbeatExecutor, CronPresets}
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET /presets — available cron presets (before /:id catch) ─────
 
@@ -32,11 +32,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutes do
     try do
       jobs = Scheduler.list_jobs()
 
-      body = Jason.encode!(%{
-        status: "ok",
-        tasks: Enum.map(jobs, &format_task/1),
-        count: length(jobs)
-      })
+      body =
+        Jason.encode!(%{
+          status: "ok",
+          tasks: Enum.map(jobs, &format_task/1),
+          count: length(jobs)
+        })
 
       conn
       |> put_resp_content_type("application/json")
@@ -184,13 +185,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SchedulerRoutes do
       {page, per_page} = pagination_params(conn)
       runs = HeartbeatExecutor.list_runs(id, page: page, per_page: per_page)
 
-      body = Jason.encode!(%{
-        status: "ok",
-        runs: Enum.map(runs, &format_run/1),
-        count: length(runs),
-        page: page,
-        per_page: per_page
-      })
+      body =
+        Jason.encode!(%{
+          status: "ok",
+          runs: Enum.map(runs, &format_run/1),
+          count: length(runs),
+          page: page,
+          per_page: per_page
+        })
 
       conn
       |> put_resp_content_type("application/json")

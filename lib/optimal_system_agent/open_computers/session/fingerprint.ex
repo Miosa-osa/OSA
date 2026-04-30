@@ -24,7 +24,10 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Fingerprint do
         generate(full)
 
       {:error, reason} ->
-        Logger.error("[OpenComputers.Session.Fingerprint] cannot read #{full}: #{inspect(reason)}")
+        Logger.error(
+          "[OpenComputers.Session.Fingerprint] cannot read #{full}: #{inspect(reason)}"
+        )
+
         :crypto.strong_rand_bytes(32)
     end
   end

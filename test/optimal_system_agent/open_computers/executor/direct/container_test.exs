@@ -47,8 +47,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ContainerTest do
       # The guard is that the GenServer survives the cast without crashing.
       GenServer.cast(pid, {
         :inbound,
-        {:container_stop_request,
-         %{container_id: Ecto.UUID.generate(), timeout_s: 5}}
+        {:container_stop_request, %{container_id: Ecto.UUID.generate(), timeout_s: 5}}
       })
 
       :timer.sleep(50)
@@ -60,8 +59,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ContainerTest do
     test "does not crash the GenServer", %{exec_pid: pid} do
       GenServer.cast(pid, {
         :inbound,
-        {:container_remove_request,
-         %{container_id: Ecto.UUID.generate(), force: false}}
+        {:container_remove_request, %{container_id: Ecto.UUID.generate(), force: false}}
       })
 
       :timer.sleep(50)
@@ -73,8 +71,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ContainerTest do
     test "does not crash the GenServer", %{exec_pid: pid} do
       GenServer.cast(pid, {
         :inbound,
-        {:container_logs_unsubscribe,
-         %{container_id: Ecto.UUID.generate()}}
+        {:container_logs_unsubscribe, %{container_id: Ecto.UUID.generate()}}
       })
 
       :timer.sleep(50)

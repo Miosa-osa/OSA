@@ -44,19 +44,21 @@ defmodule OptimalSystemAgent.Channels.CLI.AsyncTest do
       session_id = "active-session"
       :ets.insert(table, {session_id, %{request_id: 42}})
 
-      active? = case :ets.lookup(table, session_id) do
-        [{^session_id, _}] -> true
-        _ -> false
-      end
+      active? =
+        case :ets.lookup(table, session_id) do
+          [{^session_id, _}] -> true
+          _ -> false
+        end
 
       assert active?
     end
 
     test "returns false when no request exists", %{table: table} do
-      active? = case :ets.lookup(table, "no-such-session") do
-        [{"no-such-session", _}] -> true
-        _ -> false
-      end
+      active? =
+        case :ets.lookup(table, "no-such-session") do
+          [{"no-such-session", _}] -> true
+          _ -> false
+        end
 
       refute active?
     end
@@ -77,10 +79,12 @@ defmodule OptimalSystemAgent.Channels.CLI.AsyncTest do
 
       # Simulate a response with stale request_id
       stale_req_id = 99
-      result = case :ets.lookup(table, session_id) do
-        [{^session_id, %{request_id: ^stale_req_id}}] -> :handled
-        _ -> :ignored
-      end
+
+      result =
+        case :ets.lookup(table, session_id) do
+          [{^session_id, %{request_id: ^stale_req_id}}] -> :handled
+          _ -> :ignored
+        end
 
       assert result == :ignored
       # Active request should still be there
@@ -92,10 +96,12 @@ defmodule OptimalSystemAgent.Channels.CLI.AsyncTest do
       :ets.insert(table, {session_id, %{request_id: 100}})
 
       current_req_id = 100
-      result = case :ets.lookup(table, session_id) do
-        [{^session_id, %{request_id: ^current_req_id}}] -> :handled
-        _ -> :ignored
-      end
+
+      result =
+        case :ets.lookup(table, session_id) do
+          [{^session_id, %{request_id: ^current_req_id}}] -> :handled
+          _ -> :ignored
+        end
 
       assert result == :handled
     end
@@ -112,7 +118,11 @@ defmodule OptimalSystemAgent.Channels.CLI.AsyncTest do
 
     test "deleting session clears active request", %{table: table} do
       session_id = "cancel-session"
-      :ets.insert(table, {session_id, %{request_id: 1, spinner: nil, tool_ref: nil, llm_ref: nil}})
+
+      :ets.insert(
+        table,
+        {session_id, %{request_id: 1, spinner: nil, tool_ref: nil, llm_ref: nil}}
+      )
 
       # Simulate cancel: delete the entry
       :ets.delete(table, session_id)

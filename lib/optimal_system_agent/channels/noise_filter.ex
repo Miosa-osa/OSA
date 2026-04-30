@@ -59,7 +59,8 @@ defmodule OptimalSystemAgent.Channels.NoiseFilter do
     - `{:filtered, ack}`            — message is noise, return ack directly
     - `{:clarify, prompt}`          — message has low signal, ask for clarification
   """
-  @spec check(String.t(), float() | nil) :: :pass | {:filtered, String.t()} | {:clarify, String.t()}
+  @spec check(String.t(), float() | nil) ::
+          :pass | {:filtered, String.t()} | {:clarify, String.t()}
   def check(message, signal_weight \\ nil) when is_binary(message) do
     trimmed = String.trim(message)
     thresholds = weight_thresholds()
@@ -93,7 +94,11 @@ defmodule OptimalSystemAgent.Channels.NoiseFilter do
   Reads from application env on every call so thresholds can be changed at runtime
   without restarting the process.
   """
-  @spec weight_thresholds() :: %{definitely_noise: float(), likely_noise: float(), uncertain: float()}
+  @spec weight_thresholds() :: %{
+          definitely_noise: float(),
+          likely_noise: float(),
+          uncertain: float()
+        }
   def weight_thresholds do
     defaults = %{definitely_noise: 0.15, likely_noise: 0.35, uncertain: 0.65}
 
@@ -116,13 +121,19 @@ defmodule OptimalSystemAgent.Channels.NoiseFilter do
   Returns new thresholds. Does not persist — caller must set via
   Application.put_env/3 if desired.
   """
-  @spec calibrate_weights(map(), map()) :: %{definitely_noise: float(), likely_noise: float(), uncertain: float()}
+  @spec calibrate_weights(map(), map()) :: %{
+          definitely_noise: float(),
+          likely_noise: float(),
+          uncertain: float()
+        }
   def calibrate_weights(stats, opts \\ %{}) do
     current = weight_thresholds()
 
     low_bucket = Map.get(stats, :"0.0-0.2", 0)
     mid_bucket = Map.get(stats, :"0.2-0.5", 0)
-    total = low_bucket + mid_bucket + Map.get(stats, :"0.5-0.8", 0) + Map.get(stats, :"0.8-1.0", 0)
+
+    total =
+      low_bucket + mid_bucket + Map.get(stats, :"0.5-0.8", 0) + Map.get(stats, :"0.8-1.0", 0)
 
     if total < 50 do
       # Not enough data to calibrate — return current thresholds unchanged
@@ -185,7 +196,10 @@ defmodule OptimalSystemAgent.Channels.NoiseFilter do
   defp acknowledgment(input) do
     cond do
       # Confirmations
-      Regex.match?(~r/^(ok|okay|sure|yep|yeah|alright|roger|copy|affirmative|got it|gotcha)$/i, input) ->
+      Regex.match?(
+        ~r/^(ok|okay|sure|yep|yeah|alright|roger|copy|affirmative|got it|gotcha)$/i,
+        input
+      ) ->
         Enum.random(["Got it.", "Sure.", "Noted.", "OK."])
 
       # Negations

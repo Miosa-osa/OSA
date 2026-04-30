@@ -13,6 +13,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ExecutorTest do
   end
 
   describe "module exists" do
+    # Ensure the module is loaded before inspecting exports.
+    # function_exported?/3 returns false for unloaded modules even when the
+    # .beam file exists on disk.
+    setup do
+      Code.ensure_loaded!(Executor)
+      :ok
+    end
+
     test "executor module is loaded" do
       assert Code.ensure_loaded?(Executor)
     end

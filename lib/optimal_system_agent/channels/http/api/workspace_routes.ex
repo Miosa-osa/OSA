@@ -17,8 +17,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET / ─────────────────────────────────────────────────────────────────
 
@@ -36,7 +36,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
         end)
       rescue
         e ->
-          Logger.warning("[WorkspaceRoutes] Failed to list directory #{cwd}: #{Exception.message(e)}")
+          Logger.warning(
+            "[WorkspaceRoutes] Failed to list directory #{cwd}: #{Exception.message(e)}"
+          )
+
           {[], []}
       end
 
@@ -73,7 +76,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
           try do
             File.ls!(resolved)
             |> Enum.reject(&String.starts_with?(&1, "."))
-            |> Enum.reject(&(&1 in ~w(node_modules _build deps .git .elixir_ls __pycache__ .next .svelte-kit target vendor)))
+            |> Enum.reject(
+              &(&1 in ~w(node_modules _build deps .git .elixir_ls __pycache__ .next .svelte-kit target vendor))
+            )
             |> Enum.map(fn name ->
               full = Path.join(resolved, name)
               rel = Path.relative_to(full, cwd)
@@ -94,7 +99,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
             |> Enum.sort_by(fn e -> {if(e.type == "directory", do: 0, else: 1), e.name} end)
           rescue
             e ->
-              Logger.warning("[WorkspaceRoutes] Failed to list #{resolved}: #{Exception.message(e)}")
+              Logger.warning(
+                "[WorkspaceRoutes] Failed to list #{resolved}: #{Exception.message(e)}"
+              )
+
               []
           end
 
@@ -129,11 +137,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
               {:ok, content} ->
                 # Check if binary — if so, don't return content
                 if String.valid?(content) do
-                  body = Jason.encode!(%{
-                    content: content,
-                    path: Path.relative_to(resolved, cwd),
-                    size: byte_size(content)
-                  })
+                  body =
+                    Jason.encode!(%{
+                      content: content,
+                      path: Path.relative_to(resolved, cwd),
+                      size: byte_size(content)
+                    })
+
                   conn |> put_resp_content_type("application/json") |> send_resp(200, body)
                 else
                   json_error(conn, 415, "binary_file", "Binary files cannot be previewed")
@@ -165,16 +175,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   # Get git status for a single file (M, A, D, or nil)
   defp git_file_status(cwd, relative_path) do
-    case System.cmd("git", ["status", "--porcelain", relative_path], cd: cwd, stderr_to_stdout: true) do
+    case System.cmd("git", ["status", "--porcelain", relative_path],
+           cd: cwd,
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         case String.trim(output) do
-          "" -> nil
+          "" ->
+            nil
+
           line ->
             case String.at(line, 0) do
-              "M" -> "M"
-              "A" -> "A"
-              "D" -> "D"
-              "?" -> "U"
+              "M" ->
+                "M"
+
+              "A" ->
+                "A"
+
+              "D" ->
+                "D"
+
+              "?" ->
+                "U"
+
               _ ->
                 case String.at(line, 1) do
                   "M" -> "M"
@@ -184,7 +207,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
             end
         end
 
-      _ -> nil
+      _ ->
+        nil
     end
   rescue
     _ -> nil

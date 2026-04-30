@@ -48,7 +48,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Relay do
   @doc "Open a TCP socket to localhost:<vnc_port>."
   @spec connect_tcp(non_neg_integer()) :: {:ok, :gen_tcp.socket()} | {:error, term()}
   def connect_tcp(vnc_port) when is_integer(vnc_port) and vnc_port > 0 do
-    case :gen_tcp.connect(~c"127.0.0.1", vnc_port,
+    case :gen_tcp.connect(
+           ~c"127.0.0.1",
+           vnc_port,
            [:binary, active: false, packet: :raw, nodelay: true],
            @connect_timeout_ms
          ) do
@@ -156,7 +158,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Relay do
 
       _other, acc ->
         {:cont, acc}
-
     end)
   end
 

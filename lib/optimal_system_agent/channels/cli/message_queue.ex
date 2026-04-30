@@ -13,13 +13,11 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
 
   @debounce_ms 300
 
-  defstruct [
-    session_id: nil,
-    pending: [],
-    queued: [],
-    agent_busy: false,
-    timer_ref: nil
-  ]
+  defstruct session_id: nil,
+            pending: [],
+            queued: [],
+            agent_busy: false,
+            timer_ref: nil
 
   # ── Client API ───────────────────────────────────────────────────────
 

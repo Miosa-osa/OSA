@@ -10,9 +10,7 @@ defmodule OptimalSystemAgent.Agent.LoopTest do
   setup do
     case Process.whereis(OptimalSystemAgent.SessionRegistry) do
       nil ->
-        start_supervised!(
-          {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry}
-        )
+        start_supervised!({Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry})
 
       _pid ->
         :ok

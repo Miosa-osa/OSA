@@ -101,7 +101,8 @@ defmodule OptimalSystemAgent.Workspace.Store do
   """
   @spec load_workspace(String.t()) :: {:ok, map()} | {:error, :not_found | term()}
   def load_workspace(id) do
-    sql = "SELECT id, name, project_path, state_json, created_at, updated_at FROM workspaces WHERE id = ?"
+    sql =
+      "SELECT id, name, project_path, state_json, created_at, updated_at FROM workspaces WHERE id = ?"
 
     case Repo.query(sql, [id]) do
       {:ok, %{rows: [[wid, name, path, state_json, created_at, updated_at]]}} ->
@@ -130,7 +131,8 @@ defmodule OptimalSystemAgent.Workspace.Store do
   @doc "List all workspaces as lightweight summaries (no full state)."
   @spec list_workspaces() :: [map()]
   def list_workspaces do
-    sql = "SELECT id, name, project_path, created_at, updated_at FROM workspaces ORDER BY updated_at DESC"
+    sql =
+      "SELECT id, name, project_path, created_at, updated_at FROM workspaces ORDER BY updated_at DESC"
 
     case Repo.query(sql) do
       {:ok, %{rows: rows}} ->
@@ -226,7 +228,9 @@ defmodule OptimalSystemAgent.Workspace.Store do
 
     limit = Keyword.get(opts, :limit, 500)
     where = Enum.join(conditions, " AND ")
-    sql = "SELECT workspace_id, task_id, agent_id, action, details_json, inserted_at FROM task_journals WHERE #{where} ORDER BY inserted_at ASC LIMIT #{limit}"
+
+    sql =
+      "SELECT workspace_id, task_id, agent_id, action, details_json, inserted_at FROM task_journals WHERE #{where} ORDER BY inserted_at ASC LIMIT #{limit}"
 
     case Repo.query(sql, params) do
       {:ok, %{rows: rows}} ->

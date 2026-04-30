@@ -156,7 +156,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
   def loopback_only? do
     case Application.get_env(:optimal_system_agent, :http_ip) do
       {127, 0, 0, 1} -> true
-      {0, 0, 0, 0, 0, 0, 0, 1} -> true  # ::1
+      # ::1
+      {0, 0, 0, 0, 0, 0, 0, 1} -> true
       _ -> false
     end
   end
@@ -186,5 +187,4 @@ defmodule OptimalSystemAgent.Channels.HTTP.Auth do
       end
     end
   end
-
 end

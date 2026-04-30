@@ -21,7 +21,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler.SQLiteStore do
 
   def init do
     case Repo.query(@create_table) do
-      {:ok, _} -> :ok
+      {:ok, _} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("[Scheduler.SQLiteStore] Table init failed: #{inspect(reason)}")
         {:error, reason}
@@ -68,7 +70,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler.SQLiteStore do
           end
         end)
         |> Enum.reject(&is_nil/1)
-      {:error, _} -> []
+
+      {:error, _} ->
+        []
     end
   rescue
     _ -> []
@@ -90,8 +94,12 @@ defmodule OptimalSystemAgent.Agent.Scheduler.SQLiteStore do
           merged = Map.merge(existing, changes)
           save_job(Map.put(merged, "id", id))
         end
-      {:ok, %{rows: []}} -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
+
+      {:ok, %{rows: []}} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
     e -> {:error, Exception.message(e)}

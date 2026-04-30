@@ -96,7 +96,10 @@ defmodule OptimalSystemAgent.Speculative.WorkProduct do
     %{wp | files_created: [entry | wp.files_created]}
   rescue
     e ->
-      Logger.warning("[WorkProduct] Failed to stage file create #{target_path}: #{Exception.message(e)}")
+      Logger.warning(
+        "[WorkProduct] Failed to stage file create #{target_path}: #{Exception.message(e)}"
+      )
+
       wp
   end
 
@@ -116,7 +119,10 @@ defmodule OptimalSystemAgent.Speculative.WorkProduct do
     %{wp | files_modified: [entry | wp.files_modified]}
   rescue
     e ->
-      Logger.warning("[WorkProduct] Failed to stage file modify #{target_path}: #{Exception.message(e)}")
+      Logger.warning(
+        "[WorkProduct] Failed to stage file modify #{target_path}: #{Exception.message(e)}"
+      )
+
       wp
   end
 
@@ -217,8 +223,11 @@ defmodule OptimalSystemAgent.Speculative.WorkProduct do
       case File.mkdir_p(Path.dirname(entry.target_path)) do
         :ok ->
           case File.copy(entry.temp_path, entry.target_path) do
-            {:ok, _} -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, "Failed to copy #{entry.target_path}: #{inspect(reason)}"}}
+            {:ok, _} ->
+              {:cont, :ok}
+
+            {:error, reason} ->
+              {:halt, {:error, "Failed to copy #{entry.target_path}: #{inspect(reason)}"}}
           end
 
         {:error, reason} ->
@@ -231,6 +240,8 @@ defmodule OptimalSystemAgent.Speculative.WorkProduct do
     File.rm_rf!(temp_dir)
   rescue
     e ->
-      Logger.warning("[WorkProduct] Failed to remove temp dir #{temp_dir}: #{Exception.message(e)}")
+      Logger.warning(
+        "[WorkProduct] Failed to remove temp dir #{temp_dir}: #{Exception.message(e)}"
+      )
   end
 end

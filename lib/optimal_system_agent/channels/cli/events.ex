@@ -43,9 +43,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
         %{event: :orchestrator_agents_spawning, agent_count: count} ->
           Renderer.clear_line()
 
-          IO.puts(
-            "#{cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{reset}"
-          )
+          IO.puts("#{cyan}  ▶ Deploying #{count} agent#{if count > 1, do: "s", else: ""}#{reset}")
 
         %{event: :orchestrator_agent_started, agent_name: name, role: role, description: desc} ->
           task_desc = if is_binary(desc) and desc != "", do: String.slice(desc, 0, 50), else: ""
@@ -104,7 +102,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
           dur_str = Renderer.format_duration_ms(dur_ms)
           tool_count = tools || 0
           tool_label = if tool_count == 1, do: "tool use", else: "tool uses"
-          parts = ["#{tool_count} #{tool_label}", "#{tokens_str} tokens", dur_str] |> Enum.reject(&(&1 == ""))
+
+          parts =
+            ["#{tool_count} #{tool_label}", "#{tokens_str} tokens", dur_str]
+            |> Enum.reject(&(&1 == ""))
+
           IO.puts("#{dim}  ⏺ #{role_str}#{reset}")
           IO.puts("#{dim}    ⎿  Done (#{Enum.join(parts, " · ")})#{reset}")
 
@@ -150,7 +152,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
           agent_count: count
         } ->
           Renderer.clear_line()
-          IO.puts("#{cyan}  ▶ Wave #{num}/#{total} — #{count} agent#{if count > 1, do: "s", else: ""}#{reset}")
+
+          IO.puts(
+            "#{cyan}  ▶ Wave #{num}/#{total} — #{count} agent#{if count > 1, do: "s", else: ""}#{reset}"
+          )
 
         %{
           event: :context_pressure,
@@ -171,9 +176,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
             max_k = Float.round(max_t / 1000, 1)
             color = if util >= 85.0, do: IO.ANSI.red(), else: yellow
 
-            IO.puts(
-              "#{color}  #{bar} context: #{tokens_k}k/#{max_k}k (#{util}%)#{reset}"
-            )
+            IO.puts("#{color}  #{bar} context: #{tokens_k}k/#{max_k}k (#{util}%)#{reset}")
           end
 
         # Background agent completion/failure notifications
@@ -181,13 +184,21 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
           Renderer.clear_line()
           duration = Renderer.format_elapsed(dur)
           preview = String.slice(to_string(result), 0, 120)
-          IO.puts("\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}")
+
+          IO.puts(
+            "\n#{IO.ANSI.green()}  ✓ Background agent \"#{role}\" completed#{reset} #{dim}(#{duration})#{reset}"
+          )
+
           IO.puts("#{dim}    #{preview}#{reset}\n")
 
         %{event: :background_agent_failed, role: role, error: error, duration_ms: dur} ->
           Renderer.clear_line()
           duration = Renderer.format_elapsed(dur)
-          IO.puts("\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}")
+
+          IO.puts(
+            "\n#{yellow}  ✗ Background agent \"#{role}\" failed#{reset} #{dim}(#{duration})#{reset}"
+          )
+
           IO.puts("#{dim}    #{error}#{reset}\n")
 
         %{event: :background_agent_started, role: role, agent_id: aid} ->
@@ -196,7 +207,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
 
         %{event: :budget_limit_reached, current_cost: cost, limit: limit} ->
           Renderer.clear_line()
-          IO.puts("\n#{yellow}  ⚠ Budget limit reached ($#{Float.round(cost / 1, 4)} / $#{limit})#{reset}\n")
+
+          IO.puts(
+            "\n#{yellow}  ⚠ Budget limit reached ($#{Float.round(cost / 1, 4)} / $#{limit})#{reset}\n"
+          )
 
         %{event: :turn_limit_reached, turn_count: count, limit: limit} ->
           Renderer.clear_line()
@@ -233,6 +247,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Events do
 
               # Cache the active task's activeForm for the spinner
               active = Enum.find(tasks, fn t -> t.status == :in_progress end)
+
               if active do
                 form = active.metadata[:active_form] || active.title
                 :ets.insert(:cli_signal_cache, {:active_task_form, form})

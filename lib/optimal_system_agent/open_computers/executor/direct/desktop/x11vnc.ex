@@ -87,11 +87,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     x11vnc = System.find_executable("x11vnc")
 
     args = [
-      "-display", display,
+      "-display",
+      display,
       "-shared",
       "-forever",
       "-localhost",
-      "-rfbport", "0",
+      "-rfbport",
+      "0",
       "-quiet"
     ]
 
@@ -118,7 +120,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      {:error, {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
+      {:error,
+       {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
     else
       receive do
         {^port, {:data, chunk}} ->
@@ -142,7 +145,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
         {^port, {:exit_status, status}} ->
           {:error, {:x11vnc_exited_early, status}}
       after
-        remaining -> {:error, {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
+        remaining ->
+          {:error,
+           {:startup_timeout, "x11vnc did not announce PORT= within #{@startup_timeout_ms}ms"}}
       end
     end
   end

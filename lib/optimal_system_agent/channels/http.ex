@@ -42,7 +42,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> put_resp_header("x-frame-options", "DENY")
     |> put_resp_header("referrer-policy", "no-referrer")
     |> put_resp_header("x-xss-protection", "1; mode=block")
-    |> put_resp_header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:")
+    |> put_resp_header(
+      "content-security-policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
+    )
     |> put_resp_header("strict-transport-security", "max-age=31536000; includeSubDomains")
   end
 
@@ -68,7 +71,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       conn
       |> put_resp_header("access-control-allow-origin", origin_value)
       |> put_resp_header("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS")
-      |> put_resp_header("access-control-allow-headers", "content-type, authorization, accept, cache-control, x-accel-buffering")
+      |> put_resp_header(
+        "access-control-allow-headers",
+        "content-type, authorization, accept, cache-control, x-accel-buffering"
+      )
       |> put_resp_header("access-control-max-age", "86400")
 
     if vary?, do: put_resp_header(conn, "vary", "Origin"), else: conn
@@ -109,7 +115,12 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         vsn -> to_string(vsn)
       end
 
-    uptime = max(0, System.system_time(:second) - Application.get_env(:optimal_system_agent, :start_time, System.system_time(:second)))
+    uptime =
+      max(
+        0,
+        System.system_time(:second) -
+          Application.get_env(:optimal_system_agent, :start_time, System.system_time(:second))
+      )
 
     context_window = OptimalSystemAgent.Providers.Registry.context_window(model_name)
 
@@ -192,7 +203,13 @@ defmodule OptimalSystemAgent.Channels.HTTP do
             conn =
               conn
               |> put_resp_content_type("application/json")
-              |> send_resp(401, Jason.encode!(%{error: "unauthorized", message: "Authentication required after initial setup."}))
+              |> send_resp(
+                401,
+                Jason.encode!(%{
+                  error: "unauthorized",
+                  message: "Authentication required after initial setup."
+                })
+              )
 
             Plug.Conn.halt(conn)
             # Unreachable but satisfies the compiler for the tuple match
@@ -203,7 +220,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       end
 
     unless conn.halted do
-      case OptimalSystemAgent.Onboarding.model_list(provider, base_url: base_url, api_key: api_key) do
+      case OptimalSystemAgent.Onboarding.model_list(provider,
+             base_url: base_url,
+             api_key: api_key
+           ) do
         {:ok, models} ->
           conn
           |> put_resp_content_type("application/json")
@@ -257,12 +277,24 @@ defmodule OptimalSystemAgent.Channels.HTTP do
               :unauthorized ->
                 conn
                 |> put_resp_content_type("application/json")
-                |> send_resp(401, Jason.encode!(%{error: "unauthorized", message: "Authentication required after initial setup."}))
+                |> send_resp(
+                  401,
+                  Jason.encode!(%{
+                    error: "unauthorized",
+                    message: "Authentication required after initial setup."
+                  })
+                )
 
               :reject ->
                 conn
                 |> put_resp_content_type("application/json")
-                |> send_resp(400, Jason.encode!(%{error: "invalid_provider", message: "Provider not recognised. Use a supported provider name."}))
+                |> send_resp(
+                  400,
+                  Jason.encode!(%{
+                    error: "invalid_provider",
+                    message: "Provider not recognised. Use a supported provider name."
+                  })
+                )
 
               safe_params ->
                 case OptimalSystemAgent.Onboarding.health_check(safe_params) do
@@ -285,10 +317,14 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         end
 
       {:more, _partial, conn} ->
-        conn |> put_resp_content_type("application/json") |> send_resp(413, ~s({"error":"payload_too_large"}))
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(413, ~s({"error":"payload_too_large"}))
 
       {:error, _reason} ->
-        conn |> put_resp_content_type("application/json") |> send_resp(400, ~s({"error":"read_failed"}))
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(400, ~s({"error":"read_failed"}))
     end
   end
 
@@ -312,10 +348,11 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
     :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
 
-    body = Jason.encode!(%{
-      authorize_url: authorize_url,
-      state: state
-    })
+    body =
+      Jason.encode!(%{
+        authorize_url: authorize_url,
+        state: state
+      })
 
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
@@ -352,7 +389,12 @@ defmodule OptimalSystemAgent.Channels.HTTP do
               {:error, _} ->
                 # No API key creation — store OAuth tokens for Bearer auth
                 OAuth.save_oauth_credentials(tokens)
-                Application.put_env(:optimal_system_agent, :anthropic_oauth_token, tokens.access_token)
+
+                Application.put_env(
+                  :optimal_system_agent,
+                  :anthropic_oauth_token,
+                  tokens.access_token
+                )
 
                 conn
                 |> put_resp_content_type("text/html")
@@ -398,14 +440,17 @@ defmodule OptimalSystemAgent.Channels.HTTP do
               {:ok, p} -> p
               _ -> nil
             end
-          _ -> nil
+
+          _ ->
+            nil
         end
       end
 
-    body = Jason.encode!(%{
-      connected: connected,
-      profile: profile
-    })
+    body =
+      Jason.encode!(%{
+        connected: connected,
+        profile: profile
+      })
 
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
@@ -433,14 +478,20 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
     case auth_result do
       :setup_locked ->
-        Logger.warning("[Onboarding] POST /onboarding/setup blocked: setup already complete and no valid JWT presented (remote_ip=#{inspect(conn.remote_ip)})")
+        Logger.warning(
+          "[Onboarding] POST /onboarding/setup blocked: setup already complete and no valid JWT presented (remote_ip=#{inspect(conn.remote_ip)})"
+        )
 
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(409, Jason.encode!(%{
-          error: "setup_already_complete",
-          message: "Initial setup has already been completed. Re-configure via the authenticated API (/api/v1/settings)."
-        }))
+        |> send_resp(
+          409,
+          Jason.encode!(%{
+            error: "setup_already_complete",
+            message:
+              "Initial setup has already been completed. Re-configure via the authenticated API (/api/v1/settings)."
+          })
+        )
 
       _ ->
         # :first_run or {:ok, claims} — proceed with write_setup
@@ -466,8 +517,11 @@ defmodule OptimalSystemAgent.Channels.HTTP do
                       try do
                         OptimalSystemAgent.Onboarding.doctor_checks()
                         |> Enum.map(fn
-                          {:ok, desc} -> %{status: "ok", check: desc}
-                          {:error, desc, reason} -> %{status: "error", check: desc, reason: reason}
+                          {:ok, desc} ->
+                            %{status: "ok", check: desc}
+
+                          {:error, desc, reason} ->
+                            %{status: "error", check: desc, reason: reason}
                         end)
                       rescue
                         _ -> []
@@ -475,12 +529,15 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
                     conn
                     |> put_resp_content_type("application/json")
-                    |> send_resp(200, Jason.encode!(%{
-                      status: "ok",
-                      provider: Map.get(params, "provider"),
-                      model: Map.get(params, "model"),
-                      checks: checks
-                    }))
+                    |> send_resp(
+                      200,
+                      Jason.encode!(%{
+                        status: "ok",
+                        provider: Map.get(params, "provider"),
+                        model: Map.get(params, "model"),
+                        checks: checks
+                      })
+                    )
 
                   {:error, reason} ->
                     conn
@@ -495,10 +552,14 @@ defmodule OptimalSystemAgent.Channels.HTTP do
             end
 
           {:more, _partial, conn} ->
-            conn |> put_resp_content_type("application/json") |> send_resp(413, ~s({"error":"payload_too_large"}))
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(413, ~s({"error":"payload_too_large"}))
 
           {:error, _reason} ->
-            conn |> put_resp_content_type("application/json") |> send_resp(400, ~s({"error":"read_failed"}))
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(400, ~s({"error":"read_failed"}))
         end
     end
   end
@@ -510,7 +571,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       {:ok, raw, conn} ->
         case Jason.decode(raw) do
           {:ok, body} ->
-            :ets.insert(:osa_survey_responses, {System.unique_integer([:positive]), body, DateTime.utc_now()})
+            :ets.insert(
+              :osa_survey_responses,
+              {System.unique_integer([:positive]), body, DateTime.utc_now()}
+            )
 
             conn
             |> put_resp_content_type("application/json")
@@ -543,7 +607,11 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           {:ok, body} ->
             # Waitlist is a lightweight survey with just email + optional source
             attrs = Map.put_new(body, "role", "other")
-            :ets.insert(:osa_survey_responses, {System.unique_integer([:positive]), attrs, DateTime.utc_now()})
+
+            :ets.insert(
+              :osa_survey_responses,
+              {System.unique_integer([:positive]), attrs, DateTime.utc_now()}
+            )
 
             conn
             |> put_resp_content_type("application/json")

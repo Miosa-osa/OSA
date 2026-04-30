@@ -1,5 +1,6 @@
 defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   import Bitwise
+
   @moduledoc """
   Token-bucket rate limiting plug backed by ETS.
 

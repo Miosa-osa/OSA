@@ -17,9 +17,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
     # SessionRegistry
     case Process.whereis(OptimalSystemAgent.SessionRegistry) do
       nil ->
-        start_supervised!(
-          {Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry}
-        )
+        start_supervised!({Registry, keys: :unique, name: OptimalSystemAgent.SessionRegistry})
 
       _pid ->
         :ok
@@ -142,6 +140,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
   describe "checkpoint restore" do
     test "new Loop with same session_id restores from checkpoint" do
       session_id = unique_session_id()
+
       messages = [
         %{role: "user", content: "build feature X"},
         %{role: "assistant", content: "I'll start by reading..."}
@@ -149,6 +148,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
 
       # Write a checkpoint manually
       File.mkdir_p!(@checkpoint_dir)
+
       checkpoint_data = %{
         session_id: session_id,
         messages: messages,
@@ -157,6 +157,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
         turn_count: 3,
         checkpointed_at: DateTime.utc_now() |> DateTime.to_iso8601()
       }
+
       File.write!(checkpoint_path(session_id), Jason.encode!(checkpoint_data))
 
       # Start a new Loop — it should restore from the checkpoint
@@ -195,6 +196,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
         turn_count: 4,
         checkpointed_at: DateTime.utc_now() |> DateTime.to_iso8601()
       }
+
       File.write!(checkpoint_path(session_id), Jason.encode!(checkpoint_data))
 
       restored = Loop.restore_checkpoint(session_id)
@@ -242,6 +244,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
 
       # Write a checkpoint
       File.mkdir_p!(@checkpoint_dir)
+
       checkpoint_data = %{
         session_id: session_id,
         messages: [%{role: "user", content: "test"}],
@@ -250,6 +253,7 @@ defmodule OptimalSystemAgent.Agent.SessionRecoveryTest do
         turn_count: 1,
         checkpointed_at: DateTime.utc_now() |> DateTime.to_iso8601()
       }
+
       File.write!(checkpoint_path(session_id), Jason.encode!(checkpoint_data))
       assert File.exists?(checkpoint_path(session_id))
 

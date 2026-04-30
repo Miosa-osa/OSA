@@ -176,7 +176,10 @@ defmodule OptimalSystemAgent.Workspace.Session do
     :ok
   rescue
     e ->
-      Logger.warning("[Session] Broadcast failed for workspace #{workspace_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Session] Broadcast failed for workspace #{workspace_id}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 

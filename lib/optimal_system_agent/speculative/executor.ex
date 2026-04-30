@@ -187,7 +187,10 @@ defmodule OptimalSystemAgent.Speculative.Executor do
       assumption_count: length(assumptions)
     })
 
-    Logger.info("[Speculative.Executor] #{spec_id} started for agent #{agent_id} — #{length(assumptions)} assumption(s)")
+    Logger.info(
+      "[Speculative.Executor] #{spec_id} started for agent #{agent_id} — #{length(assumptions)} assumption(s)"
+    )
+
     {:reply, {:ok, spec_id}, state}
   end
 
@@ -223,7 +226,10 @@ defmodule OptimalSystemAgent.Speculative.Executor do
               failed_assumptions: Enum.map(failed, &Assumption.to_map/1)
             })
 
-            Logger.info("[Speculative.Executor] #{spec_id} invalidated — #{length(failed)} assumption(s) broke")
+            Logger.info(
+              "[Speculative.Executor] #{spec_id} invalidated — #{length(failed)} assumption(s) broke"
+            )
+
             {:reply, {:invalidated, updated}, state}
         end
 
@@ -295,7 +301,10 @@ defmodule OptimalSystemAgent.Speculative.Executor do
         {:reply, :ok, state}
 
       [{_, %{status: status}}] ->
-        Logger.debug("[Speculative.Executor] discard called on #{spec_id} with status #{status} — no-op")
+        Logger.debug(
+          "[Speculative.Executor] discard called on #{spec_id} with status #{status} — no-op"
+        )
+
         {:reply, :ok, state}
 
       [] ->

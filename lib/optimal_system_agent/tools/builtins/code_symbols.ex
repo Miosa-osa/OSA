@@ -1,320 +1,42 @@
 defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols do
-  @behaviour OptimalSystemAgent.Tools.Behaviour
-
-  @default_allowed_paths ["~", "/tmp"]
-
-  @impl true
-  def safety, do: :read_only
-
-  @impl true
-  def name, do: "code_symbols"
-
-  @impl true
-  def description,
-    do: "List functions, classes, and modules defined in a source file."
-
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "properties" => %{
-        "path" => %{
-          "type" => "string",
-          "description" => "Path to the source file to analyze"
-        },
-        "type" => %{
-          "type" => "string",
-          "description" =>
-            "Filter by symbol type: \"function\", \"class\", \"module\". Omit for all symbols."
-        }
-      },
-      "required" => ["path"]
-    }
-  end
-
-  @impl true
-  def execute(%{"path" => path} = params) when is_binary(path) do
-    expanded = Path.expand(path)
-    filter_type = params["type"]
-
-    if path_allowed?(expanded) do
-      case File.read(expanded) do
-        {:ok, content} ->
-          ext = Path.extname(expanded) |> String.downcase()
-          symbols = extract_symbols(content, ext)
-          filtered = filter_symbols(symbols, filter_type)
-          format_result(path, filtered)
-
-        {:error, :enoent} ->
-          {:error, "File not found: #{path}"}
-
-        {:error, reason} ->
-          {:error, "Error reading file: #{reason}"}
-      end
-    else
-      {:error, "Access denied: #{path} is outside allowed paths"}
-    end
-  end
-
-  def execute(%{"path" => _}), do: {:error, "path must be a string"}
-  def execute(_), do: {:error, "Missing required parameter: path"}
-
-  # --- Symbol extraction by language ---
-
-  defp extract_symbols(content, ext) when ext in [".ex", ".exs"] do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*defmodule\s+([\w.]+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "module", name}]
-
-        match = Regex.run(~r/^\s*def\s+(\w+)[\s(]/, line) ->
-          [_ | [name]] = match
-          arity = extract_arity(line)
-          [{line_num, "function", "#{name}/#{arity}"}]
-
-        match = Regex.run(~r/^\s*defp\s+(\w+)[\s(]/, line) ->
-          [_ | [name]] = match
-          arity = extract_arity(line)
-          [{line_num, "function", "#{name}/#{arity} (private)"}]
-
-        match = Regex.run(~r/^\s*defmacro\s+(\w+)[\s(]/, line) ->
-          [_ | [name]] = match
-          arity = extract_arity(line)
-          [{line_num, "function", "#{name}/#{arity} (macro)"}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ".py") do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*class\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", name}]
-
-        match = Regex.run(~r/^\s*def\s+(\w+)\s*\(/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        match = Regex.run(~r/^\s*async\s+def\s+(\w+)\s*\(/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", "#{name} (async)"}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ext) when ext in [".js", ".ts", ".jsx", ".tsx"] do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*class\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", name}]
-
-        match = Regex.run(~r/^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*[\(<]/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        match = Regex.run(~r/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        match = Regex.run(~r/^\s*export\s+(?:default\s+)?(?:const|function|class)\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", "#{name} (export)"}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ".go") do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*func\s+\((\w+\s+[\*\w]+)\)\s+(\w+)\s*\(/, line) ->
-          [_ | [receiver, name]] = match
-          [{line_num, "function", "#{name} (#{receiver})"}]
-
-        match = Regex.run(~r/^\s*func\s+(\w+)\s*\(/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        match = Regex.run(~r/^\s*type\s+(\w+)\s+struct\s*\{/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", "#{name} (struct)"}]
-
-        match = Regex.run(~r/^\s*type\s+(\w+)\s+interface\s*\{/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", "#{name} (interface)"}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ".rs") do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*pub\s+fn\s+(\w+)\s*[\(<]/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", "#{name} (pub)"}]
-
-        match = Regex.run(~r/^\s*fn\s+(\w+)\s*[\(<]/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        match = Regex.run(~r/^\s*(?:pub\s+)?struct\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", "#{name} (struct)"}]
-
-        match = Regex.run(~r/^\s*(?:pub\s+)?enum\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", "#{name} (enum)"}]
-
-        match = Regex.run(~r/^\s*impl(?:<[^>]+>)?\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "module", "impl #{name}"}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ext) when ext in [".rb"] do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*class\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", name}]
-
-        match = Regex.run(~r/^\s*module\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "module", name}]
-
-        match = Regex.run(~r/^\s*def\s+(\w+[?!]?)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(content, ext) when ext in [".java", ".kt"] do
-    lines = String.split(content, "\n")
-
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line, line_num} ->
-      cond do
-        match = Regex.run(~r/^\s*(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum)\s+(\w+)/, line) ->
-          [_ | [name]] = match
-          [{line_num, "class", name}]
-
-        match = Regex.run(~r/^\s*(?:public|private|protected|static|final|abstract|\s)+\s+\w+\s+(\w+)\s*\(/, line) ->
-          [_ | [name]] = match
-          [{line_num, "function", name}]
-
-        true ->
-          []
-      end
-    end)
-  end
-
-  defp extract_symbols(_content, _ext), do: []
-
-  # --- Helpers ---
-
-  defp extract_arity(line) do
-    case Regex.run(~r/\(([^)]*)\)/, line) do
-      [_ | [args_str]] ->
-        trimmed = String.trim(args_str)
-
-        if trimmed == "" do
-          0
-        else
-          trimmed |> String.split(",") |> length()
-        end
-
-      _ ->
-        0
-    end
-  end
-
-  defp filter_symbols(symbols, nil), do: symbols
-  defp filter_symbols(symbols, ""), do: symbols
-
-  defp filter_symbols(symbols, type_filter) when is_binary(type_filter) do
-    norm = String.downcase(type_filter)
-    Enum.filter(symbols, fn {_line, type, _name} -> type == norm end)
-  end
-
-  defp format_result(path, []) do
-    {:ok, "No symbols found in #{path}"}
-  end
-
-  defp format_result(path, symbols) do
-    lines =
-      Enum.map_join(symbols, "\n", fn {line_num, type, name} ->
-        line_str = line_num |> Integer.to_string() |> String.pad_leading(4)
-        "  L#{line_str}  [#{type}] #{name}"
-      end)
-
-    {:ok, "Symbols in #{path}:\n#{lines}"}
-  end
-
-  # --- Path safety (mirrors file_read.ex) ---
-
-  defp allowed_paths do
-    configured =
-      Application.get_env(:optimal_system_agent, :allowed_read_paths, @default_allowed_paths)
-
-    Enum.map(configured, fn p ->
-      expanded = Path.expand(p)
-      if String.ends_with?(expanded, "/"), do: expanded, else: expanded <> "/"
-    end)
-  end
-
-  defp path_allowed?(expanded_path) do
-    check_path =
-      if String.ends_with?(expanded_path, "/"), do: expanded_path, else: expanded_path <> "/"
-
-    Enum.any?(allowed_paths(), fn allowed ->
-      String.starts_with?(check_path, allowed)
-    end)
-  end
+  @moduledoc """
+  Shim — delegates all behaviour callbacks to the structured-layout
+  `OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool` module.
+
+  Preserved so that any existing callers using the flat module name
+  (`OptimalSystemAgent.Tools.Builtins.CodeSymbols`) continue to work without
+  change. The registry receives `CodeSymbols.Tool` via the normal structured-
+  layout path.
+  """
+
+  defdelegate name(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate aliases(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate search_hint(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate description(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate parameters(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate prompt(opts), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate available?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate should_defer?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate always_load?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate strict?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+
+  defdelegate concurrency_safe?(input, ctx),
+    to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+
+  defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate interrupt_behavior(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate max_result_size_chars(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+
+  defdelegate check_permissions(input, ctx),
+    to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+
+  defdelegate execute(input, ctx), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate render(stage, payload, opts), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate to_classifier_input(input), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate safety(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate deferred?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
+  defdelegate concurrent?(), to: OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool
 end

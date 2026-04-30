@@ -68,13 +68,18 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
       network = if config[:network] == true, do: [], else: ["--network", "none"]
 
       # Build docker run command
-      docker_args = [
-        "run", "--rm",
-        "--cap-drop", "ALL",
-        "--read-only",
-        "--pids-limit", "100",
-        "--memory", memory
-      ] ++ network
+      docker_args =
+        [
+          "run",
+          "--rm",
+          "--cap-drop",
+          "ALL",
+          "--read-only",
+          "--pids-limit",
+          "100",
+          "--memory",
+          memory
+        ] ++ network
 
       # Mount working directory if provided
       docker_args =
@@ -108,14 +113,15 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
     filename = Path.basename(path)
 
     # Select appropriate image based on file type
-    {image, run_cmd} = case ext do
-      ".py" -> {"python:3.12-slim", "python3 /workspace/#{filename}"}
-      ".js" -> {"node:22-slim", "node /workspace/#{filename}"}
-      ".ts" -> {"node:22-slim", "npx tsx /workspace/#{filename}"}
-      ".rb" -> {"ruby:3.3-slim", "ruby /workspace/#{filename}"}
-      ".go" -> {"golang:1.23-alpine", "go run /workspace/#{filename}"}
-      _ -> {"alpine:latest", "sh /workspace/#{filename}"}
-    end
+    {image, run_cmd} =
+      case ext do
+        ".py" -> {"python:3.12-slim", "python3 /workspace/#{filename}"}
+        ".js" -> {"node:22-slim", "node /workspace/#{filename}"}
+        ".ts" -> {"node:22-slim", "npx tsx /workspace/#{filename}"}
+        ".rb" -> {"ruby:3.3-slim", "ruby /workspace/#{filename}"}
+        ".go" -> {"golang:1.23-alpine", "go run /workspace/#{filename}"}
+        _ -> {"alpine:latest", "sh /workspace/#{filename}"}
+      end
 
     dir = Path.dirname(path)
     execute(run_cmd, [{:image, image}, {:working_dir, dir} | opts])

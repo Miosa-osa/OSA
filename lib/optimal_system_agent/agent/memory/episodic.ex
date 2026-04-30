@@ -150,7 +150,7 @@ defmodule OptimalSystemAgent.Agent.Memory.Episodic do
       type: event_type,
       event_type: event_type,
       content: content,
-      data: (if is_map(content), do: content, else: %{message: content}),
+      data: if(is_map(content), do: content, else: %{message: content}),
       timestamp: DateTime.utc_now(),
       session_id: session_id
     }

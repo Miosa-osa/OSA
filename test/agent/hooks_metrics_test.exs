@@ -35,9 +35,12 @@ defmodule OptimalSystemAgent.Agent.HooksMetricsTest do
       # Register a blocking hook with a unique name
       hook_name = "metrics_blocker_#{:erlang.unique_integer([:positive])}"
 
-      Hooks.register(:pre_tool_use, hook_name, fn _payload ->
-        {:block, "test block for metrics"}
-      end, priority: 1)
+      Hooks.register(
+        :pre_tool_use,
+        hook_name,
+        fn _payload ->
+          {:block, "test block for metrics"}
+        end, priority: 1)
 
       # Small sleep to let registration cast process
       Process.sleep(10)

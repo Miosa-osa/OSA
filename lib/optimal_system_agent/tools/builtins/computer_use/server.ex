@@ -9,8 +9,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   use GenServer
   require Logger
 
-  @default_idle_timeout_ms 10 * 60 * 1_000  # 10 minutes
-  @tree_ttl_ms 5_000                         # 5 seconds
+  # 10 minutes
+  @default_idle_timeout_ms 10 * 60 * 1_000
+  # 5 seconds
+  @tree_ttl_ms 5_000
 
   defstruct [
     :adapter,
@@ -54,7 +56,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
       idle_timeout_ms: idle_timeout_ms
     }
 
-    Logger.debug("[CU.Server] Started for session #{session_id} (#{platform}/#{inspect(adapter)})")
+    Logger.debug(
+      "[CU.Server] Started for session #{session_id} (#{platform}/#{inspect(adapter)})"
+    )
+
     {:ok, state}
   end
 
@@ -80,6 +85,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
           {:ok, data} ->
             b64 = Base.encode64(data)
             {{:ok, {:image, %{media_type: "image/png", data: b64, path: path}}}, bump_step(state)}
+
           {:error, _} ->
             {{:ok, "Screenshot saved to #{path} but could not read file"}, bump_step(state)}
         end
@@ -91,7 +97,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
 
   defp dispatch("click", %{"target" => ref}, state) do
     case resolve_ref(ref, state) do
-      {:ok, %{x: x, y: y, width: w, height: h}} when is_integer(w) and is_integer(h) and w > 0 and h > 0 ->
+      {:ok, %{x: x, y: y, width: w, height: h}}
+      when is_integer(w) and is_integer(h) and w > 0 and h > 0 ->
         cx = x + div(w, 2)
         cy = y + div(h, 2)
         result = state.adapter.click(cx, cy)
@@ -149,7 +156,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("drag", %{"x" => _, "y" => _}, state) do
-    {{:error, "drag requires target coordinates: either region.x/region.y or target_x/target_y"}, state}
+    {{:error, "drag requires target coordinates: either region.x/region.y or target_x/target_y"},
+     state}
   end
 
   defp dispatch("get_tree", params, state) do
@@ -158,7 +166,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     force = params["force_refresh"] == true
     now = System.monotonic_time(:millisecond)
 
-    if not force and state.last_tree != nil and (now - state.tree_fetched_at) < @tree_ttl_ms do
+    if not force and state.last_tree != nil and now - state.tree_fetched_at < @tree_ttl_ms do
       {{:ok, state.last_tree}, state}
     else
       case state.adapter.get_tree() do
@@ -166,11 +174,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
           parsed = Accessibility.parse_tree(raw_elements)
           {tree_text, refs} = Accessibility.assign_refs(parsed)
 
-          state = %{state |
-            last_tree: tree_text,
-            tree_fetched_at: now,
-            element_refs: refs
-          }
+          state = %{state | last_tree: tree_text, tree_fetched_at: now, element_refs: refs}
 
           {{:ok, tree_text}, state}
 

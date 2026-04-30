@@ -35,14 +35,18 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       utilization: utilization
     })
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{
-        type: :context_pressure,
-        session_id: state.session_id,
-        estimated_tokens: estimated,
-        max_tokens: max_tok,
-        utilization: utilization
-      }})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :context_pressure,
+         session_id: state.session_id,
+         estimated_tokens: estimated,
+         max_tokens: max_tok,
+         utilization: utilization
+       }}
+    )
 
     :ok
   rescue

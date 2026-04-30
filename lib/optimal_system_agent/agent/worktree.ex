@@ -34,7 +34,9 @@ defmodule OptimalSystemAgent.Agent.Worktree do
 
     # Create the worktree with a new branch from HEAD
     case System.cmd("git", ["worktree", "add", "-b", branch_name, worktree_path],
-           cd: base_dir, stderr_to_stdout: true) do
+           cd: base_dir,
+           stderr_to_stdout: true
+         ) do
       {_output, 0} ->
         Logger.info("[worktree] Created #{worktree_path} on branch #{branch_name}")
 
@@ -138,18 +140,26 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     if branch do
       # Commit any uncommitted changes in the worktree
       System.cmd("git", ["add", "-A"], cd: worktree_path, stderr_to_stdout: true)
-      System.cmd("git", ["commit", "-m", "Agent worktree changes"], cd: worktree_path, stderr_to_stdout: true)
+
+      System.cmd("git", ["commit", "-m", "Agent worktree changes"],
+        cd: worktree_path,
+        stderr_to_stdout: true
+      )
 
       # Merge the branch back
       case System.cmd("git", ["merge", "--no-ff", branch, "-m", "Merge agent worktree #{branch}"],
-             cd: base_dir, stderr_to_stdout: true) do
+             cd: base_dir,
+             stderr_to_stdout: true
+           ) do
         {_output, 0} ->
           Logger.info("[worktree] Merged branch #{branch} back to main")
           :ok
 
         {output, _code} ->
           Logger.warning("[worktree] Merge failed: #{output}")
-          {:error, "Merge failed: #{String.trim(output)}. Branch #{branch} preserved for manual merge."}
+
+          {:error,
+           "Merge failed: #{String.trim(output)}. Branch #{branch} preserved for manual merge."}
       end
     else
       {:error, "Could not determine worktree branch"}
@@ -161,12 +171,13 @@ defmodule OptimalSystemAgent.Agent.Worktree do
 
     # Remove the worktree
     System.cmd("git", ["worktree", "remove", "--force", worktree_path],
-      cd: base_dir, stderr_to_stdout: true)
+      cd: base_dir,
+      stderr_to_stdout: true
+    )
 
     # Delete the branch (if it exists and wasn't merged)
     if branch do
-      System.cmd("git", ["branch", "-D", branch],
-        cd: base_dir, stderr_to_stdout: true)
+      System.cmd("git", ["branch", "-D", branch], cd: base_dir, stderr_to_stdout: true)
     end
 
     # Clean up the directory if it still exists

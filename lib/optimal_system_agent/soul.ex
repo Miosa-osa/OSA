@@ -43,6 +43,7 @@ defmodule OptimalSystemAgent.Soul do
   require Logger
 
   alias OptimalSystemAgent.PromptLoader
+  alias OptimalSystemAgent.Soul.ToolsSection
 
   defp soul_dir, do: Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
 
@@ -205,72 +206,12 @@ defmodule OptimalSystemAgent.Soul do
 
   # ── Boot-Time Content Generators ───────────────────────────────────
 
+  # Delegates to Soul.ToolsSection which calls PromptAssembler.assemble/3,
+  # invoking each structured tool's `prompt/1` callback (dynamic, with
+  # cross-tool name references) and appending a <system-reminder> block for
+  # any deferred tools.  Flat-layout tools fall back to `description/0`.
   defp tools_content do
-    alias OptimalSystemAgent.Tools.Registry, as: Tools
-
-    skills = try do Tools.list_docs_direct() rescue _ -> [] catch :exit, _ -> [] end
-    # Use list_active to exclude deferred tools from the system prompt
-    tools = try do Tools.list_active() rescue _ -> Tools.list_tools_direct() catch :exit, _ -> [] end
-
-    case skills do
-      [] ->
-        nil
-
-      list ->
-        tool_index = Map.new(tools, fn tool -> {tool.name, tool} end)
-
-        docs =
-          Enum.map(list, fn {name, desc} ->
-            base = "- **#{name}**: #{desc}"
-
-            case Map.get(tool_index, name) do
-              %{parameters: params} when is_map(params) and map_size(params) > 0 ->
-                param_info = format_parameters(params)
-                if param_info != "", do: base <> "\n  " <> param_info, else: base
-
-              _ ->
-                base
-            end
-          end)
-
-        deferred_note =
-          try do
-            all = Tools.list_tools_direct()
-            active = Tools.list_active()
-            deferred_count = length(all) - length(active)
-            if deferred_count > 0 do
-              "\n\n_#{deferred_count} additional specialized tools are available via the `tool_search` tool._"
-            else
-              ""
-            end
-          rescue
-            _ -> ""
-          end
-
-        "## Available Tools\n#{Enum.join(docs, "\n")}#{deferred_note}"
-    end
-  rescue
-    _ -> nil
-  end
-
-  defp format_parameters(params) do
-    properties = Map.get(params, "properties", %{})
-    required = MapSet.new(Map.get(params, "required", []))
-
-    if map_size(properties) == 0 do
-      ""
-    else
-      props =
-        Enum.map(properties, fn {name, spec} ->
-          type = Map.get(spec, "type", "any")
-          req = if MapSet.member?(required, name), do: " (required)", else: ""
-          desc = Map.get(spec, "description", "")
-          desc_part = if desc != "", do: " — #{desc}", else: ""
-          "`#{name}` (#{type}#{req})#{desc_part}"
-        end)
-
-      "Parameters: #{Enum.join(props, ", ")}"
-    end
+    ToolsSection.build()
   end
 
   defp rules_content do
@@ -378,5 +319,4 @@ defmodule OptimalSystemAgent.Soul do
       Logger.warning("[Soul] Failed to load agent souls: #{Exception.message(e)}")
       %{}
   end
-
 end

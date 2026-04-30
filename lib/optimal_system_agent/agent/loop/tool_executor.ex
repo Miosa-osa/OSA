@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   require Logger
 
   alias OptimalSystemAgent.Agent.Hooks
+  alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
 
@@ -32,7 +33,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   @doc false
   def permission_tier_allows?(:full, _tool), do: true
   def permission_tier_allows?(:read_only, tool), do: tool in @read_only_tools
-  def permission_tier_allows?(:workspace, tool), do: tool in (@read_only_tools ++ @workspace_tools)
+
+  def permission_tier_allows?(:workspace, tool),
+    do: tool in (@read_only_tools ++ @workspace_tools)
 
   def permission_tier_allows?(:subagent, tool) do
     tool not in @subagent_blocked_tools
@@ -67,11 +70,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   Returns {tool_msg, result_str} tuple.
   """
   def execute_tool_call(tool_call, state) do
-    max_tool_output_bytes = Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
+    max_tool_output_bytes =
+      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
+
     arg_hint = tool_call_hint(tool_call.arguments)
-    Bus.emit(:tool_call, %{name: tool_call.name, phase: :start, args: arg_hint, session_id: state.session_id, agent: state.session_id})
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :tool_call, name: tool_call.name, phase: "start", args: arg_hint, session_id: state.session_id}})
+
+    Bus.emit(:tool_call, %{
+      name: tool_call.name,
+      phase: :start,
+      args: arg_hint,
+      session_id: state.session_id,
+      agent: state.session_id
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :tool_call,
+         name: tool_call.name,
+         phase: "start",
+         args: arg_hint,
+         session_id: state.session_id
+       }}
+    )
+
     start_time_tool = System.monotonic_time(:millisecond)
 
     # Run pre_tool_use hooks sync (security_check/spend_guard can block)
@@ -84,50 +108,60 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     tool_result =
       cond do
         not permission_tier_allows?(state.permission_tier, tool_call.name) ->
-          Logger.warning("[loop] Permission denied: tier=#{state.permission_tier} blocked #{tool_call.name} (session: #{state.session_id})")
+          Logger.warning(
+            "[loop] Permission denied: tier=#{state.permission_tier} blocked #{tool_call.name} (session: #{state.session_id})"
+          )
+
           "Blocked: #{state.permission_tier} mode — #{tool_call.name} is not permitted at this permission level"
 
         state.permission_tier == :subagent and not subagent_tool_allowed?(tool_call.name, state) ->
-          Logger.warning("[loop] Subagent tool denied: #{tool_call.name} blocked by agent definition (session: #{state.session_id})")
+          Logger.warning(
+            "[loop] Subagent tool denied: #{tool_call.name} blocked by agent definition (session: #{state.session_id})"
+          )
+
           "Blocked: this agent role does not have access to #{tool_call.name}"
 
-        true -> nil
+        true ->
+          nil
       end
 
     tool_result =
       if tool_result != nil do
         tool_result
       else
-      case run_hooks(:pre_tool_use, pre_payload) do
-        {:blocked, reason} ->
-          "Blocked: #{reason}"
+        case run_hooks(:pre_tool_use, pre_payload) do
+          {:blocked, reason} ->
+            "Blocked: #{reason}"
 
-        {:error, :hooks_unavailable} ->
-          # Hooks GenServer is down — fail closed. Never execute a tool when
-          # security_check and spend_guard are unreachable.
-          Logger.error("[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})")
-          "Blocked: security pipeline unavailable"
+          {:error, :hooks_unavailable} ->
+            # Hooks GenServer is down — fail closed. Never execute a tool when
+            # security_check and spend_guard are unreachable.
+            Logger.error(
+              "[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})"
+            )
 
-        {:ok, %{arguments: modified_args} = _modified_payload} ->
-          # Hook modified the tool arguments — use the modified version
-          enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
-          execute_tool(tool_call.name, enriched_args)
+            "Blocked: security pipeline unavailable"
 
-        {:inject_message, content} ->
-          # Hook wants to inject a system message instead of executing the tool.
-          # Store it for the next LLM call via process dict.
-          existing = Process.get(:osa_injected_messages, [])
-          Process.put(:osa_injected_messages, existing ++ [content])
-          # Still execute the tool
-          enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-          execute_tool(tool_call.name, enriched_args)
+          {:ok, %{arguments: modified_args} = _modified_payload} ->
+            # Hook modified the tool arguments — use the modified version
+            enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
+            execute_tool(tool_call.name, enriched_args)
 
-        _ ->
-          # Inject session_id so tools like ask_user can register pending state
-          enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-          execute_tool(tool_call.name, enriched_args)
+          {:inject_message, content} ->
+            # Hook wants to inject a system message instead of executing the tool.
+            # Store it for the next LLM call via process dict.
+            existing = Process.get(:osa_injected_messages, [])
+            Process.put(:osa_injected_messages, existing ++ [content])
+            # Still execute the tool
+            enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+            execute_tool(tool_call.name, enriched_args)
+
+          _ ->
+            # Inject session_id so tools like ask_user can register pending state
+            enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+            execute_tool(tool_call.name, enriched_args)
+        end
       end
-    end
 
     tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
 
@@ -140,9 +174,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       end
 
     # Apply tool result budget — persist large results to disk
-    result_str = OptimalSystemAgent.Agent.Loop.ToolResultStorage.apply_budget(
-      result_str, tool_call.name, tool_call.id
-    )
+    result_str =
+      OptimalSystemAgent.Agent.Loop.ToolResultStorage.apply_budget(
+        result_str,
+        tool_call.name,
+        tool_call.id
+      )
 
     # Run post_tool_use hooks async (cost tracker, telemetry, learning)
     post_payload = %{
@@ -155,16 +192,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     run_hooks_async(:post_tool_use, post_payload)
 
     # Fire distinct failure hook if tool errored
-    tool_failed = String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+    tool_failed =
+      String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+
     if tool_failed do
       run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
     end
 
     # Record telemetry
     try do
-      OptimalSystemAgent.Telemetry.Metrics.record_tool(tool_call.name, tool_duration_ms, not tool_failed)
-    rescue _ -> :ok
-    catch :exit, _ -> :ok
+      OptimalSystemAgent.Telemetry.Metrics.record_tool(
+        tool_call.name,
+        tool_duration_ms,
+        not tool_failed
+      )
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
 
     Bus.emit(:tool_call, %{
@@ -175,8 +220,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       session_id: state.session_id,
       agent: state.session_id
     })
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :tool_call, name: tool_call.name, phase: "end", duration_ms: tool_duration_ms, success: true, session_id: state.session_id}})
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :tool_call,
+         name: tool_call.name,
+         phase: "end",
+         duration_ms: tool_duration_ms,
+         success: true,
+         session_id: state.session_id
+       }}
+    )
 
     tool_success = !match?({:error, _}, tool_result)
     result_preview = String.slice(result_str, 0, 2000)
@@ -184,17 +241,36 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # Retrieve tool metadata (diff data, etc.) if the tool stored any
     tool_metadata = Process.delete(:osa_tool_metadata) || %{}
 
-    tool_result_event = %{
-      name: tool_call.name,
-      result: result_preview,
-      success: tool_success,
-      session_id: state.session_id,
-      agent: state.session_id
-    } |> Map.merge(tool_metadata)
+    tool_result_event =
+      %{
+        name: tool_call.name,
+        result: result_preview,
+        success: tool_success,
+        session_id: state.session_id,
+        agent: state.session_id
+      }
+      |> Map.merge(tool_metadata)
 
     Bus.emit(:tool_result, tool_result_event)
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, Map.merge(%{type: :tool_result, name: tool_call.name, result: result_preview, success: tool_success, session_id: state.session_id}, tool_metadata)})
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       Map.merge(
+         %{
+           type: :tool_result,
+           name: tool_call.name,
+           result: result_preview,
+           success: tool_success,
+           session_id: state.session_id
+         },
+         tool_metadata
+       )}
+    )
+
+    # Emit structured render payload — additive, never blocks execution.
+    RenderBridge.emit(tool_call.name, tool_result, state.session_id)
 
     # Build tool message — images get structured content blocks.
     # Both branches include `name: tool_call.name` so that on iteration 2+
@@ -215,10 +291,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
         _ ->
           limit = max_tool_output_bytes
+
           content =
             if byte_size(result_str) > limit do
               truncated = binary_part(result_str, 0, limit)
-              truncated <> "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{limit} bytes]"
+
+              truncated <>
+                "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first #{limit} bytes]"
             else
               result_str
             end
@@ -254,16 +333,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         state
       else
         paths_str = Enum.join(nudged_paths, ", ")
+
         nudge_msg = %{
           role: "system",
-          content: "[System: You modified #{paths_str} without reading #{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
-            "Always call file_read before file_edit/file_write on existing files to understand current content.]"
+          content:
+            "[System: You modified #{paths_str} without reading #{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
+              "Always call file_read before file_edit/file_write on existing files to understand current content.]"
         }
+
         %{state | messages: state.messages ++ [nudge_msg]}
       end
     end
   rescue
-    e -> Logger.debug("[loop] inject_read_nudges failed (non-critical): #{inspect(e)}"); state
+    e ->
+      Logger.debug("[loop] inject_read_nudges failed (non-critical): #{inspect(e)}")
+      state
   end
 
   # --- Private helpers ---
@@ -280,11 +364,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp tool_call_hint(%{"action" => "screenshot"}), do: "screenshot"
   defp tool_call_hint(%{"action" => "click", "x" => x, "y" => y}), do: "click (#{x}, #{y})"
   defp tool_call_hint(%{"action" => "click", "target" => t}), do: "click → #{t}"
-  defp tool_call_hint(%{"action" => "double_click", "x" => x, "y" => y}), do: "double_click (#{x}, #{y})"
+
+  defp tool_call_hint(%{"action" => "double_click", "x" => x, "y" => y}),
+    do: "double_click (#{x}, #{y})"
+
   defp tool_call_hint(%{"action" => "type", "text" => t}), do: "type #{String.slice(t, 0, 30)}"
   defp tool_call_hint(%{"action" => "key", "text" => t}), do: "key #{t}"
   defp tool_call_hint(%{"action" => "scroll", "direction" => d}), do: "scroll #{d}"
-  defp tool_call_hint(%{"action" => "move_mouse", "x" => x, "y" => y}), do: "move_mouse (#{x}, #{y})"
+
+  defp tool_call_hint(%{"action" => "move_mouse", "x" => x, "y" => y}),
+    do: "move_mouse (#{x}, #{y})"
+
   defp tool_call_hint(%{"action" => "drag", "x" => x, "y" => y}), do: "drag (#{x}, #{y})"
   defp tool_call_hint(%{"action" => a}), do: a
 
@@ -312,6 +402,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp get_nudge_count(session_id, path) do
     try do
       nudge_key = {session_id, :nudge_count, path}
+
       case :ets.lookup(:osa_files_read, nudge_key) do
         [{^nudge_key, n}] -> n
         _ -> 0
@@ -346,7 +437,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       Hooks.run_async(event, payload)
     catch
       :exit, reason ->
-        Logger.warning("[loop] Hooks GenServer unreachable for async #{event} (#{inspect(reason)})")
+        Logger.warning(
+          "[loop] Hooks GenServer unreachable for async #{event} (#{inspect(reason)})"
+        )
+
         :ok
     end
   end
@@ -367,7 +461,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       {:error, reason} ->
         case Tools.suggest_fallback_tool(tool_name) do
           {:ok, alt_tool} ->
-            Logger.info("[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'")
+            Logger.info(
+              "[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'"
+            )
 
             case Tools.execute(alt_tool, enriched_args) do
               {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->

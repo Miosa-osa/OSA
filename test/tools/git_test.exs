@@ -156,8 +156,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.GitTest do
       repo = make_repo()
       File.write!(Path.join(repo, "change.txt"), "new content")
       System.cmd("git", ["add", "-A"], cd: repo, stderr_to_stdout: true)
-      assert {:ok, output} = run(%{"command" => "commit", "args" => "-m 'feat: add change'"}, repo)
-      assert output =~ "feat: add change" or output =~ "change.txt" or output =~ "master" or output =~ "main"
+
+      assert {:ok, output} =
+               run(%{"command" => "commit", "args" => "-m 'feat: add change'"}, repo)
+
+      assert output =~ "feat: add change" or output =~ "change.txt" or output =~ "master" or
+               output =~ "main"
     end
 
     test "requires a -m flag" do
@@ -168,7 +172,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.GitTest do
 
     test "rejects --no-verify flag" do
       repo = make_repo()
-      assert {:error, msg} = run(%{"command" => "commit", "args" => "--no-verify -m 'skip hooks'"}, repo)
+
+      assert {:error, msg} =
+               run(%{"command" => "commit", "args" => "--no-verify -m 'skip hooks'"}, repo)
+
       assert msg =~ "no-verify" or msg =~ "hook"
     end
   end
@@ -195,7 +202,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.GitTest do
       assert match?({:ok, _}, result) or match?({:error, _}, result)
       # Either way, the message should mention sensitivity or all
       {_, msg} = result
-      assert msg =~ "Warning" or msg =~ "warning" or msg =~ "ALL" or msg =~ "all" or msg =~ "sensitive"
+
+      assert msg =~ "Warning" or msg =~ "warning" or msg =~ "ALL" or msg =~ "all" or
+               msg =~ "sensitive"
     end
   end
 
@@ -320,10 +329,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.GitTest do
 
     test "adds a remote with add subcommand" do
       repo = make_repo()
-      assert {:ok, _} = run(%{
-        "command" => "remote",
-        "args" => "add upstream https://github.com/example/repo.git"
-      }, repo)
+
+      assert {:ok, _} =
+               run(
+                 %{
+                   "command" => "remote",
+                   "args" => "add upstream https://github.com/example/repo.git"
+                 },
+                 repo
+               )
     end
   end
 
@@ -333,7 +347,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.GitTest do
 
   describe "path validation" do
     test "rejects non-existent path" do
-      assert {:error, msg} = Git.execute(%{"command" => "status", "path" => "/nonexistent/path/xyz"})
+      assert {:error, msg} =
+               Git.execute(%{"command" => "status", "path" => "/nonexistent/path/xyz"})
+
       assert msg =~ "does not exist" or msg =~ "Access denied" or msg =~ "path"
     end
   end

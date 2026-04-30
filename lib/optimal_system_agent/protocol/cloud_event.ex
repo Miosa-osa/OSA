@@ -87,8 +87,12 @@ defmodule OptimalSystemAgent.Protocol.CloudEvent do
     source = Map.get(map, "source")
 
     cond do
-      is_nil(type) or type == "" -> {:error, "type is required"}
-      is_nil(source) or source == "" -> {:error, "source is required"}
+      is_nil(type) or type == "" ->
+        {:error, "type is required"}
+
+      is_nil(source) or source == "" ->
+        {:error, "source is required"}
+
       true ->
         event = %__MODULE__{
           specversion: Map.get(map, "specversion", "1.0"),
@@ -100,6 +104,7 @@ defmodule OptimalSystemAgent.Protocol.CloudEvent do
           datacontenttype: Map.get(map, "datacontenttype"),
           data: Map.get(map, "data")
         }
+
         {:ok, event}
     end
   end

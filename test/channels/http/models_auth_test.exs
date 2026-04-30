@@ -13,8 +13,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
     original_auth = Application.get_env(:optimal_system_agent, :require_auth)
     original_secret = Application.get_env(:optimal_system_agent, :shared_secret)
 
-    Application.put_env(:optimal_system_agent, :shared_secret, @test_secret)
-
+    # Restore both values on exit regardless of what tests set.
     on_exit(fn ->
       if original_auth,
         do: Application.put_env(:optimal_system_agent, :require_auth, original_auth),
@@ -61,10 +60,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
   end
 
   # ── require_auth=false (the primary bug scenario) ─────────────────
+  #
+  # When require_auth=false the auth plug accepts any/no token.
+  # We deliberately do NOT configure a shared_secret here so the
+  # Integrity plug (which auto-enables when a secret is present) stays
+  # dormant — matching the real-world "local dev with no secret" setup.
 
   describe "GET /models with require_auth=false" do
     setup do
       Application.put_env(:optimal_system_agent, :require_auth, false)
+      Application.delete_env(:optimal_system_agent, :shared_secret)
       :ok
     end
 
@@ -80,7 +85,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
         |> call_api()
 
       refute resp.status == 401,
-        "Expected non-401 when require_auth=false with expired token, got #{resp.status}"
+             "Expected non-401 when require_auth=false with expired token, got #{resp.status}"
     end
 
     test "succeeds with a garbage token" do
@@ -90,7 +95,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
         |> call_api()
 
       refute resp.status == 401,
-        "Expected non-401 when require_auth=false with garbage token, got #{resp.status}"
+             "Expected non-401 when require_auth=false with garbage token, got #{resp.status}"
     end
 
     test "succeeds with a valid token" do
@@ -106,10 +111,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.ModelsAuthTest do
   end
 
   # ── require_auth=true ─────────────────────────────────────────────
+  #
+  # When require_auth=true both the auth plug AND the Integrity plug enforce
+  # authentication.  We set a fixed shared_secret so generated tokens and
+  # HMAC integrity headers are consistent within the describe block.
 
   describe "GET /models with require_auth=true" do
     setup do
       Application.put_env(:optimal_system_agent, :require_auth, true)
+      Application.put_env(:optimal_system_agent, :shared_secret, @test_secret)
       :ok
     end
 

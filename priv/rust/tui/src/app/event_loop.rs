@@ -76,15 +76,31 @@ impl App {
             _ => {
                 // Normal layout — pass activity height so the chat Rect never
                 // overlaps the spinner.
+                //
+                // Recompute the layout per frame using the current input
+                // height. The cached `self.layout` is set on resize and on
+                // explicit `recompute_layout()` calls, but the input height
+                // changes on every keystroke (single-line → multi-line wrap).
+                // Refresh here so the input area grows downward as the user
+                // types, instead of overflowing horizontally.
                 let activity_lines = self.activity.height();
                 let chat_content = if self.chat.has_messages {
                     Some(self.chat.content_height())
                 } else {
                     None // welcome screen — don't shrink
                 };
+                let input_h = self.input.needed_height();
+                let layout = crate::app::layout::Layout::compute_with_input_height(
+                    self.width,
+                    self.height,
+                    self.config.sidebar_enabled,
+                    self.tasks.height(),
+                    self.agents.height(),
+                    input_h,
+                );
                 let areas = crate::view::main_layout::LayoutAreas::compute_with_chat_height(
                     area,
-                    &self.layout,
+                    &layout,
                     self.tasks.height(),
                     self.agents.height(),
                     activity_lines,

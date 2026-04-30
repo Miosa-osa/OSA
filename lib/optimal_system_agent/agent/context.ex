@@ -64,11 +64,12 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    max_tok = case Map.get(state, :model) do
-      nil -> max_tokens()
-      "" -> max_tokens()
-      model -> max_tokens(model)
-    end
+    max_tok =
+      case Map.get(state, :model) do
+        nil -> max_tokens()
+        "" -> max_tokens()
+        model -> max_tokens(model)
+      end
 
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
     # This gives each agent role its own focused prompt from AGENT.md.
@@ -502,7 +503,11 @@ defmodule OptimalSystemAgent.Agent.Context do
             ts = Map.get(event, :timestamp)
             type = Map.get(event, :event_type, :unknown)
             data = Map.get(event, :data, %{})
-            summary = Map.get(data, :summary) || Map.get(data, :tool) || Map.get(data, :message) || inspect(data)
+
+            summary =
+              Map.get(data, :summary) || Map.get(data, :tool) || Map.get(data, :message) ||
+                inspect(data)
+
             time_str = if ts, do: Calendar.strftime(ts, "%H:%M:%S"), else: "??:??:??"
             "[#{time_str}] #{type}: #{summary}"
           end)
@@ -663,31 +668,42 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp gather_git_info do
     parts = []
 
-    parts = case System.cmd("git", ["branch", "--show-current"], stderr_to_stdout: true) do
-      {b, 0} -> ["- Git branch: #{String.trim(b)}" | parts]
-      _ -> parts
-    end
+    parts =
+      case System.cmd("git", ["branch", "--show-current"], stderr_to_stdout: true) do
+        {b, 0} -> ["- Git branch: #{String.trim(b)}" | parts]
+        _ -> parts
+      end
 
-    parts = case System.cmd("git", ["status", "--short"], stderr_to_stdout: true) do
-      {s, 0} when s != "" ->
-        trimmed = String.trim(s)
-        if trimmed != "", do: ["- Modified files:\n#{trimmed}" | parts], else: parts
-      _ -> parts
-    end
+    parts =
+      case System.cmd("git", ["status", "--short"], stderr_to_stdout: true) do
+        {s, 0} when s != "" ->
+          trimmed = String.trim(s)
+          if trimmed != "", do: ["- Modified files:\n#{trimmed}" | parts], else: parts
 
-    parts = case System.cmd("git", ["log", "--oneline", "-3"], stderr_to_stdout: true) do
-      {l, 0} -> ["- Recent commits:\n#{String.trim(l)}" | parts]
-      _ -> parts
-    end
+        _ ->
+          parts
+      end
+
+    parts =
+      case System.cmd("git", ["log", "--oneline", "-3"], stderr_to_stdout: true) do
+        {l, 0} -> ["- Recent commits:\n#{String.trim(l)}" | parts]
+        _ -> parts
+      end
 
     Enum.reverse(parts) |> Enum.join("\n")
   rescue
     _ -> ""
   end
 
-  defp get_active_model(:anthropic), do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
-  defp get_active_model(:ollama), do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
-  defp get_active_model(:openai), do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+  defp get_active_model(:anthropic),
+    do: Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+
+  defp get_active_model(:ollama),
+    do: Application.get_env(:optimal_system_agent, :ollama_model, "detecting...")
+
+  defp get_active_model(:openai),
+    do: Application.get_env(:optimal_system_agent, :openai_model, "gpt-4o")
+
   defp get_active_model(provider) do
     key = :"#{provider}_model"
     Application.get_env(:optimal_system_agent, key, to_string(provider))
@@ -698,6 +714,12 @@ defmodule OptimalSystemAgent.Agent.Context do
     effort = OptimalSystemAgent.Agent.Effort.current()
     effort_config = OptimalSystemAgent.Agent.Effort.get(effort)
     coordinator = Map.get(state, :coordinator, false)
+    # Tests construct partial state maps without `:turn_count` / `:max_turns` /
+    # `:max_budget_usd`. Default these here so `Context.build/1` is safe to
+    # call against any state shape.
+    turn_count = Map.get(state, :turn_count, 0)
+    max_turns = Map.get(state, :max_turns)
+    max_budget_usd = Map.get(state, :max_budget_usd)
 
     lines = [
       "## Runtime Context",
@@ -705,17 +727,20 @@ defmodule OptimalSystemAgent.Agent.Context do
       "- Channel: #{state.channel}",
       "- Session: #{session_id}",
       "- Effort: #{effort} (#{effort_config.description})",
-      "- Turn: #{state.turn_count}"
+      "- Turn: #{turn_count}"
     ]
 
-    lines = if coordinator, do: lines ++ ["- Mode: **coordinator** (delegation/messaging only)"], else: lines
+    lines =
+      if coordinator,
+        do: lines ++ ["- Mode: **coordinator** (delegation/messaging only)"],
+        else: lines
 
     lines =
-      if state.max_budget_usd do
+      if max_budget_usd do
         try do
           budget = OptimalSystemAgent.Budget.get_status()
           cost = (budget[:total_cost_usd] || 0) / 1
-          lines ++ ["- Budget: $#{Float.round(cost, 4)} / $#{state.max_budget_usd}"]
+          lines ++ ["- Budget: $#{Float.round(cost, 4)} / $#{max_budget_usd}"]
         rescue
           _ -> lines
         end
@@ -723,7 +748,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         lines
       end
 
-    lines = if state.max_turns, do: lines ++ ["- Turns: #{state.turn_count}/#{state.max_turns}"], else: lines
+    lines = if max_turns, do: lines ++ ["- Turns: #{turn_count}/#{max_turns}"], else: lines
 
     Enum.join(lines, "\n")
   end
@@ -740,8 +765,9 @@ defmodule OptimalSystemAgent.Agent.Context do
   end
 
   defp scratchpad_block(state) do
-    provider = Map.get(state, :provider) ||
-      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
     if Scratchpad.inject?(provider) do
       Scratchpad.instruction()
@@ -749,5 +775,4 @@ defmodule OptimalSystemAgent.Agent.Context do
       nil
     end
   end
-
 end

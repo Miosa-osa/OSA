@@ -78,7 +78,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWriteTest do
       path = Path.expand("~/.osa/workspace/test_write_#{:rand.uniform(100_000)}.txt")
 
       try do
-        assert {:ok, msg} = FileWrite.execute(%{"path" => path, "content" => "hello"})
+        # Structured layout returns {:ok, content, metadata} on new-file
+        # writes (carrying diff + stats); accept either tuple shape.
+        result = FileWrite.execute(%{"path" => path, "content" => "hello"})
+        assert elem(result, 0) == :ok
+        msg = elem(result, 1)
         assert msg =~ "lines written"
         assert File.read!(path) == "hello"
       after
@@ -90,7 +94,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWriteTest do
       path = "/tmp/osa_test_write_#{:rand.uniform(100_000)}.txt"
 
       try do
-        assert {:ok, _} = FileWrite.execute(%{"path" => path, "content" => "tmp test"})
+        result = FileWrite.execute(%{"path" => path, "content" => "tmp test"})
+        assert elem(result, 0) == :ok
         assert File.read!(path) == "tmp test"
       after
         File.rm(path)

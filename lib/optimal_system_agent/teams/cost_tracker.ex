@@ -47,9 +47,9 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
 
   # Model escalation ladder: tier atom -> next tier atom
   @escalation_ladder %{
-    :utility    => :specialist,
+    :utility => :specialist,
     :specialist => :elite,
-    :elite      => :elite
+    :elite => :elite
   }
 
   # ---------------------------------------------------------------------------
@@ -124,28 +124,28 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
 
   @impl true
   def init(opts) do
-    team_id       = Keyword.fetch!(opts, :team_id)
-    budget_usd    = Keyword.get(opts, :budget_usd, 1.0) * 1.0
-    alert_at      = Keyword.get(opts, :alert_threshold, @alert_threshold_default)
-    agent_share   = Keyword.get(opts, :agent_share, @agent_share_default)
-    rate_limit    = Keyword.get(opts, :rate_limit_tokens_per_minute, @rate_limit_default)
+    team_id = Keyword.fetch!(opts, :team_id)
+    budget_usd = Keyword.get(opts, :budget_usd, 1.0) * 1.0
+    alert_at = Keyword.get(opts, :alert_threshold, @alert_threshold_default)
+    agent_share = Keyword.get(opts, :agent_share, @agent_share_default)
+    rate_limit = Keyword.get(opts, :rate_limit_tokens_per_minute, @rate_limit_default)
 
     state = %{
-      team_id:       team_id,
-      budget_usd:    budget_usd,
+      team_id: team_id,
+      budget_usd: budget_usd,
       alert_threshold: alert_at,
-      agent_share:   agent_share,
-      rate_limit:    rate_limit,
+      agent_share: agent_share,
+      rate_limit: rate_limit,
       # team totals
-      team_tokens:   0,
+      team_tokens: 0,
       team_cost_usd: 0.0,
-      alert_fired:   false,
+      alert_fired: false,
       # per-agent: %{agent_id => %{tokens, cost_usd}}
-      agent_spend:   %{},
+      agent_spend: %{},
       # token buckets: %{agent_id => {tokens_remaining, refill_at_monotonic}}
-      buckets:       %{},
+      buckets: %{},
       # failure counts: %{{agent_id, task_id} => consecutive_count}
-      failures:      %{}
+      failures: %{}
     }
 
     {:ok, state}
@@ -154,24 +154,29 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
   @impl true
   def handle_call({:record_spend, agent_id, tokens, cost_usd}, _from, state) do
     agent_max = state.budget_usd * state.agent_share
-    current   = Map.get(state.agent_spend, agent_id, %{tokens: 0, cost_usd: 0.0})
+    current = Map.get(state.agent_spend, agent_id, %{tokens: 0, cost_usd: 0.0})
 
     if current.cost_usd + cost_usd > agent_max do
-      Logger.warning("[CostTracker:#{state.team_id}] Agent #{agent_id} exceeded spend limit (#{agent_max} USD)")
+      Logger.warning(
+        "[CostTracker:#{state.team_id}] Agent #{agent_id} exceeded spend limit (#{agent_max} USD)"
+      )
+
       {:reply, {:error, :budget_exceeded}, state}
     else
       updated_agent = %{
-        tokens:   current.tokens + tokens,
+        tokens: current.tokens + tokens,
         cost_usd: current.cost_usd + cost_usd
       }
-      new_team_tokens   = state.team_tokens + tokens
-      new_team_cost_usd = state.team_cost_usd + cost_usd
-      new_agent_spend   = Map.put(state.agent_spend, agent_id, updated_agent)
 
-      state = %{state |
-        team_tokens:   new_team_tokens,
-        team_cost_usd: new_team_cost_usd,
-        agent_spend:   new_agent_spend
+      new_team_tokens = state.team_tokens + tokens
+      new_team_cost_usd = state.team_cost_usd + cost_usd
+      new_agent_spend = Map.put(state.agent_spend, agent_id, updated_agent)
+
+      state = %{
+        state
+        | team_tokens: new_team_tokens,
+          team_cost_usd: new_team_cost_usd,
+          agent_spend: new_agent_spend
       }
 
       state = maybe_fire_budget_alert(state)
@@ -193,12 +198,12 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
 
   @impl true
   def handle_call({:check_rate_limit, agent_id}, _from, state) do
-    now     = System.monotonic_time(:millisecond)
-    bucket  = Map.get(state.buckets, agent_id, fresh_bucket(state.rate_limit, now))
-    bucket  = maybe_refill(bucket, state.rate_limit, now)
+    now = System.monotonic_time(:millisecond)
+    bucket = Map.get(state.buckets, agent_id, fresh_bucket(state.rate_limit, now))
+    bucket = maybe_refill(bucket, state.rate_limit, now)
 
     if bucket.tokens > 0 do
-      updated  = %{bucket | tokens: bucket.tokens - 1}
+      updated = %{bucket | tokens: bucket.tokens - 1}
       new_bkts = Map.put(state.buckets, agent_id, updated)
       {:reply, :ok, %{state | buckets: new_bkts}}
     else
@@ -210,7 +215,7 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
 
   @impl true
   def handle_call({:record_task_failure, agent_id, task_id}, _from, state) do
-    key   = {agent_id, task_id}
+    key = {agent_id, task_id}
     count = Map.get(state.failures, key, 0) + 1
     new_failures = Map.put(state.failures, key, count)
     state = %{state | failures: new_failures}
@@ -220,8 +225,12 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
         # Determine current tier from agent_spend metadata (best-effort)
         # Default assume :specialist for escalation calculation
         current_tier = Map.get(state.agent_spend, agent_id, %{}) |> Map.get(:tier, :specialist)
-        next_tier    = Map.get(@escalation_ladder, current_tier, :elite)
-        Logger.info("[CostTracker:#{state.team_id}] Escalating agent #{agent_id} to #{next_tier} after #{count} failures on task #{task_id}")
+        next_tier = Map.get(@escalation_ladder, current_tier, :elite)
+
+        Logger.info(
+          "[CostTracker:#{state.team_id}] Escalating agent #{agent_id} to #{next_tier} after #{count} failures on task #{task_id}"
+        )
+
         {:escalate, next_tier}
       else
         :ok
@@ -233,13 +242,14 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
   @impl true
   def handle_call(:budget_summary, _from, state) do
     summary = %{
-      team_id:      state.team_id,
-      budget_usd:   state.budget_usd,
-      spent_usd:    state.team_cost_usd,
+      team_id: state.team_id,
+      budget_usd: state.budget_usd,
+      spent_usd: state.team_cost_usd,
       remaining_usd: max(state.budget_usd - state.team_cost_usd, 0.0),
-      pct_used:     if(state.budget_usd > 0, do: state.team_cost_usd / state.budget_usd * 100, else: 0.0),
-      alert_fired:  state.alert_fired,
-      agents:       state.agent_spend
+      pct_used:
+        if(state.budget_usd > 0, do: state.team_cost_usd / state.budget_usd * 100, else: 0.0),
+      alert_fired: state.alert_fired,
+      agents: state.agent_spend
     }
 
     {:reply, summary, state}
@@ -260,15 +270,19 @@ defmodule OptimalSystemAgent.Teams.CostTracker do
   end
 
   defp maybe_fire_budget_alert(%{alert_fired: true} = state), do: state
+
   defp maybe_fire_budget_alert(state) do
     pct = if state.budget_usd > 0, do: state.team_cost_usd / state.budget_usd, else: 0.0
 
     if pct >= state.alert_threshold do
-      Logger.warning("[CostTracker:#{state.team_id}] Budget alert: #{Float.round(pct * 100, 1)}% of #{state.budget_usd} USD consumed")
+      Logger.warning(
+        "[CostTracker:#{state.team_id}] Budget alert: #{Float.round(pct * 100, 1)}% of #{state.budget_usd} USD consumed"
+      )
 
       # Emit an algedonic alert through the event bus (best-effort)
       try do
-        OptimalSystemAgent.Events.Bus.emit_algedonic(:high,
+        OptimalSystemAgent.Events.Bus.emit_algedonic(
+          :high,
           "Team #{state.team_id} has consumed #{Float.round(pct * 100, 1)}% of its budget",
           source: "cost_tracker",
           metadata: %{team_id: state.team_id, pct_used: pct, spent_usd: state.team_cost_usd}

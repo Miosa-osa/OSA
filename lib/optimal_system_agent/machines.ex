@@ -17,7 +17,8 @@ defmodule OptimalSystemAgent.Machines do
 
   defstruct active_machines: [:core], config: %{}
 
-  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+  defp config_dir,
+    do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -79,7 +80,9 @@ defmodule OptimalSystemAgent.Machines do
             {:ok, config} -> config
             _ -> %{}
           end
-        {:error, _} -> %{}
+
+        {:error, _} ->
+          %{}
       end
     else
       %{}

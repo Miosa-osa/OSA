@@ -149,7 +149,8 @@ defmodule OptimalSystemAgent.Events.DLQ do
 
               :exhausted
             else
-              backoff = min(@base_backoff_ms * :math.pow(2, new_retries) |> trunc(), @max_backoff_ms)
+              backoff =
+                min((@base_backoff_ms * :math.pow(2, new_retries)) |> trunc(), @max_backoff_ms)
 
               updated = %{
                 entry

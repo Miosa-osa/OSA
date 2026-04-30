@@ -374,7 +374,7 @@ if [ "$(uname -s)" = "Linux" ] && [ -n "${DISPLAY:-}" ]; then
 fi
 
 # Determine port (strip --dev from args passed to TUI)
-PORT="${OSA_PORT:-8089}"
+PORT="${OSA_PORT:-9089}"
 TUI_ARGS=()
 for arg in "$@"; do
   if [ "$arg" = "--dev" ]; then
@@ -389,16 +389,38 @@ URL="http://localhost:${PORT}/health"
 if _http_ok "$URL"; then
   echo -e "${DIM}Backend already running on :${PORT}${RESET}"
 else
-  # Kill anything on our port
-  if command -v lsof >/dev/null 2>&1 && lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo -e "${DIM}Port ${PORT} in use. Killing previous instance…${RESET}"
-    lsof -ti ":${PORT}" -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
-    sleep 1
+  # Kill anything on our port — try each available tool, only act when the
+  # port is actually in use. Each branch is gated on a real probe so we
+  # don't shell out spurious kill commands on a clean boot. Loops up to
+  # 5s to confirm the port is actually freed (kernel TIME_WAIT can hold
+  # an addr for a beat after kill).
+  _wait_port_free() {
+    local p="$1" tries=0
+    while [ $tries -lt 10 ]; do
+      if command -v lsof >/dev/null 2>&1; then
+        lsof -i ":${p}" -sTCP:LISTEN >/dev/null 2>&1 || return 0
+      else
+        return 0
+      fi
+      sleep 0.5
+      tries=$((tries + 1))
+    done
+    return 1
+  }
+
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo -e "${DIM}Port ${PORT} in use. Killing previous instance…${RESET}"
+      lsof -ti ":${PORT}" -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
+      _wait_port_free "$PORT" || echo -e "${YELLOW}⚠${RESET} Port ${PORT} still in use after 5s — backend may fail."
+    fi
   elif command -v fuser >/dev/null 2>&1; then
-    fuser -k "${PORT}/tcp" 2>/dev/null || true
-    sleep 1
+    if fuser -s "${PORT}/tcp" 2>/dev/null; then
+      echo -e "${DIM}Port ${PORT} in use. Killing previous instance…${RESET}"
+      fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
+      sleep 1
+    fi
   elif command -v ss >/dev/null 2>&1; then
-    # Last resort: check with ss
     if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
       echo -e "${YELLOW}⚠${RESET} Port ${PORT} in use but cannot kill (no lsof/fuser). May fail to start."
     fi

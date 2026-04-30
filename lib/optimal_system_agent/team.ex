@@ -42,7 +42,8 @@ defmodule OptimalSystemAgent.Team do
     :ets.new(@budget_table, [:named_table, :public, :set])
     :ok
   rescue
-    ArgumentError -> :ok  # Already exists
+    # Already exists
+    ArgumentError -> :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -65,7 +66,8 @@ defmodule OptimalSystemAgent.Team do
       remaining = max - used
       if remaining > 0, do: {:ok, remaining}, else: {:exhausted, 0}
     rescue
-      _ -> {:ok, 100}  # No budget set — unlimited
+      # No budget set — unlimited
+      _ -> {:ok, 100}
     end
   end
 
@@ -131,7 +133,9 @@ defmodule OptimalSystemAgent.Team do
   @doc "Claim a task — set status to :in_progress and assign to agent."
   def claim_task(team_id, task_id, agent_id) do
     case get_task(team_id, task_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       %{status: :pending} = task ->
         if dependencies_met?(team_id, task) do
           updated = %{task | status: :in_progress, assignee: agent_id}
@@ -140,22 +144,29 @@ defmodule OptimalSystemAgent.Team do
         else
           {:error, :dependencies_not_met}
         end
-      %{status: status} -> {:error, {:wrong_status, status}}
+
+      %{status: status} ->
+        {:error, {:wrong_status, status}}
     end
   end
 
   @doc "Complete a task — set status to :completed with result."
   def complete_task(team_id, task_id, result) do
     case get_task(team_id, task_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       task ->
         updated = %{task | status: :completed, result: result}
         :ets.insert(@tasks_table, {{team_id, task_id}, updated})
 
         # Check if any blocked tasks are now unblocked
         unblocked = check_unblocked(team_id, task_id)
+
         if unblocked != [] do
-          Logger.info("[Team] Tasks unblocked by #{task_id}: #{inspect(Enum.map(unblocked, & &1.id))}")
+          Logger.info(
+            "[Team] Tasks unblocked by #{task_id}: #{inspect(Enum.map(unblocked, & &1.id))}"
+          )
         end
 
         {:ok, updated}
@@ -165,7 +176,9 @@ defmodule OptimalSystemAgent.Team do
   @doc "Fail a task."
   def fail_task(team_id, task_id, error) do
     case get_task(team_id, task_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       task ->
         updated = %{task | status: :failed, result: "FAILED: #{error}"}
         :ets.insert(@tasks_table, {{team_id, task_id}, updated})

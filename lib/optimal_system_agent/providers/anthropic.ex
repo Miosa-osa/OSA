@@ -94,7 +94,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           thinking_blocks = extract_thinking(resp)
 
           result = %{content: content, tool_calls: tool_calls, usage: usage}
-          result = if thinking_blocks != [], do: Map.put(result, :thinking_blocks, thinking_blocks), else: result
+
+          result =
+            if thinking_blocks != [],
+              do: Map.put(result, :thinking_blocks, thinking_blocks),
+              else: result
+
           {:ok, result}
 
         {:ok, %{status: 429, headers: headers, body: resp_body}} ->
@@ -191,7 +196,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         acc = finalize_current_thinking(acc)
 
         result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
-        result = if acc.thinking != [], do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)), else: result
+
+        result =
+          if acc.thinking != [],
+            do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
+            else: result
+
         callback.({:done, result})
         :ok
 
@@ -271,7 +281,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         callback.({:thinking_delta, text})
 
         if acc.current_thinking do
-          %{acc | current_thinking: %{acc.current_thinking | text: acc.current_thinking.text <> text}}
+          %{
+            acc
+            | current_thinking: %{acc.current_thinking | text: acc.current_thinking.text <> text}
+          }
         else
           acc
         end
@@ -304,10 +317,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     acc =
       if acc.current_tool do
         tool = acc.current_tool
-        arguments = case Jason.decode(tool.input_json) do
-          {:ok, parsed} -> parsed
-          _ -> %{}
-        end
+
+        arguments =
+          case Jason.decode(tool.input_json) do
+            {:ok, parsed} -> parsed
+            _ -> %{}
+          end
+
         tool_call = %{id: tool.id, name: tool.name, arguments: arguments}
         callback.({:tool_use_block, tool_call})
         %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
@@ -372,6 +388,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         thinking_content =
           Enum.map(blocks, fn block ->
             base = %{"type" => "thinking", "thinking" => block.thinking || block[:thinking]}
+
             if block[:signature] || block.signature,
               do: Map.put(base, "signature", block.signature || block[:signature]),
               else: base
@@ -425,7 +442,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         %{
           "role" => "user",
           "content" => [
-            %{"type" => "tool_result", "tool_use_id" => to_string(id), "content" => formatted_blocks}
+            %{
+              "type" => "tool_result",
+              "tool_use_id" => to_string(id),
+              "content" => formatted_blocks
+            }
           ]
         }
 
@@ -434,7 +455,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         %{
           "role" => "user",
           "content" => [
-            %{"type" => "tool_result", "tool_use_id" => to_string(id), "content" => to_string(content)}
+            %{
+              "type" => "tool_result",
+              "tool_use_id" => to_string(id),
+              "content" => to_string(content)
+            }
           ]
         }
 
@@ -544,9 +569,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def build_headers(auth, thinking) do
     auth_header =
       case auth do
-        {:oauth, token} -> [{"authorization", "Bearer #{token}"}, {"anthropic-beta", "oauth-2025-04-20"}]
-        {:api_key, key} -> [{"x-api-key", key}]
-        key when is_binary(key) -> [{"x-api-key", key}]
+        {:oauth, token} ->
+          [{"authorization", "Bearer #{token}"}, {"anthropic-beta", "oauth-2025-04-20"}]
+
+        {:api_key, key} ->
+          [{"x-api-key", key}]
+
+        key when is_binary(key) ->
+          [{"x-api-key", key}]
       end
 
     base =
@@ -591,8 +621,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
       true ->
         case OptimalSystemAgent.Auth.OAuth.get_valid_token() do
-          {:ok, token} -> {:oauth, token}
-          {:error, _} -> {:error, "No Anthropic API key or OAuth token configured. Run onboarding or set ANTHROPIC_API_KEY."}
+          {:ok, token} ->
+            {:oauth, token}
+
+          {:error, _} ->
+            {:error,
+             "No Anthropic API key or OAuth token configured. Run onboarding or set ANTHROPIC_API_KEY."}
         end
     end
   end

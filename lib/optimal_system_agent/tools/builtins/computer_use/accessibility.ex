@@ -72,10 +72,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
     ~ [e1] textfield "Email" moved (200,150) → (200,180)  # changed
   """
   def diff_trees(old_refs, new_refs) when is_map(old_refs) and is_map(new_refs) do
-    all_keys = MapSet.union(
-      MapSet.new(Map.keys(old_refs)),
-      MapSet.new(Map.keys(new_refs))
-    )
+    all_keys =
+      MapSet.union(
+        MapSet.new(Map.keys(old_refs)),
+        MapSet.new(Map.keys(new_refs))
+      )
 
     all_keys
     |> Enum.sort()
@@ -91,13 +92,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
           ["- [#{ref}] #{old.role} \"#{old.name}\" (#{old.x},#{old.y})"]
 
         old.x != new.x or old.y != new.y ->
-          ["~ [#{ref}] #{new.role} \"#{new.name}\" moved (#{old.x},#{old.y}) → (#{new.x},#{new.y})"]
+          [
+            "~ [#{ref}] #{new.role} \"#{new.name}\" moved (#{old.x},#{old.y}) → (#{new.x},#{new.y})"
+          ]
 
         old.role != new.role or old.name != new.name ->
-          ["~ [#{ref}] #{old.role} \"#{old.name}\" → #{new.role} \"#{new.name}\" (#{new.x},#{new.y})"]
+          [
+            "~ [#{ref}] #{old.role} \"#{old.name}\" → #{new.role} \"#{new.name}\" (#{new.x},#{new.y})"
+          ]
 
         true ->
-          []  # unchanged
+          # unchanged
+          []
       end
     end)
     |> Enum.join("\n")

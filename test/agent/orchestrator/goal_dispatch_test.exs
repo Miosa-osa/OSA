@@ -259,9 +259,10 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.GoalDispatchTest do
     end
 
     test "handles single result" do
-      merged = GoalDispatch.merge_results([
-        %{agent: "solo", status: :ok, output: "All done"}
-      ])
+      merged =
+        GoalDispatch.merge_results([
+          %{agent: "solo", status: :ok, output: "All done"}
+        ])
 
       assert merged.status == :ok
       assert length(merged.succeeded) == 1

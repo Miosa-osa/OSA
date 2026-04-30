@@ -139,7 +139,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     end
   end
 
-  defp maybe_add_headers(opts, %{extra_headers: headers}), do: Keyword.put(opts, :extra_headers, headers)
+  defp maybe_add_headers(opts, %{extra_headers: headers}),
+    do: Keyword.put(opts, :extra_headers, headers)
+
   defp maybe_add_headers(opts, _config), do: opts
 
   # Reasoning models (o3, deepseek-reasoner, kimi) need 600s timeout

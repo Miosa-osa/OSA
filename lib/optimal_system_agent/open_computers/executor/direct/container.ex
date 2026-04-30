@@ -59,12 +59,16 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   # ── Container record ──────────────────────────────────────────────────────────
 
   defstruct [
-    :container_id,   # MIOSA-assigned UUID
-    :runtime_id,     # Docker/Podman runtime ID (64-char hex)
+    # MIOSA-assigned UUID
+    :container_id,
+    # Docker/Podman runtime ID (64-char hex)
+    :runtime_id,
     :name,
     :image,
-    :log_task,       # Task pid streaming logs (nil if not subscribed)
-    state: :running  # :running | :stopped
+    # Task pid streaming logs (nil if not subscribed)
+    :log_task,
+    # :running | :stopped
+    state: :running
   ]
 
   # ── Public API ────────────────────────────────────────────────────────────────
@@ -359,7 +363,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
           {runtime_id, 0} ->
             runtime_id = String.trim(runtime_id)
             ports_resolved = resolve_ports(runtime, runtime_id)
-            GenServer.cast(server_pid, {:container_started, container_id, runtime_id, ports_resolved})
+
+            GenServer.cast(
+              server_pid,
+              {:container_started, container_id, runtime_id, ports_resolved}
+            )
 
           {stderr, exit_code} ->
             Logger.warning(
@@ -457,7 +465,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   end
 
   defp resolve_ports(runtime, runtime_id) do
-    case System.cmd(runtime, ["inspect", "--format", "{{json .NetworkSettings.Ports}}", runtime_id],
+    case System.cmd(
+           runtime,
+           ["inspect", "--format", "{{json .NetworkSettings.Ports}}", runtime_id],
            stderr_to_stdout: true
          ) do
       {json, 0} ->
@@ -486,12 +496,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   end
 
   defp parse_port_int(v) when is_integer(v), do: v
+
   defp parse_port_int(v) when is_binary(v) do
     case Integer.parse(v) do
       {n, _} -> n
       _ -> 0
     end
   end
+
   defp parse_port_int(_), do: 0
 
   # ── Container stop (in Task) ──────────────────────────────────────────────────
@@ -631,8 +643,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   defp emit_stats(runtime, runtime_ids) do
     # docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
     args =
-      ["stats", "--no-stream", "--format",
-       "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"] ++
+      [
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+      ] ++
         runtime_ids
 
     case System.cmd(runtime, args, stderr_to_stdout: true) do
@@ -661,7 +677,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
         {disk_read, disk_write} = parse_io_pair(block_str)
 
         # We need the MIOSA container_id. We send it via the GenServer.
-        GenServer.cast(__MODULE__, {:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read, disk_write})
+        GenServer.cast(
+          __MODULE__,
+          {:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read,
+           disk_write}
+        )
 
       _ ->
         :ok
@@ -669,7 +689,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   end
 
   # Stats emission keyed by runtime_id → look up container_id in state
-  def handle_cast({:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read, disk_write}, state) do
+  def handle_cast(
+        {:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read,
+         disk_write},
+        state
+      ) do
     case Enum.find(state.containers, fn {_id, c} -> c.runtime_id == runtime_id end) do
       nil ->
         {:noreply, state}

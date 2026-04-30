@@ -77,6 +77,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp}} ->
           raw_content = msg["content"] || ""
           tool_calls = parse_tool_calls(msg, model)
+
           # Strip XML tool-call markup from content when calls were parsed from text (not tool_calls field)
           content =
             if tool_calls != [] and not Map.has_key?(msg, "tool_calls") do
@@ -85,6 +86,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
               raw_content
             end
             |> Text.strip_thinking_tokens()
+
           usage = parse_usage(resp)
           {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
 
@@ -133,10 +135,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
     # Accumulator for streamed data (stored in process dictionary like Ollama)
     stream_key = {__MODULE__, :stream, make_ref()}
+
     Process.put(stream_key, %{
       buffer: "",
       content: "",
-      tool_calls: %{},   # index → %{id, name, arguments_json}
+      # index → %{id, name, arguments_json}
+      tool_calls: %{},
       usage: %{}
     })
 
@@ -201,6 +205,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         case chunk do
           %{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}} ->
             %{acc | usage: %{input_tokens: inp, output_tokens: out}}
+
           _ ->
             acc
         end
@@ -230,6 +235,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           unless xml_tool_call_content?(acc.content <> text) do
             callback.({:text_delta, text})
           end
+
           %{acc | content: acc.content <> text}
 
         _ ->
@@ -275,10 +281,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp maybe_append_name(tc, %{"function" => %{"name" => name}}) when is_binary(name),
     do: %{tc | name: tc.name <> name}
+
   defp maybe_append_name(tc, _), do: tc
 
   defp maybe_append_args(tc, %{"function" => %{"arguments" => args}}) when is_binary(args),
     do: %{tc | arguments_json: tc.arguments_json <> args}
+
   defp maybe_append_args(tc, _), do: tc
 
   defp finalize_sse_stream(acc, callback, model) do
@@ -334,14 +342,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # OpenAI-compat providers require it to match the original tool call on
       # iteration 2+ (Bug 5: tool name mismatch on 2nd iteration).
       %{role: "tool", content: content, tool_call_id: id} = msg ->
-        base = %{"role" => "tool", "content" => to_string(content), "tool_call_id" => to_string(id)}
+        base = %{
+          "role" => "tool",
+          "content" => to_string(content),
+          "tool_call_id" => to_string(id)
+        }
+
         case Map.get(msg, :name) do
           nil -> base
           name -> Map.put(base, "name", to_string(name))
         end
 
       # Assistant messages with tool_calls — preserve structured tool calls
-      %{role: "assistant", content: content, tool_calls: calls} when is_list(calls) and calls != [] ->
+      %{role: "assistant", content: content, tool_calls: calls}
+      when is_list(calls) and calls != [] ->
         msg = %{"role" => "assistant", "content" => to_string(content)}
 
         formatted_calls =
@@ -446,16 +460,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
                   [%{id: generate_id(), name: normalize_tool_name(name), arguments: args}]
 
                 {:ok, %{"name" => name, "arguments" => args}} when is_binary(args) ->
-                  parsed = case Jason.decode(args) do
-                    {:ok, a} -> a
-                    _ -> %{}
-                  end
+                  parsed =
+                    case Jason.decode(args) do
+                      {:ok, a} -> a
+                      _ -> %{}
+                    end
+
                   [%{id: generate_id(), name: normalize_tool_name(name), arguments: parsed}]
 
-                _ -> []
+                _ ->
+                  []
               end
 
-            _ -> []
+            _ ->
+              []
           end
         end)
 
@@ -488,13 +506,16 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
       case extract_balanced_json(rest) do
         {:ok, args_str} ->
-          args = case Jason.decode(args_str) do
-            {:ok, parsed} -> parsed
-            _ -> %{}
-          end
+          args =
+            case Jason.decode(args_str) do
+              {:ok, parsed} -> parsed
+              _ -> %{}
+            end
+
           [%{id: generate_id(), name: normalize_tool_name(name), arguments: args}]
 
-        _ -> []
+        _ ->
+          []
       end
     end)
   end
@@ -507,7 +528,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       case Jason.decode(json_str) do
         {:ok, %{"name" => name, "arguments" => args}} when is_map(args) ->
           [%{id: generate_id(), name: normalize_tool_name(name), arguments: args}]
-        _ -> []
+
+        _ ->
+          []
       end
     end)
   end
@@ -543,9 +566,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # Returns {:ok, json_string} or :error.
   defp extract_balanced_json(str) do
     case :binary.match(str, "{") do
-      :nomatch -> :error
+      :nomatch ->
+        :error
+
       {start, 1} ->
         substr = binary_part(str, start, byte_size(str) - start)
+
         case scan_balanced(substr, 0, 0) do
           {:ok, len} -> {:ok, binary_part(substr, 0, len)}
           :error -> :error
@@ -561,8 +587,15 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # Enter a quoted string — skip until closing unescaped quote
   defp scan_balanced(<<"\"", rest::binary>>, depth, pos) do
     case skip_json_string(rest, pos + 1) do
-      {:ok, new_pos} -> scan_balanced(binary_part(rest, new_pos - pos - 1, byte_size(rest) - (new_pos - pos - 1)), depth, new_pos)
-      :error -> :error
+      {:ok, new_pos} ->
+        scan_balanced(
+          binary_part(rest, new_pos - pos - 1, byte_size(rest) - (new_pos - pos - 1)),
+          depth,
+          new_pos
+        )
+
+      :error ->
+        :error
     end
   end
 
@@ -610,19 +643,25 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> String.replace(~r/<function_call>.*?<\/function_call>/s, "")
     |> String.trim()
   end
+
   defp strip_tool_call_markup(content), do: content
 
   defp xml_tool_call_content?(content) when is_binary(content) do
     String.contains?(content, "<function") or String.contains?(content, "<function_call>")
   end
+
   defp xml_tool_call_content?(_), do: false
 
   # --- Private helpers ---
 
   defp maybe_add_tools(body, opts) do
     case Keyword.get(opts, :tools) do
-      nil -> body
-      [] -> body
+      nil ->
+        body
+
+      [] ->
+        body
+
       tools ->
         body
         |> Map.put(:tools, format_tools(tools))
@@ -714,9 +753,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   @http_date_months %{
-    "Jan" => 1, "Feb" => 2, "Mar" => 3, "Apr" => 4,
-    "May" => 5, "Jun" => 6, "Jul" => 7, "Aug" => 8,
-    "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12
+    "Jan" => 1,
+    "Feb" => 2,
+    "Mar" => 3,
+    "Apr" => 4,
+    "May" => 5,
+    "Jun" => 6,
+    "Jul" => 7,
+    "Aug" => 8,
+    "Sep" => 9,
+    "Oct" => 10,
+    "Nov" => 11,
+    "Dec" => 12
   }
 
   # Parse RFC 7231 date format: "Thu, 01 Jan 2026 00:00:30 GMT"
@@ -726,15 +774,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     case Regex.run(pattern, v) do
       [_, day_s, month_s, year_s, hour_s, min_s, sec_s] ->
         with {day, ""} <- Integer.parse(day_s),
-             {month, _} <- Map.fetch(@http_date_months, month_s) |> then(fn
-               {:ok, m} -> {m, ""}
-               :error -> :error
-             end),
+             {month, _} <-
+               Map.fetch(@http_date_months, month_s)
+               |> then(fn
+                 {:ok, m} -> {m, ""}
+                 :error -> :error
+               end),
              {year, ""} <- Integer.parse(year_s),
              {hour, ""} <- Integer.parse(hour_s),
              {minute, ""} <- Integer.parse(min_s),
              {second, ""} <- Integer.parse(sec_s),
-             {:ok, dt} <- DateTime.new(Date.new!(year, month, day), Time.new!(hour, minute, second)) do
+             {:ok, dt} <-
+               DateTime.new(Date.new!(year, month, day), Time.new!(hour, minute, second)) do
           {:ok, dt}
         else
           _ -> :error

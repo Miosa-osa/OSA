@@ -35,7 +35,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
       parameters: %{
         type: "object",
         properties: %{
-          action: %{type: "string", enum: ["screenshot", "click", "double_click", "type", "key", "scroll", "move_mouse", "drag", "get_tree"]},
+          action: %{
+            type: "string",
+            enum: [
+              "screenshot",
+              "click",
+              "double_click",
+              "type",
+              "key",
+              "scroll",
+              "move_mouse",
+              "drag",
+              "get_tree"
+            ]
+          },
           x: %{type: "integer", description: "X coordinate"},
           y: %{type: "integer", description: "Y coordinate"},
           text: %{type: "string", description: "Text to type or key combo"},
@@ -52,7 +65,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
     type: "function",
     function: %{
       name: "launch_app",
-      description: "Launch an application by name (e.g. firefox, nautilus, gnome-terminal, gnome-text-editor). Use this to open apps.",
+      description:
+        "Launch an application by name (e.g. firefox, nautilus, gnome-terminal, gnome-text-editor). Use this to open apps.",
       parameters: %{
         type: "object",
         properties: %{
@@ -100,8 +114,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
         {:continue, new_planner, new_step} ->
           run_loop(new_planner, journal_dir, new_step, on_step)
 
-        {:ok, _} = result -> result
-        {:error, _} = err -> err
+        {:ok, _} = result ->
+          result
+
+        {:error, _} = err ->
+          err
       end
     end
   end
@@ -131,22 +148,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   defp do_plan(planner) do
     # Trim tree to keep prompt small — only interactive elements (lines with [eN])
-    compact_tree = planner.current_tree
+    compact_tree =
+      planner.current_tree
       |> String.split("\n")
       |> Enum.filter(&String.starts_with?(&1, "[e"))
       |> Enum.take(30)
       |> Enum.join("\n")
 
     messages = [
-      %{role: "system", content: """
-      You are a desktop automation agent. Execute ONE action at a time toward the goal.
-      You have computer_use (desktop actions) and launch_app (open applications).
+      %{
+        role: "system",
+        content: """
+        You are a desktop automation agent. Execute ONE action at a time toward the goal.
+        You have computer_use (desktop actions) and launch_app (open applications).
 
-      Interactive elements on screen:
-      #{compact_tree}
+        Interactive elements on screen:
+        #{compact_tree}
 
-      #{if planner.history != [], do: "Steps done:\n#{format_history(planner.history)}", else: ""}
-      """},
+        #{if planner.history != [], do: "Steps done:\n#{format_history(planner.history)}", else: ""}
+        """
+      },
       %{role: "user", content: "Goal: #{planner.goal}\n\nCall ONE tool for the next step."}
     ]
 
@@ -154,19 +175,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
       {:ok, tool_calls} when tool_calls != [] ->
         # Fix 5 (P1): Handle both string and map arguments — some providers return
         # pre-parsed JSON maps; also guard against truncated/malformed JSON.
-        actions = Enum.map(tool_calls, fn tc ->
-          args = case tc["function"]["arguments"] do
-            a when is_binary(a) ->
-              case Jason.decode(a) do
-                {:ok, parsed} -> parsed
-                {:error, _} -> %{"action" => "screenshot"}
+        actions =
+          Enum.map(tool_calls, fn tc ->
+            args =
+              case tc["function"]["arguments"] do
+                a when is_binary(a) ->
+                  case Jason.decode(a) do
+                    {:ok, parsed} -> parsed
+                    {:error, _} -> %{"action" => "screenshot"}
+                  end
+
+                a when is_map(a) ->
+                  a
+
+                _ ->
+                  %{"action" => "screenshot"}
               end
-            a when is_map(a) -> a
-            _ -> %{"action" => "screenshot"}
-          end
-          tool_name = tc["function"]["name"]
-          if tool_name != "computer_use", do: Map.put(args, "_tool", tool_name), else: args
-        end)
+
+            tool_name = tc["function"]["name"]
+            if tool_name != "computer_use", do: Map.put(args, "_tool", tool_name), else: args
+          end)
+
         planner = Planner.set_plan(planner, actions)
         {:continue, planner, 0}
 
@@ -205,12 +234,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
       # Launch in background, wait for window to appear
       spawn(fn ->
-        System.cmd("nohup", [app | cmd_args], stderr_to_stdout: true, env: [{"DISPLAY", System.get_env("DISPLAY") || ":0"}])
+        System.cmd("nohup", [app | cmd_args],
+          stderr_to_stdout: true,
+          env: [{"DISPLAY", System.get_env("DISPLAY") || ":0"}]
+        )
       end)
+
       Process.sleep(2000)
       "Launched #{app} #{args}"
     else
-      Logger.warning("[ComputerUse.Executor] Rejected launch_app for disallowed app: #{inspect(app)}")
+      Logger.warning(
+        "[ComputerUse.Executor] Rejected launch_app for disallowed app: #{inspect(app)}"
+      )
+
       "Error: '#{app}' is not in the allowed application list"
     end
   rescue
@@ -259,13 +295,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
     key = cu_api_key()
     model = cu_model()
 
-    body = Jason.encode!(%{
-      model: model,
-      messages: messages,
-      tools: [@cu_tool, @launch_tool],
-      tool_choice: "auto",
-      max_tokens: 1024  # Fix 2 (P0): 150 caused JSON truncation on tool call responses
-    })
+    body =
+      Jason.encode!(%{
+        model: model,
+        messages: messages,
+        tools: [@cu_tool, @launch_tool],
+        tool_choice: "auto",
+        # Fix 2 (P0): 150 caused JSON truncation on tool call responses
+        max_tokens: 1024
+      })
 
     headers = [
       {"authorization", "Bearer #{key}"},
@@ -290,6 +328,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
   # ── Helpers ──────────────────────────────────────────────────────
 
   defp format_history([]), do: "(none)"
+
   defp format_history(history) do
     history
     |> Enum.with_index(1)
@@ -303,10 +342,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   defp format_done(planner) do
     steps = length(planner.history)
-    last_result = case List.last(planner.history) do
-      %{result: r} -> r
-      _ -> "done"
-    end
+
+    last_result =
+      case List.last(planner.history) do
+        %{result: r} -> r
+        _ -> "done"
+      end
+
     "Completed in #{steps} step(s). Last: #{last_result}"
   end
 
@@ -314,15 +356,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   defp cu_api_url do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
+
     case to_string(provider) do
       p when p in ["ollama", "ollama_cloud"] ->
         url = Application.get_env(:optimal_system_agent, :ollama_url) || "http://localhost:11434"
         "#{url}/v1/chat/completions"
+
       "anthropic" ->
         "https://api.anthropic.com/v1/messages"
+
       p when p in ["openai", "openrouter"] ->
-        url = Application.get_env(:optimal_system_agent, :openai_base_url) || "https://api.openai.com"
+        url =
+          Application.get_env(:optimal_system_agent, :openai_base_url) || "https://api.openai.com"
+
         "#{url}/v1/chat/completions"
+
       _ ->
         url = Application.get_env(:optimal_system_agent, :ollama_url) || "http://localhost:11434"
         "#{url}/v1/chat/completions"
@@ -331,14 +379,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   defp cu_api_key do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
+
     case to_string(provider) do
       p when p in ["ollama", "ollama_cloud"] ->
         Application.get_env(:optimal_system_agent, :ollama_api_key) || ""
+
       "anthropic" ->
         Application.get_env(:optimal_system_agent, :anthropic_api_key) || ""
+
       p when p in ["openai", "openrouter"] ->
         Application.get_env(:optimal_system_agent, :openai_api_key) ||
-        Application.get_env(:optimal_system_agent, :openrouter_api_key) || ""
+          Application.get_env(:optimal_system_agent, :openrouter_api_key) || ""
+
       _ ->
         Application.get_env(:optimal_system_agent, :ollama_api_key) || ""
     end
@@ -346,11 +398,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   defp cu_model do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
+
     case to_string(provider) do
       p when p in ["ollama", "ollama_cloud"] ->
         Application.get_env(:optimal_system_agent, :ollama_model) || "llama3.2:latest"
+
       "anthropic" ->
         Application.get_env(:optimal_system_agent, :anthropic_model) || "claude-sonnet-4-20250514"
+
       _ ->
         Application.get_env(:optimal_system_agent, :default_model) || "llama3.2:latest"
     end

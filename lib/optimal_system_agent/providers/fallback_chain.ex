@@ -27,8 +27,9 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   Returns `{:ok, result, provider_used}` or `{:error, reason}` if all fail.
   """
   def chat_with_fallback(messages, opts \\ []) do
-    primary = Keyword.get(opts, :provider) ||
-      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    primary =
+      Keyword.get(opts, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
     # Build ordered chain: primary first, then configured fallbacks (excluding primary)
     fallback_providers = chain() |> Enum.reject(fn p -> p == primary end)
@@ -43,8 +44,9 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   Same as chat_with_fallback but for streaming calls.
   """
   def chat_stream_with_fallback(messages, callback, opts \\ []) do
-    primary = Keyword.get(opts, :provider) ||
-      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    primary =
+      Keyword.get(opts, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
     fallback_providers = chain() |> Enum.reject(fn p -> p == primary end)
     ordered = [primary | fallback_providers]
@@ -67,6 +69,7 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         if errors != [] do
           Logger.info("[fallback] Succeeded with #{provider} after #{length(errors)} failure(s)")
         end
+
         {:ok, result, provider}
 
       {:error, reason} ->
@@ -95,8 +98,11 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
     case Providers.chat_stream(messages, callback, opts_with_provider) do
       {:ok, result} ->
         if errors != [] do
-          Logger.info("[fallback] Stream succeeded with #{provider} after #{length(errors)} failure(s)")
+          Logger.info(
+            "[fallback] Stream succeeded with #{provider} after #{length(errors)} failure(s)"
+          )
         end
+
         {:ok, result, provider}
 
       {:error, reason} ->
@@ -109,17 +115,38 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
     end
   rescue
     e ->
-      Logger.warning("[fallback] #{provider} stream crashed: #{Exception.message(e)}, trying next")
-      try_stream_providers(rest, messages, callback, opts, errors ++ [{provider, Exception.message(e)}])
+      Logger.warning(
+        "[fallback] #{provider} stream crashed: #{Exception.message(e)}, trying next"
+      )
+
+      try_stream_providers(
+        rest,
+        messages,
+        callback,
+        opts,
+        errors ++ [{provider, Exception.message(e)}]
+      )
   end
 
   @doc "Check if an error is retryable (rate limit, overloaded, timeout, etc.)"
   def retryable_error?(reason) when is_binary(reason) do
     reason_down = String.downcase(reason)
-    Enum.any?([
-      "rate limit", "429", "overloaded", "503", "502", "500",
-      "timeout", "connection", "unavailable", "capacity"
-    ], fn pattern -> String.contains?(reason_down, pattern) end)
+
+    Enum.any?(
+      [
+        "rate limit",
+        "429",
+        "overloaded",
+        "503",
+        "502",
+        "500",
+        "timeout",
+        "connection",
+        "unavailable",
+        "capacity"
+      ],
+      fn pattern -> String.contains?(reason_down, pattern) end
+    )
   end
 
   def retryable_error?(_), do: true

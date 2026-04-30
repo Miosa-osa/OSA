@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         File.write!(path, json)
         Logger.debug("[session_persist] Saved #{length(messages)} messages for #{session_id}")
         :ok
+
       {:error, reason} ->
         Logger.warning("[session_persist] Failed to encode session: #{inspect(reason)}")
         {:error, reason}
@@ -48,10 +49,12 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:ok, json} ->
         case Jason.decode(json) do
           {:ok, %{"messages" => messages}} ->
-            restored = Enum.map(messages, fn msg ->
-              msg
-              |> Map.new(fn {k, v} -> {String.to_atom(k), v} end)
-            end)
+            restored =
+              Enum.map(messages, fn msg ->
+                msg
+                |> Map.new(fn {k, v} -> {String.to_atom(k), v} end)
+              end)
+
             {:ok, restored}
 
           {:error, reason} ->
@@ -80,6 +83,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
           path = Path.join(@sessions_dir, file)
           session_id = String.trim_trailing(file, ".json")
           stat = File.stat!(path)
+
           %{
             session_id: session_id,
             size: stat.size,

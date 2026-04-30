@@ -60,11 +60,13 @@ defmodule OptimalSystemAgent.Channels.WeCom do
     else
       Logger.info("[WeCom] Adapter started")
       Bus.emit(:channel_connected, %{channel: :wecom})
-      {:ok, %__MODULE__{
-        bot_key: bot_key,
-        webhook_token: Application.get_env(:optimal_system_agent, :wecom_webhook_token),
-        connected: true
-      }}
+
+      {:ok,
+       %__MODULE__{
+         bot_key: bot_key,
+         webhook_token: Application.get_env(:optimal_system_agent, :wecom_webhook_token),
+         connected: true
+       }}
     end
   end
 
@@ -73,6 +75,7 @@ defmodule OptimalSystemAgent.Channels.WeCom do
     Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
       process_webhook(payload, state)
     end)
+
     {:noreply, state}
   end
 
@@ -126,15 +129,27 @@ defmodule OptimalSystemAgent.Channels.WeCom do
   end
 
   defp chunk_message(text) do
-    if String.length(text) <= @max_message_length, do: [text],
-    else: text |> String.graphemes() |> Enum.chunk_every(@max_message_length) |> Enum.map(&Enum.join/1)
+    if String.length(text) <= @max_message_length,
+      do: [text],
+      else:
+        text
+        |> String.graphemes()
+        |> Enum.chunk_every(@max_message_length)
+        |> Enum.map(&Enum.join/1)
   end
 
   defp ensure_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
-      [{_, _}] -> :ok
-      [] -> DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, session_id: session_id, channel: :wecom})
+      [{_, _}] ->
+        :ok
+
+      [] ->
+        DynamicSupervisor.start_child(
+          OptimalSystemAgent.SessionSupervisor,
+          {Loop, session_id: session_id, channel: :wecom}
+        )
     end
+
     :ok
   rescue
     _ -> :ok

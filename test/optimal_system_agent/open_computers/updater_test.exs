@@ -252,9 +252,12 @@ defmodule OptimalSystemAgent.OpenComputers.UpdaterTest do
 
     os =
       case os_family do
-        :win32 -> "windows"
+        :win32 ->
+          "windows"
+
         :unix ->
           {uname, 0} = System.cmd("uname", ["-s"])
+
           case String.trim(uname) |> String.downcase() do
             "darwin" -> "macos"
             _ -> "linux"

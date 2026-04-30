@@ -36,26 +36,28 @@ defmodule Mix.Tasks.Osa.Run do
     # Start the application
     Mix.Task.run("app.start", [])
 
-    {opts, positional, _} = OptionParser.parse(args,
-      switches: [
-        format: :string,
-        model: :string,
-        provider: :string,
-        max_turns: :integer,
-        max_budget: :float,
-        effort: :string,
-        resume: :string
-      ],
-      aliases: [f: :format, m: :model, p: :provider]
-    )
+    {opts, positional, _} =
+      OptionParser.parse(args,
+        switches: [
+          format: :string,
+          model: :string,
+          provider: :string,
+          max_turns: :integer,
+          max_budget: :float,
+          effort: :string,
+          resume: :string
+        ],
+        aliases: [f: :format, m: :model, p: :provider]
+      )
 
     format = Keyword.get(opts, :format, "text")
 
     # Get prompt from positional args or stdin
-    prompt = case positional do
-      [p | _] -> p
-      [] -> read_stdin()
-    end
+    prompt =
+      case positional do
+        [p | _] -> p
+        [] -> read_stdin()
+      end
 
     if prompt == nil or String.trim(prompt) == "" do
       IO.puts(:stderr, "Error: no prompt provided. Usage: mix osa.run \"your prompt\"")
@@ -70,19 +72,22 @@ defmodule Mix.Tasks.Osa.Run do
     # Create session
     session_id = opts[:resume] || "headless_#{System.unique_integer([:positive])}"
 
-    loop_opts = [
-      session_id: session_id,
-      channel: :headless,
-      model: opts[:model],
-      provider: if(opts[:provider], do: String.to_atom(opts[:provider])),
-      max_turns: opts[:max_turns],
-      max_budget_usd: opts[:max_budget]
-    ] |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    loop_opts =
+      [
+        session_id: session_id,
+        channel: :headless,
+        model: opts[:model],
+        provider: if(opts[:provider], do: String.to_atom(opts[:provider])),
+        max_turns: opts[:max_turns],
+        max_budget_usd: opts[:max_budget]
+      ]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
-    {:ok, _pid} = DynamicSupervisor.start_child(
-      OptimalSystemAgent.SessionSupervisor,
-      {OptimalSystemAgent.Agent.Loop, loop_opts}
-    )
+    {:ok, _pid} =
+      DynamicSupervisor.start_child(
+        OptimalSystemAgent.SessionSupervisor,
+        {OptimalSystemAgent.Agent.Loop, loop_opts}
+      )
 
     # Register streaming handler for stream-json format
     if format == "stream-json" do
@@ -109,6 +114,7 @@ defmodule Mix.Tasks.Osa.Run do
           model: opts[:model] || Application.get_env(:optimal_system_agent, :default_provider),
           cost: get_session_cost()
         }
+
         IO.puts(Jason.encode!(output))
 
       {"json", {:error, reason}} ->
@@ -146,8 +152,10 @@ defmodule Mix.Tasks.Osa.Run do
         case Map.get(payload, :event) do
           :streaming_token ->
             IO.puts(Jason.encode!(%{type: "token", delta: payload.delta}))
+
           :thinking_delta ->
             IO.puts(Jason.encode!(%{type: "thinking", delta: payload.delta}))
+
           _ ->
             :ok
         end
@@ -156,12 +164,14 @@ defmodule Mix.Tasks.Osa.Run do
 
     OptimalSystemAgent.Events.Bus.register_handler(:tool_call, fn payload ->
       if Map.get(payload, :session_id) == session_id do
-        IO.puts(Jason.encode!(%{
-          type: "tool_use",
-          name: payload.name,
-          phase: to_string(payload.phase),
-          args: Map.get(payload, :args)
-        }))
+        IO.puts(
+          Jason.encode!(%{
+            type: "tool_use",
+            name: payload.name,
+            phase: to_string(payload.phase),
+            args: Map.get(payload, :args)
+          })
+        )
       end
     end)
   end

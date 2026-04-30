@@ -1,67 +1,40 @@
 defmodule OptimalSystemAgent.Tools.Builtins.MemoryRecall do
-  @behaviour OptimalSystemAgent.Tools.Behaviour
+  @moduledoc """
+  Shim preserving the flat-layout module name.
 
-  @impl true
-  def safety, do: :read_safe
+  All implementation lives in the structured layout under
+  `lib/optimal_system_agent/tools/builtins/memory_recall/`.
 
-  @impl true
-  def name, do: "memory_recall"
+  The registry and any existing callers that reference this module name
+  will continue to work — the shim delegates every callback to
+  `MemoryRecall.Tool`, which is the structured-layout entry point.
+  """
 
-  @impl true
-  def description,
-    do:
-      "Search long-term memory for saved facts, decisions, preferences, and lessons. Returns relevant memories ranked by relevance."
+  defdelegate name(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate aliases(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate search_hint(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate description(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate prompt(opts), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate parameters(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate should_defer?(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate always_load?(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "properties" => %{
-        "query" => %{
-          "type" => "string",
-          "description" => "Search query — keywords or natural language"
-        },
-        "category" => %{
-          "type" => "string",
-          "description" => "Filter by category",
-          "enum" => ["decision", "preference", "pattern", "lesson", "context", "project"]
-        },
-        "limit" => %{
-          "type" => "integer",
-          "description" => "Max results (default 10)"
-        }
-      },
-      "required" => ["query"]
-    }
-  end
+  defdelegate concurrency_safe?(input, ctx),
+    to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-  @impl true
-  def execute(%{"query" => query} = args) do
-    opts =
-      [limit: args["limit"] || 10]
-      |> maybe_add(:category, args["category"])
+  defdelegate read_only?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate destructive?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate open_world?(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate safety(), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
+  defdelegate validate_input(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-    case OptimalSystemAgent.Memory.recall(query, opts) do
-      {:ok, []} ->
-        {:ok, "No memories found for: #{query}"}
+  defdelegate check_permissions(input, ctx),
+    to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-      {:ok, entries} ->
-        formatted =
-          entries
-          |> Enum.with_index(1)
-          |> Enum.map(fn {entry, idx} ->
-            rel = if is_float(entry.relevance), do: Float.round(entry.relevance, 2), else: entry.relevance
-            "#{idx}. [#{entry.category}] #{entry.content} (#{entry.scope}, relevance: #{rel})"
-          end)
-          |> Enum.join("\n")
+  defdelegate execute(input, ctx), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-        {:ok, "Found #{length(entries)} memories\n---\n#{formatted}"}
+  defdelegate render(stage, payload, opts),
+    to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 
-      {:error, reason} ->
-        {:error, "Memory recall failed: #{inspect(reason)}"}
-    end
-  end
-
-  defp maybe_add(opts, _key, nil), do: opts
-  defp maybe_add(opts, key, val), do: [{key, val} | opts]
+  defdelegate to_classifier_input(input), to: OptimalSystemAgent.Tools.Builtins.MemoryRecall.Tool
 end

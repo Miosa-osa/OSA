@@ -120,10 +120,21 @@ defmodule OptimalSystemAgent.Healing.Prompts do
     working_dir = Map.get(context, :working_dir, "unknown")
 
     root_cause = Map.get(diagnosis, "root_cause", Map.get(diagnosis, :root_cause, "unknown"))
-    strategy = Map.get(diagnosis, "remediation_strategy", Map.get(diagnosis, :remediation_strategy, "retry"))
-    details = Map.get(diagnosis, "remediation_details", Map.get(diagnosis, :remediation_details, ""))
+
+    strategy =
+      Map.get(
+        diagnosis,
+        "remediation_strategy",
+        Map.get(diagnosis, :remediation_strategy, "retry")
+      )
+
+    details =
+      Map.get(diagnosis, "remediation_details", Map.get(diagnosis, :remediation_details, ""))
+
     confidence = Map.get(diagnosis, "confidence", Map.get(diagnosis, :confidence, 0.0))
-    files_to_inspect = Map.get(diagnosis, "files_to_inspect", Map.get(diagnosis, :files_to_inspect, []))
+
+    files_to_inspect =
+      Map.get(diagnosis, "files_to_inspect", Map.get(diagnosis, :files_to_inspect, []))
 
     files_text =
       case files_to_inspect do

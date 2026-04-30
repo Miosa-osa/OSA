@@ -195,7 +195,14 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       :ctrl_j ->
         # Insert a literal newline for multi-line editing
         {before, after_cursor} = Enum.split(state.buffer, state.cursor)
-        state = %{state | buffer: before ++ ["\n"] ++ after_cursor, cursor: state.cursor + 1, history_index: -1}
+
+        state = %{
+          state
+          | buffer: before ++ ["\n"] ++ after_cursor,
+            cursor: state.cursor + 1,
+            history_index: -1
+        }
+
         redraw(state)
         input_loop(state)
 
@@ -582,12 +589,23 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
   # CSI sequences: ESC [ ...
   defp read_csi(tty) do
     case :file.read(tty, 1) do
-      {:ok, <<"A">>} -> :up
-      {:ok, <<"B">>} -> :down
-      {:ok, <<"C">>} -> :right
-      {:ok, <<"D">>} -> :left
-      {:ok, <<"H">>} -> :home
-      {:ok, <<"F">>} -> :end_key
+      {:ok, <<"A">>} ->
+        :up
+
+      {:ok, <<"B">>} ->
+        :down
+
+      {:ok, <<"C">>} ->
+        :right
+
+      {:ok, <<"D">>} ->
+        :left
+
+      {:ok, <<"H">>} ->
+        :home
+
+      {:ok, <<"F">>} ->
+        :end_key
 
       {:ok, <<"3">>} ->
         case :file.read(tty, 1) do
@@ -662,9 +680,10 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
       state
     else
       # Find the first history entry containing the search term
-      match = Enum.find(state.history, fn entry ->
-        String.contains?(String.downcase(entry), String.downcase(search_term))
-      end)
+      match =
+        Enum.find(state.history, fn entry ->
+          String.contains?(String.downcase(entry), String.downcase(search_term))
+        end)
 
       case match do
         nil ->
@@ -682,18 +701,31 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   defp read_search_input(tty, acc) do
     case :file.read(tty, 1) do
-      {:ok, <<13>>} -> acc  # Enter — accept
-      {:ok, <<3>>} -> ""    # Ctrl+C — cancel
-      {:ok, <<27>>} -> acc  # Escape — accept
-      {:ok, <<127>>} ->     # Backspace
+      # Enter — accept
+      {:ok, <<13>>} ->
+        acc
+
+      # Ctrl+C — cancel
+      {:ok, <<3>>} ->
+        ""
+
+      # Escape — accept
+      {:ok, <<27>>} ->
+        acc
+
+      # Backspace
+      {:ok, <<127>>} ->
         new_acc = String.slice(acc, 0, max(String.length(acc) - 1, 0))
         tty_write(tty, "\r\e[2K\e[2m(reverse-i-search)`#{new_acc}': \e[0m")
         read_search_input(tty, new_acc)
+
       {:ok, <<ch>>} when ch >= 32 ->
         new_acc = acc <> <<ch>>
         tty_write(tty, "\r\e[2K\e[2m(reverse-i-search)`#{new_acc}': \e[0m")
         read_search_input(tty, new_acc)
-      _ -> acc
+
+      _ ->
+        acc
     end
   end
 

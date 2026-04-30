@@ -81,8 +81,9 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
 
     test "mentions private reasoning" do
       instruction = Scratchpad.instruction()
+
       assert String.contains?(instruction, "Private Reasoning") or
-             String.contains?(instruction, "reasoning")
+               String.contains?(instruction, "reasoning")
     end
 
     test "mentions content is not shown to user" do
@@ -111,6 +112,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
       <think>Now I need to check edge cases.</think>
       Done with analysis.
       """
+
       {clean, thinking} = Scratchpad.extract(text)
 
       assert length(thinking) == 2
@@ -131,6 +133,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
       </think>
       I found and fixed the bug.
       """
+
       {clean, thinking} = Scratchpad.extract(text)
 
       assert length(thinking) == 1
@@ -187,6 +190,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
       def hello, do: "world"
       ```
       """
+
       {clean, _thinking} = Scratchpad.extract(text)
 
       assert String.contains?(clean, "## Header")
@@ -306,6 +310,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
       </think>
       I fixed the function.
       """
+
       {clean, thinking} = Scratchpad.extract(text)
 
       assert clean == "I fixed the function."

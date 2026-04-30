@@ -28,13 +28,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
   @impl true
   def description do
     "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\n" <>
-    "Usage:\n" <>
-    "- The path parameter must be an absolute path, not a relative path\n" <>
-    "- By default, reads the full file. Use offset and limit for large files.\n" <>
-    "- This tool can read images (PNG, JPG, GIF, WEBP) — returns base64 for vision analysis.\n" <>
-    "- This tool can only read files, not directories. Use dir_list for directories.\n" <>
-    "- If you read a file that exists but has empty contents you will receive a warning.\n" <>
-    "- ALWAYS read a file before editing it with file_edit or file_write."
+      "Usage:\n" <>
+      "- The path parameter must be an absolute path, not a relative path\n" <>
+      "- By default, reads the full file. Use offset and limit for large files.\n" <>
+      "- This tool can read images (PNG, JPG, GIF, WEBP) — returns base64 for vision analysis.\n" <>
+      "- This tool can only read files, not directories. Use dir_list for directories.\n" <>
+      "- If you read a file that exists but has empty contents you will receive a warning.\n" <>
+      "- ALWAYS read a file before editing it with file_edit or file_write."
   end
 
   @impl true
@@ -43,8 +43,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
       "type" => "object",
       "properties" => %{
         "path" => %{"type" => "string", "description" => "Path to the file to read"},
-        "offset" => %{"type" => "integer", "description" => "Line number to start reading from (1-based). Optional."},
-        "limit" => %{"type" => "integer", "description" => "Maximum number of lines to read. Optional."}
+        "offset" => %{
+          "type" => "integer",
+          "description" => "Line number to start reading from (1-based). Optional."
+        },
+        "limit" => %{
+          "type" => "integer",
+          "description" => "Maximum number of lines to read. Optional."
+        }
       },
       "required" => ["path"]
     }
@@ -116,7 +122,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead do
   defp read_image(expanded, display_path, ext) do
     case File.stat(expanded) do
       {:ok, %{size: size}} when size > @max_image_bytes ->
-        {:error, "Image too large: #{display_path} (#{div(size, 1024)}KB, max #{div(@max_image_bytes, 1024)}KB)"}
+        {:error,
+         "Image too large: #{display_path} (#{div(size, 1024)}KB, max #{div(@max_image_bytes, 1024)}KB)"}
 
       {:ok, _stat} ->
         case File.read(expanded) do

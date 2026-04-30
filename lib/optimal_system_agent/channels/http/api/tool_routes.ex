@@ -21,8 +21,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   alias OptimalSystemAgent.Tools.Registry, as: Tools
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   # ── GET / ─────────────────────────────────────────────────────────
   # Handles GET /tools, GET /skills, GET /commands after prefix strip.
@@ -88,10 +88,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
       if cmd_name in @blocked_http_commands do
-        body = Jason.encode!(%{output: "Command '#{cmd_name}' is not available via HTTP.", command: command})
+        body =
+          Jason.encode!(%{
+            output: "Command '#{cmd_name}' is not available via HTTP.",
+            command: command
+          })
+
         conn |> put_resp_content_type("application/json") |> send_resp(200, body)
       else
-        session_id = conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+        session_id =
+          conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
         output =
           try do
@@ -239,7 +245,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       %{name: "mem-save", description: "Save a note to persistent memory", category: "memory"},
       %{name: "mem-recall", description: "Recall recent memory entries", category: "memory"},
       %{name: "reload", description: "Reload skills and configuration", category: "system"},
-      %{name: "debug", description: "Enable debug logging for the current session", category: "dev"}
+      %{
+        name: "debug",
+        description: "Enable debug logging for the current session",
+        category: "dev"
+      }
     ]
 
     # Merge, dedup by name
@@ -311,6 +321,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         trigger_score =
           Enum.reduce(triggers, 0.0, fn t, acc ->
             t_lower = String.downcase(to_string(t))
+
             cond do
               t_lower == q_lower -> max(acc, 0.9)
               String.contains?(t_lower, q_lower) -> max(acc, 0.5)

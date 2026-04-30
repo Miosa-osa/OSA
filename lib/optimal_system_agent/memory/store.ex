@@ -222,11 +222,14 @@ defmodule OptimalSystemAgent.Memory.Store do
   # Reweave: update existing memories to link back to the new entry.
   # This creates bidirectional links (A-MEM / Ars Contexta pattern).
   defp reweave_links(_new_id, []), do: :ok
+
   defp reweave_links(new_id, linked_ids) do
     Enum.each(linked_ids, fn existing_id ->
       try do
         case Repo.get(MemoryEntry, existing_id) do
-          nil -> :ok
+          nil ->
+            :ok
+
           existing ->
             current_links =
               case Jason.decode(existing.links || "[]") do
@@ -236,15 +239,24 @@ defmodule OptimalSystemAgent.Memory.Store do
 
             unless new_id in current_links do
               updated_links = Jason.encode!([new_id | current_links])
+
               existing
-              |> MemoryEntry.changeset(%{links: updated_links, updated_at: DateTime.utc_now() |> DateTime.to_iso8601()})
+              |> MemoryEntry.changeset(%{
+                links: updated_links,
+                updated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+              })
               |> Repo.update()
 
               # Update ETS cache too
               case :ets.lookup(@entries_table, existing_id) do
                 [{^existing_id, cached}] ->
-                  :ets.insert(@entries_table, {existing_id, Map.put(cached, :links, updated_links)})
-                _ -> :ok
+                  :ets.insert(
+                    @entries_table,
+                    {existing_id, Map.put(cached, :links, updated_links)}
+                  )
+
+                _ ->
+                  :ok
               end
             end
         end
@@ -726,11 +738,17 @@ defmodule OptimalSystemAgent.Memory.Store do
   end
 
   defp matches_pattern?(text) do
-    Regex.match?(~r/\b(recurring|common|typical|pattern|usually|often|frequently|tend to)\b/, text)
+    Regex.match?(
+      ~r/\b(recurring|common|typical|pattern|usually|often|frequently|tend to)\b/,
+      text
+    )
   end
 
   defp matches_lesson?(text) do
-    Regex.match?(~r/\b(mistake|bug|fix|fixed|learned|lesson|error|broke|broke|failed|issue)\b/, text)
+    Regex.match?(
+      ~r/\b(mistake|bug|fix|fixed|learned|lesson|error|broke|broke|failed|issue)\b/,
+      text
+    )
   end
 
   defp matches_preference?(text) do
@@ -760,7 +778,9 @@ defmodule OptimalSystemAgent.Memory.Store do
         end
       end)
       |> Enum.map(fn candidate ->
-        overlap = keyword_overlap_score(entry_keywords, parse_keywords(candidate[:keywords] || ""))
+        overlap =
+          keyword_overlap_score(entry_keywords, parse_keywords(candidate[:keywords] || ""))
+
         {overlap, candidate}
       end)
       |> Enum.filter(fn {score, _} -> score >= @similarity_threshold end)
@@ -909,7 +929,10 @@ defmodule OptimalSystemAgent.Memory.Store do
 
   defp generate_id(content) do
     timestamp = System.system_time(:nanosecond) |> to_string()
-    :crypto.hash(:sha256, content <> timestamp) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+
+    :crypto.hash(:sha256, content <> timestamp)
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 16)
   end
 
   # ---------------------------------------------------------------------------
@@ -921,10 +944,14 @@ defmodule OptimalSystemAgent.Memory.Store do
   defp normalize_filter(val) when is_binary(val), do: val
 
   defp filter_by_category(entries, nil), do: entries
-  defp filter_by_category(entries, cat), do: Enum.filter(entries, &((&1[:category] || &1["category"]) == cat))
+
+  defp filter_by_category(entries, cat),
+    do: Enum.filter(entries, &((&1[:category] || &1["category"]) == cat))
 
   defp filter_by_scope(entries, nil), do: entries
-  defp filter_by_scope(entries, scope), do: Enum.filter(entries, &((&1[:scope] || &1["scope"]) == scope))
+
+  defp filter_by_scope(entries, scope),
+    do: Enum.filter(entries, &((&1[:scope] || &1["scope"]) == scope))
 
   defp maybe_filter_category(query, nil), do: query
   defp maybe_filter_category(query, cat), do: from(m in query, where: m.category == ^cat)

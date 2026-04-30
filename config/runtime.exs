@@ -3,10 +3,10 @@ import Config
 # ── Logger level override via env var ────────────────────────────────────
 case System.get_env("LOGGER_LEVEL") do
   "warning" -> config :logger, level: :warning
-  "error"   -> config :logger, level: :error
-  "info"    -> config :logger, level: :info
-  "debug"   -> config :logger, level: :debug
-  _         -> :ok
+  "error" -> config :logger, level: :error
+  "info" -> config :logger, level: :info
+  "debug" -> config :logger, level: :debug
+  _ -> :ok
 end
 
 # ── Helper functions for env var parsing ─────────────────────────────────
@@ -74,12 +74,24 @@ end
 
 # Smart provider auto-detection: explicit override > API key presence > ollama fallback
 provider_map = %{
-  "ollama" => :ollama, "anthropic" => :anthropic, "openai" => :openai,
-  "groq" => :groq, "openrouter" => :openrouter, "together" => :together,
-  "fireworks" => :fireworks, "deepseek" => :deepseek, "mistral" => :mistral,
-  "cerebras" => :cerebras, "google" => :google, "cohere" => :cohere,
-  "perplexity" => :perplexity, "xai" => :xai, "sambanova" => :sambanova,
-  "hyperbolic" => :hyperbolic, "lmstudio" => :lmstudio, "llamacpp" => :llamacpp,
+  "ollama" => :ollama,
+  "anthropic" => :anthropic,
+  "openai" => :openai,
+  "groq" => :groq,
+  "openrouter" => :openrouter,
+  "together" => :together,
+  "fireworks" => :fireworks,
+  "deepseek" => :deepseek,
+  "mistral" => :mistral,
+  "cerebras" => :cerebras,
+  "google" => :google,
+  "cohere" => :cohere,
+  "perplexity" => :perplexity,
+  "xai" => :xai,
+  "sambanova" => :sambanova,
+  "hyperbolic" => :hyperbolic,
+  "lmstudio" => :lmstudio,
+  "llamacpp" => :llamacpp,
   "miosa" => :miosa
 }
 
@@ -187,16 +199,21 @@ config :optimal_system_agent,
 
   # Ollama overrides (OLLAMA_API_KEY required for cloud instances)
   # Falls back to config.exs values (Ollama Cloud + nemotron-3-super:cloud) when no env var set.
-  ollama_url: System.get_env("OLLAMA_URL") || Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434"),
-  ollama_model: System.get_env("OLLAMA_MODEL") || Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-super:cloud"),
+  ollama_url:
+    System.get_env("OLLAMA_URL") ||
+      Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434"),
+  ollama_model:
+    System.get_env("OLLAMA_MODEL") ||
+      Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-super:cloud"),
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
   # OLLAMA_THINK: set to "true" to enable extended reasoning (kimi-k2, qwen3-thinking, etc.)
   # Default nil → ollama.ex disables thinking for known reasoning models to prevent timeouts.
-  ollama_think: (case System.get_env("OLLAMA_THINK") do
-    "true" -> true
-    "false" -> false
-    _ -> nil
-  end),
+  ollama_think:
+    (case System.get_env("OLLAMA_THINK") do
+       "true" -> true
+       "false" -> false
+       _ -> nil
+     end),
 
   # MIOSA / Optimal — routes through openai_compat with optimal.miosa.ai base URL
   miosa_api_key: System.get_env("MIOSA_API_KEY"),
@@ -214,28 +231,65 @@ config :optimal_system_agent,
   default_provider: default_provider,
   # Default model — resolved from OSA_MODEL env, or provider-specific env var.
   # Falls back to OLLAMA_MODEL only when the active provider is actually ollama.
-  default_model: (
+  default_model:
     System.get_env("OSA_MODEL") ||
-      case default_provider do
-        :miosa -> System.get_env("MIOSA_MODEL") || "nemotron-3-miosa"
-        :ollama -> System.get_env("OLLAMA_MODEL") || Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-super:cloud")
-        :groq -> System.get_env("GROQ_MODEL")
-        :anthropic -> System.get_env("ANTHROPIC_MODEL")
-        :openai -> System.get_env("OPENAI_MODEL")
-        :openrouter -> System.get_env("OPENROUTER_MODEL")
-        :deepseek -> System.get_env("DEEPSEEK_MODEL")
-        :together -> System.get_env("TOGETHER_MODEL")
-        :fireworks -> System.get_env("FIREWORKS_MODEL")
-        :mistral -> System.get_env("MISTRAL_MODEL")
-        :google -> System.get_env("GOOGLE_MODEL")
-        :cohere -> System.get_env("COHERE_MODEL")
-        :xai -> System.get_env("XAI_MODEL")
-        :cerebras -> System.get_env("CEREBRAS_MODEL")
-        :lmstudio -> System.get_env("LMSTUDIO_MODEL")
-        :llamacpp -> System.get_env("LLAMACPP_MODEL")
-        _ -> nil
-      end
-  ),
+      (case default_provider do
+         :miosa ->
+           System.get_env("MIOSA_MODEL") || "nemotron-3-miosa"
+
+         :ollama ->
+           System.get_env("OLLAMA_MODEL") ||
+             Application.compile_env(
+               :optimal_system_agent,
+               :ollama_model,
+               "nemotron-3-super:cloud"
+             )
+
+         :groq ->
+           System.get_env("GROQ_MODEL")
+
+         :anthropic ->
+           System.get_env("ANTHROPIC_MODEL")
+
+         :openai ->
+           System.get_env("OPENAI_MODEL")
+
+         :openrouter ->
+           System.get_env("OPENROUTER_MODEL")
+
+         :deepseek ->
+           System.get_env("DEEPSEEK_MODEL")
+
+         :together ->
+           System.get_env("TOGETHER_MODEL")
+
+         :fireworks ->
+           System.get_env("FIREWORKS_MODEL")
+
+         :mistral ->
+           System.get_env("MISTRAL_MODEL")
+
+         :google ->
+           System.get_env("GOOGLE_MODEL")
+
+         :cohere ->
+           System.get_env("COHERE_MODEL")
+
+         :xai ->
+           System.get_env("XAI_MODEL")
+
+         :cerebras ->
+           System.get_env("CEREBRAS_MODEL")
+
+         :lmstudio ->
+           System.get_env("LMSTUDIO_MODEL")
+
+         :llamacpp ->
+           System.get_env("LLAMACPP_MODEL")
+
+         _ ->
+           nil
+       end),
 
   # HTTP channel
   shared_secret:
@@ -251,22 +305,28 @@ config :optimal_system_agent,
   # Bind address for the HTTP channel.
   # Defaults to 127.0.0.1 (loopback) — safe with open-access dev mode.
   # Set OSA_HTTP_IP=0.0.0.0 to expose on all interfaces (requires auth).
-  http_ip: (
-    case System.get_env("OSA_HTTP_IP", "127.0.0.1") do
-      "0.0.0.0" -> {0, 0, 0, 0}
-      "::1"     -> {0, 0, 0, 0, 0, 0, 0, 1}
-      "::"      -> {0, 0, 0, 0, 0, 0, 0, 0}
-      ip_str    ->
-        parts = String.split(ip_str, ".")
-        if length(parts) == 4 do
-          parts
-          |> Enum.map(&String.to_integer/1)
-          |> List.to_tuple()
-        else
-          {127, 0, 0, 1}
-        end
-    end
-  ),
+  http_ip:
+    (case System.get_env("OSA_HTTP_IP", "127.0.0.1") do
+       "0.0.0.0" ->
+         {0, 0, 0, 0}
+
+       "::1" ->
+         {0, 0, 0, 0, 0, 0, 0, 1}
+
+       "::" ->
+         {0, 0, 0, 0, 0, 0, 0, 0}
+
+       ip_str ->
+         parts = String.split(ip_str, ".")
+
+         if length(parts) == 4 do
+           parts
+           |> Enum.map(&String.to_integer/1)
+           |> List.to_tuple()
+         else
+           {127, 0, 0, 1}
+         end
+     end),
 
   # Budget limits (USD)
   daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
@@ -299,65 +359,69 @@ config :optimal_system_agent,
 
   # Provider failover chain — auto-detected from configured API keys.
   # Override with comma-separated list: OSA_FALLBACK_CHAIN=anthropic,openai,ollama
-  fallback_chain: (
-    case System.get_env("OSA_FALLBACK_CHAIN") do
-      nil ->
-        candidates = [
-          {:anthropic, System.get_env("ANTHROPIC_API_KEY")},
-          {:openai, System.get_env("OPENAI_API_KEY")},
-          {:groq, System.get_env("GROQ_API_KEY")},
-          {:openrouter, System.get_env("OPENROUTER_API_KEY")},
-          {:deepseek, System.get_env("DEEPSEEK_API_KEY")},
-          {:together, System.get_env("TOGETHER_API_KEY")},
-          {:fireworks, System.get_env("FIREWORKS_API_KEY")},
-          {:mistral, System.get_env("MISTRAL_API_KEY")},
-          {:google, System.get_env("GOOGLE_API_KEY")},
-          {:cohere, System.get_env("COHERE_API_KEY")}
-        ]
+  fallback_chain:
+    (case System.get_env("OSA_FALLBACK_CHAIN") do
+       nil ->
+         candidates = [
+           {:anthropic, System.get_env("ANTHROPIC_API_KEY")},
+           {:openai, System.get_env("OPENAI_API_KEY")},
+           {:groq, System.get_env("GROQ_API_KEY")},
+           {:openrouter, System.get_env("OPENROUTER_API_KEY")},
+           {:deepseek, System.get_env("DEEPSEEK_API_KEY")},
+           {:together, System.get_env("TOGETHER_API_KEY")},
+           {:fireworks, System.get_env("FIREWORKS_API_KEY")},
+           {:mistral, System.get_env("MISTRAL_API_KEY")},
+           {:google, System.get_env("GOOGLE_API_KEY")},
+           {:cohere, System.get_env("COHERE_API_KEY")}
+         ]
 
-        configured = for {name, key} <- candidates, key != nil and key != "", do: name
+         configured = for {name, key} <- candidates, key != nil and key != "", do: name
 
-        # Only add Ollama if it's actually reachable (TCP check, 1s timeout).
-        # Prevents Req.TransportError{reason: :econnrefused} on every provider failure.
-        ollama_url = System.get_env("OLLAMA_URL") || "http://localhost:11434"
-        ollama_uri = URI.parse(ollama_url)
-        ollama_host = String.to_charlist(ollama_uri.host || "localhost")
-        ollama_port = ollama_uri.port || 11434
+         # Only add Ollama if it's actually reachable (TCP check, 1s timeout).
+         # Prevents Req.TransportError{reason: :econnrefused} on every provider failure.
+         ollama_url = System.get_env("OLLAMA_URL") || "http://localhost:11434"
+         ollama_uri = URI.parse(ollama_url)
+         ollama_host = String.to_charlist(ollama_uri.host || "localhost")
+         ollama_port = ollama_uri.port || 11434
 
-        # If OLLAMA_API_KEY is set, assume Ollama Cloud is reachable (skip TCP check).
-        # Otherwise, TCP-check local Ollama.
-        ollama_reachable =
-          if System.get_env("OLLAMA_API_KEY") do
-            true
-          else
-            case :gen_tcp.connect(ollama_host, ollama_port, [], 1_000) do
-              {:ok, sock} -> :gen_tcp.close(sock); true
-              {:error, _} -> false
-            end
-          end
+         # If OLLAMA_API_KEY is set, assume Ollama Cloud is reachable (skip TCP check).
+         # Otherwise, TCP-check local Ollama.
+         ollama_reachable =
+           if System.get_env("OLLAMA_API_KEY") do
+             true
+           else
+             case :gen_tcp.connect(ollama_host, ollama_port, [], 1_000) do
+               {:ok, sock} ->
+                 :gen_tcp.close(sock)
+                 true
 
-        chain = if ollama_reachable do
-          (configured ++ [:ollama]) |> Enum.uniq()
-        else
-          configured
-        end
+               {:error, _} ->
+                 false
+             end
+           end
 
-        Enum.reject(chain, &(&1 == default_provider))
+         chain =
+           if ollama_reachable do
+             (configured ++ [:ollama]) |> Enum.uniq()
+           else
+             configured
+           end
 
-      csv ->
-        csv
-        |> String.split(",", trim: true)
-        |> Enum.map(&String.trim/1)
-        |> Enum.map(fn name ->
-          try do
-            String.to_existing_atom(name)
-          rescue
-            ArgumentError -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-    end
-  ),
+         Enum.reject(chain, &(&1 == default_provider))
+
+       csv ->
+         csv
+         |> String.split(",", trim: true)
+         |> Enum.map(&String.trim/1)
+         |> Enum.map(fn name ->
+           try do
+             String.to_existing_atom(name)
+           rescue
+             ArgumentError -> nil
+           end
+         end)
+         |> Enum.reject(&is_nil/1)
+     end),
 
   # Plan mode (opt-in via OSA_PLAN_MODE=true)
   plan_mode_enabled: System.get_env("OSA_PLAN_MODE") == "true",
@@ -371,10 +435,11 @@ config :optimal_system_agent,
 
   # Default working directory for the agent (e.g. a project you want OSA to work on).
   # Set OSA_WORKING_DIR=~/Desktop/BOS to point OSA at the BOS codebase by default.
-  working_dir: (case System.get_env("OSA_WORKING_DIR") do
-    nil -> nil
-    path -> Path.expand(path)
-  end)
+  working_dir:
+    (case System.get_env("OSA_WORKING_DIR") do
+       nil -> nil
+       path -> Path.expand(path)
+     end)
 
 # ── Platform (multi-tenant PostgreSQL + AMQP) ────────────────────────
 # These are optional — OSA works standalone without them.
@@ -389,7 +454,8 @@ if database_url do
     url: database_url,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
 
-  config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo, OptimalSystemAgent.Platform.Repo]
+  config :optimal_system_agent,
+    ecto_repos: [OptimalSystemAgent.Store.Repo, OptimalSystemAgent.Platform.Repo]
 end
 
 config :optimal_system_agent,

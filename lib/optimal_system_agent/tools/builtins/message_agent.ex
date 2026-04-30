@@ -1,85 +1,22 @@
 defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent do
   @moduledoc """
-  Send messages between agents in a team.
+  Shim — delegates to the structured per-tool directory layout.
 
-  Enables inter-agent communication via PubSub-backed mailbox.
-  Agents can message specific teammates or broadcast to all.
-  Messages are also stored in ETS for later retrieval.
+  All logic lives in:
+    `lib/optimal_system_agent/tools/builtins/message_agent/`
+
+  This file exists only so existing callers that reference
+  `OptimalSystemAgent.Tools.Builtins.MessageAgent` by atom continue to compile.
+  The registry picks up the structured `Tool` module directly; this shim is
+  retained for legacy call-site compatibility.
   """
-  @behaviour OptimalSystemAgent.Tools.Behaviour
 
-  alias OptimalSystemAgent.Team
+  defdelegate name(), to: OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool
+  defdelegate description(), to: OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool
+  defdelegate parameters(), to: OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool
+  defdelegate safety(), to: OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool
 
-  @impl true
-  def name, do: "message_agent"
-
-  @impl true
-  def description do
-    "Send a message to another agent in your team, or read messages from teammates. " <>
-      "Use to share findings, coordinate work, or request information from other agents."
-  end
-
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "required" => ["action"],
-      "properties" => %{
-        "action" => %{
-          "type" => "string",
-          "enum" => ["send", "read", "broadcast"],
-          "description" => "send: message one agent, read: check your inbox, broadcast: message all teammates"
-        },
-        "team_id" => %{
-          "type" => "string",
-          "description" => "Team identifier."
-        },
-        "to" => %{
-          "type" => "string",
-          "description" => "Recipient agent session ID (for send action)."
-        },
-        "message" => %{
-          "type" => "string",
-          "description" => "Message content to send."
-        }
-      }
-    }
-  end
-
-  @impl true
-  def execute(%{"action" => "send", "to" => to, "message" => message} = args) do
-    team_id = Map.get(args, "team_id", "default")
-    from = Map.get(args, "__session_id__", "unknown")
-
-    Team.send_message(team_id, from, to, message)
-    {:ok, "Message sent to #{to}."}
-  end
-
-  def execute(%{"action" => "read"} = args) do
-    team_id = Map.get(args, "team_id", "default")
-    agent_id = Map.get(args, "__session_id__", "unknown")
-
-    messages = Team.read_messages(team_id, agent_id)
-
-    if messages == [] do
-      {:ok, "No messages in your inbox."}
-    else
-      lines =
-        Enum.map_join(messages, "\n", fn msg ->
-          "**#{msg.from}** (#{DateTime.to_iso8601(msg.timestamp)}): #{msg.content}"
-        end)
-
-      {:ok, "## Messages (#{length(messages)})\n\n#{lines}"}
-    end
-  end
-
-  def execute(%{"action" => "broadcast", "message" => message} = args) do
-    team_id = Map.get(args, "team_id", "default")
-    from = Map.get(args, "__session_id__", "unknown")
-
-    Team.broadcast_message(team_id, from, message)
-    {:ok, "Message broadcast to all teammates."}
-  end
-
-  def execute(_), do: {:ok, "Invalid action. Use: send, read, broadcast"}
+  # Flat-layout callers pass only input — bridge to structured execute/2 with nil ctx.
+  def execute(input),
+    do: OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler.execute(input, nil)
 end

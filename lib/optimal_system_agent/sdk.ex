@@ -43,8 +43,11 @@ defmodule OptimalSystemAgent.SDK do
     }
 
     case OptimalSystemAgent.Orchestrator.run_subagent(config) do
-      {:ok, result} -> {:ok, %{task: task, status: :completed, result: result, session_id: session_id}}
-      {:error, reason} -> {:error, inspect(reason)}
+      {:ok, result} ->
+        {:ok, %{task: task, status: :completed, result: result, session_id: session_id}}
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
     end
   end
 
@@ -211,7 +214,8 @@ defmodule OptimalSystemAgent.SDK do
     """
 
     @doc "Define a custom tool via closure."
-    @spec define(String.t(), String.t(), map(), (map() -> {:ok, any()} | {:error, String.t()})) :: :ok
+    @spec define(String.t(), String.t(), map(), (map() -> {:ok, any()} | {:error, String.t()})) ::
+            :ok
     def define(name, _description, _parameters, _handler) when is_binary(name) do
       # Phase 0: store in ETS for the runtime to discover
       :ok

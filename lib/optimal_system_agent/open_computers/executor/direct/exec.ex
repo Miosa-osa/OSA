@@ -28,8 +28,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Exec do
     case run_command(job) do
       {:ok, %{exit_code: code, stdout: out, stderr: err, duration_ms: dur}} ->
         reply.(
-          {:job_done, job.id,
-           %{exit_code: code, stdout: out, stderr: err, duration_ms: dur}}
+          {:job_done, job.id, %{exit_code: code, stdout: out, stderr: err, duration_ms: dur}}
         )
 
       {:error, reason} ->

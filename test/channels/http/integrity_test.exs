@@ -128,16 +128,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.IntegrityTest do
 
     test "disabled when require_auth is false" do
       Application.put_env(:optimal_system_agent, :require_auth, false)
-      body = ~s({"input": "hello"})
-      # No signature headers at all
-      conn =
-        conn(:post, "/test", body)
-        |> put_req_header("content-type", "application/json")
-        |> assign(:raw_body, body)
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
-        |> Integrity.call([])
+      # Clear any shared_secret left by other tests — its presence triggers
+      # the Integrity plug's auto-enable branch even when require_auth=false.
+      original_secret = Application.get_env(:optimal_system_agent, :shared_secret)
+      Application.delete_env(:optimal_system_agent, :shared_secret)
 
-      refute conn.halted
+      try do
+        body = ~s({"input": "hello"})
+        # No signature headers at all
+        conn =
+          conn(:post, "/test", body)
+          |> put_req_header("content-type", "application/json")
+          |> assign(:raw_body, body)
+          |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+          |> Integrity.call([])
+
+        refute conn.halted
+      after
+        if original_secret,
+          do: Application.put_env(:optimal_system_agent, :shared_secret, original_secret)
+      end
     end
   end
 end

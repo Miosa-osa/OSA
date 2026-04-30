@@ -80,9 +80,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
   def start_link(opts) do
     loop_id = Keyword.get(opts, :loop_id, generate_loop_id())
 
-    GenServer.start_link(__MODULE__, Keyword.put(opts, :loop_id, loop_id),
-      name: via(loop_id)
-    )
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :loop_id, loop_id), name: via(loop_id))
   end
 
   @doc "Get current state snapshot."
@@ -187,7 +185,10 @@ defmodule OptimalSystemAgent.Verification.Loop do
   end
 
   def handle_info(:overall_timeout, %{status: :running} = state) do
-    Logger.warning("[Verification.Loop] #{state.loop_id} hit overall timeout (#{state.timeout_ms}ms)")
+    Logger.warning(
+      "[Verification.Loop] #{state.loop_id} hit overall timeout (#{state.timeout_ms}ms)"
+    )
+
     state = escalate(state, :timeout)
     {:noreply, state}
   end
@@ -207,7 +208,9 @@ defmodule OptimalSystemAgent.Verification.Loop do
   defp spawn_test_task(state) do
     iteration = state.iteration + 1
 
-    Logger.info("[Verification.Loop] #{state.loop_id} — iteration #{iteration}/#{state.max_iterations}")
+    Logger.info(
+      "[Verification.Loop] #{state.loop_id} — iteration #{iteration}/#{state.max_iterations}"
+    )
 
     Bus.emit(:system_event, %{
       event: :verification_iteration,
@@ -310,14 +313,20 @@ defmodule OptimalSystemAgent.Verification.Loop do
       metadata: %{loop_id: state.loop_id, task_id: state.task_id, reason: reason}
     )
 
-    Logger.warning("[Verification.Loop] #{state.loop_id} escalated (#{reason}) after #{state.iteration} iterations")
+    Logger.warning(
+      "[Verification.Loop] #{state.loop_id} escalated (#{reason}) after #{state.iteration} iterations"
+    )
+
     %{state | status: status}
   end
 
   defp diagnose_and_fix(state, failure_output) do
     case call_llm_for_fix(state, failure_output) do
       {:ok, fix_instructions} ->
-        Logger.info("[Verification.Loop] #{state.loop_id} applying fix: #{String.slice(fix_instructions, 0, 200)}")
+        Logger.info(
+          "[Verification.Loop] #{state.loop_id} applying fix: #{String.slice(fix_instructions, 0, 200)}"
+        )
+
         apply_fix(fix_instructions)
 
         Bus.emit(:system_event, %{
@@ -335,7 +344,9 @@ defmodule OptimalSystemAgent.Verification.Loop do
         state
 
       {:error, reason} ->
-        Logger.warning("[Verification.Loop] #{state.loop_id} LLM diagnosis failed: #{inspect(reason)} — retrying without fix")
+        Logger.warning(
+          "[Verification.Loop] #{state.loop_id} LLM diagnosis failed: #{inspect(reason)} — retrying without fix"
+        )
 
         Bus.emit(:system_event, %{
           event: :verification_failed,
@@ -347,7 +358,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
         })
 
         # Exponential backoff on LLM failure — prevent tight CPU spin
-        backoff = min((Map.get(state, :error_backoff, 1_000)) * 2, 60_000)
+        backoff = min(Map.get(state, :error_backoff, 1_000) * 2, 60_000)
         state = %{state | steering_guidance: nil} |> Map.put(:error_backoff, backoff)
         Process.send_after(self(), :schedule_next_iteration, backoff)
         state
@@ -421,17 +432,23 @@ defmodule OptimalSystemAgent.Verification.Loop do
       |> Enum.map(&String.slice(&1, 2, String.length(&1)))
 
     if commands == [] do
-      Logger.info("[Verification.Loop] No shell commands found in fix — human operator must act:\n#{String.slice(instructions, 0, 500)}")
+      Logger.info(
+        "[Verification.Loop] No shell commands found in fix — human operator must act:\n#{String.slice(instructions, 0, 500)}"
+      )
     else
       Enum.each(commands, fn cmd ->
         Logger.info("[Verification.Loop] Applying fix: #{cmd}")
 
         case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
           {output, 0} ->
-            Logger.debug("[Verification.Loop] Fix command succeeded: #{String.slice(output, 0, 200)}")
+            Logger.debug(
+              "[Verification.Loop] Fix command succeeded: #{String.slice(output, 0, 200)}"
+            )
 
           {output, code} ->
-            Logger.warning("[Verification.Loop] Fix command exited #{code}: #{String.slice(output, 0, 400)}")
+            Logger.warning(
+              "[Verification.Loop] Fix command exited #{code}: #{String.slice(output, 0, 400)}"
+            )
         end
       end)
     end
@@ -453,7 +470,8 @@ defmodule OptimalSystemAgent.Verification.Loop do
     }
   end
 
-  defp via(loop_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, "vloop:#{loop_id}"}}
+  defp via(loop_id),
+    do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, "vloop:#{loop_id}"}}
 
   defp generate_loop_id, do: OptimalSystemAgent.Utils.ID.generate("vloop")
 end

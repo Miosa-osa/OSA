@@ -31,7 +31,9 @@ defmodule OptimalSystemAgent.Agent.Memory.SQLiteBridge do
     }
 
     case Message.changeset(attrs) |> Repo.insert() do
-      {:ok, _msg} -> :ok
+      {:ok, _msg} ->
+        :ok
+
       {:error, changeset} ->
         Logger.warning("[SQLiteBridge] Failed to persist message: #{inspect(changeset.errors)}")
         :ok

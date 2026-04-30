@@ -490,7 +490,9 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     expanded = Path.expand(path)
 
     if File.exists?(expanded) do
-      case (with {:ok, raw} <- File.read(expanded), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
+      case with {:ok, raw} <- File.read(expanded),
+                {:ok, decoded} <- Jason.decode(raw),
+                do: {:ok, decoded} do
         {:ok, %{"steps" => steps}} when is_list(steps) ->
           parsed =
             steps
@@ -768,7 +770,8 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     do: OptimalSystemAgent.Utils.Text.now_iso()
 
   defp workflows_dir do
-    Application.get_env(:optimal_system_agent, :workflows_dir, "~/.osa/workflows") |> Path.expand()
+    Application.get_env(:optimal_system_agent, :workflows_dir, "~/.osa/workflows")
+    |> Path.expand()
   end
 
   defp parse_status(nil), do: :pending
@@ -781,5 +784,4 @@ defmodule OptimalSystemAgent.Agent.Workflow do
   defp parse_status("skipped"), do: :skipped
   defp parse_status(atom) when is_atom(atom), do: atom
   defp parse_status(_), do: :pending
-
 end

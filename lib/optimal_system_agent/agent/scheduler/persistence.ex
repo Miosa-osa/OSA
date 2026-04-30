@@ -6,7 +6,8 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
   """
   require Logger
 
-  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+  defp config_dir,
+    do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   @doc "Path to the CRONS.json file."
   def crons_path, do: Path.expand(Path.join(config_dir(), "CRONS.json"))
@@ -19,7 +20,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
     path = crons_path()
 
     if File.exists?(path) do
-      case (with {:ok, raw} <- File.read(path), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
+      case with {:ok, raw} <- File.read(path),
+                {:ok, decoded} <- Jason.decode(raw),
+                do: {:ok, decoded} do
         {:ok, %{"jobs" => jobs}} when is_list(jobs) ->
           enabled = Enum.filter(jobs, &(&1["enabled"] == true))
           Logger.info("CRONS.json: #{length(enabled)} enabled job(s) out of #{length(jobs)}")
@@ -48,7 +51,9 @@ defmodule OptimalSystemAgent.Agent.Scheduler.Persistence do
     path = triggers_path()
 
     if File.exists?(path) do
-      case (with {:ok, raw} <- File.read(path), {:ok, decoded} <- Jason.decode(raw), do: {:ok, decoded}) do
+      case with {:ok, raw} <- File.read(path),
+                {:ok, decoded} <- Jason.decode(raw),
+                do: {:ok, decoded} do
         {:ok, %{"triggers" => triggers}} when is_list(triggers) ->
           enabled = Enum.filter(triggers, &(&1["enabled"] == true))
 

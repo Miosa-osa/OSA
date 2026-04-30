@@ -153,7 +153,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SkillMatchTest do
       refute name in matched_names
     end
 
-    test "each matched skill entry has name, description, triggers, has_instructions fields", %{skill_name: name} do
+    test "each matched skill entry has name, description, triggers, has_instructions fields", %{
+      skill_name: name
+    } do
       conn = json_post("/match", %{"message" => "matchkeyword#{@suffix} something"})
 
       assert conn.status == 200
@@ -208,10 +210,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SkillMatchTest do
       name_b = "multi-skill-b-#{@suffix}"
       seed_skill(name_a, ["multimatch#{@suffix}"])
       seed_skill(name_b, ["multimatch#{@suffix}"])
+
       on_exit(fn ->
         cleanup_skill(name_a)
         cleanup_skill(name_b)
       end)
+
       {:ok, name_a: name_a, name_b: name_b}
     end
 

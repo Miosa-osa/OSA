@@ -184,7 +184,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.PlatformVM do
 
   @impl true
   def get_tree do
-    {:error, "Accessibility tree not yet implemented for PlatformVM adapter. Use screenshot fallback."}
+    {:error,
+     "Accessibility tree not yet implemented for PlatformVM adapter. Use screenshot fallback."}
   end
 
   # ---------------------------------------------------------------------------

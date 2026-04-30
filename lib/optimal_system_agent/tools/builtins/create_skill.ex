@@ -1,69 +1,40 @@
 defmodule OptimalSystemAgent.Tools.Builtins.CreateSkill do
-  @behaviour OptimalSystemAgent.Tools.Behaviour
+  @moduledoc """
+  Shim — delegates to the structured per-tool directory layout.
 
-  @impl true
-  def safety, do: :write_safe
+  All logic lives under `lib/optimal_system_agent/tools/builtins/create_skill/`:
 
-  @impl true
-  def deferred?, do: true
+    * `CreateSkill.Tool`      — `use OptimalSystemAgent.Tools.Behaviour`, declarations
+    * `CreateSkill.Constants` — exported atoms for cross-tool reference
+    * `CreateSkill.Prompt`    — dynamic prompt builder
+    * `CreateSkill.Handler`   — validate / execute
+    * `CreateSkill.UI`        — render callbacks for the Rust TUI
 
-  @impl true
-  def name, do: "create_skill"
+  This module preserves the `OptimalSystemAgent.Tools.Builtins.CreateSkill` atom
+  so that existing registry entries, config references, and test aliases
+  continue to resolve without modification.
+  """
 
-  @impl true
-  def description,
-    do: "Create a reusable skill document. Skills load automatically and help perform similar tasks faster in the future."
+  @tool OptimalSystemAgent.Tools.Builtins.CreateSkill.Tool
 
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "properties" => %{
-        "name" => %{"type" => "string", "description" => "Kebab-case skill name (e.g. 'express-api-testing')"},
-        "description" => %{"type" => "string", "description" => "What this skill helps with"},
-        "trigger" => %{"type" => "string", "description" => "Keywords or regex for when to activate (e.g. 'express|rest api|jest')"},
-        "instructions" => %{"type" => "string", "description" => "Step-by-step instructions for the skill"},
-        "tags" => %{"type" => "array", "items" => %{"type" => "string"}, "description" => "Tags for categorization"}
-      },
-      "required" => ["name", "description", "trigger", "instructions"]
-    }
-  end
-
-  @impl true
-  def execute(%{"name" => skill_name, "description" => desc, "trigger" => trigger, "instructions" => instructions} = args) do
-    tags = args["tags"] || []
-    skills_dir = Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills") |> Path.expand()
-    skill_dir = Path.join(skills_dir, skill_name)
-    skill_path = Path.join(skill_dir, "SKILL.md")
-
-    tags_str = Enum.map_join(tags, ", ", &"\"#{&1}\"")
-
-    content = """
-    ---
-    name: #{skill_name}
-    description: #{desc}
-    trigger: "#{trigger}"
-    tags: [#{tags_str}]
-    source: manual
-    ---
-
-    ## Instructions
-
-    #{instructions}
-    """ |> String.trim_leading()
-
-    with :ok <- File.mkdir_p(skill_dir),
-         :ok <- File.write(skill_path, content) do
-      try do
-        OptimalSystemAgent.Tools.Registry.reload_skills()
-      rescue
-        _ -> :ok
-      end
-
-      {:ok, "Created skill '#{skill_name}' at #{skill_path}\nTrigger: #{trigger}\nActivates automatically on matching tasks."}
-    else
-      {:error, reason} ->
-        {:error, "Failed to create skill: #{inspect(reason)}"}
-    end
-  end
+  defdelegate name, to: @tool
+  defdelegate description, to: @tool
+  defdelegate parameters, to: @tool
+  defdelegate safety, to: @tool
+  defdelegate available?, to: @tool
+  defdelegate aliases, to: @tool
+  defdelegate search_hint, to: @tool
+  defdelegate prompt(opts), to: @tool
+  defdelegate should_defer?, to: @tool
+  defdelegate always_load?, to: @tool
+  defdelegate concurrency_safe?(input, ctx), to: @tool
+  defdelegate read_only?(input, ctx), to: @tool
+  defdelegate destructive?(input, ctx), to: @tool
+  defdelegate open_world?(input, ctx), to: @tool
+  defdelegate max_result_size_chars, to: @tool
+  defdelegate validate_input(input, ctx), to: @tool
+  defdelegate check_permissions(input, ctx), to: @tool
+  defdelegate execute(input, ctx), to: @tool
+  defdelegate render(stage, payload, opts), to: @tool
+  defdelegate to_classifier_input(input), to: @tool
 end

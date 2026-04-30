@@ -358,7 +358,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
     end
 
     test "nonexistent cwd returns error" do
-      assert {:error, msg} = ShellExecute.execute(%{"command" => "pwd", "cwd" => "/tmp/osa_nonexistent_dir_999"})
+      assert {:error, msg} =
+               ShellExecute.execute(%{
+                 "command" => "pwd",
+                 "cwd" => "/tmp/osa_nonexistent_dir_999"
+               })
+
       assert msg =~ "cwd does not exist"
     end
 
