@@ -84,7 +84,9 @@ impl SseClient {
                     return;
                 }
                 Err(SseError::Cancelled) => {
-                    let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                    let _ = self.send(BackendEvent::SseDisconnected {
+                        error: Some("cancelled".into()),
+                    });
                     return;
                 }
                 Err(SseError::Disconnected(e)) => {
@@ -113,7 +115,9 @@ impl SseClient {
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         _ = self.cancel.cancelled() => {
-                            let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                            let _ = self.send(BackendEvent::SseDisconnected {
+                                error: Some("cancelled".into()),
+                            });
                             return;
                         }
                     }
@@ -225,7 +229,7 @@ enum SseError {
 // =============================================================================
 
 fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
-    match event_type {
+    let event = match event_type {
         "connected" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -433,6 +437,28 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         other => Some(BackendEvent::ParseWarning {
             message: format!("[sse] unknown event type: {}", other),
         }),
+    };
+
+    event.map(|event| scope_backend_event(data, event))
+}
+
+fn scope_backend_event(data: &[u8], event: BackendEvent) -> BackendEvent {
+    if matches!(event, BackendEvent::SseConnected { .. }) {
+        return event;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Scoped {
+        #[serde(default)]
+        session_id: String,
+    }
+
+    match serde_json::from_slice::<Scoped>(data) {
+        Ok(scoped) if !scoped.session_id.is_empty() => BackendEvent::SessionScoped {
+            session_id: scoped.session_id,
+            event: Box::new(event),
+        },
+        _ => event,
     }
 }
 
@@ -1094,6 +1120,21 @@ mod tests {
         match event {
             Some(BackendEvent::ProactiveModeChanged { enabled }) => {
                 assert!(enabled);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn wraps_events_with_session_id() {
+        let data = br#"{"text":"hello","session_id":"session-1"}"#;
+
+        let event = parse_sse_event("streaming_token", data);
+
+        match event {
+            Some(BackendEvent::SessionScoped { session_id, event }) => {
+                assert_eq!(session_id, "session-1");
+                assert!(matches!(*event, BackendEvent::StreamingToken { .. }));
             }
             other => panic!("unexpected event: {:?}", other),
         }

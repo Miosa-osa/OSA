@@ -17,6 +17,11 @@ impl App {
                     "Backend healthy: {} v{} ({}/{})",
                     health.status, health.version, health.provider, health.model
                 );
+                self.backend_status = format!("healthy ({})", health.status);
+                self.push_diagnostic_event(format!(
+                    "health: {} v{}",
+                    health.status, health.version
+                ));
                 self.header
                     .set_provider_info(&health.provider, &health.model);
                 self.status
@@ -47,6 +52,8 @@ impl App {
             }
             Err(e) => {
                 self.health_retry_count += 1;
+                self.backend_status = format!("health retry {}", self.health_retry_count);
+                self.set_backend_error(format!("health check failed: {}", e));
                 warn!(
                     "Health check failed (attempt {}): {}",
                     self.health_retry_count, e
@@ -89,6 +96,8 @@ impl App {
         match result {
             Ok(_) => {
                 info!("Login successful");
+                self.auth_status = "authenticated".into();
+                self.push_diagnostic_event("auth: authenticated");
                 // Load commands and tools in parallel
                 self.load_commands();
                 self.load_tools();
@@ -99,6 +108,8 @@ impl App {
             }
             Err(e) => {
                 warn!("Login failed: {}", e);
+                self.auth_status = "failed".into();
+                self.set_backend_error(format!("login failed: {}", e));
                 // Clear stale tokens so subsequent requests don't send them
                 crate::client::auth::clear_tokens(&self.client.profile_dir);
                 self.toasts.push(
@@ -202,6 +213,8 @@ impl App {
         self.activity.stop();
         self.status.set_active(false);
         self.cancelled = false;
+        self.last_backend_activity = None;
+        self.backend_activity_warned = false;
 
         // Transition back to idle
         if self.state.is_processing() {
@@ -254,6 +267,8 @@ impl App {
             self.transition(AppState::Idle);
             self.activity.stop();
             self.status.set_active(false);
+            self.last_backend_activity = None;
+            self.backend_activity_warned = false;
         }
     }
 
@@ -299,6 +314,8 @@ impl App {
         self.activity.start();
         self.status.set_active(true);
         self.processing_start = Some(std::time::Instant::now());
+        self.last_backend_activity = self.processing_start;
+        self.backend_activity_warned = false;
 
         let client = self.client.clone();
         let tx = self.event_tx.clone();
@@ -329,6 +346,8 @@ impl App {
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);
         self.processing_start = Some(std::time::Instant::now());
+        self.last_backend_activity = self.processing_start;
+        self.backend_activity_warned = false;
         self.stream_buf.clear();
         self.thinking_buf.clear();
         self.agent_header_sent = false;
@@ -364,6 +383,7 @@ impl App {
 
     pub(super) fn cancel_processing(&mut self) {
         self.cancelled = true;
+        self.backend_activity_warned = false;
         self.toasts.push(
             "Interrupting...".into(),
             crate::components::toast::ToastLevel::Info,
@@ -411,6 +431,8 @@ impl App {
         // Don't cancel processing, just hide the activity
         self.activity.stop();
         self.transition(AppState::Idle);
+        self.last_backend_activity = None;
+        self.backend_activity_warned = false;
     }
 
     pub fn check_health(&self) {
@@ -585,6 +607,9 @@ impl App {
                 Some(t) => t,
                 None => {
                     warn!("No auth token for SSE");
+                    let _ = tx.send(Event::Backend(BackendEvent::SseDisconnected {
+                        error: Some("missing_auth_token".into()),
+                    }));
                     return;
                 }
             };
@@ -617,6 +642,8 @@ impl App {
         self.thinking_buf.clear();
         self.pending_tool_args.clear();
         self.agent_header_sent = false;
+        self.last_backend_activity = None;
+        self.backend_activity_warned = false;
         self.activity.stop();
         self.status.set_active(false);
 
@@ -648,6 +675,38 @@ impl App {
             format!("Switched to session {}", truncate_str(session_id, 16)),
             crate::components::toast::ToastLevel::Info,
         );
+    }
+
+    pub(crate) fn reconnect_backend_stream(&mut self) {
+        self.sse_reconnecting = true;
+        self.start_sse();
+        self.last_backend_activity = Some(std::time::Instant::now());
+        self.backend_activity_warned = false;
+        self.toasts.push(
+            "Reconnecting backend stream...".into(),
+            crate::components::toast::ToastLevel::Info,
+        );
+    }
+
+    pub(crate) fn retry_last_prompt(&mut self) {
+        if self.state.is_processing() {
+            self.reconnect_backend_stream();
+            self.toasts.push(
+                "Still processing. Press Esc to interrupt before retrying.".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+
+        if let Some(last) = self.chat.last_user_message() {
+            self.reconnect_backend_stream();
+            self.submit_prompt(&last);
+        } else {
+            self.toasts.push(
+                "Nothing to retry".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+        }
     }
 
     pub(crate) fn create_session(&mut self) {

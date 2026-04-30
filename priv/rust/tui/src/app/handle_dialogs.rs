@@ -1,12 +1,107 @@
 use crate::app::state::AppState;
 use crate::dialogs::command_palette::PaletteItem;
+use crate::dialogs::permissions::PermissionRequest;
 use crate::dialogs::DialogAction;
 use crate::event::backend::BackendEvent;
 use crate::event::Event;
+use tracing::{debug, warn};
 
 use super::App;
 
 impl App {
+    pub(super) fn show_permission_request(&mut self, request: PermissionRequest) {
+        if !request.has_request_id() {
+            warn!(
+                "Ignoring permission request for tool '{}' with empty request_id",
+                request.tool_name
+            );
+            self.toasts.push(
+                "Ignored permission request with missing id".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+
+        if self.state == AppState::Permissions && self.permissions.is_some() {
+            debug!(
+                "Queueing permission request {} while another dialog is active",
+                request.request_id
+            );
+            self.permission_queue.push_back(request);
+            return;
+        }
+
+        if !self.state.can_transition_to(AppState::Permissions)
+            && self.state != AppState::Permissions
+        {
+            debug!(
+                "Queueing permission request {} while app is in {}",
+                request.request_id, self.state
+            );
+            self.permission_queue.push_back(request);
+            return;
+        }
+
+        self.open_permission_dialog(request);
+    }
+
+    fn open_permission_dialog(&mut self, request: PermissionRequest) {
+        let mut dialog = crate::dialogs::permissions::Permissions::new();
+        dialog.set_request(request);
+        self.permissions = Some(dialog);
+
+        if self.state != AppState::Permissions {
+            self.transition(AppState::Permissions);
+        }
+    }
+
+    fn next_queued_permission(&mut self) -> Option<PermissionRequest> {
+        while let Some(request) = self.permission_queue.pop_front() {
+            if request.has_request_id() {
+                return Some(request);
+            }
+
+            warn!(
+                "Dropping queued permission request for tool '{}' with empty request_id",
+                request.tool_name
+            );
+        }
+
+        None
+    }
+
+    fn return_state_after_permissions(&self) -> AppState {
+        if matches!(self.prev_state, Some(AppState::Processing)) && self.activity.is_active() {
+            AppState::Processing
+        } else {
+            AppState::Idle
+        }
+    }
+
+    fn finish_permission_dialog(&mut self) {
+        if let Some(request) = self.next_queued_permission() {
+            self.open_permission_dialog(request);
+            return;
+        }
+
+        self.permissions = None;
+        if self.state == AppState::Permissions {
+            self.transition(self.return_state_after_permissions());
+        }
+    }
+
+    fn send_permission_response(&self, request_id: String, allowed: bool) {
+        if request_id.trim().is_empty() {
+            warn!("Skipping permission response with empty request_id");
+            return;
+        }
+
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.permission_response(&request_id, allowed).await;
+        });
+    }
+
     pub(super) fn handle_quit_dialog_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if let Some(action) = self.quit_dialog.handle_key(key) {
             match action {
@@ -248,57 +343,45 @@ impl App {
     }
 
     pub(super) fn handle_permissions_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if let Some(ref mut dialog) = self.permissions {
-            if let Some(action) = dialog.handle_key(key) {
+        if self.permissions.is_some() {
+            let action_and_request_id = self.permissions.as_mut().and_then(|dialog| {
+                dialog
+                    .handle_key(key)
+                    .map(|action| (action, dialog.request_id().to_string()))
+            });
+
+            if let Some((action, request_id)) = action_and_request_id {
                 match action {
                     DialogAction::PermissionAllow => {
-                        self.transition(AppState::Idle);
                         self.toasts.push(
                             "Permission granted".into(),
                             crate::components::toast::ToastLevel::Info,
                         );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, true).await;
-                            });
-                        }
-                        self.permissions = None;
+                        self.send_permission_response(request_id, true);
+                        self.finish_permission_dialog();
                     }
                     DialogAction::PermissionAllowSession => {
-                        self.transition(AppState::Idle);
                         self.toasts.push(
                             "Permission granted for session".into(),
                             crate::components::toast::ToastLevel::Info,
                         );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, true).await;
-                            });
-                        }
-                        self.permissions = None;
+                        self.send_permission_response(request_id, true);
+                        self.finish_permission_dialog();
                     }
                     DialogAction::PermissionDeny => {
-                        self.transition(AppState::Idle);
                         self.toasts.push(
                             "Permission denied".into(),
                             crate::components::toast::ToastLevel::Warning,
                         );
-                        if let Some(ref d) = self.permissions {
-                            let client = self.client.clone();
-                            let request_id = d.request_id().to_string();
-                            tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, false).await;
-                            });
-                        }
-                        self.permissions = None;
+                        self.send_permission_response(request_id, false);
+                        self.finish_permission_dialog();
                     }
                     _ => {}
                 }
             }
+        } else if self.state == AppState::Permissions {
+            warn!("Permissions state had no active dialog; recovering");
+            self.finish_permission_dialog();
         }
         false
     }

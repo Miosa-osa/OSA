@@ -7,6 +7,27 @@ use super::App;
 
 impl App {
     pub(super) fn handle_backend_event(&mut self, event: BackendEvent) -> bool {
+        let event = match event {
+            BackendEvent::SessionScoped { session_id, event } => {
+                if session_id != self.session_id {
+                    debug!(
+                        "Ignoring stale backend event for session {} (current {})",
+                        session_id, self.session_id
+                    );
+                    return false;
+                }
+                *event
+            }
+            event => event,
+        };
+
+        if self.state.is_processing() && event.is_processing_activity() {
+            self.last_backend_activity = Some(std::time::Instant::now());
+            self.backend_activity_warned = false;
+        }
+
+        self.push_diagnostic_event(backend_event_label(&event));
+
         match event {
             BackendEvent::HealthResult(result) => {
                 self.handle_health_result(result);
@@ -17,6 +38,7 @@ impl App {
             BackendEvent::SseConnected { session_id } => {
                 info!("SSE connected: {}", session_id);
                 self.sse_reconnecting = false;
+                self.backend_status = "stream connected".into();
                 self.sidebar.set_session(&self.session_id);
                 // Load commands and tools after SSE connection
                 self.load_commands();
@@ -24,6 +46,9 @@ impl App {
                 self.load_settings();
             }
             BackendEvent::SseDisconnected { error } => match error.as_deref() {
+                Some("cancelled") => {
+                    debug!("SSE cancelled");
+                }
                 Some("token_refreshed") => {
                     info!("SSE reconnecting with refreshed token");
                     self.toasts.push(
@@ -32,24 +57,48 @@ impl App {
                     );
                     self.start_sse();
                 }
+                Some("missing_auth_token") => {
+                    warn!("SSE missing auth token");
+                    self.toasts.push(
+                        "No auth token for backend stream. Run /login.".into(),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                    self.sse_reconnecting = true;
+                }
                 Some("auth_failed") => {
                     warn!("SSE auth failed after refresh attempt");
+                    self.auth_status = "failed".into();
+                    self.backend_status = "stream auth failed".into();
+                    self.set_backend_error("SSE auth failed after refresh attempt");
                     self.toasts.push(
-                        "SSE auth failed. Try /login to re-authenticate.".into(),
+                        "Backend stream auth failed. Run /login, then /reconnect.".into(),
                         crate::components::toast::ToastLevel::Error,
                     );
                     self.sse_reconnecting = true;
                 }
                 Some(err) => {
                     warn!("SSE disconnected: {}", err);
+                    self.backend_status = "stream disconnected".into();
+                    self.set_backend_error(format!("SSE disconnected: {}", err));
+                    self.toasts.push(
+                        format!("Backend stream disconnected: {}. Use /reconnect.", err),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
                     self.sse_reconnecting = true;
                 }
                 None => {
+                    warn!("SSE disconnected");
+                    self.backend_status = "stream disconnected".into();
+                    self.toasts.push(
+                        "Backend stream disconnected. Use /reconnect.".into(),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
                     self.sse_reconnecting = true;
                 }
             },
             BackendEvent::SseReconnecting { attempt } => {
                 debug!("SSE reconnecting (attempt {})", attempt);
+                self.backend_status = format!("stream reconnecting ({})", attempt);
                 self.sse_reconnecting = true;
             }
             BackendEvent::StreamingToken { text, .. } => {
@@ -341,6 +390,9 @@ impl App {
                     if self.state.is_processing() {
                         self.transition(AppState::Idle);
                         self.activity.stop();
+                        self.status.set_active(false);
+                        self.last_backend_activity = None;
+                        self.backend_activity_warned = false;
                     }
                 }
             },
@@ -382,7 +434,10 @@ impl App {
                     self.tasks.clear();
                     self.stream_buf.clear();
                     self.thinking_buf.clear();
+                    self.pending_tool_args.clear();
                     self.agent_header_sent = false;
+                    self.last_backend_activity = None;
+                    self.backend_activity_warned = false;
                     self.toasts.push(
                         "New session".into(),
                         crate::components::toast::ToastLevel::Info,
@@ -536,6 +591,8 @@ impl App {
 
             BackendEvent::SseAuthFailed => {
                 error!("SSE auth failed — attempting token refresh");
+                self.auth_status = "refreshing".into();
+                self.backend_status = "stream auth refresh".into();
                 let client = self.client.clone();
                 let tx = self.event_tx.clone();
                 tokio::spawn(async move {
@@ -717,6 +774,8 @@ impl App {
                     if self.state.is_processing() {
                         self.activity.stop();
                         self.status.set_active(false);
+                        self.last_backend_activity = None;
+                        self.backend_activity_warned = false;
                         self.transition(AppState::Idle);
                     }
                 }
@@ -728,6 +787,8 @@ impl App {
                     if self.state.is_processing() {
                         self.activity.stop();
                         self.status.set_active(false);
+                        self.last_backend_activity = None;
+                        self.backend_activity_warned = false;
                         self.transition(AppState::Idle);
                     }
                 }
@@ -962,13 +1023,9 @@ impl App {
                 args,
                 request_id,
             } => {
-                // Show the permission dialog — transition from Processing (or Idle) to Permissions.
-                let mut dialog = crate::dialogs::permissions::Permissions::new();
-                dialog.set_tool(tool, args, request_id);
-                self.permissions = Some(dialog);
-                if self.state.can_transition_to(AppState::Permissions) {
-                    self.transition(AppState::Permissions);
-                }
+                let request =
+                    crate::dialogs::permissions::PermissionRequest::new(tool, args, request_id);
+                self.show_permission_request(request);
             }
             BackendEvent::PlanProposed {
                 plan,
@@ -995,6 +1052,8 @@ impl App {
                     self.status.set_active(false);
                     self.agents.task_completed(); // Clear agents panel
                     self.cancelled = false;
+                    self.last_backend_activity = None;
+                    self.backend_activity_warned = false;
                     self.transition(AppState::Idle);
                     self.recompute_layout();
                     self.toasts.push(
@@ -1067,7 +1126,17 @@ impl App {
                     .push(msg.into(), crate::components::toast::ToastLevel::Info);
                 self.sidebar.set_proactive(enabled);
             }
+            BackendEvent::SessionScoped { .. } => {}
         }
         false
     }
+}
+
+fn backend_event_label(event: &BackendEvent) -> String {
+    let debug = format!("{:?}", event);
+    let name = debug
+        .split(|ch: char| ch == ' ' || ch == '{' || ch == '(')
+        .next()
+        .unwrap_or("BackendEvent");
+    name.to_string()
 }

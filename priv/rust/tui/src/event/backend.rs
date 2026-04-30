@@ -13,6 +13,13 @@ pub struct SpawningAgent {
 /// Events from the backend (SSE stream + HTTP responses)
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
+    /// SSE event payload included a session_id. The app uses this wrapper to
+    /// ignore stale events from a previous stream after switching sessions.
+    SessionScoped {
+        session_id: String,
+        event: Box<BackendEvent>,
+    },
+
     // === SSE Connection Lifecycle ===
     SseConnected {
         session_id: String,
@@ -277,4 +284,36 @@ pub enum BackendEvent {
     /// Fired 3s after cancel request if the SSE stream hasn't delivered a response.
     /// Forces the UI back to Idle to prevent getting stuck.
     CancelTimeout,
+}
+
+impl BackendEvent {
+    pub fn is_processing_activity(&self) -> bool {
+        match self {
+            BackendEvent::SessionScoped { event, .. } => event.is_processing_activity(),
+            BackendEvent::StreamingToken { .. }
+            | BackendEvent::ThinkingDelta { .. }
+            | BackendEvent::AgentResponse { .. }
+            | BackendEvent::ToolCallStart { .. }
+            | BackendEvent::ToolCallEnd { .. }
+            | BackendEvent::ToolResult { .. }
+            | BackendEvent::LlmRequest { .. }
+            | BackendEvent::LlmResponse { .. }
+            | BackendEvent::OrchestratorTaskStarted { .. }
+            | BackendEvent::OrchestratorAgentsSpawning { .. }
+            | BackendEvent::OrchestratorTaskAppraised { .. }
+            | BackendEvent::OrchestratorAgentStarted { .. }
+            | BackendEvent::OrchestratorAgentProgress { .. }
+            | BackendEvent::OrchestratorAgentCompleted { .. }
+            | BackendEvent::OrchestratorAgentFailed { .. }
+            | BackendEvent::OrchestratorWaveStarted { .. }
+            | BackendEvent::OrchestratorSynthesizing { .. }
+            | BackendEvent::OrchestratorTaskCompleted { .. }
+            | BackendEvent::SwarmStarted { .. }
+            | BackendEvent::SwarmCompleted { .. }
+            | BackendEvent::SwarmFailed { .. }
+            | BackendEvent::SwarmCancelled { .. }
+            | BackendEvent::SwarmTimeout { .. } => true,
+            _ => false,
+        }
+    }
 }

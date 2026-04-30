@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod agents;
 pub mod chat;
+pub mod diagnostics;
 pub mod header;
 pub mod input;
 pub mod sidebar;

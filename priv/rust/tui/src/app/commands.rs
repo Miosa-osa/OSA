@@ -197,14 +197,10 @@ impl App {
                 );
             }
             "/retry" => {
-                if let Some(last) = self.chat.last_user_message() {
-                    self.submit_prompt(&last);
-                } else {
-                    self.toasts.push(
-                        "Nothing to retry".into(),
-                        crate::components::toast::ToastLevel::Warning,
-                    );
-                }
+                self.retry_last_prompt();
+            }
+            "/reconnect" => {
+                self.reconnect_backend_stream();
             }
             "/undo" => {
                 self.chat.undo_last_exchange();
@@ -271,7 +267,19 @@ impl App {
                 self.execute_backend_command("memory", arg);
             }
             "/doctor" => {
-                self.execute_backend_command("doctor", "");
+                self.chat.add_system_message(
+                    &format!(
+                        "Doctor started\nSession: {}\nBackend: {}\n\nChecking health, settings, tools, sessions, and SSE...",
+                        self.session_id,
+                        self.client.base_url()
+                    ),
+                    "info",
+                );
+                self.check_health();
+                self.load_settings();
+                self.load_tools();
+                self.load_sessions();
+                self.reconnect_backend_stream();
             }
             "/config" => {
                 self.toasts.push(
@@ -318,6 +326,9 @@ impl App {
         self.transition(AppState::Processing);
         self.activity.start();
         self.status.set_active(true);
+        self.processing_start = Some(std::time::Instant::now());
+        self.last_backend_activity = self.processing_start;
+        self.backend_activity_warned = false;
 
         let client = self.client.clone();
         let tx = self.event_tx.clone();

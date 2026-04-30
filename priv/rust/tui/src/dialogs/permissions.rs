@@ -15,6 +15,27 @@ const MIN_W: u16 = 50;
 const MAX_W: u16 = 90;
 const MIN_H: u16 = 10;
 
+#[derive(Debug, Clone)]
+pub struct PermissionRequest {
+    pub tool_name: String,
+    pub tool_args: String,
+    pub request_id: String,
+}
+
+impl PermissionRequest {
+    pub fn new(tool_name: String, tool_args: String, request_id: String) -> Self {
+        Self {
+            tool_name,
+            tool_args,
+            request_id,
+        }
+    }
+
+    pub fn has_request_id(&self) -> bool {
+        !self.request_id.trim().is_empty()
+    }
+}
+
 /// Tool permission approval dialog.
 ///
 /// Layout:
@@ -67,6 +88,10 @@ impl Permissions {
         self.diff_new = None;
         self.scroll = 0;
         self.selected = 0;
+    }
+
+    pub fn set_request(&mut self, request: PermissionRequest) {
+        self.set_tool(request.tool_name, request.tool_args, request.request_id);
     }
 
     /// Returns the opaque request identifier assigned by the backend.

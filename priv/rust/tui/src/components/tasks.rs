@@ -49,6 +49,13 @@ impl Tasks {
         }
     }
 
+    pub fn active_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|task| !matches!(task.status.as_str(), "completed" | "failed"))
+            .count()
+    }
+
     pub fn clear(&mut self) {
         self.items.clear();
     }

@@ -10,7 +10,7 @@ pub mod state;
 pub mod update;
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -22,6 +22,7 @@ use crate::components::activity::Activity;
 use crate::components::agents::Agents;
 use crate::components::chat::thinking_box::ThinkingBox;
 use crate::components::chat::Chat;
+use crate::components::diagnostics::DiagnosticsPanel;
 use crate::components::header::Header;
 use crate::components::input::InputComponent;
 use crate::components::sidebar::Sidebar;
@@ -35,7 +36,7 @@ use crate::dialogs::command_palette::CommandPalette;
 use crate::dialogs::file_picker::FilePicker;
 use crate::dialogs::model_picker::ModelPicker;
 use crate::dialogs::onboarding::OnboardingWizard;
-use crate::dialogs::permissions::Permissions;
+use crate::dialogs::permissions::{PermissionRequest, Permissions};
 use crate::dialogs::plan_review::PlanReview;
 use crate::dialogs::quit_confirm::QuitConfirm;
 use crate::dialogs::reasoning::ReasoningSelector;
@@ -50,7 +51,9 @@ use crate::voice::VoiceState;
 
 /// Constants
 pub const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(5);
+pub const BACKEND_ACTIVITY_WARNING_DELAY: Duration = Duration::from_secs(45);
 pub const MAX_MESSAGE_SIZE: usize = 100_000;
+const MAX_DIAGNOSTIC_EVENTS: usize = 20;
 
 // Some fields initialized but not yet read directly (accessed via render pipeline or Phase 3+)
 #[allow(dead_code)]
@@ -67,6 +70,7 @@ pub struct App {
     pub task_checklist: TaskChecklist,
     pub agents: Agents,
     pub toasts: Toasts,
+    pub diagnostics: DiagnosticsPanel,
 
     // Dialogs
     pub quit_dialog: QuitConfirm,
@@ -76,6 +80,7 @@ pub struct App {
     pub onboarding: Option<OnboardingWizard>,
     pub plan_review: Option<PlanReview>,
     pub permissions: Option<Permissions>,
+    pub permission_queue: VecDeque<PermissionRequest>,
     pub reasoning_selector: Option<ReasoningSelector>,
     pub file_picker: Option<FilePicker>,
     pub survey: Option<crate::dialogs::survey::SurveyDialog>,
@@ -110,9 +115,16 @@ pub struct App {
     pub stream_buf: String,
     pub thinking_buf: String,
     pub processing_start: Option<Instant>,
+    pub last_backend_activity: Option<Instant>,
+    pub backend_activity_warned: bool,
     pub last_cancel_attempt: Option<Instant>,
     pub cancelled: bool,
     pub sse_reconnecting: bool,
+    pub diagnostics_visible: bool,
+    pub backend_status: String,
+    pub auth_status: String,
+    pub last_backend_error: Option<String>,
+    pub diagnostic_events: VecDeque<String>,
 
     // Pending tool call args (tool_name -> args JSON), used to pair with ToolCallEnd
     pub pending_tool_args: HashMap<String, String>,
@@ -188,6 +200,7 @@ impl App {
             task_checklist: TaskChecklist::new(),
             agents: Agents::new(),
             toasts: Toasts::new(),
+            diagnostics: DiagnosticsPanel::new(),
 
             quit_dialog: QuitConfirm::new(),
             palette: CommandPalette::new(),
@@ -196,6 +209,7 @@ impl App {
             onboarding: None,
             plan_review: None,
             permissions: None,
+            permission_queue: VecDeque::new(),
             reasoning_selector: None,
             file_picker: None,
             survey: None,
@@ -223,9 +237,16 @@ impl App {
             stream_buf: String::new(),
             thinking_buf: String::new(),
             processing_start: None,
+            last_backend_activity: None,
+            backend_activity_warned: false,
             last_cancel_attempt: None,
             cancelled: false,
             sse_reconnecting: false,
+            diagnostics_visible: false,
+            backend_status: "connecting".into(),
+            auth_status: "unknown".into(),
+            last_backend_error: None,
+            diagnostic_events: VecDeque::with_capacity(MAX_DIAGNOSTIC_EVENTS),
 
             pending_tool_args: HashMap::new(),
             agent_header_sent: false,
@@ -288,6 +309,19 @@ impl App {
             activity_lines,
             chat_content,
         )
+    }
+
+    pub(super) fn push_diagnostic_event(&mut self, event: impl Into<String>) {
+        if self.diagnostic_events.len() == MAX_DIAGNOSTIC_EVENTS {
+            self.diagnostic_events.pop_front();
+        }
+        self.diagnostic_events.push_back(event.into());
+    }
+
+    pub(super) fn set_backend_error(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.last_backend_error = Some(error.clone());
+        self.push_diagnostic_event(format!("error: {}", error));
     }
 
     /// Transition to a new state with validation

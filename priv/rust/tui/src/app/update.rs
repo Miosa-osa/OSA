@@ -69,6 +69,18 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match (key.code, key.modifiers) {
+            (KeyCode::F(12), _) => {
+                self.diagnostics_visible = !self.diagnostics_visible;
+                return false;
+            }
+            (KeyCode::Esc, _) if self.diagnostics_visible => {
+                self.diagnostics_visible = false;
+                return false;
+            }
+            _ => {}
+        }
+
         // File picker and reasoning selector are overlays that take priority
         // regardless of the current app state.
         if self.file_picker.is_some() {
@@ -243,6 +255,10 @@ impl App {
             }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                 self.background_task();
+                false
+            }
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                self.reconnect_backend_stream();
                 false
             }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
@@ -510,6 +526,20 @@ impl App {
         }
 
         if self.state.is_processing() {
+            let last_activity = self.last_backend_activity.or(self.processing_start);
+            if let Some(last_activity) = last_activity {
+                let idle_for = last_activity.elapsed();
+                if idle_for >= super::BACKEND_ACTIVITY_WARNING_DELAY
+                    && !self.backend_activity_warned
+                {
+                    self.backend_activity_warned = true;
+                    self.toasts.push(
+                        "No backend stream activity. Press Ctrl+R or run /reconnect.".into(),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
+            }
+
             if let Some(start) = self.processing_start {
                 let elapsed = start.elapsed();
                 let timeout_secs = self.config.request_timeout_secs;
@@ -526,6 +556,8 @@ impl App {
                     self.agent_header_sent = false;
                     self.activity.stop();
                     self.status.set_active(false);
+                    self.last_backend_activity = None;
+                    self.backend_activity_warned = false;
                     self.transition(AppState::Idle);
                     self.toasts.push(
                         format!("Request timed out ({}m)", timeout_secs / 60),

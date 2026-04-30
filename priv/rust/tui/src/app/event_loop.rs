@@ -5,6 +5,7 @@ use tokio::time;
 use tracing::info;
 
 use super::App;
+use crate::components::diagnostics::DiagnosticsData;
 use crate::event::{terminal, Event};
 
 impl App {
@@ -175,6 +176,29 @@ impl App {
                         }
                         _ => {}
                     }
+                }
+
+                if self.diagnostics_visible {
+                    let recent_events: Vec<String> =
+                        self.diagnostic_events.iter().cloned().collect();
+                    self.diagnostics.draw_with_data(
+                        frame,
+                        area,
+                        DiagnosticsData {
+                            session_id: &self.session_id,
+                            app_state: self.state.to_string(),
+                            backend_status: &self.backend_status,
+                            auth_status: &self.auth_status,
+                            sse_reconnecting: self.sse_reconnecting,
+                            provider: self.header.provider(),
+                            model: self.header.model_name(),
+                            active_agents: self.agents.active_count(),
+                            active_tasks: self.tasks.active_count(),
+                            background_tasks: self.bg_tasks.len(),
+                            last_backend_error: self.last_backend_error.as_deref(),
+                            recent_events: &recent_events,
+                        },
+                    );
                 }
             }
         }

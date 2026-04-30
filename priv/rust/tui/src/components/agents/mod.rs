@@ -48,6 +48,13 @@ impl Agents {
         self.active
     }
 
+    pub fn active_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.status, AgentStatus::Spawning | AgentStatus::Running))
+            .count()
+    }
+
     /// Total render height: 0 when inactive, else header + 2*agents + batch headers + optional synth + swarm.
     /// Capped at 30 to prevent degenerate cases.
     pub fn height(&self) -> u16 {
