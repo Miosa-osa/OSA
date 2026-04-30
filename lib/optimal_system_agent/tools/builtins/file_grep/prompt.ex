@@ -30,7 +30,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Prompt do
   # Lazy cross-tool name reference. If the target tool's Constants module
   # exists and exports the requested function, use the live value;
   # otherwise fall back to a literal default. Mirrors the lazy-require
-  # pattern at `src/tools/ToolSearchTool/prompt.ts:9-19`.
+  # pattern at upstream.
   defp safe_ref(mod, fun, default) do
     if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 0) do
       apply(mod, fun, [])

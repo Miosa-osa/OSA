@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Prompt do
   @moduledoc """
   Dynamic prompt for `ask_user`.
 
-  Mirrors `src/tools/AskUserQuestionTool/prompt.ts`. The prompt body is
+ The prompt body is
   a function so it can reference the current exit-plan-mode tool name
   via `safe_ref/3`.
   """

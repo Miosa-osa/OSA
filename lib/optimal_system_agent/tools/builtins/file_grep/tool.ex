@@ -74,7 +74,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Tool do
   def should_defer?, do: false
 
   @impl true
-  # Search is a hot path — Claude Code makes Grep always-load so the
+  # Search is a hot path — the upstream agent CLI makes Grep always-load so the
   # model can call it without a tool-discovery round trip.
   def always_load?, do: true
 

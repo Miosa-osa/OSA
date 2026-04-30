@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Tool do
 
   The tool is **deferred** (`should_defer? true`): it stays out of the
   always-loaded prompt section and is discoverable via ToolSearch. This
-  matches the flat tool's `deferred? -> true` and the Claude Code reference
+  matches the flat tool's `deferred? -> true` and the the upstream contract
   `shouldDefer: true` on all three ScheduleCronTool variants.
   """
 
@@ -69,7 +69,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Tool do
 
   @impl true
   # Cron is not a hot-path tool; the model discovers it via ToolSearch.
-  # Matches the flat layout's `deferred? -> true` and Claude Code's
+  # Matches the flat layout's `deferred? -> true` and the upstream agent CLI's
   # `shouldDefer: true` on CronCreateTool/CronListTool/CronDeleteTool.
   def should_defer?, do: true
 

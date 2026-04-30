@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/badge/Version-0.4.0-orange.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
-[![Tools](https://img.shields.io/badge/Tools-47-blue.svg)](#47-built-in-tools)
+[![Tools](https://img.shields.io/badge/Tools-50-blue.svg)](#50-built-in-tools)
 [![Agents](https://img.shields.io/badge/Agents-14_roles-green.svg)](#autonomous-task-orchestration)
 
 ## Quick Start
@@ -16,7 +16,36 @@ curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bas
 osa
 ```
 
-One command installs. One command runs. First run walks you through setup.
+That's it. The installer auto-detects Elixir/Erlang/Rust and installs anything missing, clones the repo, builds the backend + Rust TUI, and symlinks `osa` to your PATH. First run drops you into an interactive setup wizard (pick a provider, paste a key or pick the local Ollama default, done). Type `osa` from anywhere on disk after that.
+
+```
+✓ Backend boots in ~2s
+✓ TUI launches with full chat UI
+✓ 50 built-in tools loaded (30 always-on, 17 lazy via tool_search, 3 scheduling primitives)
+✓ Multi-provider (Anthropic, OpenAI, Ollama, Groq, Google, plus 13 more)
+✓ Cross-session memory + learning
+✓ Zero data leaves your machine unless you point it at a hosted provider
+```
+
+Already cloned? From the repo root:
+
+```bash
+bin/install   # detects local checkout, no re-clone
+osa           # launch
+```
+
+Common entry points:
+
+| Command | What it does |
+|---|---|
+| `osa` | Backend + TUI (default) |
+| `osa setup` | Re-run the setup wizard (switch provider, change key) |
+| `osa update` | Pull latest, rebuild |
+| `osa serve` | Backend only, no TUI (HTTP API on :9089) |
+| `osa doctor` | Health checks |
+| `osa --dev` | Dev profile, port 19001 |
+
+Override the port with `OSA_HTTP_PORT=<n>` in `~/.osa/.env` (default 9089).
 
 ---
 

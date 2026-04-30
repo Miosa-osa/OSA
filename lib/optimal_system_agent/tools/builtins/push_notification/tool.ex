@@ -1,5 +1,5 @@
 defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Tool do
-  @moduledoc """
+  @moduledoc  """
   Send an OS-level push notification to the user's desktop.
 
   macOS: `osascript -e 'display notification ...'`
@@ -9,7 +9,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Tool do
   Use this for out-of-band signals the user should see even if they have
   stepped away from the terminal. For in-session replies, use `send_message`.
 
-  Mirrors the `PushNotificationTool` pattern from the Claude Code reference.
   """
 
   use OptimalSystemAgent.Tools.Behaviour

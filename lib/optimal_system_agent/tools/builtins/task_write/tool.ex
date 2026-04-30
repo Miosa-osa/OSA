@@ -12,7 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool do
 
   ## Design decisions
 
-  * `should_defer?` → false — task_write is always-on (Claude Code's TodoWrite
+  * `should_defer?` → false — task_write is always-on (the TodoWrite
     is never deferred; it must be in every prompt so the model tracks its plan).
   * `always_load?` → true — same reason: the model needs it available unconditionally.
   * `concurrency_safe?` → false — mutates shared GenServer state.
@@ -106,7 +106,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool do
   @impl true
   # task_write is always-on — the model must have it available every turn so
   # it can update its plan without waiting for a deferred load. This mirrors
-  # the TodoWrite behaviour in Claude Code: it is never deferred.
+  # the TodoWrite behaviour in the upstream contract: it is never deferred.
   def should_defer?, do: false
 
   @impl true

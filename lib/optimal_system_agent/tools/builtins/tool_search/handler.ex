@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Handler do
   @moduledoc """
   Validation, permission, and execution logic for `tool_search`.
 
-  Mirrors `src/tools/ToolSearchTool/ToolSearchTool.ts`:
+  Mirrors upstream:
     * `validate/2`          — type-checks input shape (cheap)
     * `check_permissions/2` — pure registry lookup, always allow
     * `execute/2`           — delegates to Registry.search/2 with formatted output

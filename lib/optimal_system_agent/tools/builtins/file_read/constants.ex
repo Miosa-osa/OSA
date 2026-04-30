@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Constants do
   @moduledoc """
   Exported constants for cross-tool prompt references.
 
-  Mirrors `src/tools/FileReadTool/constants.ts`. Other tools' prompts
+ Other tools' prompts
   (`FileEdit.Prompt`, `FileWrite.Prompt`) reference `tool_name/0` so a
   rename here propagates everywhere automatically.
   """

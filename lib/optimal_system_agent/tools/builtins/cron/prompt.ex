@@ -2,8 +2,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Prompt do
   @moduledoc """
   Dynamic prompt for the `cron` tool.
 
-  Consolidates what Claude Code splits across CronCreateTool/CronListTool/
-  CronDeleteTool prompts (src/tools/ScheduleCronTool/prompt.ts) into a single
+  Consolidates what the upstream agent CLI splits across CronCreateTool/CronListTool/
+into a single
   function, since OSA exposes all cron actions through one action-discriminated
   tool rather than three separate tools.
 

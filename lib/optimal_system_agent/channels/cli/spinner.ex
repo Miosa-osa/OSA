@@ -1,7 +1,7 @@
 defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @moduledoc """
   CLI activity feed — shows live tool calls, reasoning iterations,
-  and token usage as the agent works. Like Claude Code's tool display.
+  and token usage as the agent works. Like the tool display.
 
   Displays like:
     ⠋ Thinking… (2s)

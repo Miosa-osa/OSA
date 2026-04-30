@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Constants do
   @moduledoc """
   Exported constants for the `cron` tool.
 
-  Mirrors the role of `src/tools/ScheduleCronTool/prompt.ts` constant exports
+  Mirrors the role of upstream constant exports
   (CRON_CREATE_TOOL_NAME, CRON_LIST_TOOL_NAME, CRON_DELETE_TOOL_NAME) but
   condensed to one name since OSA exposes all actions through a single
   action-discriminated tool.
@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Cron.Constants do
   @schedule_presets ["hourly", "daily", "weekly"]
   def schedule_presets, do: @schedule_presets
 
-  # Cap matching the Claude Code reference (CronCreateTool.ts:25).
+  # Cap matching the the upstream contract (CronCreateTool.ts:25).
   @max_jobs 50
   def max_jobs, do: @max_jobs
 end

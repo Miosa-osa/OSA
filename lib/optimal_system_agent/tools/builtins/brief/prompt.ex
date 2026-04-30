@@ -2,8 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Brief.Prompt do
   @moduledoc """
   Dynamic prompt for the `brief` tool.
 
-  Mirrors `BriefTool/prompt.ts` from the Claude Code reference.
-  Cross-references `memory_recall` since it draws from the same store.
+  Mirrors `BriefTool/prompt.ts`  Cross-references `memory_recall` since it draws from the same store.
   """
 
   alias OptimalSystemAgent.Tools.Builtins.Brief.Constants

@@ -1,12 +1,12 @@
 defmodule OptimalSystemAgent.Tools.Builtins.RemoteTrigger.Tool do
-  @moduledoc """
+  @moduledoc  """
   External-trigger management tool.
 
   Pairs with `cron` (recurring schedules) and `monitor` (active polls) as
   the third proactive scheduling primitive — a passive listener that
   external systems can fire to wake a scheduled job.
 
-  Mirrors `src/tools/RemoteTriggerTool/` from the Claude Code reference,
+  Mirrors upstream from the the upstream contract,
   on top of OSA's existing `Agent.Scheduler` trigger infrastructure.
   """
 

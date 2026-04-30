@@ -2,10 +2,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Constants do
   @moduledoc """
   Exported constants for `tool_search`.
 
-  Mirrors `src/tools/ToolSearchTool/constants.ts`. Other tools' prompts
+ Other tools' prompts
   reference `tool_name/0` so a rename here propagates automatically.
 
-  NOTE: the canonical Claude Code name is "ToolSearch" (PascalCase). OSA
+  NOTE: the canonical the upstream agent CLI name is "ToolSearch" (PascalCase). OSA
   uses snake_case consistently for builtin tool names, so the name is
   "tool_search". Cross-tool references should import this constant, not
   hardcode the string.

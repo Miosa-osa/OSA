@@ -7,7 +7,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Handler do
     * `check_permissions/2` — enforces the Git Safety Protocol rules
     * `execute/2`           — resolves the working directory and runs git
 
-  Safety rules mirror the Claude Code v2 Git Safety Protocol
+  Safety rules mirror the the prior generation Git Safety Protocol
   (docs/archive/flows/claude-code-v2-flow.md §6) plus OSA-specific
   additions (warn on `git add -A` / `git add .`).
   """

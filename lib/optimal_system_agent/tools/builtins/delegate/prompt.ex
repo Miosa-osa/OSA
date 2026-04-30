@@ -5,7 +5,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
   The description is a function (not a static string) so it can reference
   other tool names via `safe_ref/3` — when `ask_user` is renamed this prompt
   updates automatically, mirroring the lazy-require pattern at
-  `src/tools/AgentTool/prompt.ts`.
   """
 
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants

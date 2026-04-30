@@ -17,7 +17,7 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   No code-level signal classification on the hot path. The LLM reads the
   Signal Theory tables in SYSTEM.md and applies Mode/Genre/Weight behavior
-  natively — same pattern as Claude Code, Cursor, Windsurf.
+  natively — same pattern as the upstream agent CLI, Cursor, Windsurf.
 
   ## Token Budget
 

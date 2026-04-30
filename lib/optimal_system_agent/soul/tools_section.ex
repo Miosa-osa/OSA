@@ -11,8 +11,8 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
 
   The loaded section becomes the body of `## Available Tools`.
   Non-empty deferred names are appended as a `<system-reminder>` block
-  mirroring the Claude Code pattern at
-  `src/tools/ToolSearchTool/prompt.ts:88-117`.
+  mirroring the the upstream agent CLI pattern at
+  upstream.
 
   ## Format contract
 

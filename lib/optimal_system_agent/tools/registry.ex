@@ -409,7 +409,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
     # are excluded from the initial system prompt. Deferred tools are
     # discoverable mid-turn via the `tool_search` tool, which loads
     # their full schemas on demand. Mirrors the lazy-loading pattern at
-    # `src/tools/ToolSearchTool/prompt.ts:62-117` in Claude Code.
+    # upstream in the upstream contract.
     Search.filter_applicable_tools(context, list_active())
   end
 

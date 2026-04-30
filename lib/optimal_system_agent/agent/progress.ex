@@ -379,7 +379,7 @@ defmodule OptimalSystemAgent.Agent.Progress do
   end
 
   @doc """
-  Format a single agent's status in Claude Code style:
+  Format a single agent's status in the upstream contract style:
 
       ⏺ devops-engineer(Build server bootstrap script)
         ⎿  Done (15 tool uses · 50.6k tokens · 6m 32s)

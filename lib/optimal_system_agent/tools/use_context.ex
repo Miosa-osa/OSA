@@ -1,8 +1,7 @@
 defmodule OptimalSystemAgent.Tools.UseContext do
   @moduledoc """
   Per-call execution context. Mirrors `ToolUseContext` at
-  `src/Tool.ts:158-300` in the Claude Code reference implementation.
-
+  upstream
   Built once per turn by `OptimalSystemAgent.Agent.Loop.ReactLoop` and
   passed to every tool's `validate_input/2`, `check_permissions/2`,
   `execute/2`, `render/3`, and `concurrency_safe?/2`.
@@ -19,7 +18,7 @@ defmodule OptimalSystemAgent.Tools.UseContext do
     :agent_type,
     :tool_use_id,
 
-    # ── Permission rules (Claude Code's allow/deny/ask maps) ─────────
+    # ── Permission rules ─────────
     :permission_mode,
     :always_allow_rules,
     :always_deny_rules,

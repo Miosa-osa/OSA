@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
   @moduledoc """
   Dynamic prompt for `file_read`.
 
-  Mirrors `src/tools/FileReadTool/prompt.ts`. The prompt body is a function
+ The prompt body is a function
   (not a static string) so it can reference *current* tool names — when
   `file_edit` is renamed, this prompt updates automatically through the
   `safe_ref/3` helper.
@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
   # Lazy cross-tool name reference. If the target tool's Constants module
   # exists and exports the requested function, use the live value;
   # otherwise fall back to a literal default. Mirrors the lazy-require
-  # pattern at `src/tools/ToolSearchTool/prompt.ts:9-19`.
+  # pattern at upstream.
   defp safe_ref(mod, fun, default) do
     if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 0) do
       apply(mod, fun, [])

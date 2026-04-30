@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Prompt do
   @moduledoc """
   Dynamic prompt for `send_message`.
 
-  Mirrors `src/tools/SendMessageTool/prompt.ts`.
+
   """
 
   @spec render(keyword()) :: String.t()
