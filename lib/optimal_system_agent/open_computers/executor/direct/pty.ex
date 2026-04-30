@@ -91,11 +91,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
 
         FrameRouter.send_frame({:pty_opened, %{session_id: session_id, pid: self()}})
 
-        new_sessions = Map.put(state.sessions, session_id, %{
-          os_pid: os_pid,
-          port: port,
-          queued_bytes: 0
-        })
+        new_sessions =
+          Map.put(state.sessions, session_id, %{
+            os_pid: os_pid,
+            port: port,
+            queued_bytes: 0
+          })
 
         {:noreply, %{state | sessions: new_sessions}}
 
@@ -181,7 +182,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
 
       if new_queued > @max_output_queue_bytes do
         Logger.warning("[OC.Pty] backpressure overflow session=#{session_id}, dropping chunk")
-        FrameRouter.send_frame({:pty_error, %{session_id: session_id, reason: :backpressure_overflow}})
+
+        FrameRouter.send_frame(
+          {:pty_error, %{session_id: session_id, reason: :backpressure_overflow}}
+        )
+
         # Reset queue counter — session stays open
         {:noreply, put_in(state.sessions[session_id].queued_bytes, 0)}
       else
@@ -218,7 +223,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
   defp open_pty(session_id, shell, cols, rows, cwd, env) do
     case :os.type() do
       {:win32, _} ->
-        Logger.warning("[OC.Pty] session=#{session_id} Windows ConPTY not yet supported (TODO: issue #51)")
+        Logger.warning(
+          "[OC.Pty] session=#{session_id} Windows ConPTY not yet supported (TODO: issue #51)"
+        )
+
         {:error, :pty_unavailable}
 
       {:unix, _} ->
@@ -228,7 +236,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Pty do
 
   defp open_unix_pty(_session_id, shell, cols, rows, cwd, env) do
     with true <- shell_allowed?(shell),
-         resolved when is_binary(resolved) <- (System.find_executable(shell) || shell),
+         resolved when is_binary(resolved) <- System.find_executable(shell) || shell,
          true <- File.exists?(resolved) do
       # Build env list for erlexec
       exec_env =

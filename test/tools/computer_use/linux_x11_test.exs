@@ -1,5 +1,13 @@
 defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11Test do
+  # Tests in this module exercise pure command-building functions that return
+  # {cmd, args} tuples — no actual process execution occurs.  However, the
+  # module under test (LinuxX11) depends on Linux X11 tooling (xdotool, maim,
+  # slop) for its runtime paths and is therefore only meaningful on Linux.
+  # On macOS the tests are tagged :linux_only and excluded from the default
+  # run to avoid spurious failures on developer machines.
   use ExUnit.Case, async: true
+
+  @moduletag :linux_only
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11
 

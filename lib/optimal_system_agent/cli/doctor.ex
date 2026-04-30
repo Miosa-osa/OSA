@@ -60,7 +60,11 @@ defmodule OptimalSystemAgent.CLI.Doctor do
     # Check for the Rust TUI binary first, then Go TUI
     priv_dir = find_priv_dir()
 
-    rust_tui = if priv_dir, do: Path.join([priv_dir, "rust", "tui", "target", "release", "osa-tui"]), else: nil
+    rust_tui =
+      if priv_dir,
+        do: Path.join([priv_dir, "rust", "tui", "target", "release", "osa-tui"]),
+        else: nil
+
     go_tui = if priv_dir, do: Path.join([priv_dir, "go", "tui-v2", "osa"]), else: nil
 
     cond do

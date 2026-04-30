@@ -178,7 +178,10 @@ defmodule OptimalSystemAgent.Decisions.Merge do
            }}
 
         {:error, step, reason, _changes} ->
-          Logger.warning("[Decisions.Merge] merge failed at #{Kernel.inspect(step)}: #{Kernel.inspect(reason)}")
+          Logger.warning(
+            "[Decisions.Merge] merge failed at #{Kernel.inspect(step)}: #{Kernel.inspect(reason)}"
+          )
+
           {:error, {step, reason}}
       end
     else

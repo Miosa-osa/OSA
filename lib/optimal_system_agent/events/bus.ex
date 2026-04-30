@@ -34,7 +34,7 @@ defmodule OptimalSystemAgent.Events.Bus do
   # Sample 1-in-N events for failure-mode detection to keep overhead negligible.
   @failure_mode_sample_rate 10
 
-  @event_types ~w(user_message llm_request llm_response tool_call tool_result agent_response system_event channel_connected channel_disconnected channel_error ask_user_question survey_answered algedonic_alert signal_classified)a
+  @event_types ~w(user_message llm_request llm_response tool_call tool_result tool_render agent_response system_event channel_connected channel_disconnected channel_error ask_user_question survey_answered algedonic_alert signal_classified)a
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -64,7 +64,9 @@ defmodule OptimalSystemAgent.Events.Bus do
            OptimalSystemAgent.Events.TaskSupervisor,
            fn -> do_emit(event_type, payload, opts) end
          ) do
-      {:ok, _} -> :ok
+      {:ok, _} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("[Bus] Could not dispatch emit task: #{inspect(reason)}")
     end
@@ -135,10 +137,14 @@ defmodule OptimalSystemAgent.Events.Bus do
         OptimalSystemAgent.Events.Stream.append(typed_event.session_id, typed_event)
       rescue
         e ->
-          Logger.warning("[Bus] Stream append failed for session #{typed_event.session_id}: #{Exception.message(e)}")
+          Logger.warning(
+            "[Bus] Stream append failed for session #{typed_event.session_id}: #{Exception.message(e)}"
+          )
       catch
         kind, reason ->
-          Logger.warning("[Bus] Stream append #{kind} for session #{typed_event.session_id}: #{inspect(reason)}")
+          Logger.warning(
+            "[Bus] Stream append #{kind} for session #{typed_event.session_id}: #{inspect(reason)}"
+          )
       end
     end
 
@@ -228,9 +234,11 @@ defmodule OptimalSystemAgent.Events.Bus do
   @impl true
   def handle_info({:DOWN, mon_ref, :process, _pid, _reason}, state) do
     {entries, monitors} = Map.pop(state.monitors, mon_ref, [])
+
     Enum.each(entries, fn {event_type, ref} ->
       :ets.match_delete(:osa_event_handlers, {event_type, ref, :_})
     end)
+
     {:noreply, %{state | monitors: monitors}}
   end
 
@@ -288,24 +296,35 @@ defmodule OptimalSystemAgent.Events.Bus do
 
   defp dispatch_with_dlq(type, payload, handler) do
     case Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-      try do
-        handler.(payload)
-      rescue
-        e ->
-          Logger.warning("[Bus] Handler crash for #{type}: #{Exception.message(e)}")
-          OptimalSystemAgent.Events.DLQ.enqueue(type, payload, handler, Exception.message(e))
-      catch
-        kind, reason ->
-          Logger.warning("[Bus] Handler #{kind} for #{type}: #{inspect(reason)}")
-          OptimalSystemAgent.Events.DLQ.enqueue(type, payload, handler, "#{kind}: #{inspect(reason)}")
-      end
-    end) do
-      {:ok, _} -> :ok
+           try do
+             handler.(payload)
+           rescue
+             e ->
+               Logger.warning("[Bus] Handler crash for #{type}: #{Exception.message(e)}")
+               OptimalSystemAgent.Events.DLQ.enqueue(type, payload, handler, Exception.message(e))
+           catch
+             kind, reason ->
+               Logger.warning("[Bus] Handler #{kind} for #{type}: #{inspect(reason)}")
+
+               OptimalSystemAgent.Events.DLQ.enqueue(
+                 type,
+                 payload,
+                 handler,
+                 "#{kind}: #{inspect(reason)}"
+               )
+           end
+         end) do
+      {:ok, _} ->
+        :ok
+
       {:error, :max_children} ->
         Logger.warning("[Bus] TaskSupervisor at max_children — enqueuing #{type} to DLQ")
         OptimalSystemAgent.Events.DLQ.enqueue(type, payload, handler, "max_children")
+
       {:error, reason} ->
-        Logger.warning("[Bus] dispatch_with_dlq start_child failed for #{type}: #{inspect(reason)}")
+        Logger.warning(
+          "[Bus] dispatch_with_dlq start_child failed for #{type}: #{inspect(reason)}"
+        )
     end
   end
 end

@@ -35,16 +35,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     path = checkpoint_path(state.session_id)
     # Sanitize messages to valid UTF-8 before JSON encoding — codebase context
     # blocks may contain non-UTF-8 bytes from binary file reads.
-    sanitized = update_in(data, [:messages], fn msgs ->
-      Enum.map(msgs, fn
-        %{content: c} = m when is_binary(c) -> %{m | content: sanitize_utf8(c)}
-        %{"content" => c} = m when is_binary(c) -> %{m | "content" => sanitize_utf8(c)}
-        m -> m
+    sanitized =
+      update_in(data, [:messages], fn msgs ->
+        Enum.map(msgs, fn
+          %{content: c} = m when is_binary(c) -> %{m | content: sanitize_utf8(c)}
+          %{"content" => c} = m when is_binary(c) -> %{m | "content" => sanitize_utf8(c)}
+          m -> m
+        end)
       end)
-    end)
+
     File.write!(path, Jason.encode!(sanitized), [:utf8])
 
-    Logger.debug("[loop] Checkpoint written for session #{state.session_id} at iteration #{state.iteration}")
+    Logger.debug(
+      "[loop] Checkpoint written for session #{state.session_id} at iteration #{state.iteration}"
+    )
   rescue
     e ->
       Logger.warning("[loop] Checkpoint write failed: #{Exception.message(e)}")

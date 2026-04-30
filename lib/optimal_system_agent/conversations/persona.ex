@@ -96,7 +96,9 @@ defmodule OptimalSystemAgent.Conversations.Persona do
   @spec predefined(atom()) :: t()
   def predefined(key) when is_atom(key) do
     case Keyword.fetch(@predefined_defs, key) do
-      {:ok, attrs} -> from_map(Map.new(attrs))
+      {:ok, attrs} ->
+        from_map(Map.new(attrs))
+
       :error ->
         valid = Enum.map_join(predefined_keys(), ", ", &inspect/1)
         raise ArgumentError, "Unknown predefined persona: #{inspect(key)}. Valid: #{valid}"
@@ -113,9 +115,7 @@ defmodule OptimalSystemAgent.Conversations.Persona do
       role: to_string(attrs[:role] || attrs["role"] || "Participant"),
       perspective: to_string(attrs[:perspective] || attrs["perspective"] || ""),
       system_prompt_additions:
-        to_string(
-          attrs[:system_prompt_additions] || attrs["system_prompt_additions"] || ""
-        ),
+        to_string(attrs[:system_prompt_additions] || attrs["system_prompt_additions"] || ""),
       model: attrs[:model] || attrs["model"]
     }
   end

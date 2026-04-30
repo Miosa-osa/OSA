@@ -34,7 +34,9 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
     end
 
     @tag :hooks
-    test "spend_guard has higher priority (lower number) than security_check", %{available: available} do
+    test "spend_guard has higher priority (lower number) than security_check", %{
+      available: available
+    } do
       if not available, do: flunk("Hooks GenServer not running")
 
       listing = Hooks.list_hooks()
@@ -89,7 +91,12 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
     test "returns {:ok, payload} for safe file_read tool", %{available: available} do
       if not available, do: flunk("Hooks GenServer not running")
 
-      payload = %{tool_name: "file_read", arguments: %{"path" => "/tmp/safe.txt"}, session_id: "test"}
+      payload = %{
+        tool_name: "file_read",
+        arguments: %{"path" => "/tmp/safe.txt"},
+        session_id: "test"
+      }
+
       result = Hooks.run(:pre_tool_use, payload)
       assert {:ok, returned_payload} = result
       assert returned_payload.tool_name == "file_read"
@@ -192,9 +199,12 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
     test "a crashing post_tool_use hook does not crash the pipeline", %{available: available} do
       if not available, do: flunk("Hooks GenServer not running")
 
-      Hooks.register(:post_tool_use, "crasher_hook", fn _payload ->
-        raise "kaboom"
-      end, priority: 1)
+      Hooks.register(
+        :post_tool_use,
+        "crasher_hook",
+        fn _payload ->
+          raise "kaboom"
+        end, priority: 1)
 
       Process.sleep(50)
 
@@ -221,7 +231,11 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
     test "metrics track calls after running hooks", %{available: available} do
       if not available, do: flunk("Hooks GenServer not running")
 
-      Hooks.run(:pre_tool_use, %{tool_name: "file_read", arguments: %{}, session_id: "metric_test"})
+      Hooks.run(:pre_tool_use, %{
+        tool_name: "file_read",
+        arguments: %{},
+        session_id: "metric_test"
+      })
 
       metrics = Hooks.metrics()
       pre_metrics = Map.get(metrics, :pre_tool_use)
@@ -246,13 +260,16 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
 
       # Use a conditional blocker so it only blocks a specific tool name,
       # preventing pollution of other pre_tool_use tests (no unregister API).
-      Hooks.register(:pre_tool_use, "final_test_blocker", fn payload ->
-        if payload.tool_name == "blocked_test_tool" do
-          {:block, "custom block reason"}
-        else
-          {:ok, payload}
-        end
-      end, priority: 1)
+      Hooks.register(
+        :pre_tool_use,
+        "final_test_blocker",
+        fn payload ->
+          if payload.tool_name == "blocked_test_tool" do
+            {:block, "custom block reason"}
+          else
+            {:ok, payload}
+          end
+        end, priority: 1)
 
       Process.sleep(50)
 

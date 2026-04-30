@@ -119,9 +119,12 @@ defmodule OptimalSystemAgent.Agent.Tier do
     # --- Ollama Cloud (all models must support tool calling) ---
     # Updated 2026-03-16 from ollama.com/library
     ollama_cloud: %{
-      elite: "kimi-k2.5:cloud",                # multimodal agentic, tools+thinking
-      specialist: "nemotron-3-super:cloud",     # 120B MoE (12B active), tools+thinking
-      utility: "nemotron-3-nano:cloud"          # 30B, tools+thinking, agentic-optimized
+      # multimodal agentic, tools+thinking
+      elite: "kimi-k2.5:cloud",
+      # 120B MoE (12B active), tools+thinking
+      specialist: "nemotron-3-super:cloud",
+      # 30B, tools+thinking, agentic-optimized
+      utility: "nemotron-3-nano:cloud"
     },
 
     # --- Local providers (dynamic, auto-detect best installed) ---

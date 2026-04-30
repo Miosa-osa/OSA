@@ -20,12 +20,12 @@ defmodule OptimalSystemAgent.Memory.Scoring do
   # ---------------------------------------------------------------------------
 
   @category_weights %{
-    "decision"   => 1.00,
+    "decision" => 1.00,
     "preference" => 0.90,
-    "pattern"    => 0.85,
-    "lesson"     => 0.80,
-    "project"    => 0.75,
-    "context"    => 0.50
+    "pattern" => 0.85,
+    "lesson" => 0.80,
+    "project" => 0.75,
+    "context" => 0.50
   }
 
   @default_category_weight 0.50
@@ -59,7 +59,7 @@ defmodule OptimalSystemAgent.Memory.Scoring do
   def score(memory_entry, query_keywords, _session_id \\ nil)
 
   def score(memory_entry, query_keywords, _session_id) when is_map(memory_entry) do
-    base    = base_score(memory_entry)
+    base = base_score(memory_entry)
     context = context_score(memory_entry, query_keywords)
     recency = recency_score(memory_entry)
 
@@ -109,7 +109,7 @@ defmodule OptimalSystemAgent.Memory.Scoring do
     set_b = MapSet.new(keywords_b)
 
     intersection_size = set_a |> MapSet.intersection(set_b) |> MapSet.size()
-    union_size        = set_a |> MapSet.union(set_b) |> MapSet.size()
+    union_size = set_a |> MapSet.union(set_b) |> MapSet.size()
 
     if union_size == 0, do: 0.0, else: intersection_size / union_size
   end

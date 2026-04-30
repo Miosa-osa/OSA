@@ -58,7 +58,7 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
       relevant = fetch_and_score(query_text, query_keywords, session_id, limit)
 
       memory_block = format_memory_block(relevant)
-      bulletin     = fetch_bulletin()
+      bulletin = fetch_bulletin()
 
       inject_blocks(messages, memory_block, bulletin)
     end
@@ -109,15 +109,15 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
   def check_threshold(current_tokens, max_tokens) when max_tokens > 0 do
     ratio = current_tokens / max_tokens
 
-    emergency  = Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
+    emergency = Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
     aggressive = Application.get_env(:optimal_system_agent, :compaction_aggressive, 0.85)
-    warn       = Application.get_env(:optimal_system_agent, :compaction_warn, 0.80)
+    warn = Application.get_env(:optimal_system_agent, :compaction_warn, 0.80)
 
     cond do
-      ratio >= emergency  -> :emergency
+      ratio >= emergency -> :emergency
       ratio >= aggressive -> :compact
-      ratio >= warn       -> :warn
-      true                -> :ok
+      ratio >= warn -> :warn
+      true -> :ok
     end
   end
 
@@ -167,7 +167,7 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
     lines =
       Enum.map(entries, fn entry ->
         category = entry[:category] || entry["category"] || "context"
-        content  = entry[:content]  || entry["content"]  || ""
+        content = entry[:content] || entry["content"] || ""
         "[memory:#{category}] #{content}"
       end)
 
@@ -186,9 +186,10 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
   defp inject_blocks(messages, nil, nil), do: messages
 
   defp inject_blocks(messages, memory_block, bulletin) do
-    {system_prefix, rest} = Enum.split_while(messages, fn msg ->
-      to_string(msg[:role] || msg["role"]) == "system"
-    end)
+    {system_prefix, rest} =
+      Enum.split_while(messages, fn msg ->
+        to_string(msg[:role] || msg["role"]) == "system"
+      end)
 
     injected =
       [memory_block, bulletin]
@@ -229,7 +230,7 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
       |> Enum.map(&elem(&1, 0))
 
     removed = before_count - length(trimmed)
-    result  = system_msgs ++ trimmed
+    result = system_msgs ++ trimmed
 
     if removed > 0 do
       Logger.info("[Memory.Synthesis] :warn compaction removed #{removed} old tool results")
@@ -244,16 +245,16 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
     {system_msgs, non_system} = split_system(messages)
 
     keep_tail = 5
-    total     = length(non_system)
+    total = length(non_system)
 
     if total <= keep_tail do
       {:ok, messages}
     else
-      tail   = Enum.take(non_system, -keep_tail)
+      tail = Enum.take(non_system, -keep_tail)
       middle = Enum.take(non_system, total - keep_tail)
 
       summary_msg = %{
-        role:    "system",
+        role: "system",
         content: "[compacted: #{length(middle)} messages]"
       }
 
@@ -269,12 +270,12 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
     {system_msgs, non_system} = split_system(messages)
 
     keep_tail = 3
-    total     = length(non_system)
+    total = length(non_system)
 
     if total <= keep_tail do
       {:ok, messages}
     else
-      tail    = Enum.take(non_system, -keep_tail)
+      tail = Enum.take(non_system, -keep_tail)
       removed = total - keep_tail
 
       result = system_msgs ++ tail

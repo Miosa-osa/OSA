@@ -13,7 +13,11 @@ defmodule OptimalSystemAgent.OpenComputers.Telemetry do
   alias OptimalSystemAgent.OpenComputers.Telemetry.{Cpu, Disk, Memory, Os, Power}
 
   @doc "Fixed host facts snapshot (hello frame)."
-  @spec capacity() :: %{cpu: non_neg_integer(), memory_mb: non_neg_integer(), disk_gb: non_neg_integer()}
+  @spec capacity() :: %{
+          cpu: non_neg_integer(),
+          memory_mb: non_neg_integer(),
+          disk_gb: non_neg_integer()
+        }
   def capacity do
     %{cpu: Cpu.cores(), memory_mb: Memory.total_mb(), disk_gb: Disk.free_gb()}
   end

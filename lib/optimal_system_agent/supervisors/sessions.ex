@@ -18,7 +18,11 @@ defmodule OptimalSystemAgent.Supervisors.Sessions do
   def init(_init_arg) do
     children = [
       # Channel adapters (CLI, HTTP, Telegram, Discord, Slack, etc.)
-      {DynamicSupervisor, name: OptimalSystemAgent.Channels.Supervisor, strategy: :one_for_one, max_restarts: 5, max_seconds: 60},
+      {DynamicSupervisor,
+       name: OptimalSystemAgent.Channels.Supervisor,
+       strategy: :one_for_one,
+       max_restarts: 5,
+       max_seconds: 60},
 
       # Per-session event streams — must start before SessionSupervisor
       {Registry, keys: :unique, name: OptimalSystemAgent.EventStreamRegistry},

@@ -25,9 +25,12 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   def start(state) do
     %{
       state: state,
-      in_flight: %{},     # tool_use_id => Task.t()
-      completed: %{},     # tool_use_id => {tool_msg, result_str}
-      order: []            # tool_use_ids in order received
+      # tool_use_id => Task.t()
+      in_flight: %{},
+      # tool_use_id => {tool_msg, result_str}
+      completed: %{},
+      # tool_use_ids in order received
+      order: []
     }
   end
 
@@ -66,10 +69,21 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
             Task.await(task, 600_000)
           catch
             :exit, {:timeout, _} ->
-              error_msg = %{role: "tool", tool_call_id: tool_id, content: "[Tool timed out after 10 minutes]"}
+              error_msg = %{
+                role: "tool",
+                tool_call_id: tool_id,
+                content: "[Tool timed out after 10 minutes]"
+              }
+
               {error_msg, "[timeout]"}
+
             :exit, reason ->
-              error_msg = %{role: "tool", tool_call_id: tool_id, content: "[Tool crashed: #{inspect(reason)}]"}
+              error_msg = %{
+                role: "tool",
+                tool_call_id: tool_id,
+                content: "[Tool crashed: #{inspect(reason)}]"
+              }
+
               {error_msg, "[crash]"}
           end
 

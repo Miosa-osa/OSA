@@ -38,7 +38,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
 
   defp apply_weight_gate(tools, %{signal_weight: weight}) when is_number(weight) do
     if weight < @tool_weight_threshold do
-      Logger.debug("[loop] signal_weight=#{weight} < #{@tool_weight_threshold} — skipping tools for low-weight input")
+      Logger.debug(
+        "[loop] signal_weight=#{weight} < #{@tool_weight_threshold} — skipping tools for low-weight input"
+      )
+
       []
     else
       tools

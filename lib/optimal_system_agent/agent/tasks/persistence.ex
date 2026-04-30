@@ -29,7 +29,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
     end
   rescue
     e ->
-      Logger.error("[Tasks.Persistence] Failed to write workflow #{inspect(dir)}: #{Exception.message(e)}")
+      Logger.error(
+        "[Tasks.Persistence] Failed to write workflow #{inspect(dir)}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 
@@ -44,7 +47,9 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
         path = Path.join(dir, filename)
 
         case load_json_file(path) do
-          {:ok, data} -> [data]
+          {:ok, data} ->
+            [data]
+
           {:error, reason} ->
             Logger.warning("[Tasks.Persistence] Skipping workflow file #{filename}: #{reason}")
             []
@@ -55,7 +60,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
     end
   rescue
     e ->
-      Logger.warning("[Tasks.Persistence] Failed to load workflows from #{dir}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Tasks.Persistence] Failed to load workflows from #{dir}: #{Exception.message(e)}"
+      )
+
       []
   end
 
@@ -76,7 +84,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Persistence do
       :ok
     rescue
       e ->
-        Logger.error("[Tasks.Persistence] Persist failed for session #{session_id}: #{inspect(e)}")
+        Logger.error(
+          "[Tasks.Persistence] Persist failed for session #{session_id}: #{inspect(e)}"
+        )
+
         :ok
     end
   end

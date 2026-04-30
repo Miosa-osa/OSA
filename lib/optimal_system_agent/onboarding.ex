@@ -122,12 +122,49 @@ defmodule OptimalSystemAgent.Onboarding do
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
         models: [
-          %{id: "nemotron-3-super:cloud", name: "Nemotron 3 Super", ctx: 1_048_576, tools: true, recommended: true, note: "1M ctx, 120B MoE — best agentic"},
-          %{id: "kimi-k2.5:cloud", name: "Kimi K2.5", ctx: 262_144, tools: true, note: "multimodal + vision + thinking"},
-          %{id: "qwen3.5:cloud", name: "Qwen 3.5", ctx: 262_144, tools: true, note: "multimodal, vision + tools"},
-          %{id: "llama4:cloud", name: "Llama 4 Scout", ctx: 10_485_760, tools: true, note: "10M ctx, 109B MoE"},
-          %{id: "glm-5:cloud", name: "GLM-5", ctx: 262_144, tools: true, note: "744B MoE — reasoning + agentic"},
-          %{id: "deepseek-r1:cloud", name: "DeepSeek R1", ctx: 163_840, tools: false, note: "reasoning only, no tools"}
+          %{
+            id: "nemotron-3-super:cloud",
+            name: "Nemotron 3 Super",
+            ctx: 1_048_576,
+            tools: true,
+            recommended: true,
+            note: "1M ctx, 120B MoE — best agentic"
+          },
+          %{
+            id: "kimi-k2.5:cloud",
+            name: "Kimi K2.5",
+            ctx: 262_144,
+            tools: true,
+            note: "multimodal + vision + thinking"
+          },
+          %{
+            id: "qwen3.5:cloud",
+            name: "Qwen 3.5",
+            ctx: 262_144,
+            tools: true,
+            note: "multimodal, vision + tools"
+          },
+          %{
+            id: "llama4:cloud",
+            name: "Llama 4 Scout",
+            ctx: 10_485_760,
+            tools: true,
+            note: "10M ctx, 109B MoE"
+          },
+          %{
+            id: "glm-5:cloud",
+            name: "GLM-5",
+            ctx: 262_144,
+            tools: true,
+            note: "744B MoE — reasoning + agentic"
+          },
+          %{
+            id: "deepseek-r1:cloud",
+            name: "DeepSeek R1",
+            ctx: 163_840,
+            tools: false,
+            note: "reasoning only, no tools"
+          }
         ]
       },
       %{
@@ -153,12 +190,49 @@ defmodule OptimalSystemAgent.Onboarding do
         base_url: "https://openrouter.ai/api/v1",
         signup_url: "https://openrouter.ai/keys",
         models: [
-          %{id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", ctx: 1_000_000, tools: true, recommended: true, note: "1M ctx — best for coding"},
-          %{id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", ctx: 1_000_000, tools: true, note: "1M ctx — strongest reasoning"},
-          %{id: "openai/gpt-5.4-pro", name: "GPT-5.4 Pro", ctx: 1_050_000, tools: true, note: "1M ctx — latest frontier"},
-          %{id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro", ctx: 1_000_000, tools: true, note: "1M context"},
-          %{id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick", ctx: 1_000_000, tools: true, note: "400B MoE, 1M ctx"},
-          %{id: "deepseek/deepseek-r1", name: "DeepSeek R1", ctx: 163_840, tools: false, note: "reasoning only"}
+          %{
+            id: "anthropic/claude-sonnet-4-6",
+            name: "Claude Sonnet 4.6",
+            ctx: 1_000_000,
+            tools: true,
+            recommended: true,
+            note: "1M ctx — best for coding"
+          },
+          %{
+            id: "anthropic/claude-opus-4-6",
+            name: "Claude Opus 4.6",
+            ctx: 1_000_000,
+            tools: true,
+            note: "1M ctx — strongest reasoning"
+          },
+          %{
+            id: "openai/gpt-5.4-pro",
+            name: "GPT-5.4 Pro",
+            ctx: 1_050_000,
+            tools: true,
+            note: "1M ctx — latest frontier"
+          },
+          %{
+            id: "google/gemini-2.5-pro",
+            name: "Gemini 2.5 Pro",
+            ctx: 1_000_000,
+            tools: true,
+            note: "1M context"
+          },
+          %{
+            id: "meta-llama/llama-4-maverick",
+            name: "Llama 4 Maverick",
+            ctx: 1_000_000,
+            tools: true,
+            note: "400B MoE, 1M ctx"
+          },
+          %{
+            id: "deepseek/deepseek-r1",
+            name: "DeepSeek R1",
+            ctx: 163_840,
+            tools: false,
+            note: "reasoning only"
+          }
         ]
       },
       %{
@@ -172,9 +246,28 @@ defmodule OptimalSystemAgent.Onboarding do
         base_url: "https://api.anthropic.com",
         signup_url: "https://console.anthropic.com/account/keys",
         models: [
-          %{id: "claude-sonnet-4-6-20260316", name: "Claude Sonnet 4.6", ctx: 1_000_000, tools: true, recommended: true, note: "1M ctx — best for coding"},
-          %{id: "claude-opus-4-6-20260316", name: "Claude Opus 4.6", ctx: 1_000_000, tools: true, note: "1M ctx — strongest reasoning"},
-          %{id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", ctx: 200_000, tools: true, note: "fast + cheap"}
+          %{
+            id: "claude-sonnet-4-6-20260316",
+            name: "Claude Sonnet 4.6",
+            ctx: 1_000_000,
+            tools: true,
+            recommended: true,
+            note: "1M ctx — best for coding"
+          },
+          %{
+            id: "claude-opus-4-6-20260316",
+            name: "Claude Opus 4.6",
+            ctx: 1_000_000,
+            tools: true,
+            note: "1M ctx — strongest reasoning"
+          },
+          %{
+            id: "claude-haiku-4-5-20251001",
+            name: "Claude Haiku 4.5",
+            ctx: 200_000,
+            tools: true,
+            note: "fast + cheap"
+          }
         ]
       },
       %{
@@ -188,9 +281,28 @@ defmodule OptimalSystemAgent.Onboarding do
         base_url: "https://api.openai.com/v1",
         signup_url: "https://platform.openai.com/api-keys",
         models: [
-          %{id: "gpt-5.4-pro", name: "GPT-5.4 Pro", ctx: 1_050_000, tools: true, recommended: true, note: "1M ctx — latest frontier"},
-          %{id: "gpt-5.2-pro", name: "GPT-5.2 Pro", ctx: 400_000, tools: true, note: "400K ctx — agentic coding"},
-          %{id: "gpt-5.2-chat", name: "GPT-5.2 Chat", ctx: 128_000, tools: true, note: "fast + low latency"},
+          %{
+            id: "gpt-5.4-pro",
+            name: "GPT-5.4 Pro",
+            ctx: 1_050_000,
+            tools: true,
+            recommended: true,
+            note: "1M ctx — latest frontier"
+          },
+          %{
+            id: "gpt-5.2-pro",
+            name: "GPT-5.2 Pro",
+            ctx: 400_000,
+            tools: true,
+            note: "400K ctx — agentic coding"
+          },
+          %{
+            id: "gpt-5.2-chat",
+            name: "GPT-5.2 Chat",
+            ctx: 128_000,
+            tools: true,
+            note: "fast + low latency"
+          },
           %{id: "o3", name: "o3", ctx: 200_000, tools: true, note: "strongest reasoning"}
         ]
       },
@@ -265,7 +377,13 @@ defmodule OptimalSystemAgent.Onboarding do
 
     start_time = System.monotonic_time(:millisecond)
 
-    case Req.post(url, headers: headers, json: body, receive_timeout: 15_000, retry: :transient, max_retries: 2) do
+    case Req.post(url,
+           headers: headers,
+           json: body,
+           receive_timeout: 15_000,
+           retry: :transient,
+           max_retries: 2
+         ) do
       {:ok, %{status: status}} when status in 200..299 ->
         latency = System.monotonic_time(:millisecond) - start_time
         {:ok, %{status: "ok", latency_ms: latency, model: model, response_status: status}}
@@ -274,7 +392,8 @@ defmodule OptimalSystemAgent.Onboarding do
         {:error, %{error: "unauthorized", message: "API key is invalid or expired."}}
 
       {:ok, %{status: 402}} ->
-        {:error, %{error: "insufficient_credits", message: "Insufficient credits on this account."}}
+        {:error,
+         %{error: "insufficient_credits", message: "Insufficient credits on this account."}}
 
       {:ok, %{status: 403}} ->
         {:error, %{error: "forbidden", message: "Access denied. Check your API key permissions."}}
@@ -340,7 +459,7 @@ defmodule OptimalSystemAgent.Onboarding do
     env_content =
       if File.exists?(env_path) do
         old = File.read!(env_path)
-        commented = old |> String.split("\n") |> Enum.map(&("# #{&1}")) |> Enum.join("\n")
+        commented = old |> String.split("\n") |> Enum.map(&"# #{&1}") |> Enum.join("\n")
 
         """
         # Previous config (#{DateTime.utc_now() |> DateTime.to_iso8601()}):
@@ -696,7 +815,11 @@ defmodule OptimalSystemAgent.Onboarding do
           existing = File.read!(env_path)
 
           unless String.contains?(existing, "OSA_COMPUTER_USE") do
-            File.write!(env_path, existing <> "\n# Computer Use (auto-detected Linux X11)\nOSA_COMPUTER_USE=true\n")
+            File.write!(
+              env_path,
+              existing <> "\n# Computer Use (auto-detected Linux X11)\nOSA_COMPUTER_USE=true\n"
+            )
+
             System.put_env("OSA_COMPUTER_USE", "true")
             Application.put_env(:optimal_system_agent, :computer_use_enabled, true)
             Logger.info("[Onboarding] Auto-enabled computer_use (Linux X11 detected)")
@@ -738,7 +861,9 @@ defmodule OptimalSystemAgent.Onboarding do
           updated =
             content
             |> String.replace("- **Name:**\n", "- **Name:** #{name}\n", global: false)
-            |> String.replace("- **What to call them:**\n", "- **What to call them:** #{name}\n", global: false)
+            |> String.replace("- **What to call them:**\n", "- **What to call them:** #{name}\n",
+              global: false
+            )
 
           if updated != content do
             File.write!(path, updated)
@@ -761,7 +886,9 @@ defmodule OptimalSystemAgent.Onboarding do
       case File.read(path) do
         {:ok, content} ->
           updated =
-            String.replace(content, "- **Name:** OSA\n", "- **Name:** #{agent_name}\n", global: false)
+            String.replace(content, "- **Name:** OSA\n", "- **Name:** #{agent_name}\n",
+              global: false
+            )
 
           if updated != content do
             File.write!(path, updated)

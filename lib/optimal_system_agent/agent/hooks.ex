@@ -107,6 +107,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
       elapsed_us = System.monotonic_time(:microsecond) - started_at
       update_metrics_ets(event, elapsed_us, result)
     end)
+
     :ok
   end
 
@@ -121,7 +122,9 @@ defmodule OptimalSystemAgent.Agent.Hooks do
       hooks =
         entries
         |> Enum.sort_by(fn {_event, _name, priority, _handler} -> priority end)
-        |> Enum.map(fn {_event, name, priority, _handler} -> %{name: name, priority: priority} end)
+        |> Enum.map(fn {_event, name, priority, _handler} ->
+          %{name: name, priority: priority}
+        end)
 
       {event, hooks}
     end)
@@ -188,7 +191,6 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     :ets.insert(@hooks_table, {event, name, priority, handler})
     {:noreply, state}
   end
-
 
   # ── Hook Chain Execution (runs in caller process) ──────────────
 
@@ -362,6 +364,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           rescue
             _ -> :ok
           end
+
           {:ok, payload}
         end
       }
@@ -445,7 +448,6 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   defp telemetry_hook(payload), do: {:ok, payload}
 
-
   # Read-before-write — nudge when file_edit/file_write targets an existing file
   # that hasn't been read yet. Does NOT block — just adds a flag to the payload.
   defp read_before_write(%{tool_name: tool_name, arguments: args, session_id: sid} = payload)
@@ -482,7 +484,6 @@ defmodule OptimalSystemAgent.Agent.Hooks do
         if nudge_count > 2 do
           {:ok, payload}
         else
-
           {:ok,
            Map.put(
              payload,
@@ -631,6 +632,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
         # Auto-extract memories from user messages
         extractions = OptimalSystemAgent.Memory.AutoExtract.extract(input)
+
         if extractions != [] do
           OptimalSystemAgent.Memory.AutoExtract.save_extracted(extractions, sid)
         end
@@ -694,7 +696,13 @@ defmodule OptimalSystemAgent.Agent.Hooks do
 
   defp update_metrics_ets(event, elapsed_us, result) do
     :ets.update_counter(@metrics_table, {event, :calls}, {2, 1}, {{event, :calls}, 0})
-    :ets.update_counter(@metrics_table, {event, :total_us}, {2, elapsed_us}, {{event, :total_us}, 0})
+
+    :ets.update_counter(
+      @metrics_table,
+      {event, :total_us},
+      {2, elapsed_us},
+      {{event, :total_us}, 0}
+    )
 
     if match?({:blocked, _}, result) do
       :ets.update_counter(@metrics_table, {event, :blocks}, {2, 1}, {{event, :blocks}, 0})

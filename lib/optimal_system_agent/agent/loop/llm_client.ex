@@ -22,7 +22,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
   def llm_chat(%{provider: provider, model: model}, messages, opts) do
-    Logger.debug("[llm] chat — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))}")
+    Logger.debug(
+      "[llm] chat — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))}"
+    )
+
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
     Providers.chat(messages, opts)
@@ -38,7 +41,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   Returns {:ok, result} | {:error, reason}.
   """
   def llm_chat_stream(%{session_id: session_id, provider: provider, model: model}, messages, opts) do
-    Logger.debug("[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}")
+    Logger.debug(
+      "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
+    )
+
     # Heartbeat: atomics counter incremented on every streaming event.
     # The watchdog checks if the counter has changed since last poll.
     heartbeat = :atomics.new(1, signed: false)
@@ -49,49 +55,66 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+
         Bus.emit(:system_event, %{
           event: :streaming_token,
           session_id: session_id,
           delta: text
         })
+
         # Bridge to PubSub for SSE delivery to TUI
-        Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
-          {:osa_event, %{type: :streaming_token, session_id: session_id, text: text}})
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{session_id}",
+          {:osa_event, %{type: :streaming_token, session_id: session_id, text: text}}
+        )
 
       {:done, result} ->
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
         # Broadcast token usage via PubSub for TUI status bar
         usage = Map.get(result, :usage, %{})
+
         if usage != %{} do
-          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
-            {:osa_event, %{
-              type: :llm_response,
-              session_id: session_id,
-              duration_ms: 0,
-              usage: %{
-                input_tokens: Map.get(usage, :input_tokens, 0),
-                output_tokens: Map.get(usage, :output_tokens, 0)
-              }
-            }})
+          Phoenix.PubSub.broadcast(
+            OptimalSystemAgent.PubSub,
+            "osa:session:#{session_id}",
+            {:osa_event,
+             %{
+               type: :llm_response,
+               session_id: session_id,
+               duration_ms: 0,
+               usage: %{
+                 input_tokens: Map.get(usage, :input_tokens, 0),
+                 output_tokens: Map.get(usage, :output_tokens, 0)
+               }
+             }}
+          )
         end
+
         send(caller, {:llm_stream_done, result})
 
       {:thinking_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+
         Bus.emit(:system_event, %{
           event: :thinking_delta,
           session_id: session_id,
           delta: text
         })
-        Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{session_id}",
-          {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}})
+
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{session_id}",
+          {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
+        )
 
       {:tool_use_block, tool_call} ->
         # Provider detected a complete tool_use block during streaming.
         # Notify the caller to start executing this tool immediately.
         :atomics.add(heartbeat, 1, 1)
         send(caller, {:streaming_tool_block, tool_call})
+
         Bus.emit(:tool_call, %{
           name: tool_call.name,
           phase: :streaming_start,
@@ -111,28 +134,38 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     # Run the stream in a linked task so we can kill it on idle timeout.
     # Uses FallbackChain for automatic provider switching on retryable errors.
-    stream_task = Task.async(fn ->
-      case Providers.chat_stream(messages, callback, opts) do
-        {:ok, _} = success ->
-          success
+    stream_task =
+      Task.async(fn ->
+        case Providers.chat_stream(messages, callback, opts) do
+          {:ok, _} = success ->
+            success
 
-        {:error, reason} = error ->
-          # Try fallback chain on retryable errors
-          if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
-            Logger.warning("[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain")
-            case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(messages, callback, opts) do
-              {:ok, result, _provider} -> {:ok, result}
-              fallback_error -> fallback_error
+          {:error, reason} = error ->
+            # Try fallback chain on retryable errors
+            if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+              Logger.warning(
+                "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain"
+              )
+
+              case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
+                     messages,
+                     callback,
+                     opts
+                   ) do
+                {:ok, result, _provider} -> {:ok, result}
+                fallback_error -> fallback_error
+              end
+            else
+              error
             end
-          else
-            error
-          end
-      end
-    end)
+        end
+      end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for @idle_timeout_ms
     idle_timeout = Keyword.get(opts, :idle_timeout, @idle_timeout_ms)
-    watchdog = spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)
+
+    watchdog =
+      spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)
 
     # Wait for stream completion or idle timeout
     result =
@@ -149,10 +182,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
         {:llm_idle_timeout, elapsed_ms} ->
           # Watchdog detected idle connection — kill the stream
-          Logger.warning("[stream] Idle timeout after #{div(elapsed_ms, 1000)}s of silence — killing stream for session:#{session_id}")
-          Task.shutdown(stream_task, :brutal_kill)
-          {:error, "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"}
+          Logger.warning(
+            "[stream] Idle timeout after #{div(elapsed_ms, 1000)}s of silence — killing stream for session:#{session_id}"
+          )
 
+          Task.shutdown(stream_task, :brutal_kill)
+
+          {:error,
+           "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"}
       after
         # Absolute safety net: 1 hour. Should never fire for legitimate work.
         3_600_000 ->
@@ -164,13 +201,24 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       end
 
     # Record provider telemetry
-    stream_duration = System.monotonic_time(:millisecond) - (Process.get(:osa_stream_start_time) || System.monotonic_time(:millisecond))
+    stream_duration =
+      System.monotonic_time(:millisecond) -
+        (Process.get(:osa_stream_start_time) || System.monotonic_time(:millisecond))
+
     try do
       success = match?({:ok, _}, result)
-      OptimalSystemAgent.Telemetry.Metrics.record_provider(provider || :unknown, stream_duration, success)
+
+      OptimalSystemAgent.Telemetry.Metrics.record_provider(
+        provider || :unknown,
+        stream_duration,
+        success
+      )
+
       OptimalSystemAgent.Telemetry.Metrics.record_turn()
-    rescue _ -> :ok
-    catch :exit, _ -> :ok
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
 
     result
@@ -188,7 +236,15 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     watchdog_poll(heartbeat, stream_task, timeout_ms, session_id, poll_interval, last_count, 0)
   end
 
-  defp watchdog_poll(heartbeat, stream_task, timeout_ms, session_id, poll_interval, last_count, idle_ms) do
+  defp watchdog_poll(
+         heartbeat,
+         stream_task,
+         timeout_ms,
+         session_id,
+         poll_interval,
+         last_count,
+         idle_ms
+       ) do
     Process.sleep(poll_interval)
 
     # Check if stream task is still alive
@@ -204,14 +260,33 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
         if new_idle >= timeout_ms do
           # Idle timeout exceeded — notify caller
-          Logger.warning("[watchdog] No stream activity for #{div(new_idle, 1000)}s — session:#{session_id}")
+          Logger.warning(
+            "[watchdog] No stream activity for #{div(new_idle, 1000)}s — session:#{session_id}"
+          )
+
           send(stream_task.owner, {:llm_idle_timeout, new_idle})
         else
-          watchdog_poll(heartbeat, stream_task, timeout_ms, session_id, poll_interval, last_count, new_idle)
+          watchdog_poll(
+            heartbeat,
+            stream_task,
+            timeout_ms,
+            session_id,
+            poll_interval,
+            last_count,
+            new_idle
+          )
         end
       else
         # Progress detected — reset idle counter
-        watchdog_poll(heartbeat, stream_task, timeout_ms, session_id, poll_interval, current_count, 0)
+        watchdog_poll(
+          heartbeat,
+          stream_task,
+          timeout_ms,
+          session_id,
+          poll_interval,
+          current_count,
+          0
+        )
       end
     end
   end
@@ -223,7 +298,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     enabled = Application.get_env(:optimal_system_agent, :thinking_enabled, false)
 
     if enabled and provider in [:anthropic, nil] and is_anthropic_provider?() do
-      model = state.model || Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
+      model =
+        state.model ||
+          Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
 
       if String.contains?(to_string(model), "opus") do
         %{type: "adaptive"}

@@ -56,20 +56,95 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     warn_at = trunc(@max_total_tool_calls * @warn_threshold_pct)
 
-    cond do
-      new_total >= @max_total_tool_calls ->
-        handle_call_cap_exceeded(new_total, state)
+    # --- Identical-call detection ---
+    # Catches the model spamming the same tool+args back-to-back even when
+    # the calls succeed (model ignores the result and re-issues). The
+    # signature-based check below only catches repeated FAILURES; this
+    # catches repeated USELESS SUCCESSES (e.g. dir_list of cwd 6× in a row).
+    case check_repeat_calls(tool_calls, state) do
+      {:halt, _, _} = halted ->
+        halted
 
-      new_total >= warn_at and new_total - call_count < warn_at ->
-        Logger.warning(
-          "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
-            "(session: #{state.session_id})"
-        )
+      {:ok, state} ->
+        cond do
+          new_total >= @max_total_tool_calls ->
+            handle_call_cap_exceeded(new_total, state)
 
-        check_signatures(results, tool_calls, state)
+          new_total >= warn_at and new_total - call_count < warn_at ->
+            Logger.warning(
+              "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
+                "(session: #{state.session_id})"
+            )
 
-      true ->
-        check_signatures(results, tool_calls, state)
+            check_signatures(results, tool_calls, state)
+
+          true ->
+            check_signatures(results, tool_calls, state)
+        end
+    end
+  end
+
+  # Tracks the last N tool invocations as `{name, args_hash}` tuples and
+  # halts when 4+ consecutive entries are identical. Independent of success
+  # vs. error — protects against the model looping on a working tool when
+  # it isn't using the result.
+  @repeat_threshold 4
+  @repeat_window 8
+
+  defp check_repeat_calls(tool_calls, state) do
+    new_keys =
+      Enum.map(tool_calls, fn tc ->
+        args =
+          case Map.get(tc, :arguments) do
+            m when is_map(m) -> m
+            _ -> %{}
+          end
+
+        {tc.name, :erlang.phash2(args)}
+      end)
+
+    history =
+      (Map.get(state, :recent_call_keys, []) ++ new_keys)
+      |> Enum.take(-@repeat_window)
+
+    state = Map.put(state, :recent_call_keys, history)
+
+    streak =
+      history
+      |> Enum.reverse()
+      |> Enum.chunk_while(
+        nil,
+        fn key, acc ->
+          cond do
+            is_nil(acc) -> {:cont, {key, 1}}
+            elem(acc, 0) == key -> {:cont, {key, elem(acc, 1) + 1}}
+            true -> {:halt, acc}
+          end
+        end,
+        fn acc -> {:cont, acc, nil} end
+      )
+      |> List.first()
+
+    case streak do
+      {{tool, _hash}, n} when n >= @repeat_threshold ->
+        msg =
+          "Stopped: tool `#{tool}` was called with identical arguments #{n} times in a row " <>
+            "without making progress. The result of an earlier call is already in context — " <>
+            "use it, or try a different tool / different arguments."
+
+        Logger.warning("[doom] Identical-call loop on #{tool} (#{n}x) — halting")
+
+        Bus.emit(:doom_loop_halt, %{
+          session_id: state.session_id,
+          reason: :identical_repeat,
+          tool: tool,
+          repeats: n
+        })
+
+        {:halt, msg, state}
+
+      _ ->
+        {:ok, state}
     end
   end
 
@@ -93,7 +168,11 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       end
 
     Logger.debug("[doom] Checking #{length(results)} tool results for doom patterns")
-    Logger.debug("[doom] Signatures this iteration: #{inspect(Enum.map(iteration_signatures, fn {sig, _, _} -> sig end))}")
+
+    Logger.debug(
+      "[doom] Signatures this iteration: #{inspect(Enum.map(iteration_signatures, fn {sig, _, _} -> sig end))}"
+    )
+
     Logger.debug("[doom] Total accumulated: #{inspect(state.recent_failure_signatures)}")
 
     updated_failure_signatures =
@@ -159,13 +238,17 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       max_tool_calls: @max_total_tool_calls
     })
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{
-        type: :tool_call_cap_exceeded,
-        session_id: state.session_id,
-        total_tool_calls: total,
-        max_tool_calls: @max_total_tool_calls
-      }})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :tool_call_cap_exceeded,
+         session_id: state.session_id,
+         total_tool_calls: total,
+         max_tool_calls: @max_total_tool_calls
+       }}
+    )
 
     {:halt, cap_message, state}
   end
@@ -195,7 +278,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       """
       |> String.trim()
 
-    Logger.warning("[loop] Doom loop detected: #{repeated_sig_key} repeated #{repeat_count} times (session: #{state.session_id})")
+    Logger.warning(
+      "[loop] Doom loop detected: #{repeated_sig_key} repeated #{repeat_count} times (session: #{state.session_id})"
+    )
 
     Bus.emit(:system_event, %{
       event: :doom_loop_detected,
@@ -206,15 +291,19 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       consecutive_failures: repeat_count
     })
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{
-        type: :doom_loop_detected,
-        session_id: state.session_id,
-        tool_name: triggering_tool,
-        error_prefix: triggering_error,
-        signature: repeated_sig_key,
-        consecutive_failures: repeat_count
-      }})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :doom_loop_detected,
+         session_id: state.session_id,
+         tool_name: triggering_tool,
+         error_prefix: triggering_error,
+         signature: repeated_sig_key,
+         consecutive_failures: repeat_count
+       }}
+    )
 
     # Track how many times we've tried recovery for this session
     doom_recovery_count = Process.get(:osa_doom_recovery_count, 0)
@@ -228,19 +317,21 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
       recovery_directive = %{
         role: "system",
-        content: "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
-          "\"#{triggering_error}\". You MUST change your approach NOW. " <>
-          "Step 1: Call file_read on the target file to see its current state. " <>
-          "Step 2: Based on what you see, decide if the change is still needed. " <>
-          "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
-          "Do NOT call #{triggering_tool} with the same arguments again.]"
+        content:
+          "[DOOM LOOP RECOVERY: You tried #{triggering_tool} #{repeat_count} times with the same error: " <>
+            "\"#{triggering_error}\". You MUST change your approach NOW. " <>
+            "Step 1: Call file_read on the target file to see its current state. " <>
+            "Step 2: Based on what you see, decide if the change is still needed. " <>
+            "Step 3: If yes, use COMPLETELY DIFFERENT arguments. If no, move on. " <>
+            "Do NOT call #{triggering_tool} with the same arguments again.]"
       }
 
       Process.put(:osa_doom_recovery_count, doom_recovery_count + 1)
 
-      state = %{state |
-        recent_failure_signatures: [],
-        messages: state.messages ++ [recovery_directive]
+      state = %{
+        state
+        | recent_failure_signatures: [],
+          messages: state.messages ++ [recovery_directive]
       }
 
       {:ok, state}
@@ -257,7 +348,8 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
         "The text you're trying to replace doesn't exist in the file. " <>
           "Read the file with file_read to see the actual content, then use the exact text from the file."
 
-      String.contains?(triggering_error, "old_string found") and String.contains?(triggering_error, "times") ->
+      String.contains?(triggering_error, "old_string found") and
+          String.contains?(triggering_error, "times") ->
         "The text appears multiple times. Add more surrounding context to make old_string unique, " <>
           "or use replace_all: true."
 

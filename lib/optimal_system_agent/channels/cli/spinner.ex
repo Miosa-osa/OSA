@@ -15,12 +15,36 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
   @rotate_interval 4_000
 
   @status_messages [
-    "Thinking…", "Reasoning…", "Processing…", "Analyzing…", "Composing…",
-    "Synthesizing…", "Computing…", "Crafting…", "Architecting…", "Generating…",
-    "Deliberating…", "Pondering…", "Contemplating…", "Orchestrating…", "Forging…",
-    "Brewing…", "Crystallizing…", "Incubating…", "Manifesting…", "Percolating…",
-    "Constructing…", "Weaving…", "Calibrating…", "Resolving…", "Assembling…",
-    "Iterating…", "Formulating…", "Distilling…", "Channeling…", "Converging…"
+    "Thinking…",
+    "Reasoning…",
+    "Processing…",
+    "Analyzing…",
+    "Composing…",
+    "Synthesizing…",
+    "Computing…",
+    "Crafting…",
+    "Architecting…",
+    "Generating…",
+    "Deliberating…",
+    "Pondering…",
+    "Contemplating…",
+    "Orchestrating…",
+    "Forging…",
+    "Brewing…",
+    "Crystallizing…",
+    "Incubating…",
+    "Manifesting…",
+    "Percolating…",
+    "Constructing…",
+    "Weaving…",
+    "Calibrating…",
+    "Resolving…",
+    "Assembling…",
+    "Iterating…",
+    "Formulating…",
+    "Distilling…",
+    "Channeling…",
+    "Converging…"
   ]
 
   @dim IO.ANSI.faint()
@@ -267,7 +291,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     ErlangError -> :ok
   catch
     :error, :enotsup -> :ok
-    :error, :eio     -> :ok
+    :error, :eio -> :ok
   end
 
   defp safe_io_puts(data) do
@@ -276,6 +300,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
     ErlangError -> :ok
   catch
     :error, :enotsup -> :ok
-    :error, :eio     -> :ok
+    :error, :eio -> :ok
   end
 end

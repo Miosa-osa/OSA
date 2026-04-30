@@ -56,17 +56,26 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
             :ok
 
           {:error, reason} ->
-            Logger.warning("[Verification.Checkpoint] Write failed for #{loop_id}: #{inspect(reason)}")
+            Logger.warning(
+              "[Verification.Checkpoint] Write failed for #{loop_id}: #{inspect(reason)}"
+            )
+
             {:error, reason}
         end
 
       {:error, reason} ->
-        Logger.warning("[Verification.Checkpoint] JSON encode failed for #{loop_id}: #{inspect(reason)}")
+        Logger.warning(
+          "[Verification.Checkpoint] JSON encode failed for #{loop_id}: #{inspect(reason)}"
+        )
+
         {:error, reason}
     end
   rescue
     e ->
-      Logger.warning("[Verification.Checkpoint] Unexpected error saving #{loop_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Verification.Checkpoint] Unexpected error saving #{loop_id}: #{Exception.message(e)}"
+      )
+
       {:error, Exception.message(e)}
   end
 
@@ -89,12 +98,18 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
               {:ok, state}
 
             {:error, reason} ->
-              Logger.warning("[Verification.Checkpoint] JSON decode failed for #{loop_id}: #{inspect(reason)}")
+              Logger.warning(
+                "[Verification.Checkpoint] JSON decode failed for #{loop_id}: #{inspect(reason)}"
+              )
+
               {:error, reason}
           end
 
         {:error, reason} ->
-          Logger.warning("[Verification.Checkpoint] Read failed for #{loop_id}: #{inspect(reason)}")
+          Logger.warning(
+            "[Verification.Checkpoint] Read failed for #{loop_id}: #{inspect(reason)}"
+          )
+
           {:error, reason}
       end
     else
@@ -102,7 +117,10 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
     end
   rescue
     e ->
-      Logger.warning("[Verification.Checkpoint] Unexpected error restoring #{loop_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[Verification.Checkpoint] Unexpected error restoring #{loop_id}: #{Exception.message(e)}"
+      )
+
       {:error, Exception.message(e)}
   end
 
@@ -120,7 +138,10 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
         :ok
 
       {:error, reason} ->
-        Logger.warning("[Verification.Checkpoint] Delete failed for #{loop_id}: #{inspect(reason)}")
+        Logger.warning(
+          "[Verification.Checkpoint] Delete failed for #{loop_id}: #{inspect(reason)}"
+        )
+
         :ok
     end
   end

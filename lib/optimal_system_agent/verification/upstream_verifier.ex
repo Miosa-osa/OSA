@@ -53,7 +53,8 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
   Returns `:passed` or `{:failed, context_map}`.
   """
   @spec verify(String.t(), map()) :: :passed | {:failed, map()}
-  def verify(task_id, verification_criteria) when is_binary(task_id) and is_map(verification_criteria) do
+  def verify(task_id, verification_criteria)
+      when is_binary(task_id) and is_map(verification_criteria) do
     ensure_table()
     :ets.insert(@table, {task_id, :pending})
 
@@ -166,7 +167,13 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
         {:ok, :test_command_passed}
 
       {output, code} ->
-        {:fail, %{check: :test_command, command: cmd, exit_code: code, output: String.slice(output, 0, 1000)}}
+        {:fail,
+         %{
+           check: :test_command,
+           command: cmd,
+           exit_code: code,
+           output: String.slice(output, 0, 1000)
+         }}
     end
   rescue
     e ->
@@ -176,7 +183,9 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
   defp run_check({:output_spec, spec, task_output}) do
     matches =
       cond do
-        is_binary(spec) -> String.contains?(task_output, spec)
+        is_binary(spec) ->
+          String.contains?(task_output, spec)
+
         true ->
           case Regex.compile(spec) do
             {:ok, regex} -> Regex.match?(regex, task_output)

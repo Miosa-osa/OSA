@@ -25,35 +25,40 @@ defmodule OptimalSystemAgent.Memory.AutoExtract do
   def extract(user_message) when is_binary(user_message) do
     extractions = []
 
-    extractions = if Regex.match?(@preference_patterns, user_message) do
-      [%{type: :preference, content: user_message} | extractions]
-    else
-      extractions
-    end
+    extractions =
+      if Regex.match?(@preference_patterns, user_message) do
+        [%{type: :preference, content: user_message} | extractions]
+      else
+        extractions
+      end
 
-    extractions = if Regex.match?(@decision_patterns, user_message) do
-      [%{type: :decision, content: user_message} | extractions]
-    else
-      extractions
-    end
+    extractions =
+      if Regex.match?(@decision_patterns, user_message) do
+        [%{type: :decision, content: user_message} | extractions]
+      else
+        extractions
+      end
 
-    extractions = if Regex.match?(@correction_patterns, user_message) do
-      [%{type: :correction, content: user_message} | extractions]
-    else
-      extractions
-    end
+    extractions =
+      if Regex.match?(@correction_patterns, user_message) do
+        [%{type: :correction, content: user_message} | extractions]
+      else
+        extractions
+      end
 
-    extractions = if Regex.match?(@fact_patterns, user_message) do
-      [%{type: :fact, content: user_message} | extractions]
-    else
-      extractions
-    end
+    extractions =
+      if Regex.match?(@fact_patterns, user_message) do
+        [%{type: :fact, content: user_message} | extractions]
+      else
+        extractions
+      end
 
-    extractions = if Regex.match?(@name_patterns, user_message) do
-      [%{type: :identity, content: user_message} | extractions]
-    else
-      extractions
-    end
+    extractions =
+      if Regex.match?(@name_patterns, user_message) do
+        [%{type: :identity, content: user_message} | extractions]
+      else
+        extractions
+      end
 
     extractions
   end

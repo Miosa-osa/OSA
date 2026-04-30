@@ -3,12 +3,15 @@
 
 pub mod agent;
 pub mod bash;
+pub mod cron;
 pub mod diagnostics;
 pub mod file;
 pub mod generic;
 pub mod mcp;
+pub mod monitor;
 pub mod references;
 pub mod search;
+pub mod sleep;
 pub mod todos;
 pub mod web;
 
@@ -111,6 +114,26 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         // Todos
         "todoread" | "todowrite" | "todos" | "task_write" => {
             todos::TodosRenderer.render(name, args, result, opts)
+        }
+
+        // Cron / Schedule
+        "cron" | "schedule" => {
+            cron::CronRenderer.render(name, args, result, opts)
+        }
+
+        // Sleep
+        "sleep" | "wait" | "pause" => {
+            sleep::SleepRenderer.render(name, args, result, opts)
+        }
+
+        // Monitor / Watch
+        "monitor" | "watch" => {
+            monitor::MonitorRenderer.render(name, args, result, opts)
+        }
+
+        // Remote trigger
+        "remote_trigger" | "trigger" => {
+            cron::CronRenderer.render(name, args, result, opts)
         }
 
         // Diagnostics

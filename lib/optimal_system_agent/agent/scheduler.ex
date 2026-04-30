@@ -57,7 +57,8 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   alias OptimalSystemAgent.Agent.Scheduler.{CronEngine, Persistence, JobExecutor, Heartbeat}
   alias OptimalSystemAgent.Events.Bus
 
-  defp heartbeat_interval, do: Application.get_env(:optimal_system_agent, :heartbeat_interval, 1_800_000)
+  defp heartbeat_interval,
+    do: Application.get_env(:optimal_system_agent, :heartbeat_interval, 1_800_000)
 
   @circuit_breaker_limit 3
 
@@ -493,7 +494,10 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
             [{event_atom, ref} | acc]
           else
-            Logger.warning("[Scheduler] Unknown event '#{event}' — skipping trigger #{trigger["id"]}")
+            Logger.warning(
+              "[Scheduler] Unknown event '#{event}' — skipping trigger #{trigger["id"]}"
+            )
+
             acc
           end
       end

@@ -94,7 +94,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def reachable? do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
-    case Req.get("#{url}/api/tags", [{:receive_timeout, 2_000}, {:retry, false}] ++ auth_headers()) do
+    case Req.get(
+           "#{url}/api/tags",
+           [{:receive_timeout, 2_000}, {:retry, false}] ++ auth_headers()
+         ) do
       {:ok, %{status: 200}} -> true
       _ -> false
     end
@@ -107,7 +110,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def list_models(url \\ nil) do
     url = url || Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
-    case Req.get("#{url}/api/tags", [{:receive_timeout, 5_000}, {:retry, false}] ++ auth_headers()) do
+    case Req.get(
+           "#{url}/api/tags",
+           [{:receive_timeout, 5_000}, {:retry, false}] ++ auth_headers()
+         ) do
       {:ok, %{status: 200, body: %{"models" => models}}} ->
         parsed =
           Enum.map(models, fn m ->
@@ -147,15 +153,17 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
     # 600 s — thinking models (kimi-k2.5) need up to ~300 s before producing
     # any output; 120 s was too short and caused Cortex synthesis timeouts.
-    req_opts = [
-      json: body,
-      receive_timeout: 600_000,
-      pool_timeout: 60_000,
-      retry: false
-    ] ++ auth_headers()
+    req_opts =
+      [
+        json: body,
+        receive_timeout: 600_000,
+        pool_timeout: 60_000,
+        retry: false
+      ] ++ auth_headers()
 
     try do
       req = Req.new(req_opts) |> Req.merge(url: "#{url}/api/chat")
+
       case Req.post(req) do
         {:ok, %{status: 200, body: %{"message" => %{"content" => content} = msg}}} ->
           tool_calls = parse_tool_calls(msg, model)
@@ -186,7 +194,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # NDJSON streaming. Each JSON line contains a token delta.
     if String.starts_with?(url, "https://") do
       Logger.info("[Ollama] Cloud URL detected — streaming via curl port")
-      model = Keyword.get(opts, :model) || Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+
+      model =
+        Keyword.get(opts, :model) ||
+          Application.get_env(:optimal_system_agent, :ollama_model, default_model())
+
       tools = Keyword.get(opts, :tools, [])
 
       body_map = %{
@@ -196,32 +208,54 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
       }
 
-      body_map = if tools != [] and model_supports_tools?(model) do
-        Map.put(body_map, :tools, format_tools(tools))
-      else
-        body_map
-      end
+      body_map =
+        if tools != [] and model_supports_tools?(model) do
+          Map.put(body_map, :tools, format_tools(tools))
+        else
+          body_map
+        end
 
       body = Jason.encode!(body_map)
       api_key = Application.get_env(:optimal_system_agent, :ollama_api_key, "")
 
       tool_count = length(Map.get(body_map, :tools, []))
-      Logger.info("[Ollama] Cloud request: model=#{model}, tools=#{tool_count}, body_size=#{byte_size(body)}")
+
+      Logger.info(
+        "[Ollama] Cloud request: model=#{model}, tools=#{tool_count}, body_size=#{byte_size(body)}"
+      )
 
       # Write body to a temp file to avoid shell quoting issues with large JSON
-      body_file = Path.join(System.tmp_dir!(), "osa_ollama_body_#{:erlang.unique_integer([:positive])}.json")
+      body_file =
+        Path.join(
+          System.tmp_dir!(),
+          "osa_ollama_body_#{:erlang.unique_integer([:positive])}.json"
+        )
+
       File.write!(body_file, body)
 
       # Use spawn_executable with explicit args to avoid shell quoting issues
       curl_exe = System.find_executable("curl") || "curl"
+
       curl_args = [
-        "-sN", "--max-time", "300",
-        "-H", "Content-Type: application/json",
-        "-H", "Authorization: Bearer #{api_key}",
-        "-d", "@#{body_file}",
+        "-sN",
+        "--max-time",
+        "300",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        "Authorization: Bearer #{api_key}",
+        "-d",
+        "@#{body_file}",
         "#{url}/api/chat"
       ]
-      port = Port.open({:spawn_executable, curl_exe}, [:binary, :exit_status, {:line, 1_048_576}, {:args, curl_args}])
+
+      port =
+        Port.open({:spawn_executable, curl_exe}, [
+          :binary,
+          :exit_status,
+          {:line, 1_048_576},
+          {:args, curl_args}
+        ])
 
       result = cloud_stream_loop(port, callback, %{content: "", tool_calls: [], usage: %{}})
       File.rm(body_file)
@@ -256,11 +290,18 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             # Some models (e.g. nemotron cloud) send all content in the done:true chunk
             # rather than via intermediate streaming chunks. Fall back to that if needed.
             final_content_from_chunk = get_in(resp, ["message", "content"]) || ""
-            accumulated = if acc.content == "" and final_content_from_chunk != "",
-              do: final_content_from_chunk,
-              else: acc.content
+
+            accumulated =
+              if acc.content == "" and final_content_from_chunk != "",
+                do: final_content_from_chunk,
+                else: acc.content
+
             content = Text.strip_thinking_tokens(accumulated)
-            Logger.info("[Ollama] Cloud stream done: #{byte_size(content)} bytes, #{length(tool_calls)} tool calls, #{usage.total_tokens} tokens")
+
+            Logger.info(
+              "[Ollama] Cloud stream done: #{byte_size(content)} bytes, #{length(tool_calls)} tool calls, #{usage.total_tokens} tokens"
+            )
+
             callback.({:done, %{content: content, tool_calls: tool_calls, usage: usage}})
             # Wait for port exit
             receive do
@@ -268,9 +309,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             after
               5_000 -> Port.close(port)
             end
+
             :ok
 
-          {:ok, %{"message" => %{"tool_calls" => tool_calls_raw}} = resp} when is_list(tool_calls_raw) and tool_calls_raw != [] ->
+          {:ok, %{"message" => %{"tool_calls" => tool_calls_raw}} = resp}
+          when is_list(tool_calls_raw) and tool_calls_raw != [] ->
             # Tool call chunk (comes BEFORE done:true in streaming mode)
             model = get_in(resp, ["model"]) || ""
             tool_calls = parse_tool_calls(%{"tool_calls" => tool_calls_raw}, model)
@@ -314,7 +357,6 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       {^port, {:exit_status, code}} ->
         Logger.error("[Ollama] Cloud curl exited with code #{code}")
         {:error, "Ollama Cloud curl failed (exit #{code})"}
-
     after
       300_000 ->
         Port.close(port)
@@ -323,7 +365,6 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp chat_stream_impl(messages, callback, opts, url) do
-
     model =
       Keyword.get(opts, :model) ||
         Application.get_env(:optimal_system_agent, :ollama_model, default_model())
@@ -360,6 +401,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       ] ++ auth_headers()
 
     Logger.debug("[Ollama] Starting chat_stream to #{url}/api/chat model=#{model}")
+
     try do
       case Req.post("#{url}/api/chat", req_opts) do
         {:ok, _resp} ->
@@ -426,7 +468,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     Enum.map(messages, fn
       # Assistant messages that carry tool_calls must preserve them so that
       # the 2nd+ iteration has accurate conversation history.
-      %{role: "assistant", tool_calls: tool_calls} = msg when is_list(tool_calls) and tool_calls != [] ->
+      %{role: "assistant", tool_calls: tool_calls} = msg
+      when is_list(tool_calls) and tool_calls != [] ->
         formatted_calls =
           Enum.map(tool_calls, fn tc ->
             %{
@@ -445,6 +488,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       # because that clause would silently drop tool_call_id and name.
       %{role: "tool", content: content, tool_call_id: id} = msg ->
         name = Map.get(msg, :name, "")
+
         %{
           "role" => "tool",
           "content" => to_string(content),
@@ -531,18 +575,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     Enum.flat_map(calls, fn call ->
       case call do
         %{"function" => %{"name" => name} = func} ->
-          [%{
-            id: call["id"] || generate_id(),
-            name: normalize_tool_name(name),
-            arguments: Map.get(func, "arguments", %{})
-          }]
+          [
+            %{
+              id: call["id"] || generate_id(),
+              name: normalize_tool_name(name),
+              arguments: Map.get(func, "arguments", %{})
+            }
+          ]
 
         %{"name" => name} ->
-          [%{
-            id: call["id"] || generate_id(),
-            name: normalize_tool_name(name),
-            arguments: call["arguments"] || %{}
-          }]
+          [
+            %{
+              id: call["id"] || generate_id(),
+              name: normalize_tool_name(name),
+              arguments: call["arguments"] || %{}
+            }
+          ]
 
         _ ->
           Logger.warning("[Ollama] Skipping malformed tool_call: #{inspect(call)}")
@@ -606,21 +654,28 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           Enum.flat_map(calls, fn call ->
             case call do
               %{"function" => %{"name" => name} = func} ->
-                [%{
-                  id: call["id"] || generate_id(),
-                  name: normalize_tool_name(name),
-                  arguments: Map.get(func, "arguments", %{})
-                }]
+                [
+                  %{
+                    id: call["id"] || generate_id(),
+                    name: normalize_tool_name(name),
+                    arguments: Map.get(func, "arguments", %{})
+                  }
+                ]
 
               %{"name" => name} ->
-                [%{
-                  id: call["id"] || generate_id(),
-                  name: normalize_tool_name(name),
-                  arguments: call["arguments"] || %{}
-                }]
+                [
+                  %{
+                    id: call["id"] || generate_id(),
+                    name: normalize_tool_name(name),
+                    arguments: call["arguments"] || %{}
+                  }
+                ]
 
               _ ->
-                Logger.warning("[Ollama] Skipping malformed streaming tool_call: #{inspect(call)}")
+                Logger.warning(
+                  "[Ollama] Skipping malformed streaming tool_call: #{inspect(call)}"
+                )
+
                 []
             end
           end)

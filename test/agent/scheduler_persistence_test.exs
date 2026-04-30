@@ -3,6 +3,14 @@ defmodule OptimalSystemAgent.Agent.Scheduler.SQLiteStoreTest do
 
   alias OptimalSystemAgent.Agent.Scheduler.SQLiteStore
 
+  setup_all do
+    # `function_exported?/3` returns false for modules whose BEAM has not
+    # been loaded yet. Tests in this module check exports across
+    # `SQLiteStore` — load it once so order doesn't matter.
+    Code.ensure_loaded!(SQLiteStore)
+    :ok
+  end
+
   @sample_job %{
     "id" => "job-test-#{:rand.uniform(100_000)}",
     "name" => "Test Job",

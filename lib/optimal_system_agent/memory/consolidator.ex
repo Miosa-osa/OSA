@@ -161,7 +161,8 @@ defmodule OptimalSystemAgent.Memory.Consolidator do
     }
 
     if mode == :full do
-      mature = active |> Enum.filter(&(&1.occurrences >= @maturity_threshold)) |> Enum.map(& &1.id)
+      mature =
+        active |> Enum.filter(&(&1.occurrences >= @maturity_threshold)) |> Enum.map(& &1.id)
 
       # Auto-generate skills from mature patterns
       if length(mature) > 0 do

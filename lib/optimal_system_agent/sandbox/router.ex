@@ -93,7 +93,11 @@ defmodule OptimalSystemAgent.Sandbox.Router do
     path = Path.expand("~/.osa/sandbox.json")
 
     if File.exists?(path) do
-      case File.read(path) |> then(fn {:ok, c} -> Jason.decode(c); e -> e end) do
+      case File.read(path)
+           |> then(fn
+             {:ok, c} -> Jason.decode(c)
+             e -> e
+           end) do
         {:ok, %{"backend" => backend} = config} ->
           atom_backend = String.to_existing_atom(backend)
           Application.put_env(:optimal_system_agent, :sandbox_backend, atom_backend)

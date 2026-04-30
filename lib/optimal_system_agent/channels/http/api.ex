@@ -66,90 +66,91 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       |> Plug.Conn.send_resp(500, body)
   end
 
-  plug :cors
-  plug OptimalSystemAgent.Channels.HTTP.RateLimiter
-  plug :validate_content_type
-  plug :authenticate
-  plug OptimalSystemAgent.Channels.HTTP.Integrity
-  plug :match
+  plug(:cors)
+  plug(OptimalSystemAgent.Channels.HTTP.RateLimiter)
+  plug(:validate_content_type)
+  plug(:authenticate)
+  plug(OptimalSystemAgent.Channels.HTTP.Integrity)
+  plug(:match)
 
-  plug Plug.Parsers,
+  plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
     json_decoder: Jason,
     length: 1_000_000
+  )
 
-  plug :dispatch
+  plug(:dispatch)
 
   # ── Auth (no JWT required — forwarded before authenticate would halt) ─
-  forward "/auth", to: API.AuthRoutes
+  forward("/auth", to: API.AuthRoutes)
 
   # ── Channel webhooks (platform-specific auth, not JWT) ───────────────
-  forward "/channels", to: API.ChannelRoutes
+  forward("/channels", to: API.ChannelRoutes)
 
   # ── Sessions ─────────────────────────────────────────────────────────
-  forward "/sessions", to: API.SessionRoutes
+  forward("/sessions", to: API.SessionRoutes)
 
   # ── Agent SSE stream ─────────────────────────────────────────────────
-  forward "/stream", to: API.AgentRoutes
+  forward("/stream", to: API.AgentRoutes)
 
   # ── Agent introspection
-  forward "/agent", to: API.AgentStateRoutes
+  forward("/agent", to: API.AgentStateRoutes)
 
   # ── Orchestrate (Phase 0: direct agent loop bypass) ─────────────────
-  forward "/orchestrate", to: API.OrchestrateRoutes
+  forward("/orchestrate", to: API.OrchestrateRoutes)
 
   # ── Swarm launch / status ─────────────────────────────────────────────
-  forward "/swarm", to: API.OrchestrateRoutes
+  forward("/swarm", to: API.OrchestrateRoutes)
 
   # ── Tools, skills, commands ──────────────────────────────────────────
-  forward "/tools", to: API.ToolRoutes
-  forward "/skills", to: API.ToolRoutes
-  forward "/commands", to: API.ToolRoutes
+  forward("/tools", to: API.ToolRoutes)
+  forward("/skills", to: API.ToolRoutes)
+  forward("/commands", to: API.ToolRoutes)
 
   # ── Scheduled Tasks ─────────────────────────────────────────────────
-  forward "/scheduled-tasks", to: API.SchedulerRoutes
+  forward("/scheduled-tasks", to: API.SchedulerRoutes)
 
   # ── Data ─────────────────────────────────────────────────────────────
-  forward "/memory", to: API.DataRoutes
-  forward "/models", to: API.DataRoutes
-  forward "/analytics", to: API.DataRoutes
-  forward "/scheduler", to: API.DataRoutes
-  forward "/machines", to: API.DataRoutes
+  forward("/memory", to: API.DataRoutes)
+  forward("/models", to: API.DataRoutes)
+  forward("/analytics", to: API.DataRoutes)
+  forward("/scheduler", to: API.DataRoutes)
+  forward("/machines", to: API.DataRoutes)
 
   # ── Workspace introspection ───────────────────────────────────────────
-  forward "/workspace", to: API.WorkspaceRoutes
+  forward("/workspace", to: API.WorkspaceRoutes)
 
   # ── Canopy workspaces (CRUD + .canopy/ init + agent/skill discovery) ─
-  forward "/workspaces", to: API.CanopyRoutes
+  forward("/workspaces", to: API.CanopyRoutes)
 
   # ── Agent management (definitions, hierarchy, lifecycle) ─────────────
-  forward "/agents", to: API.AgentManagementRoutes
+  forward("/agents", to: API.AgentManagementRoutes)
 
   # ── Settings (read/write ~/.osa/config.json) ─────────────────────────
-  forward "/settings", to: API.SettingsRoutes
+  forward("/settings", to: API.SettingsRoutes)
 
   # ── Provider management (list, connect, disconnect) ──────────────────
-  forward "/providers", to: API.ProviderRoutes
+  forward("/providers", to: API.ProviderRoutes)
 
   # ── Cost / budget summary ─────────────────────────────────────────────
-  forward "/cost", to: API.CostRoutes
-  forward "/costs", to: API.CostRoutes
+  forward("/cost", to: API.CostRoutes)
+  forward("/costs", to: API.CostRoutes)
 
   # ── Projects / goals ────────────────────────────────────────────────
-  forward "/projects", to: API.ProjectRoutes
+  forward("/projects", to: API.ProjectRoutes)
 
   # ── Issues ──────────────────────────────────────────────────────────
-  forward "/issues", to: API.IssueRoutes
+  forward("/issues", to: API.IssueRoutes)
 
   # ── Approvals ──────────────────────────────────────────────────────
-  forward "/approvals", to: API.ApprovalRoutes
+  forward("/approvals", to: API.ApprovalRoutes)
 
   # ── Dashboard (aggregated overview) ──────────────────────────────────
-  forward "/dashboard", to: API.DashboardRoutes
+  forward("/dashboard", to: API.DashboardRoutes)
 
   # ── Config revisions ─────────────────────────────────────────────────
-  forward "/config", to: API.ConfigRoutes
+  forward("/config", to: API.ConfigRoutes)
 
   # ── Signal classification (inline — single endpoint) ─────────────────
   post "/classify" do
@@ -210,8 +211,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
     conn
     |> Plug.Conn.put_resp_header("access-control-allow-origin", origin)
-    |> Plug.Conn.put_resp_header("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    |> Plug.Conn.put_resp_header("access-control-allow-headers", "authorization, content-type, accept, cache-control, x-accel-buffering")
+    |> Plug.Conn.put_resp_header(
+      "access-control-allow-methods",
+      "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    )
+    |> Plug.Conn.put_resp_header(
+      "access-control-allow-headers",
+      "authorization, content-type, accept, cache-control, x-accel-buffering"
+    )
     |> Plug.Conn.put_resp_header("access-control-max-age", "86400")
     |> Plug.Conn.send_resp(204, "")
     |> Plug.Conn.halt()
@@ -222,18 +229,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
     conn
     |> Plug.Conn.put_resp_header("access-control-allow-origin", origin)
-    |> Plug.Conn.put_resp_header("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    |> Plug.Conn.put_resp_header("access-control-allow-headers", "authorization, content-type, accept, cache-control, x-accel-buffering")
+    |> Plug.Conn.put_resp_header(
+      "access-control-allow-methods",
+      "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    )
+    |> Plug.Conn.put_resp_header(
+      "access-control-allow-headers",
+      "authorization, content-type, accept, cache-control, x-accel-buffering"
+    )
   end
 
   # ── Content-Type validation for write methods ─────────────────────
-  defp validate_content_type(%{method: method} = conn, _opts) when method in ["POST", "PUT", "PATCH"] do
+  defp validate_content_type(%{method: method} = conn, _opts)
+       when method in ["POST", "PUT", "PATCH"] do
     case Plug.Conn.get_req_header(conn, "content-type") do
       [ct | _] ->
         if String.starts_with?(ct, "application/json") do
           conn
         else
-          body = safe_json_encode(%{error: "unsupported_media_type", details: "Content-Type must be application/json"})
+          body =
+            safe_json_encode(%{
+              error: "unsupported_media_type",
+              details: "Content-Type must be application/json"
+            })
 
           conn
           |> Plug.Conn.put_resp_content_type("application/json")
@@ -291,7 +309,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
               |> send_resp(401, Jason.encode!(%{error: "unauthorized", code: "INVALID_TOKEN"}))
               |> halt()
             else
-              Logger.warning("Invalid/expired token ignored (require_auth=false): #{inspect(reason)}")
+              Logger.warning(
+                "Invalid/expired token ignored (require_auth=false): #{inspect(reason)}"
+              )
 
               conn
               |> assign(:user_id, "anonymous")

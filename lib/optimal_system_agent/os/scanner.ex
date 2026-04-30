@@ -22,7 +22,8 @@ defmodule OptimalSystemAgent.OS.Scanner do
   alias OptimalSystemAgent.OS.Manifest
   require Logger
 
-  defp config_dir, do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+  defp config_dir,
+    do: Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
 
   @default_scan_dirs [
     "~/.osa/templates",

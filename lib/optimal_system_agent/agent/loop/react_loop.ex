@@ -29,16 +29,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
+  alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.Telemetry
 
   @cancel_table :osa_cancel_flags
 
   defp max_iterations, do: Application.get_env(:optimal_system_agent, :max_iterations, 30)
+
   defp max_response_tokens do
-    # Check for bumped max_tokens from output token recovery
+    # Check for bumped max_tokens from output token recovery.
+    # Default raised from 8K → 32K so OSA can produce longer, more detailed
+    # responses without truncation by default. Override via:
+    #   config :optimal_system_agent, :max_response_tokens, <int>
+    # if a provider's ceiling is tighter (e.g. some Ollama cloud models).
     Process.get(:osa_bumped_max_tokens) ||
-      Application.get_env(:optimal_system_agent, :max_response_tokens, 8_192)
+      Application.get_env(:optimal_system_agent, :max_response_tokens, 32_768)
   end
 
   @doc """
@@ -76,7 +82,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iter >= max_iter ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
         tools_used = Telemetry.extract_tools_used(state.messages) |> Enum.join(", ")
-        {"I've used all #{max_iter} iterations on this task.\n\n**Tools used:** #{tools_used}\n\nIf the task isn't complete, try breaking it into smaller steps or giving more specific instructions.", state}
+
+        {"I've used all #{max_iter} iterations on this task.\n\n**Tools used:** #{tools_used}\n\nIf the task isn't complete, try breaking it into smaller steps or giving more specific instructions.",
+         state}
 
       true ->
         do_iteration(state)
@@ -86,7 +94,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # --- Private ---
 
   defp do_iteration(state) do
-    Logger.debug("[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}")
+    Logger.debug(
+      "[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}"
+    )
 
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
@@ -111,6 +121,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         case Task.yield(memory_task, 2_000) || Task.shutdown(memory_task, :brutal_kill) do
           {:ok, memories} when is_list(memories) and memories != [] ->
             inject_prefetched_memory(context, memories)
+
           _ ->
             maybe_inject_memory(context, state)
         end
@@ -122,15 +133,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     context = inject_iteration_budget(context, state)
 
     max_iter = max_iterations()
-    Logger.debug("[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}")
-    Bus.emit(:llm_request, %{session_id: state.session_id, iteration: state.iteration, agent: state.session_id})
+
+    Logger.debug(
+      "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
+    )
+
+    Bus.emit(:llm_request, %{
+      session_id: state.session_id,
+      iteration: state.iteration,
+      agent: state.session_id
+    })
 
     start_time = System.monotonic_time(:millisecond)
     thinking_opts = LLMClient.thinking_config(state)
     tools_for_call = ToolFilter.filter(state.tools, state)
 
-    llm_opts = [tools: tools_for_call, temperature: LLMClient.temperature(), max_tokens: max_response_tokens()]
-    llm_opts = if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+    llm_opts = [
+      tools: tools_for_call,
+      temperature: LLMClient.temperature(),
+      max_tokens: max_response_tokens()
+    ]
+
+    llm_opts =
+      if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
 
     # Initialize streaming tool executor — tools can start running mid-stream
     streaming_ctx = StreamingToolExecutor.start(state)
@@ -139,7 +164,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     result = LLMClient.llm_chat_stream(state, context.messages, llm_opts)
 
     # Collect any streaming tool blocks that arrived during the LLM call
-    streaming_ctx = drain_streaming_tool_blocks(Process.get(:osa_streaming_tool_ctx, streaming_ctx), state)
+    streaming_ctx =
+      drain_streaming_tool_blocks(Process.get(:osa_streaming_tool_ctx, streaming_ctx), state)
+
     Process.put(:osa_streaming_tool_ctx, streaming_ctx)
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -173,16 +200,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     current_max = max_response_tokens()
     bumped = min(current_max * 2, 16_384)
 
-    Logger.info("[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}")
+    Logger.info(
+      "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
+    )
 
     # Inject the partial response so the model can continue from where it left off
-    state = %{state |
-      messages: state.messages ++ [
-        %{role: "assistant", content: content},
-        %{role: "system", content: "[Your previous response was truncated due to length. Continue from where you left off.]"}
-      ],
-      overflow_retries: state.overflow_retries + 1,
-      iteration: state.iteration + 1
+    state = %{
+      state
+      | messages:
+          state.messages ++
+            [
+              %{role: "assistant", content: content},
+              %{
+                role: "system",
+                content:
+                  "[Your previous response was truncated due to length. Continue from where you left off.]"
+              }
+            ],
+        overflow_retries: state.overflow_retries + 1,
+        iteration: state.iteration + 1
     }
 
     # Store bumped max_tokens for this session
@@ -205,7 +241,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     cond do
       state.auto_continues < 2 and Guardrails.wants_to_continue?(content) ->
-        Logger.info("[loop] Auto-continue: model described intent without tool calls (nudge #{state.auto_continues + 1}/2)")
+        Logger.info(
+          "[loop] Auto-continue: model described intent without tool calls (nudge #{state.auto_continues + 1}/2)"
+        )
 
         nudge = %{
           role: "system",
@@ -217,16 +255,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "\"Checking project structure.\" then call dir_list + file_read.]"
         }
 
-        state = %{state |
-          messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
-          auto_continues: state.auto_continues + 1,
-          iteration: state.iteration + 1
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+            auto_continues: state.auto_continues + 1,
+            iteration: state.iteration + 1
         }
 
         run(state)
 
       state.auto_continues < 3 and Guardrails.code_in_text?(content) ->
-        Logger.info("[loop] Coding nudge: model wrote code in markdown instead of calling file_write/file_edit (nudge #{state.auto_continues + 1}/3)")
+        Logger.info(
+          "[loop] Coding nudge: model wrote code in markdown instead of calling file_write/file_edit (nudge #{state.auto_continues + 1}/3)"
+        )
 
         nudge = %{
           role: "system",
@@ -236,16 +277,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "Do NOT output code in your response text — call the file_write tool NOW.]"
         }
 
-        state = %{state |
-          messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
-          auto_continues: state.auto_continues + 1,
-          iteration: state.iteration + 1
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+            auto_continues: state.auto_continues + 1,
+            iteration: state.iteration + 1
         }
 
         run(state)
 
       Guardrails.needs_verification_gate?(state) ->
-        Logger.info("[loop] Verification gate: iteration #{state.iteration}, task context present, zero successful tools — injecting verification")
+        Logger.info(
+          "[loop] Verification gate: iteration #{state.iteration}, task context present, zero successful tools — injecting verification"
+        )
 
         verification = %{
           role: "system",
@@ -256,10 +300,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "Do NOT return a final answer without tool-backed evidence.]"
         }
 
-        state = %{state |
-          messages: state.messages ++ [%{role: "assistant", content: content}, verification],
-          iteration: state.iteration + 1,
-          auto_continues: 2
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, verification],
+            iteration: state.iteration + 1,
+            auto_continues: 2
         }
 
         run(state)
@@ -269,10 +314,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         case run_stop_hooks(content, state) do
           {:continue, inject_msg, state} ->
             # Hook wants the agent to continue with an injected message
-            state = %{state |
-              messages: state.messages ++ [%{role: "assistant", content: content}, inject_msg],
-              iteration: state.iteration + 1
+            state = %{
+              state
+              | messages: state.messages ++ [%{role: "assistant", content: content}, inject_msg],
+                iteration: state.iteration + 1
             }
+
             run(state)
 
           {:override, new_content, state} ->
@@ -302,55 +349,34 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     assistant_msg =
       case Map.get(resp, :thinking_blocks) do
-        blocks when is_list(blocks) and blocks != [] -> Map.put(assistant_msg, :thinking_blocks, blocks)
-        _ -> assistant_msg
+        blocks when is_list(blocks) and blocks != [] ->
+          Map.put(assistant_msg, :thinking_blocks, blocks)
+
+        _ ->
+          assistant_msg
       end
 
     state = %{state | messages: state.messages ++ [assistant_msg]}
 
     # Check if any tools were already started via streaming execution
     streaming_ctx = Process.get(:osa_streaming_tool_ctx)
-    streaming_started_ids = if streaming_ctx, do: MapSet.new(streaming_ctx.order), else: MapSet.new()
+
+    streaming_started_ids =
+      if streaming_ctx, do: MapSet.new(streaming_ctx.order), else: MapSet.new()
 
     # Split: tools already started streaming vs tools that need fresh execution
     {already_streaming, need_execution} =
       Enum.split_with(tool_calls, fn tc -> tc.id in streaming_started_ids end)
 
-    # Split remaining tools by concurrency safety
-    {concurrent_tools, sequential_tools} =
-      Enum.split_with(need_execution, fn tc ->
-        tool_concurrent?(tc.name)
-      end)
-
-    # Execute concurrent-safe tools in parallel
-    parallel_results =
-      if concurrent_tools != [] do
-        OptimalSystemAgent.TaskSupervisor
-        |> Task.Supervisor.async_stream_nolink(
-          concurrent_tools,
-          fn tool_call -> ToolExecutor.execute_tool_call(tool_call, state) end,
-          max_concurrency: 10,
-          timeout: 60_000,
-          on_timeout: :kill_task
-        )
-        |> Enum.zip(concurrent_tools)
-        |> Enum.map(fn
-          {{:ok, result}, tool_call} -> {tool_call, result}
-          {_, tool_call} ->
-            timeout_msg = %{role: "tool", tool_call_id: tool_call.id, name: tool_call.name, content: "Error: Tool execution timed out"}
-            {tool_call, {timeout_msg, "Error: Tool execution timed out"}}
-        end)
-      else
-        []
-      end
-
-    # Execute non-concurrent tools sequentially
-    sequential_results =
-      Enum.map(sequential_tools, fn tool_call ->
-        {tool_call, ToolExecutor.execute_tool_call(tool_call, state)}
-      end)
-
-    fresh_results = parallel_results ++ sequential_results
+    # Phase 2: per-input parallel/serial split via ToolOrchestrator. The
+    # orchestrator routes through LegacyAdapter so structured tools are
+    # checked per-input via `concurrency_safe?/2` while flat tools fall
+    # back to the module-level `concurrent?/0`.
+    fresh_results =
+      ToolOrchestrator.dispatch(need_execution, state,
+        max_concurrency: 10,
+        timeout_ms: 60_000
+      )
 
     # Collect streaming tool results (these may already be done)
     streaming_results =
@@ -362,8 +388,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end
 
     # Merge results in original tool_call order
-    all_results_map = Map.new(streaming_results ++ fresh_results, fn {tc, result} -> {tc.id, {tc, result}} end)
-    results = Enum.map(tool_calls, fn tc -> Map.get(all_results_map, tc.id, {tc, {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"}, "Error: Tool not executed"}}) end)
+    all_results_map =
+      Map.new(streaming_results ++ fresh_results, fn {tc, result} -> {tc.id, {tc, result}} end)
+
+    results =
+      Enum.map(tool_calls, fn tc ->
+        Map.get(
+          all_results_map,
+          tc.id,
+          {tc,
+           {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
+            "Error: Tool not executed"}}
+        )
+      end)
 
     # Clean up streaming context
     Process.delete(:osa_streaming_tool_ctx)
@@ -417,12 +454,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     if context_overflow?(reason_str) and state.overflow_retries < 3 do
       retry_num = state.overflow_retries + 1
-      Logger.warning("Context overflow — attempting recovery (retry #{retry_num}/3, iteration #{state.iteration})")
+
+      Logger.warning(
+        "Context overflow — attempting recovery (retry #{retry_num}/3, iteration #{state.iteration})"
+      )
 
       # Try context collapse first (cheap — just withhold large tool results)
       collapsed_messages =
         case ContextCollapse.collapse(state.messages, retry_num) do
-          {:ok, collapsed} -> collapsed
+          {:ok, collapsed} ->
+            collapsed
+
           {:error, _} ->
             # Collapse failed — fall back to full compaction
             Logger.info("[loop] Context collapse insufficient, running full compaction")
@@ -446,13 +488,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Check if a tool is safe to run concurrently with others
   defp tool_concurrent?(tool_name) do
     builtin_tools = :persistent_term.get({OptimalSystemAgent.Tools.Registry, :builtin_tools}, %{})
+
     case Map.get(builtin_tools, tool_name) do
-      nil -> true  # Unknown tools default to concurrent
+      # Unknown tools default to concurrent
+      nil ->
+        true
+
       mod ->
         if function_exported?(mod, :concurrent?, 0) do
           mod.concurrent?()
         else
-          true  # Default: concurrent
+          # Default: concurrent
+          true
         end
     end
   rescue
@@ -489,16 +536,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   # Inject pre-fetched memory results into context (from async prefetch)
   defp inject_prefetched_memory(context, memories) when is_list(memories) do
-    memory_content = Enum.map(memories, fn m ->
-      key = Map.get(m, :key, Map.get(m, :content, ""))
-      "- #{key}"
-    end) |> Enum.join("\n")
+    memory_content =
+      Enum.map(memories, fn m ->
+        key = Map.get(m, :key, Map.get(m, :content, ""))
+        "- #{key}"
+      end)
+      |> Enum.join("\n")
 
     if memory_content != "" do
       memory_msg = %{
         role: "system",
         content: "[Relevant memories]\n#{memory_content}"
       }
+
       %{context | messages: context.messages ++ [memory_msg]}
     else
       context
@@ -513,7 +563,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         updated = StreamingToolExecutor.tool_block_complete(ctx, tool_call, state)
         drain_streaming_tool_blocks(updated, state)
     after
-      0 -> ctx  # No more messages — return
+      # No more messages — return
+      0 -> ctx
     end
   end
 
@@ -559,7 +610,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # iteration within a single process_message call. Cache key includes plan_mode,
   # session_id, memory version, and channel so it auto-invalidates on any change.
   defp cached_context(state) do
-    cache_key = {state.plan_mode, state.session_id, Process.get(:osa_memory_version, 0), state.channel}
+    cache_key =
+      {state.plan_mode, state.session_id, Process.get(:osa_memory_version, 0), state.channel}
 
     case Process.get(:osa_system_msg_cache) do
       {^cache_key, cached_system_msg} ->
@@ -628,7 +680,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     if state.iteration > 0 and remaining <= max_iter do
       budget_msg = %{
         role: "system",
-        content: "[Iteration #{state.iteration + 1}/#{max_iter} — #{remaining} remaining. Be efficient. Wrap up if the task is done.]"
+        content:
+          "[Iteration #{state.iteration + 1}/#{max_iter} — #{remaining} remaining. Be efficient. Wrap up if the task is done.]"
       }
 
       %{context | messages: context.messages ++ [budget_msg]}

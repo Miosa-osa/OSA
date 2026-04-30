@@ -33,10 +33,11 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
       exit(:normal)
     end
 
-    mode = Prompt.select("Setup mode", [
-      %{value: :quickstart, label: "QuickStart", hint: "Auto-detect and use sensible defaults"},
-      %{value: :full, label: "Full Setup", hint: "Choose provider, model, and channels"}
-    ])
+    mode =
+      Prompt.select("Setup mode", [
+        %{value: :quickstart, label: "QuickStart", hint: "Auto-detect and use sensible defaults"},
+        %{value: :full, label: "Full Setup", hint: "Choose provider, model, and channels"}
+      ])
 
     # Auto-detect existing providers
     %{detected: detected, ollama_local: ollama_local} = Onboarding.detect_existing()
@@ -46,8 +47,10 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
         detected != [] ->
           names = Enum.map_join(detected, ", ", & &1.provider)
           "#{names} (from environment)"
+
         ollama_local.reachable ->
           "Ollama Local (running at #{ollama_local.url})"
+
         true ->
           "none"
       end
@@ -206,11 +209,12 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   # ── Channels ──────────────────────────────────────────────────
 
   defp configure_channels do
-    selected = Prompt.multiselect("Connect channels? (optional)", [
-      %{value: "telegram", label: "Telegram", hint: "get token from @BotFather"},
-      %{value: "discord", label: "Discord", hint: "discord.com/developers → Bot → token"},
-      %{value: "slack", label: "Slack", hint: "api.slack.com/apps → OAuth → Bot token"}
-    ])
+    selected =
+      Prompt.multiselect("Connect channels? (optional)", [
+        %{value: "telegram", label: "Telegram", hint: "get token from @BotFather"},
+        %{value: "discord", label: "Discord", hint: "discord.com/developers → Bot → token"},
+        %{value: "slack", label: "Slack", hint: "api.slack.com/apps → OAuth → Bot token"}
+      ])
 
     if selected == [] do
       %{}
@@ -269,6 +273,7 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
         [lhs, rhs] ->
           lhs_clean = lhs |> String.trim() |> String.replace("export ", "")
           if Regex.match?(~r/^[A-Z_]+$/, lhs_clean), do: String.trim(rhs), else: trimmed
+
         _ ->
           trimmed
       end
@@ -277,8 +282,10 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
       cond do
         String.starts_with?(value, "\"") and String.ends_with?(value, "\"") ->
           String.slice(value, 1..-2//1)
+
         String.starts_with?(value, "'") and String.ends_with?(value, "'") ->
           String.slice(value, 1..-2//1)
+
         true ->
           value
       end

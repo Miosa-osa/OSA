@@ -115,7 +115,9 @@ defmodule OptimalSystemAgent.Settings do
           {:ok, map} when is_map(map) -> map
           _ -> %{}
         end
-      {:error, _} -> %{}
+
+      {:error, _} ->
+        %{}
     end
   rescue
     _ -> %{}

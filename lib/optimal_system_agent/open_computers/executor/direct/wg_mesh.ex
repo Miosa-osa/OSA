@@ -337,7 +337,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh do
 
   defp derive_pubkey_from_string(private_key) do
     case System.cmd("wg", ["pubkey"], input: private_key) do
-      {pubkey, 0} -> {:ok, String.trim(pubkey)}
+      {pubkey, 0} ->
+        {:ok, String.trim(pubkey)}
+
       {output, code} ->
         Logger.error("[WgMesh] wg pubkey failed exit=#{code} output=#{output}")
         {:error, :config_failed}
@@ -358,13 +360,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh do
     else
       private_key = File.read!(priv_path) |> String.trim()
 
-      config_content = build_wg_config(
-        private_key,
-        mesh.assigned_ip,
-        mesh.listen_port,
-        configure_payload.peers,
-        configure_payload.preshared_keys
-      )
+      config_content =
+        build_wg_config(
+          private_key,
+          mesh.assigned_ip,
+          mesh.listen_port,
+          configure_payload.peers,
+          configure_payload.preshared_keys
+        )
 
       File.write!(conf_path, config_content)
 

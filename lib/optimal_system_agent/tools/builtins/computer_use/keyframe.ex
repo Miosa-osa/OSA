@@ -66,14 +66,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Keyframe do
   def detect_doom_loop(journal_dir) do
     case read_journal(journal_dir) do
       {:ok, entries} when length(entries) >= 3 ->
-        # Hash the last 3 action+result pairs
+        # Use the explicit keyframe_hash field when present — it captures
+        # visual screen state and is the authoritative signal for loop
+        # detection.  Fall back to hashing action+result for entries recorded
+        # before keyframe capture was wired up.
         last_3_hashes =
           entries
           |> Enum.take(-3)
           |> Enum.map(fn entry ->
-            action = Map.get(entry, "action", "")
-            result = Map.get(entry, "result", "")
-            :crypto.hash(:sha256, "#{action}:#{result}") |> Base.encode16(case: :lower)
+            case Map.get(entry, "keyframe_hash") do
+              nil ->
+                action = Map.get(entry, "action", "")
+                result = Map.get(entry, "result", "")
+                :crypto.hash(:sha256, "#{action}:#{result}") |> Base.encode16(case: :lower)
+
+              hash ->
+                hash
+            end
           end)
 
         if length(Enum.uniq(last_3_hashes)) == 1 do
@@ -119,7 +128,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Keyframe do
           if File.dir?(path) do
             case File.stat(path, time: :posix) do
               {:ok, %{mtime: mtime_posix}} ->
-                if (now - mtime_posix) > max_age do
+                if now - mtime_posix > max_age do
                   File.rm_rf!(path)
                   {c + 1, k}
                 else

@@ -58,8 +58,13 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
     pools = load_all_pools()
 
     if map_size(pools) > 0 do
-      providers_with_pools = pools |> Enum.filter(fn {_, keys} -> length(keys) > 1 end) |> Enum.map(fn {p, keys} -> "#{p}(#{length(keys)})" end)
-      if providers_with_pools != [], do: Logger.info("CredentialPool: #{Enum.join(providers_with_pools, ", ")}")
+      providers_with_pools =
+        pools
+        |> Enum.filter(fn {_, keys} -> length(keys) > 1 end)
+        |> Enum.map(fn {p, keys} -> "#{p}(#{length(keys)})" end)
+
+      if providers_with_pools != [],
+        do: Logger.info("CredentialPool: #{Enum.join(providers_with_pools, ", ")}")
     end
 
     {:ok, %__MODULE__{pools: pools, counters: %{}}}
@@ -96,7 +101,9 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
         now = System.monotonic_time(:millisecond)
         total = length(keys)
         rate_limited = Enum.count(keys, fn {_k, until} -> until && until > now end)
-        {:reply, %{total: total, available: total - rate_limited, rate_limited: rate_limited}, state}
+
+        {:reply, %{total: total, available: total - rate_limited, rate_limited: rate_limited},
+         state}
     end
   end
 
@@ -108,12 +115,17 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
 
       keys ->
         until = System.monotonic_time(:millisecond) + @cooldown_ms
-        updated = Enum.map(keys, fn
-          {^key, _old} -> {key, until}
-          other -> other
-        end)
 
-        Logger.warning("CredentialPool: #{provider} key #{mask(key)} rate-limited for #{div(@cooldown_ms, 1000)}s")
+        updated =
+          Enum.map(keys, fn
+            {^key, _old} -> {key, until}
+            other -> other
+          end)
+
+        Logger.warning(
+          "CredentialPool: #{provider} key #{mask(key)} rate-limited for #{div(@cooldown_ms, 1000)}s"
+        )
+
         {:noreply, %{state | pools: Map.put(state.pools, provider, updated)}}
     end
   end
@@ -125,8 +137,12 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
     |> Enum.reduce(%{}, fn {provider, {pool_var, single_var}}, acc ->
       keys =
         case System.get_env(pool_var) do
-          nil -> []
-          "" -> []
+          nil ->
+            []
+
+          "" ->
+            []
+
           val ->
             val
             |> String.split(",")
@@ -187,5 +203,6 @@ defmodule OptimalSystemAgent.Providers.CredentialPool do
   defp mask(key) when is_binary(key) and byte_size(key) > 8 do
     String.slice(key, 0, 4) <> "..." <> String.slice(key, -4, 4)
   end
+
   defp mask(_key), do: "***"
 end

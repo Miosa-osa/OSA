@@ -192,7 +192,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
         spent: new_daily,
         limit: state.daily_limit,
         utilization: new_daily / state.daily_limit,
-        message: "Daily spend at #{round(new_daily / state.daily_limit * 100)}% ($#{Float.round(new_daily, 2)} / $#{state.daily_limit})",
+        message:
+          "Daily spend at #{round(new_daily / state.daily_limit * 100)}% ($#{Float.round(new_daily, 2)} / $#{state.daily_limit})",
         session_id: session_id
       })
     end
@@ -204,7 +205,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
         spent: new_monthly,
         limit: state.monthly_limit,
         utilization: new_monthly / state.monthly_limit,
-        message: "Monthly spend at #{round(new_monthly / state.monthly_limit * 100)}% ($#{Float.round(new_monthly, 2)} / $#{state.monthly_limit})",
+        message:
+          "Monthly spend at #{round(new_monthly / state.monthly_limit * 100)}% ($#{Float.round(new_monthly, 2)} / $#{state.monthly_limit})",
         session_id: session_id
       })
     end
@@ -231,7 +233,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
         type: :monthly,
         spent: new_monthly,
         limit: state.monthly_limit,
-        message: "Monthly budget exceeded: $#{Float.round(new_monthly, 2)} / $#{state.monthly_limit}",
+        message:
+          "Monthly budget exceeded: $#{Float.round(new_monthly, 2)} / $#{state.monthly_limit}",
         session_id: session_id
       })
 
@@ -371,6 +374,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
 
   defp append_ledger_entry(entry) do
     File.mkdir_p!(@ledger_dir)
+
     serialized = %{
       id: entry.id,
       ts: DateTime.to_iso8601(entry.timestamp),
@@ -381,6 +385,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
       c: entry.cost_usd,
       s: entry.session_id
     }
+
     line = Jason.encode!(serialized) <> "\n"
     File.write(@ledger_file, line, [:append])
   rescue
@@ -394,23 +399,42 @@ defmodule OptimalSystemAgent.Agent.Budget do
         |> String.split("\n", trim: true)
         |> Enum.flat_map(fn line ->
           case Jason.decode(line) do
-            {:ok, %{"id" => id, "ts" => ts, "p" => p, "m" => m, "ti" => ti, "to" => to_out, "c" => c, "s" => s}} ->
-              [%{
-                id: id,
-                timestamp: case DateTime.from_iso8601(ts) do {:ok, dt, _} -> dt; _ -> DateTime.utc_now() end,
-                provider: p,
-                model: m,
-                tokens_in: ti,
-                tokens_out: to_out,
-                cost_usd: c,
-                session_id: s
-              }]
-            _ -> []
+            {:ok,
+             %{
+               "id" => id,
+               "ts" => ts,
+               "p" => p,
+               "m" => m,
+               "ti" => ti,
+               "to" => to_out,
+               "c" => c,
+               "s" => s
+             }} ->
+              [
+                %{
+                  id: id,
+                  timestamp:
+                    case DateTime.from_iso8601(ts) do
+                      {:ok, dt, _} -> dt
+                      _ -> DateTime.utc_now()
+                    end,
+                  provider: p,
+                  model: m,
+                  tokens_in: ti,
+                  tokens_out: to_out,
+                  cost_usd: c,
+                  session_id: s
+                }
+              ]
+
+            _ ->
+              []
           end
         end)
         |> Enum.take(10_000)
 
-      _ -> []
+      _ ->
+        []
     end
   rescue
     _ -> []

@@ -57,8 +57,10 @@ defmodule OptimalSystemAgent.Memory.Observation do
       obs = %__MODULE__{
         id: System.monotonic_time(:nanosecond),
         type: validated_type,
-        tool_name: to_string(Map.get(attrs, :tool_name) || Map.get(attrs, "tool_name") || "unknown"),
-        error_message: string_or_nil(Map.get(attrs, :error_message) || Map.get(attrs, "error_message")),
+        tool_name:
+          to_string(Map.get(attrs, :tool_name) || Map.get(attrs, "tool_name") || "unknown"),
+        error_message:
+          string_or_nil(Map.get(attrs, :error_message) || Map.get(attrs, "error_message")),
         duration_ms: Map.get(attrs, :duration_ms) || Map.get(attrs, "duration_ms"),
         context: Map.get(attrs, :context) || Map.get(attrs, "context") || %{},
         recorded_at: DateTime.utc_now()
@@ -82,15 +84,19 @@ defmodule OptimalSystemAgent.Memory.Observation do
     if atom in @valid_types do
       {:ok, atom}
     else
-      {:error, "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
+      {:error,
+       "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
     end
   rescue
     ArgumentError ->
-      {:error, "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
+      {:error,
+       "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
   end
 
   defp validate_type(type),
-    do: {:error, "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
+    do:
+      {:error,
+       "invalid observation type: #{inspect(type)}. Must be one of #{inspect(@valid_types)}"}
 
   defp string_or_nil(nil), do: nil
   defp string_or_nil(s) when is_binary(s), do: s

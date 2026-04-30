@@ -181,11 +181,12 @@ defmodule OptimalSystemAgent.Budget do
       recorded_at: DateTime.utc_now()
     }
 
-    state = %{state |
-      daily_spent: state.daily_spent + cost,
-      monthly_spent: state.monthly_spent + cost,
-      # Keep at most 10 000 ledger entries in memory
-      entries: Enum.take([entry | state.entries], 10_000)
+    state = %{
+      state
+      | daily_spent: state.daily_spent + cost,
+        monthly_spent: state.monthly_spent + cost,
+        # Keep at most 10 000 ledger entries in memory
+        entries: Enum.take([entry | state.entries], 10_000)
     }
 
     {:noreply, state}

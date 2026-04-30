@@ -64,7 +64,9 @@ defmodule OptimalSystemAgent.CLI do
     # Find project root
     root =
       case File.read(Path.join([System.user_home!(), ".osa", "project_root"])) do
-        {:ok, path} -> String.trim(path)
+        {:ok, path} ->
+          String.trim(path)
+
         _ ->
           # Fallback: walk up from priv dir
           :code.priv_dir(@app) |> to_string() |> Path.join("..") |> Path.expand()
@@ -79,7 +81,11 @@ defmodule OptimalSystemAgent.CLI do
 
     # Git pull
     safe_puts("  Pulling latest...")
-    case System.cmd("git", ["pull", "--ff-only", "origin", "main"], cd: root, stderr_to_stdout: true) do
+
+    case System.cmd("git", ["pull", "--ff-only", "origin", "main"],
+           cd: root,
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         safe_puts("  #{String.trim(output)}")
 
@@ -93,6 +99,7 @@ defmodule OptimalSystemAgent.CLI do
     System.cmd("mix", ["deps.get"], cd: root, stderr_to_stdout: true)
 
     safe_puts("  Compiling...")
+
     case System.cmd("mix", ["compile"], cd: root, stderr_to_stdout: true) do
       {_, 0} -> safe_puts("  ✓ Compiled successfully")
       {output, _} -> safe_puts("  Warning: #{String.trim(output)}")
@@ -100,8 +107,10 @@ defmodule OptimalSystemAgent.CLI do
 
     # Rebuild Rust TUI if it exists
     tui_dir = Path.join([root, "priv", "rust", "tui"])
+
     if File.exists?(Path.join(tui_dir, "Cargo.toml")) do
       safe_puts("  Rebuilding TUI...")
+
       case System.cmd("cargo", ["build", "--release"], cd: tui_dir, stderr_to_stdout: true) do
         {_, 0} -> safe_puts("  ✓ TUI rebuilt")
         {output, _} -> safe_puts("  Warning: TUI build: #{String.trim(output)}")
@@ -139,6 +148,6 @@ defmodule OptimalSystemAgent.CLI do
     ErlangError -> :ok
   catch
     :error, :enotsup -> :ok
-    :error, :eio     -> :ok
+    :error, :eio -> :ok
   end
 end

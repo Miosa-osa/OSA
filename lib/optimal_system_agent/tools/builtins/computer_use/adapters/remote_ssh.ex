@@ -299,16 +299,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.RemoteSSH do
 
   defp build_ssh_args(config) do
     base = [
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "ConnectTimeout=10",
-      "-o", "BatchMode=yes"
+      "-o",
+      "StrictHostKeyChecking=no",
+      "-o",
+      "ConnectTimeout=10",
+      "-o",
+      "BatchMode=yes"
     ]
 
-    base = if config[:port] && config[:port] != 22 do
-      base ++ ["-p", "#{config[:port]}"]
-    else
-      base
-    end
+    base =
+      if config[:port] && config[:port] != 22 do
+        base ++ ["-p", "#{config[:port]}"]
+      else
+        base
+      end
 
     if config[:key_path] do
       base ++ ["-i", Path.expand(config[:key_path])]
@@ -319,22 +323,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.RemoteSSH do
 
   defp build_scp_args(config, remote_path, local_path) do
     base = [
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "ConnectTimeout=10",
-      "-o", "BatchMode=yes"
+      "-o",
+      "StrictHostKeyChecking=no",
+      "-o",
+      "ConnectTimeout=10",
+      "-o",
+      "BatchMode=yes"
     ]
 
-    base = if config[:port] && config[:port] != 22 do
-      base ++ ["-P", "#{config[:port]}"]
-    else
-      base
-    end
+    base =
+      if config[:port] && config[:port] != 22 do
+        base ++ ["-P", "#{config[:port]}"]
+      else
+        base
+      end
 
-    base = if config[:key_path] do
-      base ++ ["-i", Path.expand(config[:key_path])]
-    else
-      base
-    end
+    base =
+      if config[:key_path] do
+        base ++ ["-i", Path.expand(config[:key_path])]
+      else
+        base
+      end
 
     user = config[:user] || "root"
     host = config[:host]

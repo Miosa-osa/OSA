@@ -199,7 +199,9 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
     test "conversation_tokens increases with message content" do
       state_empty = base_state(%{messages: []})
-      state_full = base_state(%{messages: [%{role: "user", content: String.duplicate("word ", 200)}]})
+
+      state_full =
+        base_state(%{messages: [%{role: "user", content: String.duplicate("word ", 200)}]})
 
       budget_empty = Context.token_budget(state_empty)
       budget_full = Context.token_budget(state_full)
@@ -326,6 +328,7 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
     test "adds tool call tokens when tool_calls are present" do
       msg_no_tools = %{role: "assistant", content: "plain response"}
+
       msg_with_tools = %{
         role: "assistant",
         content: "",

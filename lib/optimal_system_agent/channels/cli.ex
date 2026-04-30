@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+
   alias OptimalSystemAgent.Channels.CLI.{
     Commands,
     ComputerUseDispatch,
@@ -31,6 +32,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
     Renderer,
     Session
   }
+
   alias OptimalSystemAgent.Channels.NoiseFilter
 
   def start do
@@ -39,8 +41,13 @@ defmodule OptimalSystemAgent.Channels.CLI do
     # First-run setup wizard
     if OptimalSystemAgent.Onboarding.first_run?() do
       case OptimalSystemAgent.CLI.Setup.run() do
-        :ok -> IO.puts("")
-        :skip -> IO.puts("\n#{IO.ANSI.faint()}  Skipped setup — use /login or set env vars#{IO.ANSI.reset()}\n")
+        :ok ->
+          IO.puts("")
+
+        :skip ->
+          IO.puts(
+            "\n#{IO.ANSI.faint()}  Skipped setup — use /login or set env vars#{IO.ANSI.reset()}\n"
+          )
       end
     end
 
@@ -54,12 +61,20 @@ defmodule OptimalSystemAgent.Channels.CLI do
 
         resume_id ->
           Application.delete_env(:optimal_system_agent, :resume_session_id)
+
           case OptimalSystemAgent.Agent.SessionPersistence.load(resume_id) do
             {:ok, msgs} ->
-              IO.puts("#{IO.ANSI.faint()}  Resumed session: #{resume_id} (#{length(msgs)} messages)#{IO.ANSI.reset()}\n")
+              IO.puts(
+                "#{IO.ANSI.faint()}  Resumed session: #{resume_id} (#{length(msgs)} messages)#{IO.ANSI.reset()}\n"
+              )
+
               {resume_id, msgs}
+
             {:error, _} ->
-              IO.puts("#{IO.ANSI.yellow()}  Could not resume #{resume_id} — starting new session#{IO.ANSI.reset()}\n")
+              IO.puts(
+                "#{IO.ANSI.yellow()}  Could not resume #{resume_id} — starting new session#{IO.ANSI.reset()}\n"
+              )
+
               {"cli_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower), []}
           end
       end
@@ -151,6 +166,7 @@ defmodule OptimalSystemAgent.Channels.CLI do
                 unless String.starts_with?(input, "/") do
                   Renderer.print_user_message(input)
                 end
+
                 next = process_input(input, session_id)
                 loop(next)
               end
@@ -197,7 +213,6 @@ defmodule OptimalSystemAgent.Channels.CLI do
       session_id
     end
   end
-
 
   # ── Command Handling ─────────────────────────────────────────────────
 

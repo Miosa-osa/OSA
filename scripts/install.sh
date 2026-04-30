@@ -53,7 +53,7 @@ fail()  { echo -e "${RED}✗${RESET} $*"; exit 1; }
 # ── Config ─────────────────────────────────────────────────────────
 OSA_DIR="${HOME}/.osa"
 INSTALL_DIR="${HOME}/.local/bin"
-REPO_URL="${OSA_REPO_URL:-https://github.com/Miosa-osa/OptimalSystemAgent.git}"
+REPO_URL="${OSA_REPO_URL:-https://github.com/Miosa-osa/OSA.git}"
 BRANCH="${OSA_BRANCH:-main}"
 AGENT_DIR="${OSA_DIR}/agent"
 
@@ -335,10 +335,22 @@ check_cmd elixir || fail "Elixir installation failed. Install Elixir 1.17+ manua
 check_cmd erl    || fail "Erlang installation failed. Install OTP 26+ manually."
 check_elixir_version || fail "Elixir version too old. Need 1.17+, have: $(elixir --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 
+# ── Local checkout detection (must run BEFORE clone) ─────────────
+# When this script is launched from inside a cloned repo (e.g. via
+# `bin/install`), use the existing checkout instead of cloning anew.
+SCRIPT_SELF="${BASH_SOURCE[0]:-$0}"
+LOCAL_CHECKOUT=""
+if [ -f "$(dirname "$SCRIPT_SELF")/../mix.exs" ] 2>/dev/null; then
+  LOCAL_CHECKOUT="$(cd "$(dirname "$SCRIPT_SELF")/.." && pwd)"
+fi
+
 # ── Clone or update repo ──────────────────────────────────────────
 mkdir -p "$OSA_DIR"
 
-if [ -d "$AGENT_DIR/.git" ]; then
+if [ -n "$LOCAL_CHECKOUT" ]; then
+  AGENT_DIR="$LOCAL_CHECKOUT"
+  info "Running from local checkout: $AGENT_DIR"
+elif [ -d "$AGENT_DIR/.git" ]; then
   info "Updating existing installation..."
   (cd "$AGENT_DIR" && git pull --ff-only origin "$BRANCH" 2>&1) || true
   ok "Updated"
@@ -348,13 +360,6 @@ else
   info "Cloning OSA Agent..."
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$AGENT_DIR" 2>&1 | tail -2
   ok "Cloned to $AGENT_DIR"
-fi
-
-# Support running from a local checkout
-SCRIPT_SELF="${BASH_SOURCE[0]:-$0}"
-if [ -f "$(dirname "$SCRIPT_SELF")/../mix.exs" ] 2>/dev/null; then
-  AGENT_DIR="$(cd "$(dirname "$SCRIPT_SELF")/.." && pwd)"
-  info "Running from local checkout: $AGENT_DIR"
 fi
 
 echo "$AGENT_DIR" > "$OSA_DIR/project_root"

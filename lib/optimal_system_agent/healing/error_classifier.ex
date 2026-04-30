@@ -177,7 +177,12 @@ defmodule OptimalSystemAgent.Healing.ErrorClassifier do
       contains_any?(lower, ["permission denied", "eacces", "eperm", "sandbox", "not allowed"]) ->
         {:permission_denied, :high, false}
 
-      contains_any?(lower, ["file conflict", "write before read", "merge conflict", "already modified"]) ->
+      contains_any?(lower, [
+        "file conflict",
+        "write before read",
+        "merge conflict",
+        "already modified"
+      ]) ->
         {:file_conflict, :medium, true}
 
       contains_any?(lower, ["assertion", "assert", "expected", "test failed", "flunk"]) ->

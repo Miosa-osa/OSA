@@ -163,6 +163,7 @@ defmodule OptimalSystemAgent.Events.Stream do
       |> :queue.to_list()
       |> Enum.filter(fn event ->
         time = event_time(event)
+
         time != nil and DateTime.compare(time, from) in [:gt, :eq] and
           DateTime.compare(time, to) in [:lt, :eq]
       end)

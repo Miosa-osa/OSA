@@ -161,10 +161,12 @@ defmodule OptimalSystemAgent.Teams.AgentState do
         {:error, :not_found}
 
       state ->
-        updated = %{state |
-          token_usage: state.token_usage + tokens,
-          cost_usd: state.cost_usd + cost_usd
+        updated = %{
+          state
+          | token_usage: state.token_usage + tokens,
+            cost_usd: state.cost_usd + cost_usd
         }
+
         put(team_id, updated)
         {:ok, updated}
     end

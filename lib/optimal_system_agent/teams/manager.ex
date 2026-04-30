@@ -66,7 +66,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
   @spec create_team(map()) :: {:ok, map()} | {:error, term()}
   def create_team(config) when is_map(config) do
     team_id = Map.get(config, :team_id, generate_team_id())
-    config  = Map.put(config, :team_id, team_id)
+    config = Map.put(config, :team_id, team_id)
 
     case OptimalSystemAgent.Teams.Supervisor.start_team(config) do
       {:ok, _pid} ->
@@ -92,16 +92,17 @@ defmodule OptimalSystemAgent.Teams.Manager do
           {:ok, map()} | {:error, term()}
   def create_sub_team(parent_team_id, name, opts \\ %{}) do
     with {:ok, parent_meta} <- fetch_meta(parent_team_id),
-         :ok                <- check_depth(parent_meta) do
+         :ok <- check_depth(parent_meta) do
       budget = Map.get(opts, :budget_usd, parent_meta.budget_usd / 2)
 
-      config = %{
-        name:      name,
-        parent_id: parent_team_id,
-        depth:     parent_meta.depth + 1,
-        budget_usd: budget
-      }
-      |> Map.merge(Map.drop(opts, [:budget_usd]))
+      config =
+        %{
+          name: name,
+          parent_id: parent_team_id,
+          depth: parent_meta.depth + 1,
+          budget_usd: budget
+        }
+        |> Map.merge(Map.drop(opts, [:budget_usd]))
 
       case create_team(config) do
         {:ok, child_meta} ->
@@ -109,7 +110,8 @@ defmodule OptimalSystemAgent.Teams.Manager do
           register_child(parent_team_id, child_meta.team_id)
           {:ok, child_meta}
 
-        err -> err
+        err ->
+          err
       end
     end
   end
@@ -187,11 +189,15 @@ defmodule OptimalSystemAgent.Teams.Manager do
   def spawn_agent(team_id, name, role, opts \\ []) do
     with {:ok, _meta} <- fetch_meta(team_id) do
       agent_id = "agent:#{team_id}:#{System.unique_integer([:positive, :monotonic])}"
-      tier     = Keyword.get(opts, :tier, :specialist)
-      provider = Keyword.get(opts, :provider) ||
-        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-      model    = Keyword.get(opts, :model) ||
-        OptimalSystemAgent.Agent.Tier.model_for(tier, provider)
+      tier = Keyword.get(opts, :tier, :specialist)
+
+      provider =
+        Keyword.get(opts, :provider) ||
+          Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+      model =
+        Keyword.get(opts, :model) ||
+          OptimalSystemAgent.Agent.Tier.model_for(tier, provider)
 
       agent_state = AgentState.new(agent_id, name, role, model)
       AgentState.put(team_id, agent_state)
@@ -221,7 +227,8 @@ defmodule OptimalSystemAgent.Teams.Manager do
       [{pid, _}] ->
         safely_terminate_loop(pid)
 
-      [] -> :ok
+      [] ->
+        :ok
     end
 
     AgentState.delete(team_id, agent_id)
@@ -237,9 +244,9 @@ defmodule OptimalSystemAgent.Teams.Manager do
   @spec get_parent_team(String.t()) :: map() | nil
   def get_parent_team(team_id) do
     case get_meta(team_id) do
-      %{parent_id: nil}       -> nil
+      %{parent_id: nil} -> nil
       %{parent_id: parent_id} -> get_meta(parent_id)
-      nil                     -> nil
+      nil -> nil
     end
   end
 
@@ -248,7 +255,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
   def get_child_teams(team_id) do
     case get_meta(team_id) do
       %{child_ids: ids} -> Enum.map(ids, &get_meta/1) |> Enum.reject(&is_nil/1)
-      nil               -> []
+      nil -> []
     end
   end
 
@@ -260,7 +267,9 @@ defmodule OptimalSystemAgent.Teams.Manager do
   @spec get_sibling_teams(String.t()) :: [map()]
   def get_sibling_teams(team_id) do
     case get_parent_team(team_id) do
-      nil         -> []
+      nil ->
+        []
+
       parent_meta ->
         parent_meta.child_ids
         |> Enum.reject(&(&1 == team_id))
@@ -300,6 +309,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
 
   def start_link(config) when is_map(config) do
     team_id = Map.fetch!(config, :team_id)
+
     GenServer.start_link(__MODULE__, config,
       name: {:via, Registry, {OptimalSystemAgent.Registry, {__MODULE__, team_id}}}
     )
@@ -307,23 +317,23 @@ defmodule OptimalSystemAgent.Teams.Manager do
 
   @impl true
   def init(config) do
-    team_id   = Map.fetch!(config, :team_id)
-    name      = Map.get(config, :name, "team-#{team_id}")
+    team_id = Map.fetch!(config, :team_id)
+    name = Map.get(config, :name, "team-#{team_id}")
     parent_id = Map.get(config, :parent_id)
-    depth     = Map.get(config, :depth, 0)
-    budget    = Map.get(config, :budget_usd, 1.0) * 1.0
+    depth = Map.get(config, :depth, 0)
+    budget = Map.get(config, :budget_usd, 1.0) * 1.0
 
     # Create ETS tables before writing meta
     TableRegistry.ensure_tables(team_id)
 
     meta = %{
-      team_id:    team_id,
-      name:       name,
-      parent_id:  parent_id,
-      child_ids:  [],
-      status:     :active,
+      team_id: team_id,
+      name: name,
+      parent_id: parent_id,
+      child_ids: [],
+      status: :active,
       budget_usd: budget,
-      depth:      depth,
+      depth: depth,
       created_at: DateTime.utc_now()
     }
 
@@ -356,7 +366,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
 
   defp update_meta(team_id, updates) do
     case get_meta(team_id) do
-      nil  -> :ok
+      nil -> :ok
       meta -> write_meta(team_id, Map.merge(meta, updates))
     end
   end
@@ -364,7 +374,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
   defp get_meta(team_id) do
     case :ets.lookup(TableRegistry.meta_table(team_id), :team) do
       [{:team, meta}] -> meta
-      []              -> nil
+      [] -> nil
     end
   rescue
     _ -> nil
@@ -372,7 +382,7 @@ defmodule OptimalSystemAgent.Teams.Manager do
 
   defp fetch_meta(team_id) do
     case get_meta(team_id) do
-      nil  -> {:error, :team_not_found}
+      nil -> {:error, :team_not_found}
       meta -> {:ok, meta}
     end
   end
@@ -380,11 +390,14 @@ defmodule OptimalSystemAgent.Teams.Manager do
   defp check_depth(%{depth: depth}) when depth >= @max_depth do
     {:error, :max_depth_exceeded}
   end
+
   defp check_depth(_meta), do: :ok
 
   defp register_child(parent_team_id, child_team_id) do
     case get_meta(parent_team_id) do
-      nil  -> :ok
+      nil ->
+        :ok
+
       meta ->
         updated = Map.update(meta, :child_ids, [child_team_id], &[child_team_id | &1])
         write_meta(parent_team_id, updated)
@@ -403,7 +416,8 @@ defmodule OptimalSystemAgent.Teams.Manager do
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:teams",
-      {:team_event, %{type: :team_dissolved, team_id: team_id, name: meta.name, at: DateTime.utc_now()}}
+      {:team_event,
+       %{type: :team_dissolved, team_id: team_id, name: meta.name, at: DateTime.utc_now()}}
     )
   rescue
     _ -> :ok

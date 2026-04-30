@@ -100,36 +100,92 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   @spec start_task(map(), String.t(), String.t()) :: {map(), :ok | {:error, :not_found}}
   def start_task(sessions, session_id, task_id) do
     sessions = ensure_session(sessions, session_id)
-    do_update_task(sessions, session_id, task_id, fn task ->
-      %{task | status: :in_progress, started_at: DateTime.utc_now()}
-    end, fn task ->
-      safe_emit(:system_event, %{event: :task_tracker_task_started, session_id: session_id, task_id: task_id, title: task.title})
-      safe_emit(:system_event, %{event: :task_updated, task_id: task_id, status: "in_progress", session_id: session_id})
-    end)
+
+    do_update_task(
+      sessions,
+      session_id,
+      task_id,
+      fn task ->
+        %{task | status: :in_progress, started_at: DateTime.utc_now()}
+      end,
+      fn task ->
+        safe_emit(:system_event, %{
+          event: :task_tracker_task_started,
+          session_id: session_id,
+          task_id: task_id,
+          title: task.title
+        })
+
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "in_progress",
+          session_id: session_id
+        })
+      end
+    )
   end
 
   @doc "Transition task to :completed."
   @spec complete_task(map(), String.t(), String.t()) :: {map(), :ok | {:error, :not_found}}
   def complete_task(sessions, session_id, task_id) do
     sessions = ensure_session(sessions, session_id)
-    do_update_task(sessions, session_id, task_id, fn task ->
-      %{task | status: :completed, completed_at: DateTime.utc_now()}
-    end, fn task ->
-      safe_emit(:system_event, %{event: :task_tracker_task_completed, session_id: session_id, task_id: task_id, title: task.title})
-      safe_emit(:system_event, %{event: :task_updated, task_id: task_id, status: "completed", session_id: session_id})
-    end)
+
+    do_update_task(
+      sessions,
+      session_id,
+      task_id,
+      fn task ->
+        %{task | status: :completed, completed_at: DateTime.utc_now()}
+      end,
+      fn task ->
+        safe_emit(:system_event, %{
+          event: :task_tracker_task_completed,
+          session_id: session_id,
+          task_id: task_id,
+          title: task.title
+        })
+
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "completed",
+          session_id: session_id
+        })
+      end
+    )
   end
 
   @doc "Transition task to :failed."
-  @spec fail_task(map(), String.t(), String.t(), String.t()) :: {map(), :ok | {:error, :not_found}}
+  @spec fail_task(map(), String.t(), String.t(), String.t()) ::
+          {map(), :ok | {:error, :not_found}}
   def fail_task(sessions, session_id, task_id, reason) do
     sessions = ensure_session(sessions, session_id)
-    do_update_task(sessions, session_id, task_id, fn task ->
-      %{task | status: :failed, reason: reason, completed_at: DateTime.utc_now()}
-    end, fn task ->
-      safe_emit(:system_event, %{event: :task_tracker_task_failed, session_id: session_id, task_id: task_id, title: task.title, reason: reason})
-      safe_emit(:system_event, %{event: :task_updated, task_id: task_id, status: "failed", session_id: session_id})
-    end)
+
+    do_update_task(
+      sessions,
+      session_id,
+      task_id,
+      fn task ->
+        %{task | status: :failed, reason: reason, completed_at: DateTime.utc_now()}
+      end,
+      fn task ->
+        safe_emit(:system_event, %{
+          event: :task_tracker_task_failed,
+          session_id: session_id,
+          task_id: task_id,
+          title: task.title,
+          reason: reason
+        })
+
+        safe_emit(:system_event, %{
+          event: :task_updated,
+          task_id: task_id,
+          status: "failed",
+          session_id: session_id
+        })
+      end
+    )
   end
 
   @doc "Update task fields (description, owner, metadata)."
@@ -138,17 +194,23 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
     sessions = ensure_session(sessions, session_id)
     allowed = Map.take(updates, [:description, :owner, :metadata])
 
-    do_update_task(sessions, session_id, task_id, fn task ->
-      Map.merge(task, allowed)
-    end, fn task ->
-      safe_emit(:system_event, %{
-        event: :task_tracker_task_updated,
-        session_id: session_id,
-        task_id: task_id,
-        fields: Map.keys(allowed),
-        title: task.title
-      })
-    end)
+    do_update_task(
+      sessions,
+      session_id,
+      task_id,
+      fn task ->
+        Map.merge(task, allowed)
+      end,
+      fn task ->
+        safe_emit(:system_event, %{
+          event: :task_tracker_task_updated,
+          session_id: session_id,
+          task_id: task_id,
+          fields: Map.keys(allowed),
+          title: task.title
+        })
+      end
+    )
   end
 
   @doc "Record token usage against a task. Fire-and-forget, returns new sessions."
@@ -156,9 +218,16 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   def record_tokens(sessions, session_id, task_id, count) do
     sessions = ensure_session(sessions, session_id)
 
-    {new_sessions, _} = do_update_task(sessions, session_id, task_id, fn task ->
-      %{task | tokens_used: task.tokens_used + count}
-    end, fn _task -> :ok end)
+    {new_sessions, _} =
+      do_update_task(
+        sessions,
+        session_id,
+        task_id,
+        fn task ->
+          %{task | tokens_used: task.tokens_used + count}
+        end,
+        fn _task -> :ok end
+      )
 
     new_sessions
   end
@@ -173,13 +242,27 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
     if not Enum.any?(tasks, &(&1.id == blocker_id)) do
       {sessions, {:error, :blocker_not_found}}
     else
-      do_update_task(sessions, session_id, task_id, fn task ->
-        blocked_by = task.blocked_by || []
-        if blocker_id in blocked_by, do: task,
-          else: %{task | blocked_by: blocked_by ++ [blocker_id]}
-      end, fn task ->
-        safe_emit(:system_event, %{event: :task_tracker_dependency_added, session_id: session_id, task_id: task_id, blocker_id: blocker_id, title: task.title})
-      end)
+      do_update_task(
+        sessions,
+        session_id,
+        task_id,
+        fn task ->
+          blocked_by = task.blocked_by || []
+
+          if blocker_id in blocked_by,
+            do: task,
+            else: %{task | blocked_by: blocked_by ++ [blocker_id]}
+        end,
+        fn task ->
+          safe_emit(:system_event, %{
+            event: :task_tracker_dependency_added,
+            session_id: session_id,
+            task_id: task_id,
+            blocker_id: blocker_id,
+            title: task.title
+          })
+        end
+      )
     end
   end
 
@@ -188,11 +271,24 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           {map(), :ok | {:error, :not_found}}
   def remove_dependency(sessions, session_id, task_id, blocker_id) do
     sessions = ensure_session(sessions, session_id)
-    do_update_task(sessions, session_id, task_id, fn task ->
-      %{task | blocked_by: (task.blocked_by || []) -- [blocker_id]}
-    end, fn task ->
-      safe_emit(:system_event, %{event: :task_tracker_dependency_removed, session_id: session_id, task_id: task_id, blocker_id: blocker_id, title: task.title})
-    end)
+
+    do_update_task(
+      sessions,
+      session_id,
+      task_id,
+      fn task ->
+        %{task | blocked_by: (task.blocked_by || []) -- [blocker_id]}
+      end,
+      fn task ->
+        safe_emit(:system_event, %{
+          event: :task_tracker_dependency_removed,
+          session_id: session_id,
+          task_id: task_id,
+          blocker_id: blocker_id,
+          title: task.title
+        })
+      end
+    )
   end
 
   @doc "Clear all tasks for a session."
@@ -220,9 +316,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
     sessions = ensure_session(sessions, session_id)
     tasks = sessions[session_id] || []
 
-    next = Enum.find(tasks, fn task ->
-      task.status == :pending and dependencies_met?(task, tasks)
-    end)
+    next =
+      Enum.find(tasks, fn task ->
+        task.status == :pending and dependencies_met?(task, tasks)
+      end)
 
     {:ok, next}
   end
@@ -230,8 +327,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   @doc "Convert a task to a UI map."
   @spec task_to_map(%Task{}) :: map()
   def task_to_map(%Task{} = task) do
-    %{id: task.id, subject: task.title, status: to_string(task.status),
-      active_form: task.metadata[:active_form]}
+    %{
+      id: task.id,
+      subject: task.title,
+      status: to_string(task.status),
+      active_form: task.metadata[:active_form]
+    }
   end
 
   # ── Public: Extraction ────────────────────────────────────────────────────
@@ -375,11 +476,13 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   end
 
   defp parse_datetime(nil), do: nil
+
   defp parse_datetime(str) when is_binary(str) do
     case DateTime.from_iso8601(str) do
       {:ok, dt, _} -> dt
       _ -> nil
     end
   end
+
   defp parse_datetime(_), do: nil
 end

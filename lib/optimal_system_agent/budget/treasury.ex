@@ -110,11 +110,12 @@ defmodule OptimalSystemAgent.Budget.Treasury do
       new_balance = state.balance - amount
       txn = make_txn(:debit, amount, reason, ref, new_balance)
 
-      state = %{state |
-        balance: new_balance,
-        daily_spent: state.daily_spent + amount,
-        monthly_spent: state.monthly_spent + amount,
-        ledger: [txn | state.ledger]
+      state = %{
+        state
+        | balance: new_balance,
+          daily_spent: state.daily_spent + amount,
+          monthly_spent: state.monthly_spent + amount,
+          ledger: [txn | state.ledger]
       }
 
       {:reply, {:ok, txn}, state}
@@ -131,11 +132,12 @@ defmodule OptimalSystemAgent.Budget.Treasury do
     new_reserved = state.reserved + amount
     txn = make_txn(:reserve, amount, "reserve:#{ref}", ref, new_balance)
 
-    state = %{state |
-      balance: new_balance,
-      reserved: new_reserved,
-      reserves: Map.put(state.reserves, to_string(ref), amount),
-      ledger: [txn | state.ledger]
+    state = %{
+      state
+      | balance: new_balance,
+        reserved: new_reserved,
+        reserves: Map.put(state.reserves, to_string(ref), amount),
+        ledger: [txn | state.ledger]
     }
 
     {:reply, {:ok, txn}, state}
@@ -154,11 +156,12 @@ defmodule OptimalSystemAgent.Budget.Treasury do
         new_reserved = state.reserved - amount
         txn = make_txn(:release, amount, "release:#{ref}", ref_str, new_balance)
 
-        state = %{state |
-          balance: new_balance,
-          reserved: new_reserved,
-          reserves: Map.delete(state.reserves, ref_str),
-          ledger: [txn | state.ledger]
+        state = %{
+          state
+          | balance: new_balance,
+            reserved: new_reserved,
+            reserves: Map.delete(state.reserves, ref_str),
+            ledger: [txn | state.ledger]
         }
 
         {:reply, {:ok, txn}, state}

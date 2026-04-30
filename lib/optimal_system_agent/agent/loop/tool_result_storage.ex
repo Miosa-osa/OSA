@@ -11,7 +11,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   require Logger
 
   @results_dir Path.expand("~/.osa/tool-results")
-  @default_threshold 10_240  # 10KB
+  # 10KB
+  @default_threshold 10_240
 
   @doc """
   Apply result budget to a tool result string.
@@ -20,7 +21,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   Otherwise return the result unchanged.
   """
   def apply_budget(result_str, tool_name, tool_call_id) when is_binary(result_str) do
-    threshold = Application.get_env(:optimal_system_agent, :max_tool_output_bytes, @default_threshold)
+    threshold =
+      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, @default_threshold)
 
     if byte_size(result_str) > threshold do
       persist_and_reference(result_str, tool_name, tool_call_id, threshold)
@@ -38,10 +40,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     pattern = Path.join(@results_dir, "#{session_id}_*")
 
     case Path.wildcard(pattern) do
-      [] -> :ok
+      [] ->
+        :ok
+
       files ->
         Enum.each(files, &File.rm/1)
-        Logger.debug("[tool_result_storage] Cleaned up #{length(files)} result files for #{session_id}")
+
+        Logger.debug(
+          "[tool_result_storage] Cleaned up #{length(files)} result files for #{session_id}"
+        )
     end
   rescue
     _ -> :ok
@@ -73,7 +80,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
         size_kb = Float.round(byte_size(result_str) / 1024, 1)
         preview = String.slice(result_str, 0, min(threshold, 2000))
 
-        Logger.debug("[tool_result_storage] Persisted #{tool_name} result (#{size_kb}KB) to #{path}")
+        Logger.debug(
+          "[tool_result_storage] Persisted #{tool_name} result (#{size_kb}KB) to #{path}"
+        )
 
         "#{preview}\n\n[Full output persisted: #{path} (#{size_kb}KB) — use file_read to access if needed]"
 

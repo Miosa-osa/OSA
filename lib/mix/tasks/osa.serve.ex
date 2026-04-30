@@ -41,6 +41,6 @@ defmodule Mix.Tasks.Osa.Serve do
     ErlangError -> :ok
   catch
     :error, :enotsup -> :ok
-    :error, :eio     -> :ok
+    :error, :eio -> :ok
   end
 end

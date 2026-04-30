@@ -173,7 +173,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.Docker do
 
   @impl true
   def get_tree do
-    {:error, "Accessibility tree not yet implemented for Docker adapter. Use screenshot fallback."}
+    {:error,
+     "Accessibility tree not yet implemented for Docker adapter. Use screenshot fallback."}
   end
 
   # ---------------------------------------------------------------------------

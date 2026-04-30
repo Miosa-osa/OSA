@@ -64,7 +64,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
         state = put_workflow(state, workflow)
         Persistence.save_workflow(state.dir, serialize(workflow))
 
-        Logger.info("[Tasks.Workflow] Created #{workflow.id} (#{workflow.name}) — #{length(steps)} steps")
+        Logger.info(
+          "[Tasks.Workflow] Created #{workflow.id} (#{workflow.name}) — #{length(steps)} steps"
+        )
+
         {:ok, {state, serialize(workflow)}}
 
       {:error, reason} ->
@@ -77,8 +80,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec advance(map(), String.t(), term()) :: {:ok, map()} | {:error, term()}
   def advance(state, workflow_id, result \\ nil) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
-      %{status: status} when status != :active -> {:error, {:invalid_status, status}}
+      nil ->
+        {:error, :not_found}
+
+      %{status: status} when status != :active ->
+        {:error, {:invalid_status, status}}
+
       workflow ->
         workflow = complete_current_step(workflow, result)
         next_index = workflow.current_step + 1
@@ -94,7 +101,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
         state = put_workflow(state, workflow)
         Persistence.save_workflow(state.dir, serialize(workflow))
 
-        Logger.info("[Tasks.Workflow] #{workflow_id}: step #{workflow.current_step + 1}/#{length(workflow.steps)} (#{workflow.status})")
+        Logger.info(
+          "[Tasks.Workflow] #{workflow_id}: step #{workflow.current_step + 1}/#{length(workflow.steps)} (#{workflow.status})"
+        )
+
         {:ok, {state, serialize(workflow)}}
     end
   end
@@ -103,16 +113,21 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec complete_step(map(), String.t(), term()) :: {:ok, map()} | {:error, term()}
   def complete_step(state, workflow_id, result) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
-      %{status: status} when status != :active -> {:error, {:invalid_status, status}}
+      nil ->
+        {:error, :not_found}
+
+      %{status: status} when status != :active ->
+        {:error, {:invalid_status, status}}
+
       workflow ->
         workflow = complete_current_step(workflow, result)
         current = Enum.at(workflow.steps, workflow.current_step)
         context_key = current.name |> String.downcase() |> String.replace(~r/\s+/, "_")
 
-        workflow = %{workflow |
-          context: Map.put(workflow.context, context_key, result),
-          updated_at: now_iso()
+        workflow = %{
+          workflow
+          | context: Map.put(workflow.context, context_key, result),
+            updated_at: now_iso()
         }
 
         state = put_workflow(state, workflow)
@@ -125,12 +140,17 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec skip_step(map(), String.t(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def skip_step(state, workflow_id, reason \\ nil) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
-      %{status: status} when status != :active -> {:error, {:invalid_status, status}}
+      nil ->
+        {:error, :not_found}
+
+      %{status: status} when status != :active ->
+        {:error, {:invalid_status, status}}
+
       workflow ->
-        steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-          %{step | status: :skipped, result: reason, completed_at: now_iso()}
-        end)
+        steps =
+          List.update_at(workflow.steps, workflow.current_step, fn step ->
+            %{step | status: :skipped, result: reason, completed_at: now_iso()}
+          end)
 
         next_index = workflow.current_step + 1
 
@@ -154,14 +174,18 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec pause(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def pause(state, workflow_id) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       %{status: :active} = workflow ->
         workflow = %{workflow | status: :paused, updated_at: now_iso()}
         state = put_workflow(state, workflow)
         Persistence.save_workflow(state.dir, serialize(workflow))
         Logger.info("[Tasks.Workflow] #{workflow_id}: paused")
         {:ok, {state, serialize(workflow)}}
-      %{status: status} -> {:error, {:invalid_status, status}}
+
+      %{status: status} ->
+        {:error, {:invalid_status, status}}
     end
   end
 
@@ -169,14 +193,18 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec resume(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def resume(state, workflow_id) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       %{status: :paused} = workflow ->
         workflow = %{workflow | status: :active, updated_at: now_iso()}
         state = put_workflow(state, workflow)
         Persistence.save_workflow(state.dir, serialize(workflow))
         Logger.info("[Tasks.Workflow] #{workflow_id}: resumed")
         {:ok, {state, serialize(workflow)}}
-      %{status: status} -> {:error, {:invalid_status, status}}
+
+      %{status: status} ->
+        {:error, {:invalid_status, status}}
     end
   end
 
@@ -198,25 +226,29 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   @spec status(map(), String.t()) :: {:ok, map()} | {:error, :not_found}
   def status(state, workflow_id) do
     case Map.get(state.workflows, workflow_id) do
-      nil -> {:error, :not_found}
+      nil ->
+        {:error, :not_found}
+
       workflow ->
         completed = Enum.count(workflow.steps, &(&1.status == :completed))
         skipped = Enum.count(workflow.steps, &(&1.status == :skipped))
         total = length(workflow.steps)
         current = Enum.at(workflow.steps, workflow.current_step)
 
-        {:ok, %{
-          id: workflow.id,
-          name: workflow.name,
-          status: workflow.status,
-          progress: "#{completed}/#{total}",
-          completed_steps: completed,
-          skipped_steps: skipped,
-          total_steps: total,
-          current_step: if(current, do: %{name: current.name, status: current.status}, else: nil),
-          created_at: workflow.created_at,
-          updated_at: workflow.updated_at
-        }}
+        {:ok,
+         %{
+           id: workflow.id,
+           name: workflow.name,
+           status: workflow.status,
+           progress: "#{completed}/#{total}",
+           completed_steps: completed,
+           skipped_steps: skipped,
+           total_steps: total,
+           current_step:
+             if(current, do: %{name: current.name, status: current.status}, else: nil),
+           created_at: workflow.created_at,
+           updated_at: workflow.updated_at
+         }}
     end
   end
 
@@ -229,8 +261,14 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
     |> Enum.sort_by(& &1.created_at, :desc)
     |> Enum.map(fn w ->
       completed = Enum.count(w.steps, &(&1.status == :completed))
-      %{id: w.id, name: w.name, status: w.status,
-        progress: "#{completed}/#{length(w.steps)}", created_at: w.created_at}
+
+      %{
+        id: w.id,
+        name: w.name,
+        status: w.status,
+        progress: "#{completed}/#{length(w.steps)}",
+        created_at: w.created_at
+      }
     end)
   end
 
@@ -358,8 +396,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
     case Providers.chat(messages, temperature: 0.3, max_tokens: 2048) do
       {:ok, %{content: content}} when is_binary(content) and content != "" ->
         parse_steps_response(content)
+
       {:ok, _} ->
         {:error, "LLM returned empty response for task decomposition"}
+
       {:error, reason} ->
         {:error, "LLM call failed during task decomposition: #{inspect(reason)}"}
     end
@@ -394,7 +434,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
         {:error, "LLM returned invalid steps format (expected non-empty array)"}
 
       {:error, reason} ->
-        Logger.warning("[Tasks.Workflow] Failed to parse LLM step response: #{inspect(reason)}\nRaw: #{String.slice(cleaned, 0, 200)}")
+        Logger.warning(
+          "[Tasks.Workflow] Failed to parse LLM step response: #{inspect(reason)}\nRaw: #{String.slice(cleaned, 0, 200)}"
+        )
+
         {:error, "Failed to parse LLM decomposition response as JSON"}
     end
   end
@@ -403,9 +446,9 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
     expanded = Path.expand(path)
 
     if File.exists?(expanded) do
-      case (with {:ok, raw} <- File.read(expanded),
-                 {:ok, decoded} <- Jason.decode(raw),
-                 do: {:ok, decoded}) do
+      case with {:ok, raw} <- File.read(expanded),
+                {:ok, decoded} <- Jason.decode(raw),
+                do: {:ok, decoded} do
         {:ok, %{"steps" => steps}} when is_list(steps) ->
           parsed =
             steps
@@ -473,11 +516,16 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
     workflow.steps
     |> Enum.filter(&(&1.status in [:completed, :skipped]))
     |> case do
-      [] -> "None yet."
+      [] ->
+        "None yet."
+
       steps ->
         Enum.map_join(steps, "\n", fn step ->
           status_icon = if step.status == :completed, do: "[done]", else: "[skipped]"
-          result_text = if step.result, do: " - #{truncate(to_string(step.result), 120)}", else: ""
+
+          result_text =
+            if step.result, do: " - #{truncate(to_string(step.result), 120)}", else: ""
+
           "- #{status_icon} #{step.name}#{result_text}"
         end)
     end
@@ -488,14 +536,18 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
     |> Enum.drop(workflow.current_step + 1)
     |> Enum.filter(&(&1.status == :pending))
     |> case do
-      [] -> "None — this is the last step."
-      steps -> Enum.map_join(steps, "\n", fn step ->
-        "- #{step.name}: #{truncate(step.description || "", 80)}"
-      end)
+      [] ->
+        "None — this is the last step."
+
+      steps ->
+        Enum.map_join(steps, "\n", fn step ->
+          "- #{step.name}: #{truncate(step.description || "", 80)}"
+        end)
     end
   end
 
   defp format_context(context) when map_size(context) == 0, do: "No accumulated context yet."
+
   defp format_context(context) do
     Enum.map_join(context, "\n", fn {key, value} ->
       "- **#{key}**: #{truncate(to_string(value), 150)}"
@@ -507,16 +559,20 @@ defmodule OptimalSystemAgent.Agent.Tasks.Workflow do
   end
 
   defp mark_current_step_in_progress(workflow) do
-    steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-      %{step | status: :in_progress, started_at: now_iso()}
-    end)
+    steps =
+      List.update_at(workflow.steps, workflow.current_step, fn step ->
+        %{step | status: :in_progress, started_at: now_iso()}
+      end)
+
     %{workflow | steps: steps}
   end
 
   defp complete_current_step(workflow, result) do
-    steps = List.update_at(workflow.steps, workflow.current_step, fn step ->
-      %{step | status: :completed, result: result, completed_at: now_iso()}
-    end)
+    steps =
+      List.update_at(workflow.steps, workflow.current_step, fn step ->
+        %{step | status: :completed, result: result, completed_at: now_iso()}
+      end)
+
     %{workflow | steps: steps}
   end
 

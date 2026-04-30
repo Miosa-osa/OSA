@@ -57,7 +57,8 @@ defmodule OptimalSystemAgent.Agent.DebateTest do
     test "successful result has :synthesis key" do
       case Debate.run("Hello", providers: ["mock"]) do
         {:ok, result} -> assert Map.has_key?(result, :synthesis)
-        {:error, _} -> :ok  # mock may not be configured as session-free provider — graceful
+        # mock may not be configured as session-free provider — graceful
+        {:error, _} -> :ok
       end
     end
 
@@ -104,7 +105,9 @@ defmodule OptimalSystemAgent.Agent.DebateTest do
     end
 
     test "accepts :synthesizer_provider option without crashing" do
-      result = Debate.run("test", providers: ["mock"], synthesizer_provider: "mock", timeout: 2_000)
+      result =
+        Debate.run("test", providers: ["mock"], synthesizer_provider: "mock", timeout: 2_000)
+
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
 
@@ -114,7 +117,9 @@ defmodule OptimalSystemAgent.Agent.DebateTest do
     end
 
     test "accepts :model option without crashing" do
-      result = Debate.run("test", providers: ["mock"], model: "claude-3-haiku-20240307", timeout: 2_000)
+      result =
+        Debate.run("test", providers: ["mock"], model: "claude-3-haiku-20240307", timeout: 2_000)
+
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
   end
@@ -176,13 +181,20 @@ defmodule OptimalSystemAgent.Agent.DebateTest do
     end
 
     test "POST / with valid message returns 200 or 500 (no live providers in test)" do
-      conn = json_post("/", %{"message" => "What is the speed of light?", "providers" => ["mock"], "timeout" => 2000})
+      conn =
+        json_post("/", %{
+          "message" => "What is the speed of light?",
+          "providers" => ["mock"],
+          "timeout" => 2000
+        })
+
       # 200 means debate succeeded (mock provider responded), 500 means all failed
       assert conn.status in [200, 500]
     end
 
     test "POST / 200 response body has synthesis key" do
       conn = json_post("/", %{"message" => "test", "providers" => ["mock"], "timeout" => 2000})
+
       if conn.status == 200 do
         body = Jason.decode!(conn.resp_body)
         assert Map.has_key?(body, "synthesis")

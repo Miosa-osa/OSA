@@ -16,7 +16,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   use GenServer, restart: :temporary
   require Logger
 
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{Bridge, MacOS, Relay, Windows, X11vnc}
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{
+    Bridge,
+    MacOS,
+    Relay,
+    Windows,
+    X11vnc
+  }
 
   # ── Public API ──────────────────────────────────────────────────────
 

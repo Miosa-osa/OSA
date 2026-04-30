@@ -176,7 +176,9 @@ defmodule OSA.SDK do
   defdelegate append_message(session_id, entry), to: OptimalSystemAgent.SDK.Memory, as: :append
 
   @doc "Resume a session from persistent history (checks existence)."
-  defdelegate resume_memory_session(session_id), to: OptimalSystemAgent.SDK.Memory, as: :resume_session
+  defdelegate resume_memory_session(session_id),
+    to: OptimalSystemAgent.SDK.Memory,
+    as: :resume_session
 
   @doc "Get per-session stats (token totals, message counts)."
   defdelegate session_stats(session_id), to: OptimalSystemAgent.SDK.Memory
@@ -249,7 +251,9 @@ defmodule OSA.SDK do
   defdelegate list_commands(), to: OptimalSystemAgent.SDK.Command, as: :list
 
   @doc "Register a custom slash command at runtime."
-  defdelegate register_command(name, description, template), to: OptimalSystemAgent.SDK.Command, as: :register
+  defdelegate register_command(name, description, template),
+    to: OptimalSystemAgent.SDK.Command,
+    as: :register
 
   # ── MCP ──────────────────────────────────────────────────────────
 

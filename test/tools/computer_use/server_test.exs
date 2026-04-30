@@ -18,11 +18,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     def drag(_fx, _fy, _tx, _ty), do: :ok
 
     def get_tree do
-      {:ok, [
-        %{role: "button", name: "Save", x: 500, y: 300, width: 80, height: 30},
-        %{role: "textfield", name: "Email", x: 200, y: 150, width: 200, height: 25},
-        %{role: "link", name: "Help", x: 100, y: 50, width: 40, height: 20}
-      ]}
+      {:ok,
+       [
+         %{role: "button", name: "Save", x: 500, y: 300, width: 80, height: 30},
+         %{role: "textfield", name: "Email", x: 200, y: 150, width: 200, height: 25},
+         %{role: "link", name: "Help", x: 100, y: 50, width: 40, height: 20}
+       ]}
     end
   end
 
@@ -32,13 +33,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "start_link/1" do
     test "starts with adapter and platform" do
-      {:ok, pid} = Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_1")
+      {:ok, pid} =
+        Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_1")
+
       assert Process.alive?(pid)
       GenServer.stop(pid)
     end
 
     test "initializes with empty element refs" do
-      {:ok, pid} = Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_2")
+      {:ok, pid} =
+        Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_2")
+
       state = :sys.get_state(pid)
       assert state.element_refs == %{}
       assert state.step_counter == 0
@@ -53,10 +58,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
   describe "idle shutdown" do
     test "server stops after idle timeout" do
       # Use a very short timeout for testing
-      {:ok, pid} = Server.start_link(
-        adapter: MockAdapter, platform: :linux_x11,
-        session_id: "test_idle", idle_timeout_ms: 100
-      )
+      {:ok, pid} =
+        Server.start_link(
+          adapter: MockAdapter,
+          platform: :linux_x11,
+          session_id: "test_idle",
+          idle_timeout_ms: 100
+        )
+
       ref = Process.monitor(pid)
 
       # Wait for idle shutdown
@@ -64,10 +73,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     end
 
     test "action resets idle timer" do
-      {:ok, pid} = Server.start_link(
-        adapter: MockAdapter, platform: :linux_x11,
-        session_id: "test_reset", idle_timeout_ms: 200
-      )
+      {:ok, pid} =
+        Server.start_link(
+          adapter: MockAdapter,
+          platform: :linux_x11,
+          session_id: "test_reset",
+          idle_timeout_ms: 200
+        )
+
       ref = Process.monitor(pid)
 
       # Keep alive with actions
@@ -90,7 +103,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "execute/3" do
     setup do
-      {:ok, pid} = Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_exec")
+      {:ok, pid} =
+        Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_exec")
+
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
       %{pid: pid}
     end
@@ -144,7 +159,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "element ref resolution" do
     setup do
-      {:ok, pid} = Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_refs")
+      {:ok, pid} =
+        Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_refs")
+
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
       # Populate refs by fetching tree
@@ -170,7 +187,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "tree caching" do
     setup do
-      {:ok, pid} = Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_cache")
+      {:ok, pid} =
+        Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_cache")
+
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
       %{pid: pid}
     end

@@ -46,7 +46,9 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
     total = length(tasks)
     inner = width - 4
 
-    header = "─ Tasks #{String.duplicate("─", max(inner - 12 - count_width(completed, total), 0))} #{completed}/#{total} ─"
+    header =
+      "─ Tasks #{String.duplicate("─", max(inner - 12 - count_width(completed, total), 0))} #{completed}/#{total} ─"
+
     top = "#{@dim}┌#{header}┐#{@reset}"
     bottom = "#{@dim}└#{String.duplicate("─", width - 2)}┘#{@reset}"
 
@@ -58,20 +60,25 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
 
         # Available space for title: inner width - icon(2) - spacing
         title_space = inner - 2
-        title_space = if tokens != "", do: title_space - String.length(tokens) - 1, else: title_space
+
+        title_space =
+          if tokens != "", do: title_space - String.length(tokens) - 1, else: title_space
+
         title = truncate(task.title, title_space)
 
         # Build the row content
         content = "#{icon_color}#{icon}#{@reset} #{title_color(task.status)}#{title}#{@reset}"
         # Pad to fill the box
         visible_len = 2 + String.length(title)
-        pad = if tokens != "" do
-          remaining = inner - visible_len - String.length(tokens)
-          String.duplicate(" ", max(remaining, 1)) <> "#{@dim}#{tokens}#{@reset}"
-        else
-          remaining = inner - visible_len
-          String.duplicate(" ", max(remaining, 0))
-        end
+
+        pad =
+          if tokens != "" do
+            remaining = inner - visible_len - String.length(tokens)
+            String.duplicate(" ", max(remaining, 1)) <> "#{@dim}#{tokens}#{@reset}"
+          else
+            remaining = inner - visible_len
+            String.duplicate(" ", max(remaining, 0))
+          end
 
         "#{@dim}│#{@reset} #{content}#{pad} #{@dim}│#{@reset}"
       end)

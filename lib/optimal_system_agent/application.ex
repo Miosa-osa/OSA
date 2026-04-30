@@ -34,10 +34,12 @@ defmodule OptimalSystemAgent.Application do
     load_settings_into_app_env()
 
     # Read provider from environment — OSA_DEFAULT_PROVIDER takes effect at startup
-    provider = case System.get_env("OSA_DEFAULT_PROVIDER") do
-      nil -> Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-      p -> String.to_atom(p)
-    end
+    provider =
+      case System.get_env("OSA_DEFAULT_PROVIDER") do
+        nil -> Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+        p -> String.to_atom(p)
+      end
+
     Application.put_env(:optimal_system_agent, :default_provider, provider)
 
     # Map provider-specific env vars to application config
@@ -110,26 +112,30 @@ defmodule OptimalSystemAgent.Application do
     # ── Phase 3: Supervision Tree ────────────────────────────────────────
     children =
       platform_repo_children() ++
-      [
-        # General-purpose Task.Supervisor for fire-and-forget async work
-        # (HTTP message dispatch, background learning, etc.)
-        {Task.Supervisor, name: OptimalSystemAgent.TaskSupervisor},
+        [
+          # General-purpose Task.Supervisor for fire-and-forget async work
+          # (HTTP message dispatch, background learning, etc.)
+          {Task.Supervisor, name: OptimalSystemAgent.TaskSupervisor},
+          OptimalSystemAgent.Supervisors.Infrastructure,
+          OptimalSystemAgent.Supervisors.Sessions,
+          OptimalSystemAgent.Supervisors.AgentServices,
+          OptimalSystemAgent.Supervisors.Extensions,
 
-        OptimalSystemAgent.Supervisors.Infrastructure,
-        OptimalSystemAgent.Supervisors.Sessions,
-        OptimalSystemAgent.Supervisors.AgentServices,
-        OptimalSystemAgent.Supervisors.Extensions,
+          # Deferred channel startup — starts configured channels in handle_continue
+          OptimalSystemAgent.Channels.Starter,
 
-        # Deferred channel startup — starts configured channels in handle_continue
-        OptimalSystemAgent.Channels.Starter,
-
-        # HTTP channel — Plug/Bandit on configured port (SDK API surface)
-        # Started LAST so all agent processes are ready before accepting requests
-        {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
-      ]
+          # HTTP channel — Plug/Bandit on configured port (SDK API surface)
+          # Started LAST so all agent processes are ready before accepting requests
+          {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
+        ]
 
     # max_restarts: 10 in 60s prevents infinite crash loops from burning CPU
-    opts = [strategy: :rest_for_one, name: OptimalSystemAgent.Supervisor, max_restarts: 10, max_seconds: 60]
+    opts = [
+      strategy: :rest_for_one,
+      name: OptimalSystemAgent.Supervisor,
+      max_restarts: 10,
+      max_seconds: 60
+    ]
 
     # Emit an ERROR-level log if the HTTP server is reachable without auth.
     Auth.warn_if_insecure()
@@ -160,7 +166,10 @@ defmodule OptimalSystemAgent.Application do
 
         # Signal boot complete
         Application.put_env(:optimal_system_agent, :boot_complete, true)
-        Logger.info("OSA boot complete (#{System.system_time(:second) - Application.get_env(:optimal_system_agent, :start_time, 0)}s)")
+
+        Logger.info(
+          "OSA boot complete (#{System.system_time(:second) - Application.get_env(:optimal_system_agent, :start_time, 0)}s)"
+        )
 
         {:ok, pid}
 
@@ -199,9 +208,14 @@ defmodule OptimalSystemAgent.Application do
       |> String.split("\n")
       |> Enum.each(fn line ->
         line = String.trim(line)
+
         cond do
-          line == "" -> :ok
-          String.starts_with?(line, "#") -> :ok
+          line == "" ->
+            :ok
+
+          String.starts_with?(line, "#") ->
+            :ok
+
           String.contains?(line, "=") ->
             [key | rest] = String.split(line, "=", parts: 2)
             value = Enum.join(rest, "=") |> String.trim() |> String.trim("\"") |> String.trim("'")
@@ -209,7 +223,9 @@ defmodule OptimalSystemAgent.Application do
             if System.get_env(String.trim(key)) == nil do
               System.put_env(String.trim(key), value)
             end
-          true -> :ok
+
+          true ->
+            :ok
         end
       end)
     end
@@ -236,6 +252,7 @@ defmodule OptimalSystemAgent.Application do
   defp run_migrations do
     try do
       repo = OptimalSystemAgent.Store.Repo
+
       if Process.whereis(repo) do
         migrations_path = Application.app_dir(:optimal_system_agent, "priv/repo/migrations")
         Ecto.Migrator.run(repo, migrations_path, :up, all: true, log: false)
@@ -256,8 +273,15 @@ defmodule OptimalSystemAgent.Application do
 
     Enum.each(@env_mapping, fn {env_suffix, app_suffix} ->
       case System.get_env(prefix <> env_suffix) do
-        nil -> :ok
-        value -> Application.put_env(:optimal_system_agent, String.to_atom("#{provider}#{app_suffix}"), value)
+        nil ->
+          :ok
+
+        value ->
+          Application.put_env(
+            :optimal_system_agent,
+            String.to_atom("#{provider}#{app_suffix}"),
+            value
+          )
       end
     end)
   end

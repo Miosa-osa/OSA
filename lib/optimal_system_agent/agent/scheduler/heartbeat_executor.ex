@@ -113,12 +113,14 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
         {result, run, state}
 
       {:error, :budget_exceeded} ->
-        run = %{run |
-          status: "failed",
-          completed_at: DateTime.utc_now(),
-          duration_ms: 0,
-          error_message: "Budget exceeded"
+        run = %{
+          run
+          | status: "failed",
+            completed_at: DateTime.utc_now(),
+            duration_ms: 0,
+            error_message: "Budget exceeded"
         }
+
         state = %{state | runs: Map.put(state.runs, run_id, run)}
         persist_run(run)
         emit_run_failed(run)
@@ -133,22 +135,24 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
     parent = self()
     ref = make_ref()
 
-    pid = spawn(fn ->
-      result = JobExecutor.execute_task(prompt, session_id)
-      send(parent, {ref, result})
-    end)
+    pid =
+      spawn(fn ->
+        result = JobExecutor.execute_task(prompt, session_id)
+        send(parent, {ref, result})
+      end)
 
     receive do
       {^ref, {:ok, output}} ->
         now = DateTime.utc_now()
         duration = DateTime.diff(now, run.started_at, :millisecond)
 
-        run = %{run |
-          status: "succeeded",
-          completed_at: now,
-          duration_ms: duration,
-          stdout: truncate_output(output),
-          exit_code: 0
+        run = %{
+          run
+          | status: "succeeded",
+            completed_at: now,
+            duration_ms: duration,
+            stdout: truncate_output(output),
+            exit_code: 0
         }
 
         emit_event(:system_event, %{
@@ -165,12 +169,13 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
         now = DateTime.utc_now()
         duration = DateTime.diff(now, run.started_at, :millisecond)
 
-        run = %{run |
-          status: "failed",
-          completed_at: now,
-          duration_ms: duration,
-          error_message: to_string(reason),
-          exit_code: 1
+        run = %{
+          run
+          | status: "failed",
+            completed_at: now,
+            duration_ms: duration,
+            error_message: to_string(reason),
+            exit_code: 1
         }
 
         emit_run_failed(run)
@@ -182,11 +187,12 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
         now = DateTime.utc_now()
         duration = DateTime.diff(now, run.started_at, :millisecond)
 
-        run = %{run |
-          status: "timed_out",
-          completed_at: now,
-          duration_ms: duration,
-          error_message: "Timed out after #{timeout_ms}ms"
+        run = %{
+          run
+          | status: "timed_out",
+            completed_at: now,
+            duration_ms: duration,
+            error_message: "Timed out after #{timeout_ms}ms"
         }
 
         emit_run_failed(run)
@@ -258,9 +264,11 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
   end
 
   defp truncate_output(nil), do: nil
+
   defp truncate_output(output) when byte_size(output) > 10_240 do
     :zlib.gzip(output) |> Base.encode64()
   end
+
   defp truncate_output(output), do: output
 
   defp generate_run_id do

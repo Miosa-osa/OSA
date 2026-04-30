@@ -341,7 +341,11 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Step 0: Micro-compact — truncate old tool results without LLM call.
   # Keeps the last N tool results intact, truncates older ones.
   # This is the cheapest possible compaction step.
-  @micro_compact_keep Application.compile_env(:optimal_system_agent, :micro_compact_keep_recent, 5)
+  @micro_compact_keep Application.compile_env(
+                        :optimal_system_agent,
+                        :micro_compact_keep_recent,
+                        5
+                      )
 
   @doc false
   defp apply_step(:micro_compact, annotated, system_msgs, _target) do
@@ -758,14 +762,18 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         if previous_summary do
           # Use structured template for iterative compression
           @structured_compression_template
-          |> String.replace("%PREVIOUS_SUMMARY%",
-            "PREVIOUS SUMMARY (merge new info into this):\n#{previous_summary}")
+          |> String.replace(
+            "%PREVIOUS_SUMMARY%",
+            "PREVIOUS SUMMARY (merge new info into this):\n#{previous_summary}"
+          )
           |> String.replace("%MESSAGES%", formatted)
         else
           # First compression — use structured template without previous summary
           @structured_compression_template
-          |> String.replace("%PREVIOUS_SUMMARY%",
-            "PREVIOUS SUMMARY: None — this is the first compression.")
+          |> String.replace(
+            "%PREVIOUS_SUMMARY%",
+            "PREVIOUS SUMMARY: None — this is the first compression."
+          )
           |> String.replace("%MESSAGES%", formatted)
         end
 

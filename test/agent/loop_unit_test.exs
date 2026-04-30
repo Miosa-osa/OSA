@@ -147,13 +147,11 @@ defmodule OptimalSystemAgent.Agent.LoopUnitTest do
 
   defp doom_loop?(recent_failure_signatures) do
     length(recent_failure_signatures) >= 3 and
-      (
-        Enum.any?(
-          Enum.uniq(recent_failure_signatures),
-          fn sig -> Enum.count(recent_failure_signatures, &(&1 == sig)) >= 3 end
-        ) or
-          length(recent_failure_signatures) >= 6
-      )
+      (Enum.any?(
+         Enum.uniq(recent_failure_signatures),
+         fn sig -> Enum.count(recent_failure_signatures, &(&1 == sig)) >= 3 end
+       ) or
+         length(recent_failure_signatures) >= 6)
   end
 
   describe "doom loop detection — recent_failure_signatures logic" do
@@ -338,7 +336,8 @@ defmodule OptimalSystemAgent.Agent.LoopUnitTest do
       # because iteration=20 >= 3, giving ZERO overflow retries.
       # With overflow_retries=0 < 3, all 3 retries are available.
       assert state.overflow_retries < 3
-      assert state.iteration >= 3  # tool iterations don't affect overflow retries
+      # tool iterations don't affect overflow retries
+      assert state.iteration >= 3
     end
 
     test "overflow_retries increments independently from iteration" do
@@ -346,7 +345,8 @@ defmodule OptimalSystemAgent.Agent.LoopUnitTest do
       # Simulate a retry
       state = %{state | overflow_retries: state.overflow_retries + 1}
       assert state.overflow_retries == 1
-      assert state.iteration == 8  # unchanged
+      # unchanged
+      assert state.iteration == 8
       assert should_retry_overflow?(state)
     end
 
@@ -400,7 +400,8 @@ defmodule OptimalSystemAgent.Agent.LoopUnitTest do
   # ---------------------------------------------------------------------------
 
   describe "tool output truncation" do
-    @max_bytes 10_240  # 10 KB default
+    # 10 KB default
+    @max_bytes 10_240
 
     test "small output passes through unchanged" do
       output = String.duplicate("a", 100)
@@ -439,19 +440,23 @@ defmodule OptimalSystemAgent.Agent.LoopUnitTest do
       content =
         if byte_size(output) > @max_bytes do
           truncated = binary_part(output, 0, @max_bytes)
-          truncated <> "\n\n[Output truncated — #{byte_size(output)} bytes total, showing first #{@max_bytes} bytes]"
+
+          truncated <>
+            "\n\n[Output truncated — #{byte_size(output)} bytes total, showing first #{@max_bytes} bytes]"
         else
           output
         end
 
-      assert byte_size(content) > @max_bytes  # includes the notice
+      # includes the notice
+      assert byte_size(content) > @max_bytes
       assert String.contains?(content, "[Output truncated")
       assert String.contains?(content, "#{byte_size(output)} bytes total")
     end
 
     test "truncation preserves valid binary prefix" do
       # Mix of ASCII and multi-byte chars
-      output = String.duplicate("hello 🌍 ", 2000)  # ~18KB
+      # ~18KB
+      output = String.duplicate("hello 🌍 ", 2000)
       assert byte_size(output) > @max_bytes
 
       truncated = binary_part(output, 0, @max_bytes)

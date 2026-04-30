@@ -13,8 +13,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentStateRoutes do
 
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
 
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   get "/state" do
     snap = build_summary()

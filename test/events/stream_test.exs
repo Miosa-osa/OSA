@@ -143,7 +143,10 @@ defmodule OptimalSystemAgent.Events.StreamTest do
   describe "limit filtering" do
     test "limits number of returned events (most recent)", %{sid: sid} do
       for i <- 1..5 do
-        Stream.append(sid, make_event(:tool_call, time: DateTime.add(~U[2026-03-01 00:00:00Z], i, :hour)))
+        Stream.append(
+          sid,
+          make_event(:tool_call, time: DateTime.add(~U[2026-03-01 00:00:00Z], i, :hour))
+        )
       end
 
       {:ok, events} = Stream.events(sid, limit: 2)
@@ -164,7 +167,9 @@ defmodule OptimalSystemAgent.Events.StreamTest do
       Stream.append(sid, make_event(:tool_call, time: t_new2))
       Stream.append(sid, make_event(:tool_call, time: t_new3))
 
-      {:ok, events} = Stream.events(sid, type: :tool_call, since: ~U[2026-03-02 00:00:00Z], limit: 2)
+      {:ok, events} =
+        Stream.events(sid, type: :tool_call, since: ~U[2026-03-02 00:00:00Z], limit: 2)
+
       assert length(events) == 2
       assert Enum.all?(events, &(&1.type == :tool_call))
     end
@@ -288,7 +293,8 @@ defmodule OptimalSystemAgent.Events.StreamTest do
     end
 
     test "replay on non-existent session returns error" do
-      assert {:error, :not_found} = Stream.replay("nope", ~U[2026-01-01 00:00:00Z], ~U[2026-12-31 00:00:00Z])
+      assert {:error, :not_found} =
+               Stream.replay("nope", ~U[2026-01-01 00:00:00Z], ~U[2026-12-31 00:00:00Z])
     end
   end
 
@@ -334,7 +340,9 @@ defmodule OptimalSystemAgent.Events.StreamTest do
       tasks =
         for i <- 1..n do
           Task.async(fn ->
-            event = make_event(:tool_call, time: DateTime.add(~U[2026-03-01 00:00:00Z], i, :second))
+            event =
+              make_event(:tool_call, time: DateTime.add(~U[2026-03-01 00:00:00Z], i, :second))
+
             Stream.append(sid, event)
           end)
         end

@@ -1,110 +1,41 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Cron do
-  @behaviour OptimalSystemAgent.Tools.Behaviour
+  @moduledoc """
+  Shim — delegates to the structured-layout module at `builtins/cron/`.
 
-  alias OptimalSystemAgent.Agent.Scheduler
+  The implementation has been migrated to the per-tool directory layout
+  (Pillar F). This module exists only so that existing references to
+  `OptimalSystemAgent.Tools.Builtins.Cron` continue to resolve without
+  changes to the registry or any callers.
 
-  @impl true
-  def name, do: "cron"
+  All behaviour callbacks are forwarded to `Cron.Tool`, which `use`s
+  `OptimalSystemAgent.Tools.Behaviour` and implements the full structured
+  contract.
+  """
 
-  @impl true
-  def deferred?, do: true
+  @target OptimalSystemAgent.Tools.Builtins.Cron.Tool
 
-  @impl true
-  def description do
-    "Manage scheduled recurring tasks.\n\n" <>
-    "Actions:\n" <>
-    "- `create` — schedule a new recurring task with a cron expression\n" <>
-    "- `list` — list all scheduled tasks\n" <>
-    "- `delete` — remove a scheduled task by ID\n" <>
-    "- `trigger` — manually trigger a scheduled task immediately\n\n" <>
-    "Cron expressions: \"0 */6 * * *\" (every 6h), \"*/30 * * * *\" (every 30m),\n" <>
-    "or presets: \"hourly\", \"daily\", \"weekly\""
-  end
-
-  @impl true
-  def parameters do
-    %{
-      "type" => "object",
-      "required" => ["action"],
-      "properties" => %{
-        "action" => %{
-          "type" => "string",
-          "enum" => ["create", "list", "delete", "trigger"],
-          "description" => "Action to perform"
-        },
-        "task" => %{
-          "type" => "string",
-          "description" => "Task description (for create)"
-        },
-        "schedule" => %{
-          "type" => "string",
-          "description" => "Cron expression or preset name (for create)"
-        },
-        "job_id" => %{
-          "type" => "string",
-          "description" => "Job ID (for delete/trigger)"
-        }
-      }
-    }
-  end
-
-  @impl true
-  def execute(%{"action" => "create"} = args) do
-    task = Map.get(args, "task", "")
-    schedule = Map.get(args, "schedule", "hourly")
-
-    if String.trim(task) == "" do
-      {:error, "Missing required parameter: task"}
-    else
-      case Scheduler.create_job(%{task: task, schedule: schedule}) do
-        {:ok, job} ->
-          {:ok, "Scheduled job created:\n- ID: #{job.id}\n- Schedule: #{schedule}\n- Task: #{task}"}
-        {:error, reason} ->
-          {:error, "Failed to create job: #{inspect(reason)}"}
-      end
-    end
-  rescue
-    e -> {:error, "Scheduler error: #{Exception.message(e)}"}
-  end
-
-  def execute(%{"action" => "list"}) do
-    case Scheduler.list_jobs() do
-      jobs when is_list(jobs) and length(jobs) > 0 ->
-        formatted = Enum.map(jobs, fn job ->
-          status = Map.get(job, :status, "active")
-          "- #{job.id}: #{job.task} (#{job.schedule}) [#{status}]"
-        end) |> Enum.join("\n")
-
-        {:ok, "Scheduled jobs:\n#{formatted}"}
-
-      _ ->
-        {:ok, "No scheduled jobs."}
-    end
-  rescue
-    _ -> {:ok, "No scheduled jobs (scheduler not available)."}
-  end
-
-  def execute(%{"action" => "delete", "job_id" => id}) do
-    case Scheduler.delete_job(id) do
-      :ok -> {:ok, "Job #{id} deleted."}
-      {:error, reason} -> {:error, "Failed to delete job: #{inspect(reason)}"}
-    end
-  rescue
-    e -> {:error, "Delete error: #{Exception.message(e)}"}
-  end
-
-  def execute(%{"action" => "trigger", "job_id" => id}) do
-    case Scheduler.trigger_job(id) do
-      :ok -> {:ok, "Job #{id} triggered."}
-      {:error, reason} -> {:error, "Failed to trigger: #{inspect(reason)}"}
-    end
-  rescue
-    e -> {:error, "Trigger error: #{Exception.message(e)}"}
-  end
-
-  def execute(%{"action" => action}) do
-    {:error, "Unknown action: #{action}. Use create, list, delete, or trigger."}
-  end
-
-  def execute(_), do: {:error, "Missing required parameter: action"}
+  defdelegate name(), to: @target
+  defdelegate aliases(), to: @target
+  defdelegate search_hint(), to: @target
+  defdelegate description(), to: @target
+  defdelegate parameters(), to: @target
+  defdelegate prompt(opts), to: @target
+  defdelegate should_defer?(), to: @target
+  defdelegate always_load?(), to: @target
+  defdelegate safety(), to: @target
+  defdelegate deferred?(), to: @target
+  defdelegate concurrent?(), to: @target
+  defdelegate available?(), to: @target
+  defdelegate strict?(), to: @target
+  defdelegate concurrency_safe?(input, ctx), to: @target
+  defdelegate read_only?(input, ctx), to: @target
+  defdelegate destructive?(input, ctx), to: @target
+  defdelegate open_world?(input, ctx), to: @target
+  defdelegate interrupt_behavior(), to: @target
+  defdelegate max_result_size_chars(), to: @target
+  defdelegate validate_input(input, ctx), to: @target
+  defdelegate check_permissions(input, ctx), to: @target
+  defdelegate execute(input, ctx), to: @target
+  defdelegate render(stage, payload, opts), to: @target
+  defdelegate to_classifier_input(input), to: @target
 end

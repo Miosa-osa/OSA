@@ -30,7 +30,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
     # start_link can safely reuse the same registered name.
     for mod <- [PtyExecutor, FrameRouter] do
       case Process.whereis(mod) do
-        nil -> :ok
+        nil ->
+          :ok
+
         pid ->
           try do
             GenServer.stop(pid, :normal, 2_000)
@@ -68,14 +70,18 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
   end
 
   defp open_session(pty_pid, sid, opts \\ []) do
-    cast_to_pty(pty_pid, {:pty_open_request, %{
-      session_id: sid,
-      shell: Keyword.get(opts, :shell, "/bin/sh"),
-      cols: Keyword.get(opts, :cols, 80),
-      rows: Keyword.get(opts, :rows, 24),
-      cwd: Keyword.get(opts, :cwd, System.tmp_dir!()),
-      env: Keyword.get(opts, :env, [])
-    }})
+    cast_to_pty(
+      pty_pid,
+      {:pty_open_request,
+       %{
+         session_id: sid,
+         shell: Keyword.get(opts, :shell, "/bin/sh"),
+         cols: Keyword.get(opts, :cols, 80),
+         rows: Keyword.get(opts, :rows, 24),
+         cwd: Keyword.get(opts, :cwd, System.tmp_dir!()),
+         env: Keyword.get(opts, :env, [])
+       }}
+    )
   end
 
   defp close_session(pty_pid, sid) do
@@ -160,11 +166,15 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
     end
 
     test "pty_resize for unknown session is silently ignored", %{pty_pid: pty_pid} do
-      cast_to_pty(pty_pid, {:pty_resize, %{
-        session_id: "nonexistent-session",
-        cols: 80,
-        rows: 24
-      }})
+      cast_to_pty(
+        pty_pid,
+        {:pty_resize,
+         %{
+           session_id: "nonexistent-session",
+           cols: 80,
+           rows: 24
+         }}
+      )
 
       Process.sleep(50)
       assert Process.alive?(pty_pid)

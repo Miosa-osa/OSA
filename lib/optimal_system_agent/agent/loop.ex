@@ -102,7 +102,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def start_link(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
     user_id = Keyword.get(opts, :user_id)
-    GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id, user_id}})
+
+    GenServer.start_link(__MODULE__, opts,
+      name: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id, user_id}}
+    )
   end
 
   def process_message(session_id, message, opts \\ []) do
@@ -143,6 +146,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
             :ets.insert(@cancel_table, {key, true})
             Logger.info("[loop] Cancel propagated to sub-agent #{key}")
           end
+
           acc
         end,
         :ok,
@@ -216,27 +220,35 @@ defmodule OptimalSystemAgent.Agent.Loop do
       iteration: iteration,
       plan_mode: plan_mode,
       turn_count: turn_count,
-      tools: filter_tools_for_mode(
-        Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
-        Keyword.get(opts, :coordinator, false)
-      ),
+      tools:
+        filter_tools_for_mode(
+          Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
+          Keyword.get(opts, :coordinator, false)
+        ),
       coordinator: Keyword.get(opts, :coordinator, false),
-      max_budget_usd: Keyword.get(opts, :max_budget_usd) || Application.get_env(:optimal_system_agent, :max_budget_usd),
-      max_turns: Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
+      max_budget_usd:
+        Keyword.get(opts, :max_budget_usd) ||
+          Application.get_env(:optimal_system_agent, :max_budget_usd),
+      max_turns:
+        Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
       parent_session_id: Keyword.get(opts, :parent_session_id),
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),
       system_prompt_override: Keyword.get(opts, :system_prompt_override),
-      working_dir: Keyword.get(opts, :working_dir) || Application.get_env(:optimal_system_agent, :working_dir),
+      working_dir:
+        Keyword.get(opts, :working_dir) ||
+          Application.get_env(:optimal_system_agent, :working_dir),
       strategy: nil,
       strategy_state: %{},
       started_at: DateTime.utc_now()
     }
 
     if restored != %{} do
-      Logger.info("[loop] Restored checkpoint for session #{session_id} — iteration=#{iteration}, messages=#{length(messages)}")
+      Logger.info(
+        "[loop] Restored checkpoint for session #{session_id} — iteration=#{iteration}, messages=#{length(messages)}"
+      )
     end
 
     {:ok, state}
@@ -266,82 +278,102 @@ defmodule OptimalSystemAgent.Agent.Loop do
     if limit_error do
       {:reply, {:error, limit_error}, state}
     else
+      # Clear per-message process caches
+      Process.delete(:osa_git_info_cache)
+      Process.delete(:osa_doom_recovery_count)
+      Process.delete(:osa_workspace_overview_cache)
+      Process.delete(:osa_system_msg_cache)
+      Process.put(:osa_memory_version, 0)
 
-    # Clear per-message process caches
-    Process.delete(:osa_git_info_cache)
-    Process.delete(:osa_doom_recovery_count)
-    Process.delete(:osa_workspace_overview_cache)
-    Process.delete(:osa_system_msg_cache)
-    Process.put(:osa_memory_version, 0)
-
-    # -1. UserPromptSubmit hook — can modify or block the message
-    {message, state} =
-      try do
-        case Hooks.run(:user_prompt_submit, %{
-          message: message,
-          session_id: state.session_id,
-          turn_count: state.turn_count
-        }) do
-          {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
-          {:blocked, reason} -> {nil, %{state | status: :idle}}
+      # -1. UserPromptSubmit hook — can modify or block the message
+      {message, state} =
+        try do
+          case Hooks.run(:user_prompt_submit, %{
+                 message: message,
+                 session_id: state.session_id,
+                 turn_count: state.turn_count
+               }) do
+            {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
+            {:blocked, reason} -> {nil, %{state | status: :idle}}
+            _ -> {message, state}
+          end
+        rescue
           _ -> {message, state}
+        catch
+          :exit, _ -> {message, state}
         end
-      rescue
-        _ -> {message, state}
-      catch
-        :exit, _ -> {message, state}
+
+      if is_nil(message) do
+        {:reply, {:error, "Message blocked by hook"}, state}
+      else
+        # 0. Prompt injection guard
+        if Guardrails.prompt_injection?(message) do
+          refusal = Guardrails.prompt_extraction_refusal()
+          {:reply, {:ok, refusal}, %{state | status: :idle}}
+        else
+          signal_weight = Keyword.get(opts, :signal_weight, nil)
+          state = %{state | signal_weight: signal_weight}
+
+          # Compact message history if needed
+          compacted =
+            OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages) || state.messages
+
+          state = %{state | messages: compacted}
+
+          # Build decorated message list (nudges + pre-directives + user message)
+          messages_to_append = MessageHandler.build_messages(message, state)
+
+          state = %{
+            state
+            | messages: state.messages ++ messages_to_append,
+              iteration: 0,
+              overflow_retries: 0,
+              auto_continues: 0,
+              status: :thinking,
+              exploration_done: false,
+              # Reset doom loop signatures on each new user turn —
+              # the user explicitly wants to try again, don't carry over old failures
+              recent_failure_signatures: []
+          }
+
+          # Genre routing
+          signal_genre = Keyword.get(opts, :signal_genre, :direct)
+          genre_route = GenreRouter.route_by_genre(signal_genre, message, state)
+
+          case genre_route do
+            {:respond, genre_response} ->
+              state = %{state | status: :idle}
+
+              Bus.emit(:agent_response, %{
+                session_id: state.session_id,
+                response: genre_response,
+                agent: state.session_id
+              })
+
+              Phoenix.PubSub.broadcast(
+                OptimalSystemAgent.PubSub,
+                "osa:session:#{state.session_id}",
+                {:osa_event,
+                 %{
+                   type: :agent_response,
+                   session_id: state.session_id,
+                   response: genre_response,
+                   response_type: "genre"
+                 }}
+              )
+
+              {:reply, {:ok, genre_response}, state}
+
+            :execute_tools ->
+              dispatch_message(state, skip_plan)
+          end
+        end
       end
 
-    if is_nil(message) do
-      {:reply, {:error, "Message blocked by hook"}, state}
-    else
-
-    # 0. Prompt injection guard
-    if Guardrails.prompt_injection?(message) do
-      refusal = Guardrails.prompt_extraction_refusal()
-      {:reply, {:ok, refusal}, %{state | status: :idle}}
-    else
-      signal_weight = Keyword.get(opts, :signal_weight, nil)
-      state = %{state | signal_weight: signal_weight}
-
-      # Compact message history if needed
-      compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages) || state.messages
-      state = %{state | messages: compacted}
-
-      # Build decorated message list (nudges + pre-directives + user message)
-      messages_to_append = MessageHandler.build_messages(message, state)
-
-      state = %{
-        state
-        | messages: state.messages ++ messages_to_append,
-          iteration: 0,
-          overflow_retries: 0,
-          auto_continues: 0,
-          status: :thinking,
-          exploration_done: false,
-          # Reset doom loop signatures on each new user turn —
-          # the user explicitly wants to try again, don't carry over old failures
-          recent_failure_signatures: []
-      }
-
-      # Genre routing
-      signal_genre = Keyword.get(opts, :signal_genre, :direct)
-      genre_route = GenreRouter.route_by_genre(signal_genre, message, state)
-
-      case genre_route do
-        {:respond, genre_response} ->
-          state = %{state | status: :idle}
-          Bus.emit(:agent_response, %{session_id: state.session_id, response: genre_response, agent: state.session_id})
-          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-            {:osa_event, %{type: :agent_response, session_id: state.session_id, response: genre_response, response_type: "genre"}})
-          {:reply, {:ok, genre_response}, state}
-
-        :execute_tools ->
-          dispatch_message(state, skip_plan)
-      end
+      # if message not blocked
     end
-    end # if message not blocked
-    end # if limit_error
+
+    # if limit_error
   end
 
   @impl true
@@ -424,8 +456,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
         {:ok, plan_text, state} ->
           state = %{state | status: :idle}
           Telemetry.emit_context_pressure(state)
-          Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-            {:osa_event, %{type: :done, session_id: state.session_id}})
+
+          Phoenix.PubSub.broadcast(
+            OptimalSystemAgent.PubSub,
+            "osa:session:#{state.session_id}",
+            {:osa_event, %{type: :done, session_id: state.session_id}}
+          )
+
           {:reply, {:plan, plan_text}, state}
 
         {:error, _reason, state} ->
@@ -444,18 +481,26 @@ defmodule OptimalSystemAgent.Agent.Loop do
         ReactLoop.run(state)
       rescue
         e ->
-          Logger.error("[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}")
+          Logger.error(
+            "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+          )
+
           {"I hit an error processing that request. Check the logs for details.", state}
       catch
         :exit, reason ->
           Logger.error("[loop] EXIT in ReactLoop: #{inspect(reason)}")
-          {"I hit a timeout or process error. This usually means the LLM connection dropped — try again.", state}
+
+          {"I hit a timeout or process error. This usually means the LLM connection dropped — try again.",
+           state}
       end
 
     response = maybe_scrub_prompt_leak(response)
     response = maybe_strip_dead_phrases(response)
 
-    meta = %{iteration_count: state.iteration, tools_used: Telemetry.extract_tools_used(state.messages)}
+    meta = %{
+      iteration_count: state.iteration,
+      tools_used: Telemetry.extract_tools_used(state.messages)
+    }
 
     state = %{
       state
@@ -466,7 +511,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     Telemetry.emit_context_pressure(state)
 
-    Bus.emit(:agent_response, %{session_id: state.session_id, response: response, agent: state.session_id})
+    Bus.emit(:agent_response, %{
+      session_id: state.session_id,
+      response: response,
+      agent: state.session_id
+    })
 
     # Fire post_response hooks (async, non-blocking)
     try do
@@ -483,10 +532,23 @@ defmodule OptimalSystemAgent.Agent.Loop do
       :exit, _ -> :ok
     end
 
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :agent_response, session_id: state.session_id, response: response, response_type: "agent"}})
-    Phoenix.PubSub.broadcast(OptimalSystemAgent.PubSub, "osa:session:#{state.session_id}",
-      {:osa_event, %{type: :done, session_id: state.session_id}})
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :agent_response,
+         session_id: state.session_id,
+         response: response,
+         response_type: "agent"
+       }}
+    )
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event, %{type: :done, session_id: state.session_id}}
+    )
 
     {:reply, {:ok, response}, state}
   end
@@ -495,7 +557,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp maybe_scrub_prompt_leak(response) do
     if Guardrails.response_contains_prompt_leak?(response) do
-      Logger.warning("[loop] Output guardrail: LLM response contained system prompt content — replacing with refusal")
+      Logger.warning(
+        "[loop] Output guardrail: LLM response contained system prompt content — replacing with refusal"
+      )
+
       Guardrails.prompt_extraction_refusal()
     else
       response
@@ -562,6 +627,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
               current_cost: current_cost,
               limit: state.max_budget_usd
             })
+
             "Budget limit reached ($#{Float.round(current_cost, 4)} / $#{state.max_budget_usd})"
           end
         rescue
@@ -578,6 +644,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           turn_count: state.turn_count,
           limit: state.max_turns
         })
+
         "Turn limit reached (#{state.turn_count}/#{state.max_turns})"
       end
 
@@ -588,6 +655,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
     task_write list_agents list_skills session_search ask_user)
   defp filter_tools_for_mode(tools, false), do: tools
+
   defp filter_tools_for_mode(tools, true) do
     Enum.filter(tools, fn tool ->
       name = tool[:name] || tool.name

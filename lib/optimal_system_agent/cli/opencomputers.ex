@@ -43,7 +43,11 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     IO.puts("  Enabled:      #{if enabled, do: "yes", else: "no"}")
     IO.puts("  Config flag:  #{config_enabled}")
     IO.puts("  Env var:      #{@env_var}=#{System.get_env(@env_var) || "(unset)"}")
-    IO.puts("  Marker file:  #{if marker_enabled, do: "~/.osa/.open_computers_enabled", else: "(none)"}")
+
+    IO.puts(
+      "  Marker file:  #{if marker_enabled, do: "~/.osa/.open_computers_enabled", else: "(none)"}"
+    )
+
     IO.puts("")
     IO.puts("  Control URL:  #{cfg[:control_url] || @default_control_url}")
     IO.puts("  Host key:     #{redact_key(cfg[:host_key])}")
@@ -94,9 +98,10 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   # ── login ────────────────────────────────────────────────────────
 
   defp cmd_login(args) do
-    {opts, _} = OptionParser.parse!(args,
-      strict: [key: :string, control_url: :string, force: :boolean]
-    )
+    {opts, _} =
+      OptionParser.parse!(args,
+        strict: [key: :string, control_url: :string, force: :boolean]
+      )
 
     key = resolve_key(opts)
 
@@ -202,7 +207,8 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
           true -> :unknown
         end
 
-      nil -> :unknown
+      nil ->
+        :unknown
     end
   end
 
@@ -225,10 +231,11 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     profile = shell_profile(shell)
     line = "export #{@env_var}=true"
 
-    existing = case File.read(profile) do
-      {:ok, content} -> content
-      _ -> ""
-    end
+    existing =
+      case File.read(profile) do
+        {:ok, content} -> content
+        _ -> ""
+      end
 
     if String.contains?(existing, @env_var) do
       false
@@ -260,7 +267,9 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   end
 
   defp remove_env_from_profile(:fish) do
-    IO.puts("Fish shell: remove `set -x #{@env_var} true` from ~/.config/fish/config.fish manually.")
+    IO.puts(
+      "Fish shell: remove `set -x #{@env_var} true` from ~/.config/fish/config.fish manually."
+    )
   end
 
   defp remove_env_from_profile(:unknown) do
@@ -352,9 +361,15 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   end
 
   defp parse_toml_value("\"" <> rest), do: String.trim_trailing(rest, "\"")
+
   defp parse_toml_value("[" <> rest) do
-    rest |> String.trim_trailing("]") |> String.split(",", trim: true) |> Enum.map(&String.trim/1) |> Enum.map(&parse_toml_value/1)
+    rest
+    |> String.trim_trailing("]")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&parse_toml_value/1)
   end
+
   defp parse_toml_value(other) do
     case Integer.parse(other) do
       {n, ""} -> n
@@ -376,7 +391,10 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   end
 
   defp format_modes(nil), do: ~s(["direct"])
-  defp format_modes(modes) when is_list(modes), do: "[#{Enum.map_join(modes, ", ", &~s("#{&1}"))}]"
+
+  defp format_modes(modes) when is_list(modes),
+    do: "[#{Enum.map_join(modes, ", ", &~s("#{&1}"))}]"
+
   defp format_modes(modes), do: modes
 
   # ── Usage ─────────────────────────────────────────────────────────

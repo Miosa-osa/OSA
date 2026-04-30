@@ -81,8 +81,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Config do
 
       _ ->
         case System.get_env("OSA_FS_ALLOWED_ROOTS") do
-          nil -> [home()]
-          "" -> [home()]
+          nil ->
+            [home()]
+
+          "" ->
+            [home()]
+
           env_val ->
             env_val
             |> String.split(":")

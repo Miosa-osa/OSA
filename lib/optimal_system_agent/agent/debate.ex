@@ -92,11 +92,12 @@ defmodule OptimalSystemAgent.Agent.Debate do
         {:error, :all_providers_failed}
 
       [single] ->
-        {:ok, %{
-          synthesis: single.response,
-          debate: responses,
-          participants: 1
-        }}
+        {:ok,
+         %{
+           synthesis: single.response,
+           debate: responses,
+           participants: 1
+         }}
 
       many ->
         synthesis = synthesise(many)

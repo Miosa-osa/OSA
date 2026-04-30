@@ -166,6 +166,18 @@ impl App {
                 self.chat.scroll_down(half);
                 false
             }
+            // Universal scroll bindings — work regardless of input state. The
+            // vim-style `j`/`k` are only active on empty input, but users
+            // mid-message need scroll too. Shift/Ctrl+Up/Down don't conflict
+            // with input editing or history navigation.
+            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, KeyModifiers::CONTROL) => {
+                self.chat.scroll_up(1);
+                false
+            }
+            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, KeyModifiers::CONTROL) => {
+                self.chat.scroll_down(1);
+                false
+            }
             (KeyCode::PageUp, _) => {
                 self.chat.scroll_up(self.height.saturating_sub(2));
                 false
@@ -254,6 +266,16 @@ impl App {
             }
             (KeyCode::Char('k'), KeyModifiers::NONE) if input_empty => {
                 self.chat.scroll_up(1);
+                false
+            }
+            // Universal scroll bindings — work regardless of input state.
+            // Mirrors handle_idle_key for a consistent UX while processing.
+            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, KeyModifiers::CONTROL) => {
+                self.chat.scroll_up(1);
+                false
+            }
+            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, KeyModifiers::CONTROL) => {
+                self.chat.scroll_down(1);
                 false
             }
             (KeyCode::PageUp, _) => {

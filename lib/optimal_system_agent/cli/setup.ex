@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
     %{value: :openai, label: "OpenAI", hint: "GPT models"},
     %{value: :groq, label: "Groq", hint: "Fast inference"},
     %{value: :openrouter, label: "OpenRouter", hint: "Multi-model gateway"},
-    %{value: :deepseek, label: "DeepSeek", hint: "DeepSeek models"},
+    %{value: :deepseek, label: "DeepSeek", hint: "DeepSeek models"}
   ]
 
   @channels [
@@ -32,7 +32,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
     %{value: :slack, label: "Slack", hint: "Bot token + signing secret"},
     %{value: :whatsapp, label: "WhatsApp", hint: "Uses Baileys bridge (Node.js)"},
     %{value: :matrix, label: "Matrix", hint: "Homeserver + access token"},
-    %{value: :email, label: "Email", hint: "IMAP/SMTP credentials"},
+    %{value: :email, label: "Email", hint: "IMAP/SMTP credentials"}
   ]
 
   @doc """
@@ -61,6 +61,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
         # Step 4: Channel setup (optional)
         channel = Prompt.select("Connect a messaging channel?", @channels)
+
         if channel && channel != :skip do
           setup_channel(channel)
         end
@@ -101,10 +102,19 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   defp get_auth(:anthropic) do
-    method = Prompt.select("How do you want to connect?", [
-      %{value: :oauth, label: "Sign in with Anthropic", hint: "Opens browser, uses your account"},
-      %{value: :api_key, label: "Paste an API key", hint: "From console.anthropic.com/settings/keys"},
-    ])
+    method =
+      Prompt.select("How do you want to connect?", [
+        %{
+          value: :oauth,
+          label: "Sign in with Anthropic",
+          hint: "Opens browser, uses your account"
+        },
+        %{
+          value: :api_key,
+          label: "Paste an API key",
+          hint: "From console.anthropic.com/settings/keys"
+        }
+      ])
 
     case method do
       :oauth ->
@@ -120,13 +130,14 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   defp get_auth(provider) do
-    placeholder = case provider do
-      :openai -> "sk-..."
-      :groq -> "gsk_..."
-      :openrouter -> "sk-or-..."
-      :deepseek -> "sk-..."
-      _ -> "..."
-    end
+    placeholder =
+      case provider do
+        :openai -> "sk-..."
+        :groq -> "gsk_..."
+        :openrouter -> "sk-or-..."
+        :deepseek -> "sk-..."
+        _ -> "..."
+      end
 
     key = Prompt.text("#{provider_name(provider)} API key", placeholder: placeholder, mask: true)
     if key && String.trim(key) != "", do: String.trim(key), else: nil
@@ -146,6 +157,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
     rescue
       ArgumentError -> :oauth_state
     end
+
     :ets.insert(:oauth_state, {:pkce, code_verifier, state, redirect_uri})
 
     IO.puts("\e[2m│  Opening browser...\e[0m")
@@ -175,8 +187,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   defp poll_oauth(0), do: :timeout
+
   defp poll_oauth(remaining) do
     Process.sleep(2_000)
+
     if OptimalSystemAgent.Auth.OAuth.oauth_configured?() do
       :ok
     else
@@ -205,8 +219,16 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   defp test_provider(:anthropic, key) do
     case Req.post("https://api.anthropic.com/v1/messages",
-           json: %{model: "claude-haiku-4-5", max_tokens: 1, messages: [%{role: "user", content: "hi"}]},
-           headers: [{"x-api-key", key}, {"anthropic-version", "2023-06-01"}, {"content-type", "application/json"}],
+           json: %{
+             model: "claude-haiku-4-5",
+             max_tokens: 1,
+             messages: [%{role: "user", content: "hi"}]
+           },
+           headers: [
+             {"x-api-key", key},
+             {"anthropic-version", "2023-06-01"},
+             {"content-type", "application/json"}
+           ],
            receive_timeout: 10_000
          ) do
       {:ok, %{status: 200}} -> :ok
@@ -233,7 +255,9 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # ── Channel Setup ───────────────────────────────────────────────
 
   defp setup_channel(:telegram) do
-    token = Prompt.text("Telegram bot token", placeholder: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+    token =
+      Prompt.text("Telegram bot token", placeholder: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11")
+
     if token && token != "" do
       save_env("TELEGRAM_BOT_TOKEN", token)
       Prompt.completed("Telegram", "Token saved")
@@ -242,6 +266,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   defp setup_channel(:discord) do
     token = Prompt.text("Discord bot token", placeholder: "MTI...", mask: true)
+
     if token && token != "" do
       save_env("DISCORD_BOT_TOKEN", token)
       Prompt.completed("Discord", "Token saved")
@@ -251,6 +276,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp setup_channel(:slack) do
     token = Prompt.text("Slack bot token", placeholder: "xoxb-...")
     secret = Prompt.text("Slack signing secret", mask: true)
+
     if token && token != "" do
       save_env("SLACK_BOT_TOKEN", token)
       if secret && secret != "", do: save_env("SLACK_SIGNING_SECRET", secret)
@@ -261,11 +287,12 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp setup_channel(:whatsapp) do
     Prompt.note(
       "WhatsApp requires a Node.js bridge.\n" <>
-      "1. cd scripts/whatsapp-bridge && npm install\n" <>
-      "2. node bridge.js --pair-only  (scan QR)\n" <>
-      "3. node bridge.js  (start bridge)",
+        "1. cd scripts/whatsapp-bridge && npm install\n" <>
+        "2. node bridge.js --pair-only  (scan QR)\n" <>
+        "3. node bridge.js  (start bridge)",
       "WhatsApp Setup"
     )
+
     save_env("WHATSAPP_ENABLED", "true")
     Prompt.completed("WhatsApp", "Config saved — run the bridge separately")
   end
@@ -273,6 +300,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp setup_channel(:matrix) do
     homeserver = Prompt.text("Matrix homeserver URL", placeholder: "https://matrix.example.org")
     token = Prompt.text("Access token", mask: true)
+
     if homeserver && token && homeserver != "" && token != "" do
       save_env("MATRIX_HOMESERVER", homeserver)
       save_env("MATRIX_ACCESS_TOKEN", token)
@@ -283,6 +311,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   defp setup_channel(:email) do
     address = Prompt.text("Email address", placeholder: "agent@gmail.com")
     password = Prompt.text("Email password (app-specific)", mask: true)
+
     if address && password && address != "" && password != "" do
       save_env("EMAIL_ADDRESS", address)
       save_env("EMAIL_PASSWORD", password)
@@ -304,31 +333,39 @@ defmodule OptimalSystemAgent.CLI.Setup do
       "OSA_DEFAULT_PROVIDER=#{provider}"
     ]
 
-    lines = if api_key do
-      env_key = provider_env_key(provider)
-      lines ++ ["#{env_key}=#{api_key}"]
-    else
-      lines
-    end
+    lines =
+      if api_key do
+        env_key = provider_env_key(provider)
+        lines ++ ["#{env_key}=#{api_key}"]
+      else
+        lines
+      end
 
     # Read existing .env and merge (don't overwrite other keys)
-    existing = case File.read(env_path) do
-      {:ok, content} -> content
-      _ -> ""
-    end
+    existing =
+      case File.read(env_path) do
+        {:ok, content} -> content
+        _ -> ""
+      end
 
-    existing_keys = existing
+    existing_keys =
+      existing
       |> String.split("\n")
       |> Enum.map(fn line -> line |> String.split("=", parts: 2) |> List.first() end)
       |> MapSet.new()
 
-    new_lines = Enum.reject(lines, fn line ->
-      key = line |> String.split("=", parts: 2) |> List.first()
-      MapSet.member?(existing_keys, key)
-    end)
+    new_lines =
+      Enum.reject(lines, fn line ->
+        key = line |> String.split("=", parts: 2) |> List.first()
+        MapSet.member?(existing_keys, key)
+      end)
 
     if new_lines != [] do
-      content = if existing == "", do: Enum.join(new_lines, "\n"), else: existing <> "\n" <> Enum.join(new_lines, "\n")
+      content =
+        if existing == "",
+          do: Enum.join(new_lines, "\n"),
+          else: existing <> "\n" <> Enum.join(new_lines, "\n")
+
       File.write!(env_path, content <> "\n")
       # Restrict permissions — file contains API keys
       File.chmod!(env_path, 0o600)
@@ -336,6 +373,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
     # Also set in runtime
     Application.put_env(:optimal_system_agent, :default_provider, provider)
+
     if api_key do
       config_key = provider_config_key(provider)
       Application.put_env(:optimal_system_agent, config_key, api_key)
@@ -346,10 +384,11 @@ defmodule OptimalSystemAgent.CLI.Setup do
     env_path = Path.join(@osa_dir, ".env")
     File.mkdir_p!(@osa_dir)
 
-    existing = case File.read(env_path) do
-      {:ok, content} -> content
-      _ -> ""
-    end
+    existing =
+      case File.read(env_path) do
+        {:ok, content} -> content
+        _ -> ""
+      end
 
     # Replace or append
     if String.contains?(existing, "#{key}=") do

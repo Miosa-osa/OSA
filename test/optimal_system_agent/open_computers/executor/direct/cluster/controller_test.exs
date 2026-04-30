@@ -17,7 +17,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.ControllerTes
   defmodule FakeFrameRouter do
     use GenServer
 
-    def start_link(_), do: GenServer.start_link(__MODULE__, [], name: OptimalSystemAgent.OpenComputers.FrameRouter)
+    def start_link(_),
+      do: GenServer.start_link(__MODULE__, [], name: OptimalSystemAgent.OpenComputers.FrameRouter)
+
     def init(frames), do: {:ok, frames}
     def sent_frames, do: GenServer.call(OptimalSystemAgent.OpenComputers.FrameRouter, :frames)
     def handle_call(:frames, _from, state), do: {:reply, state, state}
@@ -75,7 +77,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.ControllerTes
 
       {:cluster_provision_progress, first} = List.last(progress_frames)
       assert first.cluster_id == cluster_id
-      assert first.phase in [:installing_deps, :downloading_model, :starting, :joining_mesh, :ready]
+
+      assert first.phase in [
+               :installing_deps,
+               :downloading_model,
+               :starting,
+               :joining_mesh,
+               :ready
+             ]
     end
 
     test "unknown backend emits cluster_error frame", %{controller: _ctrl} do

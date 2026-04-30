@@ -162,8 +162,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
 
       %{tunnel_id: tid} = info ->
         FrameRouter.send_frame(
-          {:tunnel_response_chunk,
-           %{tunnel_id: tid, req_id: req_id, data: data, last: last}}
+          {:tunnel_response_chunk, %{tunnel_id: tid, req_id: req_id, data: data, last: last}}
         )
 
         new_bytes_out = info.bytes_out + byte_size(data)
@@ -185,9 +184,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
         {:noreply, state}
 
       {%{tunnel_id: tid}, tunnels} ->
-        FrameRouter.send_frame(
-          {:tunnel_close, %{tunnel_id: tid, req_id: req_id, reason: :eof}}
-        )
+        FrameRouter.send_frame({:tunnel_close, %{tunnel_id: tid, req_id: req_id, reason: :eof}})
 
         {:noreply, %{state | tunnels: tunnels}}
     end
@@ -211,7 +208,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
 
     target_host = Map.get(payload, :target_host, "127.0.0.1") |> to_charlist()
 
-    case :gen_tcp.connect(target_host, port, [:binary, {:active, false}, {:packet, 0}],
+    case :gen_tcp.connect(
+           target_host,
+           port,
+           [:binary, {:active, false}, {:packet, 0}],
            cfg.connect_timeout_ms
          ) do
       {:ok, socket} ->
@@ -253,7 +253,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
 
               {:error, reason} ->
                 :gen_tcp.close(socket)
-                GenServer.cast(server_pid, {:tunnel_open_error, req_id, tunnel_id, map_error(reason)})
+
+                GenServer.cast(
+                  server_pid,
+                  {:tunnel_open_error, req_id, tunnel_id, map_error(reason)}
+                )
             end
 
           {:error, reason} ->
@@ -415,13 +419,21 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
 
     path = Path.join(config_dir, "open_computers.toml")
 
-    case File.read(path) do
-      {:ok, content} ->
-        # Simple TOML [tunnel] section parser — no library dependency
-        parse_tunnel_section(content, base)
+    parsed =
+      case File.read(path) do
+        {:ok, content} ->
+          # Simple TOML [tunnel] section parser — no library dependency
+          parse_tunnel_section(content, base)
 
-      _ ->
-        base
+        _ ->
+          base
+      end
+
+    # Application env override — when `:oc_tunnel_enabled` is explicitly set
+    # (e.g. by tests, or operator runtime config) it wins over the file.
+    case Application.get_env(:optimal_system_agent, :oc_tunnel_enabled) do
+      nil -> parsed
+      value -> Map.put(parsed, :enabled, value)
     end
   end
 

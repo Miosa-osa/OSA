@@ -91,7 +91,7 @@ defmodule OptimalSystemAgent.MixProject do
 
       # PTY spawning — used by OpenComputers.Executor.Direct.Pty to open
       # real interactive shells with full terminal geometry (cols, rows, resize).
-      {:erlexec, "~> 2.0"},
+      {:erlexec, "~> 2.0"}
 
       # miosa_* packages are not standalone deps — their implementations live
       # in this repo. Shim modules in lib/miosa/ satisfy all call sites.

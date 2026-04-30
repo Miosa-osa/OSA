@@ -48,9 +48,11 @@ defmodule OptimalSystemAgent.CLI.Prompt do
   @doc "Print a bordered information box."
   def note(message, title) do
     lines = String.split(message, "\n")
-    max_len = Enum.reduce(lines, String.length(title) + 4, fn line, acc ->
-      max(acc, String.length(line) + 4)
-    end)
+
+    max_len =
+      Enum.reduce(lines, String.length(title) + 4, fn line, acc ->
+        max(acc, String.length(line) + 4)
+      end)
 
     border_top = String.duplicate("─", max_len)
     border_bot = String.duplicate("─", max_len)
@@ -86,14 +88,17 @@ defmodule OptimalSystemAgent.CLI.Prompt do
 
       # Clear the options and show completed state
       clear_lines(length(options))
-      IO.puts("") # blank line after clearing
+      # blank line after clearing
+      IO.puts("")
 
       case result do
         {:ok, idx} ->
           selected = Enum.at(options, idx)
           # Show as completed
-          IO.write("\e[A") # move up to overwrite blank
-          IO.write("\e[2K") # clear line
+          # move up to overwrite blank
+          IO.write("\e[A")
+          # clear line
+          IO.write("\e[2K")
           completed(message, selected.label)
           selected.value
 
@@ -132,7 +137,8 @@ defmodule OptimalSystemAgent.CLI.Prompt do
   end
 
   defp draw_select_options(options, selected) do
-    Enum.with_index(options) |> Enum.each(fn {opt, i} ->
+    Enum.with_index(options)
+    |> Enum.each(fn {opt, i} ->
       dot = if i == selected, do: "●", else: "○"
       hint = if Map.has_key?(opt, :hint) and opt.hint, do: " \e[2m(#{opt.hint})\e[0m", else: ""
 
@@ -170,7 +176,8 @@ defmodule OptimalSystemAgent.CLI.Prompt do
             |> Enum.filter(fn {_, c} -> c end)
             |> Enum.map(fn {opt, _} -> opt.value end)
 
-          labels = Enum.zip(options, checked)
+          labels =
+            Enum.zip(options, checked)
             |> Enum.filter(fn {_, c} -> c end)
             |> Enum.map(fn {opt, _} -> opt.label end)
             |> Enum.join(", ")
@@ -219,7 +226,8 @@ defmodule OptimalSystemAgent.CLI.Prompt do
   end
 
   defp draw_multiselect_options(options, checked, cursor) do
-    Enum.with_index(options) |> Enum.each(fn {opt, i} ->
+    Enum.with_index(options)
+    |> Enum.each(fn {opt, i} ->
       is_checked = Enum.at(checked, i, false)
       box = if is_checked, do: "◼", else: "◻"
       hint = if Map.has_key?(opt, :hint) and opt.hint, do: " \e[2m(#{opt.hint})\e[0m", else: ""
@@ -257,7 +265,8 @@ defmodule OptimalSystemAgent.CLI.Prompt do
 
     # Show completed state
     display = if mask, do: mask_string(value), else: value
-    IO.write("\e[A\e[2K") # clear the input line
+    # clear the input line
+    IO.write("\e[A\e[2K")
     IO.puts("\e[2m#{@bar}  #{display}\e[0m")
 
     value
@@ -272,7 +281,8 @@ defmodule OptimalSystemAgent.CLI.Prompt do
     IO.puts("#{@diamond}  \e[1m#{message}\e[0m")
 
     prev_opts = set_raw_mode()
-    selected = if default, do: 0, else: 1 # 0=Yes, 1=No
+    # 0=Yes, 1=No
+    selected = if default, do: 0, else: 1
 
     try do
       result = confirm_loop(selected)
@@ -324,9 +334,10 @@ defmodule OptimalSystemAgent.CLI.Prompt do
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     parent = self()
 
-    pid = spawn_link(fn ->
-      spinner_loop(frames, 0, label, parent)
-    end)
+    pid =
+      spawn_link(fn ->
+        spinner_loop(frames, 0, label, parent)
+      end)
 
     # Return stop function
     fn result_text ->
@@ -382,16 +393,34 @@ defmodule OptimalSystemAgent.CLI.Prompt do
               "D" -> :left
               _ -> :unknown
             end
-          _ -> :escape
+
+          _ ->
+            :escape
         end
-      "\r" -> :enter
-      "\n" -> :enter
-      " " -> :space
-      "\d" -> :backspace
-      "\x7f" -> :backspace
-      <<3>> -> :ctrl_c
-      c when is_binary(c) -> {:char, c}
-      _ -> :unknown
+
+      "\r" ->
+        :enter
+
+      "\n" ->
+        :enter
+
+      " " ->
+        :space
+
+      "\d" ->
+        :backspace
+
+      "\x7f" ->
+        :backspace
+
+      <<3>> ->
+        :ctrl_c
+
+      c when is_binary(c) ->
+        {:char, c}
+
+      _ ->
+        :unknown
     end
   rescue
     _ -> :unknown
@@ -401,13 +430,15 @@ defmodule OptimalSystemAgent.CLI.Prompt do
 
   defp clear_lines(n) when n > 0 do
     Enum.each(1..n, fn _ ->
-      IO.write("\e[A\e[2K") # move up + clear line
+      # move up + clear line
+      IO.write("\e[A\e[2K")
     end)
   end
 
   defp clear_lines(_), do: :ok
 
   defp mask_string(str) when byte_size(str) <= 8, do: "••••"
+
   defp mask_string(str) do
     String.slice(str, 0, 4) <> "..." <> String.slice(str, -4, 4)
   end

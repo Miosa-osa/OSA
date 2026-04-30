@@ -37,15 +37,24 @@ defmodule OptimalSystemAgent.Teams.Supervisor do
 
     # Start CostTracker first — Manager may reference it during init
     cost_opts = [
-      team_id:    team_id,
+      team_id: team_id,
       budget_usd: Map.get(team_config, :budget_usd, 1.0)
     ]
 
-    case DynamicSupervisor.start_child(__MODULE__, {OptimalSystemAgent.Teams.CostTracker, cost_opts}) do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
+    case DynamicSupervisor.start_child(
+           __MODULE__,
+           {OptimalSystemAgent.Teams.CostTracker, cost_opts}
+         ) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:already_started, _}} ->
+        :ok
+
       {:error, reason} ->
-        Logger.warning("[Teams.Supervisor] CostTracker start failed for #{team_id}: #{inspect(reason)}")
+        Logger.warning(
+          "[Teams.Supervisor] CostTracker start failed for #{team_id}: #{inspect(reason)}"
+        )
     end
 
     # Start the Manager (which also starts NervousSystem processes)
@@ -85,10 +94,13 @@ defmodule OptimalSystemAgent.Teams.Supervisor do
       [{pid, _}] ->
         DynamicSupervisor.terminate_child(__MODULE__, pid)
         |> tap(fn result ->
-          Logger.debug("[Teams.Supervisor] Terminated #{inspect(module)} for #{team_id}: #{inspect(result)}")
+          Logger.debug(
+            "[Teams.Supervisor] Terminated #{inspect(module)} for #{team_id}: #{inspect(result)}"
+          )
         end)
 
-      [] -> :ok
+      [] ->
+        :ok
     end
   end
 end

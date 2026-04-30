@@ -166,7 +166,10 @@ defmodule OptimalSystemAgent.Channels.Slack do
           ensure_session(session_id)
 
           Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-            case Loop.process_message(session_id, text, channel: :slack, user_id: "slack:#{user_id}") do
+            case Loop.process_message(session_id, text,
+                   channel: :slack,
+                   user_id: "slack:#{user_id}"
+                 ) do
               {:ok, response} ->
                 send_text(token, channel_id, response)
 

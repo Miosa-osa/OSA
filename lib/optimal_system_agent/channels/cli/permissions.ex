@@ -25,7 +25,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
     width = min(terminal_width() - 4, 70)
 
     IO.puts("")
-    IO.puts("  #{@dim}┌─ #{@yellow}Permission Required#{@dim} #{String.duplicate("─", max(width - 24, 2))}┐#{@reset}")
+
+    IO.puts(
+      "  #{@dim}┌─ #{@yellow}Permission Required#{@dim} #{String.duplicate("─", max(width - 24, 2))}┐#{@reset}"
+    )
+
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
     IO.puts("  #{@dim}│#{@reset}  #{@yellow}⚠#{@reset}  #{@bold}#{tool_name}#{@reset} wants to:")
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
@@ -40,16 +44,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Permissions do
 
     # Show affected paths if present
     paths = extract_paths(tool_name, args)
+
     if paths != [] do
       IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
+
       Enum.each(paths, fn path ->
-        padded = String.pad_trailing("     #{@cyan}#{path}#{@reset}", width + String.length(@cyan) + String.length(@reset))
+        padded =
+          String.pad_trailing(
+            "     #{@cyan}#{path}#{@reset}",
+            width + String.length(@cyan) + String.length(@reset)
+          )
+
         IO.puts("  #{@dim}│#{@reset}#{padded}#{@dim}│#{@reset}")
       end)
     end
 
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
-    IO.puts("  #{@dim}│#{@reset}  #{@green}[Y]#{@reset} Allow once  #{@cyan}[A]#{@reset} Allow always  #{@red}[N]#{@reset} Deny")
+
+    IO.puts(
+      "  #{@dim}│#{@reset}  #{@green}[Y]#{@reset} Allow once  #{@cyan}[A]#{@reset} Allow always  #{@red}[N]#{@reset} Deny"
+    )
+
     IO.puts("  #{@dim}│#{@reset}#{String.duplicate(" ", width)}#{@dim}│#{@reset}")
     IO.puts("  #{@dim}└#{String.duplicate("─", width)}┘#{@reset}")
 
