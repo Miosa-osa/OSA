@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use crate::app::layout::Layout;
 
 /// Computed sub-areas from the layout for the main screen
+#[allow(dead_code)]
 pub struct LayoutAreas {
     pub header: Rect,
     pub chat: Rect,
@@ -18,6 +19,7 @@ pub struct LayoutAreas {
 }
 
 impl LayoutAreas {
+    #[allow(dead_code)]
     pub fn compute(
         area: Rect,
         layout: &Layout,
@@ -41,23 +43,48 @@ impl LayoutAreas {
         chat_content_height: Option<u16>,
     ) -> Self {
         let mut y = area.y;
+        let area_bottom = area.y.saturating_add(area.height);
 
-        // Header (2 lines: header + separator)
-        let header = Rect::new(area.x, y, area.width, layout.header_height.min(area.height));
-        y += layout.header_height;
+        // Header. It is usually hidden, but keep the allocator defensive for
+        // tiny terminal sizes.
+        let header_height = layout.header_height.min(area.height);
+        let header = Rect::new(area.x, y, area.width, header_height);
+        y = y.saturating_add(header_height);
 
-        // Compute fixed bottom sections first, give remainder to chat.
-        let bottom_height =
-            task_lines + agent_lines + activity_lines + layout.status_height + layout.input_height;
-        let max_chat_height = area
-            .height
-            .saturating_sub(layout.header_height + bottom_height)
-            .max(5);
+        let remaining_after_header = area_bottom.saturating_sub(y);
+        let status_height = layout.status_height.min(remaining_after_header);
+        let input_height = layout
+            .input_height
+            .min(remaining_after_header.saturating_sub(status_height));
+        let fixed_bottom_height = status_height.saturating_add(input_height);
+
+        // Reserve status/input first so the prompt never gets pushed outside
+        // the terminal. Optional panels are then clamped to the space left
+        // after a small chat viewport.
+        let min_chat_height = 5.min(remaining_after_header.saturating_sub(fixed_bottom_height));
+        let mut optional_budget =
+            remaining_after_header.saturating_sub(fixed_bottom_height + min_chat_height);
+
+        let task_height = task_lines.min(optional_budget);
+        optional_budget = optional_budget.saturating_sub(task_height);
+
+        let agent_height = agent_lines.min(optional_budget);
+        optional_budget = optional_budget.saturating_sub(agent_height);
+
+        let activity_height = activity_lines.min(optional_budget);
+
+        let max_chat_height = remaining_after_header
+            .saturating_sub(fixed_bottom_height)
+            .saturating_sub(task_height)
+            .saturating_sub(agent_height)
+            .saturating_sub(activity_height);
 
         // If chat content is shorter than available space, shrink the chat area
         // so the input sits right below the messages (minimal gap).
         let main_height = match chat_content_height {
-            Some(content_h) if content_h + 1 < max_chat_height => (content_h + 1).max(4),
+            Some(content_h) if content_h + 1 < max_chat_height => {
+                (content_h + 1).max(4).min(max_chat_height)
+            }
             _ => max_chat_height,
         };
 
@@ -77,38 +104,38 @@ impl LayoutAreas {
         y += main_height;
 
         // Tasks
-        let tasks = if task_lines > 0 {
-            let r = Rect::new(area.x, y, area.width, task_lines);
-            y += task_lines;
+        let tasks = if task_height > 0 {
+            let r = Rect::new(area.x, y, area.width, task_height);
+            y = y.saturating_add(task_height);
             Some(r)
         } else {
             None
         };
 
         // Agents
-        let agents = if agent_lines > 0 {
-            let r = Rect::new(area.x, y, area.width, agent_lines);
-            y += agent_lines;
+        let agents = if agent_height > 0 {
+            let r = Rect::new(area.x, y, area.width, agent_height);
+            y = y.saturating_add(agent_height);
             Some(r)
         } else {
             None
         };
 
         // Activity spinner — dedicated rows below agents, above status bar
-        let activity = if activity_lines > 0 {
-            let r = Rect::new(area.x, y, area.width, activity_lines);
-            y += activity_lines;
+        let activity = if activity_height > 0 {
+            let r = Rect::new(area.x, y, area.width, activity_height);
+            y = y.saturating_add(activity_height);
             Some(r)
         } else {
             None
         };
 
         // Status bar
-        let status = Rect::new(area.x, y, area.width, layout.status_height);
-        y += layout.status_height;
+        let status = Rect::new(area.x, y, area.width, status_height);
+        y = y.saturating_add(status_height);
 
         // Input (separator + prompt) — pinned height, no excess
-        let input = Rect::new(area.x, y, area.width, layout.input_height);
+        let input = Rect::new(area.x, y, area.width, input_height);
 
         // Toast overlay (top-right corner)
         let toast = Rect::new(

@@ -7,6 +7,7 @@ use super::App;
 use crate::app::state::AppState;
 use crate::components::{AppAction, Component, ComponentAction};
 use crate::event::Event;
+use crate::util::truncate_str;
 
 impl App {
     /// Main update function. Returns true if the app should quit.
@@ -33,11 +34,7 @@ impl App {
                         wizard.handle_paste(&text);
                     }
                 } else if self.state.allows_input() {
-                    let capped = if text.len() > super::MAX_MESSAGE_SIZE {
-                        &text[..super::MAX_MESSAGE_SIZE]
-                    } else {
-                        &text
-                    };
+                    let capped = truncate_str(&text, super::MAX_MESSAGE_SIZE);
 
                     let line_count = capped.lines().count();
                     if line_count >= 5 {
@@ -423,13 +420,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        let areas = crate::view::main_layout::LayoutAreas::compute(
-            ratatui::prelude::Rect::new(0, 0, self.width, self.height),
-            &self.layout,
-            self.tasks.height(),
-            self.agents.height(),
-            self.activity.height(),
-        );
+        let areas = self.layout_areas(ratatui::prelude::Rect::new(0, 0, self.width, self.height));
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {

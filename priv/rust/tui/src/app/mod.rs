@@ -260,6 +260,36 @@ impl App {
         self.status.set_width(self.width);
     }
 
+    pub fn layout_areas(
+        &self,
+        area: ratatui::prelude::Rect,
+    ) -> crate::view::main_layout::LayoutAreas {
+        let activity_lines = self.activity.height();
+        let chat_content = if self.chat.has_messages {
+            Some(self.chat.content_height())
+        } else {
+            None
+        };
+        let input_h = self.input.needed_height();
+        let layout = Layout::compute_with_input_height(
+            self.width,
+            self.height,
+            self.config.sidebar_enabled,
+            self.tasks.height(),
+            self.agents.height(),
+            input_h,
+        );
+
+        crate::view::main_layout::LayoutAreas::compute_with_chat_height(
+            area,
+            &layout,
+            self.tasks.height(),
+            self.agents.height(),
+            activity_lines,
+            chat_content,
+        )
+    }
+
     /// Transition to a new state with validation
     pub fn transition(&mut self, target: AppState) {
         debug_assert!(

@@ -27,3 +27,26 @@ pub fn truncate_str_start(s: &str, max_bytes: usize) -> &str {
     }
     &s[idx..]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_str, truncate_str_start};
+
+    #[test]
+    fn truncate_str_respects_utf8_boundaries() {
+        let s = "ab\u{1f600}cd";
+
+        assert_eq!(truncate_str(s, 3), "ab");
+        assert_eq!(truncate_str(s, 6), "ab\u{1f600}");
+        assert_eq!(truncate_str(s, s.len()), s);
+    }
+
+    #[test]
+    fn truncate_str_start_respects_utf8_boundaries() {
+        let s = "ab\u{1f600}cd";
+
+        assert_eq!(truncate_str_start(s, 3), "cd");
+        assert_eq!(truncate_str_start(s, 6), "\u{1f600}cd");
+        assert_eq!(truncate_str_start(s, s.len()), s);
+    }
+}

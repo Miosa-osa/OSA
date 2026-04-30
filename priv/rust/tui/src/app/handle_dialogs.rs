@@ -58,16 +58,7 @@ impl App {
                 match action {
                     crate::dialogs::sessions::SessionAction::Switch(id) => {
                         self.transition(AppState::Idle);
-                        self.session_id = id;
-                        self.chat.clear();
-                        self.tasks.clear();
-                        self.stream_buf.clear();
-                        self.thinking_buf.clear();
-                        self.agent_header_sent = false;
-                        self.toasts.push(
-                            "Session switched".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
+                        self.switch_session(&id);
                     }
                     crate::dialogs::sessions::SessionAction::Create => {
                         self.transition(AppState::Idle);

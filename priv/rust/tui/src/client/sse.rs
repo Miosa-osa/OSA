@@ -389,7 +389,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::SignalClassified { signal })
         }
 
-        "system_event" => parse_system_event(data),
+        "system_event" => parse_system_event("", data),
 
         // The backend unwraps system_event sub-events: the SSE frame header
         // arrives as e.g. "orchestrator_agent_started" rather than "system_event".
@@ -426,7 +426,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "ask_user_question"
         | "survey_answered"
         | "proactive_message"
-        | "proactive_mode_changed" => parse_system_event(data),
+        | "proactive_mode_changed" => parse_system_event(event_type, data),
 
         "" => None,
 
@@ -436,14 +436,20 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
     }
 }
 
-fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
+fn parse_system_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
     #[derive(serde::Deserialize)]
     struct Base {
+        #[serde(default)]
         event: String,
     }
     let base: Base = serde_json::from_slice(data).ok()?;
+    let event = if base.event.is_empty() {
+        event_type
+    } else {
+        base.event.as_str()
+    };
 
-    match base.event.as_str() {
+    match event {
         "orchestrator_task_started" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -1052,5 +1058,44 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
 fn parse_warning(event_type: &str, err: serde_json::Error) -> BackendEvent {
     BackendEvent::ParseWarning {
         message: format!("[sse] parse {}: {}", event_type, err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_direct_system_event_from_sse_header_without_json_event() {
+        let data = br#"{"tool":"bash","args":"echo ok","request_id":"req-123"}"#;
+
+        let event = parse_sse_event("permission_required", data);
+
+        match event {
+            Some(BackendEvent::PermissionRequired {
+                tool,
+                args,
+                request_id,
+            }) => {
+                assert_eq!(tool, "bash");
+                assert_eq!(args, "echo ok");
+                assert_eq!(request_id, "req-123");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn system_event_json_event_still_takes_precedence() {
+        let data = br#"{"event":"proactive_mode_changed","enabled":true}"#;
+
+        let event = parse_sse_event("system_event", data);
+
+        match event {
+            Some(BackendEvent::ProactiveModeChanged { enabled }) => {
+                assert!(enabled);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 }

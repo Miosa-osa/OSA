@@ -5,6 +5,7 @@ use crate::client::types::Signal;
 use crate::style;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use std::cell::RefCell;
 use std::time::SystemTime;
 
 /// Message types
@@ -58,7 +59,9 @@ pub struct Message {
     /// Survey Q&A data (only for SurveyQA messages)
     pub survey_data: Option<SurveyQAData>,
     /// Cached height for given width
-    pub cached_height: Option<(u16, u16)>,
+    pub cached_height: RefCell<Option<(u16, u16)>>,
+    /// Cached markdown render for given content width
+    pub(super) cached_markdown: RefCell<Option<(u16, Text<'static>)>>,
     /// Wall-clock time when this message was created (used for timestamp display).
     /// None for tool calls and survey messages where timestamps are not shown.
     pub timestamp: Option<SystemTime>,
@@ -72,7 +75,8 @@ impl Message {
             signal,
             tool_data: None,
             survey_data: None,
-            cached_height: None,
+            cached_height: RefCell::new(None),
+            cached_markdown: RefCell::new(None),
             timestamp: Some(SystemTime::now()),
         }
     }
@@ -85,13 +89,15 @@ impl Message {
             tool_data: Some(data),
             survey_data: None,
             signal: None,
-            cached_height: None,
+            cached_height: RefCell::new(None),
+            cached_markdown: RefCell::new(None),
             timestamp: None,
         }
     }
 
     pub fn invalidate_cache(&mut self) {
-        self.cached_height = None;
+        self.cached_height.replace(None);
+        self.cached_markdown.replace(None);
     }
 
     pub fn height(&self, width: u16) -> u16 {
@@ -110,7 +116,7 @@ impl Message {
             return (sd.pairs.len() as u16 * 2).saturating_add(2);
         }
 
-        if let Some((cached_w, cached_h)) = self.cached_height {
+        if let Some((cached_w, cached_h)) = *self.cached_height.borrow() {
             if cached_w == width {
                 return cached_h;
             }
@@ -126,7 +132,7 @@ impl Message {
             self.msg_type,
             MessageType::Agent | MessageType::AgentContinuation
         ) {
-            let rendered = crate::render::markdown::render_markdown(&self.content, content_width);
+            let rendered = self.rendered_markdown(content_width);
             let rendered_lines = rendered.lines.len() as u16;
             // AgentContinuation has no header label line.
             let h = if matches!(self.msg_type, MessageType::AgentContinuation) {
@@ -134,7 +140,9 @@ impl Message {
             } else {
                 rendered_lines.max(1) + 1 // +1 for label
             };
-            return h.max(1);
+            let h = h.max(1);
+            self.cached_height.replace(Some((width, h)));
+            return h;
         }
 
         let lines: Vec<&str> = self.content.lines().collect();
@@ -160,7 +168,22 @@ impl Message {
         // AgentContinuation never reaches here (caught above by markdown path),
         // but guard anyway.
 
-        height.max(2)
+        let height = height.max(2);
+        self.cached_height.replace(Some((width, height)));
+        height
+    }
+
+    fn rendered_markdown(&self, width: u16) -> Text<'static> {
+        if let Some((cached_w, ref text)) = *self.cached_markdown.borrow() {
+            if cached_w == width {
+                return text.clone();
+            }
+        }
+
+        let rendered = crate::render::markdown::render_markdown(&self.content, width);
+        self.cached_markdown
+            .replace(Some((width, rendered.clone())));
+        rendered
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
@@ -251,10 +274,7 @@ impl Message {
                 .border_type(BorderType::Thick)
                 .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-            let styled_text = crate::render::markdown::render_markdown(
-                &self.content,
-                content_area.width.saturating_sub(2),
-            );
+            let styled_text = self.rendered_markdown(content_area.width.saturating_sub(2));
             let paragraph = Paragraph::new(styled_text).block(block);
             frame.render_widget(paragraph, content_area);
         }
@@ -271,8 +291,7 @@ impl Message {
             .border_type(BorderType::Thick)
             .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-        let styled_text =
-            crate::render::markdown::render_markdown(&self.content, area.width.saturating_sub(2));
+        let styled_text = self.rendered_markdown(area.width.saturating_sub(2));
         let paragraph = Paragraph::new(styled_text).block(block);
         frame.render_widget(paragraph, area);
     }

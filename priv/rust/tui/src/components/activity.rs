@@ -5,6 +5,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::event::Event;
+use crate::util::truncate_str;
 
 use super::{Component, ComponentAction};
 
@@ -247,7 +248,7 @@ impl Activity {
         let (emoji, verb) = tool_display(name);
         // Truncate args for detail preview
         let detail = if args.len() > 60 {
-            format!("{}...", &args[..57])
+            format!("{}...", truncate_str(args, 57))
         } else {
             args.to_string()
         };

@@ -83,29 +83,7 @@ impl App {
                 // changes on every keystroke (single-line → multi-line wrap).
                 // Refresh here so the input area grows downward as the user
                 // types, instead of overflowing horizontally.
-                let activity_lines = self.activity.height();
-                let chat_content = if self.chat.has_messages {
-                    Some(self.chat.content_height())
-                } else {
-                    None // welcome screen — don't shrink
-                };
-                let input_h = self.input.needed_height();
-                let layout = crate::app::layout::Layout::compute_with_input_height(
-                    self.width,
-                    self.height,
-                    self.config.sidebar_enabled,
-                    self.tasks.height(),
-                    self.agents.height(),
-                    input_h,
-                );
-                let areas = crate::view::main_layout::LayoutAreas::compute_with_chat_height(
-                    area,
-                    &layout,
-                    self.tasks.height(),
-                    self.agents.height(),
-                    activity_lines,
-                    chat_content,
-                );
+                let areas = self.layout_areas(area);
 
                 // Header hidden — info shown in welcome message + status bar
                 // Reclaim the 2 header lines for chat space

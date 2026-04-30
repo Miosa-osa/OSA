@@ -960,11 +960,11 @@ impl App {
             BackendEvent::PermissionRequired {
                 tool,
                 args,
-                request_id: _,
+                request_id,
             } => {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
                 let mut dialog = crate::dialogs::permissions::Permissions::new();
-                dialog.set_tool(tool, args, String::new());
+                dialog.set_tool(tool, args, request_id);
                 self.permissions = Some(dialog);
                 if self.state.can_transition_to(AppState::Permissions) {
                     self.transition(AppState::Permissions);

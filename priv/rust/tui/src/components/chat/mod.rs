@@ -7,6 +7,7 @@ pub mod welcome;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use std::cell::RefCell;
 
 use crate::client::types::Signal;
 use crate::event::Event;
@@ -25,6 +26,8 @@ pub struct Chat {
     height: u16,
     /// Streaming content (live while processing)
     streaming_content: Option<String>,
+    /// Cached live streaming message for measurement/draw reuse.
+    streaming_message: Option<Message>,
     /// Whether we have items (vs showing welcome)
     pub has_messages: bool,
     /// Welcome screen metadata (Hermes-style inventory)
@@ -42,6 +45,7 @@ impl Chat {
             width: 80,
             height: 20,
             streaming_content: None,
+            streaming_message: None,
             has_messages: false,
             welcome_provider: None,
             welcome_model: None,
@@ -146,7 +150,8 @@ impl Chat {
             signal: None,
             tool_data: None,
             survey_data: Some(SurveyQAData { survey_id, pairs }),
-            cached_height: None,
+            cached_height: RefCell::new(None),
+            cached_markdown: RefCell::new(None),
             timestamp: None,
         });
         self.has_messages = true;
@@ -212,19 +217,29 @@ impl Chat {
     }
 
     pub fn update_streaming(&mut self, content: &str) {
-        self.streaming_content = Some(content.to_string());
+        let content = content.to_string();
+        if self.streaming_content.as_ref() != Some(&content) {
+            self.streaming_message = Some(Message::new(
+                MessageType::Agent,
+                format!("{}█", content),
+                None,
+            ));
+            self.streaming_content = Some(content);
+        }
         self.has_messages = true; // ensure welcome screen is dismissed
         self.auto_scroll_to_bottom();
     }
 
     pub fn clear_streaming(&mut self) {
         self.streaming_content = None;
+        self.streaming_message = None;
     }
 
     pub fn clear(&mut self) {
         self.messages.clear();
         self.has_messages = false;
         self.streaming_content = None;
+        self.streaming_message = None;
         self.scroll_offset = 0;
     }
 
@@ -305,6 +320,9 @@ impl Chat {
         for msg in &mut self.messages {
             msg.invalidate_cache();
         }
+        if let Some(ref mut msg) = self.streaming_message {
+            msg.invalidate_cache();
+        }
     }
 
     /// Public accessor for layout — returns total content height in lines.
@@ -319,11 +337,10 @@ impl Chat {
             .map(|m| m.height(self.width).saturating_add(1)) // +1 for spacing
             .sum();
 
-        let streaming_height: u16 = if let Some(ref content) = self.streaming_content {
+        let streaming_height: u16 = if let Some(ref msg) = self.streaming_message {
             // Measure the real height of the live streaming message so scroll
             // bounds are accurate and scroll_up() is not incorrectly capped.
-            let streaming_msg = Message::new(MessageType::Agent, format!("{}█", content), None);
-            streaming_msg.height(self.width).saturating_add(1) // +1 for spacing
+            msg.height(self.width).saturating_add(1) // +1 for spacing
         } else {
             0
         };
@@ -358,10 +375,8 @@ impl Chat {
         }
 
         // Render streaming content after messages
-        if let Some(ref streaming) = self.streaming_content {
+        if let Some(ref streaming_msg) = self.streaming_message {
             if y < area.y + area.height {
-                let streaming_msg =
-                    Message::new(MessageType::Agent, format!("{}█", streaming), None);
                 let h = streaming_msg.height(area.width);
                 let available = (area.y + area.height).saturating_sub(y);
                 let render_h = h.min(available);
@@ -412,8 +427,7 @@ impl Component for Chat {
         let mut remaining_skip = self.scroll_offset;
 
         // Render streaming content first (at bottom)
-        if let Some(ref streaming) = self.streaming_content {
-            let streaming_msg = Message::new(MessageType::Agent, format!("{}█", streaming), None);
+        if let Some(ref streaming_msg) = self.streaming_message {
             let h = streaming_msg.height(area.width);
 
             if remaining_skip > 0 {
