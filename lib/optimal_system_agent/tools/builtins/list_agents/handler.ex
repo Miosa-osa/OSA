@@ -53,12 +53,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents.Handler do
       else
         lines =
           Enum.map_join(agents, "\n", fn a ->
+            allowed =
+              case a[:tools_allowed] do
+                nil -> "all tools"
+                [] -> "no tools"
+                tools -> "tools: #{Enum.join(tools, ", ")}"
+              end
+
             blocked =
               if a[:tools_blocked] != [],
                 do: " | blocked: #{Enum.join(a.tools_blocked, ", ")}",
                 else: ""
 
-            "- **#{a.name}** (#{a[:tier] || :specialist}): #{a[:description]}#{blocked}"
+            permission = a[:permission_tier] || :subagent
+            source = a[:source] || :unknown
+
+            "- **#{a.name}** (#{a[:tier] || :specialist}, #{permission}, #{source}): " <>
+              "#{a[:description]} | #{allowed}#{blocked}"
           end)
 
         {:ok,
@@ -77,6 +88,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents.Handler do
         do: "\nBlocked tools: #{Enum.join(agent.tools_blocked, ", ")}",
         else: "\nBlocked tools: none (full access)"
 
+    allowed =
+      case agent[:tools_allowed] do
+        nil -> "\nAllowed tools: all"
+        [] -> "\nAllowed tools: none"
+        tools -> "\nAllowed tools: #{Enum.join(tools, ", ")}"
+      end
+
+    source =
+      "\nSource: #{agent[:source] || :unknown}" <>
+        if(agent[:source_path], do: " (#{agent.source_path})", else: "")
+
+    permission = "\nPermission tier: #{agent[:permission_tier] || :subagent}"
+
     prompt_preview =
       if agent[:system_prompt],
         do: "\nPrompt preview: #{String.slice(agent.system_prompt, 0, 200)}...",
@@ -89,7 +113,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ListAgents.Handler do
 
     """
     ## #{agent.name} (#{agent[:tier] || :specialist})
-    #{agent[:description]}#{blocked}#{triggers}#{prompt_preview}
+    #{agent[:description]}#{permission}#{allowed}#{blocked}#{source}#{triggers}#{prompt_preview}
     """
     |> String.trim()
   end

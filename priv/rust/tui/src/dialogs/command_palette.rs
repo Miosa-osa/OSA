@@ -105,7 +105,10 @@ impl CommandPalette {
             }
             KeyCode::Up => {
                 if !self.filtered.is_empty() {
-                    self.selected = self.selected.checked_sub(1).unwrap_or(self.filtered.len() - 1);
+                    self.selected = self
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(self.filtered.len() - 1);
                 }
                 None
             }
@@ -138,7 +141,9 @@ impl CommandPalette {
         let theme = crate::style::theme();
 
         // Width: half the terminal, clamped to [MIN_WIDTH, area.width - 4].
-        let w = (area.width / 2).max(MIN_WIDTH).min(area.width.saturating_sub(4));
+        let w = (area.width / 2)
+            .max(MIN_WIDTH)
+            .min(area.width.saturating_sub(4));
         // Height: 3 (border + filter + separator) + visible items + 1 bottom border.
         let item_count = self.filtered.len().min(MAX_VISIBLE) as u16;
         let h = (3 + item_count + 1).min(area.height.saturating_sub(4));
@@ -172,7 +177,10 @@ impl CommandPalette {
         // Filter input line: "> <filter>"
         let filter_line = Line::from(vec![
             Span::styled("> ", theme.prompt_char()),
-            Span::styled(self.filter.clone(), Style::default().fg(theme.colors.secondary)),
+            Span::styled(
+                self.filter.clone(),
+                Style::default().fg(theme.colors.secondary),
+            ),
         ]);
         frame.render_widget(
             Paragraph::new(filter_line),

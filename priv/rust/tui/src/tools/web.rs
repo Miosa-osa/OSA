@@ -10,7 +10,13 @@ use super::{
 pub struct WebFetchRenderer;
 
 impl ToolRenderer for WebFetchRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let url = parse_json_arg(args, &["url", "uri", "endpoint", "input"])
@@ -64,10 +70,7 @@ impl ToolRenderer for WebFetchRenderer {
 
         // Content lines
         for line in result.lines() {
-            body.push(Line::from(Span::styled(
-                line.to_string(),
-                theme.faint(),
-            )));
+            body.push(Line::from(Span::styled(line.to_string(), theme.faint())));
         }
 
         let max_lines = if opts.compact { 8 } else { 15 };
@@ -82,7 +85,13 @@ impl ToolRenderer for WebFetchRenderer {
 pub struct WebSearchRenderer;
 
 impl ToolRenderer for WebSearchRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let query = parse_json_arg(args, &["query", "q", "search_query", "input"])

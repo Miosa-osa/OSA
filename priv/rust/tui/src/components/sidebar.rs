@@ -226,10 +226,7 @@ impl Sidebar {
 
             self.sections.push(SidebarSection {
                 title: "Context".into(),
-                items: vec![
-                    ("ctx".into(), bar),
-                    ("use".into(), pct_str),
-                ],
+                items: vec![("ctx".into(), bar), ("use".into(), pct_str)],
             });
         }
 
@@ -350,7 +347,8 @@ impl Component for Sidebar {
             }
 
             // Left border on every row of this section (title + items + gap)
-            let section_h = 1 + section.items.len() as u16 + if si + 1 < section_count { 1 } else { 0 };
+            let section_h =
+                1 + section.items.len() as u16 + if si + 1 < section_count { 1 } else { 0 };
             for row in 0..section_h {
                 let ry = y + row;
                 if ry >= area.y + area.height {
@@ -373,10 +371,7 @@ impl Component for Sidebar {
                     theme.sidebar_title()
                 };
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        &section.title,
-                        title_style,
-                    ))),
+                    Paragraph::new(Line::from(Span::styled(&section.title, title_style))),
                     Rect::new(inner_x, y, inner_w, 1),
                 );
             }
@@ -407,10 +402,7 @@ impl Component for Sidebar {
                 ]);
 
                 if inner_w > 0 {
-                    frame.render_widget(
-                        Paragraph::new(line),
-                        Rect::new(inner_x, y, inner_w, 1),
-                    );
+                    frame.render_widget(Paragraph::new(line), Rect::new(inner_x, y, inner_w, 1));
                 }
                 y += 1;
             }

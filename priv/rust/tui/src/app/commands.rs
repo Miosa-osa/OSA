@@ -88,10 +88,8 @@ impl App {
                     if parts.len() >= 2 && !parts[1].is_empty() {
                         self.switch_model(parts[0], parts[1]);
                     } else {
-                        self.chat.add_system_message(
-                            "Usage: /model provider/model_name",
-                            "warning",
-                        );
+                        self.chat
+                            .add_system_message("Usage: /model provider/model_name", "warning");
                     }
                 } else if let Some((first, rest)) = arg.split_once(' ') {
                     if KNOWN_PROVIDERS.contains(&first) {
@@ -145,7 +143,8 @@ impl App {
                         .map(|(i, t)| format!("{}. {}", i + 1, t))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    self.toasts.push(msg, crate::components::toast::ToastLevel::Info);
+                    self.toasts
+                        .push(msg, crate::components::toast::ToastLevel::Info);
                 }
             }
             "/setup" => {
@@ -171,7 +170,14 @@ impl App {
                     crate::components::toast::ToastLevel::Warning,
                 );
                 // Notify backend to toggle dangerous mode
-                self.execute_backend_command("dangerous_mode", if self.config.skip_permissions { "on" } else { "off" });
+                self.execute_backend_command(
+                    "dangerous_mode",
+                    if self.config.skip_permissions {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                );
             }
             "/tools" => {
                 let count = self.header.tool_count();
@@ -229,7 +235,10 @@ impl App {
                 let ctx = self.status.context_utilization();
                 let msg = format!(
                     "Model: {} | Tools: {} | Context: {:.0}% | Session: {}",
-                    model, tools, ctx * 100.0, self.session_id
+                    model,
+                    tools,
+                    ctx * 100.0,
+                    self.session_id
                 );
                 self.chat.add_system_message(&msg, "status");
             }
@@ -244,7 +253,9 @@ impl App {
                             let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Ok(resp))));
                         }
                         Err(e) => {
-                            let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Err(e.to_string()))));
+                            let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Err(
+                                e.to_string()
+                            ))));
                         }
                     }
                 });

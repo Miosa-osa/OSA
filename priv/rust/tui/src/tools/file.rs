@@ -1,16 +1,20 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{
-    parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
-};
+use super::{parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
 // ─── FileViewRenderer (Read) ──────────────────────────────────────────────────
 
 pub struct FileViewRenderer;
 
 impl ToolRenderer for FileViewRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let path = parse_json_arg(args, &["path", "file_path", "filename", "target_file"])
@@ -64,16 +68,17 @@ impl ToolRenderer for FileViewRenderer {
                             format!("  {:>4}  ", lineno),
                             Style::default().fg(theme.colors.dim),
                         ),
-                        Span::styled(line_content.to_string(), Style::default().fg(theme.colors.muted)),
+                        Span::styled(
+                            line_content.to_string(),
+                            Style::default().fg(theme.colors.muted),
+                        ),
                     ]));
                 }
                 if line_count > PREVIEW_LINES {
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            "         (ctrl+o to expand)".to_string(),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                    ]));
+                    out.push(Line::from(vec![Span::styled(
+                        "         (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
+                    )]));
                 }
                 return out;
             }
@@ -107,7 +112,13 @@ impl ToolRenderer for FileViewRenderer {
 pub struct FileWriteRenderer;
 
 impl ToolRenderer for FileWriteRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Extract path: try args first, then result first line (backend sends path there)
@@ -146,12 +157,17 @@ impl ToolRenderer for FileWriteRenderer {
             // Parse real line count from "N lines written" header if present,
             // otherwise fall back to counting preview lines.
             let line_count = {
-                let from_header = result.lines()
+                let from_header = result
+                    .lines()
                     .find(|l| l.contains("lines written"))
                     .and_then(|l| l.split_whitespace().next())
                     .and_then(|n| n.parse::<usize>().ok());
                 from_header.unwrap_or_else(|| {
-                    if content.is_empty() { 0 } else { content.lines().count() }
+                    if content.is_empty() {
+                        0
+                    } else {
+                        content.lines().count()
+                    }
                 })
             };
             if line_count > 0 {
@@ -180,12 +196,10 @@ impl ToolRenderer for FileWriteRenderer {
                     ]));
                 }
                 if line_count > PREVIEW_LINES {
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            "         (ctrl+o to expand)".to_string(),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                    ]));
+                    out.push(Line::from(vec![Span::styled(
+                        "         (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
+                    )]));
                 }
                 return out;
             }
@@ -219,7 +233,13 @@ impl ToolRenderer for FileWriteRenderer {
 pub struct FileEditRenderer;
 
 impl ToolRenderer for FileEditRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let path = parse_json_arg(
@@ -379,22 +399,10 @@ fn render_collapsed_diff_preview(
             "     ".to_string()
         };
         out.push(Line::from(vec![
-            Span::styled(
-                "  ".to_string(),
-                Style::default().bg(bg),
-            ),
-            Span::styled(
-                lineno_str,
-                Style::default().fg(theme.colors.dim).bg(bg),
-            ),
-            Span::styled(
-                format!("{} ", prefix),
-                Style::default().fg(fg).bg(bg),
-            ),
-            Span::styled(
-                dl.content.clone(),
-                Style::default().fg(fg).bg(bg),
-            ),
+            Span::styled("  ".to_string(), Style::default().bg(bg)),
+            Span::styled(lineno_str, Style::default().fg(theme.colors.dim).bg(bg)),
+            Span::styled(format!("{} ", prefix), Style::default().fg(fg).bg(bg)),
+            Span::styled(dl.content.clone(), Style::default().fg(fg).bg(bg)),
         ]));
     }
 
@@ -445,9 +453,10 @@ fn render_inline_diff(
 
                     // Render delete line with word highlights
                     let word_diff = TextDiff::from_words(old_line, new_line);
-                    let mut del_spans: Vec<Span<'static>> = vec![
-                        Span::styled("- ".to_string(), Style::default().fg(theme.colors.error).bg(del_bg)),
-                    ];
+                    let mut del_spans: Vec<Span<'static>> = vec![Span::styled(
+                        "- ".to_string(),
+                        Style::default().fg(theme.colors.error).bg(del_bg),
+                    )];
                     for wc in word_diff.iter_all_changes() {
                         match wc.tag() {
                             ChangeTag::Equal => {
@@ -459,7 +468,9 @@ fn render_inline_diff(
                             ChangeTag::Delete => {
                                 del_spans.push(Span::styled(
                                     wc.value().to_string(),
-                                    Style::default().fg(del_highlight).bg(theme.colors.diff_del_highlight_bg)
+                                    Style::default()
+                                        .fg(del_highlight)
+                                        .bg(theme.colors.diff_del_highlight_bg)
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             }
@@ -469,9 +480,10 @@ fn render_inline_diff(
                     lines.push(Line::from(del_spans));
 
                     // Render insert line with word highlights
-                    let mut add_spans: Vec<Span<'static>> = vec![
-                        Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success).bg(add_bg)),
-                    ];
+                    let mut add_spans: Vec<Span<'static>> = vec![Span::styled(
+                        "+ ".to_string(),
+                        Style::default().fg(theme.colors.success).bg(add_bg),
+                    )];
                     for wc in word_diff.iter_all_changes() {
                         match wc.tag() {
                             ChangeTag::Equal => {
@@ -483,7 +495,9 @@ fn render_inline_diff(
                             ChangeTag::Insert => {
                                 add_spans.push(Span::styled(
                                     wc.value().to_string(),
-                                    Style::default().fg(add_highlight).bg(theme.colors.diff_add_highlight_bg)
+                                    Style::default()
+                                        .fg(add_highlight)
+                                        .bg(theme.colors.diff_add_highlight_bg)
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             }

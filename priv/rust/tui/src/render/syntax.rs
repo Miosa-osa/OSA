@@ -34,7 +34,11 @@ pub fn highlight(code: &str, language: &str) -> Vec<Line<'static>> {
     let syntect_theme_name = if ts.themes.contains_key("base16-eighties.dark") {
         "base16-eighties.dark"
     } else {
-        ts.themes.keys().next().map(|s| s.as_str()).unwrap_or("base16-ocean.dark")
+        ts.themes
+            .keys()
+            .next()
+            .map(|s| s.as_str())
+            .unwrap_or("base16-ocean.dark")
     };
 
     // Resolve syntax definition — normalise common aliases first.

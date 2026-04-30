@@ -1,4 +1,6 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use tracing::warn;
 
 use super::App;
@@ -16,9 +18,7 @@ impl App {
                 self.recompute_layout();
                 false
             }
-            Event::Terminal(CrosstermEvent::Key(key))
-                if key.kind == KeyEventKind::Press =>
-            {
+            Event::Terminal(CrosstermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key)
             }
             Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
@@ -42,7 +42,10 @@ impl App {
                     let line_count = capped.lines().count();
                     if line_count >= 5 {
                         self.toasts.push(
-                            format!("Large paste ({} lines) \u{2014} sent as context", line_count),
+                            format!(
+                                "Large paste ({} lines) \u{2014} sent as context",
+                                line_count
+                            ),
                             crate::components::toast::ToastLevel::Info,
                         );
                     }
@@ -204,9 +207,9 @@ impl App {
                 false
             }
             _ => {
-                let action =
-                    self.input
-                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                let action = self
+                    .input
+                    .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
                         self.submit_input(&text);
@@ -287,9 +290,9 @@ impl App {
                 false
             }
             _ => {
-                let action =
-                    self.input
-                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                let action = self
+                    .input
+                    .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
                         self.submit_input(&text);
@@ -391,7 +394,11 @@ impl App {
             VoiceEvent::RecordingStopped => {
                 self.stop_recording();
             }
-            VoiceEvent::DownloadProgress { label, downloaded, total } => {
+            VoiceEvent::DownloadProgress {
+                label,
+                downloaded,
+                total,
+            } => {
                 let pct = if total > 0 {
                     ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u8
                 } else {
@@ -404,7 +411,8 @@ impl App {
                 );
             }
             VoiceEvent::AudioLevel(level) => {
-                self.status.set_audio_level((level * 100.0).clamp(0.0, 100.0) as u8);
+                self.status
+                    .set_audio_level((level * 100.0).clamp(0.0, 100.0) as u8);
             }
             VoiceEvent::HandsFreeRestart => {
                 if self.voice.hands_free && !self.voice.recording {
@@ -425,24 +433,22 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                if mouse.row >= areas.chat.y
-                    && mouse.row < areas.chat.y + areas.chat.height
-                {
+                if mouse.row >= areas.chat.y && mouse.row < areas.chat.y + areas.chat.height {
                     self.chat.scroll_up(3);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if mouse.row >= areas.chat.y
-                    && mouse.row < areas.chat.y + areas.chat.height
-                {
+                if mouse.row >= areas.chat.y && mouse.row < areas.chat.y + areas.chat.height {
                     self.chat.scroll_down(3);
                 }
             }
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 // Mic button click
                 if let Some(mic) = self.input.mic_area() {
-                    if mouse.column >= mic.x && mouse.column < mic.x + mic.width
-                        && mouse.row >= mic.y && mouse.row < mic.y + mic.height
+                    if mouse.column >= mic.x
+                        && mouse.column < mic.x + mic.width
+                        && mouse.row >= mic.y
+                        && mouse.row < mic.y + mic.height
                     {
                         if self.voice.recording {
                             self.stop_recording();
@@ -452,17 +458,16 @@ impl App {
                         return;
                     }
                 }
-                if mouse.row >= areas.input.y
-                    && mouse.row < areas.input.y + areas.input.height
-                {
+                if mouse.row >= areas.input.y && mouse.row < areas.input.y + areas.input.height {
                     let col = mouse.column.saturating_sub(areas.input.x + 2);
                     self.input.set_cursor_col(col);
                 }
                 if let Some(sb) = areas.sidebar {
-                    if mouse.column >= sb.x && mouse.column < sb.x + sb.width
-                        && mouse.row >= sb.y && mouse.row < sb.y + sb.height
-                    {
-                    }
+                    if mouse.column >= sb.x
+                        && mouse.column < sb.x + sb.width
+                        && mouse.row >= sb.y
+                        && mouse.row < sb.y + sb.height
+                    {}
                 }
             }
             _ => {}

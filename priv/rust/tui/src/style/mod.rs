@@ -432,9 +432,7 @@ impl Theme {
     }
 
     pub fn button_inactive(&self) -> Style {
-        Style::default()
-            .fg(self.colors.muted)
-            .bg(self.colors.dim)
+        Style::default().fg(self.colors.muted).bg(self.colors.dim)
     }
 
     pub fn button_danger(&self) -> Style {

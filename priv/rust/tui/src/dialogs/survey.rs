@@ -190,11 +190,7 @@ impl SurveyDialog {
     }
 
     fn build_result(&self) -> Option<SurveyAction> {
-        let answers: Vec<QuestionAnswer> = self
-            .answers
-            .iter()
-            .filter_map(|a| a.clone())
-            .collect();
+        let answers: Vec<QuestionAnswer> = self.answers.iter().filter_map(|a| a.clone()).collect();
         Some(SurveyAction::Submit(SurveyResult {
             survey_id: self.survey_id.clone(),
             answers,
@@ -204,7 +200,10 @@ impl SurveyDialog {
     // ── Key handling ────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<SurveyAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -413,12 +412,11 @@ impl SurveyDialog {
 
         // Question text (bold)
         frame.render_widget(
-            Paragraph::new(question.text.as_str())
-                .style(
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+            Paragraph::new(question.text.as_str()).style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Rect::new(inner.x, cy, inner.width, 1),
         );
         cy += 1;
@@ -446,9 +444,17 @@ impl SurveyDialog {
 
             // Indicator
             let indicator = if question.multi_select {
-                if is_checked { "[x]" } else { "[ ]" }
+                if is_checked {
+                    "[x]"
+                } else {
+                    "[ ]"
+                }
             } else {
-                if is_checked { " * " } else { " o " }
+                if is_checked {
+                    " * "
+                } else {
+                    " o "
+                }
             };
 
             let line_style = if is_selected {
@@ -488,9 +494,17 @@ impl SurveyDialog {
             let is_checked = self.checked.get(ft_idx).copied().unwrap_or(false);
 
             let indicator = if question.multi_select {
-                if is_checked { "[x]" } else { "[ ]" }
+                if is_checked {
+                    "[x]"
+                } else {
+                    "[ ]"
+                }
             } else {
-                if is_checked { " * " } else { " o " }
+                if is_checked {
+                    " * "
+                } else {
+                    " o "
+                }
             };
 
             let line_style = if is_selected {
@@ -522,10 +536,7 @@ impl SurveyDialog {
                     Style::default().fg(theme.colors.dim)
                 };
                 let ft_area = Rect::new(inner.x, cy, inner.width, 1);
-                frame.render_widget(
-                    Paragraph::new(ft_display).style(ft_style),
-                    ft_area,
-                );
+                frame.render_widget(Paragraph::new(ft_display).style(ft_style), ft_area);
                 // Position terminal cursor at the correct column when focused
                 if self.focus == FocusMode::FreeText {
                     // 4 spaces indent + display width of text before cursor

@@ -102,9 +102,9 @@ pub struct OnboardingWizard {
     verify_status: VerifyStatus,
 
     // Step 4 — Channels
-    selected_channels: Vec<bool>,          // [telegram, discord, slack]
+    selected_channels: Vec<bool>, // [telegram, discord, slack]
     channel_tokens: HashMap<String, String>,
-    current_channel_setup: Option<usize>,  // index into CHANNELS being configured
+    current_channel_setup: Option<usize>, // index into CHANNELS being configured
     channel_token_input: String,
     channel_token_masked: bool,
 
@@ -179,7 +179,8 @@ impl OnboardingWizard {
                         } else {
                             String::new()
                         };
-                        let label = format!("{:<32} {:>6}  {}{}", name, ctx_label, tools_label, note);
+                        let label =
+                            format!("{:<32} {:>6}  {}{}", name, ctx_label, tools_label, note);
                         Some((id, label))
                     })
                     .collect();
@@ -194,9 +195,7 @@ impl OnboardingWizard {
 
     fn provider_needs_key(&self) -> bool {
         self.current_provider()
-            .map(|p| {
-                p.requires_key.as_bool().unwrap_or(true) && p.id != "ollama_local"
-            })
+            .map(|p| p.requires_key.as_bool().unwrap_or(true) && p.id != "ollama_local")
             .unwrap_or(false)
     }
 
@@ -529,7 +528,10 @@ impl OnboardingWizard {
     // ── Key handling ─────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<OnboardingAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -628,8 +630,7 @@ impl OnboardingWizard {
                 KeyCode::Enter => self.advance(),
                 KeyCode::Esc => self.retreat(),
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.selected_model =
-                        self.selected_model.checked_sub(1).unwrap_or(count - 1);
+                    self.selected_model = self.selected_model.checked_sub(1).unwrap_or(count - 1);
                     None
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -672,7 +673,8 @@ impl OnboardingWizard {
                 // Find the first selected channel that does not yet have a token and
                 // open its token input. If all selected channels are configured (or none
                 // are selected), advance to confirm.
-                let next_unconfigured = self.selected_channels
+                let next_unconfigured = self
+                    .selected_channels
                     .iter()
                     .enumerate()
                     .find(|(i, &selected)| {
@@ -724,7 +726,11 @@ impl OnboardingWizard {
         }
     }
 
-    fn handle_step_channel_token(&mut self, key: KeyEvent, channel_idx: usize) -> Option<OnboardingAction> {
+    fn handle_step_channel_token(
+        &mut self,
+        key: KeyEvent,
+        channel_idx: usize,
+    ) -> Option<OnboardingAction> {
         match key.code {
             KeyCode::Enter => {
                 // Save the token and look for the next unconfigured selected channel
@@ -737,7 +743,8 @@ impl OnboardingWizard {
                 self.current_channel_setup = None;
 
                 // Find next selected but unconfigured channel
-                let next = self.selected_channels
+                let next = self
+                    .selected_channels
                     .iter()
                     .enumerate()
                     .find(|(i, &selected)| {
@@ -991,12 +998,7 @@ impl OnboardingWizard {
 
     // ── Per-step draw methods ─────────────────────────────────────────────
 
-    fn draw_step_provider(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_provider(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         frame.render_widget(
@@ -1044,12 +1046,7 @@ impl OnboardingWizard {
         }
     }
 
-    fn draw_step_details(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_details(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         let provider_name = self
@@ -1106,8 +1103,7 @@ impl OnboardingWizard {
 
         if self.provider_needs_url() {
             frame.render_widget(
-                Paragraph::new("  Base URL:")
-                    .style(Style::default().fg(theme.colors.muted)),
+                Paragraph::new("  Base URL:").style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
             );
             cy += 1;
@@ -1124,12 +1120,7 @@ impl OnboardingWizard {
         }
     }
 
-    fn draw_step_model(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_model(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         frame.render_widget(
@@ -1143,8 +1134,7 @@ impl OnboardingWizard {
         if self.model_list.is_empty() {
             // Manual input
             frame.render_widget(
-                Paragraph::new("  Model name:")
-                    .style(Style::default().fg(theme.colors.muted)),
+                Paragraph::new("  Model name:").style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
             );
             cy += 1;
@@ -1188,12 +1178,7 @@ impl OnboardingWizard {
         }
     }
 
-    fn draw_step_verify(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_verify(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         frame.render_widget(
@@ -1247,12 +1232,7 @@ impl OnboardingWizard {
         }
     }
 
-    fn draw_step_channels(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_channels(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         if let Some(channel_idx) = self.current_channel_setup {
             self.draw_step_channel_token(frame, area, theme, channel_idx);
             return;
@@ -1294,7 +1274,11 @@ impl OnboardingWizard {
 
             let check = if is_checked { "\u{25a0}" } else { "\u{25a1}" };
             let cursor_marker = if is_cursor { ">" } else { " " };
-            let token_note = if is_checked && has_token { " \u{2713}" } else { "" };
+            let token_note = if is_checked && has_token {
+                " \u{2713}"
+            } else {
+                ""
+            };
 
             let style = if is_cursor {
                 Style::default()
@@ -1352,8 +1336,7 @@ impl OnboardingWizard {
         cy += 1;
 
         frame.render_widget(
-            Paragraph::new("  Bot Token:")
-                .style(Style::default().fg(theme.colors.muted)),
+            Paragraph::new("  Bot Token:").style(Style::default().fg(theme.colors.muted)),
             Rect::new(area.x, cy, area.width, 1),
         );
         cy += 1;
@@ -1373,12 +1356,7 @@ impl OnboardingWizard {
         );
     }
 
-    fn draw_step_identity(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_identity(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         frame.render_widget(
@@ -1391,7 +1369,9 @@ impl OnboardingWizard {
 
         // User name field
         let user_label_style = if self.identity_focus == 0 {
-            Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.colors.muted)
         };
@@ -1406,7 +1386,11 @@ impl OnboardingWizard {
         frame.render_widget(
             Paragraph::new(user_display).style(
                 Style::default()
-                    .fg(if self.identity_focus == 0 { theme.colors.primary } else { theme.colors.secondary })
+                    .fg(if self.identity_focus == 0 {
+                        theme.colors.primary
+                    } else {
+                        theme.colors.secondary
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
             Rect::new(area.x, cy, area.width, 1),
@@ -1415,7 +1399,9 @@ impl OnboardingWizard {
 
         // Agent name field
         let agent_label_style = if self.identity_focus == 1 {
-            Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.colors.muted)
         };
@@ -1430,7 +1416,11 @@ impl OnboardingWizard {
         frame.render_widget(
             Paragraph::new(agent_display).style(
                 Style::default()
-                    .fg(if self.identity_focus == 1 { theme.colors.primary } else { theme.colors.secondary })
+                    .fg(if self.identity_focus == 1 {
+                        theme.colors.primary
+                    } else {
+                        theme.colors.secondary
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
             Rect::new(area.x, cy, area.width, 1),
@@ -1444,12 +1434,7 @@ impl OnboardingWizard {
         );
     }
 
-    fn draw_step_confirm(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &crate::style::Theme,
-    ) {
+    fn draw_step_confirm(&self, frame: &mut Frame, area: Rect, theme: &crate::style::Theme) {
         let mut cy = area.y + 1;
 
         frame.render_widget(
@@ -1534,10 +1519,7 @@ impl OnboardingWizard {
                 ),
                 Span::styled(value.clone(), Style::default().fg(theme.colors.secondary)),
             ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(area.x, cy, area.width, 1),
-            );
+            frame.render_widget(Paragraph::new(line), Rect::new(area.x, cy, area.width, 1));
             cy += 1;
         }
 

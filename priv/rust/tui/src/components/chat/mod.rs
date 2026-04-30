@@ -31,6 +31,7 @@ pub struct Chat {
     welcome_provider: Option<String>,
     welcome_model: Option<String>,
     welcome_tool_count: usize,
+    welcome_fast_mode: bool,
 }
 
 impl Chat {
@@ -45,6 +46,7 @@ impl Chat {
             welcome_provider: None,
             welcome_model: None,
             welcome_tool_count: 0,
+            welcome_fast_mode: false,
         }
     }
 
@@ -67,11 +69,8 @@ impl Chat {
     }
 
     pub fn add_user_message(&mut self, content: &str) {
-        self.messages.push(Message::new(
-            MessageType::User,
-            content.to_string(),
-            None,
-        ));
+        self.messages
+            .push(Message::new(MessageType::User, content.to_string(), None));
         self.has_messages = true;
         // Always jump to bottom when the user sends a new message.
         self.scroll_to_bottom();
@@ -123,8 +122,11 @@ impl Chat {
 
     /// Add an inline tool-call summary to the chat (compact one-liner, legacy).
     pub fn add_tool_message(&mut self, content: &str) {
-        self.messages
-            .push(Message::new(MessageType::ToolCall, content.to_string(), None));
+        self.messages.push(Message::new(
+            MessageType::ToolCall,
+            content.to_string(),
+            None,
+        ));
         self.has_messages = true;
         self.auto_scroll_to_bottom();
     }
@@ -265,10 +267,21 @@ impl Chat {
         self.has_messages = !self.messages.is_empty();
     }
 
-    pub fn set_welcome_info(&mut self, provider: &str, model: &str, tool_count: usize) {
+    pub fn set_welcome_info(
+        &mut self,
+        provider: &str,
+        model: &str,
+        tool_count: usize,
+        fast_mode: bool,
+    ) {
         self.welcome_provider = Some(provider.to_string());
         self.welcome_model = Some(model.to_string());
         self.welcome_tool_count = tool_count;
+        self.welcome_fast_mode = fast_mode;
+    }
+
+    pub fn set_welcome_fast_mode(&mut self, fast_mode: bool) {
+        self.welcome_fast_mode = fast_mode;
     }
 
     pub fn scroll_up(&mut self, lines: u16) {
@@ -309,11 +322,7 @@ impl Chat {
         let streaming_height: u16 = if let Some(ref content) = self.streaming_content {
             // Measure the real height of the live streaming message so scroll
             // bounds are accurate and scroll_up() is not incorrectly capped.
-            let streaming_msg = Message::new(
-                MessageType::Agent,
-                format!("{}█", content),
-                None,
-            );
+            let streaming_msg = Message::new(MessageType::Agent, format!("{}█", content), None);
             streaming_msg.height(self.width).saturating_add(1) // +1 for spacing
         } else {
             0
@@ -351,11 +360,8 @@ impl Chat {
         // Render streaming content after messages
         if let Some(ref streaming) = self.streaming_content {
             if y < area.y + area.height {
-                let streaming_msg = Message::new(
-                    MessageType::Agent,
-                    format!("{}█", streaming),
-                    None,
-                );
+                let streaming_msg =
+                    Message::new(MessageType::Agent, format!("{}█", streaming), None);
                 let h = streaming_msg.height(area.width);
                 let available = (area.y + area.height).saturating_sub(y);
                 let render_h = h.min(available);
@@ -386,6 +392,7 @@ impl Component for Chat {
                 self.welcome_tool_count,
                 self.welcome_provider.as_deref(),
                 self.welcome_model.as_deref(),
+                self.welcome_fast_mode,
             );
             return;
         }
@@ -406,11 +413,7 @@ impl Component for Chat {
 
         // Render streaming content first (at bottom)
         if let Some(ref streaming) = self.streaming_content {
-            let streaming_msg = Message::new(
-                MessageType::Agent,
-                format!("{}█", streaming),
-                None,
-            );
+            let streaming_msg = Message::new(MessageType::Agent, format!("{}█", streaming), None);
             let h = streaming_msg.height(area.width);
 
             if remaining_skip > 0 {

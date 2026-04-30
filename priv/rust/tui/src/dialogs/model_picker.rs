@@ -85,19 +85,13 @@ impl ModelPicker {
         for (i, m) in self.models.iter().enumerate() {
             let name_lc = m.name.to_lowercase();
             let provider_lc = m.provider.to_lowercase();
-            if !filter.is_empty()
-                && !name_lc.contains(&filter)
-                && !provider_lc.contains(&filter)
-            {
+            if !filter.is_empty() && !name_lc.contains(&filter) && !provider_lc.contains(&filter) {
                 continue;
             }
             if self.recent.contains(&m.name) {
                 recent_indices.push(i);
             }
-            by_provider
-                .entry(m.provider.clone())
-                .or_default()
-                .push(i);
+            by_provider.entry(m.provider.clone()).or_default().push(i);
         }
 
         // Build groups
@@ -213,7 +207,10 @@ impl ModelPicker {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -295,8 +292,8 @@ impl ModelPicker {
         } else {
             format!("  Filter: {}_  ({} models)", self.filter, count)
         };
-        let filter_para = Paragraph::new(filter_display)
-            .style(Style::default().fg(theme.colors.secondary));
+        let filter_para =
+            Paragraph::new(filter_display).style(Style::default().fg(theme.colors.secondary));
         frame.render_widget(filter_para, Rect::new(inner.x, cy, inner.width, 1));
         cy += 1;
 
@@ -326,7 +323,11 @@ impl ModelPicker {
             }
         }
 
-        let visible_rows = self.rows.iter().skip(self.scroll_offset).take(list_h as usize);
+        let visible_rows = self
+            .rows
+            .iter()
+            .skip(self.scroll_offset)
+            .take(list_h as usize);
 
         for (rel_i, row) in visible_rows.enumerate() {
             let abs_i = rel_i + self.scroll_offset;

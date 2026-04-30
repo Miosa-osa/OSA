@@ -93,31 +93,15 @@ impl Default for KeyMap {
                 "toggle sidebar",
             ),
             tab: KeyBinding::new(KeyCode::Tab, KeyModifiers::NONE, "autocomplete"),
-            clear_input: KeyBinding::new(
-                KeyCode::Char('u'),
-                KeyModifiers::CONTROL,
-                "clear input",
-            ),
-            new_session: KeyBinding::new(
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                "new session",
-            ),
-            palette: KeyBinding::new(
-                KeyCode::Char('k'),
-                KeyModifiers::CONTROL,
-                "command palette",
-            ),
+            clear_input: KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL, "clear input"),
+            new_session: KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL, "new session"),
+            palette: KeyBinding::new(KeyCode::Char('k'), KeyModifiers::CONTROL, "command palette"),
             copy_message: KeyBinding::new(
                 KeyCode::Char('y'),
                 KeyModifiers::NONE,
                 "copy last message",
             ),
-            voice_toggle: KeyBinding::new(
-                KeyCode::Char('v'),
-                KeyModifiers::ALT,
-                "voice input",
-            ),
+            voice_toggle: KeyBinding::new(KeyCode::Char('v'), KeyModifiers::ALT, "voice input"),
             voice_hands_free: KeyBinding::new(
                 KeyCode::F(9),
                 KeyModifiers::NONE,

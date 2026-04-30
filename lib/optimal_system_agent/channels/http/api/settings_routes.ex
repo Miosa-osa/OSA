@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
 
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
+  alias OptimalSystemAgent.Agent.Effort
   require Logger
 
   plug(:match)
@@ -19,11 +20,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
   # ── GET / — read current settings ──────────────────────────────────
 
   get "/" do
-    # Merge file-based config with new Settings cascade
-    file_settings = build_settings(read_config())
+    # Merge raw config first, then normalize once for stable JSON keys/types.
+    file_settings = read_config()
     cascade_settings = OptimalSystemAgent.Settings.all()
     merged = Map.merge(file_settings, cascade_settings)
-    json(conn, 200, merged)
+    json(conn, 200, build_settings(merged))
   end
 
   # ── PATCH / — update settings ───────────────────────────────────────
@@ -123,7 +124,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
       agent_name: agent_name,
       yolo_mode: yolo_mode,
       log_level: log_level,
-      context_window: context_window
+      context_window: context_window,
+      effort_level: Effort.current() |> to_string(),
+      fast_mode: Effort.fast_mode?(),
+      max_iterations: Effort.max_iterations(),
+      max_response_tokens: Effort.max_response_tokens(),
+      tool_budget: Effort.tool_budget(),
+      fast_path: %{
+        prefetch: true,
+        adaptive_tools: true,
+        full_capability_fallback: true
+      }
     }
   end
 

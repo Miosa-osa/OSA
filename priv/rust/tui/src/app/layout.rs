@@ -38,7 +38,14 @@ impl Layout {
         task_lines: u16,
         agent_lines: u16,
     ) -> Self {
-        Self::compute_with_input_height(term_width, term_height, sidebar_enabled, task_lines, agent_lines, INPUT_HEIGHT)
+        Self::compute_with_input_height(
+            term_width,
+            term_height,
+            sidebar_enabled,
+            task_lines,
+            agent_lines,
+            INPUT_HEIGHT,
+        )
     }
 
     pub fn compute_with_input_height(

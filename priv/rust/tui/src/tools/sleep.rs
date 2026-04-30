@@ -33,7 +33,13 @@ impl ToolRenderer for SleepRenderer {
             format!("{}s · {}", seconds, reason)
         };
 
-        let header = make_header(opts.status, opts.spinner_frame, "Sleep", &detail, opts.duration_ms);
+        let header = make_header(
+            opts.status,
+            opts.spinner_frame,
+            "Sleep",
+            &detail,
+            opts.duration_ms,
+        );
 
         if !opts.expanded || result.is_empty() {
             return vec![header];

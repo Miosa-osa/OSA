@@ -19,6 +19,38 @@ pub struct HealthResponse {
     pub context_window: Option<u64>,
 }
 
+// === Settings ===
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FastPathSettings {
+    #[serde(default)]
+    pub prefetch: bool,
+    #[serde(default)]
+    pub adaptive_tools: bool,
+    #[serde(default)]
+    pub full_capability_fallback: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SettingsResponse {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub effort_level: String,
+    #[serde(default)]
+    pub fast_mode: bool,
+    #[serde(default)]
+    pub max_iterations: u32,
+    #[serde(default)]
+    pub max_response_tokens: u64,
+    #[serde(default)]
+    pub tool_budget: u32,
+    #[serde(default)]
+    pub fast_path: FastPathSettings,
+}
+
 // === Auth ===
 
 #[derive(Debug, Clone, Serialize)]

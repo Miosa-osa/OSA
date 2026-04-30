@@ -88,6 +88,20 @@ defmodule OptimalSystemAgent.Agents.RegistryTest do
     assert {:project_osa, Path.join([nested, ".osa", "agents"])} in dirs
   end
 
+  test "built-in verifier agent has read-only verdict contract" do
+    agents = Registry.load_from_paths([{:built_in, Path.expand("../../priv/agents", __DIR__)}])
+
+    assert %{
+             permission_tier: :read_only,
+             max_iterations: 4,
+             tools_allowed: tools,
+             system_prompt: prompt
+           } = agents["verifier"]
+
+    assert "file_read" in tools
+    assert prompt =~ "VERDICT: PASS | FAIL | UNKNOWN"
+  end
+
   defp tmp_dir do
     dir = Path.join(System.tmp_dir!(), "osa_agent_registry_#{System.unique_integer([:positive])}")
     File.rm_rf!(dir)

@@ -428,6 +428,19 @@ OSA_AGENT_NAME=OSA
 
 **Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session
 
+### Agent Definitions
+
+Subagents are Markdown files with YAML frontmatter and a prompt body. OSA loads
+agent definitions in this precedence order, with later sources overriding
+earlier ones:
+
+`priv/agents` < project `.claude/agents` < project `.osa/agents` < `~/.osa/agents`
+
+Both flat files like `.osa/agents/verifier.md` and directory agents like
+`~/.osa/agents/verifier/AGENT.md` are supported. Claude-style frontmatter
+aliases are accepted, including `tools`, `disallowedTools`, `maxTurns`,
+`permissionMode`, `model`, `background`, `isolation`, and `skills`.
+
 ---
 
 ## Project Structure

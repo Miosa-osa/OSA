@@ -1,11 +1,11 @@
 // Phase 2+: survey_id field — wired when survey Q&A is persisted
 #![allow(dead_code)]
 
-use std::time::SystemTime;
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Wrap};
 use crate::client::types::Signal;
 use crate::style;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use std::time::SystemTime;
 
 /// Message types
 #[derive(Debug, Clone)]
@@ -122,7 +122,10 @@ impl Message {
         }
 
         // For agent messages, use the markdown renderer for accurate line count.
-        if matches!(self.msg_type, MessageType::Agent | MessageType::AgentContinuation) {
+        if matches!(
+            self.msg_type,
+            MessageType::Agent | MessageType::AgentContinuation
+        ) {
             let rendered = crate::render::markdown::render_markdown(&self.content, content_width);
             let rendered_lines = rendered.lines.len() as u16;
             // AgentContinuation has no header label line.
@@ -176,15 +179,9 @@ impl Message {
             MessageType::SystemError => {
                 self.draw_system(frame, area, &theme, theme.colors.msg_border_error)
             }
-            MessageType::ToolCall => {
-                self.draw_tool_call(frame, area, &theme)
-            }
-            MessageType::Help => {
-                self.draw_help(frame, area, &theme)
-            }
-            MessageType::SurveyQA => {
-                self.draw_survey_qa(frame, area, &theme)
-            }
+            MessageType::ToolCall => self.draw_tool_call(frame, area, &theme),
+            MessageType::Help => self.draw_help(frame, area, &theme),
+            MessageType::SurveyQA => self.draw_survey_qa(frame, area, &theme),
         }
     }
 
@@ -198,7 +195,10 @@ impl Message {
             Span::styled("❯  ", theme.prompt_char()),
             Span::styled("You", theme.user_label()),
         ];
-        let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+        let ts_text = self
+            .timestamp
+            .and_then(format_timestamp)
+            .unwrap_or_default();
         let label = build_header_line(left_spans, ts_text, area.width, theme);
         frame.render_widget(Paragraph::new(label), label_area);
 
@@ -237,7 +237,10 @@ impl Message {
             }
         }
 
-        let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+        let ts_text = self
+            .timestamp
+            .and_then(format_timestamp)
+            .unwrap_or_default();
         let label = build_header_line(label_spans, ts_text, area.width, theme);
         frame.render_widget(Paragraph::new(label), label_area);
 
@@ -248,9 +251,11 @@ impl Message {
                 .border_type(BorderType::Thick)
                 .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-            let styled_text = crate::render::markdown::render_markdown(&self.content, content_area.width.saturating_sub(2));
-            let paragraph = Paragraph::new(styled_text)
-                .block(block);
+            let styled_text = crate::render::markdown::render_markdown(
+                &self.content,
+                content_area.width.saturating_sub(2),
+            );
+            let paragraph = Paragraph::new(styled_text).block(block);
             frame.render_widget(paragraph, content_area);
         }
     }
@@ -266,12 +271,9 @@ impl Message {
             .border_type(BorderType::Thick)
             .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-        let styled_text = crate::render::markdown::render_markdown(
-            &self.content,
-            area.width.saturating_sub(2),
-        );
-        let paragraph = Paragraph::new(styled_text)
-            .block(block);
+        let styled_text =
+            crate::render::markdown::render_markdown(&self.content, area.width.saturating_sub(2));
+        let paragraph = Paragraph::new(styled_text).block(block);
         frame.render_widget(paragraph, area);
     }
 
@@ -300,18 +302,11 @@ impl Message {
                 .map(|line| Line::from(Span::styled(line.to_string(), style)))
                 .collect::<Vec<_>>(),
         );
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
 
-    fn draw_tool_call(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &style::Theme,
-    ) {
+    fn draw_tool_call(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
         // Rich tool call: render pre-built styled Lines directly
         if let Some(ref td) = self.tool_data {
             let paragraph = Paragraph::new(td.lines.clone());
@@ -325,12 +320,9 @@ impl Message {
             .border_type(BorderType::Plain)
             .border_style(Style::default().fg(theme.colors.border));
 
-        let paragraph = Paragraph::new(Span::styled(
-            self.content.as_str(),
-            theme.faint(),
-        ))
-        .block(block)
-        .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(Span::styled(self.content.as_str(), theme.faint()))
+            .block(block)
+            .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
 
@@ -361,10 +353,7 @@ impl Message {
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         for (q, a) in &sd.pairs {
-            lines.push(Line::from(Span::styled(
-                format!("  Q: {}", q),
-                muted_style,
-            )));
+            lines.push(Line::from(Span::styled(format!("  Q: {}", q), muted_style)));
             lines.push(Line::from(Span::styled(
                 format!("  A: {}", a),
                 answer_style,
@@ -412,7 +401,10 @@ fn format_timestamp(ts: SystemTime) -> Option<String> {
         Some(format!("{}:{:02} {}", hour12, minute, ampm))
     } else {
         let (month_name, day_of_month) = epoch_days_to_month_day(day);
-        Some(format!("{} {}, {}:{:02} {}", month_name, day_of_month, hour12, minute, ampm))
+        Some(format!(
+            "{} {}, {}:{:02} {}",
+            month_name, day_of_month, hour12, minute, ampm
+        ))
     }
 }
 

@@ -81,7 +81,10 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       }
     end)
 
-    append(agent_id, "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}")
+    append(
+      agent_id,
+      "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}"
+    )
   end
 
   @doc "Get a run by agent id."
@@ -145,6 +148,8 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         list -> Enum.join(list, "\n")
       end
 
+    duration_ms = Map.get(result, :duration_ms) || 0
+
     """
     Agent #{Map.get(result, :agent_id, "unknown")} #{Map.get(result, :status, :completed)}
 
@@ -154,7 +159,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     Commands run: #{commands}
     Tools: #{Map.get(result, :tool_count, 0)}
     Tokens: #{Map.get(result, :tokens_used, 0)}
-    Duration: #{Map.get(result, :duration_ms, 0)}ms
+    Duration: #{duration_ms}ms
     Transcript: #{Map.get(result, :transcript_path, "unavailable")}
     """
     |> String.trim()

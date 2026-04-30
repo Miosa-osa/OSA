@@ -83,7 +83,10 @@ impl Permissions {
 
     /// Handle a key event.  Returns `Some(action)` when the dialog should close.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<DialogAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -152,10 +155,7 @@ impl Permissions {
 
         // Title uses a gradient-style two-span sequence (primary → secondary).
         let title_line = Line::from(vec![
-            Span::styled(
-                " Permission ",
-                theme.banner_title(),
-            ),
+            Span::styled(" Permission ", theme.banner_title()),
             Span::styled(
                 "Request ",
                 Style::default()
@@ -202,10 +202,7 @@ impl Permissions {
         if cursor_y < inner.y + inner.height {
             let sep = "─".repeat(inner.width as usize);
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    sep,
-                    Style::default().fg(theme.colors.border),
-                )),
+                Paragraph::new(Span::styled(sep, Style::default().fg(theme.colors.border))),
                 Rect::new(inner.x, cursor_y, inner.width, 1),
             );
             cursor_y += 1;
@@ -234,8 +231,7 @@ impl Permissions {
                     // Render colored diff lines.
                     let diff_lines = crate::render::diff::render_diff(old, new, inner.width);
                     let total_lines = diff_lines.len() as u16;
-                    let scroll_clamped =
-                        self.scroll.min(total_lines.saturating_sub(viewport_h));
+                    let scroll_clamped = self.scroll.min(total_lines.saturating_sub(viewport_h));
                     let visible: Vec<Line> = diff_lines
                         .into_iter()
                         .skip(scroll_clamped as usize)

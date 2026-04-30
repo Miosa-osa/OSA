@@ -47,7 +47,10 @@ impl QuitConfirm {
         }
 
         // Ignore other ctrl/alt modified keys
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 

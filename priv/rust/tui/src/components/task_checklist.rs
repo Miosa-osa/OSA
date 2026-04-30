@@ -109,7 +109,11 @@ impl TaskChecklist {
             return;
         }
 
-        let completed = self.items.iter().filter(|i| i.status == ChecklistStatus::Completed).count();
+        let completed = self
+            .items
+            .iter()
+            .filter(|i| i.status == ChecklistStatus::Completed)
+            .count();
         let total = self.items.len();
         let max_subject_len = (inner.width as usize).saturating_sub(4); // "  X " prefix
 

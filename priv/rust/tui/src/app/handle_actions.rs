@@ -27,6 +27,7 @@ impl App {
                     &health.provider,
                     &health.model,
                     self.header.tool_count(),
+                    self.fast_mode,
                 );
 
                 // Welcome injection moved to ToolsLoaded handler (accurate tool count)
@@ -46,7 +47,10 @@ impl App {
             }
             Err(e) => {
                 self.health_retry_count += 1;
-                warn!("Health check failed (attempt {}): {}", self.health_retry_count, e);
+                warn!(
+                    "Health check failed (attempt {}): {}",
+                    self.health_retry_count, e
+                );
 
                 // Auto-start backend on first failure
                 if !self.backend_spawn_attempted {
@@ -56,7 +60,10 @@ impl App {
 
                 // Give up after 12 retries (60s total)
                 if self.health_retry_count >= 12 {
-                    error!("Backend unreachable after {} attempts", self.health_retry_count);
+                    error!(
+                        "Backend unreachable after {} attempts",
+                        self.health_retry_count
+                    );
                     self.transition(AppState::Idle);
                     self.toasts.push(
                         "Backend unreachable — start it manually or check config".into(),
@@ -111,7 +118,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Ok(resp))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -130,7 +139,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Ok(resp))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::OnboardingStatus(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -213,8 +224,7 @@ impl App {
             Ok(resp) => {
                 match resp.kind.as_str() {
                     "error" => {
-                        self.chat
-                            .add_system_message(&resp.output, "error");
+                        self.chat.add_system_message(&resp.output, "error");
                     }
                     "prompt" => {
                         // Feed output back as prompt
@@ -227,8 +237,7 @@ impl App {
                     }
                     _ => {
                         if !resp.output.is_empty() {
-                            self.chat
-                                .add_system_message(&resp.output, "info");
+                            self.chat.add_system_message(&resp.output, "info");
                         }
                     }
                 }
@@ -482,20 +491,35 @@ impl App {
         });
     }
 
+    pub(super) fn load_settings(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = client.get_settings().await;
+            let event = match result {
+                Ok(settings) => BackendEvent::SettingsLoaded(Ok(settings)),
+                Err(e) => BackendEvent::SettingsLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
     fn try_spawn_backend(&self) {
         let candidates: Vec<Option<std::path::PathBuf>> = vec![
             // From binary location: target/release/osagent → ../../.. = priv/rust/tui → ../../../ = root
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| {
-                    p.parent()?.parent()?.parent()?.parent()?.parent()?.parent()
-                        .map(|p| p.to_path_buf())
-                }),
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()?
+                    .parent()
+                    .map(|p| p.to_path_buf())
+            }),
             // Stored project root
             std::fs::read_to_string(
-                std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_default()
-                    ).join(".osa/project_root"),
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join(".osa/project_root"),
             )
             .ok()
             .map(|s| std::path::PathBuf::from(s.trim())),
@@ -507,9 +531,8 @@ impl App {
             if candidate.join("mix.exs").exists() {
                 info!("Auto-starting backend from: {}", candidate.display());
                 let project_dir = candidate;
-                let log_dir = std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_default()
-                    ).join(".osa/logs/backend.log");
+                let log_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join(".osa/logs/backend.log");
                 std::thread::spawn(move || {
                     let log_file = std::fs::OpenOptions::new()
                         .create(true)
@@ -534,8 +557,10 @@ impl App {
                 return;
             }
         }
-        warn!("Could not find project root to auto-start backend. \
-               Run from the project directory or create ~/.osa/project_root");
+        warn!(
+            "Could not find project root to auto-start backend. \
+               Run from the project directory or create ~/.osa/project_root"
+        );
     }
 
     pub(super) fn start_sse(&mut self) {
@@ -568,13 +593,8 @@ impl App {
                 return;
             }
 
-            let sse = crate::client::SseClient::with_cancel(
-                session_id,
-                base_url,
-                token,
-                tx,
-                cancel,
-            );
+            let sse =
+                crate::client::SseClient::with_cancel(session_id, base_url, token, tx, cancel);
             sse.connect();
         });
     }
@@ -614,7 +634,9 @@ impl App {
                     let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Ok(messages))));
                 }
                 Err(e) => {
-                    let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Err(e.to_string()))));
+                    let _ = tx.send(Event::Backend(BackendEvent::SessionMessages(Err(
+                        e.to_string()
+                    ))));
                 }
             }
         });
@@ -771,9 +793,7 @@ impl App {
             crate::voice::VoiceProvider::Local(_) => {
                 tokio::spawn(async move {
                     let provider = crate::voice::VoiceProvider::local_or_unavailable();
-                    let result = provider
-                        .transcribe_with_progress(buffer, Some(&tx))
-                        .await;
+                    let result = provider.transcribe_with_progress(buffer, Some(&tx)).await;
                     let event = match result {
                         Ok(text) => crate::event::VoiceEvent::TranscriptionReady(text),
                         Err(e) => crate::event::VoiceEvent::TranscriptionError(e.to_string()),

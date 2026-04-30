@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     file_read file_glob dir_list file_grep file_search
     memory_recall session_search semantic_search
     code_symbols web_fetch web_search list_skills
+    task_output task_list task_wait task_transcript
     list_dir read_file grep_search
   )
 

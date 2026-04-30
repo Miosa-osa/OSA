@@ -34,7 +34,13 @@ impl ToolRenderer for MonitorRenderer {
             format!("{}: {} · {}s", kind, target, duration)
         };
 
-        let header = make_header(opts.status, opts.spinner_frame, "Monitor", &detail, opts.duration_ms);
+        let header = make_header(
+            opts.status,
+            opts.spinner_frame,
+            "Monitor",
+            &detail,
+            opts.duration_ms,
+        );
 
         if !opts.expanded || result.is_empty() {
             return vec![header];
@@ -46,7 +52,9 @@ impl ToolRenderer for MonitorRenderer {
         let mut iter = result.lines();
         if let Some(summary) = iter.next() {
             let style = if summary.contains("change detected") {
-                Style::default().fg(theme.colors.success).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.colors.success)
+                    .add_modifier(Modifier::BOLD)
             } else if summary.contains("interrupted") {
                 Style::default().fg(theme.colors.warning)
             } else {
@@ -62,10 +70,7 @@ impl ToolRenderer for MonitorRenderer {
         for line in iter {
             body.push(Line::from(vec![
                 Span::styled("    ".to_string(), Style::default()),
-                Span::styled(
-                    line.to_string(),
-                    Style::default().fg(theme.colors.dim),
-                ),
+                Span::styled(line.to_string(), Style::default().fg(theme.colors.dim)),
             ]));
         }
 

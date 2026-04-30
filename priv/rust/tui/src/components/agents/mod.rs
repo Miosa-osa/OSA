@@ -3,12 +3,12 @@ mod render;
 
 use ratatui::prelude::*;
 
-use crate::event::Event;
 use crate::event::backend::SpawningAgent;
+use crate::event::Event;
 
 use super::{Component, ComponentAction};
-use entry::{AgentEntry, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 pub use entry::AgentStatus;
+use entry::{AgentEntry, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 
 // ─── Batch grouping ──────────────────────────────────────────────────────────
 
@@ -16,7 +16,6 @@ pub(super) struct BatchGroup {
     pub batch_id: Option<String>,
     pub entries: Vec<usize>, // indices into Agents.entries
 }
-
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -63,7 +62,11 @@ impl Agents {
             let groups = self.grouped_entries();
             // Only show batch headers if any entry has a batch_id
             let has_batches = groups.iter().any(|g| g.batch_id.is_some());
-            if has_batches { groups.len() as u16 } else { 0 }
+            if has_batches {
+                groups.len() as u16
+            } else {
+                0
+            }
         };
         let synth_lines = if matches!(self.synthesis, SynthesisState::Synthesizing { .. }) {
             1u16
@@ -214,12 +217,7 @@ impl Agents {
         self.collapsed = !self.collapsed;
     }
 
-    pub fn swarm_started(
-        &mut self,
-        id: impl Into<String>,
-        pattern: impl Into<String>,
-        count: u32,
-    ) {
+    pub fn swarm_started(&mut self, id: impl Into<String>, pattern: impl Into<String>, count: u32) {
         self.swarm = Some(SwarmInfo {
             id: id.into(),
             pattern: pattern.into(),

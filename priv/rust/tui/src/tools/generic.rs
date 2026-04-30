@@ -1,15 +1,19 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{
-    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
-};
+use super::{make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
 /// Fallback renderer for all unregistered tools.
 pub struct GenericRenderer;
 
 impl ToolRenderer for GenericRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Use the raw tool name as display, collapse args into a short preview
@@ -30,15 +34,15 @@ impl ToolRenderer for GenericRenderer {
         let mut body: Vec<Line<'static>> = Vec::new();
 
         // Try pretty-print JSON result
-        let result_lines: Vec<Line<'static>> =
-            if result.starts_with('{') || result.starts_with('[') {
-                render_json(result, &theme)
-            } else {
-                result
-                    .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), theme.faint())))
-                    .collect()
-            };
+        let result_lines: Vec<Line<'static>> = if result.starts_with('{') || result.starts_with('[')
+        {
+            render_json(result, &theme)
+        } else {
+            result
+                .lines()
+                .map(|l| Line::from(Span::styled(l.to_string(), theme.faint())))
+                .collect()
+        };
 
         body.extend(result_lines);
 
@@ -105,8 +109,11 @@ fn render_json(json_str: &str, theme: &crate::style::Theme) -> Vec<Line<'static>
                 Style::default().fg(theme.colors.success)
             } else if trimmed.parse::<f64>().is_ok() {
                 Style::default().fg(theme.colors.warning)
-            } else if trimmed == "true" || trimmed == "false" || trimmed == "null"
-                || trimmed.starts_with("true,") || trimmed.starts_with("false,")
+            } else if trimmed == "true"
+                || trimmed == "false"
+                || trimmed == "null"
+                || trimmed.starts_with("true,")
+                || trimmed.starts_with("false,")
             {
                 Style::default().fg(theme.colors.primary)
             } else {

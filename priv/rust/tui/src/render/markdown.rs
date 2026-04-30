@@ -59,7 +59,8 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         // ── GFM pipe tables ─────────────────────────────────────────────────
         let trimmed_for_table = raw_line.trim();
         let is_table_line = trimmed_for_table.starts_with('|') && trimmed_for_table.ends_with('|');
-        let is_separator_line = trimmed_for_table.starts_with('|') && trimmed_for_table.contains("---");
+        let is_separator_line =
+            trimmed_for_table.starts_with('|') && trimmed_for_table.contains("---");
 
         if is_table_line || is_separator_line {
             if !in_table {
@@ -83,27 +84,44 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         if raw_line.starts_with("###### ") {
             let text = &raw_line[7..];
             let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.muted).add_modifier(Modifier::ITALIC))
-            }).collect();
+            let styled_spans: Vec<Span> = spans
+                .into_iter()
+                .map(|s| {
+                    Span::styled(
+                        s.content,
+                        Style::default()
+                            .fg(theme.colors.muted)
+                            .add_modifier(Modifier::ITALIC),
+                    )
+                })
+                .collect();
             lines.push(Line::from(styled_spans));
             continue;
         }
         if raw_line.starts_with("##### ") {
             let text = &raw_line[6..];
             let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.muted))
-            }).collect();
+            let styled_spans: Vec<Span> = spans
+                .into_iter()
+                .map(|s| Span::styled(s.content, Style::default().fg(theme.colors.muted)))
+                .collect();
             lines.push(Line::from(styled_spans));
             continue;
         }
         if raw_line.starts_with("#### ") {
             let text = &raw_line[5..];
             let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.secondary).add_modifier(Modifier::BOLD))
-            }).collect();
+            let styled_spans: Vec<Span> = spans
+                .into_iter()
+                .map(|s| {
+                    Span::styled(
+                        s.content,
+                        Style::default()
+                            .fg(theme.colors.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                })
+                .collect();
             lines.push(Line::from(styled_spans));
             continue;
         }
@@ -164,7 +182,10 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             let indent_str = "  ".repeat(indent_level);
 
             let icon = if checked {
-                Span::styled(format!("{}✓ ", indent_str), Style::default().fg(Color::Green))
+                Span::styled(
+                    format!("{}✓ ", indent_str),
+                    Style::default().fg(Color::Green),
+                )
             } else {
                 Span::styled(format!("{}○ ", indent_str), theme.faint())
             };
@@ -201,7 +222,10 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             for (i, wline) in wrapped.iter().enumerate() {
                 let mut spans = vec![];
                 if i == 0 {
-                    spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
+                    spans.push(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(theme.colors.muted),
+                    ));
                 } else {
                     // Continuation lines get same indent
                     spans.push(Span::styled(" ".repeat(prefix_len), Style::default()));
@@ -220,9 +244,10 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 let indent = raw_line.len() - raw_line.trim_start().len();
                 let indent_level = indent / 2;
                 let indent_str = "  ".repeat(indent_level);
-                let mut spans = vec![
-                    Span::styled(format!("{}{}. ", indent_str, num_part), Style::default().fg(theme.colors.muted)),
-                ];
+                let mut spans = vec![Span::styled(
+                    format!("{}{}. ", indent_str, num_part),
+                    Style::default().fg(theme.colors.muted),
+                )];
                 spans.extend(parse_inline(text, &theme));
                 lines.push(Line::from(spans));
                 continue;
@@ -298,7 +323,8 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     }
 
     // Cap total width to available width
-    let total = col_widths.iter().sum::<usize>() + (num_cols + 1) + (num_cols.saturating_sub(1)) * 3;
+    let total =
+        col_widths.iter().sum::<usize>() + (num_cols + 1) + (num_cols.saturating_sub(1)) * 3;
     if total > width as usize && width > 10 {
         let max_per_col = (width as usize).saturating_sub(num_cols + 1) / num_cols.max(1);
         for w in col_widths.iter_mut() {
@@ -484,7 +510,7 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                     while let Some(&nc) = chars.peek() {
                         if nc == '*' {
                             chars.next(); // consume this `*`
-                            // Check the character after it.
+                                          // Check the character after it.
                             if chars.peek() == Some(&'*') {
                                 chars.next(); // consume second closing `*`
                                 closed = true;

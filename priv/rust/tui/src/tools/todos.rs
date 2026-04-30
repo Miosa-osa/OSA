@@ -1,19 +1,26 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{
-    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
-};
+use super::{make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
 pub struct TodosRenderer;
 
 impl ToolRenderer for TodosRenderer {
-    fn render(&self, _name: &str, _args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        _args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let todos = parse_todos(result);
 
-        let completed = todos.iter().filter(|t| t.status == TodoStatus::Completed).count();
+        let completed = todos
+            .iter()
+            .filter(|t| t.status == TodoStatus::Completed)
+            .count();
         let total = todos.len();
 
         let detail = if total > 0 {
@@ -171,10 +178,7 @@ fn todo_icon(status: &TodoStatus, theme: &crate::style::Theme) -> (String, Style
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD),
         ),
-        TodoStatus::Pending => (
-            "◻".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
+        TodoStatus::Pending => ("◻".to_string(), Style::default().fg(theme.colors.muted)),
         TodoStatus::Completed => (
             "✔".to_string(),
             Style::default()

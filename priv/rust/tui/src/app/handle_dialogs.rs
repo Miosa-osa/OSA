@@ -83,9 +83,9 @@ impl App {
                             match client.rename_session(&id, &new_title).await {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    let _ = tx.send(Event::Backend(
-                                        BackendEvent::CommandResult(Err(e.to_string())),
-                                    ));
+                                    let _ = tx.send(Event::Backend(BackendEvent::CommandResult(
+                                        Err(e.to_string()),
+                                    )));
                                 }
                             }
                         });
@@ -400,14 +400,16 @@ impl App {
                         let client = self.client.clone();
                         let request = crate::client::types::SurveyAnswerRequest {
                             survey_id: result.survey_id.clone(),
-                            answers: result.answers.iter().map(|a| {
-                                crate::client::types::SurveyAnswerEntry {
+                            answers: result
+                                .answers
+                                .iter()
+                                .map(|a| crate::client::types::SurveyAnswerEntry {
                                     question_index: a.question_index,
                                     question_text: a.question_text.clone(),
                                     selected: a.selected.clone(),
                                     free_text: a.free_text.clone(),
-                                }
-                            }).collect(),
+                                })
+                                .collect(),
                             session_id: session_id.clone(),
                         };
                         tokio::spawn(async move {
@@ -447,12 +449,36 @@ impl App {
 
         // Add built-in commands
         let mut all_items = vec![
-            PaletteItem { name: "help".into(), description: "Show help".into(), category: "system".into() },
-            PaletteItem { name: "clear".into(), description: "Clear chat".into(), category: "system".into() },
-            PaletteItem { name: "models".into(), description: "Browse models".into(), category: "system".into() },
-            PaletteItem { name: "sessions".into(), description: "Browse sessions".into(), category: "system".into() },
-            PaletteItem { name: "theme".into(), description: "Switch theme".into(), category: "system".into() },
-            PaletteItem { name: "exit".into(), description: "Quit".into(), category: "system".into() },
+            PaletteItem {
+                name: "help".into(),
+                description: "Show help".into(),
+                category: "system".into(),
+            },
+            PaletteItem {
+                name: "clear".into(),
+                description: "Clear chat".into(),
+                category: "system".into(),
+            },
+            PaletteItem {
+                name: "models".into(),
+                description: "Browse models".into(),
+                category: "system".into(),
+            },
+            PaletteItem {
+                name: "sessions".into(),
+                description: "Browse sessions".into(),
+                category: "system".into(),
+            },
+            PaletteItem {
+                name: "theme".into(),
+                description: "Switch theme".into(),
+                category: "system".into(),
+            },
+            PaletteItem {
+                name: "exit".into(),
+                description: "Quit".into(),
+                category: "system".into(),
+            },
         ];
         all_items.extend(items);
 

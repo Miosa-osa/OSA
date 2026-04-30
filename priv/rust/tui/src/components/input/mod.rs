@@ -463,9 +463,7 @@ impl Component for InputComponent {
                         return ComponentAction::Consumed;
                     }
                     // Alt+Enter or Shift+Enter: insert newline (enters multiline mode)
-                    (KeyCode::Enter, m)
-                        if m == KeyModifiers::ALT || m == KeyModifiers::SHIFT =>
-                    {
+                    (KeyCode::Enter, m) if m == KeyModifiers::ALT || m == KeyModifiers::SHIFT => {
                         self.multiline = true;
                         self.insert_char('\n');
                         return ComponentAction::Consumed;
@@ -492,7 +490,9 @@ impl Component for InputComponent {
                         return ComponentAction::Consumed;
                     }
                     // Arrow keys — up/down navigate file matches when file search active
-                    (KeyCode::Up, KeyModifiers::NONE) if self.file_search_active && !self.file_matches.is_empty() => {
+                    (KeyCode::Up, KeyModifiers::NONE)
+                        if self.file_search_active && !self.file_matches.is_empty() =>
+                    {
                         if self.file_match_index > 0 {
                             self.file_match_index -= 1;
                         } else {
@@ -500,8 +500,11 @@ impl Component for InputComponent {
                         }
                         return ComponentAction::Consumed;
                     }
-                    (KeyCode::Down, KeyModifiers::NONE) if self.file_search_active && !self.file_matches.is_empty() => {
-                        self.file_match_index = (self.file_match_index + 1) % self.file_matches.len();
+                    (KeyCode::Down, KeyModifiers::NONE)
+                        if self.file_search_active && !self.file_matches.is_empty() =>
+                    {
+                        self.file_match_index =
+                            (self.file_match_index + 1) % self.file_matches.len();
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Left, KeyModifiers::NONE) => {
@@ -569,9 +572,13 @@ impl Component for InputComponent {
                     // Step 10: Ctrl+R: restore stash
                     (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                         if self.restore_stash() {
-                            return ComponentAction::Emit(AppAction::Toast("Input restored".into()));
+                            return ComponentAction::Emit(AppAction::Toast(
+                                "Input restored".into(),
+                            ));
                         } else {
-                            return ComponentAction::Emit(AppAction::Toast("Nothing stashed".into()));
+                            return ComponentAction::Emit(AppAction::Toast(
+                                "Nothing stashed".into(),
+                            ));
                         }
                     }
                     // Regular character input
@@ -696,10 +703,8 @@ impl Component for InputComponent {
                         hint_width,
                         1,
                     );
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(hint, theme.hint())),
-                        hint_area,
-                    );
+                    frame
+                        .render_widget(Paragraph::new(Span::styled(hint, theme.hint())), hint_area);
                 }
             }
         }
@@ -712,7 +717,12 @@ impl Component for InputComponent {
             // Draw dropdown above the input (going upward from separator)
             let max_visible = self.file_matches.len().min(5) as u16;
             let dropdown_y = area.y.saturating_sub(max_visible);
-            for (i, path) in self.file_matches.iter().take(max_visible as usize).enumerate() {
+            for (i, path) in self
+                .file_matches
+                .iter()
+                .take(max_visible as usize)
+                .enumerate()
+            {
                 let row_y = dropdown_y + i as u16;
                 if row_y >= area.y {
                     break;
@@ -744,10 +754,7 @@ impl Component for InputComponent {
                     hint_width,
                     1,
                 );
-                frame.render_widget(
-                    Paragraph::new(Span::styled(hint, theme.hint())),
-                    hint_area,
-                );
+                frame.render_widget(Paragraph::new(Span::styled(hint, theme.hint())), hint_area);
             }
         }
 

@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use super::entry::{AgentEntry, AgentStatus, SynthesisState, SwarmStatus};
+use super::entry::{AgentEntry, AgentStatus, SwarmStatus, SynthesisState};
 use super::Agents;
 
 /// Braille spinner frames for running agents.
@@ -27,7 +27,11 @@ impl Agents {
             let total = self.entries.len();
 
             let header_text = if running > 0 {
-                format!("Running {} agent{}…", running, if running == 1 { "" } else { "s" })
+                format!(
+                    "Running {} agent{}…",
+                    running,
+                    if running == 1 { "" } else { "s" }
+                )
             } else if total > 0 {
                 format!(
                     "{} agent{} completed",
@@ -158,10 +162,7 @@ impl Agents {
                 row1_spans.push(Span::styled(stats_str, theme.faint()));
 
                 let row1 = Line::from(row1_spans);
-                frame.render_widget(
-                    Paragraph::new(row1),
-                    Rect::new(area.x, y, area.width, 1),
-                );
+                frame.render_widget(Paragraph::new(row1), Rect::new(area.x, y, area.width, 1));
                 y += 1;
 
                 // Row 2: continuation + action line
@@ -191,7 +192,9 @@ impl Agents {
                     };
 
                     // Truncate action
-                    let max_action = (area.width as usize).saturating_sub(continuation.len() + 4).max(8);
+                    let max_action = (area.width as usize)
+                        .saturating_sub(continuation.len() + 4)
+                        .max(8);
                     let action_truncated = truncate_str(&action_display, max_action);
 
                     let row2 = Line::from(vec![
@@ -199,10 +202,7 @@ impl Agents {
                         Span::styled("└─ ", theme.faint()),
                         Span::styled(action_truncated, action_style),
                     ]);
-                    frame.render_widget(
-                        Paragraph::new(row2),
-                        Rect::new(area.x, y, area.width, 1),
-                    );
+                    frame.render_widget(Paragraph::new(row2), Rect::new(area.x, y, area.width, 1));
                     y += 1;
                 }
             }
@@ -215,14 +215,15 @@ impl Agents {
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", spin), theme.spinner()),
                     Span::styled(
-                        format!("Synthesizing {} agent output{}…", count, if count == 1 { "" } else { "s" }),
+                        format!(
+                            "Synthesizing {} agent output{}…",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        ),
                         theme.spinner(),
                     ),
                 ]);
-                frame.render_widget(
-                    Paragraph::new(line),
-                    Rect::new(area.x, y, area.width, 1),
-                );
+                frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
             }
         }
 
@@ -238,10 +239,7 @@ impl Agents {
                 let swarm_line = Line::from(vec![
                     Span::styled("Swarm: ", theme.faint()),
                     Span::styled(&*swarm.pattern, theme.tool_name()),
-                    Span::styled(
-                        format!("  {} agents  ", swarm.agent_count),
-                        theme.faint(),
-                    ),
+                    Span::styled(format!("  {} agents  ", swarm.agent_count), theme.faint()),
                     Span::styled(status_str, status_style),
                 ]);
 

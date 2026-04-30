@@ -345,10 +345,7 @@ impl Component for Activity {
             return;
         }
         let theme = crate::style::theme();
-        let elapsed = self
-            .start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let elapsed = self.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         // Spinner animation
         let spinner_frames = ["\u{25cb}", "\u{25d4}", "\u{25d1}", "\u{25d5}", "\u{25cf}"];
@@ -381,7 +378,10 @@ impl Component for Activity {
             }
             ProcessingPhase::ToolCall => vec![
                 Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                Span::styled(format!("tool: {}", self.last_tool_name), theme.prefix_active()),
+                Span::styled(
+                    format!("tool: {}", self.last_tool_name),
+                    theme.prefix_active(),
+                ),
                 Span::styled(format!(" ({})", elapsed_str), theme.faint()),
             ],
             ProcessingPhase::Synthesizing => vec![
@@ -481,10 +481,7 @@ impl Component for Activity {
             }
 
             let line = Line::from(spans);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(area.x, y, area.width, 1),
-            );
+            frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
         }
     }
 }

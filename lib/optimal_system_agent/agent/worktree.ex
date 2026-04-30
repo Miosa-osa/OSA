@@ -77,8 +77,17 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     discard = Keyword.get(opts, :discard, false)
     base_dir = Keyword.get(opts, :repo_dir, File.cwd!())
 
-    # Check if the worktree has any changes
-    has_changes = worktree_has_changes?(worktree_path)
+    unless File.dir?(worktree_path) do
+      Logger.debug("[worktree] Cleanup skipped; missing path #{worktree_path}")
+      :ok
+    else
+      do_cleanup(worktree_path, base_dir, merge, discard)
+    end
+  end
+
+  defp do_cleanup(worktree_path, base_dir, merge, discard) do
+    branch = get_worktree_branch(worktree_path)
+    has_changes = worktree_has_changes?(worktree_path) or branch_has_commits?(branch, base_dir)
 
     result =
       cond do
@@ -88,7 +97,7 @@ defmodule OptimalSystemAgent.Agent.Worktree do
           end
 
         has_changes and not discard ->
-          Logger.info("[worktree] Preserving dirty worktree #{worktree_path} for review")
+          Logger.info("[worktree] Preserving changed worktree #{worktree_path} for review")
           :ok
 
         true ->
@@ -136,6 +145,26 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     case System.cmd("git", ["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
       {output, 0} -> String.trim(output) != ""
       _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp branch_has_commits?(nil, _base_dir), do: false
+
+  defp branch_has_commits?(branch, base_dir) do
+    case System.cmd("git", ["rev-list", "--count", "HEAD..#{branch}"],
+           cd: base_dir,
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        case Integer.parse(String.trim(output)) do
+          {count, _} -> count > 0
+          :error -> false
+        end
+
+      _ ->
+        false
     end
   rescue
     _ -> false

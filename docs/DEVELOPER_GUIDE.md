@@ -34,62 +34,43 @@ test/                    # ExUnit tests (mirrors lib/ structure)
 
 ## Adding a New Agent
 
-### 1. Create the module
+Agents are Markdown definitions, not Elixir modules. The registry loads them in
+this order, with later sources overriding earlier ones:
 
-```elixir
-# lib/optimal_system_agent/agents/my_agent.ex
-defmodule OptimalSystemAgent.Agents.MyAgent do
-  @behaviour OptimalSystemAgent.Agent.AgentBehaviour
+`priv/agents` < project `.claude/agents` < project `.osa/agents` < `~/.osa/agents`
 
-  @impl true
-  def name, do: "my-agent"
+Use `priv/agents` for curated built-ins, project `.osa/agents` for repo-local
+roles, project `.claude/agents` for Claude-compatible imports, and
+`~/.osa/agents` for user overrides.
 
-  @impl true
-  def description, do: "Does something specific"
+### 1. Create the Markdown file
 
-  @impl true
-  def tier, do: :specialist  # :elite | :specialist | :utility
+```markdown
+---
+name: my-agent
+description: Does something specific
+tier: specialist
+triggers: ["my keyword", "another trigger"]
+tools: ["file_read", "file_grep", "dir_list"]
+disallowedTools: ["file_write", "file_edit", "shell_execute"]
+maxTurns: 4
+permissionMode: plan
+---
 
-  @impl true
-  def role, do: :specialist  # :lead | :specialist | :utility
+You are a specialist agent for...
 
-  @impl true
-  def system_prompt do
-    """
-    You are a specialist agent for...
-    """
-  end
-
-  @impl true
-  def skills, do: ["brainstorming", "code-review"]
-
-  @impl true
-  def triggers, do: ["my keyword", "another trigger"]
-
-  @impl true
-  def territory, do: ["*.specific", "path/to/domain/"]
-
-  @impl true
-  def escalate_to, do: "architect"
-
-  # Optional: custom message handling
-  @impl true
-  def handle(message, context) do
-    {:ok, "Response to: #{message}"}
-  end
-end
+Return concise findings with evidence and next actions.
 ```
 
-### 2. Register in Roster
+Supported frontmatter includes both OSA and Claude-style names:
+`tools_allowed`/`tools`, `tools_blocked`/`disallowedTools`, `max_iterations`/`maxTurns`,
+`permission_tier`/`permissionMode`, `model`, `provider`, `background`,
+`isolation`, `skills`, `mcpServers`, `hooks`, `initialPrompt`, and `memory`.
 
-Add your module to `@agent_modules` in `lib/optimal_system_agent/agent/roster.ex` (line ~37):
+### 2. Reload and inspect
 
-```elixir
-@agent_modules [
-  # ... existing agents
-  OptimalSystemAgent.Agents.MyAgent
-]
-```
+Call `OptimalSystemAgent.Agents.Registry.load/0`, restart the app, or use the
+agent creation flow. Confirm with `list_agents(role: "my-agent")`.
 
 ### 3. Add tests
 
@@ -97,37 +78,14 @@ Add your module to `@agent_modules` in `lib/optimal_system_agent/agent/roster.ex
 # test/agents/my_agent_test.exs
 defmodule OptimalSystemAgent.Agents.MyAgentTest do
   use ExUnit.Case, async: true
-  alias OptimalSystemAgent.Agents.MyAgent
+  alias OptimalSystemAgent.Agents.Registry
 
-  test "implements all required callbacks" do
-    assert is_binary(MyAgent.name())
-    assert MyAgent.tier() in [:elite, :specialist, :utility]
-    assert is_list(MyAgent.triggers())
+  test "loads my-agent" do
+    agents = Registry.load_from_paths([{:project_osa, "path/to/.osa/agents"}])
+    assert agents["my-agent"].permission_tier == :read_only
   end
 end
 ```
-
-### Required Callbacks (9)
-
-| Callback | Returns | Purpose |
-|---|---|---|
-| `name/0` | `String.t()` | Unique agent identifier |
-| `description/0` | `String.t()` | Human-readable description |
-| `tier/0` | `:elite \| :specialist \| :utility` | Determines LLM model tier |
-| `role/0` | `atom()` | Agent role category |
-| `system_prompt/0` | `String.t()` | LLM system prompt |
-| `skills/0` | `[String.t()]` | Skills this agent can use |
-| `triggers/0` | `[String.t()]` | Keywords that route to this agent |
-| `territory/0` | `[String.t()]` | File patterns this agent handles |
-| `escalate_to/0` | `String.t() \| nil` | Agent to escalate to |
-
-### Optional Callbacks (3)
-
-| Callback | Purpose |
-|---|---|
-| `handle/2` | Custom message processing |
-| `before_handle/2` | Pre-processing hook |
-| `after_handle/2` | Post-processing hook |
 
 ---
 

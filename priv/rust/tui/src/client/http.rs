@@ -135,7 +135,9 @@ impl ApiClient {
     /// POST /api/v1/auth/logout
     pub async fn logout(&self) -> Result<()> {
         // Best-effort server logout
-        let _ = self.post("/api/v1/auth/logout", &serde_json::json!({})).await;
+        let _ = self
+            .post("/api/v1/auth/logout", &serde_json::json!({}))
+            .await;
 
         // Always clear local state
         {
@@ -163,6 +165,12 @@ impl ApiClient {
         let tools: Vec<ToolEntry> =
             serde_json::from_value(wrapper.get("tools").cloned().unwrap_or_default())?;
         Ok(tools)
+    }
+
+    /// GET /api/v1/settings
+    pub async fn get_settings(&self) -> Result<SettingsResponse> {
+        let resp = self.get("/api/v1/settings").await?;
+        Ok(resp.json().await?)
     }
 
     /// POST /api/v1/orchestrate
@@ -197,7 +205,9 @@ impl ApiClient {
 
     /// POST /api/v1/sessions
     pub async fn create_session(&self) -> Result<SessionCreateResponse> {
-        let resp = self.post("/api/v1/sessions", &serde_json::json!({})).await?;
+        let resp = self
+            .post("/api/v1/sessions", &serde_json::json!({}))
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -209,7 +219,9 @@ impl ApiClient {
 
     /// GET /api/v1/sessions/:id/messages
     pub async fn get_session_messages(&self, id: &str) -> Result<Vec<SessionMessage>> {
-        let resp = self.get(&format!("/api/v1/sessions/{}/messages", id)).await?;
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/messages", id))
+            .await?;
         let wrapper: serde_json::Value = resp.json().await?;
         let messages: Vec<SessionMessage> =
             serde_json::from_value(wrapper.get("messages").cloned().unwrap_or_default())?;
@@ -402,11 +414,7 @@ impl ApiClient {
     }
 
     /// POST /api/v1/sessions/:id/survey/skip
-    pub async fn skip_survey(
-        &self,
-        session_id: &str,
-        survey_id: &str,
-    ) -> Result<()> {
+    pub async fn skip_survey(&self, session_id: &str, survey_id: &str) -> Result<()> {
         let body = serde_json::json!({ "survey_id": survey_id });
         let _ = self
             .post(
@@ -538,7 +546,8 @@ impl ApiClient {
         };
 
         let url = format!("{}/api/v1/auth/refresh", self.base_url);
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .json(&serde_json::json!({ "refresh_token": refresh_token }))
             .send()
@@ -606,11 +615,7 @@ impl ApiClient {
     }
 
     /// POST JSON with auth header.
-    async fn post<T: serde::Serialize>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<reqwest::Response> {
+    async fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.post(&url).json(body);
         if let Ok(token) = self.auth.read().await.require_token() {
@@ -626,11 +631,7 @@ impl ApiClient {
     }
 
     /// PUT JSON with auth header.
-    async fn put<T: serde::Serialize>(
-        &self,
-        path: &str,
-        body: &T,
-    ) -> Result<reqwest::Response> {
+    async fn put<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.http.put(&url).json(body);
         if let Ok(token) = self.auth.read().await.require_token() {

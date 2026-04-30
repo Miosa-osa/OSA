@@ -53,4 +53,3 @@ impl Default for SynthesisState {
         Self::Idle
     }
 }
-

@@ -14,14 +14,25 @@ pub struct SpawningAgent {
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     // === SSE Connection Lifecycle ===
-    SseConnected { session_id: String },
-    SseDisconnected { error: Option<String> },
-    SseReconnecting { attempt: u32 },
+    SseConnected {
+        session_id: String,
+    },
+    SseDisconnected {
+        error: Option<String>,
+    },
+    SseReconnecting {
+        attempt: u32,
+    },
     SseAuthFailed,
 
     // === Streaming ===
-    StreamingToken { text: String, session_id: String },
-    ThinkingDelta { text: String },
+    StreamingToken {
+        text: String,
+        session_id: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
 
     // === Agent Response ===
     AgentResponse {
@@ -47,7 +58,9 @@ pub enum BackendEvent {
     },
 
     // === LLM ===
-    LlmRequest { iteration: u32 },
+    LlmRequest {
+        iteration: u32,
+    },
     LlmResponse {
         duration_ms: u64,
         input_tokens: u64,
@@ -55,10 +68,14 @@ pub enum BackendEvent {
     },
 
     // === Signal ===
-    SignalClassified { signal: Signal },
+    SignalClassified {
+        signal: Signal,
+    },
 
     // === Orchestrator ===
-    OrchestratorTaskStarted { task_id: String },
+    OrchestratorTaskStarted {
+        task_id: String,
+    },
     OrchestratorAgentsSpawning {
         agent_count: usize,
         agents: Vec<SpawningAgent>,
@@ -97,8 +114,12 @@ pub enum BackendEvent {
         wave_number: u32,
         total_waves: u32,
     },
-    OrchestratorSynthesizing { agent_count: usize },
-    OrchestratorTaskCompleted { task_id: String },
+    OrchestratorSynthesizing {
+        agent_count: usize,
+    },
+    OrchestratorTaskCompleted {
+        task_id: String,
+    },
 
     // === Context ===
     ContextPressure {
@@ -135,9 +156,16 @@ pub enum BackendEvent {
         agent_count: u32,
         result_preview: String,
     },
-    SwarmFailed { swarm_id: String, reason: String },
-    SwarmCancelled { swarm_id: String },
-    SwarmTimeout { swarm_id: String },
+    SwarmFailed {
+        swarm_id: String,
+        reason: String,
+    },
+    SwarmCancelled {
+        swarm_id: String,
+    },
+    SwarmTimeout {
+        swarm_id: String,
+    },
 
     // === Swarm Intelligence ===
     SwarmIntelligenceStarted {
@@ -145,8 +173,14 @@ pub enum BackendEvent {
         intelligence_type: String,
         task: String,
     },
-    SwarmIntelligenceRound { swarm_id: String, round: u32 },
-    SwarmIntelligenceConverged { swarm_id: String, round: u32 },
+    SwarmIntelligenceRound {
+        swarm_id: String,
+        round: u32,
+    },
+    SwarmIntelligenceConverged {
+        swarm_id: String,
+        round: u32,
+    },
     SwarmIntelligenceCompleted {
         swarm_id: String,
         converged: bool,
@@ -154,12 +188,22 @@ pub enum BackendEvent {
     },
 
     // === Hooks/Budget ===
-    HookBlocked { hook_name: String, reason: String },
-    BudgetWarning { utilization: f64, message: String },
-    BudgetExceeded { message: String },
+    HookBlocked {
+        hook_name: String,
+        reason: String,
+    },
+    BudgetWarning {
+        utilization: f64,
+        message: String,
+    },
+    BudgetExceeded {
+        message: String,
+    },
 
     // === Parse Warnings ===
-    ParseWarning { message: String },
+    ParseWarning {
+        message: String,
+    },
 
     // === HTTP Response Results ===
     HealthResult(Result<HealthResponse, String>),
@@ -167,6 +211,7 @@ pub enum BackendEvent {
     OrchestrateResult(Result<OrchestrateResponse, String>),
     CommandsLoaded(Result<Vec<CommandEntry>, String>),
     ToolsLoaded(Result<Vec<ToolEntry>, String>),
+    SettingsLoaded(Result<SettingsResponse, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),

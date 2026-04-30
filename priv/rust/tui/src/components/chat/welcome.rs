@@ -19,6 +19,7 @@ pub fn draw_welcome_with_tools(
     tool_count: usize,
     provider: Option<&str>,
     model: Option<&str>,
+    fast_mode: bool,
 ) {
     let theme = style::theme();
 
@@ -52,7 +53,7 @@ pub fn draw_welcome_with_tools(
 
     // Helper: pad content to box_width and wrap with left+right border
     let border_color = theme.colors.primary;
-    let left = "\u{2502} ";  // │ + space
+    let left = "\u{2502} "; // │ + space
     let right = " \u{2502}"; // space + │
 
     let make_bordered = |content: &str, style: Style| -> Line<'static> {
@@ -85,7 +86,9 @@ pub fn draw_welcome_with_tools(
     let greeting_centered = format!("{}{}", " ".repeat(greeting_pad), greeting);
     lines.push(make_bordered(
         &greeting_centered,
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     ));
 
     // Empty line
@@ -99,7 +102,10 @@ pub fn draw_welcome_with_tools(
         let right_pad = inner.saturating_sub(pad + char_count);
 
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled(left.to_string(), Style::default().fg(border_color)));
+        spans.push(Span::styled(
+            left.to_string(),
+            Style::default().fg(border_color),
+        ));
         spans.push(Span::raw(" ".repeat(pad)));
 
         // Gradient spans for the logo
@@ -109,7 +115,10 @@ pub fn draw_welcome_with_tools(
         }
 
         spans.push(Span::raw(" ".repeat(right_pad)));
-        spans.push(Span::styled(right.to_string(), Style::default().fg(border_color)));
+        spans.push(Span::styled(
+            right.to_string(),
+            Style::default().fg(border_color),
+        ));
         lines.push(Line::from(spans));
     }
 
@@ -117,10 +126,12 @@ pub fn draw_welcome_with_tools(
     lines.push(make_bordered("", Style::default()));
 
     // Model info (centered, faint)
+    let fast_label = if fast_mode { "  \u{00b7}  FAST" } else { "" };
     let model_line = format!(
         "{} / {}  \u{00b7}  {} tools",
         prov_display, model_display, tool_count
     );
+    let model_line = format!("{}{}", model_line, fast_label);
     let model_pad = (box_width.saturating_sub(model_line.len())) / 2;
     let model_centered = format!("{}{}", " ".repeat(model_pad), model_line);
     lines.push(make_bordered(&model_centered, theme.faint()));
@@ -144,18 +155,13 @@ pub fn draw_welcome_with_tools(
 
     // Tips (below the box)
     lines.push(Line::from(Span::styled(
-        "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette",
+        "  Ask, code, schedule, delegate  \u{00b7}  /fast turbo  \u{00b7}  Ctrl+K palette",
         theme.welcome_tip(),
     )));
 
     // Render at the TOP (not centered)
     let content_height = lines.len() as u16;
-    let content_area = Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        content_height.min(area.height),
-    );
+    let content_area = Rect::new(area.x, area.y, area.width, content_height.min(area.height));
 
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text);
@@ -172,9 +178,7 @@ fn read_user_name() -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("- **Name:**") {
-            let name = trimmed
-                .trim_start_matches("- **Name:**")
-                .trim();
+            let name = trimmed.trim_start_matches("- **Name:**").trim();
             if !name.is_empty() {
                 return Some(name.to_string());
             }

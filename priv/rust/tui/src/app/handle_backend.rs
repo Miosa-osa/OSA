@@ -21,34 +21,33 @@ impl App {
                 // Load commands and tools after SSE connection
                 self.load_commands();
                 self.load_tools();
+                self.load_settings();
             }
-            BackendEvent::SseDisconnected { error } => {
-                match error.as_deref() {
-                    Some("token_refreshed") => {
-                        info!("SSE reconnecting with refreshed token");
-                        self.toasts.push(
-                            "SSE reconnecting with refreshed token".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        self.start_sse();
-                    }
-                    Some("auth_failed") => {
-                        warn!("SSE auth failed after refresh attempt");
-                        self.toasts.push(
-                            "SSE auth failed. Try /login to re-authenticate.".into(),
-                            crate::components::toast::ToastLevel::Error,
-                        );
-                        self.sse_reconnecting = true;
-                    }
-                    Some(err) => {
-                        warn!("SSE disconnected: {}", err);
-                        self.sse_reconnecting = true;
-                    }
-                    None => {
-                        self.sse_reconnecting = true;
-                    }
+            BackendEvent::SseDisconnected { error } => match error.as_deref() {
+                Some("token_refreshed") => {
+                    info!("SSE reconnecting with refreshed token");
+                    self.toasts.push(
+                        "SSE reconnecting with refreshed token".into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                    self.start_sse();
                 }
-            }
+                Some("auth_failed") => {
+                    warn!("SSE auth failed after refresh attempt");
+                    self.toasts.push(
+                        "SSE auth failed. Try /login to re-authenticate.".into(),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                    self.sse_reconnecting = true;
+                }
+                Some(err) => {
+                    warn!("SSE disconnected: {}", err);
+                    self.sse_reconnecting = true;
+                }
+                None => {
+                    self.sse_reconnecting = true;
+                }
+            },
             BackendEvent::SseReconnecting { attempt } => {
                 debug!("SSE reconnecting (attempt {})", attempt);
                 self.sse_reconnecting = true;
@@ -121,10 +120,7 @@ impl App {
                 self.activity.set_phase(ProcessingPhase::Waiting);
 
                 // Build rich styled tool summary for the chat
-                let args = self
-                    .pending_tool_args
-                    .remove(&name)
-                    .unwrap_or_default();
+                let args = self.pending_tool_args.remove(&name).unwrap_or_default();
                 let status = if success {
                     crate::tools::ToolStatus::Success
                 } else {
@@ -159,7 +155,9 @@ impl App {
                 );
             }
             BackendEvent::ToolResult {
-                name, result, success,
+                name,
+                result,
+                success,
             } => {
                 // Attach result to last matching tool message for expand support
                 if !result.is_empty() {
@@ -191,7 +189,11 @@ impl App {
                 max_tokens,
             } => {
                 // Normalize at the handler level: backend sends 0-100 percentage
-                let ratio = if utilization > 1.0 { utilization / 100.0 } else { utilization };
+                let ratio = if utilization > 1.0 {
+                    utilization / 100.0
+                } else {
+                    utilization
+                };
                 self.status.set_context(ratio, estimated_tokens, max_tokens);
                 self.sidebar.set_context(ratio);
             }
@@ -200,7 +202,8 @@ impl App {
                 subject,
                 active_form,
             } => {
-                self.tasks.add(task_id.clone(), subject.clone(), String::new());
+                self.tasks
+                    .add(task_id.clone(), subject.clone(), String::new());
                 self.task_checklist.add(task_id, subject, Some(active_form));
                 self.recompute_layout();
             }
@@ -218,13 +221,18 @@ impl App {
                 self.task_checklist.clear();
                 for task in tasks {
                     let status = match task.status.as_str() {
-                        "completed" => crate::components::task_checklist::ChecklistStatus::Completed,
-                        "in_progress" => crate::components::task_checklist::ChecklistStatus::InProgress,
+                        "completed" => {
+                            crate::components::task_checklist::ChecklistStatus::Completed
+                        }
+                        "in_progress" => {
+                            crate::components::task_checklist::ChecklistStatus::InProgress
+                        }
                         "failed" => crate::components::task_checklist::ChecklistStatus::Failed,
                         _ => crate::components::task_checklist::ChecklistStatus::Pending,
                     };
                     let id = task.id.clone();
-                    self.task_checklist.add(task.id, task.subject, task.active_form);
+                    self.task_checklist
+                        .add(task.id, task.subject, task.active_form);
                     self.task_checklist.update(&id, status);
                 }
                 self.task_checklist.show();
@@ -253,6 +261,7 @@ impl App {
                         self.header.provider(),
                         self.header.model_name(),
                         tools.len(),
+                        self.fast_mode,
                     );
 
                     // Inject welcome as first chat message AFTER tools are loaded
@@ -276,13 +285,41 @@ impl App {
                             prov,
                             model,
                             tools.len(),
-                            if ctx_label.is_empty() { String::new() } else { format!(" · {}", ctx_label) },
+                            if ctx_label.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", ctx_label)
+                            },
                             self.working_dir,
                         );
                         self.chat.add_system_message(&welcome, "info");
                     }
                 }
                 Err(e) => warn!("Failed to load tools: {}", e),
+            },
+            BackendEvent::SettingsLoaded(result) => match result {
+                Ok(settings) => {
+                    self.fast_mode = settings.fast_mode;
+                    self.effort_level = settings.effort_level.clone();
+                    self.status
+                        .set_fast_mode(settings.fast_mode, &settings.effort_level);
+                    self.chat.set_welcome_fast_mode(settings.fast_mode);
+                    if !settings.provider.is_empty() && !settings.model.is_empty() {
+                        self.header
+                            .set_provider_info(&settings.provider, &settings.model);
+                        self.status
+                            .set_provider_info(&settings.provider, &settings.model);
+                        self.sidebar
+                            .set_provider_info(&settings.provider, &settings.model);
+                        self.chat.set_welcome_info(
+                            &settings.provider,
+                            &settings.model,
+                            self.header.tool_count(),
+                            settings.fast_mode,
+                        );
+                    }
+                }
+                Err(e) => warn!("Failed to load settings: {}", e),
             },
             BackendEvent::OrchestrateResult(result) => match result {
                 Ok(resp) => {
@@ -309,6 +346,7 @@ impl App {
             },
             BackendEvent::CommandResult(result) => {
                 self.handle_command_result(result);
+                self.load_settings();
             }
             BackendEvent::ModelSwitched(result) => match result {
                 Ok(resp) => {
@@ -319,6 +357,7 @@ impl App {
                         &resp.provider,
                         &resp.model,
                         self.header.tool_count(),
+                        self.fast_mode,
                     );
                     // Reset context bar with new model's window size
                     if let Some(ctx) = resp.context_window {
@@ -359,10 +398,8 @@ impl App {
             // === Models/Sessions loaded (dialog triggers) ===
             BackendEvent::ModelsLoaded(result) => match result {
                 Ok(resp) => {
-                    let picker = crate::dialogs::model_picker::ModelPicker::new(
-                        resp.models,
-                        Vec::new(),
-                    );
+                    let picker =
+                        crate::dialogs::model_picker::ModelPicker::new(resp.models, Vec::new());
                     self.model_picker = Some(picker);
                     self.transition(AppState::ModelPicker);
                 }
@@ -402,24 +439,62 @@ impl App {
             BackendEvent::OrchestratorTaskAppraised { .. } => {
                 // Appraisal info is informational only; no UI state change needed.
             }
-            BackendEvent::OrchestratorAgentStarted { agent_name, role, model, subject, batch_id } => {
-                self.agents.agent_started(&agent_name, &role, &model, &subject, batch_id);
-                let display = if role.is_empty() { agent_name.clone() } else { format!("{}/{}", agent_name, role) };
+            BackendEvent::OrchestratorAgentStarted {
+                agent_name,
+                role,
+                model,
+                subject,
+                batch_id,
+            } => {
+                self.agents
+                    .agent_started(&agent_name, &role, &model, &subject, batch_id);
+                let display = if role.is_empty() {
+                    agent_name.clone()
+                } else {
+                    format!("{}/{}", agent_name, role)
+                };
                 self.sidebar.set_current_agent(display);
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorAgentProgress { agent_name, current_action, tool_uses, tokens_used, subject } => {
-                self.agents.agent_progress(&agent_name, &current_action, tool_uses, tokens_used, &subject);
+            BackendEvent::OrchestratorAgentProgress {
+                agent_name,
+                current_action,
+                tool_uses,
+                tokens_used,
+                subject,
+            } => {
+                self.agents.agent_progress(
+                    &agent_name,
+                    &current_action,
+                    tool_uses,
+                    tokens_used,
+                    &subject,
+                );
             }
-            BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, .. } => {
-                self.agents.agent_completed(&agent_name, tool_uses, tokens_used);
+            BackendEvent::OrchestratorAgentCompleted {
+                agent_name,
+                tool_uses,
+                tokens_used,
+                ..
+            } => {
+                self.agents
+                    .agent_completed(&agent_name, tool_uses, tokens_used);
                 self.sidebar.set_current_agent("");
             }
-            BackendEvent::OrchestratorAgentFailed { agent_name, error, tool_uses, tokens_used } => {
-                self.agents.agent_failed(&agent_name, &error, tool_uses, tokens_used);
+            BackendEvent::OrchestratorAgentFailed {
+                agent_name,
+                error,
+                tool_uses,
+                tokens_used,
+            } => {
+                self.agents
+                    .agent_failed(&agent_name, &error, tool_uses, tokens_used);
                 self.sidebar.set_current_agent("");
             }
-            BackendEvent::OrchestratorWaveStarted { wave_number, total_waves } => {
+            BackendEvent::OrchestratorWaveStarted {
+                wave_number,
+                total_waves,
+            } => {
                 self.agents.wave_started(wave_number, total_waves);
                 self.recompute_layout();
             }
@@ -433,7 +508,12 @@ impl App {
             }
 
             // === Swarm events → Agents component ===
-            BackendEvent::SwarmStarted { swarm_id, pattern, agent_count, .. } => {
+            BackendEvent::SwarmStarted {
+                swarm_id,
+                pattern,
+                agent_count,
+                ..
+            } => {
                 self.agents.swarm_started(&swarm_id, &pattern, agent_count);
                 self.recompute_layout();
             }
@@ -461,14 +541,18 @@ impl App {
                 tokio::spawn(async move {
                     if client.try_refresh_token().await {
                         // Signal the app to restart SSE with refreshed token
-                        let _ = tx.send(crate::event::Event::Backend(BackendEvent::SseDisconnected {
-                            error: Some("token_refreshed".into()),
-                        }));
+                        let _ = tx.send(crate::event::Event::Backend(
+                            BackendEvent::SseDisconnected {
+                                error: Some("token_refreshed".into()),
+                            },
+                        ));
                     } else {
                         // Refresh failed — tell user to login manually
-                        let _ = tx.send(crate::event::Event::Backend(BackendEvent::SseDisconnected {
-                            error: Some("auth_failed".into()),
-                        }));
+                        let _ = tx.send(crate::event::Event::Backend(
+                            BackendEvent::SseDisconnected {
+                                error: Some("auth_failed".into()),
+                            },
+                        ));
                     }
                 });
             }
@@ -481,7 +565,10 @@ impl App {
                     crate::components::toast::ToastLevel::Warning,
                 );
             }
-            BackendEvent::BudgetWarning { utilization, message } => {
+            BackendEvent::BudgetWarning {
+                utilization,
+                message,
+            } => {
                 self.toasts.push(
                     format!("Budget {}%: {}", (utilization * 100.0) as u32, message),
                     crate::components::toast::ToastLevel::Warning,
@@ -501,9 +588,8 @@ impl App {
                             providers: resp.providers,
                             system_info: resp.system_info,
                         };
-                        self.onboarding = Some(
-                            crate::dialogs::onboarding::OnboardingWizard::new(data),
-                        );
+                        self.onboarding =
+                            Some(crate::dialogs::onboarding::OnboardingWizard::new(data));
                         if self.state.can_transition_to(AppState::Onboarding) {
                             self.transition(AppState::Onboarding);
                         }
@@ -559,7 +645,11 @@ impl App {
             },
 
             // === Swarm Intelligence events ===
-            BackendEvent::SwarmIntelligenceStarted { swarm_id, intelligence_type, .. } => {
+            BackendEvent::SwarmIntelligenceStarted {
+                swarm_id,
+                intelligence_type,
+                ..
+            } => {
                 self.agents.swarm_started(&swarm_id, &intelligence_type, 0);
                 self.toasts.push(
                     format!("SI started: {}", intelligence_type),
@@ -609,7 +699,8 @@ impl App {
             BackendEvent::ClassifyResult(result) => match result {
                 Ok(resp) => {
                     self.status.set_signal(resp.signal.clone());
-                    self.sidebar.set_signal_info(&resp.signal.mode, &resp.signal.genre);
+                    self.sidebar
+                        .set_signal_info(&resp.signal.mode, &resp.signal.genre);
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -643,7 +734,10 @@ impl App {
             },
             BackendEvent::TaskProgressResult(result) => match result {
                 Ok(progress) => {
-                    debug!("Task progress: {} status={}", progress.task_id, progress.status);
+                    debug!(
+                        "Task progress: {} status={}",
+                        progress.task_id, progress.status
+                    );
                     self.tasks.update(&progress.task_id, &progress.status);
                 }
                 Err(e) => {
@@ -657,11 +751,8 @@ impl App {
                 Ok(tasks) => {
                     self.tasks.clear();
                     for t in &tasks {
-                        self.tasks.add(
-                            t.task_id.clone(),
-                            t.task.clone(),
-                            String::new(),
-                        );
+                        self.tasks
+                            .add(t.task_id.clone(), t.task.clone(), String::new());
                         if t.status != "pending" {
                             self.tasks.update(&t.task_id, &t.status);
                         }
@@ -703,7 +794,10 @@ impl App {
             },
             BackendEvent::SwarmStatusResult(result) => match result {
                 Ok(status) => {
-                    let msg = format!("Swarm {} [{}]: {}", status.id, status.pattern, status.status);
+                    let msg = format!(
+                        "Swarm {} [{}]: {}",
+                        status.id, status.pattern, status.status
+                    );
                     self.chat.add_system_message(&msg, "info");
                 }
                 Err(e) => {
@@ -851,7 +945,9 @@ impl App {
                             if resp.status == "ok" {
                                 wizard.set_verify_success(resp.latency_ms.unwrap_or(0));
                             } else {
-                                let msg = resp.message.unwrap_or_else(|| resp.error.unwrap_or_else(|| "Unknown error".into()));
+                                let msg = resp.message.unwrap_or_else(|| {
+                                    resp.error.unwrap_or_else(|| "Unknown error".into())
+                                });
                                 wizard.set_verify_failed(msg);
                             }
                         }
@@ -861,7 +957,11 @@ impl App {
                     }
                 }
             }
-            BackendEvent::PermissionRequired { tool, args, request_id: _ } => {
+            BackendEvent::PermissionRequired {
+                tool,
+                args,
+                request_id: _,
+            } => {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
                 let mut dialog = crate::dialogs::permissions::Permissions::new();
                 dialog.set_tool(tool, args, String::new());
@@ -870,7 +970,10 @@ impl App {
                     self.transition(AppState::Permissions);
                 }
             }
-            BackendEvent::PlanProposed { plan, request_id: _ } => {
+            BackendEvent::PlanProposed {
+                plan,
+                request_id: _,
+            } => {
                 // Show the plan review dialog — backend paused for user approval.
                 let mut review = crate::dialogs::plan_review::PlanReview::new();
                 review.set_plan(plan);
@@ -899,22 +1002,31 @@ impl App {
                         crate::components::toast::ToastLevel::Warning,
                     );
                 }
-            },
+            }
 
             // Survey events
-            BackendEvent::AskUserQuestion { survey_id, questions, skippable } => {
-                use crate::dialogs::survey::{SurveyDialog, SurveyQuestion, SurveyOption};
-                let qs: Vec<SurveyQuestion> = questions.into_iter().map(|q| {
-                    SurveyQuestion {
+            BackendEvent::AskUserQuestion {
+                survey_id,
+                questions,
+                skippable,
+            } => {
+                use crate::dialogs::survey::{SurveyDialog, SurveyOption, SurveyQuestion};
+                let qs: Vec<SurveyQuestion> = questions
+                    .into_iter()
+                    .map(|q| SurveyQuestion {
                         text: q.text,
                         multi_select: q.multi_select,
-                        options: q.options.into_iter().map(|o| SurveyOption {
-                            label: o.label,
-                            description: o.description,
-                        }).collect(),
+                        options: q
+                            .options
+                            .into_iter()
+                            .map(|o| SurveyOption {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
                         skippable: q.skippable,
-                    }
-                }).collect();
+                    })
+                    .collect();
                 self.survey = Some(SurveyDialog::new(survey_id, qs, skippable));
                 if self.state.can_transition_to(AppState::Survey) {
                     self.transition(AppState::Survey);
@@ -925,7 +1037,10 @@ impl App {
             }
 
             // === Proactive Mode ===
-            BackendEvent::ProactiveMessage { message, message_type } => {
+            BackendEvent::ProactiveMessage {
+                message,
+                message_type,
+            } => {
                 let level = match message_type.as_str() {
                     "alert" | "work_failed" => crate::components::toast::ToastLevel::Warning,
                     "work_complete" => crate::components::toast::ToastLevel::Success,
@@ -943,11 +1058,13 @@ impl App {
                 self.toasts.push(preview, level);
             }
             BackendEvent::ProactiveModeChanged { enabled } => {
-                let msg = if enabled { "Proactive mode: ON" } else { "Proactive mode: OFF" };
-                self.toasts.push(
-                    msg.into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                let msg = if enabled {
+                    "Proactive mode: ON"
+                } else {
+                    "Proactive mode: OFF"
+                };
+                self.toasts
+                    .push(msg.into(), crate::components::toast::ToastLevel::Info);
                 self.sidebar.set_proactive(enabled);
             }
         }

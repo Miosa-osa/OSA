@@ -28,6 +28,8 @@ pub struct StatusBar {
     download_label: String,
     download_pct: u8,
     hands_free: bool,
+    fast_mode: bool,
+    effort_level: String,
 }
 
 impl StatusBar {
@@ -53,6 +55,8 @@ impl StatusBar {
             download_label: String::new(),
             download_pct: 0,
             hands_free: false,
+            fast_mode: false,
+            effort_level: String::new(),
         }
     }
 
@@ -137,6 +141,11 @@ impl StatusBar {
         self.hands_free = enabled;
     }
 
+    pub fn set_fast_mode(&mut self, enabled: bool, effort: &str) {
+        self.fast_mode = enabled;
+        self.effort_level = effort.to_string();
+    }
+
     pub fn context_utilization(&self) -> f64 {
         self.context_utilization
     }
@@ -177,6 +186,25 @@ impl StatusBar {
             }
         }
     }
+
+    fn push_fast_pill<'a>(&'a self, spans: &mut Vec<Span<'a>>, theme: &style::Theme) {
+        if self.fast_mode {
+            spans.push(Span::styled(" \u{00b7} ", theme.faint()));
+            spans.push(Span::styled(
+                " FAST ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if !self.effort_level.is_empty() {
+                spans.push(Span::styled(
+                    format!(" {}", self.effort_level),
+                    theme.faint(),
+                ));
+            }
+        }
+    }
 }
 
 impl Component for StatusBar {
@@ -193,11 +221,17 @@ impl Component for StatusBar {
             let bar_total = 20usize;
             let filled = (pct as usize * bar_total / 100).min(bar_total);
             let empty = bar_total - filled;
-            let bar = format!("[{}{}]", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty));
+            let bar = format!(
+                "[{}{}]",
+                "\u{2588}".repeat(filled),
+                "\u{2591}".repeat(empty)
+            );
             let spans = vec![
                 Span::styled(
                     format!("\u{21E9} Downloading {}: ", self.download_label),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(bar, Style::default().fg(Color::Cyan)),
                 Span::styled(format!(" {}%", pct), theme.progress_label()),
@@ -237,11 +271,19 @@ impl Component for StatusBar {
             if self.hands_free {
                 spans.push(Span::styled(
                     " \u{00b7} HF",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(" \u{2014} auto-stop on silence", theme.faint()));
+                spans.push(Span::styled(
+                    " \u{2014} auto-stop on silence",
+                    theme.faint(),
+                ));
             } else {
-                spans.push(Span::styled(" \u{2014} click \u{25C9} to stop \u{00b7} Esc cancel", theme.faint()));
+                spans.push(Span::styled(
+                    " \u{2014} click \u{25C9} to stop \u{00b7} Esc cancel",
+                    theme.faint(),
+                ));
             }
             let line = Line::from(spans);
             frame.render_widget(Paragraph::new(line), area);
@@ -250,12 +292,12 @@ impl Component for StatusBar {
 
         // Transcribing indicator — after recording stops, before result arrives
         if self.transcribing {
-            let spans = vec![
-                Span::styled(
-                    "\u{27F3} Transcribing...",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                "\u{27F3} Transcribing...",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )];
             let line = Line::from(spans);
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -270,6 +312,8 @@ impl Component for StatusBar {
                 spans.push(Span::styled(" / ", theme.faint()));
                 spans.push(Span::styled(&self.model_name, theme.header_model()));
             }
+
+            self.push_fast_pill(&mut spans, &theme);
 
             // Signal pill — always visible when classified
             self.push_signal_pill(&mut spans, &theme);
@@ -327,6 +371,8 @@ impl Component for StatusBar {
                 spans.push(Span::styled(&self.model_name, theme.header_model()));
             }
 
+            self.push_fast_pill(&mut spans, &theme);
+
             // Signal pill — always visible when classified
             self.push_signal_pill(&mut spans, &theme);
 
@@ -372,17 +418,16 @@ impl Component for StatusBar {
 
             if self.bg_count > 0 {
                 spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!("{} bg", self.bg_count),
-                    theme.faint(),
-                ));
+                spans.push(Span::styled(format!("{} bg", self.bg_count), theme.faint()));
             }
 
             if self.hands_free {
                 spans.push(Span::styled(" \u{00b7} ", theme.faint()));
                 spans.push(Span::styled(
                     "HF",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 

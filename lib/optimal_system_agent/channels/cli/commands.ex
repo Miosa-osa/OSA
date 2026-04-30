@@ -44,7 +44,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "version" => {"Show version info", :cmd_version},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
+    "fast" => {"Toggle fast full-capability mode", :cmd_fast},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
     "metrics" => {"Show telemetry metrics", :cmd_metrics},
@@ -657,6 +657,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
     IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
+    IO.puts("  #{@dim}Path:#{@reset}       speculative prefetch + adaptive tools")
     IO.puts("  #{@dim}Iterations:#{@reset} #{config.max_iterations}")
     IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
     IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")

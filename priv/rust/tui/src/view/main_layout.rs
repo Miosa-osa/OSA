@@ -47,11 +47,8 @@ impl LayoutAreas {
         y += layout.header_height;
 
         // Compute fixed bottom sections first, give remainder to chat.
-        let bottom_height = task_lines
-            + agent_lines
-            + activity_lines
-            + layout.status_height
-            + layout.input_height;
+        let bottom_height =
+            task_lines + agent_lines + activity_lines + layout.status_height + layout.input_height;
         let max_chat_height = area
             .height
             .saturating_sub(layout.header_height + bottom_height)
@@ -60,9 +57,7 @@ impl LayoutAreas {
         // If chat content is shorter than available space, shrink the chat area
         // so the input sits right below the messages (minimal gap).
         let main_height = match chat_content_height {
-            Some(content_h) if content_h + 1 < max_chat_height => {
-                (content_h + 1).max(4)
-            }
+            Some(content_h) if content_h + 1 < max_chat_height => (content_h + 1).max(4),
             _ => max_chat_height,
         };
 

@@ -122,9 +122,7 @@ impl FilePicker {
     fn apply_filter(&mut self) {
         let f = self.filter.to_lowercase();
         self.filtered = (0..self.entries.len())
-            .filter(|&i| {
-                f.is_empty() || self.entries[i].name.to_lowercase().contains(&f)
-            })
+            .filter(|&i| f.is_empty() || self.entries[i].name.to_lowercase().contains(&f))
             .collect();
         self.cursor = self.cursor.min(self.filtered.len().saturating_sub(1));
         self.adjust_scroll();
@@ -134,7 +132,10 @@ impl FilePicker {
 
     fn move_up(&mut self) {
         if !self.filtered.is_empty() {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(self.filtered.len() - 1);
+            self.cursor = self
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(self.filtered.len() - 1);
             self.adjust_scroll();
         }
     }
@@ -172,9 +173,7 @@ impl FilePicker {
             } else {
                 let mut path = self.current_dir.clone();
                 path.push(&entry.name);
-                Some(FilePickerAction::Select(
-                    path.to_string_lossy().to_string(),
-                ))
+                Some(FilePickerAction::Select(path.to_string_lossy().to_string()))
             }
         } else {
             None
@@ -192,7 +191,10 @@ impl FilePicker {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<FilePickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -266,7 +268,10 @@ impl FilePicker {
         let path_str = self.current_dir.to_string_lossy();
         let max_path_w = inner.width.saturating_sub(4) as usize;
         let path_display = if path_str.len() > max_path_w {
-            format!("…{}", &path_str[path_str.len() - max_path_w.saturating_sub(1)..])
+            format!(
+                "…{}",
+                &path_str[path_str.len() - max_path_w.saturating_sub(1)..]
+            )
         } else {
             path_str.to_string()
         };
@@ -285,8 +290,7 @@ impl FilePicker {
             format!("  Filter: {}_  ({} items)", self.filter, count)
         };
         frame.render_widget(
-            Paragraph::new(filter_display)
-                .style(Style::default().fg(theme.colors.muted)),
+            Paragraph::new(filter_display).style(Style::default().fg(theme.colors.muted)),
             Rect::new(inner.x, cy, inner.width, 1),
         );
         cy += 1;
@@ -294,8 +298,7 @@ impl FilePicker {
         // Error if any
         if let Some(err) = &self.error {
             frame.render_widget(
-                Paragraph::new(format!("  ⚠ {}", err))
-                    .style(theme.error_text()),
+                Paragraph::new(format!("  ⚠ {}", err)).style(theme.error_text()),
                 Rect::new(inner.x, cy, inner.width, 1),
             );
             cy += 1;

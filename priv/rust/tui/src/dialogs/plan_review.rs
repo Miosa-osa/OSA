@@ -48,7 +48,10 @@ impl PlanReview {
 
     /// Handle a key event.  Returns `Some(action)` when the panel should close.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<DialogAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 

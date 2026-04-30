@@ -83,7 +83,10 @@ impl AppState {
     }
 
     pub fn allows_input(&self) -> bool {
-        matches!(self, AppState::Idle | AppState::Processing | AppState::Recording)
+        matches!(
+            self,
+            AppState::Idle | AppState::Processing | AppState::Recording
+        )
     }
 
     pub fn is_processing(&self) -> bool {

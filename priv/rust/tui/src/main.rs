@@ -12,14 +12,14 @@ mod app;
 mod client;
 mod components;
 mod config;
+mod dialogs;
 mod event;
 mod logging;
 mod render;
 mod style;
-mod view;
-mod dialogs;
-mod util;
 mod tools;
+mod util;
+mod view;
 mod voice;
 
 fn main() -> Result<()> {
@@ -65,7 +65,12 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, crossterm::event::EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;

@@ -2,7 +2,7 @@ pub mod capture;
 pub mod transcribe;
 
 pub use capture::VoiceCapture;
-pub use transcribe::{VoiceProvider, CloudTranscriber, GroqTranscriber};
+pub use transcribe::{CloudTranscriber, GroqTranscriber, VoiceProvider};
 
 use std::time::Instant;
 
@@ -29,7 +29,9 @@ impl VoiceState {
                 if let Ok(key) = std::env::var("GROQ_API_KEY") {
                     VoiceProvider::Groq(GroqTranscriber::new(key))
                 } else {
-                    tracing::warn!("VOICE_PROVIDER=groq but no GROQ_API_KEY, falling back to local");
+                    tracing::warn!(
+                        "VOICE_PROVIDER=groq but no GROQ_API_KEY, falling back to local"
+                    );
                     VoiceProvider::local_or_unavailable()
                 }
             }
@@ -37,7 +39,9 @@ impl VoiceState {
                 if let Ok(key) = std::env::var("OPENAI_API_KEY") {
                     VoiceProvider::Cloud(CloudTranscriber::new(key))
                 } else {
-                    tracing::warn!("VOICE_PROVIDER=cloud but no OPENAI_API_KEY, falling back to local");
+                    tracing::warn!(
+                        "VOICE_PROVIDER=cloud but no OPENAI_API_KEY, falling back to local"
+                    );
                     VoiceProvider::local_or_unavailable()
                 }
             }
@@ -56,8 +60,6 @@ impl VoiceState {
 
     /// Elapsed recording time in seconds
     pub fn elapsed_secs(&self) -> u64 {
-        self.started_at
-            .map(|s| s.elapsed().as_secs())
-            .unwrap_or(0)
+        self.started_at.map(|s| s.elapsed().as_secs()).unwrap_or(0)
     }
 }

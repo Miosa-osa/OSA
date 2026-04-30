@@ -107,10 +107,7 @@ impl SseClient {
 
                     warn!(
                         "SSE disconnected (attempt {}/{}), retrying in {}s: {:?}",
-                        attempt,
-                        MAX_RECONNECTS,
-                        backoff_secs,
-                        e
+                        attempt, MAX_RECONNECTS, backoff_secs, e
                     );
 
                     tokio::select! {
@@ -127,10 +124,7 @@ impl SseClient {
 
     /// Single connection attempt. Returns Ok(()) on clean close, Err on failure.
     async fn connect_once(&self) -> std::result::Result<(), SseError> {
-        let url = format!(
-            "{}/api/v1/stream/{}",
-            self.base_url, self.session_id
-        );
+        let url = format!("{}/api/v1/stream/{}", self.base_url, self.session_id);
 
         // No total-request timeout for SSE long-polling — the stream is
         // intentionally long-lived. Duration::from_secs(0) is NOT "no
@@ -156,9 +150,7 @@ impl SseClient {
             .map_err(|e| SseError::Disconnected(e.into()))?;
 
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(SseError::AuthFailed);
         }
         if !status.is_success() {
@@ -175,11 +167,10 @@ impl SseClient {
 
         // Read the stream line by line
         let byte_stream = resp.bytes_stream();
-        let stream_reader = tokio_util::io::StreamReader::new(
-            byte_stream.map(|result| {
+        let stream_reader =
+            tokio_util::io::StreamReader::new(byte_stream.map(|result| {
                 result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }),
-        );
+            }));
         let mut lines = tokio::io::BufReader::with_capacity(MAX_LINE_BYTES, stream_reader).lines();
 
         let mut event_type = String::new();
@@ -727,9 +718,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
-        "task_checklist_hide" => {
-            Some(BackendEvent::TaskChecklistHide)
-        }
+        "task_checklist_hide" => Some(BackendEvent::TaskChecklistHide),
 
         "swarm_started" => {
             #[derive(serde::Deserialize)]

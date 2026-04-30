@@ -80,7 +80,6 @@ impl Header {
             frame.render_widget(separator, sep_area);
         }
     }
-
 }
 
 impl Component for Header {

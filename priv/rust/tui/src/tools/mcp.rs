@@ -2,13 +2,19 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    render_tool_box, status_icon, format_duration, truncate_lines, RenderOpts, ToolRenderer,
+    format_duration, render_tool_box, status_icon, truncate_lines, RenderOpts, ToolRenderer,
 };
 
 pub struct McpRenderer;
 
 impl ToolRenderer for McpRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Parse `mcp__server__tool` convention
@@ -132,8 +138,12 @@ fn pretty_json_lines(json_str: &str, theme: &crate::style::Theme) -> Vec<Line<'s
             } else if trimmed.starts_with('"') {
                 // String value
                 Style::default().fg(theme.colors.success)
-            } else if trimmed == "{" || trimmed == "}" || trimmed == "[" || trimmed == "]"
-                || trimmed == "}," || trimmed == "],"
+            } else if trimmed == "{"
+                || trimmed == "}"
+                || trimmed == "["
+                || trimmed == "]"
+                || trimmed == "},"
+                || trimmed == "],"
             {
                 Style::default().fg(theme.colors.muted)
             } else {

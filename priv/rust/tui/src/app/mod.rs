@@ -131,6 +131,8 @@ pub struct App {
 
     // Commands from backend
     pub command_entries: Vec<crate::client::types::CommandEntry>,
+    pub fast_mode: bool,
+    pub effort_level: String,
 
     // Voice input
     pub voice: VoiceState,
@@ -159,8 +161,8 @@ impl App {
             .unwrap_or_default();
 
         // Initialize theme
-        let theme = crate::style::themes::by_name(&config.theme)
-            .unwrap_or_else(crate::style::themes::dark);
+        let theme =
+            crate::style::themes::by_name(&config.theme).unwrap_or_else(crate::style::themes::dark);
         crate::style::set_theme(theme);
 
         // Use actual terminal size instead of hardcoded 80x24
@@ -232,6 +234,8 @@ impl App {
             backend_spawn_attempted: false,
             health_retry_count: 0,
             command_entries: Vec::new(),
+            fast_mode: false,
+            effort_level: String::new(),
 
             voice: VoiceState::new(),
             welcome_injected: false,

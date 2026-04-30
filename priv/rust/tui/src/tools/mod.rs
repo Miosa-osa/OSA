@@ -45,7 +45,8 @@ pub struct RenderOpts {
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
 pub trait ToolRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>>;
+    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts)
+        -> Vec<Line<'static>>;
 }
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
@@ -60,9 +61,7 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
 
     match lower.as_str() {
         // Bash
-        "bash" | "run_bash_command" => {
-            bash::BashRenderer.render(name, args, result, opts)
-        }
+        "bash" | "run_bash_command" => bash::BashRenderer.render(name, args, result, opts),
 
         // File: Read
         "read" | "read_file" | "file_read" => {
@@ -75,41 +74,35 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         }
 
         // File: Edit / MultiEdit / Download
-        "edit" | "edit_file" | "file_edit" | "str_replace_editor"
-        | "multiedit" | "multi_edit" | "download" | "str_replace_based_edit_tool" => {
-            file::FileEditRenderer.render(name, args, result, opts)
-        }
+        "edit"
+        | "edit_file"
+        | "file_edit"
+        | "str_replace_editor"
+        | "multiedit"
+        | "multi_edit"
+        | "download"
+        | "str_replace_based_edit_tool" => file::FileEditRenderer.render(name, args, result, opts),
 
         // Search: Glob
-        "glob" | "file_glob" => {
-            search::GlobRenderer.render(name, args, result, opts)
-        }
+        "glob" | "file_glob" => search::GlobRenderer.render(name, args, result, opts),
 
         // Search: Grep
-        "grep" | "file_grep" => {
-            search::GrepRenderer.render(name, args, result, opts)
-        }
+        "grep" | "file_grep" => search::GrepRenderer.render(name, args, result, opts),
 
         // Search: LS
-        "ls" | "list_directory" => {
-            search::LsRenderer.render(name, args, result, opts)
-        }
+        "ls" | "list_directory" => search::LsRenderer.render(name, args, result, opts),
 
         // Web
         "web_fetch" | "webfetch" | "fetch" => {
             web::WebFetchRenderer.render(name, args, result, opts)
         }
-        "web_search" | "websearch" => {
-            web::WebSearchRenderer.render(name, args, result, opts)
-        }
+        "web_search" | "websearch" => web::WebSearchRenderer.render(name, args, result, opts),
 
         // Agent / Task
         "task" | "agent" | "sub_agent" | "orchestrate" => {
             agent::AgentRenderer.render(name, args, result, opts)
         }
-        "delegate" => {
-            agent::DelegateRenderer.render(name, args, result, opts)
-        }
+        "delegate" => agent::DelegateRenderer.render(name, args, result, opts),
 
         // Todos
         "todoread" | "todowrite" | "todos" | "task_write" => {
@@ -117,34 +110,22 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         }
 
         // Cron / Schedule
-        "cron" | "schedule" => {
-            cron::CronRenderer.render(name, args, result, opts)
-        }
+        "cron" | "schedule" => cron::CronRenderer.render(name, args, result, opts),
 
         // Sleep
-        "sleep" | "wait" | "pause" => {
-            sleep::SleepRenderer.render(name, args, result, opts)
-        }
+        "sleep" | "wait" | "pause" => sleep::SleepRenderer.render(name, args, result, opts),
 
         // Monitor / Watch
-        "monitor" | "watch" => {
-            monitor::MonitorRenderer.render(name, args, result, opts)
-        }
+        "monitor" | "watch" => monitor::MonitorRenderer.render(name, args, result, opts),
 
         // Remote trigger
-        "remote_trigger" | "trigger" => {
-            cron::CronRenderer.render(name, args, result, opts)
-        }
+        "remote_trigger" | "trigger" => cron::CronRenderer.render(name, args, result, opts),
 
         // Diagnostics
-        "diagnostics" => {
-            diagnostics::DiagnosticsRenderer.render(name, args, result, opts)
-        }
+        "diagnostics" => diagnostics::DiagnosticsRenderer.render(name, args, result, opts),
 
         // References
-        "references" => {
-            references::ReferencesRenderer.render(name, args, result, opts)
-        }
+        "references" => references::ReferencesRenderer.render(name, args, result, opts),
 
         // Generic fallback
         _ => generic::GenericRenderer.render(name, args, result, opts),
@@ -157,10 +138,7 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
 pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String, Style) {
     let theme = crate::style::theme();
     match status {
-        ToolStatus::Pending => (
-            "○".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
+        ToolStatus::Pending => ("○".to_string(), Style::default().fg(theme.colors.muted)),
         ToolStatus::AwaitingPermission => (
             "◐".to_string(),
             Style::default()
@@ -190,10 +168,7 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
                 .fg(theme.colors.error)
                 .add_modifier(Modifier::BOLD),
         ),
-        ToolStatus::Canceled => (
-            "⊘".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
+        ToolStatus::Canceled => ("⊘".to_string(), Style::default().fg(theme.colors.muted)),
     }
 }
 

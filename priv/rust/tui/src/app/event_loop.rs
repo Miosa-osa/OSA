@@ -138,12 +138,7 @@ impl App {
                 if !self.thinking_box.is_empty() {
                     let tb_height = self.thinking_box.height(areas.chat.width).min(2);
                     let tb_y = areas.status.y.saturating_sub(tb_height);
-                    let thinking_area = Rect::new(
-                        areas.chat.x,
-                        tb_y,
-                        areas.chat.width,
-                        tb_height,
-                    );
+                    let thinking_area = Rect::new(areas.chat.x, tb_y, areas.chat.width, tb_height);
                     self.thinking_box.draw(frame, thinking_area);
                 }
 
