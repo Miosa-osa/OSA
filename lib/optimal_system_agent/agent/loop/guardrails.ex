@@ -225,6 +225,22 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   def needs_exploration?(_), do: false
 
   @doc """
+  Returns true when the user is asking for live visual context from the active
+  screen or desktop.
+
+  This is signal-based rather than tied to one exact sentence: it combines an
+  observation verb with a visible-surface noun, or a direct reference to the
+  shared UI.
+  """
+  def visual_observation_request?(message) when is_binary(message) do
+    normalized = normalize_text(message)
+
+    observation_signal?(normalized) and visible_surface_signal?(normalized)
+  end
+
+  def visual_observation_request?(_), do: false
+
+  @doc """
   Detect messages that should use the delegate tool.
 
   Returns true when the message contains multi-part task indicators
@@ -254,6 +270,25 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   end
 
   def delegation_task?(_), do: false
+
+  defp observation_signal?(message) do
+    Regex.match?(~r/\b(see|seeing|look|watch|view|observe|inspect|read|show|tell)\b/u, message)
+  end
+
+  defp visible_surface_signal?(message) do
+    Regex.match?(
+      ~r/\b(screen|desktop|window|display|monitor|ui|interface|terminal|page|this|here)\b/u,
+      message
+    )
+  end
+
+  defp normalize_text(message) do
+    message
+    |> String.downcase()
+    |> String.replace(~r/[^\p{L}\p{N}\s']/u, " ")
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
+  end
 
   # Count bullet points or numbered items that look like independent tasks.
   # Filters out sub-items (indented bullets) and short items (< 15 chars).

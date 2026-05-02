@@ -34,6 +34,21 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandlerTest do
     assert directive =~ "Do not guess"
     assert directive =~ "computer_use"
     assert directive =~ "`snapshot`"
+    assert directive =~ "answer the user normally"
+    assert directive =~ "concrete failure"
+  end
+
+  test "visual observation detection is signal based, not tied to one exact phrase" do
+    Application.put_env(:optimal_system_agent, :computer_use_enabled, true)
+
+    messages =
+      MessageHandler.build_messages("can you inspect this terminal here", %{
+        turn_count: 0,
+        permission_tier: :full
+      })
+
+    assert [%{role: "system", content: directive}, %{role: "user"}] = messages
+    assert directive =~ "computer_use"
   end
 
   test "visual screen requests do not add the directive when computer use is disabled" do
