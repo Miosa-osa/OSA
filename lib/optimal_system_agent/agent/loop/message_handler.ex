@@ -124,6 +124,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   defp build_pre_directives(message, state) do
     []
     |> maybe_add_task_directive(message)
+    |> maybe_add_visual_observation_directive(message)
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> Enum.reverse()
@@ -190,6 +191,37 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       true ->
         acc
     end
+  end
+
+  defp maybe_add_visual_observation_directive(acc, message) do
+    if visual_observation_request?(message) and computer_use_available?() do
+      directive = %{
+        role: "system",
+        content:
+          "[System: The user is asking about what is visible on the screen or desktop. " <>
+            "Do not guess from conversation text. First call computer_use with action " <>
+            "`snapshot` when available, otherwise `screenshot`, then answer from the observation.]"
+      }
+
+      [directive | acc]
+    else
+      acc
+    end
+  end
+
+  defp visual_observation_request?(message) when is_binary(message) do
+    normalized = String.downcase(message)
+
+    Regex.match?(
+      ~r/\b(what do you see|what can you see|what'?s on (my |the )?(screen|desktop)|look at (this|my screen|the screen)|see (my|the) screen|look (at|on) (my|the) desktop|read (my|the) screen)\b/,
+      normalized
+    )
+  end
+
+  defp visual_observation_request?(_), do: false
+
+  defp computer_use_available? do
+    Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
   end
 
   defp maybe_add_delegation_directive(acc, message, state) do
