@@ -357,6 +357,12 @@ config :optimal_system_agent,
   update_url: System.get_env("OSA_UPDATE_URL"),
   update_interval: parse_int.(System.get_env("OSA_UPDATE_INTERVAL"), 86_400_000),
 
+  # OpenComputers host daemon mode. The installer sets the env var in the
+  # launchd/systemd service; the marker is kept for interactive CLI enablement.
+  open_computers_enabled:
+    System.get_env("OSA_OPEN_COMPUTERS_ENABLED") == "true" or
+      File.exists?(Path.expand("~/.osa/.open_computers_enabled")),
+
   # Provider failover chain — auto-detected from configured API keys.
   # Override with comma-separated list: OSA_FALLBACK_CHAIN=anthropic,openai,ollama
   fallback_chain:

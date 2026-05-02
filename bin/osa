@@ -171,6 +171,12 @@ case "${1:-}" in
     exit 0
     ;;
 
+  opencomputers)
+    shift
+    (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.opencomputers(System.argv())" -- "$@")
+    exit $?
+    ;;
+
   help|--help|-h)
     echo ""
     echo -e "${BOLD}  OSA Agent${RESET} — Your OS, Supercharged"
@@ -182,6 +188,7 @@ case "${1:-}" in
     echo -e "    ${CYAN}osa serve${RESET}        Start backend only (headless HTTP API)"
     echo -e "    ${CYAN}osa doctor${RESET}       Run health checks"
     echo -e "    ${CYAN}osa version${RESET}      Print version"
+    echo -e "    ${CYAN}osa opencomputers${RESET} Manage MIOSA host connection"
     echo ""
     echo -e "  ${BOLD}Options:${RESET}"
     echo -e "    ${CYAN}--dev${RESET}            Dev profile (port 19001)"

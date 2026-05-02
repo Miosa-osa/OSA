@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   @moduledoc """
   CLI handler for `osa opencomputers <verb>`.
 
-  Verbs: status | login | enable | disable | logout
+  Verbs: status | login | connect | enable | disable | logout
   """
 
   @osa_dir Path.join(System.user_home!(), ".osa")
@@ -17,7 +17,8 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     case verb do
       "status" -> cmd_status()
       "login" -> cmd_login(rest)
-      "enable" -> cmd_enable()
+      "connect" -> cmd_login(rest)
+      "enable" -> cmd_enable(rest)
       "disable" -> cmd_disable()
       "logout" -> cmd_logout(rest)
       _ -> usage()
@@ -178,20 +179,30 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
 
   # ── enable ───────────────────────────────────────────────────────
 
-  defp cmd_enable do
+  defp cmd_enable(args) do
+    {opts, _} =
+      OptionParser.parse!(args,
+        strict: [profile: :boolean, no_profile: :boolean]
+      )
+
     File.mkdir_p!(@osa_dir)
     File.write!(@marker_path, "")
 
-    shell = detect_shell()
-    wrote_profile = set_env_in_profile(shell)
+    wrote_profile =
+      if Keyword.get(opts, :no_profile, false) do
+        false
+      else
+        shell = detect_shell()
+        set_env_in_profile(shell)
+      end
 
     IO.puts("OpenComputers enabled.")
-    if wrote_profile, do: IO.puts("Added #{@env_var}=true to #{shell_profile(shell)}")
+    if wrote_profile, do: IO.puts("Added #{@env_var}=true to your shell profile")
     IO.puts("Marker written: #{@marker_path}")
     IO.puts("")
 
     if is_nil(Process.whereis(OptimalSystemAgent.OpenComputers.Supervisor)) do
-      IO.puts("Supervisor not running. Restart OSA or run `osa opencomputers start` to activate.")
+      IO.puts("Supervisor not running. Restart OSA to activate.")
     else
       IO.puts("Supervisor already running — extension is live.")
     end
@@ -406,9 +417,10 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     Verbs:
       status                         Print config + connection state
       login [--key <key>]            Write host key to ~/.osa/open_computers.toml
+      connect [--key <key>]          Alias for login
             [--control-url <url>]    (default: #{@default_control_url})
             [--force]                Skip overwrite confirmation
-      enable                         Set OSA_OPEN_COMPUTERS_ENABLED=true in shell profile
+      enable [--no-profile]          Enable host mode; optionally skip shell profile edits
       disable                        Remove env var + stop running supervisor
       logout [--force]               Clear host_key and stop session
     """)
