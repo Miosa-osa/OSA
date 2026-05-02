@@ -194,13 +194,15 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   end
 
   defp maybe_add_visual_observation_directive(acc, message) do
-    if visual_observation_request?(message) and computer_use_available?() do
+    if Guardrails.visual_observation_request?(message) and computer_use_available?() do
       directive = %{
         role: "system",
         content:
           "[System: The user is asking about what is visible on the screen or desktop. " <>
             "Do not guess from conversation text. First call computer_use with action " <>
-            "`snapshot` when available, otherwise `screenshot`, then answer from the observation.]"
+            "`snapshot` when available, otherwise `screenshot`. After the observation, answer " <>
+            "the user normally. If the observation tool fails, briefly report the concrete failure " <>
+            "instead of pretending to see the screen.]"
       }
 
       [directive | acc]
@@ -208,17 +210,6 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       acc
     end
   end
-
-  defp visual_observation_request?(message) when is_binary(message) do
-    normalized = String.downcase(message)
-
-    Regex.match?(
-      ~r/\b(what do you see|what can you see|what'?s on (my |the )?(screen|desktop)|look at (this|my screen|the screen)|see (my|the) screen|look (at|on) (my|the) desktop|read (my|the) screen)\b/,
-      normalized
-    )
-  end
-
-  defp visual_observation_request?(_), do: false
 
   defp computer_use_available? do
     Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
