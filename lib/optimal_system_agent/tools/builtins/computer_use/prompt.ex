@@ -47,6 +47,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
 
     **get_tree** — Return the accessibility element tree for the current screen.
       - Use element refs from the tree as `target` for click actions.
+      - Not available on MIOSA REST computers; use `screenshot` there.
+
+    **wait** — Pause server-side for `seconds` (0–30).
+
+    **list_windows** — Return open windows. MIOSA REST computers only.
+
+    **focus_window** — Focus a MIOSA window by `window_id`.
+
+    **launch** — Launch an application by `app` name or command.
+
+    **cursor** — Return the current mouse cursor coordinates. MIOSA REST computers only.
+
+    **snapshot** — Return an AI-friendly UI snapshot with refs when the MIOSA computer supports it.
+      - Optional filters: `app`, `window_id`, `surface`, `root`, `max_depth`, `interactive_only`, `compact`.
+
+    **right_click** / **triple_click** — Click at `x`/`y` or a MIOSA snapshot `target` ref.
+
+    **set_value** — Set an element value using `target` or `x`/`y` plus `text`.
+
+    **clipboard_get** / **clipboard_set** / **clipboard_clear** — Read, write, or clear text clipboard.
+
+    **list_apps** — Return running or launchable applications when supported by the MIOSA computer.
+
+    **list_surfaces** — Return observable surfaces such as windows, menus, sheets, popovers, or alerts.
+
+    **resize_window** / **move_window** — Change a MIOSA window by `window_id`.
+
+    **scroll_to** — Scroll an element or coordinate into view.
 
     ## Parameters
 
@@ -61,6 +89,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
       - Docker/headless: virtual framebuffer (Xvfb)
       - Remote SSH: tunnelled X11 or platform VM adapter
       - Platform VM: OSA compute layer integration
+      - MIOSA: REST API for cloud computers and OpenComputers (`computer_use_platform: :miosa`)
 
     Computer use is only available when `computer_use_enabled: true` is set in
     the OSA application config.

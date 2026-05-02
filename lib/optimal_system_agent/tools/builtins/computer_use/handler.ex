@@ -89,6 +89,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp validate_action_params("key", params), do: validate_key_combo(params)
   defp validate_action_params("scroll", params), do: validate_scroll(params)
   defp validate_action_params("get_tree", _params), do: :ok
+  defp validate_action_params("wait", params), do: validate_wait(params)
+  defp validate_action_params("list_windows", _params), do: :ok
+  defp validate_action_params("focus_window", params), do: validate_window_id(params)
+  defp validate_action_params("launch", params), do: validate_app(params)
+  defp validate_action_params("cursor", _params), do: :ok
+  defp validate_action_params("snapshot", _params), do: :ok
+  defp validate_action_params("right_click", params), do: validate_target_or_coords(params)
+  defp validate_action_params("triple_click", params), do: validate_target_or_coords(params)
+  defp validate_action_params("set_value", params), do: validate_set_value(params)
+  defp validate_action_params("clipboard_get", _params), do: :ok
+  defp validate_action_params("clipboard_set", params), do: validate_text(params)
+  defp validate_action_params("clipboard_clear", _params), do: :ok
+  defp validate_action_params("list_apps", _params), do: :ok
+  defp validate_action_params("list_surfaces", _params), do: :ok
+  defp validate_action_params("resize_window", params), do: validate_window_size(params)
+  defp validate_action_params("move_window", params), do: validate_window_position(params)
+  defp validate_action_params("scroll_to", params), do: validate_target_or_coords(params)
 
   defp validate_region(%{"x" => x, "y" => y, "width" => w, "height" => h})
        when is_integer(x) and is_integer(y) and is_integer(w) and is_integer(h) and
@@ -173,6 +190,56 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
 
   defp validate_scroll(_),
     do: {:error, "Missing required parameter: direction"}
+
+  defp validate_wait(params) do
+    seconds = Map.get(params, "seconds", 1)
+
+    if is_number(seconds) and seconds >= 0 and seconds <= 30 do
+      :ok
+    else
+      {:error, "seconds must be a number between 0 and 30"}
+    end
+  end
+
+  defp validate_window_id(%{"window_id" => id}) when is_binary(id) and id != "", do: :ok
+  defp validate_window_id(_), do: {:error, "Missing required parameter: window_id"}
+
+  defp validate_app(%{"app" => app}) when is_binary(app) and app != "", do: :ok
+  defp validate_app(_), do: {:error, "Missing required parameter: app"}
+
+  defp validate_target_or_coords(params) do
+    cond do
+      params["target"] != nil -> :ok
+      has_coords?(params) -> validate_coords(params)
+      true -> {:error, "action requires either coordinates (x, y) or a target element ref"}
+    end
+  end
+
+  defp validate_set_value(params) do
+    with :ok <- validate_text(params),
+         :ok <- validate_target_or_coords(params) do
+      :ok
+    end
+  end
+
+  defp validate_window_size(%{"window_id" => id, "width" => width, "height" => height})
+       when is_binary(id) and id != "" and is_integer(width) and is_integer(height) and width > 0 and
+              height > 0,
+       do: :ok
+
+  defp validate_window_size(%{"window_id" => id}) when is_binary(id) and id != "",
+    do: {:error, "resize_window requires positive integer width and height"}
+
+  defp validate_window_size(_), do: {:error, "Missing required parameter: window_id"}
+
+  defp validate_window_position(%{"window_id" => id, "x" => x, "y" => y})
+       when is_binary(id) and id != "" and is_integer(x) and is_integer(y),
+       do: :ok
+
+  defp validate_window_position(%{"window_id" => id}) when is_binary(id) and id != "",
+    do: {:error, "move_window requires integer x and y"}
+
+  defp validate_window_position(_), do: {:error, "Missing required parameter: window_id"}
 
   # ── Private: lazy GenServer management ────────────────────────────────
 
