@@ -274,6 +274,6 @@ fi
 printf "\n${GREEN}${BOLD}  OSA ${VERSION} installed successfully!${RESET}\n\n"
 printf "  Next step:\n"
 printf "\n"
-printf "    ${BOLD}osa opencomputers connect --key <your-key>${RESET}\n"
+printf "    ${BOLD}osa opencomputers login --key <your-key>${RESET}\n"
 printf "\n"
 printf "  ${DIM}Get your key at: https://miosa.ai/opencomputers${RESET}\n\n"

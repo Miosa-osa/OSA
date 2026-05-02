@@ -207,7 +207,7 @@ if ($pathChanged) {
 
 Write-Host "  Next step:"
 Write-Host ""
-Write-Host "    osa opencomputers connect --key <your-key>" -ForegroundColor White
+Write-Host "    osa opencomputers login --key <your-key>" -ForegroundColor White
 Write-Host ""
 Write-Host "  Get your key at: https://miosa.ai/opencomputers" -ForegroundColor DarkGray
 Write-Host ""
