@@ -10,7 +10,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants do
   @tool_name "computer_use"
   def tool_name, do: @tool_name
 
-  @valid_actions ~w(screenshot click double_click type key scroll move_mouse drag get_tree)a
+  @valid_actions ~w(
+    screenshot click double_click type key scroll move_mouse drag get_tree
+    wait list_windows focus_window launch cursor snapshot right_click triple_click
+    set_value clipboard_get clipboard_set clipboard_clear list_apps list_surfaces
+    resize_window move_window scroll_to
+  )a
   def valid_actions, do: @valid_actions
 
   @valid_scroll_directions ~w(up down left right)

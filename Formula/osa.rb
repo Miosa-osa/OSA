@@ -1,4 +1,4 @@
-class Osagent < Formula
+class Osa < Formula
   desc "Signal Theory-optimized AI agent - your OS, supercharged"
   homepage "https://github.com/Miosa-osa/OSA"
   version "0.1.0"
@@ -26,13 +26,13 @@ class Osagent < Formula
     end
   end
 
-  conflicts_with "osa", because: "both formulas install the OSA command-line tools"
+  conflicts_with "osagent", because: "both formulas install the OSA command-line tools"
   conflicts_with "miosa", because: "both formulas install the OSA command-line tools"
 
   def install
     libexec.install Dir["*"]
-    bin.install_symlink libexec/"bin/osagent" => "osagent"
     bin.install_symlink libexec/"bin/osagent" => "osa"
+    bin.install_symlink libexec/"bin/osagent" => "osagent"
     bin.install_symlink libexec/"bin/osagent" => "miosa"
   end
 
@@ -46,8 +46,8 @@ class Osagent < Formula
   end
 
   test do
-    assert_match "osagent v", shell_output("#{bin}/osagent version")
     assert_match "osagent v", shell_output("#{bin}/osa version")
+    assert_match "osagent v", shell_output("#{bin}/osagent version")
     assert_match "osagent v", shell_output("#{bin}/miosa version")
   end
 end

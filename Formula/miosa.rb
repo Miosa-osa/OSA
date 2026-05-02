@@ -1,5 +1,5 @@
-class Osagent < Formula
-  desc "Signal Theory-optimized AI agent - your OS, supercharged"
+class Miosa < Formula
+  desc "CLI entrypoint for the Optimal System Agent"
   homepage "https://github.com/Miosa-osa/OSA"
   version "0.1.0"
   license "MIT"
@@ -27,27 +27,27 @@ class Osagent < Formula
   end
 
   conflicts_with "osa", because: "both formulas install the OSA command-line tools"
-  conflicts_with "miosa", because: "both formulas install the OSA command-line tools"
+  conflicts_with "osagent", because: "both formulas install the OSA command-line tools"
 
   def install
     libexec.install Dir["*"]
-    bin.install_symlink libexec/"bin/osagent" => "osagent"
-    bin.install_symlink libexec/"bin/osagent" => "osa"
     bin.install_symlink libexec/"bin/osagent" => "miosa"
+    bin.install_symlink libexec/"bin/osagent" => "osa"
+    bin.install_symlink libexec/"bin/osagent" => "osagent"
   end
 
   def caveats
     <<~EOS
-      OSA installed the following commands:
+      MIOSA installed the following commands:
+        miosa
         osa
         osagent
-        miosa
     EOS
   end
 
   test do
-    assert_match "osagent v", shell_output("#{bin}/osagent version")
-    assert_match "osagent v", shell_output("#{bin}/osa version")
     assert_match "osagent v", shell_output("#{bin}/miosa version")
+    assert_match "osagent v", shell_output("#{bin}/osa version")
+    assert_match "osagent v", shell_output("#{bin}/osagent version")
   end
 end

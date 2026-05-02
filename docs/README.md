@@ -10,8 +10,13 @@
 
 ```bash
 # Install and run
+brew tap miosa-osa/tap
 brew install miosa-osa/tap/osa
 osa serve
+
+# Compatibility entrypoints installed by the same package:
+osagent version
+miosa version
 
 # Or from source
 git clone https://github.com/miosa-osa/osa.git

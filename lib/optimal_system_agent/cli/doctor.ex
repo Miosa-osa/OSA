@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   Health check for the `osagent doctor` CLI subcommand.
 
   Runs lightweight diagnostics without starting the full OTP application.
-  Checks runtime, TUI binary, HTTP API, provider availability, GoldRush
+  Checks runtime, CLI wrapper, TUI binary, HTTP API, provider availability, GoldRush
   event router, working directory, PostgreSQL, and AMQP connectivity.
   """
 
@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
 
     checks = [
       check_runtime(),
+      check_cli(),
       check_tui(),
       check_api(),
       check_provider(),
@@ -54,6 +55,22 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp check_runtime do
     otp_release = :erlang.system_info(:otp_release) |> to_string()
     {:pass, "Runtime", "OTP #{otp_release}"}
+  end
+
+  defp check_cli do
+    cond do
+      path = System.find_executable("osa") ->
+        {:pass, "CLI", "osa on PATH (#{path})"}
+
+      path = System.find_executable("osagent") ->
+        {:pass, "CLI", "osagent on PATH (#{path})"}
+
+      path = repo_cli_path() ->
+        {:pass, "CLI", "repo wrapper (#{abbreviate_home(path)})"}
+
+      true ->
+        {:fail, "CLI", "osa not on PATH and bin/osa not executable"}
+    end
   end
 
   defp check_tui do
@@ -201,6 +218,16 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       dir ->
         to_string(dir)
     end
+  end
+
+  defp repo_cli_path do
+    candidates =
+      [
+        Path.expand("bin/osa"),
+        Path.expand("../bin/osa", find_priv_dir() || File.cwd!())
+      ]
+
+    Enum.find(candidates, fn path -> File.exists?(path) and executable?(path) end)
   end
 
   defp executable?(path) do

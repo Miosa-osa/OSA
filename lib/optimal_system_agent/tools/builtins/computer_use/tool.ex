@@ -71,6 +71,54 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
         "window" => %{
           "type" => "string",
           "description" => "Window name/title to focus before executing the action"
+        },
+        "window_id" => %{
+          "type" => "string",
+          "description" => "Window ID for focus_window"
+        },
+        "app" => %{
+          "type" => "string",
+          "description" => "Application name or command for launch"
+        },
+        "seconds" => %{
+          "type" => "number",
+          "description" => "Seconds to wait for wait action"
+        },
+        "width" => %{
+          "type" => "integer",
+          "description" => "Window width for resize_window"
+        },
+        "height" => %{
+          "type" => "integer",
+          "description" => "Window height for resize_window"
+        },
+        "target_x" => %{
+          "type" => "integer",
+          "description" => "Target X coordinate for drag"
+        },
+        "target_y" => %{
+          "type" => "integer",
+          "description" => "Target Y coordinate for drag"
+        },
+        "surface" => %{
+          "type" => "string",
+          "description" => "Surface to observe for snapshot/list_surfaces"
+        },
+        "root" => %{
+          "type" => "string",
+          "description" => "Element ref root for a scoped snapshot"
+        },
+        "max_depth" => %{
+          "type" => "integer",
+          "description" => "Maximum accessibility tree depth for snapshot"
+        },
+        "interactive_only" => %{
+          "type" => "boolean",
+          "description" => "Only return interactive elements in snapshot"
+        },
+        "compact" => %{
+          "type" => "boolean",
+          "description" => "Return compact snapshot output"
         }
       },
       "required" => ["action"]
