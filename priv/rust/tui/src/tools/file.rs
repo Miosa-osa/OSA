@@ -1,5 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use tracing::debug;
 
 use super::{parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
@@ -262,7 +263,7 @@ impl ToolRenderer for FileEditRenderer {
             Span::styled(display_name.to_string(), theme.tool_name()),
             Span::raw("  "),
             Span::styled(
-                path,
+                path.clone(),
                 Style::default()
                     .fg(theme.colors.secondary)
                     .add_modifier(Modifier::UNDERLINED),
@@ -280,12 +281,19 @@ impl ToolRenderer for FileEditRenderer {
         // Parse old/new up front — needed for both collapsed and expanded paths.
         let old = parse_json_arg(args, &["old_string", "old", "original", "before"]);
         let new = parse_json_arg(args, &["new_string", "new", "replacement", "after"]);
+        let patch = parse_patch_text(args, result);
 
         if !opts.expanded {
             // Collapsed: show diff summary + up to 5 changed lines when old/new are available.
             if let (Some(ref old_text), Some(ref new_text)) = (&old, &new) {
                 let mut lines = vec![header];
                 lines.extend(render_collapsed_diff_preview(old_text, new_text, &theme));
+                return lines;
+            }
+            if let Some(ref patch_text) = patch {
+                log_patch_render(name, &path, patch_text, "collapsed");
+                let mut lines = vec![header];
+                lines.extend(render_collapsed_patch_preview(patch_text, &theme));
                 return lines;
             }
             return vec![header];
@@ -298,6 +306,18 @@ impl ToolRenderer for FileEditRenderer {
         match (old, new) {
             (Some(old_text), Some(new_text)) => {
                 body.extend(render_inline_diff(&old_text, &new_text, opts.width, &theme));
+            }
+            _ if patch.is_some() => {
+                log_patch_render(
+                    name,
+                    &path,
+                    patch.as_deref().unwrap_or_default(),
+                    "expanded",
+                );
+                body.extend(render_patch_diff(
+                    patch.as_deref().unwrap_or_default(),
+                    &theme,
+                ));
             }
             _ => {
                 // Fallback: plain result text
@@ -312,6 +332,237 @@ impl ToolRenderer for FileEditRenderer {
 
         render_tool_box(header, body)
     }
+}
+
+fn log_patch_render(tool_name: &str, path: &str, patch: &str, mode: &str) {
+    let stats = patch_stats(patch);
+    debug!(
+        target: "osa_tui::tools::file",
+        tool_name,
+        path,
+        mode,
+        files_seen = stats.files_seen,
+        files_added = stats.files_added,
+        files_updated = stats.files_updated,
+        files_deleted = stats.files_deleted,
+        lines_added = stats.lines_added,
+        lines_removed = stats.lines_removed,
+        "rendering patch diff tool card"
+    );
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PatchStats {
+    files_added: usize,
+    files_updated: usize,
+    files_deleted: usize,
+    files_seen: usize,
+    lines_added: usize,
+    lines_removed: usize,
+}
+
+fn parse_patch_text(args: &str, result: &str) -> Option<String> {
+    parse_json_arg(args, &["patch", "diff", "changes", "content", "input"])
+        .or_else(|| parse_json_arg(result, &["patch", "diff", "changes", "content", "output"]))
+        .or_else(|| {
+            if looks_like_patch(args) {
+                Some(args.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if looks_like_patch(result) {
+                Some(result.to_string())
+            } else {
+                None
+            }
+        })
+        .map(|text| text.replace("\\n", "\n"))
+        .filter(|text| looks_like_patch(text))
+}
+
+fn looks_like_patch(text: &str) -> bool {
+    text.contains("*** Begin Patch")
+        || text.contains("diff --git ")
+        || text.lines().any(|line| {
+            line.starts_with("*** Update File:")
+                || line.starts_with("*** Add File:")
+                || line.starts_with("*** Delete File:")
+                || line.starts_with("@@ ")
+        })
+}
+
+fn patch_stats(patch: &str) -> PatchStats {
+    let mut stats = PatchStats::default();
+
+    for line in patch.lines() {
+        if line.starts_with("*** Add File:") {
+            stats.files_added += 1;
+            stats.files_seen += 1;
+        } else if line.starts_with("*** Update File:") {
+            stats.files_updated += 1;
+            stats.files_seen += 1;
+        } else if line.starts_with("*** Delete File:") {
+            stats.files_deleted += 1;
+            stats.files_seen += 1;
+        } else if line.starts_with("diff --git ") {
+            stats.files_seen += 1;
+        } else if is_added_patch_line(line) {
+            stats.lines_added += 1;
+        } else if is_removed_patch_line(line) {
+            stats.lines_removed += 1;
+        }
+    }
+
+    stats
+}
+
+fn patch_summary(stats: &PatchStats) -> String {
+    let files_changed = stats
+        .files_seen
+        .max(stats.files_added + stats.files_updated + stats.files_deleted);
+
+    let mut parts: Vec<String> = Vec::new();
+    if files_changed > 0 {
+        parts.push(format!(
+            "{} file{}",
+            files_changed,
+            if files_changed == 1 { "" } else { "s" }
+        ));
+    }
+    if stats.files_added > 0 {
+        parts.push(format!("{} added", stats.files_added));
+    }
+    if stats.files_updated > 0 {
+        parts.push(format!("{} edited", stats.files_updated));
+    }
+    if stats.files_deleted > 0 {
+        parts.push(format!("{} deleted", stats.files_deleted));
+    }
+
+    let change_text = match (stats.lines_added, stats.lines_removed) {
+        (0, 0) => "no line changes".to_string(),
+        (added, 0) => format!("+{}", added),
+        (0, removed) => format!("-{}", removed),
+        (added, removed) => format!("+{} -{}", added, removed),
+    };
+    parts.push(change_text);
+
+    format!("Changed {}", parts.join(" · "))
+}
+
+fn render_collapsed_patch_preview(patch: &str, theme: &crate::style::Theme) -> Vec<Line<'static>> {
+    let stats = patch_stats(patch);
+    let mut out = vec![Line::from(vec![
+        Span::styled("└ ".to_string(), Style::default().fg(theme.colors.muted)),
+        Span::styled(
+            patch_summary(&stats),
+            Style::default().fg(theme.colors.success),
+        ),
+    ])];
+
+    let mut shown = 0usize;
+    for line in patch.lines().filter(|line| is_changed_patch_line(line)) {
+        if shown >= 6 {
+            out.push(Line::from(vec![Span::styled(
+                "         (ctrl+o to expand)".to_string(),
+                Style::default().fg(theme.colors.dim),
+            )]));
+            break;
+        }
+
+        let (prefix, content, fg, bg) = if is_added_patch_line(line) {
+            (
+                "+",
+                line.trim_start_matches('+').to_string(),
+                theme.colors.success,
+                theme.colors.diff_add_bg,
+            )
+        } else {
+            (
+                "-",
+                line.trim_start_matches('-').to_string(),
+                theme.colors.error,
+                theme.colors.diff_del_bg,
+            )
+        };
+
+        out.push(Line::from(vec![
+            Span::styled("  ".to_string(), Style::default().bg(bg)),
+            Span::styled(format!("{} ", prefix), Style::default().fg(fg).bg(bg)),
+            Span::styled(content, Style::default().fg(fg).bg(bg)),
+        ]));
+        shown += 1;
+    }
+
+    out
+}
+
+fn render_patch_diff(patch: &str, theme: &crate::style::Theme) -> Vec<Line<'static>> {
+    patch
+        .lines()
+        .map(|line| {
+            if line.starts_with("*** Add File:")
+                || line.starts_with("*** Update File:")
+                || line.starts_with("*** Delete File:")
+                || line.starts_with("*** Move to:")
+                || line.starts_with("diff --git ")
+            {
+                Line::from(vec![Span::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(theme.colors.secondary)
+                        .add_modifier(Modifier::BOLD),
+                )])
+            } else if line.starts_with("@@") || line.starts_with("--- ") || line.starts_with("+++ ")
+            {
+                Line::from(vec![Span::styled(
+                    line.to_string(),
+                    theme.diff_hunk_label(),
+                )])
+            } else if is_added_patch_line(line) {
+                Line::from(vec![
+                    Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success)),
+                    Span::styled(
+                        line.trim_start_matches('+').to_string(),
+                        Style::default()
+                            .fg(theme.colors.success)
+                            .bg(theme.colors.diff_add_bg),
+                    ),
+                ])
+            } else if is_removed_patch_line(line) {
+                Line::from(vec![
+                    Span::styled("- ".to_string(), Style::default().fg(theme.colors.error)),
+                    Span::styled(
+                        line.trim_start_matches('-').to_string(),
+                        Style::default()
+                            .fg(theme.colors.error)
+                            .bg(theme.colors.diff_del_bg),
+                    ),
+                ])
+            } else if line.starts_with("*** Begin Patch") || line.starts_with("*** End Patch") {
+                Line::from(vec![Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.colors.dim),
+                )])
+            } else {
+                Line::from(vec![Span::styled(line.to_string(), theme.diff_context())])
+            }
+        })
+        .collect()
+}
+
+fn is_changed_patch_line(line: &str) -> bool {
+    is_added_patch_line(line) || is_removed_patch_line(line)
+}
+
+fn is_added_patch_line(line: &str) -> bool {
+    line.starts_with('+') && !line.starts_with("+++")
+}
+
+fn is_removed_patch_line(line: &str) -> bool {
+    line.starts_with('-') && !line.starts_with("---")
 }
 
 /// Collapsed diff summary: `└ Added N, removed M lines` followed by up to 5 changed lines.
@@ -530,4 +781,64 @@ fn render_inline_diff(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PATCH: &str = r#"*** Begin Patch
+*** Update File: src/example.rs
+@@
+-let old = true;
++let new = true;
+ context
+*** Add File: src/new.rs
++pub fn added() {}
+*** End Patch
+"#;
+
+    #[test]
+    fn parses_patch_stats_from_apply_patch_payload() {
+        let stats = patch_stats(PATCH);
+
+        assert_eq!(stats.files_updated, 1);
+        assert_eq!(stats.files_added, 1);
+        assert_eq!(stats.lines_added, 2);
+        assert_eq!(stats.lines_removed, 1);
+        assert_eq!(
+            patch_summary(&stats),
+            "Changed 2 files · 1 added · 1 edited · +2 -1"
+        );
+    }
+
+    #[test]
+    fn detects_patch_text_from_json_args() {
+        let json = serde_json::json!({ "patch": PATCH }).to_string();
+
+        assert_eq!(parse_patch_text(&json, "").as_deref(), Some(PATCH));
+    }
+
+    #[test]
+    fn collapsed_patch_preview_shows_change_summary_and_lines() {
+        let theme = crate::style::theme();
+        let lines = render_collapsed_patch_preview(PATCH, &theme);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(rendered[0].contains("Changed 2 files"));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("+ let new = true;")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("- let old = true;")));
+    }
 }

@@ -81,6 +81,8 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         | "multiedit"
         | "multi_edit"
         | "download"
+        | "apply_patch"
+        | "patch"
         | "str_replace_based_edit_tool" => file::FileEditRenderer.render(name, args, result, opts),
 
         // Search: Glob
