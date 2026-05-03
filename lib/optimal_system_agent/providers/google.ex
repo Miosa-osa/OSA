@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Providers.Google do
   @behaviour OptimalSystemAgent.Providers.Behaviour
 
   require Logger
+  alias OptimalSystemAgent.Providers.ModelCatalog
 
   @default_url "https://generativelanguage.googleapis.com/v1beta"
 
@@ -26,7 +27,10 @@ defmodule OptimalSystemAgent.Providers.Google do
 
   @impl true
   def available_models do
-    ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+    :google
+    |> ModelCatalog.names_for()
+    |> Kernel.++(["gemini-2.0-flash", "gemini-2.5-pro", "gemini-2.5-flash"])
+    |> Enum.uniq()
   end
 
   @impl true

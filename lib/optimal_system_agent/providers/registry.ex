@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Providers.HealthChecker
+  alias OptimalSystemAgent.Providers.ModelCatalog
 
   # Consolidated compat provider — one module handles 13 OpenAI-compatible APIs
   @compat Providers.OpenAICompatProvider
@@ -120,6 +121,29 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec list_providers() :: list(atom())
   def list_providers, do: Map.keys(@providers)
+
+  @doc "Return the effective model name for the current or given provider."
+  @spec current_model(atom() | String.t() | nil) :: String.t()
+  def current_model(provider \\ nil) do
+    provider =
+      case provider || default_provider() do
+        p when is_binary(p) -> String.to_existing_atom(p)
+        p -> p
+      end
+
+    case Application.get_env(:optimal_system_agent, :default_model) do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        case provider_info(provider) do
+          {:ok, info} -> to_string(info.default_model)
+          _ -> to_string(provider || "unknown")
+        end
+    end
+  rescue
+    _ -> Application.get_env(:optimal_system_agent, :default_model, "unknown") |> to_string()
+  end
 
   @doc """
   Get information about a specific provider.
@@ -534,7 +558,8 @@ defmodule OptimalSystemAgent.Providers.Registry do
   otherwise fall back to a conservative 8_192.
   """
   @model_context_windows %{
-    # Anthropic — all Claude 4.x models have 1M context
+    # Anthropic
+    "claude-opus-4-7" => 1_000_000,
     "claude-opus-4-6" => 1_000_000,
     "claude-sonnet-4-6" => 1_000_000,
     "claude-haiku-4-5" => 200_000,
@@ -543,6 +568,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "claude-3-5-haiku-20241022" => 200_000,
     "claude-3-opus-20240229" => 200_000,
     # OpenAI
+    "gpt-5.5" => 1_050_000,
+    "gpt-5.5-pro" => 1_050_000,
+    "gpt-5.4" => 1_050_000,
+    "gpt-5.4-mini" => 1_050_000,
+    "gpt-5.4-nano" => 1_050_000,
+    "gpt-5.3-codex" => 1_050_000,
+    "gpt-5.2" => 1_050_000,
+    "gpt-5.2-pro" => 1_050_000,
+    "gpt-5.2-codex" => 1_050_000,
     "gpt-4.1" => 1_047_576,
     "gpt-4.1-mini" => 1_047_576,
     "gpt-4.1-nano" => 1_047_576,
@@ -556,6 +590,8 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "gemini-2.5-flash" => 1_048_576,
     "gemini-2.0-flash" => 1_048_576,
     # DeepSeek
+    "deepseek-v4-pro" => 1_000_000,
+    "deepseek-v4-flash" => 1_000_000,
     "deepseek-chat" => 128_000,
     "deepseek-reasoner" => 128_000,
     # Groq (context varies by model)
@@ -572,9 +608,26 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
+    case ModelCatalog.context_window(model) do
+      {:ok, ctx} ->
+        ctx
+
+      :error ->
+        context_window_from_static_or_ollama(model)
+    end
+  end
+
+  def context_window(_) do
+    case current_model() do
+      "unknown" -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+      model -> context_window(model)
+    end
+  end
+
+  defp context_window_from_static_or_ollama(model) do
     case Map.get(@model_context_windows, model) do
       nil ->
-        # Try prefix match for Ollama models and variants
+        # Try prefix match for model aliases and dated variants.
         matched =
           Enum.find(@model_context_windows, fn {key, _v} ->
             String.starts_with?(model, key)
@@ -585,7 +638,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
             size
 
           nil ->
-            # Check Ollama model info for num_ctx
+            # Check Ollama model info for num_ctx.
             case get_ollama_context(model) do
               {:ok, ctx} -> ctx
               _ -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
@@ -596,9 +649,6 @@ defmodule OptimalSystemAgent.Providers.Registry do
         size
     end
   end
-
-  def context_window(_),
-    do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
   defp get_ollama_context(model) do
     # Check ETS cache first

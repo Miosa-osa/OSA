@@ -34,6 +34,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     ArgumentError -> :ok
   end
 
+  defp orchestrate_ack("queued"), do: "Message queued behind the active agent turn."
+  defp orchestrate_ack(_), do: "Message dispatched to agent loop."
+
   # POST /api/v1/orchestrate — direct agent loop invocation
   post "/" do
     input = conn.body_params["input"] || ""
@@ -71,56 +74,34 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             end)
           end
 
-          # Process the message asynchronously through the agent loop
-          Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-            try do
-              result = SessionManager.process_message(session_id, input)
-
-              case result do
-                {:ok, response} when is_binary(response) ->
-                  Logger.info("[OrchestrateRoutes] Got response (#{byte_size(response)} bytes)")
-
-                  Bus.emit(:system_event, %{
-                    type: :orchestrate_complete,
-                    session_id: session_id,
-                    response: response
-                  })
-
-                {:error, reason} ->
-                  Logger.warning("[OrchestrateRoutes] Agent loop error: #{inspect(reason)}")
-
-                  Bus.emit(:system_event, %{
-                    type: :cli_agent_response_ready,
-                    session_id: session_id,
-                    response: "Error: #{inspect(reason)}"
-                  })
-
-                other ->
-                  Logger.info("[OrchestrateRoutes] Agent loop returned: #{inspect(other)}")
-              end
-            rescue
-              e ->
-                Logger.error("[OrchestrateRoutes] Agent loop crashed: #{Exception.message(e)}")
-
-                Bus.emit(:system_event, %{
-                  type: :cli_agent_response_ready,
+          case SessionManager.enqueue_message(session_id, input,
+                 task_supervisor: OptimalSystemAgent.TaskSupervisor,
+                 process_opts: [timeout: :infinity]
+               ) do
+            {:ok, turn} ->
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(
+                202,
+                Jason.encode!(%{
+                  status: turn.status,
                   session_id: session_id,
-                  response: "Agent error: #{Exception.message(e)}"
+                  turn_id: turn.turn_id,
+                  queue_depth: turn.queue_depth,
+                  message: orchestrate_ack(turn.status)
                 })
-            end
-          end)
+              )
 
-          # Return 202 Accepted — response comes via SSE stream
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(
-            202,
-            Jason.encode!(%{
-              status: "processing",
-              session_id: session_id,
-              message: "Message dispatched to agent loop."
-            })
-          )
+            {:error, reason} ->
+              Logger.warning("[OrchestrateRoutes] queue error: #{inspect(reason)}")
+
+              conn
+              |> put_resp_content_type("application/json")
+              |> send_resp(
+                503,
+                Jason.encode!(%{error: "queue_failed", details: inspect(reason)})
+              )
+          end
 
         {:error, reason} ->
           conn

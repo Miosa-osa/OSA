@@ -128,6 +128,21 @@ pub enum BackendEvent {
         task_id: String,
     },
 
+    // === Session turn queue ===
+    TurnQueued {
+        turn_id: String,
+        queue_depth: u32,
+        position: u32,
+    },
+    TurnStarted {
+        turn_id: String,
+        queue_depth: u32,
+    },
+    TurnCompleted {
+        turn_id: String,
+        queue_depth: u32,
+    },
+
     // === Context ===
     ContextPressure {
         utilization: f64,
@@ -219,6 +234,7 @@ pub enum BackendEvent {
     CommandsLoaded(Result<Vec<CommandEntry>, String>),
     ToolsLoaded(Result<Vec<ToolEntry>, String>),
     SettingsLoaded(Result<SettingsResponse, String>),
+    StartupBriefingLoaded(Result<StartupContextResponse, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
@@ -308,6 +324,8 @@ impl BackendEvent {
             | BackendEvent::OrchestratorWaveStarted { .. }
             | BackendEvent::OrchestratorSynthesizing { .. }
             | BackendEvent::OrchestratorTaskCompleted { .. }
+            | BackendEvent::TurnStarted { .. }
+            | BackendEvent::TurnCompleted { .. }
             | BackendEvent::SwarmStarted { .. }
             | BackendEvent::SwarmCompleted { .. }
             | BackendEvent::SwarmFailed { .. }

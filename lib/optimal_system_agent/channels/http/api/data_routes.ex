@@ -15,7 +15,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   require Logger
 
   alias OptimalSystemAgent.SDK.Memory
-  alias OptimalSystemAgent.Providers
+  alias OptimalSystemAgent.Providers.ModelCatalog
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
 
@@ -335,70 +335,32 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       Application.get_env(:optimal_system_agent, :default_model) ||
         Application.get_env(:optimal_system_agent, :ollama_model, "llama3.2:latest")
 
-    ollama_models =
-      try do
-        case OptimalSystemAgent.Providers.Ollama.list_models() do
-          {:ok, models} ->
-            Enum.map(models, fn m ->
-              ctx =
-                try do
-                  OptimalSystemAgent.Providers.Registry.context_window(m.name)
-                rescue
-                  _ -> 128_000
-                end
+    configured_providers = configured_provider_map()
+    provider_string = to_string(provider)
 
-              %{
-                name: m.name,
-                provider: "ollama",
-                size: m.size,
-                active: to_string(provider) == "ollama" and m.name == current_model,
-                context_window: ctx
-              }
-            end)
+    local_ollama_models = list_local_ollama_models(provider_string, current_model)
 
-          _ ->
-            []
-        end
-      rescue
-        _ -> []
-      end
+    catalog_models =
+      ModelCatalog.entries()
+      |> Enum.map(fn entry ->
+        model_entry(entry.provider, entry.name, current_model, provider_string,
+          size: entry.size,
+          context_window: entry.context_window,
+          configured: Map.get(configured_providers, entry.provider, false),
+          capabilities: entry.capabilities,
+          source: entry.source
+        )
+      end)
 
-    cloud_models =
-      try do
-        OptimalSystemAgent.Providers.Registry.list_providers()
-        |> Enum.reject(&(&1 == :ollama))
-        |> Enum.filter(&OptimalSystemAgent.Providers.Registry.provider_configured?/1)
-        |> Enum.flat_map(fn p ->
-          case OptimalSystemAgent.Providers.Registry.provider_info(p) do
-            {:ok, info} ->
-              Enum.map(info.available_models, fn model_name ->
-                ctx =
-                  try do
-                    OptimalSystemAgent.Providers.Registry.context_window(model_name)
-                  rescue
-                    _ -> 128_000
-                  end
-
-                %{
-                  name: model_name,
-                  provider: to_string(p),
-                  size: 0,
-                  active: provider == p and model_name == current_model,
-                  context_window: ctx
-                }
-              end)
-
-            _ ->
-              []
-          end
-        end)
-      rescue
-        _ -> []
-      end
+    provider_models =
+      list_provider_models(provider_string, current_model, configured_providers)
 
     all_models =
-      (ollama_models ++ cloud_models)
-      |> Enum.sort_by(& &1.context_window, :desc)
+      (local_ollama_models ++ catalog_models ++ provider_models)
+      |> uniq_models()
+      |> Enum.sort_by(fn m ->
+        {not m.configured, -m.context_window, m.provider, m.name}
+      end)
 
     body =
       Jason.encode!(%{
@@ -410,6 +372,122 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, body)
+  end
+
+  defp list_local_ollama_models(provider_string, current_model) do
+    case OptimalSystemAgent.Providers.Ollama.list_models() do
+      {:ok, models} ->
+        Enum.map(models, fn m ->
+          model_entry("ollama", m.name, current_model, provider_string,
+            size: m.size,
+            configured: true,
+            capabilities: infer_capabilities(m.name),
+            source: "ollama-local"
+          )
+        end)
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp list_provider_models(provider_string, current_model, configured_providers) do
+    OptimalSystemAgent.Providers.Registry.list_providers()
+    |> Enum.reject(&(&1 in [:mock, :ollama]))
+    |> Enum.flat_map(fn provider ->
+      case OptimalSystemAgent.Providers.Registry.provider_info(provider) do
+        {:ok, info} ->
+          Enum.map(info.available_models, fn model_name ->
+            model_entry(to_string(provider), model_name, current_model, provider_string,
+              configured: Map.get(configured_providers, to_string(provider), false),
+              capabilities: infer_capabilities(model_name),
+              source: "provider"
+            )
+          end)
+
+        _ ->
+          []
+      end
+    end)
+  rescue
+    _ -> []
+  end
+
+  defp configured_provider_map do
+    OptimalSystemAgent.Providers.Registry.list_providers()
+    |> Enum.reject(&(&1 == :mock))
+    |> Map.new(fn provider ->
+      {to_string(provider), OptimalSystemAgent.Providers.Registry.provider_configured?(provider)}
+    end)
+  rescue
+    _ -> %{"ollama" => true}
+  end
+
+  defp model_entry(provider, name, current_model, current_provider, opts) do
+    context_window =
+      Keyword.get_lazy(opts, :context_window, fn ->
+        try do
+          OptimalSystemAgent.Providers.Registry.context_window(name)
+        rescue
+          _ -> 128_000
+        end
+      end)
+
+    %{
+      name: name,
+      provider: provider,
+      size: Keyword.get(opts, :size, 0),
+      active: provider == current_provider and name == current_model,
+      context_window: context_window,
+      configured: Keyword.get(opts, :configured, false),
+      capabilities: Keyword.get(opts, :capabilities, infer_capabilities(name)),
+      source: Keyword.get(opts, :source, "provider")
+    }
+  end
+
+  defp uniq_models(models) do
+    models
+    |> Enum.reduce(%{}, fn model, acc ->
+      key = {model.provider, model.name}
+
+      Map.update(acc, key, model, fn existing ->
+        cond do
+          model.source == "ollama-local" -> model
+          existing.source == "ollama-local" -> existing
+          model.configured and not existing.configured -> model
+          true -> existing
+        end
+      end)
+    end)
+    |> Map.values()
+  end
+
+  defp infer_capabilities(model_name) do
+    name = String.downcase(model_name)
+
+    [
+      if(String.contains?(name, "cloud"), do: "cloud"),
+      if(String.contains?(name, "coder") or String.contains?(name, "codex"), do: "coding"),
+      if(
+        String.contains?(name, "reason") or String.contains?(name, "think") or
+          String.contains?(name, "r1") or String.starts_with?(name, "o"),
+        do: "reasoning"
+      ),
+      if(
+        String.contains?(name, "vision") or String.contains?(name, "vl") or
+          String.contains?(name, "kimi-k2.6"),
+        do: "vision"
+      ),
+      if(
+        String.contains?(name, "tool") or String.contains?(name, "qwen") or
+          String.contains?(name, "nemotron"),
+        do: "tools"
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   defp handle_analytics(conn) do

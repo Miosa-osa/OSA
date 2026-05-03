@@ -148,9 +148,6 @@ pub struct App {
 
     // Voice input
     pub voice: VoiceState,
-
-    // Welcome message injected flag
-    pub welcome_injected: bool,
 }
 
 impl App {
@@ -259,7 +256,6 @@ impl App {
             effort_level: String::new(),
 
             voice: VoiceState::new(),
-            welcome_injected: false,
         })
     }
 

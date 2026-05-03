@@ -17,7 +17,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   """
   @spec emit_context_pressure(map()) :: :ok
   def emit_context_pressure(state) do
-    max_tok = OptimalSystemAgent.Providers.Registry.context_window(state.model)
+    model =
+      Map.get(state, :model) ||
+        OptimalSystemAgent.Providers.Registry.current_model(Map.get(state, :provider))
+
+    max_tok = OptimalSystemAgent.Providers.Registry.context_window(model)
 
     estimated =
       if state.last_input_tokens > 0,

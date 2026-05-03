@@ -10,6 +10,8 @@ defmodule OptimalSystemAgent.Agent.RunStore do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.RunResult
+
   @table __MODULE__
   @default_runs_dir Path.expand("~/.osa/agent-runs")
 
@@ -21,6 +23,9 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           status: :running | :completed | :failed | :cancelled,
           started_at: DateTime.t(),
           completed_at: DateTime.t() | nil,
+          last_heartbeat_at: DateTime.t(),
+          phase: :queued | :spawning | :running | :waiting | :completed | :failed | :cancelled,
+          current_action: String.t() | nil,
           duration_ms: non_neg_integer() | nil,
           tool_count: non_neg_integer(),
           tokens_used: non_neg_integer(),
@@ -46,6 +51,9 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         status: :running,
         started_at: started_at,
         completed_at: nil,
+        last_heartbeat_at: started_at,
+        phase: :spawning,
+        current_action: "spawning",
         duration_ms: nil,
         tool_count: 0,
         tokens_used: 0,
@@ -60,30 +68,62 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   @doc "Record a progress line for a running agent."
   @spec progress(String.t(), String.t(), non_neg_integer()) :: :ok
   def progress(agent_id, action, tool_count \\ 0) do
-    update(agent_id, fn run -> %{run | tool_count: max(run.tool_count, tool_count)} end)
+    now = DateTime.utc_now()
+
+    update(agent_id, fn run ->
+      %{
+        run
+        | phase: :running,
+          current_action: action,
+          last_heartbeat_at: now,
+          tool_count: max(run.tool_count, tool_count)
+      }
+    end)
+
     append(agent_id, "PROGRESS tools=#{tool_count}\n\n#{action}")
+  end
+
+  @doc "Record a heartbeat without appending noisy transcript output."
+  @spec heartbeat(String.t(), String.t() | nil) :: :ok
+  def heartbeat(agent_id, action \\ nil) do
+    now = DateTime.utc_now()
+
+    update(agent_id, fn run ->
+      %{
+        run
+        | phase: :running,
+          current_action: action || run.current_action,
+          last_heartbeat_at: now
+      }
+    end)
   end
 
   @doc "Mark a run complete and attach the structured result."
   @spec complete(String.t(), map()) :: :ok
   def complete(agent_id, result) do
     now = DateTime.utc_now()
+    result = RunResult.new(result)
 
     update(agent_id, fn run ->
+      phase = terminal_phase(result.status)
+
       %{
         run
-        | status: Map.get(result, :status, :completed),
+        | status: result.status,
+          phase: phase,
+          current_action: Atom.to_string(phase),
           completed_at: now,
-          duration_ms: Map.get(result, :duration_ms),
-          tool_count: Map.get(result, :tool_count, run.tool_count),
-          tokens_used: Map.get(result, :tokens_used, run.tokens_used),
+          last_heartbeat_at: now,
+          duration_ms: result.duration_ms,
+          tool_count: result.tool_count,
+          tokens_used: result.tokens_used,
           result: result
       }
     end)
 
     append(
       agent_id,
-      "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}"
+      "STOP status=#{result.status}\n\n#{format_result(result)}"
     )
   end
 
@@ -132,6 +172,8 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   @doc "Format a structured result for legacy string-return callers."
   @spec format_result(map()) :: String.t()
   def format_result(result) do
+    result = RunResult.new(result)
+
     files =
       result
       |> Map.get(:files_changed, [])
@@ -148,22 +190,42 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         list -> Enum.join(list, "\n")
       end
 
-    duration_ms = Map.get(result, :duration_ms) || 0
+    inspected = format_list(result.files_inspected)
+    findings = format_list(result.findings)
+    tests = format_list(result.tests_run)
+    blockers = format_list(result.blockers)
+    next_actions = format_list(result.next_actions)
+    errors = format_list(result.errors)
 
     """
-    Agent #{Map.get(result, :agent_id, "unknown")} #{Map.get(result, :status, :completed)}
+    Agent #{result.agent_id} #{result.status}
 
-    #{Map.get(result, :summary, "")}
+    #{result.summary}
 
     Files changed: #{files}
+    Files inspected: #{inspected}
+    Findings: #{findings}
     Commands run: #{commands}
-    Tools: #{Map.get(result, :tool_count, 0)}
-    Tokens: #{Map.get(result, :tokens_used, 0)}
-    Duration: #{duration_ms}ms
-    Transcript: #{Map.get(result, :transcript_path, "unavailable")}
+    Tests run: #{tests}
+    Blockers: #{blockers}
+    Next actions: #{next_actions}
+    Errors: #{errors}
+    Confidence: #{result.confidence}%
+    Tools: #{result.tool_count}
+    Tokens: #{result.tokens_used}
+    Duration: #{result.duration_ms}ms
+    Transcript: #{result.transcript_path}
     """
     |> String.trim()
   end
+
+  defp format_list([]), do: "none"
+  defp format_list(list), do: Enum.join(list, "\n")
+
+  defp terminal_phase(:completed), do: :completed
+  defp terminal_phase(:failed), do: :failed
+  defp terminal_phase(:cancelled), do: :cancelled
+  defp terminal_phase(_), do: :failed
 
   defp update(agent_id, fun) do
     ensure_table()

@@ -96,21 +96,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("click", %{"target" => ref}, state) do
-    case resolve_ref(ref, state) do
-      {:ok, %{x: x, y: y, width: w, height: h}}
-      when is_integer(w) and is_integer(h) and w > 0 and h > 0 ->
-        cx = x + div(w, 2)
-        cy = y + div(h, 2)
-        result = state.adapter.click(cx, cy)
-        {format_result(result, "Click on #{ref} at (#{cx}, #{cy})"), bump_step(state)}
-
-      {:ok, %{x: x, y: y}} ->
-        result = state.adapter.click(x, y)
-        {format_result(result, "Click on #{ref} at (#{x}, #{y})"), bump_step(state)}
-
-      {:error, _} = err ->
-        {err, state}
-    end
+    click_resolved_ref(ref, state)
   end
 
   defp dispatch("click", %{"x" => x, "y" => y}, state) do
@@ -184,6 +170,97 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     end
   end
 
+  defp dispatch("wait", params, state) do
+    if function_exported?(state.adapter, :wait, 1) do
+      result = state.adapter.wait(Map.get(params, "seconds", 1))
+      {format_result(result, "Waited"), bump_step(state)}
+    else
+      {{:error, "wait is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("list_windows", _params, state) do
+    if function_exported?(state.adapter, :list_windows, 0) do
+      {state.adapter.list_windows(), bump_step(state)}
+    else
+      {{:error, "list_windows is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("focus_window", %{"window_id" => window_id}, state) do
+    if function_exported?(state.adapter, :focus_window, 1) do
+      result = state.adapter.focus_window(window_id)
+      {format_result(result, "Focused window #{window_id}"), bump_step(state)}
+    else
+      {{:error, "focus_window is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("launch", %{"app" => app}, state) do
+    if function_exported?(state.adapter, :launch, 1) do
+      result = state.adapter.launch(app)
+      {format_result(result, "Launched #{app}"), bump_step(state)}
+    else
+      {{:error, "launch is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("cursor", _params, state) do
+    if function_exported?(state.adapter, :cursor, 0) do
+      {state.adapter.cursor(), bump_step(state)}
+    else
+      {{:error, "cursor is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("snapshot", params, state) do
+    adapter_result(state, :snapshot, [params])
+  end
+
+  defp dispatch("right_click", params, state) do
+    adapter_ok(state, :right_click, [params], "Right click")
+  end
+
+  defp dispatch("triple_click", params, state) do
+    adapter_ok(state, :triple_click, [params], "Triple click")
+  end
+
+  defp dispatch("set_value", params, state) do
+    adapter_ok(state, :set_value, [params], "Set value")
+  end
+
+  defp dispatch("clipboard_get", _params, state) do
+    adapter_result(state, :clipboard_get, [])
+  end
+
+  defp dispatch("clipboard_set", %{"text" => text}, state) do
+    adapter_ok(state, :clipboard_set, [text], "Clipboard set")
+  end
+
+  defp dispatch("clipboard_clear", _params, state) do
+    adapter_ok(state, :clipboard_clear, [], "Clipboard cleared")
+  end
+
+  defp dispatch("list_apps", _params, state) do
+    adapter_result(state, :list_apps, [])
+  end
+
+  defp dispatch("list_surfaces", params, state) do
+    adapter_result(state, :list_surfaces, [params])
+  end
+
+  defp dispatch("resize_window", params, state) do
+    adapter_ok(state, :resize_window, [params], "Window resized")
+  end
+
+  defp dispatch("move_window", params, state) do
+    adapter_ok(state, :move_window, [params], "Window moved")
+  end
+
+  defp dispatch("scroll_to", params, state) do
+    adapter_ok(state, :scroll_to, [params], "Scrolled to target")
+  end
+
   defp dispatch(action, _params, state) do
     {{:error, "Unknown action: #{action}"}, state}
   end
@@ -191,12 +268,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   defp format_result(:ok, msg), do: {:ok, msg}
   defp format_result({:error, _} = err, _msg), do: err
 
+  defp adapter_result(state, function, args) do
+    if function_exported?(state.adapter, function, length(args)) do
+      {apply(state.adapter, function, args), bump_step(state)}
+    else
+      {{:error, "#{function} is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp adapter_ok(state, function, args, message) do
+    if function_exported?(state.adapter, function, length(args)) do
+      result = apply(state.adapter, function, args)
+      {format_result(result, message), bump_step(state)}
+    else
+      {{:error, "#{function} is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
   # ── Element Refs ────────────────────────────────────────────────────
 
   defp resolve_ref(ref, state) do
     case Map.get(state.element_refs, ref) do
       nil -> {:error, "Unknown element ref: #{ref}"}
       element -> {:ok, element}
+    end
+  end
+
+  defp click_resolved_ref(ref, state) do
+    case resolve_ref(ref, state) do
+      {:ok, %{x: x, y: y, width: w, height: h}}
+      when is_integer(w) and is_integer(h) and w > 0 and h > 0 ->
+        cx = x + div(w, 2)
+        cy = y + div(h, 2)
+        result = state.adapter.click(cx, cy)
+        {format_result(result, "Click on #{ref} at (#{cx}, #{cy})"), bump_step(state)}
+
+      {:ok, %{x: x, y: y}} ->
+        result = state.adapter.click(x, y)
+        {format_result(result, "Click on #{ref} at (#{x}, #{y})"), bump_step(state)}
+
+      {:error, _} = err ->
+        {err, state}
     end
   end
 

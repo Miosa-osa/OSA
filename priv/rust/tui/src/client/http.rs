@@ -173,6 +173,22 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/workspace
+    pub async fn workspace(&self) -> Result<WorkspaceResponse> {
+        let resp = self.get("/api/v1/workspace").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /api/v1/tui/context
+    pub async fn startup_context(&self, session_id: &str) -> Result<StartupContextResponse> {
+        let path = format!(
+            "/api/v1/tui/context?session_id={}",
+            Self::percent_encode(session_id)
+        );
+        let resp = self.get(&path).await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST /api/v1/orchestrate
     pub async fn orchestrate(&self, req: &OrchestrateRequest) -> Result<OrchestrateResponse> {
         let resp = self.post("/api/v1/orchestrate", req).await?;

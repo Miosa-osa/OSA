@@ -44,7 +44,13 @@ defmodule OptimalSystemAgent.Agent.RunStoreTest do
       worktree: nil
     })
 
-    assert %{status: :completed, result: %{summary: "VERDICT: PASS"}} = RunStore.get(agent_id)
+    assert %{
+             status: :completed,
+             phase: :completed,
+             current_action: "completed",
+             result: %{summary: "VERDICT: PASS", files_inspected: []}
+           } = RunStore.get(agent_id)
+
     assert Enum.any?(RunStore.list(status: :completed), &(&1.agent_id == agent_id))
     assert {:ok, transcript} = RunStore.transcript(agent_id)
     assert transcript =~ "START role=verifier"

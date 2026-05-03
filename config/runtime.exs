@@ -196,6 +196,21 @@ config :optimal_system_agent,
 
   # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
   computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
+  computer_use_platform:
+    (case System.get_env("OSA_COMPUTER_USE_PLATFORM") do
+       nil -> nil
+       "" -> nil
+       "miosa" -> :miosa
+       "macos" -> :macos
+       "linux_x11" -> :linux_x11
+       "linux_wayland" -> :linux_wayland
+       _ -> nil
+     end),
+  computer_use_miosa: [
+    computer_id: System.get_env("MIOSA_COMPUTER_ID") || System.get_env("OSA_COMPUTER_ID"),
+    api_key: System.get_env("MIOSA_API_KEY"),
+    base_url: System.get_env("MIOSA_API_BASE_URL") || "https://api.miosa.ai/api/v1"
+  ],
 
   # Ollama overrides (OLLAMA_API_KEY required for cloud instances)
   # Falls back to config.exs values (Ollama Cloud + nemotron-3-super:cloud) when no env var set.

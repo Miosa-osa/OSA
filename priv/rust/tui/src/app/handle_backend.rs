@@ -1,5 +1,7 @@
 use crate::app::state::AppState;
+use crate::client::types::StartupContextResponse;
 use crate::components::activity::ProcessingPhase;
+use crate::components::chat::welcome::StartupBriefing;
 use crate::event::backend::BackendEvent;
 use tracing::{debug, error, info, warn};
 
@@ -44,6 +46,7 @@ impl App {
                 self.load_commands();
                 self.load_tools();
                 self.load_settings();
+                self.load_startup_briefing();
             }
             BackendEvent::SseDisconnected { error } => match error.as_deref() {
                 Some("cancelled") => {
@@ -102,14 +105,14 @@ impl App {
                 self.sse_reconnecting = true;
             }
             BackendEvent::StreamingToken { text, .. } => {
-                if self.state.is_processing() {
-                    self.stream_buf.push_str(&text);
-                    self.chat.update_streaming(&self.stream_buf);
-                    self.activity.add_stream_chars(text.len());
-                    self.activity.set_phase(ProcessingPhase::Streaming);
-                }
+                self.begin_backend_turn();
+                self.stream_buf.push_str(&text);
+                self.chat.update_streaming(&self.stream_buf);
+                self.activity.add_stream_chars(text.len());
+                self.activity.set_phase(ProcessingPhase::Streaming);
             }
             BackendEvent::ThinkingDelta { text } => {
+                self.begin_backend_turn();
                 self.thinking_buf.push_str(&text);
                 self.thinking_box.update(&text);
                 self.activity.add_thinking_chars(text.len());
@@ -123,6 +126,7 @@ impl App {
                 self.handle_agent_response(response, signal);
             }
             BackendEvent::ToolCallStart { name, args } => {
+                self.begin_backend_turn();
                 // Flush any accumulated streaming text as a chat message BEFORE
                 // the tool call. This interleaves text and tool calls
                 // chronologically instead of dumping all text at the end.
@@ -215,6 +219,7 @@ impl App {
                 debug!("Tool result: {} (success={})", name, success);
             }
             BackendEvent::LlmRequest { iteration } => {
+                self.begin_backend_turn();
                 self.activity.set_iteration(iteration as u32);
                 self.status.set_iteration(iteration as u32);
                 debug!("LLM request iteration {}", iteration);
@@ -228,6 +233,14 @@ impl App {
                     .set_stats(input_tokens, output_tokens, duration_ms);
                 self.activity.set_tokens(input_tokens, output_tokens);
                 self.sidebar.set_tokens(input_tokens, output_tokens);
+
+                let max_tokens = self.status.context_max();
+                if input_tokens > 0 && max_tokens > 0 {
+                    let ratio = input_tokens as f64 / max_tokens as f64;
+                    self.status.set_context(ratio, input_tokens, max_tokens);
+                    self.sidebar
+                        .set_context_usage(ratio, input_tokens, max_tokens);
+                }
             }
             BackendEvent::SignalClassified { signal } => {
                 self.status.set_signal(signal);
@@ -237,14 +250,22 @@ impl App {
                 estimated_tokens,
                 max_tokens,
             } => {
+                let effective_max = max_tokens.max(self.status.context_max());
                 // Normalize at the handler level: backend sends 0-100 percentage
                 let ratio = if utilization > 1.0 {
                     utilization / 100.0
                 } else {
                     utilization
                 };
-                self.status.set_context(ratio, estimated_tokens, max_tokens);
-                self.sidebar.set_context(ratio);
+                let effective_ratio = if effective_max > 0 {
+                    estimated_tokens as f64 / effective_max as f64
+                } else {
+                    ratio
+                };
+                self.status
+                    .set_context(effective_ratio, estimated_tokens, effective_max);
+                self.sidebar
+                    .set_context_usage(effective_ratio, estimated_tokens, effective_max);
             }
             BackendEvent::TaskCreated {
                 task_id,
@@ -312,39 +333,21 @@ impl App {
                         tools.len(),
                         self.fast_mode,
                     );
-
-                    // Inject welcome as first chat message AFTER tools are loaded
-                    // (so tool count is accurate)
-                    if !self.welcome_injected && !self.chat.has_messages {
-                        self.welcome_injected = true;
-                        let version = env!("CARGO_PKG_VERSION");
-                        let user_name = super::handle_actions::read_user_name_sync();
-                        let greeting = match user_name {
-                            Some(name) => format!("Welcome back, {}!", name),
-                            None => "Welcome!".to_string(),
-                        };
-                        let prov = self.header.provider();
-                        let model = self.header.model_name();
-                        let ctx_label = self.status.context_max_label();
-
-                        let welcome = format!(
-                            "{}\n\n◆ OSA Agent v{}\n{} / {} · {} tools{}\n{}",
-                            greeting,
-                            version,
-                            prov,
-                            model,
-                            tools.len(),
-                            if ctx_label.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {}", ctx_label)
-                            },
-                            self.working_dir,
-                        );
-                        self.chat.add_system_message(&welcome, "info");
-                    }
                 }
                 Err(e) => warn!("Failed to load tools: {}", e),
+            },
+            BackendEvent::StartupBriefingLoaded(result) => match result {
+                Ok(workspace) => {
+                    self.chat
+                        .set_startup_briefing(build_startup_briefing(workspace, &self.working_dir));
+                    self.recompute_layout();
+                }
+                Err(e) => {
+                    debug!("Startup briefing unavailable: {}", e);
+                    self.chat
+                        .set_startup_briefing(fallback_startup_briefing(&self.working_dir));
+                    self.recompute_layout();
+                }
             },
             BackendEvent::SettingsLoaded(result) => match result {
                 Ok(settings) => {
@@ -376,6 +379,13 @@ impl App {
                         "Orchestrate response: session={}, status={}",
                         resp.session_id, resp.status
                     );
+                    if resp.status == "queued" {
+                        let depth = resp.queue_depth.unwrap_or(1);
+                        self.toasts.push(
+                            format!("Queued ({} pending)", depth),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
                     // Don't transition to Idle here. The HTTP response is just an
                     // acknowledgment — SSE events (StreamingToken, AgentResponse)
                     // drive the actual processing lifecycle. AgentResponse already
@@ -518,6 +528,7 @@ impl App {
                 tokens_used,
                 subject,
             } => {
+                self.update_context_from_estimated_tokens(tokens_used as u64);
                 self.agents.agent_progress(
                     &agent_name,
                     &current_action,
@@ -532,6 +543,7 @@ impl App {
                 tokens_used,
                 ..
             } => {
+                self.update_context_from_estimated_tokens(tokens_used as u64);
                 self.agents
                     .agent_completed(&agent_name, tool_uses, tokens_used);
                 self.sidebar.set_current_agent("");
@@ -542,6 +554,7 @@ impl App {
                 tool_uses,
                 tokens_used,
             } => {
+                self.update_context_from_estimated_tokens(tokens_used as u64);
                 self.agents
                     .agent_failed(&agent_name, &error, tool_uses, tokens_used);
                 self.sidebar.set_current_agent("");
@@ -560,6 +573,35 @@ impl App {
             BackendEvent::OrchestratorTaskCompleted { .. } => {
                 self.agents.task_completed();
                 self.recompute_layout();
+            }
+
+            // === Session turn queue ===
+            BackendEvent::TurnQueued {
+                queue_depth,
+                position,
+                ..
+            } => {
+                self.toasts.push(
+                    format!("Queued turn #{} ({} pending)", position, queue_depth),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            BackendEvent::TurnStarted { queue_depth, .. } => {
+                self.begin_backend_turn();
+                if queue_depth > 0 {
+                    self.toasts.push(
+                        format!("Started next turn ({} still queued)", queue_depth),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
+            }
+            BackendEvent::TurnCompleted { queue_depth, .. } => {
+                if queue_depth > 0 {
+                    self.toasts.push(
+                        format!("Turn done; {} queued", queue_depth),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
             }
 
             // === Swarm events → Agents component ===
@@ -1130,6 +1172,22 @@ impl App {
         }
         false
     }
+
+    fn update_context_from_estimated_tokens(&mut self, estimated_tokens: u64) {
+        let max_tokens = self.status.context_max();
+        if estimated_tokens == 0 || max_tokens == 0 {
+            return;
+        }
+
+        if estimated_tokens < self.status.context_estimated() {
+            return;
+        }
+
+        let ratio = estimated_tokens as f64 / max_tokens as f64;
+        self.status.set_context(ratio, estimated_tokens, max_tokens);
+        self.sidebar
+            .set_context_usage(ratio, estimated_tokens, max_tokens);
+    }
 }
 
 fn backend_event_label(event: &BackendEvent) -> String {
@@ -1139,4 +1197,117 @@ fn backend_event_label(event: &BackendEvent) -> String {
         .next()
         .unwrap_or("BackendEvent");
     name.to_string()
+}
+
+fn build_startup_briefing(context: StartupContextResponse, fallback_dir: &str) -> StartupBriefing {
+    let folder = if !context.working_dir.is_empty() {
+        context.working_dir.clone()
+    } else if !context.cwd.is_empty() {
+        context.cwd.clone()
+    } else {
+        fallback_dir.to_string()
+    };
+
+    let project_type = if context.project.types.is_empty() {
+        None
+    } else {
+        Some(context.project.types.join("/"))
+    };
+    let files = startup_files(&context);
+    let git = startup_git_summary(&context);
+    let memory_hints = memory_hints(&context);
+    let session_hints = session_hints(&context);
+    let first_actions = first_actions(project_type.as_deref(), &files, context.git.dirty);
+
+    StartupBriefing {
+        folder,
+        project_type,
+        files,
+        git,
+        memory_hints,
+        session_hints,
+        first_actions,
+    }
+}
+
+fn fallback_startup_briefing(working_dir: &str) -> StartupBriefing {
+    StartupBriefing {
+        folder: working_dir.to_string(),
+        first_actions: vec![
+            "Ask for a project tour".to_string(),
+            "Use /help for commands".to_string(),
+        ],
+        ..Default::default()
+    }
+}
+
+fn startup_files(context: &StartupContextResponse) -> Vec<String> {
+    let mut files: Vec<String> = context
+        .project
+        .files
+        .iter()
+        .map(|file| file.file.clone())
+        .filter(|file| !file.is_empty())
+        .collect();
+    for dir in context.project.directories.iter().take(3) {
+        files.push(format!("{}/", dir));
+    }
+    files.truncate(5);
+    files
+}
+
+fn startup_git_summary(context: &StartupContextResponse) -> Option<String> {
+    if !context.git.available {
+        return None;
+    }
+
+    let status = if context.git.dirty {
+        format!("{} changed", context.git.status_count)
+    } else {
+        "clean".to_string()
+    };
+
+    Some(match context.git.branch.as_deref() {
+        Some(branch) if !branch.is_empty() => format!("{} · {}", branch, status),
+        _ => status,
+    })
+}
+
+fn memory_hints(context: &StartupContextResponse) -> Vec<String> {
+    context
+        .memory_hints
+        .iter()
+        .filter_map(|hint| hint.content.clone())
+        .filter(|content| !content.trim().is_empty())
+        .take(2)
+        .collect()
+}
+
+fn session_hints(context: &StartupContextResponse) -> Vec<String> {
+    let mut hints = Vec::new();
+    if context.session.is_new {
+        hints.push("new session".to_string());
+    }
+    if context.session.saved_count > 0 {
+        hints.push(format!("{} saved sessions", context.session.saved_count));
+    }
+    hints
+}
+
+fn first_actions(project_type: Option<&str>, files: &[String], git_dirty: bool) -> Vec<String> {
+    let mut actions = Vec::new();
+
+    if git_dirty {
+        actions.push("Review git changes".to_string());
+    }
+    if files.iter().any(|f| f.eq_ignore_ascii_case("README.md")) {
+        actions.push("Ask for a README summary".to_string());
+    }
+    if let Some(project_type) = project_type {
+        actions.push(format!("Ask for a {} project tour", project_type));
+    }
+    actions.push("Use /help for commands".to_string());
+
+    actions.truncate(3);
+    actions
 }

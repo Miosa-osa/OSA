@@ -77,12 +77,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskOutput.Handler do
   defp format_run(run) do
     """
     Agent #{run.agent_id} is #{run.status}.
+    - Phase: #{Map.get(run, :phase, :unknown)}
+    - Current action: #{Map.get(run, :current_action) || "none"}
     - Role: #{run.role}
     - Parent: #{run.parent_session_id}
     - Tools: #{run.tool_count}
     - Tokens: #{run.tokens_used}
+    - Last heartbeat: #{format_datetime(Map.get(run, :last_heartbeat_at))}
     - Transcript: #{run.transcript_path}
     """
     |> String.trim()
   end
+
+  defp format_datetime(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp format_datetime(_), do: "unknown"
 end

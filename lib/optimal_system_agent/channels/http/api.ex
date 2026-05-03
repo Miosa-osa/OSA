@@ -16,7 +16,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     /swarm       → OrchestrationRoutes  POST /launch, GET /|/:id, DELETE /:id
     /debate      → DebateRoutes       POST / (multi-agent debate + synthesis)
     /stream      → AgentRoutes       GET /tui_output (SSE alias), GET /:session_id  (SSE)
-    /tui         → TuiRoutes         GET /output (SSE), POST /input
+    /tui         → TuiRoutes         GET /output (SSE), GET /context, POST /input
+    /startup     → TuiRoutes         GET /context
     /tools       → ToolRoutes        GET /, POST /:name/execute
     /skills      → ToolRoutes        GET /, POST /create
     /commands    → ToolRoutes        GET /, POST /execute
@@ -97,6 +98,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   # ── Agent introspection
   forward("/agent", to: API.AgentStateRoutes)
+
+  # ── Startup/context briefing ────────────────────────────────────────
+  forward("/startup", to: API.TuiRoutes)
 
   # ── Orchestrate (Phase 0: direct agent loop bypass) ─────────────────
   forward("/orchestrate", to: API.OrchestrateRoutes)

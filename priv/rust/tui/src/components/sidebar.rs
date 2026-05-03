@@ -28,6 +28,8 @@ pub struct Sidebar {
     session_id: String,
     tool_count: usize,
     context_pct: f64,
+    context_estimated: u64,
+    context_max: u64,
     // ── New fields ──────────────────────────────────────────────────────────
     /// Cumulative input tokens across all LlmResponse events this session.
     input_tokens: u64,
@@ -58,6 +60,8 @@ impl Sidebar {
             session_id: String::new(),
             tool_count: 0,
             context_pct: 0.0,
+            context_estimated: 0,
+            context_max: 0,
             input_tokens: 0,
             output_tokens: 0,
             elapsed_ms: 0,
@@ -99,6 +103,13 @@ impl Sidebar {
 
     pub fn set_context(&mut self, pct: f64) {
         self.context_pct = pct.clamp(0.0, 1.0);
+        self.rebuild_sections();
+    }
+
+    pub fn set_context_usage(&mut self, pct: f64, estimated: u64, max: u64) {
+        self.context_pct = pct.clamp(0.0, 1.0);
+        self.context_estimated = estimated;
+        self.context_max = max;
         self.rebuild_sections();
     }
 
@@ -222,11 +233,23 @@ impl Sidebar {
             let filled = ((self.context_pct * bar_w as f64).round() as usize).min(bar_w);
             let empty = bar_w - filled;
             let bar = format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty));
-            let pct_str = format!("{}%", (self.context_pct * 100.0) as u32);
+            let pct_str = format!("{}%", (self.context_pct * 100.0).round() as u32);
+            let mut items = vec![("ctx".into(), bar), ("use".into(), pct_str)];
+
+            if self.context_estimated > 0 && self.context_max > 0 {
+                items.push((
+                    "tok".into(),
+                    format!(
+                        "{}/{}",
+                        Self::format_tokens(self.context_estimated),
+                        Self::format_tokens(self.context_max)
+                    ),
+                ));
+            }
 
             self.sections.push(SidebarSection {
                 title: "Context".into(),
-                items: vec![("ctx".into(), bar), ("use".into(), pct_str)],
+                items,
             });
         }
 
@@ -261,7 +284,7 @@ impl Sidebar {
     /// Examples: 42 → "42", 1_200 → "1.2K", 85_000 → "85K", 1_500_000 → "1.5M"
     fn format_tokens(n: u64) -> String {
         if n >= 1_000_000 {
-            let m = n as f64 / 1_000_000.0;
+            let m = n as f64 / 1_048_576.0;
             if (m.fract() * 10.0).round() == 0.0 {
                 format!("{}M", m as u64)
             } else {
@@ -412,5 +435,66 @@ impl Component for Sidebar {
                 y += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sidebar;
+
+    #[test]
+    fn context_usage_updates_percent_and_token_window() {
+        let mut sidebar = Sidebar::new();
+
+        sidebar.set_context_usage(0.291, 37_280, 128_000);
+
+        let context = sidebar
+            .sections
+            .iter()
+            .find(|section| section.title == "Context")
+            .expect("context section");
+
+        assert_eq!(
+            context
+                .items
+                .iter()
+                .find(|(label, _)| label == "use")
+                .map(|(_, value)| value.as_str()),
+            Some("29%")
+        );
+        assert_eq!(
+            context
+                .items
+                .iter()
+                .find(|(label, _)| label == "tok")
+                .map(|(_, value)| value.as_str()),
+            Some("37.3K/128K")
+        );
+    }
+
+    #[test]
+    fn percent_only_context_remains_supported() {
+        let mut sidebar = Sidebar::new();
+
+        sidebar.set_context(0.5);
+
+        let context = sidebar
+            .sections
+            .iter()
+            .find(|section| section.title == "Context")
+            .expect("context section");
+
+        assert_eq!(
+            context
+                .items
+                .iter()
+                .find(|(label, _)| label == "use")
+                .map(|(_, value)| value.as_str()),
+            Some("50%")
+        );
+        assert!(context
+            .items
+            .iter()
+            .all(|(label, _)| label.as_str() != "tok"));
     }
 }

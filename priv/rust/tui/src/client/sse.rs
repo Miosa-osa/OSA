@@ -408,6 +408,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "orchestrator_wave_started"
         | "orchestrator_synthesizing"
         | "orchestrator_task_completed"
+        | "turn_queued"
+        | "turn_started"
+        | "turn_completed"
         | "context_pressure"
         | "task_created"
         | "task_updated"
@@ -662,6 +665,54 @@ fn parse_system_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorTaskCompleted {
                 task_id: ev.task_id,
+            })
+        }
+
+        "turn_queued" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                turn_id: String,
+                #[serde(default)]
+                queue_depth: u32,
+                #[serde(default)]
+                position: u32,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::TurnQueued {
+                turn_id: ev.turn_id,
+                queue_depth: ev.queue_depth,
+                position: ev.position,
+            })
+        }
+
+        "turn_started" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                turn_id: String,
+                #[serde(default)]
+                queue_depth: u32,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::TurnStarted {
+                turn_id: ev.turn_id,
+                queue_depth: ev.queue_depth,
+            })
+        }
+
+        "turn_completed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                turn_id: String,
+                #[serde(default)]
+                queue_depth: u32,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            Some(BackendEvent::TurnCompleted {
+                turn_id: ev.turn_id,
+                queue_depth: ev.queue_depth,
             })
         }
 

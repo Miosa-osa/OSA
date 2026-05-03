@@ -33,6 +33,20 @@ fn format_count(n: usize) -> String {
     }
 }
 
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_048_576.0)
+    } else if n >= 1000 {
+        format!("{:.1}K", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn compact_model_name(name: &str) -> String {
+    truncate_str(name, 26).to_string()
+}
+
 /// Format elapsed seconds into human-readable duration: 45s → 2m 15s → 1h 3m
 fn format_elapsed(secs: u64) -> String {
     if secs < 60 {
@@ -396,7 +410,10 @@ impl Component for Activity {
         if !self.model_name.is_empty() {
             spinner_spans.insert(
                 0,
-                Span::styled(format!("{} \u{2219} ", self.model_name), theme.faint()),
+                Span::styled(
+                    format!("{} \u{2219} ", compact_model_name(&self.model_name)),
+                    theme.faint(),
+                ),
             );
         }
 
@@ -412,8 +429,9 @@ impl Component for Activity {
         if self.input_tokens > 0 || self.output_tokens > 0 {
             spinner_spans.push(Span::styled(
                 format!(
-                    "  \u{25b8} {}in/{}out",
-                    self.input_tokens, self.output_tokens
+                    "  \u{25b8} {} in / {} out",
+                    format_tokens(self.input_tokens),
+                    format_tokens(self.output_tokens)
                 ),
                 theme.faint(),
             ));

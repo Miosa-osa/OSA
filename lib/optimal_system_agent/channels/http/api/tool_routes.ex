@@ -85,16 +85,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   post "/execute" do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
-      cmd_name = command |> String.split() |> List.first() |> String.downcase()
+      full_command = normalize_command(command, conn.body_params["arg"])
+      cmd_name = full_command |> String.split() |> List.first() |> String.downcase()
 
       if cmd_name in @blocked_http_commands do
-        body =
-          Jason.encode!(%{
-            output: "Command '#{cmd_name}' is not available via HTTP.",
-            command: command
-          })
-
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+        command_response(conn, %{
+          kind: "error",
+          output: "Command '#{cmd_name}' is not available via HTTP.",
+          command: full_command
+        })
       else
         session_id =
           conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
@@ -106,13 +105,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
             Process.group_leader(self(), string_io)
 
             try do
-              OptimalSystemAgent.Channels.CLI.Commands.dispatch(command, session_id)
+              OptimalSystemAgent.Channels.CLI.Commands.dispatch(full_command, session_id)
             after
               Process.group_leader(self(), original_gl)
             end
 
-            {_, captured} = StringIO.close(string_io)
-            captured
+            string_io
+            |> StringIO.close()
+            |> captured_output()
           rescue
             e -> "Error: #{Exception.message(e)}"
           end
@@ -122,8 +122,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
           |> String.replace(~r/\e\[[0-9;]*m/, "")
           |> String.trim()
 
-        body = Jason.encode!(%{output: clean_output, command: command})
-        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+        command_response(conn, %{
+          kind: command_kind(clean_output),
+          output: clean_output,
+          command: full_command
+        })
       end
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
@@ -239,23 +242,39 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         %{name: name, description: desc, category: category}
       end)
 
-    # Add API-only commands not in the CLI
-    api_only = [
-      %{name: "mem-search", description: "Search persistent memory", category: "memory"},
-      %{name: "mem-save", description: "Save a note to persistent memory", category: "memory"},
-      %{name: "mem-recall", description: "Recall recent memory entries", category: "memory"},
-      %{name: "reload", description: "Reload skills and configuration", category: "system"},
-      %{
-        name: "debug",
-        description: "Enable debug logging for the current session",
-        category: "dev"
-      }
-    ]
-
-    # Merge, dedup by name
-    all = cli_entries ++ api_only
-    all |> Enum.uniq_by(& &1.name)
+    Enum.uniq_by(cli_entries, & &1.name)
   end
+
+  defp normalize_command(command, arg) do
+    command = String.trim(command)
+    arg = if is_binary(arg), do: String.trim(arg), else: ""
+
+    cond do
+      arg == "" -> command
+      String.contains?(command, " ") -> command
+      true -> command <> " " <> arg
+    end
+  end
+
+  defp command_response(conn, payload) do
+    body =
+      payload
+      |> Map.put_new(:kind, "info")
+      |> Jason.encode!()
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, body)
+  end
+
+  defp command_kind(output) do
+    if String.match?(output, ~r/(^|\n)\s*error:/i), do: "error", else: "info"
+  end
+
+  defp captured_output({:ok, {_input, output}}), do: output
+  defp captured_output({_input, output}), do: output
+  defp captured_output(output) when is_binary(output), do: output
+  defp captured_output(_), do: ""
 
   defp categorize_command(name) do
     cond do

@@ -13,6 +13,17 @@ const LOGO: &[&str] = &[
     " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
 ];
 
+#[derive(Debug, Clone, Default)]
+pub struct StartupBriefing {
+    pub folder: String,
+    pub project_type: Option<String>,
+    pub files: Vec<String>,
+    pub git: Option<String>,
+    pub memory_hints: Vec<String>,
+    pub session_hints: Vec<String>,
+    pub first_actions: Vec<String>,
+}
+
 pub fn draw_welcome_with_tools(
     frame: &mut Frame,
     area: Rect,
@@ -20,22 +31,17 @@ pub fn draw_welcome_with_tools(
     provider: Option<&str>,
     model: Option<&str>,
     fast_mode: bool,
+    startup_briefing: Option<&StartupBriefing>,
 ) {
     let theme = style::theme();
 
-    let cwd = std::env::current_dir()
-        .map(|p| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let s = p.display().to_string();
-            if !home.is_empty() && s.starts_with(&home) {
-                format!("~{}", &s[home.len()..])
-            } else if s.len() > 50 {
-                format!("...{}", &s[s.len() - 47..])
-            } else {
-                s
-            }
-        })
-        .unwrap_or_default();
+    let cwd = startup_briefing
+        .map(|briefing| abbreviate_path(&briefing.folder))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| abbreviate_path(&p.display().to_string()))
+                .unwrap_or_default()
+        });
 
     // Try to read user's name from ~/.osa/USER.md
     let user_name = read_user_name();
@@ -144,6 +150,10 @@ pub fn draw_welcome_with_tools(
     // Empty line
     lines.push(make_bordered("", Style::default()));
 
+    if let Some(briefing) = startup_briefing {
+        push_briefing_lines(&mut lines, briefing, box_width, &make_bordered, &theme);
+    }
+
     // Bottom border  ╰──────╯
     lines.push(Line::from(Span::styled(
         format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(box_width + 2)),
@@ -166,6 +176,122 @@ pub fn draw_welcome_with_tools(
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text);
     frame.render_widget(paragraph, content_area);
+}
+
+fn push_briefing_lines(
+    lines: &mut Vec<Line<'static>>,
+    briefing: &StartupBriefing,
+    box_width: usize,
+    make_bordered: &dyn Fn(&str, Style) -> Line<'static>,
+    theme: &crate::style::Theme,
+) {
+    let label_style = theme.faint();
+    let value_style = Style::default().fg(Color::White);
+    let hint_style = theme.welcome_tip();
+
+    lines.push(make_bordered("", Style::default()));
+
+    if let Some(project_type) = briefing.project_type.as_deref() {
+        push_kv(
+            lines,
+            "Project",
+            project_type,
+            box_width,
+            make_bordered,
+            value_style,
+        );
+    }
+
+    if !briefing.files.is_empty() {
+        let files = briefing.files.join(", ");
+        push_kv(
+            lines,
+            "Files",
+            &files,
+            box_width,
+            make_bordered,
+            value_style,
+        );
+    }
+
+    if let Some(git) = briefing.git.as_deref() {
+        push_kv(lines, "Git", git, box_width, make_bordered, value_style);
+    }
+
+    let hints: Vec<&str> = briefing
+        .memory_hints
+        .iter()
+        .chain(briefing.session_hints.iter())
+        .map(String::as_str)
+        .take(2)
+        .collect();
+    if !hints.is_empty() {
+        push_kv(
+            lines,
+            "Hints",
+            &hints.join(" / "),
+            box_width,
+            make_bordered,
+            hint_style,
+        );
+    }
+
+    if !briefing.first_actions.is_empty() {
+        lines.push(make_bordered("", Style::default()));
+        lines.push(make_bordered("First actions", label_style));
+        for action in briefing.first_actions.iter().take(3) {
+            let line = format!("  - {}", action);
+            lines.push(make_bordered(&fit(&line, box_width), hint_style));
+        }
+    }
+}
+
+fn push_kv(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    box_width: usize,
+    make_bordered: &dyn Fn(&str, Style) -> Line<'static>,
+    style: Style,
+) {
+    let label = format!("{:<8}", label);
+    let value_width = box_width.saturating_sub(label.chars().count() + 2);
+    let line = format!("{}  {}", label, fit(value, value_width));
+    lines.push(make_bordered(&line, style));
+}
+
+fn fit(value: &str, max_width: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_width {
+        return value.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let keep = max_width - 3;
+    format!(
+        "{}...",
+        value.chars().take(keep).collect::<String>().trim_end()
+    )
+}
+
+fn abbreviate_path(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && path.starts_with(&home) {
+        format!("~{}", &path[home.len()..])
+    } else if path.chars().count() > 50 {
+        let tail: String = path
+            .chars()
+            .rev()
+            .take(47)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("...{}", tail)
+    } else {
+        path.to_string()
+    }
 }
 
 /// Read user name from ~/.osa/USER.md

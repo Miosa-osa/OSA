@@ -44,7 +44,6 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   @response_reserve 8_192
 
-  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
   defp max_tokens(model), do: OptimalSystemAgent.Providers.Registry.context_window(model)
 
   # ---------------------------------------------------------------------------
@@ -66,9 +65,18 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     max_tok =
       case Map.get(state, :model) do
-        nil -> max_tokens()
-        "" -> max_tokens()
-        model -> max_tokens(model)
+        nil ->
+          max_tokens(
+            OptimalSystemAgent.Providers.Registry.current_model(Map.get(state, :provider))
+          )
+
+        "" ->
+          max_tokens(
+            OptimalSystemAgent.Providers.Registry.current_model(Map.get(state, :provider))
+          )
+
+        model ->
+          max_tokens(model)
       end
 
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
@@ -112,7 +120,22 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    max_tok = max_tokens()
+    max_tok =
+      case Map.get(state, :model) do
+        nil ->
+          max_tokens(
+            OptimalSystemAgent.Providers.Registry.current_model(Map.get(state, :provider))
+          )
+
+        "" ->
+          max_tokens(
+            OptimalSystemAgent.Providers.Registry.current_model(Map.get(state, :provider))
+          )
+
+        model ->
+          max_tokens(model)
+      end
+
     static_tokens = Soul.static_token_count()
 
     # Gather dynamic blocks for individual cost breakdown

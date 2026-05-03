@@ -85,7 +85,14 @@ impl ModelPicker {
         for (i, m) in self.models.iter().enumerate() {
             let name_lc = m.name.to_lowercase();
             let provider_lc = m.provider.to_lowercase();
-            if !filter.is_empty() && !name_lc.contains(&filter) && !provider_lc.contains(&filter) {
+            let capability_lc = m.capabilities.join(" ").to_lowercase();
+            let source_lc = m.source.clone().unwrap_or_default().to_lowercase();
+            if !filter.is_empty()
+                && !name_lc.contains(&filter)
+                && !provider_lc.contains(&filter)
+                && !capability_lc.contains(&filter)
+                && !source_lc.contains(&filter)
+            {
                 continue;
             }
             if self.recent.contains(&m.name) {
@@ -353,11 +360,19 @@ impl ModelPicker {
                     let is_active = m.active.unwrap_or(false);
                     let is_selected = abs_i == self.cursor;
 
-                    let dot = if is_active { "●" } else { "○" };
+                    let dot = if is_active {
+                        "●"
+                    } else if m.configured {
+                        "○"
+                    } else {
+                        "◌"
+                    };
                     let dot_style = if is_active {
                         Style::default().fg(theme.colors.success)
-                    } else {
+                    } else if m.configured {
                         Style::default().fg(theme.colors.dim)
+                    } else {
+                        Style::default().fg(theme.colors.warning)
                     };
 
                     // Size badge
@@ -382,8 +397,9 @@ impl ModelPicker {
                         }
                     });
 
-                    // Reasoning badge — detect by name suffix
-                    let has_reasoning = m.name.contains("reasoning")
+                    let has_cap = |needle: &str| m.capabilities.iter().any(|c| c == needle);
+                    let has_reasoning = has_cap("reasoning")
+                        || m.name.contains("reasoning")
                         || m.name.contains("think")
                         || m.name.contains("r1")
                         || m.name.contains("o1")
@@ -423,6 +439,27 @@ impl ModelPicker {
                     if has_reasoning {
                         spans.push(Span::styled(
                             " ⚡reasoning",
+                            Style::default().fg(theme.colors.warning),
+                        ));
+                    }
+
+                    if has_cap("coding") || has_cap("agent") {
+                        spans.push(Span::styled(
+                            " code",
+                            Style::default().fg(theme.colors.secondary),
+                        ));
+                    }
+
+                    if has_cap("cloud") || m.source.as_deref() == Some("ollama-cloud") {
+                        spans.push(Span::styled(
+                            " cloud",
+                            Style::default().fg(theme.colors.primary),
+                        ));
+                    }
+
+                    if !m.configured {
+                        spans.push(Span::styled(
+                            " setup",
                             Style::default().fg(theme.colors.warning),
                         ));
                     }

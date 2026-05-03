@@ -51,6 +51,126 @@ pub struct SettingsResponse {
     pub fast_path: FastPathSettings,
 }
 
+// === Workspace ===
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceResponse {
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub project_name: String,
+    #[serde(default)]
+    pub project_type: String,
+    #[serde(default)]
+    pub git_status: Vec<String>,
+    #[serde(default)]
+    pub git_log: Vec<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub git_dirty: bool,
+    #[serde(default)]
+    pub directories: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub session_count: usize,
+    #[serde(default)]
+    pub memory_count: usize,
+}
+
+// === Startup context ===
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupContextResponse {
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub working_dir: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub git: StartupGitContext,
+    #[serde(default)]
+    pub project: StartupProjectContext,
+    #[serde(default)]
+    pub session: StartupSessionContext,
+    #[serde(default)]
+    pub memory_hints: Vec<StartupMemoryHint>,
+    #[serde(default)]
+    pub capabilities: StartupCapabilities,
+    #[serde(default)]
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupGitContext {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub status: Vec<String>,
+    #[serde(default)]
+    pub status_count: usize,
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupProjectContext {
+    #[serde(default)]
+    pub files: Vec<StartupProjectFile>,
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub directories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupProjectFile {
+    #[serde(default)]
+    pub file: String,
+    #[serde(default, rename = "type")]
+    pub file_type: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupSessionContext {
+    #[serde(default)]
+    pub current_id: Option<String>,
+    #[serde(default)]
+    pub saved_count: usize,
+    #[serde(default)]
+    pub is_new: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupMemoryHint {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StartupCapabilities {
+    #[serde(default)]
+    pub command_count: usize,
+    #[serde(default)]
+    pub tool_count: usize,
+    #[serde(default)]
+    pub commands: Vec<CommandEntry>,
+    #[serde(default)]
+    pub tools: Vec<ToolEntry>,
+}
+
 // === Auth ===
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +207,12 @@ pub struct OrchestrateRequest {
 pub struct OrchestrateResponse {
     pub session_id: String,
     pub status: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub queue_depth: Option<u32>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 // === Signal ===
@@ -198,6 +324,12 @@ pub struct ModelEntry {
     pub active: Option<bool>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

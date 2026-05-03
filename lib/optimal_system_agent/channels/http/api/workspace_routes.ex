@@ -10,8 +10,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
         - cwd         : current working directory
         - git_status  : short git status lines (empty list when not a git repo)
         - git_log     : last 5 commit oneline summaries (empty list when not a git repo)
-        - directories : top-level directory names in cwd
-        - files       : top-level regular file names in cwd
+        - directories      : top-level directory names in cwd
+        - files            : top-level regular file names in cwd
+        - project_name     : basename of cwd
+        - project_type     : coarse detected project type
+        - git_branch       : current branch, nil outside git repositories
+        - git_dirty        : true when git status has changes
+        - session_count    : recent saved session count
+        - memory_count     : persisted memory entry count when available
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
@@ -25,7 +31,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
   get "/" do
     cwd = File.cwd!()
 
-    {git_status, git_log} = fetch_git_info(cwd)
+    {git_status, git_log, git_branch} = fetch_git_info(cwd)
 
     {dirs, files} =
       try do
@@ -46,10 +52,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
     body =
       Jason.encode!(%{
         cwd: cwd,
+        project_name: Path.basename(cwd),
+        project_type: detect_project_type(files),
         git_status: git_status,
         git_log: git_log,
+        git_branch: git_branch,
+        git_dirty: git_status != [],
         directories: Enum.sort(dirs),
-        files: Enum.sort(files)
+        files: Enum.sort(files),
+        session_count: session_count(),
+        memory_count: memory_count()
       })
 
     conn
@@ -165,12 +177,67 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   # ── Private ───────────────────────────────────────────────────────────────
 
-  # Run git commands in the given directory. Returns {status_lines, log_lines}.
+  # Run git commands in the given directory.
   # Both lists are empty when git is not available or the directory is not a git repo.
   defp fetch_git_info(cwd) do
     status_lines = run_git(cwd, ["status", "--short"])
     log_lines = run_git(cwd, ["log", "--oneline", "-5"])
-    {status_lines, log_lines}
+
+    branch =
+      case run_git(cwd, ["branch", "--show-current"]) do
+        [name | _] when name != "" -> name
+        _ -> nil
+      end
+
+    {status_lines, log_lines, branch}
+  end
+
+  defp detect_project_type(files) do
+    file_set = MapSet.new(files)
+
+    cond do
+      MapSet.member?(file_set, "mix.exs") and MapSet.member?(file_set, "Cargo.toml") ->
+        "elixir/rust"
+
+      MapSet.member?(file_set, "mix.exs") ->
+        "elixir"
+
+      MapSet.member?(file_set, "Cargo.toml") ->
+        "rust"
+
+      MapSet.member?(file_set, "package.json") ->
+        "javascript"
+
+      MapSet.member?(file_set, "pyproject.toml") or MapSet.member?(file_set, "requirements.txt") ->
+        "python"
+
+      true ->
+        "unknown"
+    end
+  end
+
+  defp session_count do
+    OptimalSystemAgent.Agent.SessionPersistence.list(limit: 100)
+    |> length()
+  rescue
+    _ -> 0
+  end
+
+  defp memory_count do
+    path = Path.expand("~/.osa/memory.json")
+
+    with {:ok, json} <- File.read(path),
+         {:ok, decoded} <- Jason.decode(json) do
+      cond do
+        is_list(decoded) -> length(decoded)
+        is_map(decoded) -> map_size(decoded)
+        true -> 0
+      end
+    else
+      _ -> 0
+    end
+  rescue
+    _ -> 0
   end
 
   # Get git status for a single file (M, A, D, or nil)

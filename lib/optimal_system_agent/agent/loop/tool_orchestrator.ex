@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   @default_max_concurrency 10
   @default_timeout_ms 60_000
+  @long_running_timeout_ms 10 * 60_000
 
   @type tool_call :: %{
           required(:id) => String.t(),
@@ -137,14 +138,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     supervisor = Keyword.get(opts, :supervisor, OptimalSystemAgent.TaskSupervisor)
     executor = Keyword.get(opts, :executor, ToolExecutor)
     max_conc = Keyword.get(opts, :max_concurrency, @default_max_concurrency)
-    timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    default_timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
 
     supervisor
     |> Task.Supervisor.async_stream_nolink(
       tool_calls,
       fn tc -> executor.execute_tool_call(tc, state) end,
       max_concurrency: max_conc,
-      timeout: timeout,
+      timeout: batch_timeout(tool_calls, default_timeout),
       on_timeout: :kill_task
     )
     |> Enum.zip(tool_calls)
@@ -166,6 +167,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   defp parallel_result({_, tc}),
     do: {tc, error_result(tc, "Tool execution failed")}
+
+  defp batch_timeout(tool_calls, default_timeout) do
+    if Enum.any?(tool_calls, &long_running_tool?/1) do
+      max(default_timeout, @long_running_timeout_ms)
+    else
+      default_timeout
+    end
+  end
+
+  defp long_running_tool?(%{name: name}) when name in ["delegate", "task_wait", "peer_review"],
+    do: true
+
+  defp long_running_tool?(_), do: false
 
   defp error_result(tc, msg) do
     {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: "Error: #{msg}"},

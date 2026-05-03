@@ -116,6 +116,7 @@ defmodule OptimalSystemAgent.Application do
           # General-purpose Task.Supervisor for fire-and-forget async work
           # (HTTP message dispatch, background learning, etc.)
           {Task.Supervisor, name: OptimalSystemAgent.TaskSupervisor},
+          OptimalSystemAgent.Agent.TurnQueue,
           OptimalSystemAgent.Supervisors.Infrastructure,
           OptimalSystemAgent.Supervisors.Sessions,
           OptimalSystemAgent.Supervisors.AgentServices,

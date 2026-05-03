@@ -48,7 +48,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Tool do
 
     case wait_until_done(agent_id, deadline) do
       {:ok, run} ->
-        result = run.result || %{agent_id: agent_id, status: run.status, summary: ""}
+        result =
+          run.result ||
+            %{
+              agent_id: agent_id,
+              parent_session_id: run.parent_session_id,
+              role: run.role,
+              status: run.status,
+              summary: "",
+              transcript_path: run.transcript_path
+            }
+
         {:ok, RunStore.format_result(result)}
 
       {:timeout, run} when is_map(run) ->

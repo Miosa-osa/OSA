@@ -16,13 +16,13 @@ Audience: operators deploying OSA in a persistent or production environment.
 
 ```bash
 brew tap Miosa-osa/tap
-brew install osagent
+brew install osa
 
-osagent setup     # configure provider and API key
-osagent           # start interactive chat
+osa setup         # configure provider and API key
+osa               # start interactive chat
 ```
 
-Homebrew installs the release tarball into `libexec/` and symlinks `bin/osagent`.
+Homebrew installs the release tarball into `libexec/` and exposes `osa`, `osagent`, and `miosa` command entrypoints.
 
 ## Pre-built Tarball (Linux / macOS)
 

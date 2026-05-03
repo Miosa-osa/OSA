@@ -263,12 +263,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
     plan_mode = Map.get(restored, :plan_mode, false)
     turn_count = Map.get(restored, :turn_count, 0)
 
+    provider =
+      Keyword.get(opts, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    model =
+      Keyword.get(opts, :model) || OptimalSystemAgent.Providers.Registry.current_model(provider)
+
     state = %__MODULE__{
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
       channel: Keyword.get(opts, :channel, :cli),
-      provider: Keyword.get(opts, :provider),
-      model: Keyword.get(opts, :model),
+      provider: provider,
+      model: model,
       messages: messages,
       iteration: iteration,
       plan_mode: plan_mode,

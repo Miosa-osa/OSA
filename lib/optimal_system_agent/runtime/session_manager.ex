@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Agent.TurnQueue
 
   @tracked_sessions_table :osa_runtime_sessions
   @default_retry_delay_ms 50
@@ -151,6 +152,25 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
       fn -> process_message(session_id, message, loop_opts) end,
       restart: :temporary
     )
+  end
+
+  @doc "Queue a message for ordered background processing through a session loop."
+  @spec enqueue_message(session_id(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enqueue_message(session_id, message, opts \\ []) do
+    process_opts = Keyword.get(opts, :process_opts, [])
+
+    opts =
+      opts
+      |> Keyword.put_new(:process_fun, &process_message/3)
+      |> Keyword.put(:process_opts, process_opts)
+
+    TurnQueue.enqueue(session_id, message, opts)
+  end
+
+  @doc "Get the active/queued turn status for a session."
+  @spec turn_queue_status(session_id(), keyword()) :: map()
+  def turn_queue_status(session_id, opts \\ []) do
+    TurnQueue.status(session_id, opts)
   end
 
   @doc "Cancel a running session and its registered sub-agents."

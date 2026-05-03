@@ -229,16 +229,15 @@ defmodule OptimalSystemAgent.Agent.Progress do
        ) do
     case Map.get(state.tasks, task_id) do
       nil ->
-        state
+        task_progress = new_task_progress(task_id)
+
+        handle_orchestrator_event(event, %{
+          state
+          | tasks: Map.put(state.tasks, task_id, task_progress)
+        })
 
       task_progress ->
-        agent = %AgentProgress{
-          id: agent_id,
-          name: event[:agent_name] || "unnamed",
-          role: event[:role] || :builder,
-          status: :running,
-          started_at: DateTime.utc_now()
-        }
+        agent = new_agent_progress(agent_id, event)
 
         updated = %{
           task_progress
@@ -258,12 +257,27 @@ defmodule OptimalSystemAgent.Agent.Progress do
        ) do
     case Map.get(state.tasks, task_id) do
       nil ->
-        state
+        task_progress = new_task_progress(task_id)
+
+        handle_orchestrator_event(event, %{
+          state
+          | tasks: Map.put(state.tasks, task_id, task_progress)
+        })
 
       task_progress ->
         case Map.get(task_progress.agents, agent_id) do
           nil ->
-            state
+            agent = new_agent_progress(agent_id, event)
+
+            task_progress = %{
+              task_progress
+              | agents: Map.put(task_progress.agents, agent_id, agent)
+            }
+
+            handle_orchestrator_event(event, %{
+              state
+              | tasks: Map.put(state.tasks, task_id, task_progress)
+            })
 
           agent ->
             updated_agent = %{
@@ -292,12 +306,27 @@ defmodule OptimalSystemAgent.Agent.Progress do
        ) do
     case Map.get(state.tasks, task_id) do
       nil ->
-        state
+        task_progress = new_task_progress(task_id)
+
+        handle_orchestrator_event(event, %{
+          state
+          | tasks: Map.put(state.tasks, task_id, task_progress)
+        })
 
       task_progress ->
         case Map.get(task_progress.agents, agent_id) do
           nil ->
-            state
+            agent = new_agent_progress(agent_id, event)
+
+            task_progress = %{
+              task_progress
+              | agents: Map.put(task_progress.agents, agent_id, agent)
+            }
+
+            handle_orchestrator_event(event, %{
+              state
+              | tasks: Map.put(state.tasks, task_id, task_progress)
+            })
 
           agent ->
             updated_agent = %{
@@ -346,6 +375,27 @@ defmodule OptimalSystemAgent.Agent.Progress do
   end
 
   defp handle_orchestrator_event(_event, state), do: state
+
+  defp new_task_progress(task_id) do
+    now = DateTime.utc_now()
+
+    %TaskProgress{
+      id: task_id,
+      status: :running,
+      started_at: now,
+      last_update: now
+    }
+  end
+
+  defp new_agent_progress(agent_id, event) do
+    %AgentProgress{
+      id: agent_id,
+      name: event[:agent_name] || agent_id,
+      role: event[:role] || :builder,
+      status: :running,
+      started_at: DateTime.utc_now()
+    }
+  end
 
   # ── Progress Formatting ─────────────────────────────────────────────
 

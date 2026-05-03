@@ -62,6 +62,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     - Required verification
     - Expected result format
 
+    ## Expected Result Contract
+    Ask subagents to report in this structure so the parent can synthesize reliably:
+    - Summary
+    - Files inspected
+    - Files changed
+    - Findings
+    - Commands run
+    - Tests run
+    - Blockers
+    - Assumptions
+    - Next actions
+    - Confidence
+
     Worktree isolation never merges by default. Use merge_worktree=true only
     when you explicitly want a successful isolated agent to merge its branch.
 

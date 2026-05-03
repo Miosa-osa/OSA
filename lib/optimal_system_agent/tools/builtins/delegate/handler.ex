@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
   alias OptimalSystemAgent.Tools.UseContext
+  alias OptimalSystemAgent.Agent.DevelopmentMode
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.Tier
@@ -46,6 +47,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"task" => task} = args, ctx) do
     role = Map.get(args, "role") || Map.get(args, "subagent_type")
+    mode = DevelopmentMode.parse(Map.get(args, "mode"))
+    mode_policy = DevelopmentMode.policy(mode)
     tier_str = Map.get(args, "tier")
     parent_id = resolve_parent_id(args, ctx)
 
@@ -55,6 +58,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       cond do
         tier_str -> parse_tier(tier_str)
         agent_def -> agent_def[:tier] || Constants.min_subagent_tier()
+        mode -> mode_policy.tier
         true -> Constants.min_subagent_tier()
       end
 
@@ -71,22 +75,33 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     background =
       case Map.fetch(args, "background") do
         {:ok, value} -> value == true
-        :error -> (agent_def && agent_def[:background]) || false
+        :error -> (agent_def && agent_def[:background]) || mode_policy.background
+      end
+
+    permission_override =
+      Map.get(args, "permissionMode") ||
+        Map.get(args, "permission_mode") ||
+        (agent_def && agent_def[:permission_tier])
+
+    permission_tier =
+      if permission_override do
+        parse_permission_tier(permission_override)
+      else
+        if mode do
+          mode_policy.permission_tier
+        else
+          :subagent
+        end
       end
 
     config = %{
-      task: task,
+      task: DevelopmentMode.annotate_task(task, mode),
       parent_session_id: parent_id,
       role: role || "agent",
       tier: tier,
       model: Map.get(args, "model") || (agent_def && agent_def[:model]),
       provider: Map.get(args, "provider") || (agent_def && agent_def[:provider]),
-      permission_tier:
-        parse_permission_tier(
-          Map.get(args, "permissionMode") ||
-            Map.get(args, "permission_mode") ||
-            (agent_def && agent_def[:permission_tier])
-        ),
+      permission_tier: permission_tier,
       system_prompt: agent_def && agent_def[:system_prompt],
       tools_allowed: agent_def && agent_def[:tools_allowed],
       tools_blocked: (agent_def && agent_def[:tools_blocked]) || [],

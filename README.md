@@ -34,6 +34,16 @@ bin/install   # detects local checkout, no re-clone
 osa           # launch
 ```
 
+Homebrew:
+
+```bash
+brew tap miosa-osa/tap
+brew install osa
+osa doctor
+```
+
+The Homebrew package also installs compatible `osagent` and `miosa` command aliases.
+
 Common entry points:
 
 | Command | What it does |
@@ -332,7 +342,7 @@ curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bas
 
 The installer auto-detects your OS and architecture. On **macOS arm64**, **Linux amd64**, and **Linux arm64** it downloads the pre-built single binary from GitHub Releases — no Elixir, Erlang, or Rust required. On other platforms it falls back to a source build (installs Elixir/Erlang/Rust automatically).
 
-**Homebrew:** `brew tap miosa-osa/tap && brew install osagent`
+**Homebrew:** `brew tap miosa-osa/tap && brew install osa`
 
 **Windows:** Download `osa-windows-amd64.exe` from [GitHub Releases](https://github.com/Miosa-osa/OSA/releases/latest) and add it to your PATH.
 

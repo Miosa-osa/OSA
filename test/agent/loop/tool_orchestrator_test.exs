@@ -17,6 +17,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
     def concurrency_safe?(_input, _ctx), do: false
   end
 
+  defmodule DelegateTool do
+    @moduledoc false
+    def name, do: "delegate"
+    def concurrency_safe?(_input, _ctx), do: true
+  end
+
   defmodule StubExecutor do
     @moduledoc false
     def execute_tool_call(tc, _state) do
@@ -57,7 +63,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
       {Registry, :builtin_tools},
       Map.merge(builtin_tools, %{
         SafeTool.name() => SafeTool,
-        UnsafeTool.name() => UnsafeTool
+        UnsafeTool.name() => UnsafeTool,
+        DelegateTool.name() => DelegateTool
       })
     )
 
@@ -135,6 +142,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
 
     test "handles empty tool_calls list", %{state: state} do
       assert [] = ToolOrchestrator.dispatch([], state, executor: StubExecutor)
+    end
+
+    test "long-running orchestration tools are not killed by the default short timeout", %{
+      state: state,
+      supervisor: supervisor
+    } do
+      tcs = [%{id: "delegate-1", name: DelegateTool.name()}]
+
+      [{_tc, {_msg, result_str}}] =
+        ToolOrchestrator.dispatch(tcs, state,
+          executor: SlowStubExecutor,
+          supervisor: supervisor,
+          timeout_ms: 10
+        )
+
+      assert result_str == "slow:delegate"
     end
 
     test "unsafe calls are barriers before later safe calls", %{

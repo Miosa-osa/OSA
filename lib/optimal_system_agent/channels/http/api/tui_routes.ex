@@ -3,7 +3,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
   TUI-specific routes.
 
     GET  /tui/output  — SSE stream of agent output destined for the TUI
+    GET  /tui/context — Startup/context briefing for the TUI
     POST /tui/input   — Receive text input from the TUI and dispatch to the agent loop
+
+  Alias:
+    GET /startup/context is forwarded to this router by the parent API router.
 
   The /stream/tui_output alias is handled directly in AgentRoutes so that it
   fits naturally into the /stream/* forwarding group. This module owns the
@@ -19,10 +23,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
 
+  alias OptimalSystemAgent.StartupContext
   alias OptimalSystemAgent.Runtime.SessionManager
 
   plug(:match)
   plug(:dispatch)
+
+  # ── GET /context — bounded startup/context briefing ─────────────────
+
+  get "/context" do
+    conn = fetch_query_params(conn)
+
+    session_id =
+      conn.query_params["session_id"] ||
+        first_req_header(conn, "x-session-id") ||
+        first_req_header(conn, "x-osa-session-id")
+
+    json(conn, 200, StartupContext.build(session_id: session_id))
+  end
 
   # ── GET /output — TUI SSE output stream ─────────────────────────────
   #
@@ -128,5 +146,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TuiRoutes do
           {:error, _} -> conn
         end
     end
+  end
+
+  defp first_req_header(conn, name) do
+    conn
+    |> get_req_header(name)
+    |> List.first()
   end
 end

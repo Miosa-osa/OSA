@@ -39,10 +39,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutesTest do
       body = decode(conn)
 
       assert Map.has_key?(body, "cwd")
+      assert Map.has_key?(body, "project_name")
+      assert Map.has_key?(body, "project_type")
       assert Map.has_key?(body, "git_status")
       assert Map.has_key?(body, "git_log")
+      assert Map.has_key?(body, "git_branch")
+      assert Map.has_key?(body, "git_dirty")
       assert Map.has_key?(body, "directories")
       assert Map.has_key?(body, "files")
+      assert Map.has_key?(body, "session_count")
+      assert Map.has_key?(body, "memory_count")
     end
 
     test "cwd is a non-empty string" do
@@ -124,6 +130,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutesTest do
       body = decode(conn)
       {:ok, actual_cwd} = File.cwd()
       assert body["cwd"] == actual_cwd
+    end
+
+    test "project_name matches cwd basename" do
+      conn = get_workspace()
+      body = decode(conn)
+      {:ok, actual_cwd} = File.cwd()
+      assert body["project_name"] == Path.basename(actual_cwd)
+    end
+
+    test "project metadata has stable primitive types" do
+      conn = get_workspace()
+      body = decode(conn)
+
+      assert is_binary(body["project_type"])
+      assert is_boolean(body["git_dirty"])
+      assert is_integer(body["session_count"])
+      assert is_integer(body["memory_count"])
     end
 
     test "directories and files together account for entries in cwd" do

@@ -81,6 +81,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
               "utility (fastest, cheapest). Defaults to the role's configured tier, or 'specialist'. " <>
               "Note: utility is silently promoted to specialist — small models cannot reliably call tools."
         },
+        "mode" => %{
+          "type" => "string",
+          "enum" => ["explore", "diagnose", "implement", "review", "test", "ship"],
+          "description" =>
+            "Development workflow preset. Controls default tier, permission posture, " <>
+              "background behavior, and verification expectations unless explicitly overridden."
+        },
         "background" => %{
           "type" => "boolean",
           "description" =>

@@ -10,12 +10,28 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   """
 
   alias OptimalSystemAgent.Providers.OpenAICompat
+  alias OptimalSystemAgent.Providers.ModelCatalog
 
   @provider_configs %{
     openai: %{
       default_url: "https://api.openai.com/v1",
-      default_model: "gpt-4o",
-      available_models: ["gpt-4o", "gpt-4o-mini", "o3", "o3-mini", "o4-mini"]
+      default_model: "gpt-5.5",
+      available_models: [
+        "gpt-5.5",
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.3-codex",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "gpt-5.2-codex",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+        "gpt-4o",
+        "gpt-4o-mini"
+      ]
     },
     groq: %{
       default_url: "https://api.groq.com/openai/v1",
@@ -24,8 +40,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     },
     deepseek: %{
       default_url: "https://api.deepseek.com/v1",
-      default_model: "deepseek-chat",
-      available_models: ["deepseek-chat", "deepseek-reasoner"]
+      default_model: "deepseek-v4-pro",
+      available_models: [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ]
     },
     together: %{
       default_url: "https://api.together.xyz/v1",
@@ -82,7 +103,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   @doc "Return available models for a given provider."
   def available_models(provider) do
     config = get_config!(provider)
-    Map.get(config, :available_models, [config.default_model])
+
+    configured = Map.get(config, :available_models, [config.default_model])
+
+    provider
+    |> ModelCatalog.names_for()
+    |> Kernel.++(configured)
+    |> Enum.uniq()
   end
 
   @doc "Send a chat completion request through the named provider."

@@ -15,6 +15,7 @@ use crate::style;
 
 use super::{Component, ComponentAction};
 use message::{Message, MessageType, SurveyQAData, ToolCallData};
+use welcome::StartupBriefing;
 
 /// Chat viewport managing a scrollable list of messages
 pub struct Chat {
@@ -35,6 +36,7 @@ pub struct Chat {
     welcome_model: Option<String>,
     welcome_tool_count: usize,
     welcome_fast_mode: bool,
+    startup_briefing: Option<StartupBriefing>,
 }
 
 impl Chat {
@@ -51,6 +53,7 @@ impl Chat {
             welcome_model: None,
             welcome_tool_count: 0,
             welcome_fast_mode: false,
+            startup_briefing: None,
         }
     }
 
@@ -299,6 +302,10 @@ impl Chat {
         self.welcome_fast_mode = fast_mode;
     }
 
+    pub fn set_startup_briefing(&mut self, briefing: StartupBriefing) {
+        self.startup_briefing = Some(briefing);
+    }
+
     pub fn scroll_up(&mut self, lines: u16) {
         let max_scroll = self.compute_content_height().saturating_sub(self.height);
         self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
@@ -408,6 +415,7 @@ impl Component for Chat {
                 self.welcome_provider.as_deref(),
                 self.welcome_model.as_deref(),
                 self.welcome_fast_mode,
+                self.startup_briefing.as_ref(),
             );
             return;
         }

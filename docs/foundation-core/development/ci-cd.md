@@ -84,10 +84,10 @@ When a GitHub release is published (fires after `release.yml` completes and the 
 2. Wait 30 seconds for release assets to become available.
 3. Download all four tarballs and compute `sha256` checksums.
 4. Checkout `Miosa-osa/homebrew-tap` using the `HOMEBREW_TAP_TOKEN` secret.
-5. Render the Homebrew formula `Formula/osagent.rb` with current version and checksums.
+5. Render the Homebrew formulas `Formula/osa.rb`, `Formula/osagent.rb`, and `Formula/miosa.rb` with current version and checksums.
 6. Commit and push to the tap repository.
 
-The formula installs the release tarball into `libexec/` and symlinks `bin/osagent` to `libexec/bin/osagent`. The `test do` block asserts `osagent version` outputs a version string.
+Each formula installs the release tarball into `libexec/` and symlinks `osa`, `osagent`, and `miosa` to `libexec/bin/osagent`. The `test do` block asserts all three entrypoints print a version string.
 
 ### Required Secrets
 

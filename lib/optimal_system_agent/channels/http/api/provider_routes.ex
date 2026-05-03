@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
   require Logger
+  alias OptimalSystemAgent.Providers.ModelCatalog
 
   plug(:match)
   plug(:dispatch)
@@ -54,6 +55,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
             %{available_models: models} when is_list(models) -> models
             _ -> []
           end
+          |> Kernel.++(ModelCatalog.names_for(slug))
+          |> Enum.uniq()
 
         configured = provider_configured(provider, stored_keys)
 
@@ -64,7 +67,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
           configured: configured,
           connected: configured,
           default_model: default_model,
-          available_models: available_models
+          available_models: available_models,
+          model_count: length(available_models),
+          models: provider_models(slug, available_models, configured)
         }
       end)
 
@@ -188,6 +193,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
   defp provider_type(:ollama), do: "local"
   defp provider_type(:lmstudio), do: "local"
   defp provider_type(_), do: "cloud"
+
+  defp provider_models(slug, available_models, configured) do
+    catalog_by_name =
+      slug
+      |> ModelCatalog.entries_for()
+      |> Map.new(&{&1.name, &1})
+
+    available_models
+    |> Enum.map(fn name ->
+      catalog = Map.get(catalog_by_name, name, %{})
+
+      %{
+        name: name,
+        context_window:
+          Map.get_lazy(catalog, :context_window, fn ->
+            OptimalSystemAgent.Providers.Registry.context_window(name)
+          end),
+        capabilities: Map.get(catalog, :capabilities, []),
+        source: Map.get(catalog, :source, "provider"),
+        configured: configured
+      }
+    end)
+  end
 
   defp provider_display_name(slug) do
     case slug do

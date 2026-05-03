@@ -22,11 +22,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def name, do: :anthropic
 
   @impl true
-  def default_model, do: "claude-sonnet-4-6"
+  def default_model, do: "claude-opus-4-7"
 
   @impl true
   def available_models do
-    ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
+    ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]
   end
 
   @impl true

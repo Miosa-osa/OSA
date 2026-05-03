@@ -516,14 +516,24 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
         :pass ->
-          # Fire-and-forget — the loop processes in background.
-          # Client polls GET /sessions/:id/messages for results.
-          # Uses Task.Supervisor to ensure the task survives long LLM calls
-          # (Task.start would create an unsupervised process that may be reaped).
-          SessionManager.process_message_async(session_id, message)
+          case SessionManager.enqueue_message(session_id, message,
+                 task_supervisor: OptimalSystemAgent.TaskSupervisor,
+                 process_opts: [timeout: :infinity]
+               ) do
+            {:ok, turn} ->
+              resp =
+                Jason.encode!(%{
+                  status: turn.status,
+                  session_id: session_id,
+                  turn_id: turn.turn_id,
+                  queue_depth: turn.queue_depth
+                })
 
-          resp = Jason.encode!(%{status: "processing", session_id: session_id})
-          conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
+              conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
+
+            {:error, reason} ->
+              json_error(conn, 503, "queue_failed", inspect(reason))
+          end
       end
     else
       json_error(conn, 404, "session_not_found", "Session #{session_id} not found")

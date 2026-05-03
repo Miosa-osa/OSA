@@ -338,19 +338,26 @@ impl App {
     }
 
     pub(crate) fn submit_prompt(&mut self, text: &str) {
+        let already_processing = self.state == AppState::Processing;
+
         self.chat.add_user_message(text);
-        if self.state != AppState::Processing {
+        if !already_processing {
             self.transition(AppState::Processing);
+            self.activity.start();
+            self.activity.set_model_name(self.header.model_name());
+            self.status.set_active(true);
+            self.processing_start = Some(std::time::Instant::now());
+            self.last_backend_activity = self.processing_start;
+            self.backend_activity_warned = false;
+            self.stream_buf.clear();
+            self.thinking_buf.clear();
+            self.agent_header_sent = false;
+        } else {
+            self.toasts.push(
+                "Queued behind current turn".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
         }
-        self.activity.start();
-        self.activity.set_model_name(self.header.model_name());
-        self.status.set_active(true);
-        self.processing_start = Some(std::time::Instant::now());
-        self.last_backend_activity = self.processing_start;
-        self.backend_activity_warned = false;
-        self.stream_buf.clear();
-        self.thinking_buf.clear();
-        self.agent_header_sent = false;
 
         // Send to backend
         let client = self.client.clone();
@@ -379,6 +386,22 @@ impl App {
             };
             let _ = tx.send(Event::Backend(event));
         });
+    }
+
+    pub(super) fn begin_backend_turn(&mut self) {
+        if self.state != AppState::Processing {
+            self.transition(AppState::Processing);
+            self.activity.start();
+            self.activity.set_model_name(self.header.model_name());
+            self.status.set_active(true);
+            self.processing_start = Some(std::time::Instant::now());
+            self.stream_buf.clear();
+            self.thinking_buf.clear();
+            self.agent_header_sent = false;
+        }
+
+        self.last_backend_activity = Some(std::time::Instant::now());
+        self.backend_activity_warned = false;
     }
 
     pub(super) fn cancel_processing(&mut self) {
@@ -521,6 +544,20 @@ impl App {
             let event = match result {
                 Ok(settings) => BackendEvent::SettingsLoaded(Ok(settings)),
                 Err(e) => BackendEvent::SettingsLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    pub(super) fn load_startup_briefing(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            let result = client.startup_context(&session_id).await;
+            let event = match result {
+                Ok(context) => BackendEvent::StartupBriefingLoaded(Ok(context)),
+                Err(e) => BackendEvent::StartupBriefingLoaded(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
         });
@@ -914,22 +951,4 @@ impl App {
         }
         info!("Hands-free voice mode: {}", self.voice.hands_free);
     }
-}
-
-/// Read user name from ~/.osa/USER.md (sync, for welcome message)
-pub fn read_user_name_sync() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = format!("{}/.osa/USER.md", home);
-    let content = std::fs::read_to_string(&path).ok()?;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("- **Name:**") {
-            let name = trimmed.trim_start_matches("- **Name:**").trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
 }

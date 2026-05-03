@@ -150,9 +150,19 @@ impl StatusBar {
         self.context_utilization
     }
 
+    pub fn context_max(&self) -> u64 {
+        self.context_max
+    }
+
+    pub fn context_estimated(&self) -> u64 {
+        self.context_estimated
+    }
+
     fn format_tokens(n: u64) -> String {
-        if n >= 1000 {
-            format!("{:.1}k", n as f64 / 1000.0)
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_048_576.0)
+        } else if n >= 1000 {
+            format!("{:.1}K", n as f64 / 1000.0)
         } else {
             n.to_string()
         }
@@ -376,16 +386,16 @@ impl Component for StatusBar {
             // Signal pill — always visible when classified
             self.push_signal_pill(&mut spans, &theme);
 
-            // Token display: show context usage like OpenClaw: "tokens 19.3k/1.0m (2%)"
+            // Token display: one compact context readout, not duplicated token/context fields.
             if self.context_estimated > 0 && self.context_max > 0 {
                 let pct = (self.context_utilization * 100.0).round() as u32;
                 spans.push(Span::styled(" \u{00b7} ", theme.faint()));
                 spans.push(Span::styled(
                     format!(
-                        "tokens {}/{} ({}%)",
-                        Self::format_tokens(self.context_estimated),
-                        Self::format_tokens(self.context_max),
+                        "ctx {}% ({}/{})",
                         pct,
+                        Self::format_tokens(self.context_estimated),
+                        Self::format_tokens(self.context_max)
                     ),
                     theme.progress_label(),
                 ));
@@ -396,21 +406,6 @@ impl Component for StatusBar {
                         "{}/{} tokens",
                         Self::format_tokens(self.input_tokens),
                         Self::format_tokens(self.output_tokens),
-                    ),
-                    theme.progress_label(),
-                ));
-            }
-
-            // Only show context when we have real data (hide the broken 0%)
-            if self.context_estimated > 0 && self.context_max > 0 {
-                let pct = (self.context_utilization * 100.0).round() as u32;
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "ctx {}% ({}/{})",
-                        pct,
-                        Self::format_tokens(self.context_estimated),
-                        Self::format_tokens(self.context_max),
                     ),
                     theme.progress_label(),
                 ));

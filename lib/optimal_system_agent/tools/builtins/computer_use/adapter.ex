@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
   @doc """
   Detect the current platform. Priority: config override → OS detection → env vars.
   """
-  @spec detect_platform() :: :macos | :linux_x11 | :linux_wayland | :unknown
+  @spec detect_platform() :: :macos | :linux_x11 | :linux_wayland | :miosa | :unknown
   def detect_platform do
     case Application.get_env(:optimal_system_agent, :computer_use_platform) do
       nil -> detect_from_os()
@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter do
   @spec adapter_for(atom()) :: {:ok, module()} | {:error, String.t()}
   def adapter_for(:macos), do: {:ok, Adapters.MacOS}
   def adapter_for(:linux_x11), do: {:ok, Adapters.LinuxX11}
+  def adapter_for(:miosa), do: {:ok, Adapters.Miosa}
   def adapter_for(:linux_wayland), do: {:error, "Wayland adapter not yet implemented"}
 
   def adapter_for(:unknown),

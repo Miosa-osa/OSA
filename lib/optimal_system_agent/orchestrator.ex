@@ -12,9 +12,10 @@ defmodule OptimalSystemAgent.Orchestrator do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
-  alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.Hooks
+  alias OptimalSystemAgent.Agent.RunResult
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Team
 
@@ -61,7 +62,10 @@ defmodule OptimalSystemAgent.Orchestrator do
         # Spawn all tasks in this wave as async Tasks
         tasks =
           Enum.map(indexed_configs, fn {config, original_idx} ->
-            config = Map.put(config, :parent_session_id, parent_id)
+            config =
+              config
+              |> Map.put(:parent_session_id, parent_id)
+              |> Map.put(:task_id, team_id)
 
             {original_idx,
              Task.Supervisor.async_nolink(
@@ -135,6 +139,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   def run_subagent(config) do
     task = Map.fetch!(config, :task)
     parent_id = Map.fetch!(config, :parent_session_id)
+    task_id = Map.get(config, :task_id, parent_id)
     role = Map.get(config, :role, "agent")
     tier = Map.get(config, :tier, :specialist)
 
@@ -145,6 +150,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     model = Map.get(config, :model) || Tier.model_for(tier, provider)
     max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier)
+    subagent_timeout_ms = Map.get(config, :timeout_ms, 10 * 60_000)
 
     # Generate subagent session ID, or honor a caller-provided ID for
     # background/lifecycle tooling that returns the id before execution starts.
@@ -187,6 +193,8 @@ defmodule OptimalSystemAgent.Orchestrator do
     # Emit: agent started
     emit_event(parent_id, %{
       event: "orchestrator_agent_started",
+      task_id: task_id,
+      agent_id: subagent_id,
       agent_name: subagent_id,
       role: role,
       model: to_string(model),
@@ -275,7 +283,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Start event forwarder BEFORE spawning the subagent so it catches
     # all tool_call events from the first iteration onward.
-    forwarder = start_event_forwarder(subagent_id, parent_id, role)
+    forwarder = start_event_forwarder(subagent_id, parent_id, task_id, role)
 
     case DynamicSupervisor.start_child(
            OptimalSystemAgent.SessionSupervisor,
@@ -283,7 +291,17 @@ defmodule OptimalSystemAgent.Orchestrator do
          ) do
       {:ok, pid} ->
         # Execute the task (blocking call)
-        result = execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info)
+        result =
+          execute_and_collect(
+            subagent_id,
+            task,
+            parent_id,
+            task_id,
+            role,
+            max_iter,
+            worktree_info,
+            subagent_timeout_ms
+          )
 
         # Fire subagent_stop hook (learning capture, telemetry)
         {tool_uses_final, tokens_final} = get_subagent_stats(subagent_id)
@@ -350,6 +368,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           status: "failed",
           error: inspect(reason),
@@ -445,12 +465,21 @@ defmodule OptimalSystemAgent.Orchestrator do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp execute_and_collect(subagent_id, task, parent_id, role, _max_iter, worktree_info) do
+  defp execute_and_collect(
+         subagent_id,
+         task,
+         parent_id,
+         task_id,
+         role,
+         _max_iter,
+         worktree_info,
+         timeout_ms
+       ) do
     start_time = System.monotonic_time(:millisecond)
 
     result =
       try do
-        Loop.process_message(subagent_id, task)
+        Loop.process_message(subagent_id, task, timeout: timeout_ms)
       rescue
         e ->
           Logger.error("[Orchestrator] Subagent #{subagent_id} crashed: #{Exception.message(e)}")
@@ -492,6 +521,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           status: "completed",
           tool_uses: tool_uses,
@@ -515,6 +546,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           status: "failed",
           error: to_string(reason),
@@ -545,6 +578,8 @@ defmodule OptimalSystemAgent.Orchestrator do
         # Unexpected return: treat as success with inspect.
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           status: "completed",
           tool_uses: tool_uses,
@@ -582,39 +617,47 @@ defmodule OptimalSystemAgent.Orchestrator do
     agent_id = Map.fetch!(attrs, :agent_id)
     run = RunStore.get(agent_id)
 
-    %{
-      agent_id: agent_id,
-      parent_session_id: Map.fetch!(attrs, :parent_session_id),
-      role: Map.fetch!(attrs, :role),
-      status: Map.fetch!(attrs, :status),
-      summary: Map.get(attrs, :summary, ""),
-      files_changed: Map.get(attrs, :files_changed, []),
-      commands_run: Map.get(attrs, :commands_run, []),
-      tool_count: Map.get(attrs, :tool_count, 0),
-      tokens_used: Map.get(attrs, :tokens_used, 0),
-      duration_ms: Map.get(attrs, :duration_ms, 0),
-      errors: Map.get(attrs, :errors, []),
-      next_actions: Map.get(attrs, :next_actions, []),
-      transcript_path: (run && run.transcript_path) || "unavailable",
-      worktree: Map.get(attrs, :worktree)
-    }
+    attrs
+    |> Map.put(:agent_id, agent_id)
+    |> Map.put_new(:summary, "")
+    |> Map.put_new(:files_inspected, [])
+    |> Map.put_new(:files_changed, [])
+    |> Map.put_new(:findings, [])
+    |> Map.put_new(:commands_run, [])
+    |> Map.put_new(:tests_run, [])
+    |> Map.put_new(:blockers, [])
+    |> Map.put_new(:errors, [])
+    |> Map.put_new(:assumptions, [])
+    |> Map.put_new(:next_actions, [])
+    |> Map.put_new(:verification, %{})
+    |> Map.put_new(:confidence, 0)
+    |> Map.put_new(:tool_count, 0)
+    |> Map.put_new(:tokens_used, 0)
+    |> Map.put_new(:duration_ms, 0)
+    |> Map.put(:transcript_path, (run && run.transcript_path) || "unavailable")
+    |> RunResult.new()
   end
 
   defp failure_result(agent_id, parent_id, role, reason, opts \\ []) do
-    structured_result(%{
-      agent_id: agent_id,
-      parent_session_id: parent_id,
-      role: role,
-      status: :failed,
-      summary: "Subagent #{role} failed: #{inspect(reason)}",
-      files_changed: Keyword.get(opts, :files_changed, []),
-      commands_run: [],
-      tool_count: Keyword.get(opts, :tool_count, 0),
-      tokens_used: Keyword.get(opts, :tokens_used, 0),
-      duration_ms: Keyword.get(opts, :duration_ms, 0),
-      errors: [inspect(reason)],
-      worktree: Keyword.get(opts, :worktree)
-    })
+    RunResult.failure(
+      %{
+        agent_id: agent_id,
+        parent_session_id: parent_id,
+        role: role,
+        files_changed: Keyword.get(opts, :files_changed, []),
+        commands_run: [],
+        tool_count: Keyword.get(opts, :tool_count, 0),
+        tokens_used: Keyword.get(opts, :tokens_used, 0),
+        duration_ms: Keyword.get(opts, :duration_ms, 0),
+        transcript_path:
+          case RunStore.get(agent_id) do
+            %{transcript_path: path} -> path
+            _ -> "unavailable"
+          end,
+        worktree: Keyword.get(opts, :worktree)
+      },
+      reason
+    )
   end
 
   defp changed_files(nil), do: []
@@ -636,15 +679,15 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   # Event forwarder: spawns a Task that listens for subagent tool_call
   # events and re-emits them as orchestrator_agent_progress on the parent channel.
-  defp start_event_forwarder(subagent_id, parent_id, role) do
+  defp start_event_forwarder(subagent_id, parent_id, task_id, role) do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       # Subscribe inside this process; PubSub subscriptions are per-process.
       Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{subagent_id}")
-      forwarder_loop(subagent_id, parent_id, role, 0)
+      forwarder_loop(subagent_id, parent_id, task_id, role, 0)
     end)
   end
 
-  defp forwarder_loop(subagent_id, parent_id, role, tool_count) do
+  defp forwarder_loop(subagent_id, parent_id, task_id, role, tool_count) do
     receive do
       # Tool call start: update action line with what the tool is doing.
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase, args: args}}
@@ -654,6 +697,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         emit_event(parent_id, %{
           event: "orchestrator_agent_progress",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           role: role,
           current_action: action,
@@ -662,7 +707,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           description: ""
         })
 
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, task_id, role, tool_count)
 
       # Tool call end: increment counter.
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase}}
@@ -672,6 +717,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         emit_event(parent_id, %{
           event: "orchestrator_agent_progress",
+          task_id: task_id,
+          agent_id: subagent_id,
           agent_name: subagent_id,
           role: role,
           current_action: to_string(tool_name),
@@ -680,10 +727,10 @@ defmodule OptimalSystemAgent.Orchestrator do
           description: ""
         })
 
-        forwarder_loop(subagent_id, parent_id, role, new_count)
+        forwarder_loop(subagent_id, parent_id, task_id, role, new_count)
 
       _ ->
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, task_id, role, tool_count)
     after
       # Stop forwarding after 5 minutes (safety net)
       300_000 -> :ok
@@ -737,9 +784,36 @@ defmodule OptimalSystemAgent.Orchestrator do
       "osa:session:#{parent_session_id}",
       {:osa_event, full_event}
     )
+
+    Bus.emit(
+      :system_event,
+      normalize_bus_event(event_data, event_name),
+      source: "orchestrator",
+      session_id: parent_session_id
+    )
   rescue
     _ -> :ok
   end
+
+  defp normalize_event_name(event) when is_atom(event), do: event
+
+  defp normalize_event_name(event) when is_binary(event) do
+    String.to_existing_atom(event)
+  rescue
+    ArgumentError -> :unknown
+  end
+
+  defp normalize_bus_event(event_data, event_name) do
+    event_data
+    |> Map.put(:event, normalize_event_name(event_name))
+    |> normalize_bus_status()
+  end
+
+  defp normalize_bus_status(%{status: status} = event_data) when is_binary(status) do
+    Map.put(event_data, :status, normalize_event_name(status))
+  end
+
+  defp normalize_bus_status(event_data), do: event_data
 
   defp next_subagent_number(_parent_id) do
     # Node-unique monotonic integer avoids ETS ownership issues and races.

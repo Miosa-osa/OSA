@@ -25,6 +25,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandPaletteTest do
     |> ToolRoutes.call(@opts)
   end
 
+  defp execute_command(params) do
+    conn(:post, "/execute", Jason.encode!(params))
+    |> put_req_header("content-type", "application/json")
+    |> Plug.Parsers.call(
+      Plug.Parsers.init(parsers: [:json], pass: ["application/json"], json_decoder: Jason)
+    )
+    |> put_script_name(["commands"])
+    |> ToolRoutes.call(@opts)
+  end
+
   defp put_script_name(conn, names) do
     %{conn | script_name: names}
   end
@@ -89,7 +99,91 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandPaletteTest do
       names = Enum.map(body["commands"], fn c -> c["name"] end)
       assert "help" in names
       assert "status" in names
-      assert "reload" in names
+      assert "agents" in names
+    end
+
+    test "does not advertise commands without executable handlers" do
+      conn = get_commands()
+      body = decode(conn)
+      names = Enum.map(body["commands"], fn c -> c["name"] end)
+
+      refute "reload" in names
+      refute "debug" in names
+      refute "mem-search" in names
+      refute "mem-save" in names
+      refute "mem-recall" in names
+    end
+  end
+
+  describe "POST /commands/execute" do
+    test "returns the TUI command result contract for executable commands" do
+      conn =
+        execute_command(%{
+          "command" => "agents",
+          "arg" => "",
+          "session_id" => "command-test"
+        })
+
+      assert conn.status == 200
+      body = decode(conn)
+      assert body["kind"] == "info"
+      assert body["command"] == "agents"
+      assert is_binary(body["output"])
+      assert body["output"] =~ "Agent"
+    end
+
+    test "combines the TUI arg field with command before dispatching" do
+      missing_session = "missing-session-#{@suffix}"
+
+      conn =
+        execute_command(%{
+          "command" => "resume",
+          "arg" => missing_session,
+          "session_id" => "command-test"
+        })
+
+      assert conn.status == 200
+      body = decode(conn)
+      assert body["kind"] == "info"
+      assert body["command"] == "resume #{missing_session}"
+      assert body["output"] =~ "Session '#{missing_session}' not found"
+    end
+
+    test "blocked commands return an error kind instead of executing" do
+      conn =
+        execute_command(%{
+          "command" => "exit",
+          "arg" => "",
+          "session_id" => "command-test"
+        })
+
+      assert conn.status == 200
+      body = decode(conn)
+      assert body["kind"] == "error"
+      assert body["output"] =~ "not available via HTTP"
+    end
+
+    test "all advertised commands execute through the TUI HTTP contract" do
+      commands =
+        get_commands()
+        |> decode()
+        |> Map.fetch!("commands")
+        |> Enum.map(&Map.fetch!(&1, "name"))
+
+      for command <- commands do
+        conn =
+          execute_command(%{
+            "command" => command,
+            "arg" => "",
+            "session_id" => "command-smoke-#{@suffix}"
+          })
+
+        assert conn.status == 200
+
+        body = decode(conn)
+        assert body["kind"] in ["info", "error", "prompt", "action"]
+        assert is_binary(body["output"])
+      end
     end
   end
 
