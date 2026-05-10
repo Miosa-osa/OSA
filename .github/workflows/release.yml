@@ -50,7 +50,7 @@ jobs:
         run: mix deps.get --only prod
 
       - name: Build Burrito binary (macos_arm64)
-        run: mix release burrito --target macos_arm64
+        run: mix release burrito
         env:
           BURRITO_TARGET: macos_arm64
 
@@ -87,7 +87,7 @@ jobs:
         run: mix deps.get --only prod
 
       - name: Build Burrito binary (linux_amd64)
-        run: mix release burrito --target linux_amd64
+        run: mix release burrito
         env:
           BURRITO_TARGET: linux_amd64
 
@@ -124,7 +124,7 @@ jobs:
         run: mix deps.get --only prod
 
       - name: Build Burrito binary (linux_arm64)
-        run: mix release burrito --target linux_arm64
+        run: mix release burrito
         env:
           BURRITO_TARGET: linux_arm64
 
@@ -189,7 +189,7 @@ jobs:
 
       - name: Build Burrito binary (windows_amd64)
         shell: bash
-        run: mix release burrito --target windows_amd64
+        run: mix release burrito
         env:
           BURRITO_TARGET: windows_amd64
 
