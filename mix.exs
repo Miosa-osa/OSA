@@ -91,7 +91,11 @@ defmodule OptimalSystemAgent.MixProject do
 
       # PTY spawning — used by OpenComputers.Executor.Direct.Pty to open
       # real interactive shells with full terminal geometry (cols, rows, resize).
-      {:erlexec, "~> 2.0"}
+      # PINNED to 2.0.6 — later versions use OTP 27 -doc() attribute which
+      # breaks compile on OTP 26. We pin OTP 26 because OTP 27 has Mix release
+      # bugs (TypedStruct.MixProject + Decimal.Error already compiled). When
+      # OTP 27 Mix issues are resolved upstream, this pin can be relaxed.
+      {:erlexec, "== 2.0.6"}
 
       # miosa_* packages are not standalone deps — their implementations live
       # in this repo. Shim modules in lib/miosa/ satisfy all call sites.
