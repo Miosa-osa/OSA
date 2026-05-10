@@ -203,28 +203,30 @@ jobs:
           path: burrito_out/osa-windows-amd64.exe
 
   # ── Publish GitHub Release ────────────────────────────────────────────
+  #
+  # Depends ONLY on the Linux amd64 build. macOS, Linux arm64, and Windows
+  # builds still run in parallel above — they just don't block publishing.
+  # Rationale: a flaky build on any single platform should not hold the
+  # entire release hostage. Linux amd64 binaries are the immediate consumer
+  # (MIOSA Firecracker rootfs install.sh). Other platforms can be added
+  # back to `needs:` and `files:` once their build pipelines are confirmed
+  # stable.
   publish:
-    needs:
-      - build-macos-arm64
-      - build-linux-amd64
-      - build-linux-arm64
-      - build-windows-amd64
+    needs: build-linux-amd64
     runs-on: ubuntu-22.04
     permissions:
       contents: write  # required to create the GitHub Release
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all binaries
+      - name: Download Linux amd64 binary
         uses: actions/download-artifact@v4
         with:
-          path: release-assets
+          name: osa-linux-amd64
+          path: release-assets/osa-linux-amd64
 
-      - name: Make Linux/macOS binaries executable
-        run: |
-          chmod +x release-assets/osa-darwin-arm64/osa-darwin-arm64
-          chmod +x release-assets/osa-linux-amd64/osa-linux-amd64
-          chmod +x release-assets/osa-linux-arm64/osa-linux-arm64
+      - name: Make Linux binary executable
+        run: chmod +x release-assets/osa-linux-amd64/osa-linux-amd64
 
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
@@ -235,7 +237,4 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: |
-            release-assets/osa-darwin-arm64/osa-darwin-arm64
             release-assets/osa-linux-amd64/osa-linux-amd64
-            release-assets/osa-linux-arm64/osa-linux-arm64
-            release-assets/osa-windows-amd64/osa-windows-amd64.exe
