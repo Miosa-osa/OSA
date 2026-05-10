@@ -57,7 +57,7 @@ jobs:
       - name: Install Zig (Burrito pre_check requires zig on PATH)
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.13.0
+          version: 0.15.2
 
       - name: Build Burrito binary (macos_arm64)
         run: mix release burrito
@@ -99,7 +99,7 @@ jobs:
       - name: Install Zig (Burrito pre_check requires zig on PATH)
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.13.0
+          version: 0.15.2
 
       - name: Build Burrito binary (linux_amd64)
         run: mix release burrito
@@ -141,7 +141,7 @@ jobs:
       - name: Install Zig (Burrito pre_check requires zig on PATH)
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.13.0
+          version: 0.15.2
 
       - name: Build Burrito binary (linux_arm64)
         run: mix release burrito
