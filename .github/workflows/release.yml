@@ -54,6 +54,11 @@ jobs:
       - name: Install deps
         run: mix deps.get --only prod
 
+      - name: Install Zig (Burrito pre_check requires zig on PATH)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
       - name: Build Burrito binary (macos_arm64)
         run: mix release burrito
         env:
@@ -91,6 +96,11 @@ jobs:
       - name: Install deps
         run: mix deps.get --only prod
 
+      - name: Install Zig (Burrito pre_check requires zig on PATH)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
       - name: Build Burrito binary (linux_amd64)
         run: mix release burrito
         env:
@@ -127,6 +137,11 @@ jobs:
 
       - name: Install deps
         run: mix deps.get --only prod
+
+      - name: Install Zig (Burrito pre_check requires zig on PATH)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
 
       - name: Build Burrito binary (linux_arm64)
         run: mix release burrito
