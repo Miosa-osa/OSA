@@ -13,7 +13,12 @@ concurrency:
 env:
   MIX_ENV: prod
   ELIXIR_VERSION: "1.17.3"
-  OTP_VERSION: "27.1"
+  # OTP 27 has Mix release bugs (TypedStruct.MixProject and Decimal.Error
+  # 'already compiled' errors during dep walk, plus inspect protocol
+  # changes that crash with {badkey, pretty, []}). Pinned to OTP 26
+  # until upstream Elixir/Mix fixes land. Companion PR #76 pins
+  # erlexec to 2.0.6 (last pre-OTP-27 release).
+  OTP_VERSION: "26.2.5"
 
 jobs:
   # ── macOS arm64 (Apple Silicon) ──────────────────────────────────────
