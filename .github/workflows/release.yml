@@ -54,10 +54,20 @@ jobs:
       - name: Install deps
         run: mix deps.get --only prod
 
-      - name: Install Zig (Burrito pre_check requires zig on PATH)
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.2
+      - name: Install Zig 0.15.2 (Burrito 1.5.0 baseline)
+        # mlugg/setup-zig@v1 hits 404 for Zig 0.15.x because the action
+        # uses the old `zig-<os>-<arch>` naming; Zig 0.15.x uses
+        # `zig-<arch>-<os>`. Manual install bypasses the bad URL pattern.
+        run: |
+          ZIG_VERSION=0.15.2
+          ZIG_TARBALL=zig-aarch64-macos-${ZIG_VERSION}.tar.xz
+          ZIG_DIR=zig-aarch64-macos-${ZIG_VERSION}
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o /tmp/zig.tar.xz
+          mkdir -p $HOME/.local/zig
+          tar -xJf /tmp/zig.tar.xz -C $HOME/.local/zig
+          echo "$HOME/.local/zig/${ZIG_DIR}" >> $GITHUB_PATH
+          ls -la $HOME/.local/zig/${ZIG_DIR}/zig
+          $HOME/.local/zig/${ZIG_DIR}/zig version
 
       - name: Build Burrito binary (macos_arm64)
         run: mix release burrito
@@ -96,10 +106,20 @@ jobs:
       - name: Install deps
         run: mix deps.get --only prod
 
-      - name: Install Zig (Burrito pre_check requires zig on PATH)
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.2
+      - name: Install Zig 0.15.2 (Burrito 1.5.0 baseline)
+        # mlugg/setup-zig@v1 hits 404 for Zig 0.15.x because the action
+        # uses the old `zig-<os>-<arch>` naming; Zig 0.15.x uses
+        # `zig-<arch>-<os>`. Manual install bypasses the bad URL pattern.
+        run: |
+          ZIG_VERSION=0.15.2
+          ZIG_TARBALL=zig-x86_64-linux-${ZIG_VERSION}.tar.xz
+          ZIG_DIR=zig-x86_64-linux-${ZIG_VERSION}
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o /tmp/zig.tar.xz
+          mkdir -p $HOME/.local/zig
+          tar -xJf /tmp/zig.tar.xz -C $HOME/.local/zig
+          echo "$HOME/.local/zig/${ZIG_DIR}" >> $GITHUB_PATH
+          ls -la $HOME/.local/zig/${ZIG_DIR}/zig
+          $HOME/.local/zig/${ZIG_DIR}/zig version
 
       - name: Build Burrito binary (linux_amd64)
         run: mix release burrito
@@ -138,10 +158,20 @@ jobs:
       - name: Install deps
         run: mix deps.get --only prod
 
-      - name: Install Zig (Burrito pre_check requires zig on PATH)
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.2
+      - name: Install Zig 0.15.2 (Burrito 1.5.0 baseline)
+        # mlugg/setup-zig@v1 hits 404 for Zig 0.15.x because the action
+        # uses the old `zig-<os>-<arch>` naming; Zig 0.15.x uses
+        # `zig-<arch>-<os>`. Manual install bypasses the bad URL pattern.
+        run: |
+          ZIG_VERSION=0.15.2
+          ZIG_TARBALL=zig-aarch64-linux-${ZIG_VERSION}.tar.xz
+          ZIG_DIR=zig-aarch64-linux-${ZIG_VERSION}
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o /tmp/zig.tar.xz
+          mkdir -p $HOME/.local/zig
+          tar -xJf /tmp/zig.tar.xz -C $HOME/.local/zig
+          echo "$HOME/.local/zig/${ZIG_DIR}" >> $GITHUB_PATH
+          ls -la $HOME/.local/zig/${ZIG_DIR}/zig
+          $HOME/.local/zig/${ZIG_DIR}/zig version
 
       - name: Build Burrito binary (linux_arm64)
         run: mix release burrito
