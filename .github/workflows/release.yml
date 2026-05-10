@@ -75,7 +75,7 @@ jobs:
           BURRITO_TARGET: macos_arm64
 
       - name: Rename binary
-        run: mv burrito_out/macos_arm64 burrito_out/osa-darwin-arm64
+        run: mv burrito_out/burrito_macos_arm64 burrito_out/osa-darwin-arm64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -127,7 +127,7 @@ jobs:
           BURRITO_TARGET: linux_amd64
 
       - name: Rename binary
-        run: mv burrito_out/linux_amd64 burrito_out/osa-linux-amd64
+        run: mv burrito_out/burrito_linux_amd64 burrito_out/osa-linux-amd64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -179,7 +179,7 @@ jobs:
           BURRITO_TARGET: linux_arm64
 
       - name: Rename binary
-        run: mv burrito_out/linux_arm64 burrito_out/osa-linux-arm64
+        run: mv burrito_out/burrito_linux_arm64 burrito_out/osa-linux-arm64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -245,7 +245,7 @@ jobs:
 
       - name: Rename binary
         shell: bash
-        run: mv burrito_out/windows_amd64.exe burrito_out/osa-windows-amd64.exe
+        run: mv burrito_out/burrito_windows_amd64.exe burrito_out/osa-windows-amd64.exe
 
       - uses: actions/upload-artifact@v4
         with:
