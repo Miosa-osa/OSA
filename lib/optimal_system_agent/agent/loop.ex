@@ -110,7 +110,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def process_message(session_id, message, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 30_000)
+    # The agent loop runs up to `max_turns` iterations with tool calls and
+    # subagents, and is bounded logically by max_turns + max_budget_usd — not
+    # by wall-clock here. The previous 30s default capped every real task far
+    # below the loop's own limits and below the orchestrator's 10-minute
+    # Task.await ceiling, so multi-step work (e.g. codebase exploration) died
+    # with {:timeout}. Default to that same 10-minute ceiling; callers can
+    # still override via opts[:timeout].
+    timeout = Keyword.get(opts, :timeout, 600_000)
     GenServer.call(via(session_id), {:process, message, opts}, timeout)
   end
 
