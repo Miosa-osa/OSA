@@ -32,18 +32,34 @@ impl App {
 
         // Main loop
         loop {
-            // Render
+            // Render once per batch of events.
             terminal.draw(|frame| self.draw(frame))?;
 
-            // Wait for next event
-            match self.event_rx.recv().await {
-                Some(event) => {
-                    let should_quit = self.update(event);
-                    if should_quit {
-                        break;
-                    }
-                }
+            // Block until at least one event is available.
+            let event = match self.event_rx.recv().await {
+                Some(event) => event,
                 None => break, // all senders dropped
+            };
+            let mut should_quit = self.update(event);
+
+            // Coalesce: apply every event already queued before redrawing. During
+            // streaming the backend emits one StreamingToken per token; drawing
+            // per token re-renders the full markdown of the growing message every
+            // time (O(n^2)) and floods the terminal. Draining the backlog here
+            // collapses a burst of tokens into a single redraw — the main lever
+            // for smooth, fast streaming output. Events are still processed in
+            // FIFO order, so behavior is unchanged.
+            while !should_quit {
+                match self.event_rx.try_recv() {
+                    Ok(event) => should_quit = self.update(event),
+                    // Empty (nothing queued) or Disconnected (the next recv()
+                    // returns None and breaks) — stop draining and redraw.
+                    Err(_) => break,
+                }
+            }
+
+            if should_quit {
+                break;
             }
         }
 
