@@ -176,12 +176,20 @@ impl App {
             if !final_text.is_empty() {
                 self.chat.add_agent_continuation(&final_text);
             }
-            self.agent_header_sent = false;
+            // Do NOT reset agent_header_sent here. It is reset only when the user
+            // submits a new prompt (submit_prompt). Resetting it per response
+            // meant a turn that produced more than one agent_response event
+            // (e.g. text → subagent/tool → more text) emitted a second "◈ OSA"
+            // header, visually splitting one answer into chunks. Keeping it set
+            // makes the rest of the turn render as header-less continuations.
         } else {
-            // No tool calls occurred this turn — show the full response
-            // under the "◈ OSA" header as a single block.
+            // First agent output of this turn — show it under the "◈ OSA"
+            // header, then mark the header as sent so any further output this
+            // turn (continued text after a tool/subagent) flows underneath the
+            // same header instead of starting a new block.
             self.chat
                 .add_agent_message(&display_response, signal.as_ref());
+            self.agent_header_sent = true;
         }
 
         // Clear streaming state
