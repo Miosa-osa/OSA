@@ -64,7 +64,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp do_chat(base_url, auth, model, messages, opts) do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
-    system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
+    system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
     thinking = Keyword.get(opts, :thinking)
 
     body =
@@ -129,7 +129,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp do_chat_stream(base_url, auth, model, messages, callback, opts) do
     formatted = format_messages(messages)
     {system_msgs, chat_msgs} = Enum.split_with(formatted, &(&1["role"] == "system"))
-    system_text = Enum.map_join(system_msgs, "\n\n", & &1["content"])
+    system_text = Enum.map_join(system_msgs, "\n\n", &system_content_to_string(&1["content"]))
     thinking = Keyword.get(opts, :thinking)
 
     body =
@@ -176,42 +176,59 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   defp collect_stream(resp, callback, acc) do
-    ref = resp.body
-
     receive do
-      {^ref, {:data, data}} ->
-        {events, new_buffer} = parse_sse_chunk(acc.buffer <> data)
-        acc = %{acc | buffer: new_buffer}
+      message ->
+        # Req delivers `into: :self` chunks tagged with an internal ref. Use
+        # Req.parse_message/2 to decode them — matching on `resp.body` directly
+        # never matches (the messages are tagged with resp.body.ref, not the
+        # struct), which previously hung the stream until the caller timed out.
+        case Req.parse_message(resp, message) do
+          {:ok, parts} ->
+            {acc, done?} =
+              Enum.reduce(parts, {acc, false}, fn
+                {:data, data}, {inner, done?} ->
+                  {events, new_buffer} = parse_sse_chunk(inner.buffer <> data)
+                  inner = %{inner | buffer: new_buffer}
 
-        acc =
-          Enum.reduce(events, acc, fn event, inner_acc ->
-            process_stream_event(event, callback, inner_acc)
-          end)
+                  inner =
+                    Enum.reduce(events, inner, fn event, a ->
+                      process_stream_event(event, callback, a)
+                    end)
 
-        collect_stream(resp, callback, acc)
+                  {inner, done?}
 
-      {^ref, :done} ->
-        # Finalize any in-progress tool call or thinking block
-        acc = finalize_current_tool(acc)
-        acc = finalize_current_thinking(acc)
+                :done, {inner, _done?} ->
+                  {inner, true}
 
-        result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
+                _other, state ->
+                  state
+              end)
 
-        result =
-          if acc.thinking != [],
-            do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
-            else: result
+            if done? do
+              acc = finalize_current_tool(acc)
+              acc = finalize_current_thinking(acc)
 
-        callback.({:done, result})
-        :ok
+              result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
 
-      {^ref, {:error, reason}} ->
-        Logger.error("Anthropic stream error: #{inspect(reason)}")
-        {:error, "Stream error: #{inspect(reason)}"}
+              result =
+                if acc.thinking != [],
+                  do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
+                  else: result
 
-      {{Finch.HTTP1.Pool, _}, _} ->
-        # Finch internal connection pool message — safely discard
-        collect_stream(resp, callback, acc)
+              callback.({:done, result})
+              :ok
+            else
+              collect_stream(resp, callback, acc)
+            end
+
+          {:error, reason} ->
+            Logger.error("Anthropic stream error: #{inspect(reason)}")
+            {:error, "Stream error: #{inspect(reason)}"}
+
+          :unknown ->
+            # Not a message for this response (e.g. Finch pool internals) — skip.
+            collect_stream(resp, callback, acc)
+        end
     after
       620_000 ->
         Logger.error("Anthropic stream timeout after 620s")
@@ -519,6 +536,24 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         msg
     end)
   end
+
+  # Normalize a system message's content to a plain string. Content may arrive
+  # as a binary, or as a list of content blocks (e.g. [%{"text" => "..."}] or
+  # [%{"type" => "text", "text" => "..."}]). map_join over raw list content
+  # crashes with "cannot convert the given list to a string", so flatten here.
+  defp system_content_to_string(content) when is_binary(content), do: content
+  defp system_content_to_string(nil), do: ""
+
+  defp system_content_to_string(content) when is_list(content) do
+    Enum.map_join(content, "\n", fn
+      %{"text" => t} when is_binary(t) -> t
+      %{text: t} when is_binary(t) -> t
+      t when is_binary(t) -> t
+      _ -> ""
+    end)
+  end
+
+  defp system_content_to_string(other), do: to_string(other)
 
   defp maybe_add_system(body, ""), do: body
   defp maybe_add_system(body, nil), do: body
