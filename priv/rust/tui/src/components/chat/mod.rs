@@ -5,6 +5,8 @@ pub mod message;
 pub mod thinking_box;
 pub mod welcome;
 
+use std::cell::Cell;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
@@ -23,6 +25,12 @@ pub struct Chat {
     /// Viewport dimensions
     width: u16,
     height: u16,
+    /// Actual chat-area height from the most recent draw. The cached `height`
+    /// (set on resize) does not subtract the activity-spinner rows that the
+    /// real draw area reserves — using it for scroll bounds left the top of
+    /// long output unreachable until the terminal was enlarged. Captured every
+    /// frame so scroll math matches what is actually on screen.
+    last_viewport_height: Cell<u16>,
     /// Streaming content (live while processing)
     streaming_content: Option<String>,
     /// Whether we have items (vs showing welcome)
@@ -40,6 +48,7 @@ impl Chat {
             scroll_offset: 0,
             width: 80,
             height: 20,
+            last_viewport_height: Cell::new(20),
             streaming_content: None,
             has_messages: false,
             welcome_provider: None,
@@ -272,7 +281,9 @@ impl Chat {
     }
 
     pub fn scroll_up(&mut self, lines: u16) {
-        let max_scroll = self.compute_content_height().saturating_sub(self.height);
+        let max_scroll = self
+            .compute_content_height()
+            .saturating_sub(self.last_viewport_height.get());
         self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
     }
 
@@ -281,7 +292,9 @@ impl Chat {
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = self.compute_content_height().saturating_sub(self.height);
+        self.scroll_offset = self
+            .compute_content_height()
+            .saturating_sub(self.last_viewport_height.get());
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -378,6 +391,11 @@ impl Component for Chat {
         if area.height == 0 || area.width == 0 {
             return;
         }
+
+        // Record the real viewport height so scroll bounds (scroll_up /
+        // scroll_to_top) clamp against what is actually rendered, not the
+        // cached resize-time height that ignores the activity-spinner rows.
+        self.last_viewport_height.set(area.height);
 
         if !self.has_messages {
             welcome::draw_welcome_with_tools(
