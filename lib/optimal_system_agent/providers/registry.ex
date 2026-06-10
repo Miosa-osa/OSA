@@ -558,6 +558,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # DeepSeek
     "deepseek-chat" => 128_000,
     "deepseek-reasoner" => 128_000,
+    # Ollama Cloud
+    "nemotron-3-ultra:cloud" => 1_048_576,
+    "nemotron-3-super:cloud" => 1_048_576,
+    "minimax-m3:cloud" => 1_048_576,
+    "qwen3.5:cloud" => 262_144,
+    "qwen3.6" => 262_144,
+    "glm-5.1:cloud" => 262_144,
+    "glm-5:cloud" => 262_144,
+    "gemma4:cloud" => 262_144,
+    "lfm2.5" => 128_000,
+    "kimi-k2.5:cloud" => 262_144,
+    "deepseek-r1:cloud" => 163_840,
+    "llama4:cloud" => 10_485_760,
     # Groq (context varies by model)
     "llama-3.3-70b-versatile" => 128_000,
     "llama-3.1-8b-instant" => 131_072,

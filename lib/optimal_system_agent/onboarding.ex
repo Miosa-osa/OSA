@@ -118,24 +118,48 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "bring_your_own",
         requires_key: true,
         env_var: "OLLAMA_API_KEY",
-        default_model: "nemotron-3-super:cloud",
+        default_model: "nemotron-3-ultra:cloud",
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
         models: [
+          %{
+            id: "nemotron-3-ultra:cloud",
+            name: "Nemotron 3 Ultra",
+            ctx: 1_048_576,
+            tools: true,
+            recommended: true,
+            note: "high-throughput reasoning + long-running agents"
+          },
+          %{
+            id: "minimax-m3:cloud",
+            name: "MiniMax M3",
+            ctx: 1_048_576,
+            tools: true,
+            vision: true,
+            note: "1M ctx, multimodal coding + agentic workflows"
+          },
           %{
             id: "nemotron-3-super:cloud",
             name: "Nemotron 3 Super",
             ctx: 1_048_576,
             tools: true,
-            recommended: true,
             note: "1M ctx, 120B MoE — best agentic"
           },
           %{
-            id: "kimi-k2.5:cloud",
-            name: "Kimi K2.5",
+            id: "gemma4:cloud",
+            name: "Gemma 4",
             ctx: 262_144,
             tools: true,
-            note: "multimodal + vision + thinking"
+            vision: true,
+            note: "multimodal reasoning, coding, audio-capable family"
+          },
+          %{
+            id: "qwen3.6",
+            name: "Qwen 3.6",
+            ctx: 262_144,
+            tools: true,
+            vision: true,
+            note: "agentic coding + thinking preservation"
           },
           %{
             id: "qwen3.5:cloud",
@@ -145,11 +169,11 @@ defmodule OptimalSystemAgent.Onboarding do
             note: "multimodal, vision + tools"
           },
           %{
-            id: "llama4:cloud",
-            name: "Llama 4 Scout",
-            ctx: 10_485_760,
+            id: "glm-5.1:cloud",
+            name: "GLM-5.1",
+            ctx: 262_144,
             tools: true,
-            note: "10M ctx, 109B MoE"
+            note: "flagship agentic engineering + coding"
           },
           %{
             id: "glm-5:cloud",
@@ -159,11 +183,33 @@ defmodule OptimalSystemAgent.Onboarding do
             note: "744B MoE — reasoning + agentic"
           },
           %{
+            id: "llama4:cloud",
+            name: "Llama 4 Scout",
+            ctx: 10_485_760,
+            tools: true,
+            vision: true,
+            note: "10M ctx, 109B MoE"
+          },
+          %{
             id: "deepseek-r1:cloud",
             name: "DeepSeek R1",
             ctx: 163_840,
             tools: false,
             note: "reasoning only, no tools"
+          },
+          %{
+            id: "lfm2.5",
+            name: "LFM2.5",
+            ctx: 128_000,
+            tools: true,
+            note: "8B edge model, fast reliable tool calling"
+          },
+          %{
+            id: "kimi-k2.5:cloud",
+            name: "Kimi K2.5",
+            ctx: 262_144,
+            tools: true,
+            note: "multimodal + vision + thinking"
           }
         ]
       },
@@ -628,7 +674,7 @@ defmodule OptimalSystemAgent.Onboarding do
               "OSA_DEFAULT_PROVIDER=ollama",
               "OLLAMA_URL=#{base_url || "https://ollama.com"}",
               if(api_key, do: "OLLAMA_API_KEY=#{api_key}", else: nil),
-              if(model, do: "OLLAMA_MODEL=#{model}", else: "OLLAMA_MODEL=nemotron-3-super:cloud")
+              if(model, do: "OLLAMA_MODEL=#{model}", else: "OLLAMA_MODEL=nemotron-3-ultra:cloud")
             ]
 
         "ollama_local" ->
@@ -944,7 +990,7 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
 
         body = %{
-          model: model || "nemotron-3-super:cloud",
+          model: model || "nemotron-3-ultra:cloud",
           messages: [%{role: "user", content: "hi"}],
           stream: false,
           options: %{num_predict: 5}

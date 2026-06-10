@@ -213,13 +213,13 @@ config :optimal_system_agent,
   ],
 
   # Ollama overrides (OLLAMA_API_KEY required for cloud instances)
-  # Falls back to config.exs values (Ollama Cloud + nemotron-3-super:cloud) when no env var set.
+  # Falls back to config.exs values (Ollama Cloud + nemotron-3-ultra:cloud) when no env var set.
   ollama_url:
     System.get_env("OLLAMA_URL") ||
       Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434"),
   ollama_model:
     System.get_env("OLLAMA_MODEL") ||
-      Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-super:cloud"),
+      Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-ultra:cloud"),
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
   # OLLAMA_THINK: set to "true" to enable extended reasoning (kimi-k2, qwen3-thinking, etc.)
   # Default nil → ollama.ex disables thinking for known reasoning models to prevent timeouts.
@@ -257,7 +257,7 @@ config :optimal_system_agent,
              Application.compile_env(
                :optimal_system_agent,
                :ollama_model,
-               "nemotron-3-super:cloud"
+               "nemotron-3-ultra:cloud"
              )
 
          :groq ->

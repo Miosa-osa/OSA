@@ -6,7 +6,7 @@ config :optimal_system_agent,
 
   # Ollama Cloud settings
   ollama_url: "https://ollama.com",
-  ollama_model: "qwen3-next:80b",
+  ollama_model: "nemotron-3-ultra:cloud",
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
 
   # Anthropic settings (set ANTHROPIC_API_KEY env var)
