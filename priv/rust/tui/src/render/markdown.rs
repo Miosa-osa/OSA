@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Convert a Markdown string to a ratatui [`Text`] value.
 ///
@@ -388,7 +390,7 @@ fn detect_checkbox(line: &str) -> Option<(bool, &str)> {
 /// Breaks on word boundaries (spaces), preserving words intact when possible.
 /// Lines longer than `max_width` with no spaces are force-broken.
 fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || input.len() <= max_width {
+    if max_width == 0 || UnicodeWidthStr::width(input) <= max_width {
         return vec![input.to_string()];
     }
 
@@ -397,25 +399,42 @@ fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
     let mut col = 0;
 
     for word in input.split_inclusive(' ') {
-        let word_len = word.len();
-        if col + word_len > max_width && col > 0 {
+        let word_width = UnicodeWidthStr::width(word);
+        if col + word_width > max_width && col > 0 {
             result.push(current.trim_end().to_string());
             current = String::new();
             col = 0;
         }
         // Force-break words longer than max_width
-        if word_len > max_width && col == 0 {
-            let mut remaining = word;
-            while remaining.len() > max_width {
-                let (chunk, rest) = remaining.split_at(max_width);
-                result.push(chunk.to_string());
-                remaining = rest;
+        if word_width > max_width && col == 0 {
+            let mut chunks = Vec::new();
+            let mut chunk = String::new();
+            let mut chunk_width = 0;
+
+            for grapheme in UnicodeSegmentation::graphemes(word, true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if !chunk.is_empty() && chunk_width + grapheme_width > max_width {
+                    chunks.push(chunk);
+                    chunk = String::new();
+                    chunk_width = 0;
+                }
+
+                chunk.push_str(grapheme);
+                chunk_width += grapheme_width;
             }
-            current.push_str(remaining);
-            col = remaining.len();
+
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
+
+            if let Some(last) = chunks.pop() {
+                result.extend(chunks);
+                col = UnicodeWidthStr::width(last.as_str());
+                current = last;
+            }
         } else {
             current.push_str(word);
-            col += word_len;
+            col += word_width;
         }
     }
 
@@ -613,4 +632,18 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
 
     flush_plain!();
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+
+    #[test]
+    fn wraps_streaming_cursor_without_splitting_utf8() {
+        let input = "Notes](https://adtools.org/buyers-guide/ai-news-anthropic-claude-code-█";
+
+        let wrapped = wrap_text(input, 71);
+
+        assert_eq!(wrapped, vec![input]);
+    }
 }
