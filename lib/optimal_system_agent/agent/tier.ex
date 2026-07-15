@@ -117,14 +117,14 @@ defmodule OptimalSystemAgent.Agent.Tier do
     },
 
     # --- Ollama Cloud (all models must support tool calling) ---
-    # Updated 2026-03-16 from ollama.com/library
+    # Updated 2026-07 — verified live against ollama.com/search?c=cloud
     ollama_cloud: %{
-      # multimodal agentic, tools+thinking
-      elite: "kimi-k2.5:cloud",
-      # 120B MoE (12B active), tools+thinking
-      specialist: "nemotron-3-super:cloud",
-      # 30B, tools+thinking, agentic-optimized
-      utility: "nemotron-3-nano:cloud"
+      # Z.ai flagship — long-horizon agentic + coding
+      elite: "glm-5.2:cloud",
+      # 1M ctx, native multimodal agentic
+      specialist: "minimax-m3:cloud",
+      # frontier intelligence built for speed
+      utility: "gemini-3-flash-preview:cloud"
     },
 
     # --- Local providers (dynamic, auto-detect best installed) ---

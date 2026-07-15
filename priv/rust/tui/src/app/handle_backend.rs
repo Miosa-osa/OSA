@@ -338,16 +338,42 @@ impl App {
             },
             BackendEvent::SessionCreated(result) => match result {
                 Ok(resp) => {
-                    self.session_id = resp.id;
+                    let resumed = resp.status.as_deref() == Some("resumed");
+                    self.session_id = resp.id.clone();
                     self.chat.clear();
                     self.tasks.clear();
                     self.stream_buf.clear();
                     self.thinking_buf.clear();
                     self.agent_header_sent = false;
-                    self.toasts.push(
-                        "New session".into(),
-                        crate::components::toast::ToastLevel::Info,
-                    );
+
+                    // The session id just changed — reconnect the SSE stream to it,
+                    // otherwise responses stream to the new session while the TUI is
+                    // still listening on the old one ("waiting for response" forever).
+                    self.start_sse();
+
+                    if resumed {
+                        // Folder already had a conversation — pull its history back in
+                        // so the user sees where they left off (Claude Code style).
+                        let client = self.client.clone();
+                        let tx = self.event_tx.clone();
+                        let sid = resp.id.clone();
+                        tokio::spawn(async move {
+                            let ev = match client.get_session_messages(&sid).await {
+                                Ok(messages) => BackendEvent::SessionMessages(Ok(messages)),
+                                Err(e) => BackendEvent::SessionMessages(Err(e.to_string())),
+                            };
+                            let _ = tx.send(crate::event::Event::Backend(ev));
+                        });
+                        self.toasts.push(
+                            "Resumed this folder's conversation".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    } else {
+                        self.toasts.push(
+                            "New session".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -507,19 +533,21 @@ impl App {
                         if self.state.can_transition_to(AppState::Onboarding) {
                             self.transition(AppState::Onboarding);
                         }
-                    } else if resp.needs_bootstrap {
-                        // CLI wizard completed but bootstrap conversation hasn't happened yet.
-                        // Auto-send the first message to kick off the identity ritual.
-                        info!("Bootstrap needed — auto-sending first message");
-                        self.submit_prompt("Hey, I just set you up. What's good?");
-
-                        // Delete BOOTSTRAP.md so this only fires once.
-                        // The bootstrap context block in the backend will also
-                        // stop injecting now that the file is gone.
-                        if let Ok(home) = std::env::var("HOME") {
-                            let bp = std::path::PathBuf::from(home).join(".osa/BOOTSTRAP.md");
-                            let _ = std::fs::remove_file(&bp);
-                            info!("Removed {:?} — bootstrap won't repeat", bp);
+                    } else {
+                        // Onboarded. Two things, both Claude-Code-style:
+                        // 1. needs_bootstrap: the agent hasn't learned the user yet — do
+                        //    NOT auto-send a greeting or delete anything. Just show the
+                        //    banner and wait. The backend injects "get to know the user"
+                        //    context only while USER.md has no name, so it learns naturally
+                        //    in the first real conversation, then stops on its own.
+                        if resp.needs_bootstrap {
+                            info!("Bootstrap pending — banner, waiting for first prompt");
+                        }
+                        // 2. Resolve THIS folder's session once: resume the folder's prior
+                        //    conversation if it has one, else stay on a fresh blank session.
+                        if !self.dir_session_resolved {
+                            self.dir_session_resolved = true;
+                            self.create_session();
                         }
                     }
                 }

@@ -150,8 +150,15 @@ pub struct SessionMessage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionCreateResponse {
     pub id: String,
-    pub created_at: String,
-    pub title: String,
+    /// "created" for a new session, "resumed" when the folder already had one.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 // === Models ===

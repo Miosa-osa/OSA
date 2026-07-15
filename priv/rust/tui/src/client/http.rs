@@ -196,8 +196,17 @@ impl ApiClient {
     }
 
     /// POST /api/v1/sessions
-    pub async fn create_session(&self) -> Result<SessionCreateResponse> {
-        let resp = self.post("/api/v1/sessions", &serde_json::json!({})).await?;
+    /// Create a session, or resume the one for `working_dir` if it exists
+    /// (directory-scoped, Claude Code style).
+    pub async fn create_session(
+        &self,
+        working_dir: Option<String>,
+    ) -> Result<SessionCreateResponse> {
+        let body = match working_dir {
+            Some(dir) => serde_json::json!({ "working_dir": dir }),
+            None => serde_json::json!({}),
+        };
+        let resp = self.post("/api/v1/sessions", &body).await?;
         Ok(resp.json().await?)
     }
 

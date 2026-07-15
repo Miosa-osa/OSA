@@ -13,13 +13,14 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   @sessions_dir Path.expand("~/.osa/sessions")
   @max_sessions 50
 
-  @doc "Save session state to disk."
-  def save(session_id, messages) when is_list(messages) do
+  @doc "Save session state to disk. `working_dir` tags the session to a folder so it can be resumed there."
+  def save(session_id, messages, working_dir \\ nil) when is_list(messages) do
     File.mkdir_p!(@sessions_dir)
     path = session_path(session_id)
 
     data = %{
       session_id: session_id,
+      working_dir: normalize_dir(working_dir),
       message_count: length(messages),
       saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       messages: sanitize_messages(messages)
@@ -71,9 +72,13 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     e -> {:error, Exception.message(e)}
   end
 
-  @doc "List recent saved sessions."
+  @doc """
+  List recent saved sessions. Pass `working_dir:` to only return sessions for
+  that folder (directory-scoped, Claude Code style).
+  """
   def list(opts \\ []) do
     limit = Keyword.get(opts, :limit, @max_sessions)
+    filter_dir = normalize_dir(Keyword.get(opts, :working_dir))
 
     case File.ls(@sessions_dir) do
       {:ok, files} ->
@@ -86,9 +91,15 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
           %{
             session_id: session_id,
+            working_dir: read_working_dir(path),
             size: stat.size,
             modified_at: stat.mtime
           }
+        end)
+        |> then(fn sessions ->
+          if filter_dir,
+            do: Enum.filter(sessions, &(&1.working_dir == filter_dir)),
+            else: sessions
         end)
         |> Enum.sort_by(& &1.modified_at, {:desc, NaiveDateTime})
         |> Enum.take(limit)
@@ -98,6 +109,14 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   rescue
     _ -> []
+  end
+
+  @doc "Return the most recently saved session_id for a folder, or nil. Powers per-directory resume."
+  def find_latest_for_dir(working_dir) do
+    case list(working_dir: working_dir, limit: 1) do
+      [%{session_id: id} | _] -> id
+      _ -> nil
+    end
   end
 
   @doc "Delete a saved session."
@@ -112,7 +131,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       [{pid, _}] ->
         try do
           state = :sys.get_state(pid)
-          save(session_id, state.messages)
+          save(session_id, state.messages, Map.get(state, :working_dir))
         rescue
           _ -> :ok
         end
@@ -127,6 +146,29 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   defp session_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
     Path.join(@sessions_dir, "#{safe_id}.json")
+  end
+
+  # Canonical form for a working dir so the same folder always matches (expand ~,
+  # strip trailing slash). nil stays nil.
+  defp normalize_dir(nil), do: nil
+
+  defp normalize_dir(dir) when is_binary(dir) do
+    case String.trim(dir) do
+      "" -> nil
+      d -> d |> Path.expand() |> String.trim_trailing("/")
+    end
+  end
+
+  defp normalize_dir(_), do: nil
+
+  # Cheaply read just the working_dir field from a saved session file.
+  defp read_working_dir(path) do
+    with {:ok, json} <- File.read(path),
+         {:ok, %{"working_dir" => dir}} <- Jason.decode(json) do
+      dir
+    else
+      _ -> nil
+    end
   end
 
   # Strip non-serializable data from messages

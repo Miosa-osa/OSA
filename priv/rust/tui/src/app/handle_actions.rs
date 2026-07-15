@@ -639,8 +639,16 @@ impl App {
     pub(crate) fn create_session(&mut self) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
+        // Tag the session to the current folder so it resumes there next time.
+        let working_dir = if self.working_dir.is_empty() {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        } else {
+            Some(self.working_dir.clone())
+        };
         tokio::spawn(async move {
-            let result = client.create_session().await;
+            let result = client.create_session(working_dir).await;
             let event = match result {
                 Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
                 Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),

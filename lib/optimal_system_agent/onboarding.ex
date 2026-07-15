@@ -118,24 +118,69 @@ defmodule OptimalSystemAgent.Onboarding do
         group: "bring_your_own",
         requires_key: true,
         env_var: "OLLAMA_API_KEY",
-        default_model: "nemotron-3-super:cloud",
+        default_model: "glm-5.2:cloud",
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
+        # Current Ollama Cloud catalog (verified live 2026-07). All run with no
+        # local GPU/download — Ollama offloads to its cloud. `:cloud` tags require
+        # either an Ollama Cloud key or a signed-in device identity.
         models: [
           %{
-            id: "nemotron-3-super:cloud",
-            name: "Nemotron 3 Super",
-            ctx: 1_048_576,
+            id: "glm-5.2:cloud",
+            name: "GLM-5.2",
+            ctx: 204_800,
             tools: true,
             recommended: true,
-            note: "1M ctx, 120B MoE — best agentic"
+            note: "Z.ai flagship — long-horizon agentic + coding"
           },
           %{
-            id: "kimi-k2.5:cloud",
-            name: "Kimi K2.5",
+            id: "glm-5.1:cloud",
+            name: "GLM-5.1",
+            ctx: 204_800,
+            tools: true,
+            note: "agentic, state-of-the-art coding"
+          },
+          %{
+            id: "kimi-k2.7-code:cloud",
+            name: "Kimi K2.7 Code",
             ctx: 262_144,
             tools: true,
-            note: "multimodal + vision + thinking"
+            note: "Moonshot coding-focused agentic"
+          },
+          %{
+            id: "kimi-k2.6:cloud",
+            name: "Kimi K2.6",
+            ctx: 262_144,
+            tools: true,
+            note: "multimodal agentic, long-horizon coding"
+          },
+          %{
+            id: "minimax-m3:cloud",
+            name: "MiniMax M3",
+            ctx: 1_048_576,
+            tools: true,
+            note: "1M ctx, native multimodal + agentic"
+          },
+          %{
+            id: "deepseek-v4-pro:cloud",
+            name: "DeepSeek V4 Pro",
+            ctx: 163_840,
+            tools: true,
+            note: "frontier MoE, multiple reasoning modes"
+          },
+          %{
+            id: "deepseek-v4-flash:cloud",
+            name: "DeepSeek V4 Flash",
+            ctx: 163_840,
+            tools: true,
+            note: "284B MoE / 13B active — fast"
+          },
+          %{
+            id: "gpt-oss:120b-cloud",
+            name: "GPT-OSS 120B",
+            ctx: 131_072,
+            tools: true,
+            note: "OpenAI open-weight, strong reasoning"
           },
           %{
             id: "qwen3.5:cloud",
@@ -145,25 +190,25 @@ defmodule OptimalSystemAgent.Onboarding do
             note: "multimodal, vision + tools"
           },
           %{
-            id: "llama4:cloud",
-            name: "Llama 4 Scout",
-            ctx: 10_485_760,
+            id: "gemini-3-flash-preview:cloud",
+            name: "Gemini 3 Flash",
+            ctx: 1_048_576,
             tools: true,
-            note: "10M ctx, 109B MoE"
+            note: "frontier intelligence built for speed"
           },
           %{
-            id: "glm-5:cloud",
-            name: "GLM-5",
-            ctx: 262_144,
+            id: "nemotron-3-super:cloud",
+            name: "Nemotron 3 Super",
+            ctx: 1_048_576,
             tools: true,
-            note: "744B MoE — reasoning + agentic"
+            note: "1M ctx, 120B MoE — efficient agentic"
           },
           %{
-            id: "deepseek-r1:cloud",
-            name: "DeepSeek R1",
-            ctx: 163_840,
-            tools: false,
-            note: "reasoning only, no tools"
+            id: "gemma4:cloud",
+            name: "Gemma 4",
+            ctx: 131_072,
+            tools: true,
+            note: "frontier reasoning + multimodal"
           }
         ]
       },

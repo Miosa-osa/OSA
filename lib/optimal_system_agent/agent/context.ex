@@ -362,27 +362,36 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Dynamic block builders
   # ---------------------------------------------------------------------------
 
-  # Bootstrap block — injected only during first-run when ~/.osa/BOOTSTRAP.md exists.
-  # Priority 0 (highest) ensures it appears before all other dynamic context.
-  # Self-deleting: agent removes the file when bootstrapping is complete.
+  # "Get to know the user" block. Injected only while the agent hasn't learned
+  # who the user is yet — the completion signal is real state (USER.md has a name),
+  # NOT a self-deleting file. Once the agent has filled in USER.md, this stops on
+  # its own, so the agent behaves normally instead of re-introducing itself.
   defp bootstrap_block do
     bootstrap_dir =
       Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
       |> Path.expand()
 
-    bootstrap_path = Path.join(bootstrap_dir, "BOOTSTRAP.md")
+    if user_known?(bootstrap_dir) do
+      nil
+    else
+      bootstrap_path = Path.join(bootstrap_dir, "BOOTSTRAP.md")
 
-    if File.exists?(bootstrap_path) do
       case File.read(bootstrap_path) do
         {:ok, content} ->
           content = String.trim(content)
-          if content == "", do: nil, else: "## FIRST RUN — Bootstrap Active\n\n#{content}"
+          if content == "", do: nil, else: "## GET TO KNOW THE USER\n\n#{content}"
 
         {:error, _} ->
           nil
       end
-    else
-      nil
+    end
+  end
+
+  # True once USER.md has a name filled in (not the blank template).
+  defp user_known?(dir) do
+    case File.read(Path.join(dir, "USER.md")) do
+      {:ok, content} -> Regex.match?(~r/-\s*\*\*Name:\*\*\s*\S+/, content)
+      {:error, _} -> false
     end
   end
 

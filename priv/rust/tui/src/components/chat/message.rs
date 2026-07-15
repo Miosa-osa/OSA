@@ -161,20 +161,29 @@ impl Message {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
+        self.draw_scrolled(frame, area, 0);
+    }
+
+    /// Draw with `scroll_top` lines skipped from the top of the message. Used when
+    /// a message is taller than the space above it in the scroll viewport, so its
+    /// BOTTOM is shown (adjacent to the message below) instead of always its top.
+    pub fn draw_scrolled(&self, frame: &mut Frame, area: Rect, scroll_top: u16) {
         let theme = style::theme();
 
         match self.msg_type {
-            MessageType::User => self.draw_user(frame, area, &theme),
-            MessageType::Agent => self.draw_agent(frame, area, &theme),
-            MessageType::AgentContinuation => self.draw_agent_continuation(frame, area, &theme),
+            MessageType::User => self.draw_user(frame, area, &theme, scroll_top),
+            MessageType::Agent => self.draw_agent(frame, area, &theme, scroll_top),
+            MessageType::AgentContinuation => {
+                self.draw_agent_continuation(frame, area, &theme, scroll_top)
+            }
             MessageType::SystemInfo => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_system)
+                self.draw_system(frame, area, &theme, theme.colors.msg_border_system, scroll_top)
             }
             MessageType::SystemWarning => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_warning)
+                self.draw_system(frame, area, &theme, theme.colors.msg_border_warning, scroll_top)
             }
             MessageType::SystemError => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_error)
+                self.draw_system(frame, area, &theme, theme.colors.msg_border_error, scroll_top)
             }
             MessageType::ToolCall => {
                 self.draw_tool_call(frame, area, &theme)
@@ -188,22 +197,27 @@ impl Message {
         }
     }
 
-    fn draw_user(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
+    fn draw_user(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
 
-        let label_area = Rect::new(area.x, area.y, area.width, 1);
-        let left_spans = vec![
-            Span::styled("❯  ", theme.prompt_char()),
-            Span::styled("You", theme.user_label()),
-        ];
-        let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
-        let label = build_header_line(left_spans, ts_text, area.width, theme);
-        frame.render_widget(Paragraph::new(label), label_area);
+        let mut y = area.y;
+        if scroll_top == 0 {
+            let label_area = Rect::new(area.x, area.y, area.width, 1);
+            let left_spans = vec![
+                Span::styled("❯  ", theme.prompt_char()),
+                Span::styled("You", theme.user_label()),
+            ];
+            let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+            let label = build_header_line(left_spans, ts_text, area.width, theme);
+            frame.render_widget(Paragraph::new(label), label_area);
+            y = area.y + 1;
+        }
 
-        if area.height > 1 {
-            let content_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        let body_h = (area.y + area.height).saturating_sub(y);
+        if body_h > 0 {
+            let content_area = Rect::new(area.x, y, area.width, body_h);
             let block = Block::default()
                 .borders(Borders::LEFT)
                 .border_type(BorderType::Thick)
@@ -211,52 +225,62 @@ impl Message {
 
             let paragraph = Paragraph::new(self.content.as_str())
                 .block(block)
-                .wrap(Wrap { trim: false });
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_top.saturating_sub(1), 0));
             frame.render_widget(paragraph, content_area);
         }
     }
 
-    fn draw_agent(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
+    fn draw_agent(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
 
-        let label_area = Rect::new(area.x, area.y, area.width, 1);
-        let mut label_spans = vec![
-            Span::styled("◈ ", theme.agent_label()),
-            Span::styled("OSA", theme.agent_label()),
-        ];
+        // When scrolled into the message, the "◈ OSA" header (line 0) is above the
+        // viewport — skip it and offset the body by the remaining scrolled lines.
+        let mut y = area.y;
+        if scroll_top == 0 {
+            let label_area = Rect::new(area.x, area.y, area.width, 1);
+            let mut label_spans = vec![
+                Span::styled("◈ ", theme.agent_label()),
+                Span::styled("OSA", theme.agent_label()),
+            ];
 
-        if let Some(ref signal) = self.signal {
-            if !signal.mode.is_empty() {
-                label_spans.push(Span::styled("  ", Style::default()));
-                label_spans.push(Span::styled(
-                    format!("[{}/{}]", signal.mode, signal.genre),
-                    theme.status_signal(),
-                ));
+            if let Some(ref signal) = self.signal {
+                if !signal.mode.is_empty() {
+                    label_spans.push(Span::styled("  ", Style::default()));
+                    label_spans.push(Span::styled(
+                        format!("[{}/{}]", signal.mode, signal.genre),
+                        theme.status_signal(),
+                    ));
+                }
             }
+
+            let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+            let label = build_header_line(label_spans, ts_text, area.width, theme);
+            frame.render_widget(Paragraph::new(label), label_area);
+            y = area.y + 1;
         }
 
-        let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
-        let label = build_header_line(label_spans, ts_text, area.width, theme);
-        frame.render_widget(Paragraph::new(label), label_area);
-
-        if area.height > 1 {
-            let content_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        let body_h = (area.y + area.height).saturating_sub(y);
+        if body_h > 0 {
+            let content_area = Rect::new(area.x, y, area.width, body_h);
             let block = Block::default()
                 .borders(Borders::LEFT)
                 .border_type(BorderType::Thick)
                 .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
             let styled_text = crate::render::markdown::render_markdown(&self.content, content_area.width.saturating_sub(2));
+            let body_scroll = scroll_top.saturating_sub(1); // header was line 0
             let paragraph = Paragraph::new(styled_text)
-                .block(block);
+                .block(block)
+                .scroll((body_scroll, 0));
             frame.render_widget(paragraph, content_area);
         }
     }
 
     /// Draw a continuation chunk — same left-border style as Agent but no "◈ OSA" header.
-    fn draw_agent_continuation(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
+    fn draw_agent_continuation(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
@@ -270,8 +294,10 @@ impl Message {
             &self.content,
             area.width.saturating_sub(2),
         );
+        // No header on a continuation, so scroll_top applies straight to the body.
         let paragraph = Paragraph::new(styled_text)
-            .block(block);
+            .block(block)
+            .scroll((scroll_top, 0));
         frame.render_widget(paragraph, area);
     }
 
@@ -281,6 +307,7 @@ impl Message {
         area: Rect,
         theme: &style::Theme,
         border_color: Color,
+        scroll_top: u16,
     ) {
         let block = Block::default()
             .borders(Borders::LEFT)
@@ -302,7 +329,8 @@ impl Message {
         );
         let paragraph = Paragraph::new(text)
             .block(block)
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_top, 0));
         frame.render_widget(paragraph, area);
     }
 

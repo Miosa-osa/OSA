@@ -123,6 +123,40 @@ impl App {
                 self.create_session();
                 false
             }
+            // Ctrl+V — paste from the system clipboard directly (via arboard).
+            // Complements the terminal's bracketed paste, which mouse-capture and
+            // some paste methods (middle-click, right-click) don't deliver.
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) if self.state.allows_input() => {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                    Ok(text) if !text.is_empty() => {
+                        let capped: String =
+                            text.chars().take(super::MAX_MESSAGE_SIZE).collect();
+                        let lines = capped.lines().count();
+                        self.input.insert_str(&capped);
+                        if lines >= 5 {
+                            self.toasts.push(
+                                format!("Pasted {} lines", lines),
+                                crate::components::toast::ToastLevel::Info,
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        self.toasts.push(
+                            "Clipboard is empty".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
+                    Err(e) => {
+                        // Surface the failure instead of silently doing nothing, so
+                        // clipboard access problems are diagnosable.
+                        self.toasts.push(
+                            format!("Paste failed: {} (try Ctrl+Shift+V)", e),
+                            crate::components::toast::ToastLevel::Warning,
+                        );
+                    }
+                }
+                false
+            }
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                 self.config.sidebar_enabled = !self.config.sidebar_enabled;
                 let _ = self.config.save();

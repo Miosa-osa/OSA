@@ -47,7 +47,12 @@ pub fn draw_welcome_with_tools(
     let prov_display = provider.unwrap_or("not configured");
     let model_display = model.unwrap_or("none");
 
-    let box_width: usize = 52;
+    // Responsive: fit the box to the pane instead of a fixed 52 cols, so narrow
+    // panes (e.g. many tiled terminals) reflow cleanly instead of clipping.
+    // Reserve 4 cols for the "│ " / " │" borders. Floor keeps it readable; the
+    // full ASCII logo only fits at ~44+, so it's gated below.
+    let box_width: usize = (area.width as usize).saturating_sub(4).clamp(20, 52);
+    let show_logo = box_width >= 44;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Helper: pad content to box_width and wrap with left+right border
@@ -91,26 +96,38 @@ pub fn draw_welcome_with_tools(
     // Empty line
     lines.push(make_bordered("", Style::default()));
 
-    // Logo lines (centered, with gradient)
-    for art_line in LOGO {
-        let char_count = art_line.chars().count();
-        let pad = (box_width.saturating_sub(char_count)) / 2;
-        let inner = box_width;
-        let right_pad = inner.saturating_sub(pad + char_count);
+    // Logo lines (centered, with gradient) — only when the box is wide enough
+    // to hold the full ASCII art. On narrow panes, show a compact "O S A" instead
+    // so nothing overflows the border.
+    if show_logo {
+        for art_line in LOGO {
+            let char_count = art_line.chars().count();
+            let pad = (box_width.saturating_sub(char_count)) / 2;
+            let inner = box_width;
+            let right_pad = inner.saturating_sub(pad + char_count);
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled(left.to_string(), Style::default().fg(border_color)));
-        spans.push(Span::raw(" ".repeat(pad)));
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            spans.push(Span::styled(left.to_string(), Style::default().fg(border_color)));
+            spans.push(Span::raw(" ".repeat(pad)));
 
-        // Gradient spans for the logo
-        let gradient_line = style::gradient::theme_gradient(art_line, true);
-        for span in gradient_line.spans {
-            spans.push(span);
+            // Gradient spans for the logo
+            let gradient_line = style::gradient::theme_gradient(art_line, true);
+            for span in gradient_line.spans {
+                spans.push(span);
+            }
+
+            spans.push(Span::raw(" ".repeat(right_pad)));
+            spans.push(Span::styled(right.to_string(), Style::default().fg(border_color)));
+            lines.push(Line::from(spans));
         }
-
-        spans.push(Span::raw(" ".repeat(right_pad)));
-        spans.push(Span::styled(right.to_string(), Style::default().fg(border_color)));
-        lines.push(Line::from(spans));
+    } else {
+        let compact = "O S A";
+        let pad = (box_width.saturating_sub(compact.len())) / 2;
+        let centered = format!("{}{}", " ".repeat(pad), compact);
+        lines.push(make_bordered(
+            &centered,
+            Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+        ));
     }
 
     // Empty line
@@ -142,11 +159,17 @@ pub fn draw_welcome_with_tools(
     // Blank line
     lines.push(Line::from(""));
 
-    // Tips (below the box)
-    lines.push(Line::from(Span::styled(
-        "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette",
-        theme.welcome_tip(),
-    )));
+    // Tips (below the box) — pick the longest variant that fits the pane so it
+    // never clips mid-word on narrow terminals.
+    let w = area.width as usize;
+    let tip = if w >= 70 {
+        "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette"
+    } else if w >= 40 {
+        "  /help commands  \u{00b7}  Ctrl+K palette"
+    } else {
+        "  /help  \u{00b7}  Ctrl+K"
+    };
+    lines.push(Line::from(Span::styled(tip, theme.welcome_tip())));
 
     // Render at the TOP (not centered)
     let content_height = lines.len() as u16;

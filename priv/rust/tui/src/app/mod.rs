@@ -137,6 +137,8 @@ pub struct App {
 
     // Welcome message injected flag
     pub welcome_injected: bool,
+    // Set once we've resolved this folder's session on launch (resume-or-create).
+    pub dir_session_resolved: bool,
 }
 
 impl App {
@@ -235,6 +237,7 @@ impl App {
 
             voice: VoiceState::new(),
             welcome_injected: false,
+            dir_session_resolved: false,
         })
     }
 

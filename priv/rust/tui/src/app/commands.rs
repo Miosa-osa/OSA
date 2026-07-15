@@ -239,7 +239,7 @@ impl App {
                 let client = self.client.clone();
                 let tx = self.event_tx.clone();
                 tokio::spawn(async move {
-                    match client.create_session().await {
+                    match client.create_session(None).await {
                         Ok(resp) => {
                             let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Ok(resp))));
                         }

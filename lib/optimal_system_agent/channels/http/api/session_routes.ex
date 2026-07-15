@@ -64,22 +64,37 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   post "/" do
     user_id = conn.assigns[:user_id] || "anonymous"
+    working_dir = conn.body_params["working_dir"]
 
-    case SessionManager.create_session(user_id: user_id, channel: :http) do
-      {:ok, %{session_id: session_id}} ->
-        body = Jason.encode!(%{id: session_id, status: "created"})
+    # Directory-scoped resume (Claude Code style): if this folder already has a
+    # saved session, hand it back instead of starting fresh. New folder → new session.
+    existing =
+      working_dir &&
+        OptimalSystemAgent.Agent.SessionPersistence.find_latest_for_dir(working_dir)
 
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(201, body)
+    if existing do
+      body = Jason.encode!(%{id: existing, status: "resumed", working_dir: working_dir})
 
-      {:error, _reason} ->
-        json_error(
-          conn,
-          500,
-          "session_create_failed",
-          "An internal error occurred while creating the session"
-        )
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, body)
+    else
+      case SessionManager.create_session(user_id: user_id, channel: :http) do
+        {:ok, %{session_id: session_id}} ->
+          body = Jason.encode!(%{id: session_id, status: "created", working_dir: working_dir})
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(201, body)
+
+        {:error, _reason} ->
+          json_error(
+            conn,
+            500,
+            "session_create_failed",
+            "An internal error occurred while creating the session"
+          )
+      end
     end
   end
 

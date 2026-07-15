@@ -494,7 +494,10 @@ impl Component for Chat {
             let render_h = h.min(available);
             y -= render_h;
             let msg_area = Rect::new(area.x, y, area.width, render_h);
-            msg.draw(frame, msg_area);
+            // If the message is taller than the space above, it's the top of the
+            // viewport — skip its top lines so its BOTTOM shows (not always its top),
+            // which is what makes scrolling through a long single reply work.
+            msg.draw_scrolled(frame, msg_area, h.saturating_sub(render_h));
             // spacing
             if y > area.y {
                 y -= 1;
