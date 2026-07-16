@@ -58,6 +58,12 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       {Registry, keys: :unique, name: OptimalSystemAgent.MCP.Registry},
       {DynamicSupervisor, name: OptimalSystemAgent.MCP.Supervisor, strategy: :one_for_one},
 
+      # MCP client manager — reads ~/.osa/mcp.json, starts ServerSessions, and
+      # owns the aggregate mcp_tools map in :persistent_term. Starts AFTER
+      # Tools.Registry (so its persistent_term key exists) and after the MCP
+      # Registry + Supervisor it starts children under.
+      OptimalSystemAgent.MCP.Client.Manager,
+
       # Telemetry metrics (per-tool/per-provider execution stats)
       OptimalSystemAgent.Telemetry.Metrics,
 

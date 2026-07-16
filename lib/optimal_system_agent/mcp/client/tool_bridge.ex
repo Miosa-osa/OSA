@@ -1,0 +1,137 @@
+defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
+  @moduledoc """
+  Pure translation layer between MCP tool schemas and OSA's tool registry.
+
+  Two responsibilities:
+
+    * `build_tools/2` — turn a server's raw MCP tool schemas into the OSA
+      `mcp_tools` map, keyed by the `mcp__<server>__<tool>` convention, with
+      `should_defer?: true` so MCP tools stay out of the base system prompt and
+      are surfaced on demand via `tool_search`.
+
+    * `call/2` — given a prefixed tool name and arguments, parse out the server
+      and original tool name, invoke the `ServerSession`, and normalize the
+      MCP `content[]` result into OSA's tool-result shape.
+
+  Naming: `mcp__<server>__<tool>` (double underscore as separator). The server
+  segment is already sanitized to `[a-z0-9_]` by `MCP.Config`.
+  """
+
+  alias OptimalSystemAgent.MCP.Client.ServerSession
+  alias OptimalSystemAgent.MCP.Protocol.Messages
+
+  @prefix "mcp__"
+  @sep "__"
+
+  @doc "Build the OSA `mcp_tools` map fragment for one server's tool schemas."
+  @spec build_tools(String.t(), [map()]) :: %{String.t() => map()}
+  def build_tools(server_name, schemas) when is_list(schemas) do
+    schemas
+    |> Enum.map(fn schema -> build_entry(server_name, schema) end)
+    |> Enum.reject(&is_nil/1)
+    |> Map.new()
+  end
+
+  @doc "The `mcp__<server>__<tool>` key for a server/tool pair."
+  @spec tool_key(String.t(), String.t()) :: String.t()
+  def tool_key(server_name, tool_name) do
+    @prefix <> server_name <> @sep <> tool_name
+  end
+
+  @doc """
+  Parse a prefixed tool name into `{:ok, {server, tool}}` or `:error`.
+
+  The tool segment may itself contain `__`, so we split on the FIRST `__`
+  after the server segment: `mcp__srv__a__b` → `{"srv", "a__b"}`.
+  """
+  @spec parse_key(String.t()) :: {:ok, {String.t(), String.t()}} | :error
+  def parse_key(@prefix <> rest) do
+    case String.split(rest, @sep, parts: 2) do
+      [server, tool] when server != "" and tool != "" -> {:ok, {server, tool}}
+      _ -> :error
+    end
+  end
+
+  def parse_key(_), do: :error
+
+  @doc "Whether a tool name uses the MCP prefix."
+  @spec mcp_tool?(String.t()) :: boolean()
+  def mcp_tool?(name) when is_binary(name), do: String.starts_with?(name, @prefix)
+  def mcp_tool?(_), do: false
+
+  @doc """
+  Execute an MCP tool by its prefixed name.
+
+  Returns OSA's tool-result shape:
+    * `{:ok, binary}` — text result
+    * `{:ok, {:image, %{media_type, data, path}}}` — image result
+    * `{:error, reason}`
+  """
+  @spec call(String.t(), map()) ::
+          {:ok, binary()} | {:ok, {:image, map()}} | {:error, term()}
+  def call(prefixed_name, arguments) do
+    case parse_key(prefixed_name) do
+      {:ok, {server, tool}} ->
+        do_call(server, tool, arguments || %{})
+
+      :error ->
+        {:error, "Invalid MCP tool name: #{prefixed_name}"}
+    end
+  end
+
+  # ── Private ───────────────────────────────────────────────────────────
+
+  # Extracted for testability: the ServerSession module is looked up at call
+  # time so tests can supply a canned session module via the app env.
+  defp do_call(server, tool, arguments) do
+    session_mod =
+      Application.get_env(:optimal_system_agent, :mcp_server_session, ServerSession)
+
+    case session_mod.call_tool(server, tool, strip_internal(arguments)) do
+      {:ok, result} -> Messages.normalize_tool_result(result)
+      {:error, reason} -> {:error, mcp_error_message(reason)}
+    end
+  end
+
+  defp build_entry(_server_name, schema) when not is_map(schema), do: nil
+
+  defp build_entry(server_name, schema) do
+    original = schema["name"]
+
+    if is_binary(original) and original != "" do
+      key = tool_key(server_name, original)
+
+      {key,
+       %{
+         original_name: original,
+         server: server_name,
+         description: schema["description"] || "MCP tool #{original} on #{server_name}",
+         input_schema: schema["inputSchema"] || %{"type" => "object", "properties" => %{}},
+         should_defer?: true
+       }}
+    else
+      nil
+    end
+  end
+
+  # Drop OSA-injected internal args (e.g. __session_id__) before forwarding
+  # to the remote server.
+  defp strip_internal(arguments) when is_map(arguments) do
+    arguments
+    |> Enum.reject(fn {k, _v} ->
+      key = to_string(k)
+      String.starts_with?(key, "__") and String.ends_with?(key, "__")
+    end)
+    |> Map.new()
+  end
+
+  defp strip_internal(other), do: other
+
+  defp mcp_error_message({:mcp_error, %{message: message}}) when is_binary(message),
+    do: "MCP error: #{message}"
+
+  defp mcp_error_message(:not_ready), do: "MCP server not ready"
+  defp mcp_error_message(:timeout), do: "MCP tool call timed out"
+  defp mcp_error_message(reason) when is_binary(reason), do: reason
+  defp mcp_error_message(reason), do: "MCP tool error: #{inspect(reason)}"
+end

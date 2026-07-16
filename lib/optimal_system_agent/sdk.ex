@@ -528,11 +528,13 @@ defmodule OptimalSystemAgent.SDK do
   # ── MCP ──────────────────────────────────────────────────────────────
 
   defmodule MCP do
-    @moduledoc "SDK MCP server management facade. MCP.Manager not yet implemented."
+    @moduledoc "SDK MCP server management facade — delegates to MCP.Client.Manager."
 
-    def list_servers, do: []
-    def list_tools, do: []
-    def reload_servers, do: :ok
+    alias OptimalSystemAgent.MCP.Client.Manager
+
+    def list_servers, do: Manager.list_servers()
+    def list_tools, do: Manager.list_tools()
+    def reload_servers, do: Manager.reload()
   end
 
   # ── Supervisor ───────────────────────────────────────────────────────

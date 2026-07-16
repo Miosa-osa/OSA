@@ -49,13 +49,24 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   @doc "List only non-deferred tools (for system prompt injection). Reduces prompt size."
   def list_active do
+    builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+    mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
+
     list_tools_direct()
     |> Enum.reject(fn tool ->
-      builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
+      cond do
+        # Built-in tool declaring itself deferred.
+        (mod = Map.get(builtin_tools, tool.name)) != nil ->
+          function_exported?(mod, :deferred?, 0) and mod.deferred?()
 
-      case Map.get(builtin_tools, tool.name) do
-        nil -> false
-        mod -> function_exported?(mod, :deferred?, 0) and mod.deferred?()
+        # MCP tool marked should_defer? — CRITICAL: keep these out of the base
+        # prompt so MCP tools don't flood the system prompt. They stay
+        # discoverable mid-turn via `tool_search`.
+        (info = Map.get(mcp_tools, tool.name)) != nil ->
+          Map.get(info, :should_defer?, false)
+
+        true ->
+          false
       end
     end)
   end
@@ -141,7 +152,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
         case Map.get(mcp_tools, tool_name) do
           nil -> {:error, "Unknown tool: #{tool_name}"}
-          _mcp_info -> {:error, "MCP tools not available in this build"}
+          _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
         end
 
       mod ->
@@ -167,7 +178,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
         case Map.get(mcp_tools, tool_name) do
           nil -> {:error, "Unknown tool: #{tool_name}"}
-          _mcp_info -> {:error, "MCP tools not available in this build"}
+          _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
         end
 
       mod ->
@@ -244,8 +255,20 @@ defmodule OptimalSystemAgent.Tools.Registry do
     end
   end
 
-  @doc "Discover MCP tools from all running servers and register them. No-op in this build."
-  def register_mcp_tools, do: :ok
+  @doc """
+  Discover MCP tools from all running servers and register them.
+
+  Delegates to `MCP.Client.Manager.reload/0`, which re-reads `~/.osa/mcp.json`,
+  reconciles running server sessions, and republishes the aggregate
+  `mcp_tools` map into `:persistent_term` under this module's key.
+  """
+  def register_mcp_tools do
+    OptimalSystemAgent.MCP.Client.Manager.reload()
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   @doc "List tool and skill documentation (for context injection)."
   def list_docs do
@@ -548,7 +571,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
           case Map.get(mcp_tools, tool_name) do
             nil -> {:error, "Unknown tool: #{tool_name}"}
-            _mcp_info -> {:error, "MCP tools not available in this build"}
+            _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
           end
 
         mod ->
