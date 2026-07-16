@@ -354,19 +354,29 @@ impl Component for Activity {
         let spinner_frames = ["\u{25cb}", "\u{25d4}", "\u{25d1}", "\u{25d5}", "\u{25cf}"];
         let spinner_char = spinner_frames[(self.phrase_tick as usize / 2) % spinner_frames.len()];
 
+        // Claude-Code-style rotating "thinking" word — switches every ~2s so the
+        // wait feels alive instead of a static "thinking".
+        const THINKING_WORDS: &[&str] = &[
+            "Thinking", "Pondering", "Noodling", "Simmering", "Percolating",
+            "Ruminating", "Cogitating", "Mulling", "Marinating", "Brewing",
+            "Conjuring", "Divining", "Puzzling", "Musing", "Scheming",
+            "Deliberating", "Contemplating", "Wrangling", "Untangling", "Computing",
+        ];
+        let think_word = THINKING_WORDS[(elapsed as usize / 2) % THINKING_WORDS.len()];
+
         // Phase-driven spinner line — shows real backend state
         let elapsed_str = format_elapsed(elapsed);
         let mut spinner_spans: Vec<Span<'_>> = match self.phase {
             ProcessingPhase::Waiting => vec![
                 Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                Span::styled("waiting for response...", theme.prefix_active()),
+                Span::styled(format!("{}\u{2026}", think_word), theme.prefix_active()),
                 Span::styled(format!(" ({})", elapsed_str), theme.faint()),
             ],
             ProcessingPhase::Thinking => {
                 let chars = format_count(self.thinking_chars);
                 vec![
                     Span::styled(format!("\u{1f9e0} {} ", spinner_char), theme.spinner()),
-                    Span::styled("thinking", theme.prefix_active()),
+                    Span::styled(format!("{}\u{2026}", think_word), theme.prefix_active()),
                     Span::styled(format!(" ({})", elapsed_str), theme.faint()),
                     Span::styled(format!(" \u{00b7} {} chars", chars), theme.faint()),
                 ]
