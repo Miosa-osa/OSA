@@ -144,6 +144,16 @@ defmodule OptimalSystemAgent.Tools.Registry do
   MCP tools (prefixed `mcp_`) are routed to MCP.Client.call_tool/2.
   """
   def execute_direct(tool_name, arguments) do
+    case circuit_breaker(tool_name, arguments) do
+      {:blocked, reason} ->
+        {:error, circuit_breaker_message(tool_name, reason)}
+
+      :ok ->
+        execute_direct_unguarded(tool_name, arguments)
+    end
+  end
+
+  defp execute_direct_unguarded(tool_name, arguments) do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
     case Map.get(builtin_tools, tool_name) do
@@ -170,6 +180,36 @@ defmodule OptimalSystemAgent.Tools.Registry do
   :persistent_term for module lookup.
   """
   def execute(tool_name, arguments) do
+    case circuit_breaker(tool_name, arguments) do
+      {:blocked, reason} ->
+        # Authoritative enforcement point. Every non-loop caller (MCP server
+        # dispatcher, Tools.Pipeline, HTTP tool routes, sub-agent Tasks) reaches
+        # tool execution through here, so the hard circuit-breaker cannot be
+        # bypassed by skipping the agent loop.
+        {:error, circuit_breaker_message(tool_name, reason)}
+
+      :ok ->
+        execute_unguarded(tool_name, arguments)
+    end
+  end
+
+  # Hard, tier-independent circuit-breaker enforced at the tool-execution
+  # MECHANISM (this module) so every caller — the agent loop, the MCP server
+  # dispatcher, Tools.Pipeline, the cron scheduler, and sub-agent Tasks — is
+  # covered. It cannot be bypassed by skipping the agent loop.
+  defp circuit_breaker(tool_name, arguments) do
+    OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(%{
+      name: tool_name,
+      arguments: arguments
+    })
+  end
+
+  defp circuit_breaker_message(tool_name, reason) do
+    "Blocked by a hard safety limit (#{tool_name}): #{reason}. " <>
+      "This action is never permitted, in any permission tier."
+  end
+
+  defp execute_unguarded(tool_name, arguments) do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
     case Map.get(builtin_tools, tool_name) do
@@ -565,19 +605,25 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   def handle_call({:execute, tool_name, arguments}, _from, state) do
     result =
-      case Map.get(state.builtin_tools, tool_name) do
-        nil ->
-          mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
+      case circuit_breaker(tool_name, arguments) do
+        {:blocked, reason} ->
+          {:error, circuit_breaker_message(tool_name, reason)}
 
-          case Map.get(mcp_tools, tool_name) do
-            nil -> {:error, "Unknown tool: #{tool_name}"}
-            _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
-          end
+        :ok ->
+          case Map.get(state.builtin_tools, tool_name) do
+            nil ->
+              mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
-        mod ->
-          case validate_arguments(mod, arguments) do
-            :ok -> mod.execute(arguments)
-            {:error, _reason} = error -> error
+              case Map.get(mcp_tools, tool_name) do
+                nil -> {:error, "Unknown tool: #{tool_name}"}
+                _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
+              end
+
+            mod ->
+              case validate_arguments(mod, arguments) do
+                :ok -> mod.execute(arguments)
+                {:error, _reason} = error -> error
+              end
           end
       end
 
