@@ -148,6 +148,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
+  Proactively compact the live session's context buffer using
+  `ProactiveCompaction.compact/1` — folds older turns into a high-recall
+  summary before the window fills.
+
+  Returns `{:ok, %{messages_before, messages_after, tokens_before, tokens_after}}`
+  or `{:error, :no_session}`.
+  """
+  @spec proactive_compact(String.t()) :: {:ok, map()} | {:error, :no_session | term()}
+  def proactive_compact(session_id) do
+    GenServer.call(via(session_id), :proactive_compact, 120_000)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
   Toggle plan mode for the session.
 
   Returns `{:ok, enabled?}` or `{:error, :no_session}`.
@@ -474,6 +489,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def handle_call(:compact, _from, state) do
     compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
     {:reply, :ok, %{state | messages: compacted}}
+  end
+
+  def handle_call(:proactive_compact, _from, state) do
+    messages = state.messages || []
+    compacted = OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(messages)
+
+    stats = %{
+      messages_before: length(messages),
+      messages_after: length(compacted),
+      tokens_before: OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages),
+      tokens_after: OptimalSystemAgent.Agent.Compactor.estimate_tokens(compacted)
+    }
+
+    {:reply, {:ok, stats}, %{state | messages: compacted}}
   end
 
   def handle_call(:enter_plan_mode, _from, %{plan_mode_enabled: true} = state) do

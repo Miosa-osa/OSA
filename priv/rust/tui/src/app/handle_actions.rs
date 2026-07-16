@@ -354,6 +354,14 @@ impl App {
         } else {
             Some(self.working_dir.clone())
         };
+        // Collect pasted/dropped attachments for this turn, then clear them so the
+        // next prompt starts fresh (the chips already left the input on submit).
+        let images = if self.attachments.is_empty() {
+            None
+        } else {
+            Some(self.attachments.iter().map(|a| a.wire_value()).collect::<Vec<_>>())
+        };
+        self.attachments.clear();
 
         tokio::spawn(async move {
             let req = crate::client::types::OrchestrateRequest {
@@ -363,6 +371,7 @@ impl App {
                 workspace_id: None,
                 skip_plan: None,
                 working_dir,
+                images,
             };
             let result = client.orchestrate(&req).await;
             let event = match result {

@@ -49,6 +49,9 @@ pub struct OrchestrateRequest {
     pub skip_plan: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Attachments for vision-capable models: file paths or base64-encoded images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +179,45 @@ pub struct SessionMessage {
     pub content: String,
     #[serde(default)]
     pub timestamp: Option<String>,
+}
+
+/// GET /api/v1/sessions/:id/context — token-usage breakdown.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextStats {
+    #[serde(default)]
+    pub system_tokens: u64,
+    #[serde(default)]
+    pub conversation_tokens: u64,
+    #[serde(default)]
+    pub tool_result_tokens: u64,
+    #[serde(default)]
+    pub max_tokens: u64,
+    #[serde(default)]
+    pub used_tokens: u64,
+}
+
+/// POST /api/v1/sessions/:id/compact — proactive compaction result.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompactResponse {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub messages_before: u64,
+    #[serde(default)]
+    pub messages_after: u64,
+    #[serde(default)]
+    pub tokens_before: u64,
+    #[serde(default)]
+    pub tokens_after: u64,
+}
+
+/// GET /api/v1/sessions/:id/recap — short LLM summary of the session.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecapResponse {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub recap: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

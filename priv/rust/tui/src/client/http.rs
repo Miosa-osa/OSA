@@ -235,6 +235,43 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/sessions/:id/context — token-usage breakdown for the session.
+    pub async fn get_context(&self, id: &str) -> Result<ContextStats> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/context", id))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /api/v1/sessions/:id/compact — trigger proactive compaction now.
+    pub async fn compact_session(&self, id: &str) -> Result<CompactResponse> {
+        let resp = self
+            .post(
+                &format!("/api/v1/sessions/{}/compact", id),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /api/v1/sessions/:id/recap — short LLM summary of the session so far.
+    pub async fn recap_session(&self, id: &str) -> Result<RecapResponse> {
+        let resp = self.get(&format!("/api/v1/sessions/{}/recap", id)).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /api/v1/sessions/:id/fork — fork into a new session seeded with the
+    /// current transcript. Returns the new session (SessionCreateResponse).
+    pub async fn fork_session(&self, id: &str) -> Result<SessionCreateResponse> {
+        let resp = self
+            .post(
+                &format!("/api/v1/sessions/{}/fork", id),
+                &serde_json::json!({}),
+            )
+            .await?;
+        Ok(resp.json().await?)
+    }
+
     /// GET /api/v1/sessions/:id/messages
     pub async fn get_session_messages(&self, id: &str) -> Result<Vec<SessionMessage>> {
         let resp = self.get(&format!("/api/v1/sessions/{}/messages", id)).await?;

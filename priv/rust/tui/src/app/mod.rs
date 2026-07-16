@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod commands;
 pub mod event_loop;
 pub mod focus;
@@ -149,6 +150,9 @@ pub struct App {
     pub goal_cycle: u32,
     pub goal_max_cycles: u32,
 
+    // Pasted / drag-dropped image & file attachments, shown as [Image #N] chips.
+    pub attachments: Vec<crate::app::attachment::Attachment>,
+
     // Welcome message injected flag
     pub welcome_injected: bool,
     // Set once we've resolved this folder's session on launch (resume-or-create).
@@ -267,6 +271,7 @@ impl App {
             goal: None,
             goal_cycle: 0,
             goal_max_cycles,
+            attachments: Vec::new(),
             welcome_injected: false,
             dir_session_resolved: false,
             pending_welcome_banner: None,

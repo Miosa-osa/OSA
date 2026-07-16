@@ -24,6 +24,15 @@ impl KeyBinding {
     }
 }
 
+/// True when `event` is the Shift+Tab permission-mode cycle. Terminals disagree
+/// on how they encode Shift+Tab: most emit `KeyCode::BackTab` (sometimes with a
+/// stray SHIFT modifier, sometimes NONE), a few report `Tab`+SHIFT. Accept all
+/// of them so the cycle fires consistently across terminals.
+pub fn is_permission_cycle(event: &KeyEvent) -> bool {
+    matches!(event.code, KeyCode::BackTab)
+        || (event.code == KeyCode::Tab && event.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 /// All key bindings — 22 bindings matching Go keymap
 pub struct KeyMap {
     pub submit: KeyBinding,
@@ -44,6 +53,7 @@ pub struct KeyMap {
     pub toggle_background: KeyBinding,
     pub toggle_sidebar: KeyBinding,
     pub tab: KeyBinding,
+    pub permission_cycle: KeyBinding,
     pub clear_input: KeyBinding,
     pub new_session: KeyBinding,
     pub palette: KeyBinding,
@@ -93,6 +103,11 @@ impl Default for KeyMap {
                 "toggle sidebar",
             ),
             tab: KeyBinding::new(KeyCode::Tab, KeyModifiers::NONE, "autocomplete"),
+            permission_cycle: KeyBinding::new(
+                KeyCode::BackTab,
+                KeyModifiers::NONE,
+                "cycle permission mode",
+            ),
             clear_input: KeyBinding::new(
                 KeyCode::Char('u'),
                 KeyModifiers::CONTROL,

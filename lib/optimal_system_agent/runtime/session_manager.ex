@@ -176,6 +176,10 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   @spec get_state(session_id()) :: {:ok, map()} | {:error, term()}
   def get_state(session_id), do: Loop.get_state(session_id)
 
+  @doc "Proactively compact a live session's context buffer (summarize older turns)."
+  @spec proactive_compact(session_id()) :: {:ok, map()} | {:error, term()}
+  def proactive_compact(session_id), do: Loop.proactive_compact(session_id)
+
   @doc "Look up a live loop process."
   @spec lookup_loop(session_id()) :: {:ok, pid(), term()} | :error
   def lookup_loop(session_id) when is_binary(session_id) do

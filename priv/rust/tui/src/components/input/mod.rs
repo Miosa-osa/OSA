@@ -665,15 +665,13 @@ impl Component for InputComponent {
                 // Multiline: split on newlines, each line gets wrapped by Paragraph
                 for (i, text_line) in content_str.split('\n').enumerate() {
                     if i == 0 {
-                        text_lines.push(Line::from(vec![
-                            Span::styled(prompt, prompt_style),
-                            Span::raw(text_line.to_string()),
-                        ]));
+                        let mut spans = vec![Span::styled(prompt, prompt_style)];
+                        spans.extend(chip_spans(text_line, theme.attachment_chip()));
+                        text_lines.push(Line::from(spans));
                     } else {
-                        text_lines.push(Line::from(vec![
-                            Span::raw("  "), // indent continuation lines
-                            Span::raw(text_line.to_string()),
-                        ]));
+                        let mut spans = vec![Span::raw("  ".to_string())]; // indent
+                        spans.extend(chip_spans(text_line, theme.attachment_chip()));
+                        text_lines.push(Line::from(spans));
                     }
                 }
             } else if avail > 0 && content_str.chars().count() > avail {
@@ -685,15 +683,13 @@ impl Component for InputComponent {
                     0
                 };
                 let visible: String = content_str.chars().skip(start).take(avail).collect();
-                text_lines.push(Line::from(vec![
-                    Span::styled(prompt, prompt_style),
-                    Span::raw(visible),
-                ]));
+                let mut spans = vec![Span::styled(prompt, prompt_style)];
+                spans.extend(chip_spans(&visible, theme.attachment_chip()));
+                text_lines.push(Line::from(spans));
             } else {
-                text_lines.push(Line::from(vec![
-                    Span::styled(prompt, prompt_style),
-                    Span::raw(content_str.to_string()),
-                ]));
+                let mut spans = vec![Span::styled(prompt, prompt_style)];
+                spans.extend(chip_spans(content_str, theme.attachment_chip()));
+                text_lines.push(Line::from(spans));
             }
 
             let paragraph = ratatui::widgets::Paragraph::new(Text::from(text_lines))
@@ -833,4 +829,46 @@ impl InputComponent {
     pub fn mic_area(&self) -> Option<Rect> {
         self.mic_area.get()
     }
+}
+
+/// True when `tok` is an attachment chip token like "[Image #3]" or "[File #12]".
+fn is_chip_token(tok: &str) -> bool {
+    let inner = match tok.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        Some(i) => i,
+        None => return false,
+    };
+    for prefix in ["Image #", "File #"] {
+        if let Some(num) = inner.strip_prefix(prefix) {
+            return !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// Split `text` into spans, styling attachment chip tokens ("[Image #N]",
+/// "[File #N]") distinctly with `chip_style` and leaving the rest as-is.
+fn chip_spans(text: &str, chip_style: Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        if let Some(rel) = rest[open..].find(']') {
+            let close = open + rel;
+            let token = &rest[open..=close];
+            if is_chip_token(token) {
+                if open > 0 {
+                    spans.push(Span::raw(rest[..open].to_string()));
+                }
+                spans.push(Span::styled(token.to_string(), chip_style));
+                rest = &rest[close + 1..];
+                continue;
+            }
+        }
+        // A '[' that doesn't open a chip: emit through it and keep scanning.
+        spans.push(Span::raw(rest[..=open].to_string()));
+        rest = &rest[open + 1..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::raw(rest.to_string()));
+    }
+    spans
 }

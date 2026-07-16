@@ -51,6 +51,17 @@ impl PermissionMode {
         matches!(self, PermissionMode::Default)
     }
 
+    /// Advance to the next mode in the Shift+Tab cycle, matching Claude Code's
+    /// order: Default → AcceptEdits → Plan → BypassPermissions → Default.
+    pub fn next(&self) -> PermissionMode {
+        match self {
+            PermissionMode::Default => PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits => PermissionMode::Plan,
+            PermissionMode::Plan => PermissionMode::BypassPermissions,
+            PermissionMode::BypassPermissions => PermissionMode::Default,
+        }
+    }
+
     /// Rose-pine-mapped color for this mode (matches CC's `getModeColor`).
     fn color(&self, theme: &style::Theme) -> Color {
         match self {
@@ -155,6 +166,10 @@ impl StatusBar {
 
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.permission_mode = mode;
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_mode
     }
 
     pub fn set_shell_count(&mut self, count: usize) {

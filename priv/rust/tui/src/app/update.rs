@@ -41,6 +41,11 @@ impl App {
                         picker.handle_paste(&text);
                     }
                 } else if self.state.allows_input() {
+                    // Drag-drop / a pasted file path becomes an attachment chip
+                    // instead of raw text.
+                    if self.ingest_paste_as_attachments(&text) {
+                        return false;
+                    }
                     let capped = if text.len() > super::MAX_MESSAGE_SIZE {
                         &text[..super::MAX_MESSAGE_SIZE]
                     } else {
@@ -102,7 +107,40 @@ impl App {
         }
     }
 
+    /// Advance the tool-permission mode one step (Shift+Tab). Mirrors Claude
+    /// Code's cycle: Default → AcceptEdits → Plan → BypassPermissions → Default.
+    ///
+    /// The status line reflects the active mode. Reaching BypassPermissions
+    /// keeps `config.skip_permissions` and the sidebar YOLO indicator in sync so
+    /// the display is internally consistent with `/yolo`. Full backend
+    /// enforcement (dangerous-mode sync, AcceptEdits auto-approve of edit
+    /// prompts, Plan read-only gating) is not wired yet — those modes currently
+    /// change only the displayed state; `/yolo` remains the authoritative bypass
+    /// control that notifies the backend.
+    fn cycle_permission_mode(&mut self) {
+        use crate::components::status_bar::PermissionMode;
+        let next = self.status.permission_mode().next();
+        self.status.set_permission_mode(next);
+
+        // Keep the sidebar YOLO indicator consistent with the bypass display.
+        let bypass = matches!(next, PermissionMode::BypassPermissions);
+        self.config.skip_permissions = bypass;
+        self.sidebar.set_yolo_mode(bypass);
+
+        self.toasts.push(
+            format!("Permission mode: {}", next.title()),
+            crate::components::toast::ToastLevel::Info,
+        );
+    }
+
     fn handle_idle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Shift+Tab cycles the tool-permission mode (Default → AcceptEdits →
+        // Plan → BypassPermissions → Default), matching Claude Code.
+        if crate::app::keys::is_permission_cycle(&key) {
+            self.cycle_permission_mode();
+            return false;
+        }
+
         let input_empty = self.input.is_empty();
 
         match (key.code, key.modifiers) {
@@ -135,8 +173,16 @@ impl App {
             // Complements the terminal's bracketed paste, which mouse-capture and
             // some paste methods (middle-click, right-click) don't deliver.
             (KeyCode::Char('v'), KeyModifiers::CONTROL) if self.state.allows_input() => {
+                // An image on the clipboard becomes an [Image #N] attachment chip.
+                if self.ingest_clipboard_image() {
+                    return false;
+                }
                 match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
                     Ok(text) if !text.is_empty() => {
+                        // A copied file path attaches instead of inserting text.
+                        if self.ingest_paste_as_attachments(&text) {
+                            return false;
+                        }
                         let capped: String =
                             text.chars().take(super::MAX_MESSAGE_SIZE).collect();
                         let lines = capped.lines().count();
@@ -218,6 +264,12 @@ impl App {
     }
 
     fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Shift+Tab cycles the permission mode even mid-turn, matching Claude Code.
+        if crate::app::keys::is_permission_cycle(&key) {
+            self.cycle_permission_mode();
+            return false;
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => {
                 self.cancel_processing();

@@ -304,6 +304,34 @@ impl App {
                     crate::components::toast::ToastLevel::Info,
                 );
             }
+            "/context" => {
+                // Fetch token-usage breakdown and render a compact summary in chat.
+                self.show_context();
+            }
+            "/compact" => {
+                // Trigger proactive compaction on the live loop now.
+                self.toasts.push(
+                    "Compacting context...".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.do_compact();
+            }
+            "/recap" => {
+                // Ask the backend for a short LLM summary of the session so far.
+                self.toasts.push(
+                    "Summarizing session...".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.do_recap();
+            }
+            "/fork" => {
+                // Fork the current session into a new one preserving history.
+                self.toasts.push(
+                    "Forking session...".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.do_fork();
+            }
             _ => {
                 // Unknown slash command -> send to backend
                 let cmd_name = &cmd[1..]; // strip leading /
@@ -326,6 +354,100 @@ impl App {
             let event = match result {
                 Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
                 Err(e) => BackendEvent::ModelSwitched(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// GET /sessions/:id/context → render a compact token-usage summary in chat.
+    fn show_context(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.get_context(&sid).await {
+                Ok(c) => {
+                    let pct = if c.max_tokens > 0 {
+                        (c.used_tokens as f64 / c.max_tokens as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let output = format!(
+                        "Context: {}/{} tokens ({:.0}%)\n  conversation: {}\n  system: {}\n  tool results: {}",
+                        c.used_tokens,
+                        c.max_tokens,
+                        pct,
+                        c.conversation_tokens,
+                        c.system_tokens,
+                        c.tool_result_tokens
+                    );
+                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
+                        kind: "info".into(),
+                        output,
+                        action: None,
+                    }))
+                }
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// POST /sessions/:id/compact → trigger proactive compaction, confirm in chat.
+    fn do_compact(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.compact_session(&sid).await {
+                Ok(r) => {
+                    let output = format!(
+                        "Context compacted: {} → {} messages (~{} → ~{} tokens)",
+                        r.messages_before, r.messages_after, r.tokens_before, r.tokens_after
+                    );
+                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
+                        kind: "info".into(),
+                        output,
+                        action: None,
+                    }))
+                }
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// GET /sessions/:id/recap → render a short LLM summary of the session in chat.
+    fn do_recap(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.recap_session(&sid).await {
+                Ok(r) => BackendEvent::CommandResult(Ok(
+                    crate::client::types::CommandExecuteResponse {
+                        kind: "info".into(),
+                        output: format!("Recap:\n{}", r.recap),
+                        action: None,
+                    },
+                )),
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// POST /sessions/:id/fork → fork into a new session and switch the TUI to it.
+    /// Reuses the SessionCreated handler (status "resumed" pulls the seeded
+    /// transcript back in) so history is preserved on screen.
+    fn do_fork(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.fork_session(&sid).await {
+                Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
+                Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
         });

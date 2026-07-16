@@ -22,6 +22,8 @@ syntect = { version = "5", default-features = false, features = ["default-syntax
 similar = { version = "2", features = ["text"] }
 fuzzy-matcher = "0.3"
 arboard = "3"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

@@ -684,6 +684,119 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     |> send_resp(200, body)
   end
 
+  # ── POST /sessions/:id/compact ─────────────────────────────────────
+  #
+  # Trigger proactive compaction NOW on the live loop's message buffer.
+  # Folds older turns into a high-recall summary (ProactiveCompaction.compact/1).
+
+  post "/:id/compact" do
+    session_id = conn.params["id"]
+
+    case SessionManager.proactive_compact(session_id) do
+      {:ok, stats} ->
+        json(conn, 200, Map.merge(%{status: "compacted", session_id: session_id}, stats))
+
+      {:error, :no_session} ->
+        json_error(
+          conn,
+          404,
+          "not_running",
+          "No active agent loop for session #{session_id}"
+        )
+
+      {:error, reason} ->
+        json_error(conn, 500, "compact_failed", inspect(reason))
+    end
+  end
+
+  # ── GET /sessions/:id/recap ────────────────────────────────────────
+  #
+  # Return a short LLM summary of the session so far, built from the
+  # persisted transcript via a single summarization call.
+
+  get "/:id/recap" do
+    session_id = conn.params["id"]
+
+    turns =
+      session_id
+      |> OptimalSystemAgent.Store.SessionTranscript.get_transcript()
+      |> Enum.reject(fn t -> t.role == "system" end)
+
+    if turns == [] do
+      json(conn, 200, %{session_id: session_id, recap: "No conversation yet to summarize.", turns: 0})
+    else
+      formatted =
+        turns
+        |> Enum.map(fn t -> "#{String.capitalize(t.role || "")}: #{t.content}" end)
+        |> Enum.join("\n\n")
+
+      prompt =
+        "Summarize the following agent session in 3-6 concise bullet points. " <>
+          "Capture the user's goal, what was accomplished, key decisions, and any open next steps. " <>
+          "Do not invent facts. Output only the summary.\n\n" <> formatted
+
+      recap =
+        try do
+          case OptimalSystemAgent.Providers.Registry.chat(
+                 [%{role: "user", content: prompt}],
+                 temperature: 0.3,
+                 max_tokens: 500
+               ) do
+            {:ok, %{content: content}} when is_binary(content) and content != "" ->
+              content
+
+            _ ->
+              "Could not generate a recap right now."
+          end
+        rescue
+          _ -> "Could not generate a recap right now."
+        end
+
+      json(conn, 200, %{session_id: session_id, recap: recap, turns: length(turns)})
+    end
+  end
+
+  # ── POST /sessions/:id/fork ────────────────────────────────────────
+  #
+  # Fork the current session into a NEW one, seeding it with a copy of the
+  # source transcript so history is preserved. Returns the new session with
+  # status "resumed" so the TUI pulls the seeded transcript back in on switch.
+
+  post "/:id/fork" do
+    source_session_id = conn.params["id"]
+    user_id = conn.assigns[:user_id] || "anonymous"
+
+    transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(source_session_id)
+
+    case SessionManager.create_session(user_id: user_id, channel: :http) do
+      {:ok, %{session_id: new_id}} ->
+        Enum.each(transcript, fn t ->
+          OptimalSystemAgent.Store.SessionTranscript.save_turn(
+            new_id,
+            t.role,
+            t.content,
+            tool_name: t.tool_name,
+            tokens: Map.get(t, :tokens) || 0
+          )
+        end)
+
+        body =
+          Jason.encode!(%{
+            id: new_id,
+            status: "resumed",
+            source_session: source_session_id,
+            message_count: length(transcript)
+          })
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(201, body)
+
+      {:error, _reason} ->
+        json_error(conn, 500, "fork_failed", "Failed to fork session #{source_session_id}")
+    end
+  end
+
   match _ do
     json_error(conn, 404, "not_found", "Session endpoint not found")
   end
