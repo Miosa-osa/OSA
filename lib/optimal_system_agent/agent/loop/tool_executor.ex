@@ -8,9 +8,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   require Logger
 
   alias OptimalSystemAgent.Agent.Hooks
+  alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
+  alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Observability
 
   # Tools allowed in :read_only mode (no side-effects, no writes)
   @read_only_tools ~w(
@@ -82,19 +85,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   end/result events fire inside `finalize_result/5`.
   """
   def execute_tool_call(tool_call, state) do
-    arg_hint = tool_call_hint(tool_call.arguments)
+    # Idempotency + per-step durable write record (primitive #27). On a mid-turn
+    # crash+resume, a step whose {session, turn, iteration, tool, args} key was
+    # already recorded as completed returns the recorded result WITHOUT
+    # re-executing its side effects. Disabled or session-less callers run the
+    # tool exactly as before — this wrapper is a pure passthrough then.
+    DurableLog.run_once(state, tool_call, fn ->
+      arg_hint = tool_call_hint(tool_call.arguments)
 
-    emit_tool_call_start(tool_call, arg_hint, state)
+      emit_tool_call_start(tool_call, arg_hint, state)
 
-    start_time_tool = System.monotonic_time(:millisecond)
+      start_time_tool = System.monotonic_time(:millisecond)
 
-    tool_result =
-      case approve_tool_call(tool_call, state) do
-        {:blocked, message} -> message
-        :allow -> run_tool(tool_call, state)
-      end
+      tool_result =
+        case approve_tool_call(tool_call, state) do
+          {:blocked, message} -> message
+          :allow -> run_tool(tool_call, state)
+        end
 
-    finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool)
+      finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool)
+    end)
   end
 
   @doc """
@@ -145,13 +155,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # orchestrator before approval/execution, so it always precedes the paired
   # :end / :tool_result events emitted from finalize_result/5.
   defp emit_tool_call_start(tool_call, arg_hint, state) do
-    Bus.emit(:tool_call, %{
-      name: tool_call.name,
-      phase: :start,
-      args: arg_hint,
-      session_id: state.session_id,
-      agent: state.session_id
-    })
+    Bus.emit(
+      :tool_call,
+      %{
+        name: tool_call.name,
+        phase: :start,
+        args: arg_hint,
+        session_id: state.session_id,
+        agent: state.session_id
+      },
+      Observability.annotate(state, source: "agent.tool_executor")
+    )
+
+    # OpenTelemetry GenAI execute_tool span (no-op unless otel_enabled).
+    Observability.otel_tool(state, tool_call.name)
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
@@ -233,11 +250,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   # CONCERN 2 — execution.
   #
-  # Runs the pre_tool_use hook pipeline sync (security_check/spend_guard can
-  # block) and then dispatches the tool. Returns the raw tool result: an
+  # Runs schema-validation (REASK on malformed args — single chokepoint for all
+  # tools), then the pre_tool_use hook pipeline sync (security_check/spend_guard
+  # can block) and then dispatches the tool. Returns the raw tool result: an
   # `{:image, media_type, b64, path}` tuple, a binary, or a "Blocked:"/"Error:"
   # string. Only reached when approve_tool_call/2 returned :allow.
   defp run_tool(tool_call, state) do
+    # Validate the model's tool arguments against the tool schema BEFORE running
+    # any hook or the tool itself. On invalid/malformed input, hand the model a
+    # REASK error (verbatim tool result) so it rewrites the call next step —
+    # instead of silently executing with empty (%{}) arguments.
+    case ToolArgValidator.validate(tool_call, state) do
+      {:reask, message} -> message
+      :ok -> run_validated_tool(tool_call, state)
+    end
+  end
+
+  defp run_validated_tool(tool_call, state) do
     # Run pre_tool_use hooks sync (security_check/spend_guard can block)
     pre_payload = %{
       tool_name: tool_call.name,
@@ -339,14 +368,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       :exit, _ -> :ok
     end
 
-    Bus.emit(:tool_call, %{
-      name: tool_call.name,
-      phase: :end,
-      duration_ms: tool_duration_ms,
-      args: arg_hint,
-      session_id: state.session_id,
-      agent: state.session_id
-    })
+    Bus.emit(
+      :tool_call,
+      %{
+        name: tool_call.name,
+        phase: :end,
+        duration_ms: tool_duration_ms,
+        result_bytes: byte_size(result_str),
+        success: not tool_failed,
+        args: arg_hint,
+        session_id: state.session_id,
+        agent: state.session_id
+      },
+      Observability.annotate(state, source: "agent.tool_executor")
+    )
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
@@ -372,13 +407,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       %{
         name: tool_call.name,
         result: result_preview,
+        result_bytes: byte_size(result_str),
         success: tool_success,
         session_id: state.session_id,
         agent: state.session_id
       }
       |> Map.merge(tool_metadata)
 
-    Bus.emit(:tool_result, tool_result_event)
+    Bus.emit(:tool_result, tool_result_event, Observability.annotate(state, source: "agent.tool_executor"))
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,

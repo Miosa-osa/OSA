@@ -258,6 +258,18 @@ defmodule OptimalSystemAgent.Tools.Registry do
   end
 
   @doc """
+  Look up the builtin tool module backing `tool_name`.
+
+  Returns the module (a structured or flat tool) or `nil` when the name is not a
+  builtin — e.g. MCP tools or an unknown/aliased name. Lock-free read via
+  `:persistent_term`, safe to call from sub-agent Tasks and the agent loop.
+  """
+  @spec module_for(String.t()) :: module() | nil
+  def module_for(tool_name) do
+    :persistent_term.get({__MODULE__, :builtin_tools}, %{}) |> Map.get(tool_name)
+  end
+
+  @doc """
   Validate tool arguments against the module's JSON Schema (from `parameters/0`).
 
   Returns `:ok` when arguments conform to the schema, or

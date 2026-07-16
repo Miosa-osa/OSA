@@ -91,6 +91,12 @@ defmodule OptimalSystemAgent.Application do
     # Guardian can pause unattended execution after N blocks (config threshold).
     :ets.new(:osa_auto_mode, [:named_table, :public, :set])
 
+    # ETS table for tool-call argument REASK counters (BUG A / primitive #31).
+    # Rows: {{session_id, tool_name}, invalid_attempt_count}
+    # ToolArgValidator caps how many times a tool is re-asked for corrected
+    # arguments before returning a terminal error, bounding malformed-args loops.
+    :ets.new(:osa_reask_counts, [:named_table, :public, :set])
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 

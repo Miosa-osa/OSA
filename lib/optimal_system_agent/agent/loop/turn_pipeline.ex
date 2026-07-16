@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Observability
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Compactor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
@@ -125,10 +126,20 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   # signal weight, compaction, decorated message build, and per-turn state reset
   defp prepare_turn(message, opts, state) do
     signal_weight = Keyword.get(opts, :signal_weight, nil)
-    state = %{state | signal_weight: signal_weight}
 
-    # Compact message history if needed
-    compacted = Compactor.maybe_compact(state.messages) || state.messages
+    # Mint a per-turn correlation id (prompt.id-style) and emit turn_start so the
+    # per-session event stream is correlated + replayable (primitive #30).
+    state = %{state | signal_weight: signal_weight, turn_id: Observability.new_turn_id()}
+    Observability.turn_start(state)
+
+    # Compact message history if needed. Feed the last response's REAL provider-
+    # reported input-token count (recorded by the budget/accounting stage) into
+    # the compaction decision instead of the char-heuristic estimate; falls back
+    # to the estimate on the first turn when no real count exists yet.
+    compacted =
+      Compactor.maybe_compact(state.messages, Map.get(state, :last_input_tokens, 0)) ||
+        state.messages
+
     state = %{state | messages: compacted}
 
     # Build decorated message list (nudges + pre-directives + user message)

@@ -769,13 +769,10 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     lines =
       if max_budget_usd do
-        try do
-          budget = OptimalSystemAgent.Budget.get_status()
-          cost = (budget[:total_cost_usd] || 0) / 1
-          lines ++ ["- Budget: $#{Float.round(cost, 4)} / $#{max_budget_usd}"]
-        rescue
-          _ -> lines
-        end
+        # Real per-session spend accumulated by `Loop.Accounting` — not the
+        # old dead `total_cost_usd` lookup that always resolved to $0.
+        cost = (Map.get(state, :session_cost_usd, 0.0) || 0.0) / 1
+        lines ++ ["- Budget: $#{Float.round(cost, 4)} / $#{max_budget_usd}"]
       else
         lines
       end

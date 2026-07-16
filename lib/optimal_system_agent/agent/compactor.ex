@@ -103,16 +103,23 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   Inspects the given message list and compacts it if any usage threshold is
   exceeded. Returns the (possibly compacted) message list.
 
+  `known_tokens` is an optional REAL, provider-reported input-token count for
+  the current context (from `Loop.Accounting` / the budget stage). When it is a
+  positive integer it drives the compaction *decision* (usage ratio) instead of
+  the word-count heuristic — the heuristic under-counts because it ignores the
+  system prompt + tool schemas that also consume the window. `nil`/`0` falls
+  back to the estimate, preserving the original `maybe_compact/1` behaviour.
+
   This function is safe — it never raises. On any unexpected error it returns
   the original messages unchanged.
   """
-  @spec maybe_compact([map()]) :: [map()]
-  def maybe_compact(messages) do
+  @spec maybe_compact([map()], non_neg_integer() | nil) :: [map()]
+  def maybe_compact(messages, known_tokens \\ nil) do
     try do
-      do_maybe_compact(messages)
+      do_maybe_compact(messages, known_tokens)
     rescue
       e ->
-        Logger.error("Compactor.maybe_compact/1 crashed: #{Exception.message(e)}")
+        Logger.error("Compactor.maybe_compact crashed: #{Exception.message(e)}")
         messages
     end
   end
@@ -230,10 +237,22 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp do_maybe_compact(messages) do
-    tokens_before = estimate_tokens(messages)
+  defp do_maybe_compact(messages, known_tokens) do
+    # Message-only heuristic estimate — used for the pipeline's savings math so
+    # before/after token counts stay in the same unit.
+    estimated = estimate_tokens(messages)
+
+    # Decision token count: prefer the real provider-reported input tokens when
+    # available (they include system prompt + tool schemas the estimate omits),
+    # else fall back to the heuristic estimate.
+    decision_tokens =
+      case known_tokens do
+        n when is_integer(n) and n > 0 -> n
+        _ -> estimated
+      end
+
     max_tok = max_tokens()
-    usage_ratio = tokens_before / max_tok
+    usage_ratio = decision_tokens / max_tok
 
     cond do
       usage_ratio > tier3_threshold() ->
@@ -241,15 +260,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
           "Compactor: usage at #{pct(usage_ratio)} — running full pipeline (emergency)"
         )
 
-        run_pipeline(messages, tokens_before, :emergency, max_tok)
+        run_pipeline(messages, estimated, :emergency, max_tok)
 
       usage_ratio > tier2_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running aggressive pipeline")
-        run_pipeline(messages, tokens_before, :aggressive, max_tok)
+        run_pipeline(messages, estimated, :aggressive, max_tok)
 
       usage_ratio > tier1_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running background pipeline")
-        run_pipeline(messages, tokens_before, :background, max_tok)
+        run_pipeline(messages, estimated, :background, max_tok)
 
       true ->
         messages

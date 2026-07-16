@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Providers.HealthChecker
+  alias OptimalSystemAgent.Providers.Resilience
 
   # Consolidated compat provider — one module handles 13 OpenAI-compatible APIs
   @compat Providers.OpenAICompatProvider
@@ -303,7 +304,12 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # --- Private ---
 
   defp call_with_fallback(provider, module, messages, opts) do
-    case with_retry(fn -> apply_provider(module, messages, opts) end) do
+    # Same-provider retry (backoff, retry-after aware) runs *before* any
+    # model/provider fallback. Only once these retries are exhausted do we
+    # drop to the configured fallback chain below.
+    retried = Resilience.with_retry(fn -> apply_provider(module, messages, opts) end, retry_opts(provider))
+
+    case retried do
       {:ok, _} = result ->
         HealthChecker.record_success(provider)
         result
@@ -382,52 +388,160 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   defp stream_with_fallback(provider, module, messages, callback, opts) do
-    result = with_retry(fn -> try_stream_provider(module, messages, callback, opts) end)
+    # 1. Native streaming with same-provider retry (backoff, retry-after aware,
+    #    mid-stream error aware). Only after these retries are exhausted do we
+    #    consider any model/provider fallback.
+    on_retry = fn info -> notify_stream_retry(callback, info) end
 
-    case result do
+    primary_result =
+      if stream_capable?(module) do
+        Resilience.with_retry(
+          fn -> native_stream(module, messages, callback, opts) end,
+          retry_opts(provider, on_retry)
+        )
+      else
+        # Provider does not implement streaming — go straight to sync.
+        fallback_sync_stream(module, messages, callback, opts)
+      end
+
+    case primary_result do
       :ok ->
         :ok
 
-      {:error, reason} ->
-        fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
-
-        remaining_chain =
-          fallback_chain
-          |> Enum.drop_while(&(&1 == provider))
-          |> then(fn
-            chain when chain == fallback_chain -> chain
-            [_ | rest] -> rest
-            [] -> []
-          end)
-
-        if remaining_chain == [] do
-          Logger.error("Provider #{provider} stream failed, no fallback: #{reason}")
-          {:error, reason}
-        else
-          Logger.warning(
-            "Provider #{provider} stream failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}"
-          )
-
-          # Try each fallback provider
-          Enum.reduce_while(remaining_chain, {:error, reason}, fn fb_provider, _acc ->
-            case Map.get(@providers, fb_provider) do
-              nil ->
-                {:cont, {:error, "Unknown fallback provider: #{fb_provider}"}}
-
-              fb_module ->
-                case try_stream_provider(fb_module, messages, callback, opts) do
-                  :ok ->
-                    {:halt, :ok}
-
-                  {:error, r} ->
-                    Logger.warning("Fallback stream provider #{fb_provider} failed: #{r}")
-                    {:cont, {:error, r}}
-                end
-            end
-          end)
+      {:error, _reason} ->
+        # 2. Same-provider sync fallback (a plain request sometimes succeeds
+        #    where a stream-only hiccup did not), then the model/provider chain.
+        case fallback_sync_stream(module, messages, callback, opts) do
+          :ok -> :ok
+          {:error, sync_reason} -> stream_fallback_chain(provider, messages, callback, opts, sync_reason)
         end
     end
   end
+
+  # Model/provider fallback for streaming — only reached after same-provider
+  # retries (and a same-provider sync attempt) are exhausted.
+  defp stream_fallback_chain(provider, messages, callback, opts, reason) do
+    fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
+
+    remaining_chain =
+      fallback_chain
+      |> Enum.drop_while(&(&1 == provider))
+      |> then(fn
+        chain when chain == fallback_chain -> chain
+        [_ | rest] -> rest
+        [] -> []
+      end)
+      |> filter_boot_excluded_providers()
+
+    if remaining_chain == [] do
+      Logger.error(
+        "Provider #{provider} stream failed, no fallback: #{Resilience.reason_to_string(reason)}"
+      )
+
+      {:error, reason}
+    else
+      Logger.warning(
+        "Provider #{provider} stream failed: #{Resilience.reason_to_string(reason)}. " <>
+          "Trying fallback chain: #{inspect(remaining_chain)}"
+      )
+
+      Enum.reduce_while(remaining_chain, {:error, reason}, fn fb_provider, _acc ->
+        case Map.get(@providers, fb_provider) do
+          nil ->
+            {:cont, {:error, "Unknown fallback provider: #{fb_provider}"}}
+
+          fb_module ->
+            case try_stream_provider(fb_module, messages, callback, opts) do
+              :ok ->
+                {:halt, :ok}
+
+              {:error, r} ->
+                Logger.warning(
+                  "Fallback stream provider #{fb_provider} failed: #{Resilience.reason_to_string(r)}"
+                )
+
+                {:cont, {:error, r}}
+            end
+        end
+      end)
+    end
+  end
+
+  # True when the module can stream natively (so it is worth wrapping in the
+  # same-provider retry loop rather than dropping straight to sync).
+  defp stream_capable?({:compat, _provider}), do: true
+  defp stream_capable?(module) when is_atom(module), do: function_exported?(module, :chat_stream, 3)
+
+  # A single native streaming attempt — NO sync fallback. Returns
+  # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
+  # error and decide whether to retry the same provider.
+  defp native_stream({:compat, provider}, messages, callback, opts) do
+    @compat.chat_stream(provider, messages, callback, opts)
+  rescue
+    e -> {:error, "Compat provider #{provider} streaming raised: #{Exception.message(e)}"}
+  end
+
+  defp native_stream(module, messages, callback, opts) when is_atom(module) do
+    Logger.info("[Registry] Calling #{module}.chat_stream/3 (native, retryable)")
+    module.chat_stream(messages, callback, opts)
+  rescue
+    e -> {:error, "Provider #{module} chat_stream raised: #{Exception.message(e)}"}
+  end
+
+  # Build retry options for Resilience.with_retry: logs, emits a TUI-facing
+  # `:provider_retry` system event, and (optionally) forwards to a stream
+  # callback so a live stream can surface "retrying (n/max)…".
+  defp retry_opts(provider, extra_on_retry \\ nil) do
+    on_retry = fn info ->
+      Logger.warning(
+        "[resilience] #{provider} retry #{info.next_attempt}/#{info.max_attempts} " <>
+          "in #{info.delay_ms}ms — #{Resilience.reason_to_string(info.reason)}"
+      )
+
+      emit_retry_event(provider, info)
+      if is_function(extra_on_retry, 1), do: extra_on_retry.(info)
+      :ok
+    end
+
+    [on_retry: on_retry]
+  end
+
+  defp emit_retry_event(provider, info) do
+    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+      event: :provider_retry,
+      provider: provider,
+      attempt: info.next_attempt,
+      max_attempts: info.max_attempts,
+      delay_ms: info.delay_ms,
+      reason: Resilience.reason_to_string(info.reason)
+    })
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp notify_stream_retry(callback, info) when is_function(callback, 1) do
+    try do
+      callback.(
+        {:provider_retry,
+         %{
+           attempt: info.next_attempt,
+           max_attempts: info.max_attempts,
+           delay_ms: info.delay_ms,
+           reason: Resilience.reason_to_string(info.reason)
+         }}
+      )
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp notify_stream_retry(_callback, _info), do: :ok
 
   defp try_stream_provider({:compat, provider}, messages, callback, opts) do
     # Compat providers now support chat_stream via OpenAICompatProvider
@@ -469,42 +583,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
-  # Retry wrapper for rate-limited responses.
-  #
-  # - On `{:error, {:rate_limited, seconds}}` — sleep for `seconds` (capped at 60s),
-  #   then retry.
-  # - On `{:error, {:rate_limited, nil}}` — use exponential backoff: 1s, 2s, 4s.
-  # - Any other error — return immediately without retrying.
-  # - Max 3 attempts total (1 initial + 2 retries).
-  # - Streaming responses return `:ok` on success; the retry logic handles both
-  #   `{:ok, _}` and bare `:ok`.
-  @max_retries 3
-  @backoff_base_ms 1_000
-
-  defp with_retry(fun, attempt \\ 1) do
-    result = fun.()
-
-    case result do
-      {:error, {:rate_limited, retry_after}} when attempt <= @max_retries ->
-        sleep_ms =
-          if is_integer(retry_after) and retry_after > 0 do
-            min(retry_after, 60) * 1_000
-          else
-            round(@backoff_base_ms * :math.pow(2, attempt - 1))
-          end
-
-        Logger.warning(
-          "Rate limited (attempt #{attempt}/#{@max_retries}). " <>
-            "Retrying in #{div(sleep_ms, 1_000)}s..."
-        )
-
-        Process.sleep(sleep_ms)
-        with_retry(fun, attempt + 1)
-
-      _other ->
-        result
-    end
-  end
+  # Same-provider retry/backoff now lives in `Providers.Resilience`. The
+  # registry composes it: `Resilience.with_retry/2` retries the same provider
+  # on transient failures, and only when those are exhausted do the fallback
+  # helpers below drop to an alternate model/provider.
 
   defp apply_provider({:compat, provider}, messages, opts) do
     try do

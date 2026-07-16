@@ -161,7 +161,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             current_tool: nil,
             buffer: "",
             thinking: [],
-            current_thinking: nil
+            current_thinking: nil,
+            stream_error: nil
           })
 
         {:error, reason} ->
@@ -204,21 +205,31 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                   state
               end)
 
-            if done? do
-              acc = finalize_current_tool(acc)
-              acc = finalize_current_thinking(acc)
+            cond do
+              # A streaming `error` event arrived mid-stream (e.g. overloaded_error).
+              # This is NOT an HTTP status — the connection was already 200 OK.
+              # Distinguish it and route to the retry path, preserving whatever
+              # partial output was already streamed to the callback.
+              acc.stream_error != nil ->
+                Logger.warning("Anthropic mid-stream error: #{acc.stream_error}")
+                {:error, {:stream_error, acc.stream_error, acc.content}}
 
-              result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
+              done? ->
+                acc = finalize_current_tool(acc)
+                acc = finalize_current_thinking(acc)
 
-              result =
-                if acc.thinking != [],
-                  do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
-                  else: result
+                result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
 
-              callback.({:done, result})
-              :ok
-            else
-              collect_stream(resp, callback, acc)
+                result =
+                  if acc.thinking != [],
+                    do: Map.put(result, :thinking_blocks, Enum.reverse(acc.thinking)),
+                    else: result
+
+                callback.({:done, result})
+                :ok
+
+              true ->
+                collect_stream(resp, callback, acc)
             end
 
           {:error, reason} ->
@@ -355,6 +366,22 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp process_stream_event(%{"type" => "message_start"}, _callback, acc), do: acc
   defp process_stream_event(%{"type" => "message_delta"}, _callback, acc), do: acc
   defp process_stream_event(%{"type" => "ping"}, _callback, acc), do: acc
+
+  # Mid-stream error event. The SSE stream opened 200 OK, then the server
+  # emitted `event: error` (commonly `overloaded_error`). Record it on the
+  # accumulator so `collect_stream/3` can stop and route to the retry path
+  # instead of silently finalizing a truncated response as success.
+  defp process_stream_event(%{"type" => "error"} = event, _callback, acc) do
+    msg =
+      case event["error"] do
+        %{"message" => m} when is_binary(m) -> m
+        %{"type" => t} when is_binary(t) -> t
+        other -> inspect(other)
+      end
+
+    %{acc | stream_error: msg}
+  end
+
   defp process_stream_event(_event, _callback, acc), do: acc
 
   defp finalize_current_tool(%{current_tool: nil} = acc), do: acc

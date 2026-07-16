@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   """
 
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Constants
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -93,18 +94,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   defp do_edit(expanded, display_path, old, new, replace_all) do
     case File.read(expanded) do
       {:ok, content} ->
-        occurrences = count_occurrences(content, old)
-
-        cond do
-          occurrences == 0 ->
+        # Codex V4A-style 3-stage cascade (exact → line-endings → whitespace) so
+        # trivial whitespace / line-ending drift doesn't fail an otherwise-valid
+        # edit. Matcher.replace preserves the exact-match fast path verbatim.
+        case Matcher.replace(content, old, new, replace_all) do
+          {:error, :not_found} ->
             {:error, "old_string not found in #{display_path}"}
 
-          occurrences > 1 and not replace_all ->
+          {:error, :ambiguous, count} ->
             {:error,
-             "old_string found #{occurrences} times — must be unique. Add more surrounding context or use replace_all."}
+             "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
 
-          true ->
-            new_content = String.replace(content, old, new, global: replace_all)
+          {:ok, new_content, occurrences, stage} ->
             File.write!(expanded, new_content)
 
             # Emit file_changed hook — fire-and-forget, never crash caller
@@ -122,11 +123,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
             {diff_text, diff_stats} =
               OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
 
+            fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
+
             result =
               if replace_all and occurrences > 1 do
-                "Replaced #{occurrences} occurrences in #{display_path}"
+                "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
               else
-                "Replaced in #{display_path}\n#{format_diff(old, new, content, display_path)}"
+                "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
               end
 
             # Attach diff metadata for SSE consumers (3-tuple) when diff is non-empty
@@ -143,10 +146,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
       {:error, reason} ->
         {:error, "Cannot read #{display_path}: #{reason}"}
     end
-  end
-
-  defp count_occurrences(content, pattern) do
-    content |> String.split(pattern) |> length() |> Kernel.-(1)
   end
 
   # Build a minimal unified diff showing the change with context lines.

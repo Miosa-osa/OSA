@@ -28,10 +28,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Observability
 
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
+  alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Loop.Survey
@@ -85,6 +87,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
     signal_weight: nil,
     started_at: nil,
     last_input_tokens: 0,
+    # Per-turn correlation id (a prompt.id-style field) minted by
+    # `Observability.new_turn_id/0` at turn start. Threaded into the CloudEvent
+    # envelope of every lifecycle event so the per-session event stream is a
+    # correlated, replayable log (primitive #30).
+    turn_id: nil,
+    # Per-session token + cost accounting (primitive #29). Always on — see
+    # `Loop.Accounting`. `session_cost_usd` is the running spend that makes the
+    # `max_budget_usd` cap real; exposed via `get_state` for the TUI/auto-mode.
+    session_cost_usd: 0.0,
+    session_input_tokens: 0,
+    session_output_tokens: 0,
+    session_cache_creation_tokens: 0,
+    session_cache_read_tokens: 0,
     # Coordinator mode — restricts tools to delegation/messaging/management only
     coordinator: false,
     # Budget and turn limits — nil = no limit
@@ -380,10 +395,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
       started_at: DateTime.utc_now()
     }
 
+    # Durable execution (primitive #27): if a checkpoint is being restored AND
+    # the durable step log has completed steps from an interrupted turn, the
+    # ReactLoop will auto-resume — re-issued tool calls whose idempotency keys
+    # are already recorded replay their result instead of re-executing. The log
+    # is intentionally NOT cleared here (it is the resume evidence); it is
+    # cleared at the next successful turn boundary / on session end.
+    durable_steps = DurableLog.step_count(session_id)
+
     if restored != %{} do
       Logger.info(
         "[loop] Restored checkpoint for session #{session_id} — iteration=#{iteration}, messages=#{length(messages)}"
       )
+
+      if durable_steps > 0 do
+        Logger.info(
+          "[loop] Auto-resume: #{durable_steps} durable step(s) recorded for session #{session_id} — completed steps will replay-dedup instead of re-running"
+        )
+      end
     end
 
     # SessionStart hook — fire-and-forget; announces the new session.
@@ -391,7 +420,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       session_id: session_id,
       user_id: state.user_id,
       channel: state.channel,
-      resumed: restored != %{}
+      resumed: restored != %{},
+      resumed_steps: durable_steps
     })
 
     {:ok, state}
@@ -436,7 +466,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
       started_at: state.started_at,
       uptime_seconds: uptime,
       provider: state.provider,
-      model: state.model
+      model: state.model,
+      spend: OptimalSystemAgent.Agent.Loop.Accounting.snapshot(state)
     }
 
     {:reply, {:ok, snap}, state}
@@ -519,18 +550,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def terminate(:normal, state) do
     fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
+    DurableLog.clear(state.session_id)
     :ok
   end
 
   def terminate(:shutdown, state) do
     fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
+    DurableLog.clear(state.session_id)
     :ok
   end
 
   def terminate({:shutdown, _}, state) do
     fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
+    DurableLog.clear(state.session_id)
     :ok
   end
 
@@ -637,11 +671,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     Telemetry.emit_context_pressure(state)
 
-    Bus.emit(:agent_response, %{
-      session_id: state.session_id,
-      response: response,
-      agent: state.session_id
-    })
+    # Turn-end lifecycle event (primitive #30) — correlated to the turn_id minted
+    # at turn start, so the per-session event stream brackets each turn.
+    Observability.turn_end(state, response)
+
+    Bus.emit(
+      :agent_response,
+      %{
+        session_id: state.session_id,
+        response: response,
+        agent: state.session_id
+      },
+      Observability.annotate(state, source: "agent.loop")
+    )
 
     # Fire post_response hooks (async, non-blocking)
     try do
@@ -677,6 +719,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       "osa:session:#{state.session_id}",
       {:osa_event, %{type: :done, session_id: state.session_id}}
     )
+
+    # Turn completed successfully — the per-step durable log for this turn is no
+    # longer needed for resume. Clear it so files stay per-turn and small; the
+    # next turn (fresh iteration/turn_count) starts with an empty log.
+    DurableLog.clear(state.session_id)
 
     {:reply, {:ok, response}, state}
   end

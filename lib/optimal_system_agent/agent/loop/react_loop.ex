@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Scratchpad
   alias OptimalSystemAgent.Agent.Loop.StreamingToolExecutor
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Observability
 
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.LLMClient
@@ -32,6 +33,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Loop.Accounting
+  alias OptimalSystemAgent.Agent.Loop.Limits
   alias OptimalSystemAgent.Agent.Loop.VerificationGate
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
@@ -91,6 +94,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         {"Cancelled by user.", state}
 
+      # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
+      # not just at the next turn boundary. Only fires when a caller set
+      # `max_budget_usd`; default nil = OFF, so long runs are never killed.
+      Limits.budget_exceeded?(state) ->
+        cost = Float.round(Map.get(state, :session_cost_usd, 0.0) / 1, 4)
+        limit = Map.get(state, :max_budget_usd)
+        Logger.warning("[loop] Budget cap reached ($#{cost}/$#{limit}) for session #{sid}")
+
+        Bus.emit(:system_event, %{
+          event: :budget_limit_reached,
+          session_id: sid,
+          current_cost: cost,
+          limit: limit
+        })
+
+        {"Stopped: budget cap reached ($#{cost} / $#{limit}). Raise max_budget_usd to continue.",
+         state}
+
       iter >= max_iter ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
         tools_used = Telemetry.extract_tools_used(state.messages) |> Enum.join(", ")
@@ -117,7 +138,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       with cw when is_integer(cw) and cw > 0 <-
              OptimalSystemAgent.Providers.Registry.context_window(state.model),
            true <- ProactiveCompaction.should_compact?(state, cw) do
-        %{state | messages: ProactiveCompaction.compact(state.messages)}
+        before_count = length(state.messages)
+        compacted = ProactiveCompaction.compact(state.messages)
+
+        if length(compacted) != before_count do
+          Observability.compaction(state, %{
+            strategy: :proactive,
+            messages_before: before_count,
+            messages_after: length(compacted),
+            iteration: state.iteration
+          })
+        end
+
+        %{state | messages: compacted}
       else
         _ -> state
       end
@@ -167,11 +200,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
     )
 
-    Bus.emit(:llm_request, %{
-      session_id: state.session_id,
-      iteration: state.iteration,
-      agent: state.session_id
-    })
+    Bus.emit(
+      :llm_request,
+      %{
+        session_id: state.session_id,
+        iteration: state.iteration,
+        model: state.model,
+        agent: state.session_id
+      },
+      Observability.annotate(state, source: "agent.react_loop")
+    )
+
+    # OpenTelemetry GenAI chat-request span (no-op unless otel_enabled).
+    Observability.otel_model_request(state)
 
     start_time = System.monotonic_time(:millisecond)
     thinking_opts = LLMClient.thinking_config(state)
@@ -207,15 +248,28 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end
 
     input_tokens = Map.get(usage, :input_tokens, 0)
-    state = if input_tokens > 0, do: %{state | last_input_tokens: input_tokens}, else: state
 
-    Bus.emit(:llm_response, %{
-      session_id: state.session_id,
-      provider: state.provider,
-      duration_ms: duration_ms,
-      usage: usage,
-      agent: state.session_id
-    })
+    # Record real token usage + cost for this LLM round-trip and accumulate it
+    # into the per-session accounting (primitive #29). Also refreshes
+    # last_input_tokens for context-pressure telemetry.
+    state = Accounting.record(state, usage)
+
+    Bus.emit(
+      :llm_response,
+      %{
+        session_id: state.session_id,
+        provider: state.provider,
+        model: state.model,
+        duration_ms: duration_ms,
+        usage: usage,
+        agent: state.session_id
+      },
+      Observability.annotate(state, source: "agent.react_loop")
+    )
+
+    # OpenTelemetry GenAI chat-response span carrying real token usage
+    # (no-op unless otel_enabled).
+    Observability.otel_model_response(state, usage)
 
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
 
@@ -533,9 +587,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     else
       if context_overflow?(reason_str) do
         Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
+
+        Observability.emit(
+          :system_event,
+          %{event: :error, kind: :context_overflow, iteration: state.iteration},
+          state,
+          source: "agent.react_loop"
+        )
+
         {"I've exceeded the context window. Try breaking your request into smaller parts.", state}
       else
         Logger.error("LLM call failed: #{reason_str}")
+
+        Observability.emit(
+          :system_event,
+          %{event: :error, kind: :llm_error, reason: reason_str, iteration: state.iteration},
+          state,
+          source: "agent.react_loop"
+        )
+
         {"I encountered an error processing your request. Please try again.", state}
       end
     end
