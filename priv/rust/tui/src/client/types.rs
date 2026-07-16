@@ -625,6 +625,66 @@ pub struct SurveyAnswerEntry {
     pub free_text: Option<String>,
 }
 
+// === Rewind checkpoints (/rewind) ===
+
+/// A single rewind checkpoint from GET /api/v1/rewind/:session_id — a snapshot
+/// of conversation (and optionally code) taken before a user prompt.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RewindCheckpoint {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub iteration: i64,
+    #[serde(default)]
+    pub message_count: i64,
+    #[serde(default)]
+    pub has_code: bool,
+}
+
+/// Restore scope for POST /api/v1/rewind/restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindScope {
+    Code,
+    Conversation,
+    Both,
+}
+
+impl RewindScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RewindScope::Code => "code",
+            RewindScope::Conversation => "conversation",
+            RewindScope::Both => "both",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RewindScope::Code => "Code only",
+            RewindScope::Conversation => "Conversation only",
+            RewindScope::Both => "Code + conversation",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewindRestoreRequest {
+    pub session_id: String,
+    pub checkpoint_id: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RewindRestoreResponse {
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub message_count: Option<i64>,
+}
+
 // === Error ===
 
 #[derive(Debug, Clone, Deserialize)]

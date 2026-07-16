@@ -3,6 +3,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
   use Plug.Test
 
   alias OptimalSystemAgent.Channels.HTTP.API.SessionRoutes
+  alias OptimalSystemAgent.Store.SessionTranscript
 
   @opts SessionRoutes.init([])
 
@@ -188,6 +189,49 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
       body = decode_body(conn)
       assert body["messages"] == []
       assert body["count"] == 0
+    end
+  end
+
+  # ── POST /sessions/:id/steer ──────────────────────────────────────────
+
+  describe "POST /sessions/:id/steer" do
+    test "returns 400 when text is missing or empty" do
+      post_conn = json_post("/")
+      session_id = decode_body(post_conn)["id"]
+
+      conn = json_post("/#{session_id}/steer", %{})
+      assert conn.status == 400
+      assert decode_body(conn)["error"] == "invalid_request"
+
+      conn2 = json_post("/#{session_id}/steer", %{"text" => "   "})
+      assert conn2.status == 400
+    end
+
+    test "returns 404 for a session with no live loop" do
+      fake_id = "no-such-session-#{System.unique_integer([:positive])}"
+      conn = json_post("/#{fake_id}/steer", %{"text" => "adapt now"})
+
+      assert conn.status == 404
+      assert decode_body(conn)["error"] == "session_not_found"
+    end
+
+    test "steers a live session with 202 and queues the directive" do
+      session_id = "steer-route-#{System.unique_integer([:positive])}"
+
+      # Register a fake loop process so live_session?/1 returns true, without
+      # starting a real agent loop (the ETS queue is what carries the steer).
+      {:ok, _} =
+        Registry.register(OptimalSystemAgent.SessionRegistry, session_id, :test)
+
+      conn = json_post("/#{session_id}/steer", %{"text" => "focus on tests"})
+
+      assert conn.status == 202
+      body = decode_body(conn)
+      assert body["status"] == "steered"
+      assert body["session_id"] == session_id
+
+      # The directive is now sitting in the ETS steer queue for the loop to drain.
+      assert "focus on tests" in OptimalSystemAgent.Agent.Loop.Steer.drain(session_id)
     end
   end
 
@@ -386,6 +430,66 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
       body = decode_body(conn)
       assert body["status"] == "ok"
       assert body["decision"] == "deny"
+    end
+  end
+
+  # ── POST /sessions/:id/fork (fork-at-turn, primitive #34) ─────────────
+
+  defp seed_transcript(n) do
+    src = "fork-src-#{System.unique_integer([:positive])}"
+    Enum.each(1..n, fn i -> SessionTranscript.save_turn(src, "user", "message #{i}") end)
+    src
+  end
+
+  describe "POST /sessions/:id/fork" do
+    test "whole-session fork seeds the full transcript" do
+      src = seed_transcript(5)
+      conn = json_post("/#{src}/fork", %{})
+
+      assert conn.status == 201
+      body = decode_body(conn)
+      assert body["status"] == "resumed"
+      assert body["source_session"] == src
+      assert body["message_count"] == 5
+      assert body["forked_at"] == nil
+      assert is_binary(body["id"])
+    end
+
+    test "fork-at-turn seeds only turns up to and including the index" do
+      src = seed_transcript(5)
+      conn = json_post("/#{src}/fork", %{"turn" => 2})
+
+      assert conn.status == 201
+      body = decode_body(conn)
+      assert body["message_count"] == 3
+      assert body["forked_at"] == 2
+
+      # The new session's persisted transcript reflects the slice.
+      assert length(SessionTranscript.get_transcript(body["id"])) == 3
+    end
+
+    test "fork-at-turn accepts a numeric string index" do
+      src = seed_transcript(4)
+      body = json_post("/#{src}/fork", %{"message_index" => "1"}) |> decode_body()
+
+      assert body["message_count"] == 2
+      assert body["forked_at"] == 1
+    end
+
+    test "fork-at-turn accepts the up_to alias" do
+      src = seed_transcript(4)
+      body = json_post("/#{src}/fork", %{"up_to" => 0}) |> decode_body()
+
+      assert body["message_count"] == 1
+      assert body["forked_at"] == 0
+    end
+
+    test "out-of-range index is clamped to the transcript length" do
+      src = seed_transcript(3)
+      body = json_post("/#{src}/fork", %{"turn" => 99}) |> decode_body()
+
+      assert body["message_count"] == 3
+      assert body["forked_at"] == 2
     end
   end
 

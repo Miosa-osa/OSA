@@ -59,6 +59,77 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
     assert ToolFilter.filter(tools, %{provider: :anthropic, messages: []}) == tools
   end
 
+  # ── Tri-mode delegation policy (primitive #34) ──────────────────────────
+
+  describe "delegation policy tool gating" do
+    defp tools_with_delegate do
+      ~w(file_read shell_execute delegate create_agent)
+      |> Enum.map(&%{name: &1})
+    end
+
+    test "proactive policy keeps spawning tools" do
+      filtered =
+        ToolFilter.filter(tools_with_delegate(), %{
+          provider: :anthropic,
+          messages: [],
+          delegation_policy: :proactive
+        })
+
+      names = Enum.map(filtered, & &1.name)
+      assert "delegate" in names
+      assert "create_agent" in names
+    end
+
+    test "nil policy (config default) keeps spawning tools" do
+      filtered =
+        ToolFilter.filter(tools_with_delegate(), %{provider: :anthropic, messages: []})
+
+      names = Enum.map(filtered, & &1.name)
+      assert "delegate" in names
+    end
+
+    test "disabled policy strips spawning tools but keeps the rest" do
+      filtered =
+        ToolFilter.filter(tools_with_delegate(), %{
+          provider: :anthropic,
+          messages: [],
+          delegation_policy: :disabled
+        })
+
+      names = Enum.map(filtered, & &1.name)
+      refute "delegate" in names
+      refute "create_agent" in names
+      assert "file_read" in names
+      assert "shell_execute" in names
+    end
+
+    test "explicit_only strips spawning tools when the user did not ask" do
+      filtered =
+        ToolFilter.filter(tools_with_delegate(), %{
+          provider: :anthropic,
+          messages: [%{role: "user", content: "fix the failing build"}],
+          delegation_policy: :explicit_only
+        })
+
+      names = Enum.map(filtered, & &1.name)
+      refute "delegate" in names
+      assert "file_read" in names
+    end
+
+    test "explicit_only keeps spawning tools when the user asked to delegate" do
+      filtered =
+        ToolFilter.filter(tools_with_delegate(), %{
+          provider: :anthropic,
+          messages: [%{role: "user", content: "delegate this to a subagent"}],
+          delegation_policy: :explicit_only
+        })
+
+      names = Enum.map(filtered, & &1.name)
+      assert "delegate" in names
+      assert "create_agent" in names
+    end
+  end
+
   defp session_effort_level do
     case :ets.whereis(:osa_settings) do
       :undefined ->

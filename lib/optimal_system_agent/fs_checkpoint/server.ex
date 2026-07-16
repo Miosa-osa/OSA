@@ -48,6 +48,32 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     GenServer.call(__MODULE__, {:diff, checkpoint_id})
   end
 
+  @doc """
+  Return the current HEAD commit hash of the shadow repo, or nil when the
+  server is not running / has no commits. Used by the /rewind subsystem to
+  pin the code state that existed when a rewind checkpoint was created.
+  """
+  @spec head() :: String.t() | nil
+  def head do
+    GenServer.call(__MODULE__, :head)
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc """
+  Restore the full working tree to the snapshotted state as of `commit`.
+
+  Every file present in that commit's tree is written back to its original
+  absolute path with the content it had at `commit`. Files created after the
+  commit are left untouched (this never deletes). Used by /rewind code restore.
+  """
+  @spec restore_to(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def restore_to(commit) when is_binary(commit) do
+    GenServer.call(__MODULE__, {:restore_to, commit}, 30_000)
+  catch
+    :exit, _ -> {:error, "FSCheckpoint server unavailable"}
+  end
+
   # ── Server callbacks ──────────────────────────────────────────────────
 
   @impl true
@@ -92,6 +118,18 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   @impl true
   def handle_call({:diff, checkpoint_id}, _from, state) do
     result = do_diff(state.repo_path, checkpoint_id)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call(:head, _from, state) do
+    result = do_head(state.repo_path)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:restore_to, commit}, _from, state) do
+    result = do_restore_to(state.repo_path, commit)
     {:reply, result, state}
   end
 
@@ -264,6 +302,63 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
 
       {err, _} ->
         {:error, "Failed to read checkpoint files: #{err}"}
+    end
+  end
+
+  # ── Private: head / restore_to (whole-tree, for /rewind) ─────────────
+
+  defp do_head(repo_path) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path, stderr_to_stdout: true) do
+      {hash, 0} -> String.trim(hash)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp do_restore_to(repo_path, commit) do
+    case System.cmd("git", ["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
+      {full_hash, 0} ->
+        full_hash = String.trim(full_hash)
+        restore_tree_from_commit(repo_path, full_hash)
+
+      {_, _} ->
+        {:error, "Commit '#{commit}' not found in shadow repo"}
+    end
+  end
+
+  defp restore_tree_from_commit(repo_path, full_hash) do
+    case System.cmd("git", ["ls-tree", "-r", "--name-only", full_hash],
+           cd: repo_path,
+           stderr_to_stdout: true
+         ) do
+      {files_output, 0} ->
+        files = files_output |> String.trim() |> String.split("\n", trim: true)
+
+        restored =
+          files
+          |> Enum.map(fn file_in_repo ->
+            target = "/" <> file_in_repo
+
+            case System.cmd("git", ["show", "#{full_hash}:#{file_in_repo}"],
+                   cd: repo_path,
+                   stderr_to_stdout: true
+                 ) do
+              {content, 0} ->
+                File.mkdir_p!(Path.dirname(target))
+                File.write!(target, content)
+                target
+
+              _ ->
+                nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        {:ok, "Restored #{length(restored)} file(s) to code state at #{String.slice(full_hash, 0, 8)}"}
+
+      {err, _} ->
+        {:error, "Failed to read checkpoint tree: #{err}"}
     end
   end
 

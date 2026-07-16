@@ -131,6 +131,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}"
     )
 
+    # Mid-turn steer (primitive #32): fold any steer directives queued for this
+    # session into history at this step boundary — BEFORE compaction and context
+    # build — so the agent adapts on the very next LLM call without the turn
+    # being cancelled and in-flight work lost. Persisted into state.messages (not
+    # just one-shot context) so the directive is visible for the rest of the turn.
+    state = inject_pending_steer(state)
+
     # Proactive context compaction: shrink history before building context /
     # calling the model so the window stays under threshold. Complementary to
     # the reactive ContextCollapse fallback in handle_result/3 (413 retry).
@@ -306,6 +313,62 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     # Store bumped max_tokens for this session
     Process.put(:osa_bumped_max_tokens, bumped)
+    run(state)
+  end
+
+  # TRUNCATED-MESSAGE tool-call guard (PI primitive — correctness).
+  #
+  # When a model response is cut off by the token limit, the provider can hand
+  # back tool-call JSON that happens to parse as valid while its arguments are
+  # actually partial. Executing it would run a tool with WRONG/partial input.
+  # Per PI's pattern, when the stop reason signals truncation (Anthropic
+  # "max_tokens" / OpenAI-compat "length") and the message carries tool calls,
+  # FAIL every tool call instead of executing any, then return a continuation
+  # directive so the model re-emits complete calls.
+  #
+  # Ordered after the max_tokens bump-and-retry clause above: a first-pass
+  # "max_tokens" truncation still gets a larger budget there (it drops the
+  # partial tool calls); this clause catches the tool-call cases that one does
+  # not — OpenAI-compat "length", or "max_tokens" past the overflow-retry cap.
+  defp handle_result(
+         {:ok, %{tool_calls: tool_calls, stop_reason: stop_reason} = resp},
+         state,
+         _context
+       )
+       when is_list(tool_calls) and tool_calls != [] and stop_reason in ["max_tokens", "length"] do
+    Logger.warning(
+      "[loop] Truncated response (stop_reason=#{stop_reason}) carried #{length(tool_calls)} " <>
+        "tool call(s) — failing all to avoid executing partial arguments; requesting re-emit"
+    )
+
+    content = Map.get(resp, :content) || ""
+    assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
+
+    failed_tool_msgs =
+      Enum.map(tool_calls, fn tc ->
+        %{
+          role: "tool",
+          tool_call_id: tc.id,
+          content:
+            "Error: tool call not executed — the assistant message was truncated by the token " <>
+              "limit, so the arguments may be incomplete. Re-issue this call with complete arguments."
+        }
+      end)
+
+    directive = %{
+      role: "system",
+      content:
+        "[System: Your previous message was truncated by the token limit before the tool call(s) " <>
+          "finished. None were executed, because their arguments may be incomplete. Re-emit the " <>
+          "complete tool call(s) now.]"
+    }
+
+    state = %{
+      state
+      | messages: state.messages ++ [assistant_msg] ++ failed_tool_msgs ++ [directive],
+        iteration: state.iteration + 1
+    }
+
     run(state)
   end
 
@@ -754,6 +817,34 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp maybe_inject_memory(context, _state), do: context
+
+  # Mid-turn steer drain (primitive #32). Destructively pulls any steer
+  # directives queued for this session out of the ETS steer queue and appends
+  # them to state.messages as system directives. Returns state unchanged when
+  # nothing is queued (the common per-step case).
+  defp inject_pending_steer(%{session_id: sid} = state) do
+    case OptimalSystemAgent.Agent.Loop.Steer.drain(sid) do
+      [] ->
+        state
+
+      texts ->
+        Logger.info(
+          "[loop] Mid-turn steer: folded #{length(texts)} directive(s) into session #{sid} at iteration #{state.iteration}"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :steer_injected,
+          session_id: sid,
+          iteration: state.iteration,
+          count: length(texts)
+        })
+
+        %{
+          state
+          | messages: state.messages ++ OptimalSystemAgent.Agent.Loop.Steer.to_messages(texts)
+        }
+    end
+  end
 
   defp inject_pending_agent_messages(context, state) do
     messages =

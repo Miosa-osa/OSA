@@ -58,6 +58,13 @@ defmodule OptimalSystemAgent.Application do
     # per session so the pre_tool_use hook can nudge when writing unread files.
     :ets.new(:osa_files_read, [:named_table, :public, :set])
 
+    # ETS table for the mid-turn steer queue (primitive #32). Rows:
+    # {{session_id, seq}, text} in an ordered_set so steers drain FIFO. public so
+    # the HTTP request process can queue a steer while the loop process is blocked
+    # mid-turn in handle_call — the running ReactLoop drains it between steps
+    # (same concurrency rationale as :osa_cancel_flags). See Loop.Steer.
+    :ets.new(:osa_steer_queue, [:named_table, :public, :ordered_set])
+
     # ETS table for ask_user_question survey answers — the HTTP endpoint writes
     # answers here, Loop.ask_user_question/4 polls and consumes them.
     :ets.new(:osa_survey_answers, [:set, :public, :named_table])

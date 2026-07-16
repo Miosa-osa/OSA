@@ -434,6 +434,30 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── POST /sessions/:id/steer ───────────────────────────────────────
+  #
+  # Inject a mid-turn steer directive into a RUNNING turn (primitive #32).
+  # Unlike POST /:id/message (starts/queues a fresh turn) or the client-side
+  # front-of-queue, the text is folded into the live ReAct loop at its next step
+  # boundary so the agent adapts WITHOUT the turn being cancelled and in-flight
+  # work being lost. Body: { "text": "..." } (also accepts "message").
+  post "/:id/steer" do
+    session_id = conn.params["id"]
+    text = conn.body_params["text"] || conn.body_params["message"]
+
+    cond do
+      not (is_binary(text) and String.trim(text) != "") ->
+        json_error(conn, 400, "invalid_request", "text is required")
+
+      not SessionManager.live_session?(session_id) ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+
+      true ->
+        :ok = SessionManager.steer(session_id, text)
+        json(conn, 202, %{status: "steered", session_id: session_id})
+    end
+  end
+
   # ── POST /sessions/:id/survey/answer ──────────────────────────────
 
   post "/:id/survey/answer" do
@@ -777,16 +801,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   # Fork the current session into a NEW one, seeding it with a copy of the
   # source transcript so history is preserved. Returns the new session with
   # status "resumed" so the TUI pulls the seeded transcript back in on switch.
+  #
+  # Fork-at-turn (primitive #34): an optional body index selects a specific
+  # point in history to branch from — the new session is seeded with turns
+  # 0..index INCLUSIVE (0-based). Accepts any of `turn`, `turn_index`,
+  # `message_index`, `index`, `up_to` (integer or numeric string). Omit for a
+  # whole-session fork (previous behaviour). Out-of-range indexes are clamped.
 
   post "/:id/fork" do
     source_session_id = conn.params["id"]
     user_id = conn.assigns[:user_id] || "anonymous"
+    body = conn.body_params || %{}
 
     transcript = OptimalSystemAgent.Store.SessionTranscript.get_transcript(source_session_id)
 
+    raw_index =
+      body["turn"] || body["turn_index"] || body["message_index"] || body["index"] ||
+        body["up_to"]
+
+    {seeded, forked_at} = slice_transcript(transcript, raw_index)
+
     case SessionManager.create_session(user_id: user_id, channel: :http) do
       {:ok, %{session_id: new_id}} ->
-        Enum.each(transcript, fn t ->
+        Enum.each(seeded, fn t ->
           OptimalSystemAgent.Store.SessionTranscript.save_turn(
             new_id,
             t.role,
@@ -796,17 +833,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           )
         end)
 
-        body =
+        body_json =
           Jason.encode!(%{
             id: new_id,
             status: "resumed",
             source_session: source_session_id,
-            message_count: length(transcript)
+            message_count: length(seeded),
+            forked_at: forked_at
           })
 
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(201, body)
+        |> send_resp(201, body_json)
 
       {:error, _reason} ->
         json_error(conn, 500, "fork_failed", "Failed to fork session #{source_session_id}")
@@ -887,6 +925,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         end
     end
   end
+
+  # Fork-at-turn slice: seed turns 0..index INCLUSIVE. nil / non-numeric index
+  # → whole transcript (whole-session fork). Index is clamped into range so an
+  # out-of-bounds request never crashes; returns {seeded_turns, forked_at_index}
+  # where forked_at is nil for a whole-session fork.
+  defp slice_transcript([], _raw), do: {[], nil}
+  defp slice_transcript(transcript, nil), do: {transcript, nil}
+
+  defp slice_transcript(transcript, raw) do
+    case normalize_index(raw) do
+      nil ->
+        {transcript, nil}
+
+      idx ->
+        clamped = idx |> max(0) |> min(length(transcript) - 1)
+        {Enum.take(transcript, clamped + 1), clamped}
+    end
+  end
+
+  defp normalize_index(n) when is_integer(n), do: n
+
+  defp normalize_index(s) when is_binary(s) do
+    case Integer.parse(String.trim(s)) do
+      {n, _} -> n
+      :error -> nil
+    end
+  end
+
+  defp normalize_index(_), do: nil
 
   defp parse_int(nil, default), do: default
 

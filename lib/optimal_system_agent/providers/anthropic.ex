@@ -93,7 +93,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           usage = extract_usage(resp)
           thinking_blocks = extract_thinking(resp)
 
-          result = %{content: content, tool_calls: tool_calls, usage: usage}
+          result = %{
+            content: content,
+            tool_calls: tool_calls,
+            usage: usage,
+            stop_reason: resp["stop_reason"]
+          }
 
           result =
             if thinking_blocks != [],
@@ -162,7 +167,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             buffer: "",
             thinking: [],
             current_thinking: nil,
-            stream_error: nil
+            stream_error: nil,
+            stop_reason: nil
           })
 
         {:error, reason} ->
@@ -218,7 +224,11 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                 acc = finalize_current_tool(acc)
                 acc = finalize_current_thinking(acc)
 
-                result = %{content: acc.content, tool_calls: Enum.reverse(acc.tool_calls)}
+                result = %{
+                  content: acc.content,
+                  tool_calls: Enum.reverse(acc.tool_calls),
+                  stop_reason: acc.stop_reason
+                }
 
                 result =
                   if acc.thinking != [],
@@ -364,6 +374,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
   defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
   defp process_stream_event(%{"type" => "message_start"}, _callback, acc), do: acc
+
+  # The final `message_delta` carries the terminal stop_reason (e.g.
+  # "max_tokens" when the response was truncated by the token limit). Capture
+  # it so the loop's TRUNCATED-MESSAGE guard can refuse partial tool calls.
+  defp process_stream_event(
+         %{"type" => "message_delta", "delta" => %{"stop_reason" => stop_reason}},
+         _callback,
+         acc
+       )
+       when is_binary(stop_reason) do
+    if Map.has_key?(acc, :stop_reason), do: %{acc | stop_reason: stop_reason}, else: acc
+  end
+
   defp process_stream_event(%{"type" => "message_delta"}, _callback, acc), do: acc
   defp process_stream_event(%{"type" => "ping"}, _callback, acc), do: acc
 

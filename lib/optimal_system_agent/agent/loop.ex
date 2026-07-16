@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
+  alias OptimalSystemAgent.Agent.Loop.Steer
   alias OptimalSystemAgent.Agent.Loop.Survey
   alias OptimalSystemAgent.Agent.Loop.Telemetry
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
@@ -108,7 +109,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Delegation nesting depth — 0 for a top-level session, incremented for
     # each subagent generation. Read by ToolFilter to strip spawning tools at
     # the max depth (fork-bomb / runaway-cost guard).
-    delegation_depth: 0
+    delegation_depth: 0,
+    # Tri-mode delegation policy (primitive #34): :disabled | :explicit_only |
+    # :proactive. nil defers to `config :optimal_system_agent, :delegation_policy`
+    # (default :proactive). Read by ToolFilter + the delegate handler.
+    delegation_policy: nil
   ]
 
   @cancel_table :osa_cancel_flags
@@ -191,6 +196,33 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @spec inject_agent_result(String.t(), String.t()) :: :ok
   def inject_agent_result(session_id, content) when is_binary(content) do
     GenServer.cast(via(session_id), {:inject_agent_result, content})
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Queue a mid-turn steer directive for a running session (primitive #32).
+
+  The text is folded into the live ReAct loop at its NEXT step boundary as a
+  user-authored system directive, so the agent adapts WITHOUT the turn being
+  cancelled and in-flight work being lost — this is the true mid-turn path the
+  TUI `/steer` targets while the agent is Processing.
+
+  Transport is the ETS steer queue (`Loop.Steer`), not the process mailbox,
+  because the loop process is blocked in `handle_call` for the whole turn and
+  would not service a `cast` until the turn ended. The accompanying `{:steer,
+  text}` cast only handles the idle case (mailbox free): it drains any still-
+  queued steers into history so they are not stranded until the next turn. The
+  ETS drain is destructive, so exactly one of the two paths injects each steer.
+
+  Always returns `:ok`; a steer for an unknown/dead session is simply never
+  drained.
+  """
+  @spec steer(String.t(), String.t()) :: :ok
+  def steer(session_id, text) when is_binary(session_id) and is_binary(text) do
+    Steer.queue(session_id, text)
+    GenServer.cast(via(session_id), {:steer, text})
+    :ok
   catch
     :exit, _ -> :ok
   end
@@ -383,6 +415,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
+      delegation_policy: Keyword.get(opts, :delegation_policy),
       parent_session_id: Keyword.get(opts, :parent_session_id),
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),
@@ -434,6 +467,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call({:process, message, opts}, _from, state) do
+    # Rewind checkpoint: snapshot conversation + code state *before* this
+    # prompt is processed, so the user can later rewind to this point.
+    # Best-effort and never allowed to disrupt the turn.
+    _ = maybe_rewind_checkpoint(state, message)
+
     # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
     # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
     # guard, compaction, message build, and genre routing) live in TurnPipeline
@@ -544,6 +582,39 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def handle_cast({:inject_agent_result, content}, state) do
     injected = %{role: "user", content: content}
     {:noreply, %{state | messages: state.messages ++ [injected]}}
+  end
+
+  # Mid-turn steer (primitive #32). This cast is only ever *serviced* when the
+  # loop is idle (mailbox free) — during a turn the process is blocked in
+  # handle_call and the running ReactLoop drains the ETS steer queue between
+  # steps first. When it does run (idle), drain any still-queued steers into
+  # history so they are not stranded until the next process_message. The text
+  # argument is redundant with the ETS queue (populated by `steer/2`) and is
+  # kept only to make the message self-describing; draining is what applies it,
+  # which guarantees no double injection.
+  @impl true
+  def handle_cast({:steer, _text}, state) do
+    case Steer.drain(state.session_id) do
+      [] ->
+        {:noreply, state}
+
+      texts ->
+        {:noreply, %{state | messages: state.messages ++ Steer.to_messages(texts)}}
+    end
+  end
+
+  @impl true
+  def handle_cast({:rewind_conversation, messages, meta}, state) do
+    new_state = %{
+      state
+      | messages: messages,
+        iteration: Map.get(meta, :iteration, state.iteration),
+        plan_mode: Map.get(meta, :plan_mode, state.plan_mode),
+        turn_count: Map.get(meta, :turn_count, state.turn_count)
+    }
+
+    Checkpoint.checkpoint_state(new_state)
+    {:noreply, new_state}
   end
 
   @impl true
@@ -805,6 +876,32 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate clear_checkpoint(session_id), to: Checkpoint
+
+  @doc """
+  Apply a restored conversation to a *live* loop process, if one is running.
+  No-op (returns `:ok`) when the session has no running loop — callers still
+  restore via the crash-recovery checkpoint for the next resume.
+  """
+  def rewind_conversation(session_id, messages, meta \\ %{}) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
+      [{_pid, _} | _] ->
+        GenServer.cast(via(session_id), {:rewind_conversation, messages, meta})
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # Best-effort rewind checkpoint before a user prompt. Wrapped so a snapshot
+  # failure can never break the turn.
+  defp maybe_rewind_checkpoint(state, message) do
+    Checkpoint.create_rewind_checkpoint(state, label: message)
+  rescue
+    _ -> {:error, :snapshot_failed}
+  end
 
   @doc false
   defdelegate needs_verification_gate?(state), to: Guardrails

@@ -682,25 +682,44 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def context_window(_),
     do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
-  defp get_ollama_context(model) do
-    # Check ETS cache first
-    case :ets.whereis(:osa_context_cache) do
-      :undefined ->
-        :ok
+  # Sentinel cached for models whose context length could not be resolved from
+  # Ollama (unreachable, non-200, or no context_length key). Caching the miss —
+  # not just the hit — is a hot-path fix: context_window/1 runs on EVERY ReAct
+  # iteration, so without a negative cache an unresolved model re-issued the 3s
+  # /api/show POST every single iteration. The value it resolves to (the config
+  # default) is unchanged; only the repeated blocking IO is eliminated. ETS is
+  # cleared on restart, matching the "context_length doesn't change without a
+  # re-pull" rationale of the positive cache.
+  @no_ctx_sentinel :no_ctx
 
-      _ ->
-        case :ets.lookup(:osa_context_cache, model) do
-          [{^model, cached_ctx}] -> return_cached(cached_ctx)
-          _ -> :ok
-        end
-    end
-    |> case do
+  defp get_ollama_context(model) do
+    case cache_lookup(model) do
       {:ok, _ctx} = hit -> hit
-      _ -> fetch_ollama_context(model)
+      :negative -> :error
+      :miss -> fetch_ollama_context(model)
     end
   end
 
-  defp return_cached(ctx), do: {:ok, ctx}
+  defp cache_lookup(model) do
+    case :ets.whereis(:osa_context_cache) do
+      :undefined ->
+        :miss
+
+      _ ->
+        case :ets.lookup(:osa_context_cache, model) do
+          [{^model, @no_ctx_sentinel}] -> :negative
+          [{^model, cached_ctx}] when is_integer(cached_ctx) -> {:ok, cached_ctx}
+          _ -> :miss
+        end
+    end
+  end
+
+  defp cache_put(model, value) do
+    case :ets.whereis(:osa_context_cache) do
+      :undefined -> :ok
+      _ -> :ets.insert(:osa_context_cache, {model, value})
+    end
+  end
 
   defp fetch_ollama_context(model) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
@@ -719,22 +738,21 @@ defmodule OptimalSystemAgent.Providers.Registry do
           end)
 
         if ctx do
-          # Cache the result
-          case :ets.whereis(:osa_context_cache) do
-            :undefined -> :ok
-            _ -> :ets.insert(:osa_context_cache, {model, ctx})
-          end
-
+          cache_put(model, ctx)
           {:ok, ctx}
         else
+          cache_put(model, @no_ctx_sentinel)
           :error
         end
 
       _ ->
+        cache_put(model, @no_ctx_sentinel)
         :error
     end
   rescue
-    _ -> :error
+    _ ->
+      cache_put(model, @no_ctx_sentinel)
+      :error
   end
 
   @doc """

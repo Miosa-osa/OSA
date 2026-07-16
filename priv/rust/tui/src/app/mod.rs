@@ -41,6 +41,7 @@ use crate::dialogs::permissions::Permissions;
 use crate::dialogs::plan_review::PlanReview;
 use crate::dialogs::quit_confirm::QuitConfirm;
 use crate::dialogs::reasoning::ReasoningSelector;
+use crate::dialogs::rewind::RewindDialog;
 use crate::dialogs::sessions::SessionBrowser;
 use crate::event::Event;
 
@@ -79,6 +80,7 @@ pub struct App {
     pub plan_review: Option<PlanReview>,
     pub permissions: Option<Permissions>,
     pub reasoning_selector: Option<ReasoningSelector>,
+    pub rewind_dialog: Option<RewindDialog>,
     pub config_editor: Option<ConfigEditor>,
     pub file_picker: Option<FilePicker>,
     pub survey: Option<crate::dialogs::survey::SurveyDialog>,
@@ -252,6 +254,7 @@ impl App {
             plan_review: None,
             permissions: None,
             reasoning_selector: None,
+            rewind_dialog: None,
             config_editor: None,
             file_picker: None,
             survey: None,

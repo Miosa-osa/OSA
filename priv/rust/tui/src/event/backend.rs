@@ -199,6 +199,8 @@ pub enum BackendEvent {
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
+    RewindCheckpointsLoaded(Result<Vec<RewindCheckpoint>, String>),
+    RewindRestored(Result<RewindRestoreResponse, String>),
     ModelsLoaded(Result<ModelListResponse, String>),
     ModelSwitched(Result<ModelSwitchResponse, String>),
     OnboardingStatus(Result<OnboardingStatusResponse, String>),

@@ -334,15 +334,12 @@ impl App {
         );
     }
 
-    /// /steer — inject a priority message. Idle: submit immediately. Processing:
-    /// jump to the FRONT of the queue so it runs first at the next turn
-    /// boundary.
-    ///
-    /// TODO(backend mid-turn steer): true mid-turn injection — interrupting the
-    /// running agent loop with a new user message WITHOUT waiting for the turn
-    /// to finish — needs backend support the orchestrate/SSE protocol does not
-    /// expose yet. Until then this is the queue-at-boundary version (front of
-    /// queue), which is safe and deterministic.
+    /// /steer — inject a directive. Idle: submit immediately as a new turn.
+    /// Processing: TRUE mid-turn steer — POST the text to the live session so the
+    /// backend folds it into the running ReAct loop at its next step boundary
+    /// (primitive #32). The agent adapts WITHOUT the turn being cancelled and
+    /// in-flight work lost — a strict upgrade over the old front-of-queue
+    /// behaviour (which only ran the steer at the NEXT turn).
     pub(crate) fn steer_message(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() {
@@ -353,10 +350,19 @@ impl App {
             return;
         }
         if self.state == AppState::Processing {
-            self.message_queue.insert(0, text.to_string());
-            self.input.set_queued_count(self.message_queue.len());
+            // Mid-turn injection: hand the directive to the backend steer queue.
+            // The running loop drains it at its next step boundary; no cancel,
+            // no waiting for the turn to finish.
+            let client = self.client.clone();
+            let session_id = self.session_id.clone();
+            let steer_text = text.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = client.steer_session(&session_id, &steer_text).await {
+                    tracing::warn!("Backend steer failed: {}", e);
+                }
+            });
             self.toasts.push(
-                "steer queued — runs next".into(),
+                "steering — folding into the current turn".into(),
                 crate::components::toast::ToastLevel::Info,
             );
         } else {

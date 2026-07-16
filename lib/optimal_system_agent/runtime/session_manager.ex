@@ -157,6 +157,15 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   @spec cancel(session_id()) :: :ok | {:error, term()}
   def cancel(session_id), do: Loop.cancel(session_id)
 
+  @doc """
+  Queue a mid-turn steer directive for a running session (primitive #32).
+
+  The text is injected into the live ReAct loop at its next step boundary so the
+  agent adapts without the turn being cancelled. See `Loop.steer/2`.
+  """
+  @spec steer(session_id(), String.t()) :: :ok
+  def steer(session_id, text), do: Loop.steer(session_id, text)
+
   @doc "Stop a live loop process and forget runtime tracking."
   @spec stop_session(session_id()) :: :ok | {:error, :not_found} | {:error, term()}
   def stop_session(session_id) do

@@ -541,6 +541,44 @@ impl App {
                 }
             },
 
+            BackendEvent::RewindCheckpointsLoaded(result) => match result {
+                Ok(checkpoints) => {
+                    if checkpoints.is_empty() {
+                        self.toasts.push(
+                            "No rewind checkpoints yet".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    } else {
+                        self.rewind_dialog =
+                            Some(crate::dialogs::rewind::RewindDialog::new(checkpoints));
+                        self.transition(AppState::Rewind);
+                    }
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("Failed to load checkpoints: {}", e),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                }
+            },
+
+            BackendEvent::RewindRestored(result) => match result {
+                Ok(resp) => {
+                    let detail = match resp.message_count {
+                        Some(n) => format!("Rewound ({}, {} messages)", resp.scope, n),
+                        None => format!("Rewound ({})", resp.scope),
+                    };
+                    self.toasts
+                        .push(detail, crate::components::toast::ToastLevel::Info);
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("Rewind failed: {}", e),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                }
+            },
+
             // === Orchestrator events → Agents component ===
             BackendEvent::OrchestratorTaskStarted { task_id } => {
                 self.agents.task_started(&task_id);

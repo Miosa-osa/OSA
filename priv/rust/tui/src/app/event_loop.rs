@@ -274,6 +274,11 @@ impl App {
                                     b.draw(frame, area);
                                 }
                             }
+                            AppState::Rewind => {
+                                if let Some(ref d) = self.rewind_dialog {
+                                    d.draw(frame, area);
+                                }
+                            }
                             AppState::Permissions => {
                                 if let Some(ref d) = self.permissions {
                                     d.draw(frame, area);

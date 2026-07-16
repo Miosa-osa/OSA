@@ -41,6 +41,15 @@ config :optimal_system_agent,
   compaction_aggressive: 0.85,
   compaction_emergency: 0.95,
 
+  # Observability — OpenTelemetry GenAI export (primitive #30). Off by default:
+  # no OTLP dependency is shipped, so this is an adapter seam. Set
+  # `otel_enabled: true` and point `otel_adapter` at a module implementing
+  # `OptimalSystemAgent.Observability.OTel` to export GenAI spans/attributes.
+  # Structured, correlated per-session events are always on (see
+  # `OptimalSystemAgent.Observability`) — only OTLP export is gated here.
+  otel_enabled: false,
+  otel_adapter: OptimalSystemAgent.Observability.OTel.Noop,
+
   # Proactive monitor interval (milliseconds)
   proactive_interval: 30 * 60 * 1000,
 

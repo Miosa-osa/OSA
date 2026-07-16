@@ -1,0 +1,98 @@
+defmodule OptimalSystemAgent.Agent.Loop.Steer do
+  @moduledoc """
+  Mid-turn steer queue (primitive #32 — TRUE mid-turn steer).
+
+  A *steer* is a user directive folded into a RUNNING agent turn at its next
+  ReAct step boundary. Unlike a new turn (`process_message`) or a front-of-queue
+  message (runs at the *next* turn), a steer lets the agent adapt WITHOUT the
+  caller cancelling the turn and losing in-flight work.
+
+  ## Why ETS and not a GenServer message
+
+  The `Loop` process is blocked inside `handle_call/3` for the whole duration of
+  a turn (`ReactLoop.run/1` runs synchronously there), so its mailbox is not
+  serviced — a `cast`/`call` would only be handled *after* the turn ends, which
+  defeats "mid-turn". ETS reads/writes work concurrently regardless of the
+  process being busy, so a steer queued from the HTTP request process is visible
+  to the running loop between steps. This mirrors exactly why `Loop.cancel/1`
+  uses the `:osa_cancel_flags` ETS table.
+
+  ## Storage
+
+  Rows are `{{session_id, seq}, text}` in the `:osa_steer_queue` `:ordered_set`,
+  where `seq` is a strictly-increasing monotonic integer, so `drain/1` returns
+  the queued directives in FIFO order and removes them (each steer is injected
+  exactly once, no matter which entry point enqueued it).
+  """
+  require Logger
+
+  @table :osa_steer_queue
+
+  @doc """
+  Enqueue a steer directive for `session_id`.
+
+  Concurrent-safe and non-blocking; returns `:ok` even if the table is missing
+  (feature simply degrades to a no-op rather than crashing the caller).
+  """
+  @spec queue(String.t(), String.t()) :: :ok
+  def queue(session_id, text) when is_binary(session_id) and is_binary(text) do
+    seq = :erlang.unique_integer([:monotonic, :positive])
+    :ets.insert(@table, {{session_id, seq}, text})
+    :ok
+  rescue
+    ArgumentError ->
+      Logger.warning("[steer] queue table missing — steer dropped for #{session_id}")
+      :ok
+  end
+
+  @doc """
+  Remove and return all queued steer directives for `session_id`, oldest first.
+  Returns `[]` when nothing is queued (or the table is unavailable).
+  """
+  @spec drain(String.t()) :: [String.t()]
+  def drain(session_id) when is_binary(session_id) do
+    # Select {seq, text} for this session, then delete each row by its full key.
+    match = [{{{session_id, :"$1"}, :"$2"}, [], [{{:"$1", :"$2"}}]}]
+
+    case :ets.select(@table, match) do
+      [] ->
+        []
+
+      rows ->
+        rows
+        |> Enum.sort_by(fn {seq, _text} -> seq end)
+        |> Enum.map(fn {seq, text} ->
+          :ets.delete(@table, {session_id, seq})
+          text
+        end)
+    end
+  rescue
+    ArgumentError -> []
+  end
+
+  @doc "Number of steer directives currently queued for `session_id`."
+  @spec count(String.t()) :: non_neg_integer()
+  def count(session_id) when is_binary(session_id) do
+    :ets.select_count(@table, [{{{session_id, :_}, :_}, [], [true]}])
+  rescue
+    ArgumentError -> 0
+  end
+
+  @doc """
+  Build the message list injected into the conversation for a set of steer
+  texts. A steer is surfaced as a `system` directive (consistent with every
+  other mid-turn injection in `ReactLoop`, which avoids provider role-alternation
+  issues) but is clearly labelled as coming from the user.
+  """
+  @spec to_messages([String.t()]) :: [map()]
+  def to_messages(texts) when is_list(texts) do
+    Enum.map(texts, fn text ->
+      %{
+        role: "system",
+        content:
+          "[User steer — a mid-turn directive from the user. Adapt your current work to " <>
+            "incorporate this now, without discarding progress already made]: " <> text
+      }
+    end)
+  end
+end

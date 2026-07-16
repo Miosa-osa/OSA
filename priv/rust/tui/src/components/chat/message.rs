@@ -552,6 +552,7 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  /model <name>", "Switch model"),
         ("  /sessions", "Browse sessions"),
         ("  /session new", "New session"),
+        ("  /rewind", "Restore code/conversation from a checkpoint"),
         ("  /theme <name>", "Switch theme"),
         ("  /verbose", "Toggle tool detail"),
         ("  /yolo", "Toggle auto-approve (dangerous)"),

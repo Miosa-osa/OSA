@@ -220,6 +220,35 @@ impl ApiClient {
         Ok(recents.into_iter().map(SessionInfo::from).collect())
     }
 
+    /// GET /api/v1/rewind/:session_id — list recent rewind checkpoints
+    /// (conversation + code snapshots taken before each user prompt).
+    pub async fn list_rewind_checkpoints(&self, session_id: &str) -> Result<Vec<RewindCheckpoint>> {
+        let resp = self
+            .get(&format!("/api/v1/rewind/{}", session_id))
+            .await?;
+        let wrapper: serde_json::Value = resp.json().await?;
+        let checkpoints: Vec<RewindCheckpoint> =
+            serde_json::from_value(wrapper.get("checkpoints").cloned().unwrap_or_default())?;
+        Ok(checkpoints)
+    }
+
+    /// POST /api/v1/rewind/restore — restore code / conversation / both from a
+    /// rewind checkpoint.
+    pub async fn restore_rewind(
+        &self,
+        session_id: &str,
+        checkpoint_id: &str,
+        scope: RewindScope,
+    ) -> Result<RewindRestoreResponse> {
+        let body = RewindRestoreRequest {
+            session_id: session_id.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            scope: scope.as_str().to_string(),
+        };
+        let resp = self.post("/api/v1/rewind/restore", &body).await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST /api/v1/sessions with { working_dir } — directory-scoped resume.
     /// Returns the existing session for `working_dir` (status "resumed") if one
     /// exists on disk, otherwise a freshly created one (status "created").
@@ -450,6 +479,20 @@ impl ApiClient {
             .post(
                 &format!("/api/v1/sessions/{}/cancel", id),
                 &serde_json::json!({}),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// POST /api/v1/sessions/:id/steer — inject a mid-turn steer directive into
+    /// a RUNNING turn (primitive #32). The backend folds the text into the live
+    /// ReAct loop at its next step boundary so the agent adapts without the turn
+    /// being cancelled and in-flight work lost.
+    pub async fn steer_session(&self, id: &str, text: &str) -> Result<()> {
+        let _ = self
+            .post(
+                &format!("/api/v1/sessions/{}/steer", id),
+                &serde_json::json!({ "text": text }),
             )
             .await?;
         Ok(())

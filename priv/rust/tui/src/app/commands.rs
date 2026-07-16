@@ -393,6 +393,11 @@ impl App {
                 );
                 self.do_fork();
             }
+            "/rewind" => {
+                // Open the rewind dialog: restore code / conversation / both from
+                // a checkpoint snapshotted before an earlier prompt.
+                self.load_rewind_checkpoints();
+            }
             _ => {
                 // Unknown slash command -> send to backend
                 let cmd_name = &cmd[1..]; // strip leading /

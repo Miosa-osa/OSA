@@ -16,6 +16,12 @@ config :optimal_system_agent, compactor_llm_enabled: false
 # Use a different HTTP port in tests to avoid conflicts
 config :optimal_system_agent, http_port: 0
 
+# Durable execution (primitive #27): isolate the per-step durable log under the
+# system tmp dir so tests never write to ~/.osa. `durable_execution` stays at its
+# default (true) so the idempotency/replay path is exercised by its own tests.
+config :optimal_system_agent,
+  durable_log_dir: Path.join(System.tmp_dir!(), "osa-test-durable")
+
 # Per-run test secret — no hardcoded secrets
 config :optimal_system_agent,
   shared_secret: "osa-test-#{:crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)}"

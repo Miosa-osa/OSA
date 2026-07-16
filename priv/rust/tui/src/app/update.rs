@@ -99,6 +99,7 @@ impl App {
             AppState::Palette => self.handle_palette_key(key),
             AppState::ModelPicker => self.handle_model_picker_key(key),
             AppState::Sessions => self.handle_session_browser_key(key),
+            AppState::Rewind => self.handle_rewind_key(key),
             AppState::Onboarding => self.handle_onboarding_key(key),
             AppState::PlanReview => self.handle_plan_review_key(key),
             AppState::Permissions => self.handle_permissions_key(key),

@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.Tier
+  alias OptimalSystemAgent.Agent.DelegationPolicy
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -33,13 +34,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()}
-  def check_permissions(%{"task" => task} = input, _ctx) do
-    if String.trim(task) == "" do
-      {:deny, "Access denied: task description must not be blank"}
-    else
-      {:allow, input}
+  def check_permissions(%{"task" => task} = input, ctx) do
+    cond do
+      String.trim(task) == "" ->
+        {:deny, "Access denied: task description must not be blank"}
+
+      true ->
+        check_delegation_policy(input, ctx)
     end
   end
+
+  # Tri-mode delegation policy gate (primitive #34). Enforced here as
+  # defense-in-depth: ToolFilter already strips the tool from the LLM's list
+  # when delegation is not permitted, but a still-listed / hand-crafted call is
+  # denied here too. `:proactive` allows, `:disabled` denies, `:explicit_only`
+  # allows only when the user asked to delegate this turn.
+  defp check_delegation_policy(input, ctx) do
+    policy = DelegationPolicy.resolve(%{delegation_policy: ctx_policy(ctx)})
+    messages = ctx_messages(ctx)
+
+    cond do
+      policy == :disabled ->
+        {:deny,
+         "Access denied: delegation is disabled for this session (delegation policy: disabled)"}
+
+      policy == :explicit_only and not DelegationPolicy.user_requested?(messages) ->
+        {:deny,
+         "Access denied: delegation policy is explicit-only — the user has not requested delegation this turn"}
+
+      true ->
+        {:allow, input}
+    end
+  end
+
+  defp ctx_policy(%UseContext{delegation_policy: p}), do: p
+  defp ctx_policy(ctx) when is_map(ctx), do: Map.get(ctx, :delegation_policy)
+  defp ctx_policy(_), do: nil
+
+  defp ctx_messages(%UseContext{messages: m}) when is_list(m), do: m
+  defp ctx_messages(ctx) when is_map(ctx), do: Map.get(ctx, :messages) || []
+  defp ctx_messages(_), do: []
 
   # ── Stage 3: Execute ───────────────────────────────────────────────────
 

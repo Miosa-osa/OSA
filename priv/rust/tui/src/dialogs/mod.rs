@@ -11,6 +11,7 @@ pub mod picker;
 pub mod plan_review;
 pub mod quit_confirm;
 pub mod reasoning;
+pub mod rewind;
 pub mod sessions;
 pub mod survey;
 pub mod transcript_viewer;

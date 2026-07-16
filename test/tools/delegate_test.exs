@@ -178,6 +178,52 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
     end
   end
 
+  # ── Handler: tri-mode delegation policy (primitive #34) ──────────────────
+
+  defp policy_ctx(policy, messages) do
+    %{UseContext.empty() | delegation_policy: policy, messages: messages}
+  end
+
+  describe "Handler.check_permissions/2 delegation policy" do
+    test "proactive policy allows delegation" do
+      assert {:allow, _} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:proactive, []))
+    end
+
+    test "nil policy (config default :proactive) allows delegation" do
+      assert {:allow, _} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(nil, []))
+    end
+
+    test "disabled policy denies delegation" do
+      assert {:deny, msg} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:disabled, []))
+
+      assert msg =~ "disabled"
+    end
+
+    test "explicit_only denies when the user did not ask to delegate" do
+      messages = [%{role: "user", content: "please fix the failing test"}]
+
+      assert {:deny, msg} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:explicit_only, messages))
+
+      assert msg =~ "explicit-only"
+    end
+
+    test "explicit_only allows when the user asked to delegate" do
+      messages = [%{role: "user", content: "delegate this to a subagent, please"}]
+
+      assert {:allow, _} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx(:explicit_only, messages))
+    end
+
+    test "explicit_only accepts string policy form 'explicit-only'" do
+      assert {:deny, _} =
+               Handler.check_permissions(%{"task" => "do X"}, policy_ctx("explicit-only", []))
+    end
+  end
+
   # ── UI.render/3 ──────────────────────────────────────────────────────────
 
   describe "UI.render/3" do

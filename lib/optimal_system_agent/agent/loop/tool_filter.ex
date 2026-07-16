@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   """
   require Logger
   alias OptimalSystemAgent.Agent.FastPath
+  alias OptimalSystemAgent.Agent.DelegationPolicy
 
   # Minimum signal weight required to include tools in the LLM call.
   @tool_weight_threshold 0.20
@@ -49,6 +50,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   def filter(tools, state) do
     tools
     |> apply_delegation_depth_guard(state)
+    |> apply_delegation_policy(state)
     |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
     |> FastPath.select_tools(state)
@@ -91,19 +93,44 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
     depth = Map.get(state, :delegation_depth, 0)
 
     if is_integer(depth) and depth >= max_delegation_depth() do
-      {stripped, kept} = Enum.split_with(tools, fn t -> tool_name(t) in @spawning_tools end)
-
-      if stripped != [] do
-        Logger.debug(
-          "[loop] delegation_depth=#{depth} >= #{max_delegation_depth()} — stripping spawning tools " <>
-            "(#{stripped |> Enum.map(&tool_name/1) |> Enum.join(", ")})"
-        )
-      end
-
-      kept
+      strip_spawning_tools(
+        tools,
+        "delegation_depth=#{depth} >= #{max_delegation_depth()}"
+      )
     else
       tools
     end
+  end
+
+  # Tri-mode delegation policy (primitive #34) — layered on top of the depth
+  # guard. `:proactive` leaves the tool list untouched; `:disabled` always
+  # strips spawning tools; `:explicit_only` strips them unless the user asked to
+  # delegate in the current turn. Enforced again at the delegate handler as
+  # defense-in-depth in case the model calls a still-listed tool.
+  defp apply_delegation_policy(tools, state) do
+    policy = DelegationPolicy.resolve(state)
+    messages = Map.get(state, :messages, [])
+
+    if DelegationPolicy.allow?(policy, messages) do
+      tools
+    else
+      strip_spawning_tools(tools, "delegation_policy=#{policy}")
+    end
+  end
+
+  # Split off @spawning_tools, logging what was removed and why. Shared by the
+  # depth guard and the policy gate so both stay in lockstep on the tool list.
+  defp strip_spawning_tools(tools, reason) do
+    {stripped, kept} = Enum.split_with(tools, fn t -> tool_name(t) in @spawning_tools end)
+
+    if stripped != [] do
+      Logger.debug(
+        "[loop] #{reason} — stripping spawning tools " <>
+          "(#{stripped |> Enum.map(&tool_name/1) |> Enum.join(", ")})"
+      )
+    end
+
+    kept
   end
 
   defp tool_name(%{name: name}), do: to_string(name)

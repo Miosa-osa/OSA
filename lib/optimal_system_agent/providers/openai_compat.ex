@@ -74,7 +74,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
     try do
       case Req.post(url, json: body, headers: headers, receive_timeout: timeout) do
-        {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp}} ->
+        {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} = choice | _]} = resp}} ->
           raw_content = msg["content"] || ""
           tool_calls = parse_tool_calls(msg, model)
 
@@ -88,7 +88,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
             |> Text.strip_thinking_tokens()
 
           usage = parse_usage(resp)
-          {:ok, %{content: content, tool_calls: tool_calls, usage: usage}}
+
+          {:ok,
+           %{
+             content: content,
+             tool_calls: tool_calls,
+             usage: usage,
+             stop_reason: choice["finish_reason"]
+           }}
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
           retry_after = parse_retry_after(resp_headers)
@@ -141,7 +148,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       content: "",
       # index → %{id, name, arguments_json}
       tool_calls: %{},
-      usage: %{}
+      usage: %{},
+      finish_reason: nil
     })
 
     try do
@@ -199,8 +207,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp process_sse_line(json_str, callback, acc) do
     case Jason.decode(json_str) do
-      {:ok, %{"choices" => [%{"delta" => delta} | _]} = chunk} ->
+      {:ok, %{"choices" => [%{"delta" => delta} = choice | _]} = chunk} ->
         acc = process_delta(delta, callback, acc)
+
+        # Capture the terminal finish_reason ("length" when truncated by the
+        # token limit) so the loop's TRUNCATED-MESSAGE guard can refuse partial
+        # tool calls.
+        acc =
+          case choice["finish_reason"] do
+            fr when is_binary(fr) -> %{acc | finish_reason: fr}
+            _ -> acc
+          end
+
         # Capture usage if present (some providers send it in the final chunk)
         case chunk do
           %{"usage" => %{"prompt_tokens" => inp, "completion_tokens" => out}} ->
@@ -329,7 +347,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         end
       end
 
-    result = %{content: content, tool_calls: tool_calls, usage: acc.usage}
+    result = %{
+      content: content,
+      tool_calls: tool_calls,
+      usage: acc.usage,
+      stop_reason: Map.get(acc, :finish_reason)
+    }
+
     callback.({:done, result})
     :ok
   end

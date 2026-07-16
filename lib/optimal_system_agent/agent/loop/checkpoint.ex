@@ -118,4 +118,319 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   rescue
     _ -> :ok
   end
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Rewind checkpoints (/rewind UX)
+  #
+  # Unlike the single-file crash-recovery checkpoint above (which is
+  # overwritten each tool cycle), rewind checkpoints keep a *history* of
+  # snapshots — one taken before each user prompt. Each snapshot pairs the
+  # conversation state (messages) with the code state at that moment,
+  # captured as the HEAD of the FSCheckpoint shadow repo (`fs_head`).
+  #
+  # A user can later restore code, conversation, or both from any recent
+  # snapshot. Retention is bounded (default 50 per session).
+  # ══════════════════════════════════════════════════════════════════════
+
+  @default_max_rewind 50
+  @label_max_len 120
+
+  @doc "Root directory for rewind checkpoint history."
+  def rewind_dir do
+    Application.get_env(:optimal_system_agent, :rewind_checkpoint_dir, "~/.osa/rewind")
+    |> Path.expand()
+  end
+
+  @doc "Per-session directory holding rewind checkpoint files."
+  def rewind_session_dir(session_id) do
+    Path.join(rewind_dir(), sanitize_session(session_id))
+  end
+
+  defp max_rewind do
+    try do
+      OptimalSystemAgent.Settings.get("rewind_checkpoints_max_count", @default_max_rewind)
+    rescue
+      _ -> @default_max_rewind
+    end
+  end
+
+  @doc """
+  Create a rewind checkpoint from the given loop state. Meant to be called
+  right *before* a user prompt is processed, so `state.messages` reflects the
+  conversation as it was before that prompt.
+
+  Options:
+    * `:label`   — a human label (typically the user prompt); truncated
+    * `:fs_head` — override the captured code HEAD (defaults to shadow repo)
+
+  Returns `{:ok, id}` or `{:error, reason}`. Never raises.
+  """
+  def create_rewind_checkpoint(state, opts \\ []) do
+    ts = System.system_time(:millisecond)
+    id = "#{ts}_#{:crypto.strong_rand_bytes(3) |> Base.url_encode64(padding: false)}"
+
+    fs_head =
+      case Keyword.fetch(opts, :fs_head) do
+        {:ok, v} -> v
+        :error -> safe_fs_head()
+      end
+
+    messages = Map.get(state, :messages, [])
+
+    entry = %{
+      id: id,
+      session_id: state.session_id,
+      created_ms: ts,
+      created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      label: derive_label(Keyword.get(opts, :label)),
+      iteration: Map.get(state, :iteration, 0),
+      plan_mode: Map.get(state, :plan_mode, false),
+      turn_count: Map.get(state, :turn_count, 0),
+      message_count: length(messages),
+      fs_head: fs_head,
+      messages: sanitize_messages(messages)
+    }
+
+    dir = rewind_session_dir(state.session_id)
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, id <> ".json"), Jason.encode!(entry), [:utf8])
+
+    prune_rewind(state.session_id)
+
+    Logger.debug("[rewind] Checkpoint #{id} created for session #{state.session_id}")
+    {:ok, id}
+  rescue
+    e ->
+      Logger.warning("[rewind] Checkpoint create failed: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
+  end
+
+  @doc """
+  List rewind checkpoints for a session, newest first. Each entry is metadata
+  only (no full message payload) — `id`, `label`, `created_at`, `iteration`,
+  `message_count`, and whether a code snapshot (`has_code`) is available.
+  """
+  def list_rewind_checkpoints(session_id, limit \\ @default_max_rewind) do
+    dir = rewind_session_dir(session_id)
+
+    case File.ls(dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.map(fn file ->
+          case read_entry(Path.join(dir, file)) do
+            {:ok, entry} -> entry_metadata(entry)
+            _ -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.sort_by(& &1.created_ms, :desc)
+        |> Enum.take(limit)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  @doc "Fetch a full rewind checkpoint entry (including messages)."
+  def get_rewind_checkpoint(session_id, id) do
+    path = Path.join(rewind_session_dir(session_id), sanitize_id(id) <> ".json")
+
+    case read_entry(path) do
+      {:ok, entry} -> {:ok, entry}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Restore from a rewind checkpoint.
+
+  `scope` is one of `:code`, `:conversation`, or `:both`.
+
+    * code         — restore touched files to their snapshotted content via
+                     the FSCheckpoint shadow repo (`fs_head`).
+    * conversation — rewrite the crash-recovery checkpoint with the snapshot's
+                     messages (so a resume loads them) and return the messages
+                     so a live loop can be updated by the caller.
+
+  Returns `{:ok, result_map}` or `{:error, reason}`.
+  """
+  def restore_rewind(session_id, id, scope) when scope in [:code, :conversation, :both] do
+    case get_rewind_checkpoint(session_id, id) do
+      {:ok, entry} ->
+        code = if scope in [:code, :both], do: restore_code(entry), else: :skipped
+        {convo, messages} = if scope in [:conversation, :both], do: restore_conversation(entry), else: {:skipped, nil}
+
+        {:ok,
+         %{
+           id: id,
+           scope: scope,
+           code: code,
+           conversation: convo,
+           messages: messages,
+           iteration: entry[:iteration] || 0,
+           plan_mode: entry[:plan_mode] || false,
+           turn_count: entry[:turn_count] || 0
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def restore_rewind(_session_id, _id, _scope), do: {:error, :invalid_scope}
+
+  @doc "Delete all rewind checkpoints for a session."
+  def clear_rewind_checkpoints(session_id) do
+    File.rm_rf(rewind_session_dir(session_id))
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  @doc "Prune oldest rewind checkpoints for a session beyond the retention limit."
+  def prune_rewind(session_id, max \\ nil) do
+    max = max || max_rewind()
+    dir = rewind_session_dir(session_id)
+
+    case File.ls(dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.sort(:desc)
+        |> Enum.drop(max)
+        |> Enum.each(fn f -> File.rm(Path.join(dir, f)) end)
+
+        :ok
+
+      {:error, _} ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # ── Rewind private helpers ────────────────────────────────────────────
+
+  defp restore_code(entry) do
+    case entry[:fs_head] do
+      head when is_binary(head) and head != "" ->
+        case OptimalSystemAgent.FSCheckpoint.Server.restore_to(head) do
+          {:ok, msg} -> %{status: "restored", detail: msg}
+          {:error, reason} -> %{status: "error", detail: reason}
+        end
+
+      _ ->
+        %{status: "unavailable", detail: "No code snapshot was captured for this checkpoint"}
+    end
+  end
+
+  defp restore_conversation(entry) do
+    messages = entry[:messages] || []
+
+    # Rewrite the crash-recovery checkpoint so a resume of this session loads
+    # the restored conversation state.
+    restored_state = %{
+      session_id: entry[:session_id],
+      messages: messages,
+      iteration: entry[:iteration] || 0,
+      plan_mode: entry[:plan_mode] || false,
+      turn_count: entry[:turn_count] || 0
+    }
+
+    _ = checkpoint_state(restored_state)
+
+    {%{status: "restored", message_count: length(messages)}, messages}
+  end
+
+  defp entry_metadata(entry) do
+    %{
+      id: entry[:id],
+      label: entry[:label] || "",
+      created_at: entry[:created_at],
+      created_ms: entry[:created_ms] || 0,
+      iteration: entry[:iteration] || 0,
+      turn_count: entry[:turn_count] || 0,
+      message_count: entry[:message_count] || length(entry[:messages] || []),
+      has_code: is_binary(entry[:fs_head]) and entry[:fs_head] != ""
+    }
+  end
+
+  defp read_entry(path) do
+    with true <- File.exists?(path),
+         {:ok, content} <- File.read(path),
+         {:ok, data} <- Jason.decode(content) do
+      {:ok, atomize_entry(data)}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  # Convert top-level string keys to atoms and message maps' keys to atoms,
+  # mirroring restore_checkpoint/1's handling.
+  defp atomize_entry(data) when is_map(data) do
+    messages =
+      (data["messages"] || [])
+      |> Enum.map(fn
+        msg when is_map(msg) ->
+          for {k, v} <- msg, into: %{}, do: {String.to_atom(k), v}
+
+        other ->
+          other
+      end)
+
+    %{
+      id: data["id"],
+      session_id: data["session_id"],
+      created_ms: data["created_ms"] || 0,
+      created_at: data["created_at"],
+      label: data["label"] || "",
+      iteration: data["iteration"] || 0,
+      plan_mode: data["plan_mode"] || false,
+      turn_count: data["turn_count"] || 0,
+      message_count: data["message_count"] || length(messages),
+      fs_head: data["fs_head"],
+      messages: messages
+    }
+  end
+
+  defp safe_fs_head do
+    OptimalSystemAgent.FSCheckpoint.Server.head()
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp sanitize_messages(msgs) when is_list(msgs) do
+    Enum.map(msgs, fn
+      %{content: c} = m when is_binary(c) -> %{m | content: sanitize_utf8(c)}
+      %{"content" => c} = m when is_binary(c) -> %{m | "content" => sanitize_utf8(c)}
+      m -> m
+    end)
+  end
+
+  defp sanitize_messages(_), do: []
+
+  defp derive_label(label) when is_binary(label) do
+    label
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, @label_max_len)
+  end
+
+  defp derive_label(_), do: "checkpoint"
+
+  # Session ids are opaque strings from callers; keep them filesystem-safe.
+  defp sanitize_session(session_id) do
+    session_id
+    |> to_string()
+    |> String.replace(~r/[^A-Za-z0-9_.-]/, "_")
+  end
+
+  defp sanitize_id(id) do
+    id
+    |> to_string()
+    |> String.replace(~r/[^A-Za-z0-9_.\-=]/, "_")
+  end
 end

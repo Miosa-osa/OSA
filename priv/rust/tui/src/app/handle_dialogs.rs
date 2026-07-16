@@ -433,6 +433,73 @@ impl App {
         self.reasoning_selector = Some(ReasoningSelector::new(ReasoningLevel::Off));
     }
 
+    // ── Rewind (/rewind) ────────────────────────────────────────────────
+
+    /// Fetch recent rewind checkpoints for the current session and open the
+    /// restore dialog once they arrive (GET /api/v1/rewind/:session_id).
+    pub(crate) fn load_rewind_checkpoints(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.list_rewind_checkpoints(&sid).await {
+                Ok(cps) => crate::event::backend::BackendEvent::RewindCheckpointsLoaded(Ok(cps)),
+                Err(e) => crate::event::backend::BackendEvent::RewindCheckpointsLoaded(Err(
+                    e.to_string(),
+                )),
+            };
+            let _ = tx.send(crate::event::Event::Backend(event));
+        });
+    }
+
+    pub(super) fn handle_rewind_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if let Some(ref mut dialog) = self.rewind_dialog {
+            if let Some(action) = dialog.handle_key(key) {
+                match action {
+                    crate::dialogs::rewind::RewindAction::Restore(id, scope) => {
+                        use crate::client::types::RewindScope;
+                        self.rewind_dialog = None;
+                        self.transition(AppState::Idle);
+
+                        // If the conversation is being restored, reset the visible
+                        // scrollback — the live loop's context is swapped server-side.
+                        if matches!(scope, RewindScope::Conversation | RewindScope::Both) {
+                            self.chat.clear();
+                            self.tasks.clear();
+                            self.stream_buf.clear();
+                            self.thinking_buf.clear();
+                            self.agent_header_sent = false;
+                            self.chat.add_system_message(
+                                "Rewound conversation to an earlier checkpoint.",
+                                "info",
+                            );
+                        }
+
+                        let client = self.client.clone();
+                        let tx = self.event_tx.clone();
+                        let sid = self.session_id.clone();
+                        tokio::spawn(async move {
+                            let event = match client.restore_rewind(&sid, &id, scope).await {
+                                Ok(resp) => {
+                                    crate::event::backend::BackendEvent::RewindRestored(Ok(resp))
+                                }
+                                Err(e) => crate::event::backend::BackendEvent::RewindRestored(Err(
+                                    e.to_string(),
+                                )),
+                            };
+                            let _ = tx.send(crate::event::Event::Backend(event));
+                        });
+                    }
+                    crate::dialogs::rewind::RewindAction::Cancel => {
+                        self.rewind_dialog = None;
+                        self.transition(AppState::Idle);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub(super) fn handle_reasoning_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if let Some(ref mut selector) = self.reasoning_selector {
             if let Some(action) = selector.handle_key(key) {

@@ -58,6 +58,11 @@ defmodule OptimalSystemAgent.Tools.UseContext do
     # The delegate handler reads this to propagate depth into spawned children.
     delegation_depth: 0,
 
+    # ── Tri-mode delegation policy (primitive #34) ───────────────────
+    # :disabled | :explicit_only | :proactive (nil defers to config default).
+    # The delegate handler reads this to deny disallowed delegation.
+    delegation_policy: nil,
+
     # ── Extension point ──────────────────────────────────────────────
     extras: %{}
   ]
@@ -77,6 +82,7 @@ defmodule OptimalSystemAgent.Tools.UseContext do
           additional_working_dirs: map(),
           permission_tier: permission_tier() | nil,
           delegation_depth: non_neg_integer(),
+          delegation_policy: atom() | String.t() | nil,
           allowed_tools: [String.t()] | nil,
           blocked_tools: [String.t()],
           file_state_cache: map(),
@@ -121,6 +127,7 @@ defmodule OptimalSystemAgent.Tools.UseContext do
       max_turns: Map.get(state, :max_turns),
       abort_ref: Map.get(state, :abort_ref),
       delegation_depth: Map.get(state, :delegation_depth, 0),
+      delegation_policy: Map.get(state, :delegation_policy),
       emit: Keyword.get(opts, :emit),
       tools: Keyword.get(opts, :tools, []),
       agents: Keyword.get(opts, :agents, []),

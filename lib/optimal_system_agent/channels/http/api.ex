@@ -40,6 +40,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     /dashboard   → DashboardRoutes   GET /
     /classify    → inline            POST / (signal classification)
     /config      → ConfigRoutes      GET /revisions/:type/:id, GET /revisions/:type/:id/:n, POST /revisions/:type/:id/rollback, GET /revisions/:type/:id/diff
+    /rewind      → RewindRoutes      GET /:session_id, GET /:session_id/:id, POST /restore (code|conversation|both)
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
@@ -158,6 +159,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
 
   # ── Config revisions ─────────────────────────────────────────────────
   forward("/config", to: API.ConfigRoutes)
+
+  # ── Rewind checkpoints (list + restore code/conversation/both) ───────
+  forward("/rewind", to: API.RewindRoutes)
 
   # ── Signal classification (inline — single endpoint) ─────────────────
   post "/classify" do
