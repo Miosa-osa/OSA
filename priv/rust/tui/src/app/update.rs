@@ -368,6 +368,10 @@ impl App {
                 let action =
                     self.input
                         .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                // The input may have grown or shrunk (Shift+Enter newline, paste,
+                // submit/clear) — recompute so the box height tracks the content
+                // instead of staying stuck at its previous size.
+                self.recompute_layout();
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
                         self.submit_input(&text);

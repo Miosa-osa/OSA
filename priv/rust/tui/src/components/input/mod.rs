@@ -1006,6 +1006,18 @@ impl Component for InputComponent {
         };
         let input_area = Rect::new(area.x, area.y + 1, area.width, input_h);
 
+        // Vertical scroll: once the input has grown to its cap, keep the cursor's
+        // line visible by scrolling within the box (so Shift+Enter keeps working
+        // past the visible height instead of clipping).
+        let v_scroll: u16 = if self.multiline || self.content.contains('\n') {
+            let cursor_line = self.content[..self.cursor.min(self.content.len())]
+                .matches('\n')
+                .count() as u16;
+            cursor_line.saturating_sub(input_area.height.saturating_sub(1))
+        } else {
+            0
+        };
+
         // Step 4: Processing-aware prompt
         let (prompt, prompt_len) = if self.processing {
             ("\u{25c8} \u{276f} ", 4) // "◈ ❯ " — 4 display chars
@@ -1104,27 +1116,9 @@ impl Component for InputComponent {
             }
 
             let paragraph = ratatui::widgets::Paragraph::new(Text::from(text_lines))
-                .wrap(ratatui::widgets::Wrap { trim: false });
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((v_scroll, 0));
             frame.render_widget(paragraph, input_area);
-
-            // Right-aligned hints for multiline
-            if self.multiline {
-                let line_count = self.content.lines().count();
-                let hint = format!("[{} lines \u{00b7} ctrl+enter submit]", line_count);
-                let hint_width = hint.len() as u16;
-                if input_area.width > hint_width + 10 {
-                    let hint_area = Rect::new(
-                        input_area.x + input_area.width - hint_width,
-                        input_area.y,
-                        hint_width,
-                        1,
-                    );
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(hint, theme.hint())),
-                        hint_area,
-                    );
-                }
-            }
         }
 
         // Slash command completions popup (draws above input)
@@ -1228,7 +1222,9 @@ impl Component for InputComponent {
                 };
                 let indent: u16 = if line_idx == 0 { prompt_len as u16 } else { 2 };
                 let cursor_x = area.x + indent + col as u16;
-                let cursor_y = area.y + 1 + line_idx as u16;
+                // Account for the vertical scroll so the caret tracks the cursor
+                // line even after the input has scrolled past its visible height.
+                let cursor_y = area.y + 1 + (line_idx as u16).saturating_sub(v_scroll);
                 if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
                     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
                 }
