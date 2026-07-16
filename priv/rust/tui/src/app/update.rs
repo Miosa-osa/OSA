@@ -29,6 +29,17 @@ impl App {
                     if let Some(ref mut wizard) = self.onboarding {
                         wizard.handle_paste(&text);
                     }
+                } else if self.state == AppState::ModelPicker
+                    && self
+                        .model_picker
+                        .as_ref()
+                        .map(|p| p.is_key_entry())
+                        .unwrap_or(false)
+                {
+                    // Paste-friendly API key entry on the picker's key screen.
+                    if let Some(ref mut picker) = self.model_picker {
+                        picker.handle_paste(&text);
+                    }
                 } else if self.state.allows_input() {
                     let capped = if text.len() > super::MAX_MESSAGE_SIZE {
                         &text[..super::MAX_MESSAGE_SIZE]

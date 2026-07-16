@@ -455,13 +455,109 @@ impl App {
     }
 
     pub(crate) fn load_models(&self) {
+        // Provider-first picker: load the provider catalog + detection status
+        // (not the flat model list), so we can render ✓ ready / ⚠ needs-key.
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = client.list_models().await;
+            let result = client.onboarding_status().await;
             let event = match result {
-                Ok(resp) => BackendEvent::ModelsLoaded(Ok(resp)),
-                Err(e) => BackendEvent::ModelsLoaded(Err(e.to_string())),
+                Ok(resp) => BackendEvent::ProviderPickerData(Ok(resp)),
+                Err(e) => BackendEvent::ProviderPickerData(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Verify a candidate provider key live (picker key screen).
+    pub(crate) fn verify_provider_key(
+        &self,
+        provider: String,
+        api_key: Option<String>,
+        model: String,
+        base_url: Option<String>,
+    ) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let body = serde_json::json!({
+                "provider": provider,
+                "api_key": api_key,
+                "model": model,
+                "base_url": base_url,
+            });
+            // The authenticated variant attaches a Bearer only when a token
+            // exists and works in both contexts: post-onboarding (auth required
+            // to pass through a candidate key) and first-run (backend permits
+            // params for known providers without a token).
+            let result = client.onboarding_health_check_auth(&body).await;
+            let event = match result {
+                Ok(resp) => BackendEvent::ModelPickerKeyVerified(Ok(resp)),
+                Err(e) => BackendEvent::ModelPickerKeyVerified(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Persist a verified key (merging into .env) then switch to it.
+    pub(crate) fn save_provider_key_and_switch(
+        &self,
+        provider: String,
+        runtime_provider: String,
+        api_key: Option<String>,
+        model: String,
+        base_url: Option<String>,
+    ) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let saved = client
+                .providers_save_key(
+                    &provider,
+                    api_key.as_deref(),
+                    base_url.as_deref(),
+                    Some(&model),
+                    true,
+                )
+                .await;
+            match saved {
+                Ok(_) => {
+                    // Reflect the switch live in the UI header + context window.
+                    let req = crate::client::types::ModelSwitchRequest {
+                        provider: runtime_provider,
+                        model: model.clone(),
+                    };
+                    let event = match client.switch_model(&req).await {
+                        Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
+                        Err(e) => BackendEvent::ModelSwitched(Err(e.to_string())),
+                    };
+                    let _ = tx.send(Event::Backend(event));
+                }
+                Err(e) => {
+                    let _ = tx.send(Event::Backend(BackendEvent::ModelSwitched(Err(
+                        e.to_string()
+                    ))));
+                }
+            }
+        });
+    }
+
+    /// Fetch a provider's dynamic model list (miosa / ollama_local / custom).
+    pub(crate) fn load_provider_models(
+        &self,
+        provider: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .onboarding_models(&provider, base_url.as_deref(), api_key.as_deref())
+                .await;
+            let event = match result {
+                Ok(resp) => BackendEvent::ProviderModelsLoaded(Ok(resp)),
+                Err(e) => BackendEvent::ProviderModelsLoaded(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
         });

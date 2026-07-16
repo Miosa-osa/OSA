@@ -375,22 +375,77 @@ impl App {
                 }
             },
             // === Models/Sessions loaded (dialog triggers) ===
-            BackendEvent::ModelsLoaded(result) => match result {
+            // ModelsLoaded is legacy (the flat model list). The picker is now
+            // provider-first and opens via ProviderPickerData; this arm is kept
+            // only to remain exhaustive over the event enum.
+            BackendEvent::ModelsLoaded(_result) => {}
+
+            // === Provider-first picker: catalog + detection loaded ===
+            BackendEvent::ProviderPickerData(result) => match result {
                 Ok(resp) => {
-                    let picker = crate::dialogs::model_picker::ModelPicker::new(
-                        resp.models,
-                        Vec::new(),
-                    );
+                    let current_provider = self.header.provider().to_string();
+                    let current_model = self.header.model_name().to_string();
+                    let picker =
+                        crate::dialogs::model_picker::ModelPicker::new_provider_first(
+                            resp.providers,
+                            resp.detected,
+                            current_provider,
+                            current_model,
+                        );
                     self.model_picker = Some(picker);
                     self.transition(AppState::ModelPicker);
                 }
                 Err(e) => {
                     self.toasts.push(
-                        format!("Failed to load models: {}", e),
+                        format!("Failed to load providers: {}", e),
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
             },
+
+            // === Provider-first picker: candidate key verified ===
+            BackendEvent::ModelPickerKeyVerified(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    match result {
+                        Ok(r) if r.status == "ok" => {
+                            picker.set_verify_success(r.latency_ms.unwrap_or(0));
+                        }
+                        Ok(r) => {
+                            // Distinguish a bad key from a network/API error by
+                            // branching on the JSON error code (HTTP is always 200).
+                            let reason = r
+                                .message
+                                .clone()
+                                .or_else(|| r.error.clone())
+                                .unwrap_or_else(|| "Unknown error".into());
+                            match r.error.as_deref() {
+                                Some("unauthorized")
+                                | Some("forbidden")
+                                | Some("insufficient_credits") => {
+                                    picker.set_verify_failed(reason);
+                                }
+                                _ => picker.set_verify_error(reason),
+                            }
+                        }
+                        Err(e) => picker.set_verify_error(e),
+                    }
+                }
+            }
+
+            // === Provider-first picker: dynamic model list loaded ===
+            BackendEvent::ProviderModelsLoaded(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    match result {
+                        Ok(resp) => picker.set_provider_models(resp.models),
+                        Err(e) => {
+                            self.toasts.push(
+                                format!("Failed to load models: {}", e),
+                                crate::components::toast::ToastLevel::Error,
+                            );
+                        }
+                    }
+                }
+            }
             BackendEvent::SessionsLoaded(result) => match result {
                 Ok(sessions) => {
                     let browser = crate::dialogs::sessions::SessionBrowser::new(

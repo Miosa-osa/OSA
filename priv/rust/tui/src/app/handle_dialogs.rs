@@ -35,25 +35,73 @@ impl App {
     }
 
     pub(super) fn handle_model_picker_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if let Some(ref mut picker) = self.model_picker {
-            if let Some(action) = picker.handle_key(key) {
-                match action {
-                    crate::dialogs::model_picker::ModelPickerAction::Select { provider, model } => {
-                        self.transition(AppState::Idle);
-                        self.switch_model(&provider, &model);
-                    }
-                    crate::dialogs::model_picker::ModelPickerAction::Cancel => {
-                        self.transition(AppState::Idle);
-                    }
-                    crate::dialogs::model_picker::ModelPickerAction::ConfigureProviders => {
-                        // Close the picker and open the setup wizard, where the user
-                        // picks a provider and types/pastes the API key in the UI.
-                        // The wizard writes ~/.osa/.env and applies it live.
-                        self.transition(AppState::Idle);
-                        self.force_onboarding();
-                    }
+        use crate::dialogs::model_picker::ModelPickerAction;
+
+        let action = self
+            .model_picker
+            .as_mut()
+            .and_then(|picker| picker.handle_key(key));
+
+        if let Some(action) = action {
+            match action {
+                // Terminal actions — close the picker.
+                ModelPickerAction::SelectModel {
+                    provider,
+                    runtime_provider,
+                    model,
+                    base_url,
+                } => {
+                    self.transition(AppState::Idle);
+                    self.model_picker = None;
+                    // Persist selection into .env (merge, set active) and switch
+                    // live. For a re-select of the current default this is a no-op
+                    // switch, which is harmless.
+                    self.save_provider_key_and_switch(
+                        provider,
+                        runtime_provider,
+                        None,
+                        model,
+                        base_url,
+                    );
                 }
-                self.model_picker = None;
+                ModelPickerAction::Cancel => {
+                    self.transition(AppState::Idle);
+                    self.model_picker = None;
+                }
+                ModelPickerAction::SaveKeyAndSwitch {
+                    provider,
+                    runtime_provider,
+                    api_key,
+                    model,
+                    base_url,
+                } => {
+                    self.transition(AppState::Idle);
+                    self.model_picker = None;
+                    self.save_provider_key_and_switch(
+                        provider,
+                        runtime_provider,
+                        api_key,
+                        model,
+                        base_url,
+                    );
+                }
+                // Non-terminal actions — KEEP the picker alive (critical: do not
+                // clear it, or the "Verifying…" / Models transition is lost).
+                ModelPickerAction::VerifyKey {
+                    provider,
+                    api_key,
+                    model,
+                    base_url,
+                } => {
+                    self.verify_provider_key(provider, api_key, model, base_url);
+                }
+                ModelPickerAction::LoadProviderModels {
+                    provider,
+                    base_url,
+                    api_key,
+                } => {
+                    self.load_provider_models(provider, base_url, api_key);
+                }
             }
         }
         false

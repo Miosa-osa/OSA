@@ -195,6 +195,14 @@ pub enum BackendEvent {
     OnboardingComplete(Result<OnboardingSetupResponse, String>),
     OnboardingHealthCheck(Result<OnboardingHealthCheckResponse, String>),
 
+    // === Provider-first model picker (3-mode machine) ===
+    /// Provider list + detection loaded → open the provider-first picker.
+    ProviderPickerData(Result<OnboardingStatusResponse, String>),
+    /// Result of verifying a candidate provider key from the key screen.
+    ModelPickerKeyVerified(Result<OnboardingHealthCheckResponse, String>),
+    /// A provider's dynamic model list loaded → switch picker to Models mode.
+    ProviderModelsLoaded(Result<OnboardingModelsResponse, String>),
+
     // === Dialogs ===
     /// Backend requesting tool permission approval from the user.
     PermissionRequired {

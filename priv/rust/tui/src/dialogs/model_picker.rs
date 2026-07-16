@@ -1,262 +1,663 @@
-/// Model picker dialog — enhanced browser with provider groups, size badges,
-/// reasoning badges, and recently-used section.
+/// Provider-first model picker — a 3-mode state machine living entirely in this
+/// file: `Providers` (choose a provider, with ✓ ready / ⚠ needs-key status),
+/// `Models` (drill into a configured provider's models), and `KeyEntry` (a
+/// tight, paste-friendly, live-verifying API-key screen).
 ///
-/// # Actions to add to `DialogAction` in mod.rs:
-/// ```
-/// ModelPickerSelect { provider: String, model: String },
-/// ModelPickerCancel,
-/// ```
+/// Reverse-engineered from Claude Code / OpenCode: status tags, configured
+/// indicators ("Anthropic (api)"), a "Default (recommended)" top row, and a
+/// dedicated key screen instead of the clunky 7-step onboarding wizard.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
-use crate::client::types::ModelEntry;
+use crate::client::types::{DetectedProvidersResponse, OnboardingModel, OnboardingProvider};
 
-const MAX_W: u16 = 80;
-const MAX_H: u16 = 28;
+const MAX_W: u16 = 82;
+const MAX_H: u16 = 30;
 
 // ── Action ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum ModelPickerAction {
-    Select { provider: String, model: String },
+    /// A model was chosen for an already-configured provider.
+    SelectModel {
+        provider: String,
+        runtime_provider: String,
+        model: String,
+        base_url: Option<String>,
+    },
     Cancel,
-    /// User wants to add a provider / paste an API key — open the setup wizard.
-    ConfigureProviders,
+    /// Fire a live health-check for a candidate key on the key screen.
+    VerifyKey {
+        provider: String,
+        api_key: Option<String>,
+        model: String,
+        base_url: Option<String>,
+    },
+    /// Key verified — persist it (merging into .env) and switch to it.
+    SaveKeyAndSwitch {
+        provider: String,
+        runtime_provider: String,
+        api_key: Option<String>,
+        model: String,
+        base_url: Option<String>,
+    },
+    /// Load a provider's dynamic model list (miosa / ollama_local / custom).
+    LoadProviderModels {
+        provider: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    },
 }
 
-// ── Internal types ───────────────────────────────────────────────────────────
+// ── Internal enums ───────────────────────────────────────────────────────────
 
-/// A logical group header row.
-struct ModelGroup {
-    provider: String,
-    /// Indices into `ModelPicker::models`
-    model_indices: Vec<usize>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerMode {
+    Providers,
+    Models,
+    KeyEntry,
 }
 
-/// A single row in the rendered list — either a group header or a model entry.
-#[derive(Clone)]
-enum Row {
-    Header(String),
-    Model { model_idx: usize },
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthMethod {
+    PasteKey,
+    OAuth,
+    DeviceFree,
+}
+
+#[derive(Clone, PartialEq)]
+enum VerifyState {
+    Idle,
+    Verifying,
+    Valid { latency_ms: u64 },
+    Invalid { reason: String },
+    Error { reason: String },
+}
+
+struct KeyEntryState {
+    provider_id: String,
+    provider_name: String,
+    signup_url: Option<String>,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    api_key: String,
+    masked: bool,
+    auth_method: AuthMethod,
+    methods: Vec<AuthMethod>,
+    verify: VerifyState,
+}
+
+impl KeyEntryState {
+    fn method_idx(&self) -> usize {
+        self.methods
+            .iter()
+            .position(|m| *m == self.auth_method)
+            .unwrap_or(0)
+    }
+
+    fn cycle_method(&mut self) {
+        if self.methods.len() <= 1 {
+            return;
+        }
+        let next = (self.method_idx() + 1) % self.methods.len();
+        self.auth_method = self.methods[next];
+        // Changing method resets any prior verification result.
+        self.verify = VerifyState::Idle;
+    }
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
 
 pub struct ModelPicker {
-    models: Vec<ModelEntry>,
-    groups: Vec<ModelGroup>,
-    /// Flat list of renderable rows (built on construction / filter change)
-    rows: Vec<Row>,
-    /// Current filter text typed by the user
+    providers: Vec<OnboardingProvider>,
+    detected: Option<DetectedProvidersResponse>,
+    /// Sorted indices into `providers` (priority order).
+    order: Vec<usize>,
+    mode: PickerMode,
+    current_provider: String,
+    current_model: String,
+
+    /// Providers-mode cursor: 0 = "Default (recommended)", 1.. = order[i-1].
+    prov_cursor: usize,
+    prov_scroll: usize,
     filter: String,
-    /// Index into `rows` (headers are skipped during navigation)
-    cursor: usize,
-    scroll_offset: usize,
-    /// Model names in MRU order (most-recent first)
-    recent: Vec<String>,
+
+    /// Models mode.
+    models: Vec<OnboardingModel>,
+    models_cursor: usize,
+    models_scroll: usize,
+    /// The onboarding provider id whose models we're viewing.
+    models_provider: String,
+    models_base_url: Option<String>,
+
+    key_entry: Option<KeyEntryState>,
 }
 
 impl ModelPicker {
-    pub fn new(models: Vec<ModelEntry>, recent: Vec<String>) -> Self {
-        let mut picker = Self {
-            models,
-            groups: Vec::new(),
-            rows: Vec::new(),
+    pub fn new_provider_first(
+        providers: Vec<OnboardingProvider>,
+        detected: Option<DetectedProvidersResponse>,
+        current_provider: String,
+        current_model: String,
+    ) -> Self {
+        let order = Self::sorted_order(&providers);
+        Self {
+            providers,
+            detected,
+            order,
+            mode: PickerMode::Providers,
+            current_provider,
+            current_model,
+            prov_cursor: 0,
+            prov_scroll: 0,
             filter: String::new(),
-            cursor: 0,
-            scroll_offset: 0,
-            recent,
-        };
-        picker.rebuild();
-        picker
-    }
-
-    // ── Filter / rebuild ─────────────────────────────────────────────────────
-
-    fn rebuild(&mut self) {
-        let filter = self.filter.to_lowercase();
-
-        // Partition into recent and non-recent groups
-        let mut recent_indices: Vec<usize> = Vec::new();
-        let mut by_provider: std::collections::BTreeMap<String, Vec<usize>> =
-            std::collections::BTreeMap::new();
-
-        for (i, m) in self.models.iter().enumerate() {
-            let name_lc = m.name.to_lowercase();
-            let provider_lc = m.provider.to_lowercase();
-            if !filter.is_empty()
-                && !name_lc.contains(&filter)
-                && !provider_lc.contains(&filter)
-            {
-                continue;
-            }
-            if self.recent.contains(&m.name) {
-                recent_indices.push(i);
-            }
-            by_provider
-                .entry(m.provider.clone())
-                .or_default()
-                .push(i);
-        }
-
-        // Build groups
-        self.groups.clear();
-        if !recent_indices.is_empty() {
-            self.groups.push(ModelGroup {
-                provider: "Recently Used".into(),
-                model_indices: recent_indices,
-            });
-        }
-        for (provider, indices) in by_provider {
-            self.groups.push(ModelGroup {
-                provider,
-                model_indices: indices,
-            });
-        }
-
-        // Build flat row list
-        self.rows.clear();
-        for g in &self.groups {
-            self.rows.push(Row::Header(g.provider.clone()));
-            for &idx in &g.model_indices {
-                self.rows.push(Row::Model { model_idx: idx });
-            }
-        }
-
-        // Clamp cursor to a selectable row
-        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
-        self.ensure_on_model();
-    }
-
-    /// Advance cursor forward until it lands on a Model row.
-    fn ensure_on_model(&mut self) {
-        if self.rows.is_empty() {
-            return;
-        }
-        // Try forward first
-        let start = self.cursor;
-        let mut i = self.cursor;
-        loop {
-            if matches!(self.rows[i], Row::Model { .. }) {
-                self.cursor = i;
-                return;
-            }
-            i = (i + 1) % self.rows.len();
-            if i == start {
-                break; // no model rows at all
-            }
+            models: Vec::new(),
+            models_cursor: 0,
+            models_scroll: 0,
+            models_provider: String::new(),
+            models_base_url: None,
+            key_entry: None,
         }
     }
 
-    fn move_up(&mut self) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let start = self.cursor;
-        let mut i = self.cursor;
-        loop {
-            i = if i == 0 { self.rows.len() - 1 } else { i - 1 };
-            if matches!(self.rows[i], Row::Model { .. }) {
-                self.cursor = i;
-                break;
-            }
-            if i == start {
-                break;
-            }
-        }
-        self.adjust_scroll();
+    // ── Sorting / lookup ─────────────────────────────────────────────────────
+
+    fn priority(id: &str) -> usize {
+        const PINNED: [&str; 7] = [
+            "ollama_cloud",
+            "miosa",
+            "anthropic",
+            "openai",
+            "openrouter",
+            "ollama_local",
+            "custom",
+        ];
+        PINNED.iter().position(|p| *p == id).unwrap_or(99)
     }
 
-    fn move_down(&mut self) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let start = self.cursor;
-        let mut i = self.cursor;
-        loop {
-            i = (i + 1) % self.rows.len();
-            if matches!(self.rows[i], Row::Model { .. }) {
-                self.cursor = i;
-                break;
-            }
-            if i == start {
-                break;
-            }
-        }
-        self.adjust_scroll();
+    fn sorted_order(providers: &[OnboardingProvider]) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..providers.len()).collect();
+        idx.sort_by(|&a, &b| {
+            let pa = Self::priority(&providers[a].id);
+            let pb = Self::priority(&providers[b].id);
+            pa.cmp(&pb).then_with(|| providers[a].name.cmp(&providers[b].name))
+        });
+        idx
     }
 
-    fn adjust_scroll(&mut self) {
-        let visible = MAX_H as usize - 6; // header + filter + footer
-        if self.cursor < self.scroll_offset {
-            self.scroll_offset = self.cursor;
-        } else if self.cursor >= self.scroll_offset + visible {
-            self.scroll_offset = self.cursor - visible + 1;
+    fn runtime_provider(id: &str) -> String {
+        match id {
+            "ollama_cloud" | "ollama_local" | "ollama" => "ollama",
+            "miosa" => "miosa",
+            "anthropic" => "anthropic",
+            "openai" | "custom" => "openai",
+            "openrouter" => "openrouter",
+            other => other,
         }
+        .to_string()
     }
 
-    fn selected_model(&self) -> Option<&ModelEntry> {
-        match self.rows.get(self.cursor)? {
-            Row::Model { model_idx } => self.models.get(*model_idx),
-            Row::Header(_) => None,
+    fn requires_key(p: &OnboardingProvider) -> bool {
+        match &p.requires_key {
+            serde_json::Value::Bool(b) => *b,
+            // "optional" → not required (custom); "true" → required.
+            serde_json::Value::String(s) => s != "optional",
+            _ => false,
         }
     }
 
-    fn model_count(&self) -> usize {
-        self.rows
+    fn detected_ids(&self) -> Vec<String> {
+        self.detected
+            .as_ref()
+            .map(|d| d.detected.iter().map(|x| x.provider.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn ollama_local_reachable(&self) -> bool {
+        self.detected
+            .as_ref()
+            .and_then(|d| d.ollama_local.as_ref())
+            .map(|o| o.reachable)
+            .unwrap_or(false)
+    }
+
+    /// True when a provider is ready to use without further key entry.
+    fn is_ready(&self, p: &OnboardingProvider) -> bool {
+        let detected = self.detected_ids();
+        match p.id.as_str() {
+            // REQUIREMENT 1: Ollama Cloud is ready either with a stored key OR
+            // via a signed-in local Ollama daemon (device identity, key-free).
+            "ollama_cloud" => detected.contains(&p.id) || self.ollama_local_reachable(),
+            "ollama_local" => self.ollama_local_reachable(),
+            _ => {
+                if !Self::requires_key(p) {
+                    true
+                } else {
+                    detected.contains(&p.id)
+                }
+            }
+        }
+    }
+
+    /// OpenCode-style configured suffix, e.g. " (api)".
+    fn configured_suffix(&self, p: &OnboardingProvider) -> &'static str {
+        if self.detected_ids().contains(&p.id) {
+            " (api)"
+        } else {
+            ""
+        }
+    }
+
+    fn static_models(p: &OnboardingProvider) -> Option<Vec<OnboardingModel>> {
+        p.models
+            .as_array()
+            .map(|_| serde_json::from_value::<Vec<OnboardingModel>>(p.models.clone()).unwrap_or_default())
+    }
+
+    fn provider_matches_filter(&self, p: &OnboardingProvider) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        let f = self.filter.to_lowercase();
+        p.name.to_lowercase().contains(&f) || p.id.to_lowercase().contains(&f)
+    }
+
+    /// Visible provider indices (filtered), in sorted order.
+    fn visible_providers(&self) -> Vec<usize> {
+        self.order
             .iter()
-            .filter(|r| matches!(r, Row::Model { .. }))
-            .count()
+            .copied()
+            .filter(|&i| self.provider_matches_filter(&self.providers[i]))
+            .collect()
     }
 
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
-        // Ctrl+N — add a provider / paste an API key (opens the setup wizard where
-        // you type the key right in the UI). Checked before the Ctrl/Alt guard.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
-            return Some(ModelPickerAction::ConfigureProviders);
+        match self.mode {
+            PickerMode::Providers => self.handle_providers_key(key),
+            PickerMode::Models => self.handle_models_key(key),
+            PickerMode::KeyEntry => self.handle_key_entry_key(key),
         }
+    }
+
+    fn handle_providers_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return None;
         }
-
+        let vis = self.visible_providers();
+        let total = vis.len() + 1; // +1 for the "Default" row
         match key.code {
             KeyCode::Esc => return Some(ModelPickerAction::Cancel),
-            KeyCode::Enter => {
-                if let Some(m) = self.selected_model() {
-                    return Some(ModelPickerAction::Select {
-                        provider: m.provider.clone(),
-                        model: m.name.clone(),
-                    });
+            KeyCode::Up | KeyCode::Char('k') if self.filter.is_empty() => {
+                if self.prov_cursor > 0 {
+                    self.prov_cursor -= 1;
                 }
+                self.adjust_prov_scroll();
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_down(),
+            KeyCode::Up => {
+                if self.prov_cursor > 0 {
+                    self.prov_cursor -= 1;
+                }
+                self.adjust_prov_scroll();
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.filter.is_empty() => {
+                if self.prov_cursor + 1 < total {
+                    self.prov_cursor += 1;
+                }
+                self.adjust_prov_scroll();
+            }
+            KeyCode::Down => {
+                if self.prov_cursor + 1 < total {
+                    self.prov_cursor += 1;
+                }
+                self.adjust_prov_scroll();
+            }
+            KeyCode::Enter => {
+                if self.prov_cursor == 0 {
+                    // "Default (recommended)" resolves to the CURRENT model —
+                    // selecting it keeps the current setup, so just close.
+                    return Some(ModelPickerAction::Cancel);
+                }
+                let sel = vis.get(self.prov_cursor - 1).copied()?;
+                return self.activate_provider(sel);
+            }
             KeyCode::Backspace => {
                 self.filter.pop();
-                let old_cursor = self.cursor;
-                self.rebuild();
-                // Preserve cursor position rather than jumping to top
-                self.cursor = old_cursor.min(self.rows.len().saturating_sub(1));
-                self.ensure_on_model();
-                self.adjust_scroll();
+                self.prov_cursor = 0;
+                self.prov_scroll = 0;
             }
             KeyCode::Char(c) => {
                 self.filter.push(c);
-                self.scroll_offset = 0;
-                self.cursor = 0;
-                self.rebuild();
+                self.prov_cursor = 0;
+                self.prov_scroll = 0;
             }
             _ => {}
         }
         None
     }
 
-    // ── Drawing ───────────────────────────────────────────────────────────────
+    /// Enter pressed on a provider row: drill into models (ready) or open the
+    /// key screen (needs a key).
+    fn activate_provider(&mut self, idx: usize) -> Option<ModelPickerAction> {
+        let p = self.providers[idx].clone();
+        if self.is_ready(&p) {
+            // Ready → show its models.
+            self.models_provider = p.id.clone();
+            // CRITICAL: Ollama Cloud that's ready ONLY via the local device
+            // identity (no stored OLLAMA_API_KEY) must run its :cloud models
+            // through the LOCAL daemon (localhost), NOT ollama.com — otherwise
+            // saving the selection would write OLLAMA_URL=https://ollama.com with
+            // no key and every request 401s. Use the cloud base_url only when an
+            // actual key is present.
+            let key_free_ollama =
+                p.id == "ollama_cloud" && !self.detected_ids().contains(&p.id);
+            self.models_base_url = if key_free_ollama {
+                Some("http://localhost:11434".to_string())
+            } else {
+                p.base_url.clone()
+            };
+            if let Some(models) = Self::static_models(&p) {
+                self.models = models;
+                self.models_cursor = 0;
+                self.models_scroll = 0;
+                self.mode = PickerMode::Models;
+                None
+            } else {
+                // Dynamic catalog — fetch from backend (which falls back to the
+                // provider's configured key), stay open.
+                return Some(ModelPickerAction::LoadProviderModels {
+                    provider: p.id.clone(),
+                    base_url: self.models_base_url.clone(),
+                    api_key: None,
+                });
+            }
+        } else {
+            // Needs a key → open the dedicated key screen.
+            self.open_key_entry(&p);
+            None
+        }
+    }
+
+    fn open_key_entry(&mut self, p: &OnboardingProvider) {
+        // Auth methods available per provider. PasteKey is always first and the
+        // default focus. OAuth is a "coming soon" stub for providers that will
+        // support sign-in. Ollama Cloud offers a key-free device-identity path.
+        let methods: Vec<AuthMethod> = match p.id.as_str() {
+            "ollama_cloud" => vec![AuthMethod::PasteKey, AuthMethod::DeviceFree],
+            "anthropic" | "miosa" => vec![AuthMethod::PasteKey, AuthMethod::OAuth],
+            _ => vec![AuthMethod::PasteKey],
+        };
+        self.key_entry = Some(KeyEntryState {
+            provider_id: p.id.clone(),
+            provider_name: p.name.clone(),
+            signup_url: p.signup_url.clone(),
+            base_url: p.base_url.clone(),
+            default_model: p.default_model.clone(),
+            api_key: String::new(),
+            masked: true,
+            auth_method: AuthMethod::PasteKey,
+            methods,
+            verify: VerifyState::Idle,
+        });
+        self.mode = PickerMode::KeyEntry;
+    }
+
+    fn handle_models_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return None;
+        }
+        let vis = self.visible_models();
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = PickerMode::Providers;
+                self.filter.clear();
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.filter.is_empty() => {
+                self.models_cursor = self.models_cursor.saturating_sub(1);
+                self.adjust_models_scroll();
+            }
+            KeyCode::Up => {
+                self.models_cursor = self.models_cursor.saturating_sub(1);
+                self.adjust_models_scroll();
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.filter.is_empty() => {
+                if self.models_cursor + 1 < vis.len() {
+                    self.models_cursor += 1;
+                }
+                self.adjust_models_scroll();
+            }
+            KeyCode::Down => {
+                if self.models_cursor + 1 < vis.len() {
+                    self.models_cursor += 1;
+                }
+                self.adjust_models_scroll();
+            }
+            KeyCode::Enter => {
+                let midx = vis.get(self.models_cursor).copied()?;
+                let model = self.models[midx].id.clone();
+                return Some(ModelPickerAction::SelectModel {
+                    provider: self.models_provider.clone(),
+                    runtime_provider: Self::runtime_provider(&self.models_provider),
+                    model,
+                    base_url: self.models_base_url.clone(),
+                });
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.models_cursor = 0;
+                self.models_scroll = 0;
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.models_cursor = 0;
+                self.models_scroll = 0;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn visible_models(&self) -> Vec<usize> {
+        let f = self.filter.to_lowercase();
+        self.models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                self.filter.is_empty()
+                    || m.name.to_lowercase().contains(&f)
+                    || m.id.to_lowercase().contains(&f)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn handle_key_entry_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        // Match the mask/reveal chord BEFORE the Ctrl/Alt guard.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            if let Some(ke) = self.key_entry.as_mut() {
+                ke.masked = !ke.masked;
+            }
+            return None;
+        }
+        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = PickerMode::Providers;
+                self.key_entry = None;
+            }
+            KeyCode::Tab => {
+                if let Some(ke) = self.key_entry.as_mut() {
+                    ke.cycle_method();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(ke) = self.key_entry.as_mut() {
+                    ke.api_key.pop();
+                    ke.verify = VerifyState::Idle;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(ke) = self.key_entry.as_mut() {
+                    ke.api_key.push(c);
+                    ke.verify = VerifyState::Idle;
+                }
+            }
+            KeyCode::Enter => return self.key_entry_submit(),
+            _ => {}
+        }
+        None
+    }
+
+    fn key_entry_submit(&mut self) -> Option<ModelPickerAction> {
+        let ke = self.key_entry.as_mut()?;
+        let model = ke
+            .default_model
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        match ke.auth_method {
+            AuthMethod::OAuth => {
+                // Stub — must not trap. PasteKey remains reachable via Tab.
+                ke.verify = VerifyState::Error {
+                    reason: "OAuth sign-in coming soon — use Tab for Paste API key".into(),
+                };
+                None
+            }
+            AuthMethod::DeviceFree => {
+                // Ollama Cloud key-free: verify against the LOCAL daemon (device
+                // identity), no key. Uses provider="ollama_local" + localhost.
+                match &ke.verify {
+                    VerifyState::Valid { .. } => {
+                        let provider = ke.provider_id.clone();
+                        ke.verify = VerifyState::Idle;
+                        Some(ModelPickerAction::SaveKeyAndSwitch {
+                            runtime_provider: Self::runtime_provider(&provider),
+                            provider,
+                            api_key: None,
+                            model,
+                            base_url: Some("http://localhost:11434".to_string()),
+                        })
+                    }
+                    VerifyState::Verifying => None,
+                    _ => {
+                        ke.verify = VerifyState::Verifying;
+                        Some(ModelPickerAction::VerifyKey {
+                            provider: "ollama_local".to_string(),
+                            api_key: None,
+                            model,
+                            base_url: Some("http://localhost:11434".to_string()),
+                        })
+                    }
+                }
+            }
+            AuthMethod::PasteKey => {
+                if ke.api_key.trim().is_empty() {
+                    return None;
+                }
+                match &ke.verify {
+                    VerifyState::Valid { .. } => {
+                        // Second Enter → save + switch.
+                        let provider = ke.provider_id.clone();
+                        let api_key = ke.api_key.clone();
+                        let base_url = ke.base_url.clone();
+                        ke.verify = VerifyState::Idle;
+                        Some(ModelPickerAction::SaveKeyAndSwitch {
+                            runtime_provider: Self::runtime_provider(&provider),
+                            provider,
+                            api_key: Some(api_key),
+                            model,
+                            base_url,
+                        })
+                    }
+                    VerifyState::Verifying => None,
+                    _ => {
+                        // First Enter → verify.
+                        ke.verify = VerifyState::Verifying;
+                        Some(ModelPickerAction::VerifyKey {
+                            provider: ke.provider_id.clone(),
+                            api_key: Some(ke.api_key.clone()),
+                            model,
+                            base_url: ke.base_url.clone(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Paste + verify-result setters (called from the app layer) ────────────
+
+    pub fn is_key_entry(&self) -> bool {
+        self.mode == PickerMode::KeyEntry
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(ke) = self.key_entry.as_mut() {
+            let cleaned = clean_pasted_key(text);
+            ke.api_key.push_str(&cleaned);
+            ke.verify = VerifyState::Idle;
+        }
+    }
+
+    pub fn set_verify_success(&mut self, latency_ms: u64) {
+        if let Some(ke) = self.key_entry.as_mut() {
+            ke.verify = VerifyState::Valid { latency_ms };
+        }
+    }
+
+    pub fn set_verify_failed(&mut self, reason: String) {
+        if let Some(ke) = self.key_entry.as_mut() {
+            ke.verify = VerifyState::Invalid { reason };
+        }
+    }
+
+    pub fn set_verify_error(&mut self, reason: String) {
+        if let Some(ke) = self.key_entry.as_mut() {
+            ke.verify = VerifyState::Error { reason };
+        }
+    }
+
+    /// Push a freshly-loaded dynamic model list and switch to Models mode.
+    pub fn set_provider_models(&mut self, models: Vec<OnboardingModel>) {
+        self.models = models;
+        self.models_cursor = 0;
+        self.models_scroll = 0;
+        self.filter.clear();
+        self.mode = PickerMode::Models;
+    }
+
+    // ── Scroll helpers ───────────────────────────────────────────────────────
+
+    fn list_height(&self) -> usize {
+        (MAX_H as usize).saturating_sub(6)
+    }
+
+    fn adjust_prov_scroll(&mut self) {
+        let visible = self.list_height();
+        if self.prov_cursor < self.prov_scroll {
+            self.prov_scroll = self.prov_cursor;
+        } else if self.prov_cursor >= self.prov_scroll + visible {
+            self.prov_scroll = self.prov_cursor - visible + 1;
+        }
+    }
+
+    fn adjust_models_scroll(&mut self) {
+        let visible = self.list_height();
+        if self.models_cursor < self.models_scroll {
+            self.models_scroll = self.models_cursor;
+        } else if self.models_cursor >= self.models_scroll + visible {
+            self.models_scroll = self.models_cursor - visible + 1;
+        }
+    }
+
+    // ── Drawing ──────────────────────────────────────────────────────────────
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = crate::style::theme();
@@ -286,28 +687,34 @@ impl ModelPicker {
             return;
         }
 
+        match self.mode {
+            PickerMode::Providers => self.draw_providers(frame, inner, &theme),
+            PickerMode::Models => self.draw_models(frame, inner, &theme),
+            PickerMode::KeyEntry => self.draw_key_entry(frame, inner, &theme),
+        }
+    }
+
+    fn draw_providers(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
         let mut cy = inner.y;
 
-        // Title
-        let title = Paragraph::new("Select Model")
+        let title = Paragraph::new("Select Provider")
             .style(theme.dialog_title())
             .alignment(Alignment::Center);
         frame.render_widget(title, Rect::new(inner.x, cy, inner.width, 1));
         cy += 1;
 
-        // Filter bar
-        let count = self.model_count();
-        let filter_display = if self.filter.is_empty() {
-            format!("  Filter: _  ({} models)", count)
+        let vis = self.visible_providers();
+        let filter_line = if self.filter.is_empty() {
+            format!("  Filter: _  ({} providers)", vis.len())
         } else {
-            format!("  Filter: {}_  ({} models)", self.filter, count)
+            format!("  Filter: {}_  ({} providers)", self.filter, vis.len())
         };
-        let filter_para = Paragraph::new(filter_display)
-            .style(Style::default().fg(theme.colors.secondary));
-        frame.render_widget(filter_para, Rect::new(inner.x, cy, inner.width, 1));
+        frame.render_widget(
+            Paragraph::new(filter_line).style(Style::default().fg(theme.colors.secondary)),
+            Rect::new(inner.x, cy, inner.width, 1),
+        );
         cy += 1;
 
-        // Separator
         let sep = "─".repeat(inner.width as usize);
         frame.render_widget(
             Paragraph::new(sep.as_str()).style(Style::default().fg(theme.colors.dim)),
@@ -315,148 +722,395 @@ impl ModelPicker {
         );
         cy += 1;
 
-        // List area
-        let list_h = inner.height.saturating_sub(cy - inner.y + 2); // 2 = separator + help
+        let list_h = inner.height.saturating_sub(cy - inner.y + 1);
 
-        // Empty state: show a centered message when the filter matches nothing
-        if self.model_count() == 0 {
-            if list_h > 0 {
-                let msg_y = cy + list_h / 2;
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        "No matching models",
-                        Style::default().fg(theme.colors.muted),
-                    ))
-                    .alignment(Alignment::Center),
-                    Rect::new(inner.x, msg_y, inner.width, 1),
-                );
-            }
-        }
-
-        let visible_rows = self.rows.iter().skip(self.scroll_offset).take(list_h as usize);
-
-        for (rel_i, row) in visible_rows.enumerate() {
-            let abs_i = rel_i + self.scroll_offset;
-            let ry = cy + rel_i as u16;
-            if ry >= cy + list_h {
+        // Build the flat renderable row list: Default + visible providers.
+        // Row 0 is the Default (recommended) entry.
+        let total_rows = vis.len() + 1;
+        for rel in 0..(list_h as usize) {
+            let abs = rel + self.prov_scroll;
+            if abs >= total_rows {
                 break;
             }
+            let ry = cy + rel as u16;
+            let is_selected = abs == self.prov_cursor;
+            let cursor_char = if is_selected { "▸" } else { " " };
+            let row_style = if is_selected {
+                Style::default()
+                    .fg(theme.colors.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.colors.muted)
+            };
 
-            match row {
-                Row::Header(provider) => {
-                    let header = format!("  {} ", provider.to_uppercase());
-                    frame.render_widget(
-                        Paragraph::new(header).style(
-                            Style::default()
-                                .fg(theme.colors.muted)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Rect::new(inner.x, ry, inner.width, 1),
-                    );
-                }
-                Row::Model { model_idx } => {
-                    let m = &self.models[*model_idx];
-                    let is_active = m.active.unwrap_or(false);
-                    let is_selected = abs_i == self.cursor;
+            if abs == 0 {
+                // Default (recommended)
+                let spans = vec![
+                    Span::styled(format!("{} ", cursor_char), row_style),
+                    Span::styled("Default (recommended)", row_style),
+                    Span::styled(
+                        format!("  · current: {}", self.current_model),
+                        Style::default().fg(theme.colors.dim),
+                    ),
+                ];
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(inner.x, ry, inner.width, 1),
+                );
+                continue;
+            }
 
-                    let dot = if is_active { "●" } else { "○" };
-                    let dot_style = if is_active {
-                        Style::default().fg(theme.colors.success)
-                    } else {
-                        Style::default().fg(theme.colors.dim)
-                    };
+            let p = &self.providers[vis[abs - 1]];
+            let ready = self.is_ready(p);
+            let (tag, tag_style) = if ready {
+                ("✓ ready", Style::default().fg(theme.colors.success))
+            } else {
+                ("⚠ needs key", Style::default().fg(theme.colors.warning))
+            };
+            let suffix = self.configured_suffix(p);
 
-                    // Size badge
-                    let size_badge = m.size.map(|s| {
-                        let gb = s as f64 / 1_000_000_000.0;
-                        if gb >= 1.0 {
-                            format!(" {:.0}B", gb)
-                        } else {
-                            let mb = s as f64 / 1_000_000.0;
-                            format!(" {:.0}M", mb)
-                        }
-                    });
+            let mut spans = vec![
+                Span::styled(format!("{} ", cursor_char), row_style),
+                Span::styled(p.name.clone(), row_style),
+            ];
+            if !suffix.is_empty() {
+                spans.push(Span::styled(
+                    suffix,
+                    Style::default().fg(theme.colors.success),
+                ));
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(tag, tag_style));
 
-                    // Context window badge
-                    let ctx_badge = m.context_window.map(|tokens| {
-                        if tokens >= 1_000_000 {
-                            format!(" {}M ctx", tokens / 1_000_000)
-                        } else if tokens >= 1_000 {
-                            format!(" {}K ctx", tokens / 1_000)
-                        } else {
-                            format!(" {} ctx", tokens)
-                        }
-                    });
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(inner.x, ry, inner.width.min(46), 1),
+            );
 
-                    // Reasoning badge — detect by name suffix
-                    let has_reasoning = m.name.contains("reasoning")
-                        || m.name.contains("think")
-                        || m.name.contains("r1")
-                        || m.name.contains("o1")
-                        || m.name.contains("o3");
+            // Dim capability hint on the right side of the row.
+            if !p.description.is_empty() && inner.width > 48 {
+                let hint = format!("{}  ", p.description);
+                let hint_w = inner.width.saturating_sub(48);
+                let para = Paragraph::new(Span::styled(
+                    hint,
+                    Style::default().fg(theme.colors.dim),
+                ))
+                .alignment(Alignment::Right);
+                frame.render_widget(para, Rect::new(inner.x + 48, ry, hint_w, 1));
+            }
+        }
 
-                    let row_style = if is_selected {
-                        Style::default()
-                            .fg(theme.colors.primary)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.colors.muted)
-                    };
+        self.draw_help(
+            frame,
+            inner,
+            theme,
+            &[
+                ("↑↓/jk", "nav"),
+                ("Enter", "open"),
+                ("type", "filter"),
+                ("Esc", "cancel"),
+            ],
+        );
+    }
 
-                    let cursor_char = if is_selected { "▸" } else { " " };
+    fn draw_models(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+        let mut cy = inner.y;
 
-                    let mut spans = vec![
-                        Span::styled(format!("{} ", cursor_char), row_style),
-                        Span::styled(dot, dot_style),
-                        Span::raw(" "),
-                        Span::styled(m.name.clone(), row_style),
-                    ];
+        let title = Paragraph::new(format!("Models · {}", self.models_provider))
+            .style(theme.dialog_title())
+            .alignment(Alignment::Center);
+        frame.render_widget(title, Rect::new(inner.x, cy, inner.width, 1));
+        cy += 1;
 
-                    if let Some(badge) = &size_badge {
-                        spans.push(Span::styled(
-                            badge.clone(),
-                            Style::default().fg(theme.colors.dim),
-                        ));
-                    }
+        let vis = self.visible_models();
+        let filter_line = if self.filter.is_empty() {
+            format!("  Filter: _  ({} models)", vis.len())
+        } else {
+            format!("  Filter: {}_  ({} models)", self.filter, vis.len())
+        };
+        frame.render_widget(
+            Paragraph::new(filter_line).style(Style::default().fg(theme.colors.secondary)),
+            Rect::new(inner.x, cy, inner.width, 1),
+        );
+        cy += 1;
 
-                    if let Some(badge) = &ctx_badge {
-                        spans.push(Span::styled(
-                            badge.clone(),
-                            Style::default().fg(theme.colors.dim),
-                        ));
-                    }
+        let sep = "─".repeat(inner.width as usize);
+        frame.render_widget(
+            Paragraph::new(sep.as_str()).style(Style::default().fg(theme.colors.dim)),
+            Rect::new(inner.x, cy, inner.width, 1),
+        );
+        cy += 1;
 
-                    if has_reasoning {
-                        spans.push(Span::styled(
-                            " ⚡reasoning",
-                            Style::default().fg(theme.colors.warning),
-                        ));
-                    }
+        let list_h = inner.height.saturating_sub(cy - inner.y + 1);
 
-                    let line = Line::from(spans);
-                    frame.render_widget(
-                        Paragraph::new(line),
-                        Rect::new(inner.x, ry, inner.width, 1),
-                    );
+        if vis.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No models",
+                    Style::default().fg(theme.colors.muted),
+                ))
+                .alignment(Alignment::Center),
+                Rect::new(inner.x, cy + list_h / 2, inner.width, 1),
+            );
+        }
+
+        for rel in 0..(list_h as usize) {
+            let abs = rel + self.models_scroll;
+            if abs >= vis.len() {
+                break;
+            }
+            let ry = cy + rel as u16;
+            let m = &self.models[vis[abs]];
+            let is_selected = abs == self.models_cursor;
+            let cursor_char = if is_selected { "▸" } else { " " };
+            let row_style = if is_selected {
+                Style::default()
+                    .fg(theme.colors.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.colors.muted)
+            };
+
+            let mut spans = vec![
+                Span::styled(format!("{} ", cursor_char), row_style),
+                Span::styled(
+                    if m.name.is_empty() { m.id.clone() } else { m.name.clone() },
+                    row_style,
+                ),
+            ];
+            if m.recommended {
+                spans.push(Span::styled(
+                    " ★",
+                    Style::default().fg(theme.colors.success),
+                ));
+            }
+            if m.ctx > 0 {
+                let ctx = if m.ctx >= 1_000_000 {
+                    format!(" {}M ctx", m.ctx / 1_000_000)
+                } else if m.ctx >= 1_000 {
+                    format!(" {}K ctx", m.ctx / 1_000)
+                } else {
+                    format!(" {} ctx", m.ctx)
+                };
+                spans.push(Span::styled(ctx, Style::default().fg(theme.colors.dim)));
+            }
+            if m.tools {
+                spans.push(Span::styled(
+                    " ⚒tools",
+                    Style::default().fg(theme.colors.dim),
+                ));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(inner.x, ry, inner.width, 1),
+            );
+
+            // Second-line tagline (note), rendered dim on the same row's right.
+            if let Some(note) = &m.note {
+                if !note.is_empty() && inner.width > 44 {
+                    let hint_w = inner.width.saturating_sub(44);
+                    let para = Paragraph::new(Span::styled(
+                        format!("{}  ", note),
+                        Style::default().fg(theme.colors.dim),
+                    ))
+                    .alignment(Alignment::Right);
+                    frame.render_widget(para, Rect::new(inner.x + 44, ry, hint_w, 1));
                 }
             }
         }
 
-        // Help bar at bottom
+        self.draw_help(
+            frame,
+            inner,
+            theme,
+            &[
+                ("↑↓/jk", "nav"),
+                ("Enter", "select"),
+                ("Esc", "back"),
+            ],
+        );
+    }
+
+    fn draw_key_entry(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+        let ke = match &self.key_entry {
+            Some(k) => k,
+            None => return,
+        };
+        let mut cy = inner.y + 1;
+
+        let title = Paragraph::new(format!("Connect {}", ke.provider_name))
+            .style(theme.dialog_title())
+            .alignment(Alignment::Center);
+        frame.render_widget(title, Rect::new(inner.x, cy, inner.width, 1));
+        cy += 2;
+
+        // Auth-method toggle (only shown when more than one method exists).
+        if ke.methods.len() > 1 {
+            let mut spans = vec![Span::styled(
+                "  Method: ",
+                Style::default().fg(theme.colors.secondary),
+            )];
+            for (i, m) in ke.methods.iter().enumerate() {
+                let label = match m {
+                    AuthMethod::PasteKey => "Paste API key",
+                    AuthMethod::OAuth => "Sign in (OAuth)",
+                    AuthMethod::DeviceFree => "Use key-free (device identity)",
+                };
+                let selected = *m == ke.auth_method;
+                let style = if selected {
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.colors.dim)
+                };
+                if i > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(theme.colors.dim)));
+                }
+                spans.push(Span::styled(label, style));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(inner.x, cy, inner.width, 1),
+            );
+            cy += 2;
+        }
+
+        // Contextual help line with the create-key URL.
+        if let Some(url) = &ke.signup_url {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("  Get a key: {}", url),
+                    Style::default().fg(theme.colors.dim),
+                )),
+                Rect::new(inner.x, cy, inner.width, 1),
+            );
+            cy += 2;
+        }
+
+        match ke.auth_method {
+            AuthMethod::DeviceFree => {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  Uses your signed-in local Ollama (no API key needed).",
+                        Style::default().fg(theme.colors.secondary),
+                    )),
+                    Rect::new(inner.x, cy, inner.width, 1),
+                );
+                cy += 2;
+            }
+            AuthMethod::OAuth => {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  OAuth sign-in is coming soon — press Tab to paste a key.",
+                        Style::default().fg(theme.colors.warning),
+                    )),
+                    Rect::new(inner.x, cy, inner.width, 1),
+                );
+                cy += 2;
+            }
+            AuthMethod::PasteKey => {
+                // Masked field.
+                let shown = if ke.api_key.is_empty() {
+                    "Enter your API key".to_string()
+                } else if ke.masked {
+                    "•".repeat(ke.api_key.chars().count().min(48))
+                } else {
+                    ke.api_key.clone()
+                };
+                let field_style = if ke.api_key.is_empty() {
+                    Style::default().fg(theme.colors.dim)
+                } else {
+                    Style::default().fg(theme.colors.muted)
+                };
+                let spans = vec![
+                    Span::styled("  ▏", Style::default().fg(theme.colors.primary)),
+                    Span::styled(shown, field_style),
+                    Span::styled("_", Style::default().fg(theme.colors.primary)),
+                ];
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(inner.x, cy, inner.width, 1),
+                );
+                cy += 2;
+            }
+        }
+
+        // Live verification status line.
+        let (status_text, status_style) = match &ke.verify {
+            VerifyState::Idle => (String::new(), Style::default()),
+            VerifyState::Verifying => (
+                "  Verifying…".to_string(),
+                Style::default().fg(theme.colors.secondary),
+            ),
+            VerifyState::Valid { latency_ms } => (
+                format!("  ✓ Key valid ({} ms) — press Enter to save", latency_ms),
+                Style::default().fg(theme.colors.success),
+            ),
+            VerifyState::Invalid { reason } => (
+                format!("  ✗ Invalid key: {}", reason),
+                Style::default().fg(theme.colors.error),
+            ),
+            VerifyState::Error { reason } => (
+                format!("  ✗ Network/API error: {}", reason),
+                Style::default().fg(theme.colors.warning),
+            ),
+        };
+        if !status_text.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(status_text, status_style)),
+                Rect::new(inner.x, cy, inner.width, 1),
+            );
+        }
+
+        let help: &[(&str, &str)] = match ke.auth_method {
+            AuthMethod::PasteKey => &[
+                ("Enter", "verify/save"),
+                ("Ctrl+R", "reveal"),
+                ("Tab", "method"),
+                ("Esc", "back"),
+            ],
+            _ => &[("Enter", "continue"), ("Tab", "method"), ("Esc", "back")],
+        };
+        self.draw_help(frame, inner, theme, help);
+    }
+
+    fn draw_help(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+        entries: &[(&str, &str)],
+    ) {
         let bottom_y = inner.y + inner.height.saturating_sub(1);
-        let help = Line::from(vec![
-            Span::styled("↑↓/jk", theme.dialog_help_key()),
-            Span::styled(" nav  ", theme.dialog_help()),
-            Span::styled("Enter", theme.dialog_help_key()),
-            Span::styled(" select  ", theme.dialog_help()),
-            Span::styled("^N", theme.dialog_help_key()),
-            Span::styled(" add key/provider  ", theme.dialog_help()),
-            Span::styled("Esc", theme.dialog_help_key()),
-            Span::styled(" cancel", theme.dialog_help()),
-        ]);
+        let mut spans: Vec<Span> = Vec::new();
+        for (k, label) in entries {
+            spans.push(Span::styled(*k, theme.dialog_help_key()));
+            spans.push(Span::styled(format!(" {}  ", label), theme.dialog_help()));
+        }
         frame.render_widget(
-            Paragraph::new(help).alignment(Alignment::Center),
+            Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
             Rect::new(inner.x, bottom_y, inner.width, 1),
         );
     }
+}
+
+/// Clean pasted text: strip shell export prefix, quotes, whitespace, semicolons.
+/// Mirrors the onboarding wizard's paste handling.
+fn clean_pasted_key(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let value = if let Some(idx) = trimmed.find('=') {
+        trimmed[idx + 1..].trim()
+    } else {
+        trimmed
+    };
+    let unquoted = if (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+        || (value.starts_with('`') && value.ends_with('`'))
+    {
+        &value[1..value.len().saturating_sub(1)]
+    } else {
+        value
+    };
+    unquoted.strip_suffix(';').unwrap_or(unquoted).trim().to_string()
 }

@@ -248,15 +248,17 @@ defmodule OptimalSystemAgent.Channels.HTTP do
               if setup_completed?() do
                 case verify_bearer(conn) do
                   {:ok, _claims} ->
-                    # Authenticated: still restrict to known provider names.
-                    # Strip base_url for non-custom providers to prevent
-                    # open-redirect style SSRF.
+                    # Authenticated callers (e.g. the in-UI provider/key picker)
+                    # may verify a CANDIDATE key for a provider other than the
+                    # active one, so we honour caller-supplied api_key/base_url.
+                    # Still restricted to the known provider allowlist below,
+                    # which bounds the SSRF surface to real LLM endpoints.
                     provider = Map.get(params, "provider", "")
 
                     if provider not in allowed_health_check_providers() do
                       :reject
                     else
-                      Map.drop(params, ["base_url", "api_key"])
+                      params
                     end
 
                   {:error, _} ->

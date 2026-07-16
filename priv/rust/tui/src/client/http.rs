@@ -461,6 +461,19 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// POST /onboarding/health-check WITH auth (post-onboarding candidate-key
+    /// verification). The backend only honours caller-supplied api_key/base_url
+    /// for authenticated callers once setup is complete.
+    pub async fn onboarding_health_check_auth(
+        &self,
+        req: &serde_json::Value,
+    ) -> Result<OnboardingHealthCheckResponse> {
+        // Note: the endpoint returns HTTP 200 even on provider errors, so we
+        // must not rely on `post`'s status check — use a raw authenticated POST.
+        let resp = self.post_allow_status("/onboarding/health-check", req).await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST /onboarding/setup
     pub async fn onboarding_setup(
         &self,
@@ -468,6 +481,27 @@ impl ApiClient {
     ) -> Result<OnboardingSetupResponse> {
         let resp = self.post_no_auth("/onboarding/setup", req).await?;
         Ok(resp.json().await?)
+    }
+
+    /// POST /api/v1/providers/key — the authenticated single save path for the
+    /// in-UI picker. Merges into ~/.osa/.env so keys accumulate and persist.
+    pub async fn providers_save_key(
+        &self,
+        provider: &str,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+        model: Option<&str>,
+        set_active: bool,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "set_active": set_active,
+        });
+        let _ = self.post("/api/v1/providers/key", &body).await?;
+        Ok(())
     }
 
     // -- Permissions --
@@ -612,6 +646,22 @@ impl ApiClient {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.post(&url).json(body).send().await?;
         Ok(resp)
+    }
+
+    /// POST JSON with auth header, returning the response WITHOUT bailing on a
+    /// non-2xx status. Used for endpoints (like /onboarding/health-check) that
+    /// signal provider-level failures in the JSON body while still replying 200.
+    async fn post_allow_status<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self.http.post(&url).json(body);
+        if let Ok(token) = self.auth.read().await.require_token() {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        Ok(req.send().await?)
     }
 
     /// POST JSON with auth header.

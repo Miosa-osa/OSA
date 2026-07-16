@@ -79,16 +79,15 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec detect_existing() :: %{detected: [map()], ollama_local: map()}
   def detect_existing do
+    # Derive the env-var scan list from providers_list/0 so every catalog
+    # provider can surface a "✓ ready" indicator. De-dupe by env var
+    # (openai + custom share OPENAI_API_KEY — first-declared wins).
     detected =
-      [
-        detect_key("miosa", "MIOSA_API_KEY"),
-        detect_key("anthropic", "ANTHROPIC_API_KEY"),
-        detect_key("openai", "OPENAI_API_KEY"),
-        detect_key("openrouter", "OPENROUTER_API_KEY"),
-        detect_key("ollama_cloud", "OLLAMA_API_KEY"),
-        detect_key("groq", "GROQ_API_KEY"),
-        detect_key("deepseek", "DEEPSEEK_API_KEY")
-      ]
+      providers_list()
+      |> Enum.map(fn p -> {p.id, Map.get(p, :env_var)} end)
+      |> Enum.filter(fn {_id, env_var} -> is_binary(env_var) and env_var != "" end)
+      |> Enum.uniq_by(fn {_id, env_var} -> env_var end)
+      |> Enum.map(fn {id, env_var} -> detect_key(id, env_var) end)
       |> Enum.reject(&is_nil/1)
 
     ollama_local = probe_ollama_local()
@@ -117,6 +116,10 @@ defmodule OptimalSystemAgent.Onboarding do
         description: "Fast, no GPU needed",
         group: "bring_your_own",
         requires_key: true,
+        # Key is optional: a signed-in local Ollama daemon proxies `:cloud`
+        # models via device identity (no key). The picker treats this provider
+        # as ready when either an OLLAMA_API_KEY exists OR local Ollama is up.
+        key_optional: true,
         env_var: "OLLAMA_API_KEY",
         default_model: "glm-5.2:cloud",
         base_url: "https://ollama.com",
@@ -382,12 +385,14 @@ defmodule OptimalSystemAgent.Onboarding do
         fetch_ollama_models(url)
 
       "miosa" ->
-        api_key = Keyword.get(opts, :api_key)
+        # Fall back to the configured key so an already-connected MIOSA
+        # provider can list its models without re-supplying the key.
+        api_key = Keyword.get(opts, :api_key) || System.get_env("MIOSA_API_KEY")
         fetch_openai_models("https://optimal.miosa.ai/v1", api_key)
 
       "custom" ->
         base_url = Keyword.get(opts, :base_url)
-        api_key = Keyword.get(opts, :api_key)
+        api_key = Keyword.get(opts, :api_key) || System.get_env("OPENAI_API_KEY")
 
         if base_url do
           fetch_openai_models(base_url, api_key)
@@ -490,34 +495,26 @@ defmodule OptimalSystemAgent.Onboarding do
     user_name = Map.get(params, :user_name) || Map.get(params, "user_name")
     agent_name = Map.get(params, :agent_name) || Map.get(params, "agent_name")
 
-    # Build .env content
-    env_content = build_env_content(provider, model, api_key, base_url)
-
-    # Append channel tokens
-    env_content = append_channel_tokens(env_content, channel_tokens)
-
-    # Append identity
-    env_content = append_identity(env_content, user_name, agent_name)
     env_path = Path.join(@osa_dir, ".env")
 
-    # Preserve old config as comments if .env already exists
-    env_content =
-      if File.exists?(env_path) do
-        old = File.read!(env_path)
-        commented = old |> String.split("\n") |> Enum.map(&"# #{&1}") |> Enum.join("\n")
+    # MERGE, don't clobber. Parse the existing .env, overlay the selected
+    # provider's canonical vars (preserving every other provider's *_API_KEY),
+    # fold in channel tokens + identity, and serialize each var exactly once.
+    # This is the fix for keys being lost when switching the active provider.
+    merged =
+      env_path
+      |> parse_env_file()
+      |> merge_env(provider_env_pairs(provider, model, api_key, base_url))
+      |> merge_env({channel_token_pairs(channel_tokens), []})
+      |> merge_env({identity_pairs(user_name, agent_name), []})
 
-        """
-        # Previous config (#{DateTime.utc_now() |> DateTime.to_iso8601()}):
-        #{commented}
-
-        #{env_content}
-        """
-      else
-        env_content
-      end
+    env_content = serialize_env(merged)
 
     case File.write(env_path, env_content) do
       :ok ->
+        # Lock down permissions — the file holds API keys.
+        _ = File.chmod(env_path, 0o600)
+
         # Apply env vars in-process so they take effect immediately
         apply_env_vars(provider, model, api_key, base_url)
         apply_channel_tokens(channel_tokens)
@@ -548,6 +545,106 @@ defmodule OptimalSystemAgent.Onboarding do
 
       {:error, reason} ->
         {:error, "Failed to write .env: #{:file.format_error(reason)}"}
+    end
+  end
+
+  @doc """
+  Add or switch a provider's API key, MERGING into ~/.osa/.env.
+
+  Used by the authenticated `POST /api/v1/providers/key` endpoint (the in-UI
+  key screen). Unlike `write_setup/1` it does not touch the workspace or
+  identity — it only persists the key + (optionally) flips the active provider.
+
+  `params` keys (string or atom): `provider`, `api_key`, `base_url`, `model`,
+  `set_active` (default true).
+
+  When `set_active` is true the active provider + model flip and other
+  providers' keys are preserved. When false only the key var is written, so a
+  user can stash a key without leaving their current provider.
+  """
+  @spec upsert_provider_key(map()) :: :ok | {:error, String.t()}
+  def upsert_provider_key(%{} = params) do
+    File.mkdir_p!(@osa_dir)
+
+    provider = Map.get(params, :provider) || Map.get(params, "provider")
+    api_key = Map.get(params, :api_key) || Map.get(params, "api_key")
+    base_url = Map.get(params, :base_url) || Map.get(params, "base_url")
+    model = Map.get(params, :model) || Map.get(params, "model")
+    set_active = Map.get(params, :set_active, Map.get(params, "set_active", true))
+
+    env_path = Path.join(@osa_dir, ".env")
+    existing = parse_env_file(env_path)
+
+    merged =
+      if set_active do
+        merge_env(existing, provider_env_pairs(provider, model, api_key, base_url))
+      else
+        env_var = provider_env_var(provider)
+        pairs = [maybe_pair(env_var, api_key)] |> Enum.reject(&is_nil/1)
+        merge_env(existing, {pairs, []})
+      end
+
+    case File.write(env_path, serialize_env(merged)) do
+      :ok ->
+        _ = File.chmod(env_path, 0o600)
+
+        if set_active do
+          apply_env_vars(provider, model, api_key, base_url)
+        else
+          apply_provider_key(provider, api_key)
+        end
+
+        Logger.info(
+          "[Onboarding] Provider key upserted: provider=#{provider} set_active=#{set_active}"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to write .env: #{:file.format_error(reason)}"}
+    end
+  end
+
+  @doc """
+  Apply a provider's API key to the running node WITHOUT changing the active
+  provider — sets both the OS env var and the Application config atom so the
+  next request picks it up live (no restart).
+  """
+  @spec apply_provider_key(String.t(), String.t() | nil) :: :ok
+  def apply_provider_key(provider_id, api_key) do
+    env_var = provider_env_var(provider_id)
+    app_key = provider_app_key(provider_id)
+
+    if is_binary(env_var) and api_key not in [nil, ""] do
+      System.put_env(env_var, api_key)
+    end
+
+    if not is_nil(app_key) and api_key not in [nil, ""] do
+      Application.put_env(:optimal_system_agent, app_key, api_key)
+    end
+
+    :ok
+  end
+
+  @doc "Look up a provider's API-key env var name from the catalog."
+  @spec provider_env_var(String.t()) :: String.t() | nil
+  def provider_env_var(provider_id) do
+    case Enum.find(providers_list(), &(&1.id == provider_id)) do
+      %{env_var: env_var} when is_binary(env_var) -> env_var
+      _ -> nil
+    end
+  end
+
+  # Maps a catalog provider id to its Application config key for the API key.
+  defp provider_app_key(provider_id) do
+    case provider_id do
+      "miosa" -> :miosa_api_key
+      "ollama_cloud" -> :ollama_api_key
+      "openrouter" -> :openrouter_api_key
+      "anthropic" -> :anthropic_api_key
+      "openai" -> :openai_api_key
+      "custom" -> :openai_api_key
+      _ -> nil
     end
   end
 
@@ -645,90 +742,146 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   end
 
-  # ── Private: .env Generation ──────────────────────────────────────────
+  # ── Private: .env Merge / Serialize ───────────────────────────────────
 
-  defp build_env_content(provider, model, api_key, base_url) do
-    lines = [
+  # Parse an existing .env into an ordered [{key, value}] list. Skips blank
+  # lines and comments. First occurrence of a key wins (mirrors the runtime.exs
+  # loader, which only sets a var when it isn't already present).
+  defp parse_env_file(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        content
+        |> String.split("\n")
+        |> Enum.reduce([], fn line, acc ->
+          trimmed = String.trim(line)
+
+          cond do
+            trimmed == "" ->
+              acc
+
+            String.starts_with?(trimmed, "#") ->
+              acc
+
+            true ->
+              case String.split(trimmed, "=", parts: 2) do
+                [k, v] ->
+                  k = String.trim(k)
+                  v = v |> String.trim() |> String.trim("\"") |> String.trim("'")
+
+                  if k != "" and not List.keymember?(acc, k, 0) do
+                    acc ++ [{k, v}]
+                  else
+                    acc
+                  end
+
+                _ ->
+                  acc
+              end
+          end
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Canonical KV set for a provider selection, plus the list of keys to DELETE
+  # (used to clear the opposite active-model override so it can't pin the wrong
+  # model — e.g. a stale OSA_MODEL overriding OLLAMA_MODEL). Nil pairs (no key /
+  # no model supplied) are dropped by merge_env so existing values survive.
+  defp provider_env_pairs(provider, model, api_key, base_url) do
+    case provider do
+      "miosa" ->
+        {[
+           {"OSA_DEFAULT_PROVIDER", "miosa"},
+           maybe_pair("MIOSA_API_KEY", api_key),
+           {"OSA_MODEL", model || "nemotron-3-miosa"}
+         ], ["OLLAMA_MODEL"]}
+
+      p when p in ["ollama_cloud", "ollama_local", "ollama"] ->
+        default_url =
+          if p == "ollama_local", do: "http://localhost:11434", else: "https://ollama.com"
+
+        url = base_url || default_url
+
+        # OLLAMA_URL is the authoritative switch (localhost = key-free device
+        # identity; ollama.com = keyed). Always rewritten. OLLAMA_API_KEY only
+        # written when a key was actually entered — never nil'd out.
+        {[
+           {"OSA_DEFAULT_PROVIDER", "ollama"},
+           {"OLLAMA_URL", url},
+           maybe_pair("OLLAMA_API_KEY", api_key),
+           maybe_pair("OLLAMA_MODEL", model)
+         ], ["OSA_MODEL"]}
+
+      "openrouter" ->
+        {[
+           {"OSA_DEFAULT_PROVIDER", "openrouter"},
+           maybe_pair("OPENROUTER_API_KEY", api_key),
+           maybe_pair("OSA_MODEL", model)
+         ], []}
+
+      "anthropic" ->
+        {[
+           {"OSA_DEFAULT_PROVIDER", "anthropic"},
+           maybe_pair("ANTHROPIC_API_KEY", api_key),
+           maybe_pair("OSA_MODEL", model)
+         ], []}
+
+      "openai" ->
+        {[
+           {"OSA_DEFAULT_PROVIDER", "openai"},
+           maybe_pair("OPENAI_API_KEY", api_key),
+           maybe_pair("OPENAI_BASE_URL", base_url),
+           maybe_pair("OSA_MODEL", model)
+         ], []}
+
+      "custom" ->
+        {[
+           {"OSA_DEFAULT_PROVIDER", "openai"},
+           maybe_pair("OPENAI_API_KEY", api_key),
+           maybe_pair("OPENAI_BASE_URL", base_url),
+           maybe_pair("OSA_MODEL", model)
+         ], []}
+
+      other ->
+        {[{"OSA_DEFAULT_PROVIDER", other}, maybe_pair("OSA_MODEL", model)], []}
+    end
+  end
+
+  defp maybe_pair(_k, nil), do: nil
+  defp maybe_pair(_k, ""), do: nil
+  defp maybe_pair(k, v), do: {k, v}
+
+  # Overlay incoming pairs onto the existing set: delete the specified keys,
+  # then upsert each non-nil incoming pair in place (preserving order). Never
+  # drops other providers' keys — that is the whole point of the merge.
+  defp merge_env(existing, {incoming, delete_keys}) do
+    incoming = Enum.reject(incoming, &is_nil/1)
+    base = Enum.reject(existing, fn {k, _v} -> k in delete_keys end)
+
+    Enum.reduce(incoming, base, fn {k, v}, acc ->
+      if List.keymember?(acc, k, 0) do
+        List.keyreplace(acc, k, 0, {k, v})
+      else
+        acc ++ [{k, v}]
+      end
+    end)
+  end
+
+  # Emit each var exactly once (no duplicates, no commented-out keys), so the
+  # first-occurrence-wins loader always reads the intended value.
+  defp serialize_env(pairs) do
+    header = [
       "# OSA Agent Configuration",
-      "# Generated by setup wizard — #{DateTime.utc_now() |> DateTime.to_iso8601()}",
-      "# Edit freely. Changes take effect on next restart.",
+      "# Generated by setup — #{DateTime.utc_now() |> DateTime.to_iso8601()}",
+      "# Keys accumulate; switching provider preserves other providers' keys.",
       ""
     ]
 
-    lines =
-      case provider do
-        "miosa" ->
-          lines ++
-            [
-              "# MIOSA Platform (Optimal)",
-              "OSA_DEFAULT_PROVIDER=miosa",
-              if(api_key, do: "MIOSA_API_KEY=#{api_key}", else: nil),
-              if(model, do: "OSA_MODEL=#{model}", else: "OSA_MODEL=nemotron-3-miosa")
-            ]
+    body = Enum.map(pairs, fn {k, v} -> "#{k}=#{v}" end)
 
-        "ollama_cloud" ->
-          lines ++
-            [
-              "# Ollama Cloud",
-              "OSA_DEFAULT_PROVIDER=ollama",
-              "OLLAMA_URL=#{base_url || "https://ollama.com"}",
-              if(api_key, do: "OLLAMA_API_KEY=#{api_key}", else: nil),
-              if(model, do: "OLLAMA_MODEL=#{model}", else: "OLLAMA_MODEL=nemotron-3-super:cloud")
-            ]
-
-        "ollama_local" ->
-          lines ++
-            [
-              "# Ollama Local",
-              "OSA_DEFAULT_PROVIDER=ollama",
-              "OLLAMA_URL=#{base_url || "http://localhost:11434"}",
-              if(model, do: "OLLAMA_MODEL=#{model}", else: nil)
-            ]
-
-        "openrouter" ->
-          lines ++
-            [
-              "# OpenRouter",
-              "OSA_DEFAULT_PROVIDER=openrouter",
-              if(api_key, do: "OPENROUTER_API_KEY=#{api_key}", else: nil),
-              if(model, do: "OSA_MODEL=#{model}", else: nil)
-            ]
-
-        "anthropic" ->
-          lines ++
-            [
-              "# Anthropic",
-              "OSA_DEFAULT_PROVIDER=anthropic",
-              if(api_key, do: "ANTHROPIC_API_KEY=#{api_key}", else: nil),
-              if(model, do: "OSA_MODEL=#{model}", else: nil)
-            ]
-
-        "openai" ->
-          lines ++
-            [
-              "# OpenAI",
-              "OSA_DEFAULT_PROVIDER=openai",
-              if(api_key, do: "OPENAI_API_KEY=#{api_key}", else: nil),
-              if(base_url, do: "OPENAI_BASE_URL=#{base_url}", else: nil),
-              if(model, do: "OSA_MODEL=#{model}", else: nil)
-            ]
-
-        "custom" ->
-          lines ++
-            [
-              "# Custom Endpoint (OpenAI-compatible)",
-              "OSA_DEFAULT_PROVIDER=openai",
-              if(api_key, do: "OPENAI_API_KEY=#{api_key}", else: nil),
-              if(base_url, do: "OPENAI_BASE_URL=#{base_url}", else: nil),
-              if(model, do: "OSA_MODEL=#{model}", else: nil)
-            ]
-
-        _ ->
-          lines ++ ["OSA_DEFAULT_PROVIDER=#{provider}"]
-      end
-
-    lines
-    |> Enum.reject(&is_nil/1)
+    (header ++ body)
     |> Enum.join("\n")
     |> Kernel.<>("\n")
   end
@@ -753,39 +906,68 @@ defmodule OptimalSystemAgent.Onboarding do
     # Set the appropriate env var so runtime.exs picks it up on next boot
     case provider do
       "miosa" ->
-        if api_key, do: System.put_env("MIOSA_API_KEY", api_key)
+        # Guard every key write: a nil api_key means "switch model only" and
+        # must never clobber the already-configured key held in app config.
+        if api_key do
+          System.put_env("MIOSA_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :miosa_api_key, api_key)
+        end
+
         System.put_env("OSA_DEFAULT_PROVIDER", "miosa")
-        Application.put_env(:optimal_system_agent, :miosa_api_key, api_key)
         Application.put_env(:optimal_system_agent, :miosa_url, "https://optimal.miosa.ai/v1")
 
       "ollama_cloud" ->
-        if api_key, do: System.put_env("OLLAMA_API_KEY", api_key)
+        # Only set the key when one was entered — the key-free device-identity
+        # path must never clobber a previously stored OLLAMA_API_KEY.
+        if api_key do
+          System.put_env("OLLAMA_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :ollama_api_key, api_key)
+        end
+
         url = base_url || "https://ollama.com"
         System.put_env("OLLAMA_URL", url)
         Application.put_env(:optimal_system_agent, :ollama_url, url)
-        Application.put_env(:optimal_system_agent, :ollama_api_key, api_key)
+
+        if model do
+          System.put_env("OLLAMA_MODEL", model)
+          Application.put_env(:optimal_system_agent, :ollama_model, model)
+        end
 
       "ollama_local" ->
         url = base_url || "http://localhost:11434"
         System.put_env("OLLAMA_URL", url)
         Application.put_env(:optimal_system_agent, :ollama_url, url)
 
+        if model do
+          System.put_env("OLLAMA_MODEL", model)
+          Application.put_env(:optimal_system_agent, :ollama_model, model)
+        end
+
       "openrouter" ->
-        if api_key, do: System.put_env("OPENROUTER_API_KEY", api_key)
-        Application.put_env(:optimal_system_agent, :openrouter_api_key, api_key)
+        if api_key do
+          System.put_env("OPENROUTER_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :openrouter_api_key, api_key)
+        end
 
       "anthropic" ->
-        if api_key, do: System.put_env("ANTHROPIC_API_KEY", api_key)
-        Application.put_env(:optimal_system_agent, :anthropic_api_key, api_key)
+        if api_key do
+          System.put_env("ANTHROPIC_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :anthropic_api_key, api_key)
+        end
 
       "openai" ->
-        if api_key, do: System.put_env("OPENAI_API_KEY", api_key)
-        Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
+        if api_key do
+          System.put_env("OPENAI_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
+        end
 
       "custom" ->
-        if api_key, do: System.put_env("OPENAI_API_KEY", api_key)
+        if api_key do
+          System.put_env("OPENAI_API_KEY", api_key)
+          Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
+        end
+
         if base_url, do: System.put_env("OPENAI_BASE_URL", base_url)
-        Application.put_env(:optimal_system_agent, :openai_api_key, api_key)
 
       _ ->
         :ok
@@ -800,24 +982,15 @@ defmodule OptimalSystemAgent.Onboarding do
     "slack" => "SLACK_BOT_TOKEN"
   }
 
-  defp append_channel_tokens(env_content, tokens) when map_size(tokens) == 0, do: env_content
+  defp channel_token_pairs(tokens) when map_size(tokens) == 0, do: []
 
-  defp append_channel_tokens(env_content, tokens) do
-    lines =
-      tokens
-      |> Enum.filter(fn {_k, v} -> is_binary(v) and v != "" end)
-      |> Enum.map(fn {channel, token} ->
-        env_var = Map.get(@channel_env_map, channel, "#{String.upcase(channel)}_TOKEN")
-        "#{env_var}=#{token}"
-      end)
-
-    case lines do
-      [] ->
-        env_content
-
-      lines ->
-        env_content <> "\n# Channels\n" <> Enum.join(lines, "\n") <> "\n"
-    end
+  defp channel_token_pairs(tokens) do
+    tokens
+    |> Enum.filter(fn {_k, v} -> is_binary(v) and v != "" end)
+    |> Enum.map(fn {channel, token} ->
+      env_var = Map.get(@channel_env_map, channel, "#{String.upcase(channel)}_TOKEN")
+      {env_var, token}
+    end)
   end
 
   defp apply_channel_tokens(tokens) when map_size(tokens) == 0, do: :ok
@@ -878,20 +1051,12 @@ defmodule OptimalSystemAgent.Onboarding do
 
   # ── Private: Identity Handling ────────────────────────────────────────
 
-  defp append_identity(env_content, nil, nil), do: env_content
-
-  defp append_identity(env_content, user_name, agent_name) do
-    lines =
-      [
-        if(user_name && user_name != "", do: "OSA_USER_NAME=#{user_name}", else: nil),
-        if(agent_name && agent_name != "", do: "OSA_AGENT_NAME=#{agent_name}", else: nil)
-      ]
-      |> Enum.reject(&is_nil/1)
-
-    case lines do
-      [] -> env_content
-      lines -> env_content <> "\n# Identity\n" <> Enum.join(lines, "\n") <> "\n"
-    end
+  defp identity_pairs(user_name, agent_name) do
+    [
+      maybe_pair("OSA_USER_NAME", user_name),
+      maybe_pair("OSA_AGENT_NAME", agent_name)
+    ]
+    |> Enum.reject(&is_nil/1)
   end
 
   defp prepopulate_user_md(nil), do: :ok

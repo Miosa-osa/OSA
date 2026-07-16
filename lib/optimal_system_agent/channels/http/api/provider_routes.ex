@@ -71,6 +71,52 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
     json(conn, 200, %{providers: providers})
   end
 
+  # ── POST /key — add/switch a provider key (merges into ~/.osa/.env) ──
+  #
+  # The single authenticated save path for the in-UI provider/key picker.
+  # Unlike /:slug/connect (which wrote a competing, non-persisted config.json),
+  # this merges into ~/.osa/.env — the runtime source of truth — so keys
+  # accumulate and survive restarts. `provider` is an onboarding catalog id
+  # (e.g. "ollama_cloud", "anthropic"), not a runtime provider atom.
+
+  post "/key" do
+    known_ids =
+      try do
+        OptimalSystemAgent.Onboarding.providers_list() |> Enum.map(& &1.id)
+      rescue
+        _ -> []
+      end
+
+    case conn.body_params do
+      %{"provider" => provider} = body when is_binary(provider) ->
+        if provider not in known_ids do
+          json_error(conn, 400, "invalid_provider", "Unknown provider: #{provider}")
+        else
+          set_active = Map.get(body, "set_active", true)
+
+          upsert = %{
+            provider: provider,
+            api_key: Map.get(body, "api_key"),
+            base_url: Map.get(body, "base_url"),
+            model: Map.get(body, "model"),
+            set_active: set_active
+          }
+
+          case OptimalSystemAgent.Onboarding.upsert_provider_key(upsert) do
+            :ok ->
+              Logger.info("[Providers] Key upserted for #{provider} (set_active=#{set_active})")
+              json(conn, 200, %{status: "ok", provider: provider, model: Map.get(body, "model")})
+
+            {:error, _reason} ->
+              json_error(conn, 500, "save_failed", "Could not persist provider key")
+          end
+        end
+
+      _ ->
+        json_error(conn, 400, "invalid_request", "Missing required field: provider")
+    end
+  end
+
   # ── POST /:slug/connect — store API key ────────────────────────────
 
   post "/:slug/connect" do

@@ -4,8 +4,11 @@ config :optimal_system_agent,
   # Default LLM provider: :ollama (local) or :anthropic (cloud) or :openai
   default_provider: :ollama,
 
-  # Ollama Cloud settings
-  ollama_url: "https://ollama.com",
+  # Ollama settings — default to the local daemon, which proxies `:cloud`
+  # models via device identity (key-free). The onboarding/picker flow always
+  # writes an explicit OLLAMA_URL, so this default only affects zero-config
+  # boots, where localhost is the friendlier "no GPU, no key" starting point.
+  ollama_url: "http://localhost:11434",
   ollama_model: "qwen3-next:80b",
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
 
