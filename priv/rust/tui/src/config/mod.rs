@@ -27,6 +27,11 @@ pub struct Config {
     /// Max auto-continue cycles for an active /goal before stopping.
     #[serde(default = "default_goal_max_cycles")]
     pub goal_max_cycles: u32,
+    /// Screen-reader / plain-text (accessibility) mode. When true, the activity
+    /// indicator renders as a single static plain-language status line instead of
+    /// the animated star spinner + braille feed. Toggled via `/a11y`.
+    #[serde(default)]
+    pub a11y: bool,
     #[serde(skip)]
     pub profile_dir: PathBuf,
     #[serde(skip)]
@@ -54,6 +59,7 @@ impl Default for Config {
             theme: default_theme(),
             request_timeout_secs: default_request_timeout_secs(),
             goal_max_cycles: default_goal_max_cycles(),
+            a11y: false,
             sidebar_enabled: false,
             profile_dir: default_profile_dir(),
             base_url: default_base_url(),

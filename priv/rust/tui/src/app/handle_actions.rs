@@ -220,6 +220,11 @@ impl App {
         // (DONE / cap / cancelled) or auto-submit the next continue prompt.
         self.maybe_continue_goal();
 
+        // Message queue: if the turn fully ended (and /goal didn't take over,
+        // which would flip us back to Processing), auto-submit the next queued
+        // prompt FIFO. Guarded to Idle inside, so this is a no-op mid-turn.
+        self.maybe_dequeue_message();
+
         self.recompute_layout();
     }
 
@@ -264,6 +269,9 @@ impl App {
             self.activity.stop();
             self.status.set_active(false);
         }
+
+        // A queued command/shell just finished — pull the next queued item.
+        self.maybe_dequeue_message();
     }
 
     fn handle_command_action(&mut self, action: &str) {
@@ -285,6 +293,25 @@ impl App {
             return;
         }
 
+        // /steer <text>: inject a high-priority message. Handled before the
+        // Processing-enqueue path so it can jump to the FRONT of the queue.
+        if let Some(rest) = text.strip_prefix("/steer") {
+            // Only treat as the steer command when it's exactly "/steer" or
+            // "/steer <args>" — so a future "/steerX" command still routes on.
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                self.steer_message(rest.trim());
+                return;
+            }
+        }
+
+        // Message-queue parity (Claude Code / Hermes "keep typing while busy"):
+        // while the agent is working, Enter ENQUEUES the message (FIFO) instead
+        // of interrupting. It auto-submits when the current turn completes.
+        if self.state == AppState::Processing {
+            self.enqueue_message(text);
+            return;
+        }
+
         if text.starts_with('/') {
             self.handle_command(text);
         } else if let Some(shell_cmd) = text.strip_prefix('!') {
@@ -292,6 +319,70 @@ impl App {
         } else {
             self.submit_prompt(text);
         }
+    }
+
+    /// Enqueue a message typed while the agent is Processing. It runs (FIFO)
+    /// when the current turn completes. Shows a toast + updates the "N queued"
+    /// indicator on the input.
+    fn enqueue_message(&mut self, text: &str) {
+        self.message_queue.push(text.to_string());
+        let n = self.message_queue.len();
+        self.input.set_queued_count(n);
+        self.toasts.push(
+            format!("queued ({})", n),
+            crate::components::toast::ToastLevel::Info,
+        );
+    }
+
+    /// /steer — inject a priority message. Idle: submit immediately. Processing:
+    /// jump to the FRONT of the queue so it runs first at the next turn
+    /// boundary.
+    ///
+    /// TODO(backend mid-turn steer): true mid-turn injection — interrupting the
+    /// running agent loop with a new user message WITHOUT waiting for the turn
+    /// to finish — needs backend support the orchestrate/SSE protocol does not
+    /// expose yet. Until then this is the queue-at-boundary version (front of
+    /// queue), which is safe and deterministic.
+    pub(crate) fn steer_message(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            self.toasts.push(
+                "Usage: /steer <text>".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+        if self.state == AppState::Processing {
+            self.message_queue.insert(0, text.to_string());
+            self.input.set_queued_count(self.message_queue.len());
+            self.toasts.push(
+                "steer queued — runs next".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+        } else {
+            self.submit_prompt(text);
+        }
+    }
+
+    /// Auto-submit the next queued message once the agent is cleanly back to
+    /// Idle (turn fully ended — not mid-turn, not auto-continued by /goal, no
+    /// open dialog). FIFO: oldest first. Called at every turn-completion site.
+    pub(super) fn maybe_dequeue_message(&mut self) {
+        // Only fire when we're back at a clean Idle prompt. This guards against
+        // mid-turn agent_response events (still Processing) and dialog states
+        // (Permissions / PlanReview / Survey) that route through the same
+        // completion handlers.
+        if self.state != AppState::Idle {
+            return;
+        }
+        if self.message_queue.is_empty() {
+            return;
+        }
+        let next = self.message_queue.remove(0);
+        self.input.set_queued_count(self.message_queue.len());
+        // Re-enter the normal submit path so queued commands / shell / prompts
+        // all behave exactly as if freshly typed at an Idle prompt.
+        self.submit_input(&next);
     }
 
     fn execute_shell(&mut self, cmd: &str) {
@@ -392,6 +483,13 @@ impl App {
         // A user interrupt also stops any active /goal auto-continue loop.
         if self.goal.is_some() {
             self.clear_goal(true);
+        }
+
+        // ...and drops any queued messages: the user is taking back control, so
+        // we don't auto-fire the backlog after the stop.
+        if !self.message_queue.is_empty() {
+            self.message_queue.clear();
+            self.input.set_queued_count(0);
         }
 
         // Immediately clear the agents panel so the UI reflects the interrupt

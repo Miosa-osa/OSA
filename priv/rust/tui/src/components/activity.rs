@@ -164,6 +164,10 @@ pub struct Activity {
     /// random flavor word. Cleared when no task is in progress.
     active_verb: Option<String>,
     pub verbosity: Verbosity,
+    /// Screen-reader / plain-text mode. When true, `draw` emits a single static
+    /// plain-language status line (no spinner, braille bars, or boxed chrome)
+    /// instead of the rich animated activity panel.
+    a11y: bool,
 }
 
 /// Rotating counter so consecutive requests pick different starting verbs.
@@ -228,7 +232,34 @@ impl Activity {
             start_time: None,
             active_verb: None,
             verbosity: Verbosity::All,
+            a11y: false,
         }
+    }
+
+    /// Enable/disable screen-reader (plain-text) mode.
+    pub fn set_a11y(&mut self, on: bool) {
+        self.a11y = on;
+    }
+
+    /// Whether screen-reader (plain-text) mode is active.
+    pub fn a11y(&self) -> bool {
+        self.a11y
+    }
+
+    /// Plain-language description of the current activity for screen-reader mode.
+    /// A running tool takes precedence (announces the concrete action); otherwise
+    /// falls back to the active task step, then the processing-phase label.
+    fn a11y_status(&self) -> String {
+        if let Some(entry) = self.tool_feed.iter().rev().find(|e| e.duration_ms.is_none()) {
+            if entry.detail.is_empty() {
+                return format!("{} ({})", entry.verb, entry.name);
+            }
+            return format!("{} {}", entry.verb, entry.detail);
+        }
+        if let Some(v) = self.active_verb.as_deref() {
+            return v.to_string();
+        }
+        crate::a11y::phase_label(self.phase).to_string()
     }
 
     pub fn start(&mut self) {
@@ -367,6 +398,10 @@ impl Activity {
         if !self.active {
             return 0;
         }
+        // Plain-text mode is always a single static status line.
+        if self.a11y {
+            return 1;
+        }
         match self.verbosity {
             Verbosity::Off => 1,
             Verbosity::New => 2,
@@ -407,11 +442,33 @@ impl Component for Activity {
         if !self.active || area.height == 0 {
             return;
         }
-        let theme = crate::style::theme();
         let elapsed = self
             .start_time
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
+
+        // Screen-reader / plain-text mode: one static, unstyled status line. No
+        // spinner glyph, no braille feed, no color — just plain language a screen
+        // reader can announce ("OSA: running (bash) (12s, 1.5k tokens)").
+        if self.a11y {
+            let tokens = if self.output_tokens > 0 {
+                self.output_tokens as usize
+            } else {
+                (self.stream_chars + self.thinking_chars) / 4
+            };
+            let mut text = format!("OSA: {} ({}", self.a11y_status(), format_elapsed(elapsed));
+            if tokens > 0 {
+                text.push_str(&format!(", {} tokens", format_count(tokens)));
+            }
+            text.push(')');
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::raw(text))),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            return;
+        }
+
+        let theme = crate::style::theme();
 
         // Star spinner (Claude Code): pulses out then back, ~200ms/frame here.
         let spinner_frames = ["\u{00b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}",

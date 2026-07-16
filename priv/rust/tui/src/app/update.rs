@@ -90,6 +90,9 @@ impl App {
         if self.reasoning_selector.is_some() {
             return self.handle_reasoning_key(key);
         }
+        if self.config_editor.is_some() {
+            return self.handle_config_editor_key(key);
+        }
 
         match self.state {
             AppState::Quit => self.handle_quit_dialog_key(key),

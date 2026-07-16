@@ -479,6 +479,174 @@ impl App {
         );
     }
 
+    // ── Config editor (/config) ────────────────────────────────────────────
+
+    /// Open the unified `/config` full-screen settings editor, seeded from the
+    /// live config, status bar, header, and `~/.osa/.env`.
+    pub(crate) fn open_config_editor(&mut self) {
+        use crate::components::status_bar::PermissionMode;
+        use crate::dialogs::config_editor::{ConfigEditor, ConfigSnapshot};
+
+        let env = self.client.read_env_map();
+        let get = |k: &str| env.get(k).cloned().unwrap_or_default();
+
+        let provider = {
+            let p = get("OSA_PROVIDER");
+            if p.is_empty() {
+                self.header.provider().to_string()
+            } else {
+                p
+            }
+        };
+        let model = {
+            let m = get("OSA_MODEL");
+            if m.is_empty() {
+                self.header.model_name().to_string()
+            } else {
+                m
+            }
+        };
+        let reasoning_effort = {
+            let r = get("OSA_REASONING_EFFORT");
+            if r.is_empty() {
+                "medium".to_string()
+            } else {
+                r
+            }
+        };
+        let permission_mode = match self.status.permission_mode() {
+            PermissionMode::Default => "default",
+            PermissionMode::Auto => "auto",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::BypassPermissions => "bypass",
+        }
+        .to_string();
+        let sandbox_backend = {
+            let s = get("OSA_SANDBOX_BACKEND");
+            if s.is_empty() {
+                "miosa".to_string()
+            } else {
+                s
+            }
+        };
+
+        let snapshot = ConfigSnapshot {
+            provider,
+            model,
+            reasoning_effort,
+            theme: self.config.theme.clone(),
+            permission_mode,
+            notifications: self.notify_on_complete,
+            sandbox_backend,
+            api_base_url: get("OSA_API_BASE"),
+            themes: crate::style::themes::available()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+
+        self.config_editor = Some(ConfigEditor::new(snapshot));
+    }
+
+    pub(super) fn handle_config_editor_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::dialogs::config_editor::ConfigAction;
+
+        let action = self
+            .config_editor
+            .as_mut()
+            .and_then(|editor| editor.handle_key(key));
+
+        let Some(action) = action else {
+            return false;
+        };
+
+        match action {
+            ConfigAction::Close => {
+                self.config_editor = None;
+            }
+            ConfigAction::OpenModelPicker => {
+                // Hand off to the existing provider/model picker flow.
+                self.config_editor = None;
+                self.load_models();
+            }
+            ConfigAction::SetValue { field, value } => {
+                self.apply_config_value(field, &value);
+            }
+        }
+        false
+    }
+
+    /// Persist + apply a single committed config value.
+    fn apply_config_value(&mut self, field: crate::dialogs::config_editor::ConfigField, value: &str) {
+        use crate::components::status_bar::PermissionMode;
+        use crate::dialogs::config_editor::ConfigField;
+
+        match field {
+            ConfigField::ReasoningEffort => {
+                let _ = self.client.set_env_var("OSA_REASONING_EFFORT", value);
+                self.execute_reasoning_command(value);
+            }
+            ConfigField::Theme => {
+                if let Some(theme) = crate::style::themes::by_name(value) {
+                    self.config.theme = value.to_string();
+                    let _ = self.config.save();
+                    crate::style::set_theme(theme);
+                    self.toasts.push(
+                        format!("Theme: {}", value),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
+            }
+            ConfigField::PermissionMode => {
+                let mode = match value {
+                    "auto" => PermissionMode::Auto,
+                    "acceptEdits" => PermissionMode::AcceptEdits,
+                    "plan" => PermissionMode::Plan,
+                    "bypass" => PermissionMode::BypassPermissions,
+                    _ => PermissionMode::Default,
+                };
+                self.status.set_permission_mode(mode);
+                let bypass = matches!(mode, PermissionMode::BypassPermissions);
+                self.config.skip_permissions = bypass;
+                self.sidebar.set_yolo_mode(bypass);
+                let _ = self.client.set_env_var("OSA_PERMISSION_MODE", value);
+                self.toasts.push(
+                    format!("Permission mode: {}", mode.title()),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            ConfigField::Notifications => {
+                let on = value == "on";
+                self.notify_on_complete = on;
+                let _ = self
+                    .client
+                    .set_env_var("OSA_NOTIFY", if on { "on" } else { "off" });
+                self.toasts.push(
+                    format!("Notifications: {}", if on { "on" } else { "off" }),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            ConfigField::SandboxBackend => {
+                let _ = self.client.set_env_var("OSA_SANDBOX_BACKEND", value);
+                self.toasts.push(
+                    format!("Sandbox backend: {}", value),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            ConfigField::ApiBaseUrl => {
+                let _ = self.client.set_env_var("OSA_API_BASE", value);
+                self.toasts.push(
+                    "API base URL saved (restart to apply)".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            // Provider/Model are edited via the model picker (OpenModelPicker),
+            // not through SetValue.
+            ConfigField::Provider | ConfigField::Model => {}
+        }
+    }
+
     pub(super) fn handle_survey_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         use crate::dialogs::survey::SurveyAction;
 

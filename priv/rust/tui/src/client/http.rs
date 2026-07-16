@@ -601,6 +601,83 @@ impl ApiClient {
     }
 
     // =========================================================================
+    // Local config store (~/.osa/.env)
+    // =========================================================================
+
+    /// Absolute path to the profile's `.env` config store.
+    pub fn env_path(&self) -> PathBuf {
+        self.profile_dir.join(".env")
+    }
+
+    /// Read `~/.osa/.env` into a KEY=VALUE map. Missing file → empty map. Lines
+    /// that are blank, comments (`#`), or lack an `=` are skipped. A leading
+    /// `export ` prefix and surrounding quotes on the value are stripped.
+    pub fn read_env_map(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let path = self.env_path();
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return map;
+        };
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let key = k.trim().to_string();
+                let val = v
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !key.is_empty() {
+                    map.insert(key, val);
+                }
+            }
+        }
+        map
+    }
+
+    /// Read a single value from `~/.osa/.env`.
+    pub fn read_env_var(&self, key: &str) -> Option<String> {
+        self.read_env_map().get(key).cloned()
+    }
+
+    /// Merge a single KEY=VALUE into `~/.osa/.env`, preserving other lines,
+    /// comments, and ordering. Rewrites the matching key in place if present,
+    /// otherwise appends it. Creates the file (and profile dir) if needed.
+    pub fn set_env_var(&self, key: &str, value: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.profile_dir)?;
+        let path = self.env_path();
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+        let mut out: Vec<String> = Vec::new();
+        let mut replaced = false;
+        for line in existing.lines() {
+            let trimmed = line.trim_start();
+            let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+            let matches_key = body
+                .split_once('=')
+                .map(|(k, _)| k.trim() == key)
+                .unwrap_or(false);
+            if matches_key && !trimmed.starts_with('#') {
+                out.push(format!("{}={}", key, value));
+                replaced = true;
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        if !replaced {
+            out.push(format!("{}={}", key, value));
+        }
+        let mut data = out.join("\n");
+        data.push('\n');
+        std::fs::write(&path, data)?;
+        Ok(())
+    }
+
+    // =========================================================================
     // HTTP helpers
     // =========================================================================
 

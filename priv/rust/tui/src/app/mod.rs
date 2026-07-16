@@ -33,6 +33,7 @@ use crate::components::toast::Toasts;
 use crate::config::cli::Cli;
 use crate::config::Config;
 use crate::dialogs::command_palette::CommandPalette;
+use crate::dialogs::config_editor::ConfigEditor;
 use crate::dialogs::file_picker::FilePicker;
 use crate::dialogs::model_picker::ModelPicker;
 use crate::dialogs::onboarding::OnboardingWizard;
@@ -78,6 +79,7 @@ pub struct App {
     pub plan_review: Option<PlanReview>,
     pub permissions: Option<Permissions>,
     pub reasoning_selector: Option<ReasoningSelector>,
+    pub config_editor: Option<ConfigEditor>,
     pub file_picker: Option<FilePicker>,
     pub survey: Option<crate::dialogs::survey::SurveyDialog>,
 
@@ -176,6 +178,12 @@ pub struct App {
     // Background-agent dashboard (AppState::AgentsDashboard): index of the
     // currently-selected agent row, for cancel targeting.
     pub agents_dashboard_selected: usize,
+
+    // Message queue: prompts typed while the agent is Processing are enqueued
+    // (FIFO) instead of interrupting, then auto-submitted one at a time on each
+    // turn completion. /steer inserts at the front (priority). Parity with
+    // Claude Code / Hermes "keep typing while busy".
+    pub message_queue: Vec<String>,
 }
 
 impl App {
@@ -244,6 +252,7 @@ impl App {
             plan_review: None,
             permissions: None,
             reasoning_selector: None,
+            config_editor: None,
             file_picker: None,
             survey: None,
 
@@ -297,6 +306,7 @@ impl App {
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
             agents_dashboard_selected: 0,
+            message_queue: Vec::new(),
         })
     }
 
@@ -307,6 +317,7 @@ impl App {
             || self.state.is_fullscreen()
             || self.file_picker.is_some()
             || self.transcript.is_some()
+            || self.config_editor.is_some()
     }
 
     pub fn recompute_layout(&mut self) {

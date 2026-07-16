@@ -36,6 +36,11 @@ impl App {
             }
         });
 
+        // Seed screen-reader (plain-text) mode from persisted config, or auto-detect
+        // from the environment (NO_COLOR / accessibility hints) on first run.
+        self.activity
+            .set_a11y(self.config.a11y || crate::a11y::env_hint());
+
         // Initial health check
         self.check_health();
 
@@ -249,8 +254,11 @@ impl App {
                         .draw_dashboard(frame, area, self.agents_dashboard_selected);
                 }
                 _ => {
-                    // File picker overlay takes highest modal priority.
-                    if let Some(ref picker) = self.file_picker {
+                    // Config editor and file picker overlays take highest modal
+                    // priority (drawn over whatever state is underneath).
+                    if let Some(ref editor) = self.config_editor {
+                        editor.draw(frame, area);
+                    } else if let Some(ref picker) = self.file_picker {
                         picker.draw(frame, area);
                     } else {
                         match self.state {
@@ -322,7 +330,9 @@ impl App {
             .split(area);
 
         self.chat.draw_live(frame, rows[0]);
-        if !self.thinking_box.is_empty() {
+        // In screen-reader mode the boxed thinking display is skipped in favor of
+        // the activity's plain-text status line (screen readers choke on the box).
+        if !self.thinking_box.is_empty() && !self.activity.a11y() {
             self.thinking_box.draw(frame, rows[1]);
         } else {
             self.activity.draw(frame, rows[1]);

@@ -172,6 +172,28 @@ impl App {
                     crate::components::toast::ToastLevel::Info,
                 );
             }
+            "/a11y" | "/screenreader" | "/screen-reader" => {
+                // Toggle screen-reader (plain-text) mode. Accepts an explicit
+                // on/off arg, otherwise flips the current state.
+                let on = match arg.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" => true,
+                    "off" | "false" | "0" | "no" => false,
+                    _ => !self.activity.a11y(),
+                };
+                self.activity.set_a11y(on);
+                self.config.a11y = on;
+                let _ = self.config.save();
+                let msg = if on {
+                    "Screen reader mode: on — plain-text status, spinner disabled"
+                } else {
+                    "Screen reader mode: off — rich activity display restored"
+                };
+                // Announce as a plain scrollback line (a screen reader reads this),
+                // and also toast for sighted users.
+                self.chat.add_system_message(msg, "info");
+                self.toasts
+                    .push(msg.to_string(), crate::components::toast::ToastLevel::Info);
+            }
             "/yolo" | "/dangerous" => {
                 self.config.skip_permissions = !self.config.skip_permissions;
                 let state = if self.config.skip_permissions {
@@ -189,6 +211,11 @@ impl App {
                     format!("YOLO mode: {}", state),
                     crate::components::toast::ToastLevel::Warning,
                 );
+                self.announce_a11y(if self.config.skip_permissions {
+                    "permission mode: bypass (auto-approving all tools)"
+                } else {
+                    "permission mode: default (permission prompts enabled)"
+                });
                 // Notify backend to toggle dangerous mode
                 self.execute_backend_command("dangerous_mode", if self.config.skip_permissions { "on" } else { "off" });
             }
@@ -215,6 +242,11 @@ impl App {
                     format!("Auto mode: {}", state),
                     crate::components::toast::ToastLevel::Info,
                 );
+                self.announce_a11y(if turning_on {
+                    "permission mode: auto (guardian auto-approves safe actions)"
+                } else {
+                    "permission mode: default (permission prompts enabled)"
+                });
                 // Notify backend to toggle the auto permission tier.
                 self.execute_backend_command("auto_mode", if turning_on { "on" } else { "off" });
             }
@@ -322,10 +354,8 @@ impl App {
                 self.execute_backend_command("doctor", "");
             }
             "/config" => {
-                self.toasts.push(
-                    "Config: ~/.osa/.env | Run 'osa setup' to reconfigure".into(),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                // Open the unified full-screen settings editor.
+                self.open_config_editor();
             }
             "/desktop" | "/gui" => {
                 // Send to backend — it handles finding and launching the Tauri app
@@ -368,6 +398,15 @@ impl App {
                 let cmd_name = &cmd[1..]; // strip leading /
                 self.execute_backend_command(cmd_name, arg);
             }
+        }
+    }
+
+    /// Announce a state change as a plain scrollback line, but only in
+    /// screen-reader mode (sighted users already get toasts / rich chrome).
+    /// Keeps the reader informed of permission-mode and similar transitions.
+    pub(crate) fn announce_a11y(&mut self, msg: &str) {
+        if self.activity.a11y() {
+            self.chat.add_system_message(msg, "info");
         }
     }
 

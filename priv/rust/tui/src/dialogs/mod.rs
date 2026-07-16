@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod command_palette;
+pub mod config_editor;
 pub mod file_picker;
 pub mod model_picker;
 pub mod onboarding;
@@ -45,4 +46,8 @@ pub enum DialogAction {
     PickerSelect { index: usize, label: String },
     /// User cancelled a generic picker without selecting.
     PickerCancel,
+    /// User closed the /config editor.
+    ConfigClose,
+    /// User committed a value in the /config editor (field label + new value).
+    ConfigSetValue { field: String, value: String },
 }

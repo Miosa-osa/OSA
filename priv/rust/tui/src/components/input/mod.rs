@@ -64,6 +64,9 @@ pub struct InputComponent {
     redo_stack: Vec<(String, usize)>,
     /// Reverse-incremental history search state (Ctrl+R)
     reverse_search: Option<ReverseSearch>,
+    /// Number of messages queued while the agent is Processing. Purely for the
+    /// small "N queued" indicator; set by the app via `set_queued_count`.
+    queued_count: usize,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -98,7 +101,14 @@ impl InputComponent {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             reverse_search: None,
+            queued_count: 0,
         }
+    }
+
+    /// Set the "N queued" indicator (messages waiting for the current turn to
+    /// finish). 0 hides it.
+    pub fn set_queued_count(&mut self, n: usize) {
+        self.queued_count = n;
     }
 
     pub fn value(&self) -> &str {
@@ -1181,6 +1191,26 @@ impl Component for InputComponent {
             );
         } else {
             self.mic_area.set(None);
+        }
+
+        // Message-queue indicator ("N queued") — shown while messages wait for
+        // the current turn to finish. During processing the mic button is
+        // hidden, so the right edge is free for this badge.
+        if self.queued_count > 0 {
+            let label = format!(" \u{29d6} {} queued ", self.queued_count);
+            let w = label.chars().count() as u16;
+            if input_area.width > w + 6 {
+                let q_area = Rect::new(
+                    input_area.x + input_area.width - w,
+                    input_area.y,
+                    w,
+                    1,
+                );
+                frame.render_widget(
+                    Paragraph::new(Span::styled(label, theme.hint())),
+                    q_area,
+                );
+            }
         }
 
         // Show cursor

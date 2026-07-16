@@ -372,6 +372,9 @@ impl App {
                         self.transition(AppState::Idle);
                         self.activity.stop();
                     }
+                    // The current turn errored out — don't let queued messages
+                    // get stuck; drain the next one if we're back at Idle.
+                    self.maybe_dequeue_message();
                 }
             },
             BackendEvent::CommandResult(result) => {

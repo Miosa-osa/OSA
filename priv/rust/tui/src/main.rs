@@ -11,6 +11,7 @@ use ratatui::{prelude::*, Terminal, TerminalOptions, Viewport};
 use std::io::{self, Write};
 use tracing::error;
 
+mod a11y;
 mod app;
 mod client;
 mod components;
