@@ -59,9 +59,11 @@ fn main() -> Result<()> {
     result
 }
 
-/// Inline viewport height for the live region:
-/// preview cap (8) + thinking/activity (1) + status (1) + input reserve (2+).
-pub const LIVE_H_BASE: u16 = 12;
+/// Inline viewport height for the live region: kept compact (Claude-Code style)
+/// so there's no big empty gap when idle. streaming preview (~2) + thinking/
+/// activity (1) + status (1) + input (1, grows as you type). Finished replies go
+/// to native scrollback, so the live preview does NOT need to be tall.
+pub const LIVE_H_BASE: u16 = 5;
 
 /// Clamp the inline viewport height to something sane for the terminal size.
 fn compute_viewport_height(term_rows: u16) -> u16 {
