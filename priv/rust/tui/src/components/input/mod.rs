@@ -302,6 +302,65 @@ impl InputComponent {
         }
     }
 
+    /// Current cursor column, counted in chars from the start of its line.
+    fn cursor_column(&self) -> usize {
+        let line_start = self.content[..self.cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        self.content[line_start..self.cursor].chars().count()
+    }
+
+    /// Byte offset of `col` chars into the line spanning `[start, end)`,
+    /// clamped to the line's end.
+    fn byte_at_column(&self, start: usize, end: usize, col: usize) -> usize {
+        let line = &self.content[start..end];
+        match line.char_indices().nth(col) {
+            Some((b, _)) => start + b,
+            None => end,
+        }
+    }
+
+    /// Multiline: move the cursor up one line, preserving the column when
+    /// possible. On the first line, jump to the start of the buffer.
+    fn move_cursor_up(&mut self) {
+        let col = self.cursor_column();
+        let cur_line_start = self.content[..self.cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        if cur_line_start == 0 {
+            self.cursor = 0;
+            return;
+        }
+        // Previous line occupies [prev_start, cur_line_start - 1) (excludes its
+        // trailing '\n' at cur_line_start - 1).
+        let prev_end = cur_line_start - 1;
+        let prev_start = self.content[..prev_end]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        self.cursor = self.byte_at_column(prev_start, prev_end, col);
+    }
+
+    /// Multiline: move the cursor down one line, preserving the column when
+    /// possible. On the last line, jump to the end of the buffer.
+    fn move_cursor_down(&mut self) {
+        let col = self.cursor_column();
+        let next_start = match self.content[self.cursor..].find('\n') {
+            Some(rel) => self.cursor + rel + 1,
+            None => {
+                self.cursor = self.content.len();
+                return;
+            }
+        };
+        let next_end = self.content[next_start..]
+            .find('\n')
+            .map(|p| next_start + p)
+            .unwrap_or(self.content.len());
+        self.cursor = self.byte_at_column(next_start, next_end, col);
+    }
+
     fn handle_tab(&mut self) -> bool {
         // Step 9: If file search is active, cycle through file matches
         if self.file_search_active && !self.file_matches.is_empty() {
@@ -770,8 +829,27 @@ impl Component for InputComponent {
                 }
 
                 match (key.code, key.modifiers) {
-                    // Submit (single-line mode)
-                    (KeyCode::Enter, KeyModifiers::NONE) if !self.multiline => {
+                    // Shift+Enter or Alt+Enter: insert a newline (enters multiline
+                    // mode). This is the ONLY way to add a line break — plain Enter
+                    // always submits (Claude Code convention).
+                    (KeyCode::Enter, m)
+                        if m == KeyModifiers::ALT || m == KeyModifiers::SHIFT =>
+                    {
+                        self.multiline = true;
+                        self.insert_char('\n');
+                        return ComponentAction::Consumed;
+                    }
+                    // Escape cancels file search if active
+                    (KeyCode::Esc, KeyModifiers::NONE) if self.file_search_active => {
+                        self.file_search_active = false;
+                        self.file_matches.clear();
+                        return ComponentAction::Consumed;
+                    }
+                    // Enter ALWAYS submits — both single-line and multiline. (Ctrl+Enter
+                    // is accepted too for muscle-memory / terminals that map it.)
+                    (KeyCode::Enter, m)
+                        if m == KeyModifiers::NONE || m == KeyModifiers::CONTROL =>
+                    {
                         // If file search dropdown is active and we have matches, select current match
                         if self.file_search_active && !self.file_matches.is_empty() {
                             let selected = self.file_matches[self.file_match_index].clone();
@@ -790,33 +868,6 @@ impl Component for InputComponent {
                         }
                         let text = self.submit();
                         return ComponentAction::Emit(AppAction::Submit(text));
-                    }
-                    // Escape cancels file search if active
-                    (KeyCode::Esc, KeyModifiers::NONE) if self.file_search_active => {
-                        self.file_search_active = false;
-                        self.file_matches.clear();
-                        return ComponentAction::Consumed;
-                    }
-                    // Alt+Enter or Shift+Enter: insert newline (enters multiline mode)
-                    (KeyCode::Enter, m)
-                        if m == KeyModifiers::ALT || m == KeyModifiers::SHIFT =>
-                    {
-                        self.multiline = true;
-                        self.insert_char('\n');
-                        return ComponentAction::Consumed;
-                    }
-                    // Ctrl+Enter in multiline: submit
-                    (KeyCode::Enter, m) if self.multiline && m == KeyModifiers::CONTROL => {
-                        if self.content.trim().is_empty() {
-                            return ComponentAction::Consumed;
-                        }
-                        let text = self.submit();
-                        return ComponentAction::Emit(AppAction::Submit(text));
-                    }
-                    // Enter in multiline: insert newline
-                    (KeyCode::Enter, KeyModifiers::NONE) if self.multiline => {
-                        self.insert_char('\n');
-                        return ComponentAction::Consumed;
                     }
                     // Backspace
                     (KeyCode::Backspace, KeyModifiers::NONE) => {
@@ -837,6 +888,21 @@ impl Component for InputComponent {
                     }
                     (KeyCode::Down, KeyModifiers::NONE) if self.file_search_active && !self.file_matches.is_empty() => {
                         self.file_match_index = (self.file_match_index + 1) % self.file_matches.len();
+                        return ComponentAction::Consumed;
+                    }
+                    // Multiline: Up/Down move the CURSOR between lines (preserving
+                    // column) rather than recalling history. History recall stays
+                    // for single-line / empty input (handled by the arms below).
+                    (KeyCode::Up, KeyModifiers::NONE)
+                        if self.multiline || self.content.contains('\n') =>
+                    {
+                        self.move_cursor_up();
+                        return ComponentAction::Consumed;
+                    }
+                    (KeyCode::Down, KeyModifiers::NONE)
+                        if self.multiline || self.content.contains('\n') =>
+                    {
+                        self.move_cursor_down();
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Left, KeyModifiers::NONE) => {
@@ -1010,10 +1076,18 @@ impl Component for InputComponent {
         // line visible by scrolling within the box (so Shift+Enter keeps working
         // past the visible height instead of clipping).
         let v_scroll: u16 = if self.multiline || self.content.contains('\n') {
+            let total_lines = self.content.split('\n').count() as u16;
             let cursor_line = self.content[..self.cursor.min(self.content.len())]
                 .matches('\n')
                 .count() as u16;
-            cursor_line.saturating_sub(input_area.height.saturating_sub(1))
+            let visible = input_area.height.max(1);
+            // Keep lines 0..visible showing while the cursor is near the top; only
+            // scroll once the cursor passes the last visible row, and never scroll
+            // past the final line (which would blank out the box when it's small).
+            let max_scroll = total_lines.saturating_sub(visible);
+            cursor_line
+                .saturating_sub(visible.saturating_sub(1))
+                .min(max_scroll)
         } else {
             0
         };

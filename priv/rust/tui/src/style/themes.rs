@@ -40,8 +40,8 @@ pub fn dark() -> Theme {
             dialog_bg: hex("#1F2937"),
             button_active_bg: hex("#06B6D4"),  // OSA blue
             button_active_text: hex("#08131A"),
-            grad_a: hex("#7DD3FC"),   // OSA logo gradient: light blue →
-            grad_b: hex("#06B6D4"),   // OSA blue
+            grad_a: hex("#E6F6FD"),   // OSA logo gradient: near-white light blue →
+            grad_b: hex("#06B6D4"),   // OSA blue — visible light→blue fade
             // Word-level diff colors (line bg + brighter changed-word bg).
             diff_del_bg: Color::Rgb(122, 41, 54),
             diff_add_bg: Color::Rgb(34, 92, 43),

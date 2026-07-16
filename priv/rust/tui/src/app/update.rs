@@ -6,6 +6,33 @@ use crate::app::state::AppState;
 use crate::components::{AppAction, Component, ComponentAction};
 use crate::event::Event;
 
+/// True only when a pasted string is entirely one-or-more existing filesystem
+/// paths (drag-drop of files or a copied path), as opposed to ordinary text.
+/// Ordinary prose — even prose that happens to contain a word matching a
+/// filename — returns false so it is inserted as text rather than hijacked into
+/// an attachment chip.
+fn paste_is_file_paths(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Whole paste is a single existing path (handles paths containing spaces).
+    if std::path::Path::new(trimmed).exists() {
+        return true;
+    }
+    // Otherwise accept only when EVERY whitespace/newline-separated token is an
+    // existing path (multi-file drag-drop). A single non-path token means text.
+    let mut tokens = trimmed.split_whitespace();
+    let mut any = false;
+    for tok in &mut tokens {
+        any = true;
+        if !std::path::Path::new(tok).exists() {
+            return false;
+        }
+    }
+    any
+}
+
 impl App {
     /// Main update function. Returns true if the app should quit.
     pub fn update(&mut self, event: Event) -> bool {
@@ -42,8 +69,10 @@ impl App {
                     }
                 } else if self.state.allows_input() {
                     // Drag-drop / a pasted file path becomes an attachment chip
-                    // instead of raw text.
-                    if self.ingest_paste_as_attachments(&text) {
+                    // instead of raw text — but ONLY when the paste is entirely
+                    // existing file path(s). Ordinary text (even text that happens
+                    // to contain a word matching a filename) is inserted as-is.
+                    if paste_is_file_paths(&text) && self.ingest_paste_as_attachments(&text) {
                         return false;
                     }
                     let capped = if text.len() > super::MAX_MESSAGE_SIZE {
@@ -227,8 +256,9 @@ impl App {
                 }
                 match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
                     Ok(text) if !text.is_empty() => {
-                        // A copied file path attaches instead of inserting text.
-                        if self.ingest_paste_as_attachments(&text) {
+                        // A copied file path attaches instead of inserting text —
+                        // but only when the whole paste is existing file path(s).
+                        if paste_is_file_paths(&text) && self.ingest_paste_as_attachments(&text) {
                             return false;
                         }
                         let capped: String =
@@ -307,6 +337,10 @@ impl App {
                 let action =
                     self.input
                         .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                // The input may have grown or shrunk (Shift+Enter newline, paste,
+                // clear) — recompute so the box height tracks the content instead
+                // of staying stuck at its previous size.
+                self.recompute_layout();
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
                         self.submit_input(&text);

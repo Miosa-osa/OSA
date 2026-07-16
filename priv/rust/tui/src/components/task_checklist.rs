@@ -95,13 +95,31 @@ impl TaskChecklist {
         }
 
         let theme = crate::style::theme();
-        let h = self.height();
+        // Clamp the panel height to the parent area: `height()` grows with the item
+        // count and can exceed the live region. Left unclamped it once produced a
+        // panel that sat ABOVE the inline viewport and wrote outside the frame
+        // buffer, panicking with "index outside of buffer". Never taller/wider
+        // than the area we were handed.
+        let h = self.height().min(area.height);
         let w = PANEL_WIDTH.min(area.width);
+        if h < 3 || w == 0 {
+            return;
+        }
 
-        // Position: bottom-right of the given area
+        // Position: bottom-right of the given area.
         let x = area.x + area.width.saturating_sub(w);
         let y = area.y + area.height.saturating_sub(h);
         let panel = Rect::new(x, y, w, h);
+
+        // Second line of defense: intersect the self-computed panel with the
+        // frame's real drawable area. If the (already area-clamped) panel still
+        // does not fully fit the frame, render nothing rather than risk writing
+        // outside the buffer.
+        let bounds = frame.area();
+        let panel = panel.intersection(bounds);
+        if panel.width == 0 || panel.height == 0 {
+            return;
+        }
 
         let block = Block::default()
             .title(" Tasks ")
@@ -111,7 +129,7 @@ impl TaskChecklist {
             .border_style(Style::default().fg(theme.colors.border));
 
         let inner = block.inner(panel);
-        frame.render_widget(block, panel);
+        crate::app::event_loop::safe_render_widget(frame, block, panel);
 
         if inner.height == 0 || inner.width == 0 {
             return;
@@ -140,7 +158,11 @@ impl TaskChecklist {
             };
 
             let subject = if item.subject.len() > max_subject_len {
-                format!("{}…", &item.subject[..max_subject_len.saturating_sub(1)])
+                // Slice on a char boundary so multi-byte subjects can never panic.
+                format!(
+                    "{}…",
+                    crate::util::truncate_str(&item.subject, max_subject_len.saturating_sub(1))
+                )
             } else {
                 item.subject.clone()
             };
@@ -152,6 +174,6 @@ impl TaskChecklist {
         }
 
         let para = Paragraph::new(lines);
-        frame.render_widget(para, inner);
+        crate::app::event_loop::safe_render_widget(frame, para, inner);
     }
 }

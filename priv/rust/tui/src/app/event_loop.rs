@@ -18,6 +18,27 @@ use crate::event::{terminal, Event};
 
 type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 
+/// Intersect `rect` with the frame's drawable area, returning a rect guaranteed
+/// to lie within `frame.area()` (possibly zero-sized). Pass the result as the
+/// `area` to any component's `draw`: because every downstream `render_widget`
+/// stays inside this rect, an oversized or misplaced area degrades gracefully
+/// instead of panicking with "index outside of buffer".
+pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
+    rect.intersection(frame.area())
+}
+
+/// Render `widget` into `rect` after clipping it to the frame's drawable area.
+/// Skips the draw entirely when nothing survives the clip. This is the single
+/// choke point that guarantees a widget can never index outside the frame
+/// buffer, no matter how the target rect was computed.
+pub fn safe_render_widget<W: ratatui::widgets::Widget>(frame: &mut Frame, widget: W, rect: Rect) {
+    let clipped = rect.intersection(frame.area());
+    if clipped.width == 0 || clipped.height == 0 {
+        return;
+    }
+    frame.render_widget(widget, clipped);
+}
+
 impl App {
     pub async fn run(&mut self, mut terminal: Term, inline_h: u16) -> Result<()> {
         // Spawn terminal event reader (reassigned when we pause it around an
@@ -231,7 +252,7 @@ impl App {
         if let Some(ref tv) = self.transcript {
             tv.draw(frame, area, &self.transcript_log);
             if self.toasts.has_toasts() {
-                self.toasts.draw(frame, toast_rect(area));
+                self.toasts.draw(frame, toast_rect(area).intersection(area));
             }
             return;
         }
@@ -300,7 +321,7 @@ impl App {
                 }
             }
             if self.toasts.has_toasts() {
-                self.toasts.draw(frame, toast_rect(area));
+                self.toasts.draw(frame, toast_rect(area).intersection(area));
             }
         } else {
             self.draw_inline(frame, area);
@@ -334,22 +355,35 @@ impl App {
             ])
             .split(area);
 
-        self.chat.draw_live(frame, rows[0]);
+        // Bounds-check every live-region rect against the frame's real drawable
+        // area before handing it to a component. The layout is derived from
+        // `area`, but a lagged resize or an under-reported inline viewport can
+        // leave a row partly outside the frame buffer; clamping keeps each
+        // component's internal `render_widget` calls inside the buffer.
+        let bounds = frame.area();
+        let a_stream = clamp_to_frame(frame, rows[0]);
+        let a_think = clamp_to_frame(frame, rows[1]);
+        let a_hint = clamp_to_frame(frame, rows[2]);
+        let a_input = clamp_to_frame(frame, rows[3]);
+        let a_status = clamp_to_frame(frame, rows[4]);
+
+        self.chat.draw_live(frame, a_stream);
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
         if !self.thinking_box.is_empty() && !self.activity.a11y() {
-            self.thinking_box.draw(frame, rows[1]);
+            self.thinking_box.draw(frame, a_think);
         } else {
-            self.activity.draw(frame, rows[1]);
+            self.activity.draw(frame, a_think);
         }
-        self.draw_context_hint(frame, rows[2]);
-        self.input.draw(frame, rows[3]);
-        self.status.draw(frame, rows[4]);
+        self.draw_context_hint(frame, a_hint);
+        self.input.draw(frame, a_input);
+        self.status.draw(frame, a_status);
         // Live task checklist floats bottom-right of the streaming/chat region
         // (Claude Code's todo panel). It self-positions and no-ops when empty.
-        self.task_checklist.draw(frame, rows[0]);
+        // It additionally clamps its own panel to the frame internally.
+        self.task_checklist.draw(frame, a_stream);
         if self.toasts.has_toasts() {
-            self.toasts.draw(frame, toast_rect(area));
+            self.toasts.draw(frame, toast_rect(area).intersection(bounds));
         }
     }
 
@@ -430,4 +464,237 @@ fn toast_rect(area: Rect) -> Rect {
         40.min(area.width),
         3.min(area.height),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Render-hardening tests
+//
+// A ratatui panic ("index outside of buffer") crashed the whole TUI when a
+// widget wrote outside its frame buffer — the task-checklist overlay computed a
+// panel that could land above the live region. These tests render the
+// crash-prone components and the live-region layout across a wide range of
+// terminal sizes and states, asserting that `draw` never panics. They exercise
+// the component `draw` fns directly against a `TestBackend` frame — no App, no
+// network — so a regression that writes out of bounds fails the test instead of
+// crashing a user's session.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod render_tests {
+    use super::{clamp_to_frame, safe_render_widget};
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::Terminal;
+
+    // `Activity::draw` and `InputComponent::draw` are `Component` trait methods.
+    use crate::components::activity::{Activity, ProcessingPhase};
+    use crate::components::agents::Agents;
+    use crate::components::input::InputComponent;
+    use crate::components::task_checklist::{ChecklistStatus, TaskChecklist};
+    use crate::components::Component;
+
+    /// The terminal sizes every case is exercised at, from absurdly tiny to large.
+    const SIZES: &[(u16, u16)] = &[
+        (10, 3),
+        (20, 5),
+        (40, 10),
+        (80, 24),
+        (120, 40),
+        (200, 60),
+    ];
+
+    /// Run `f` inside a `TestBackend` draw at every size. Any panic in `f`
+    /// (including a ratatui out-of-buffer index) fails the test.
+    fn for_each_size(mut f: impl FnMut(&mut ratatui::Frame<'_>, Rect)) {
+        for &(w, h) in SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|frame| {
+                let area = frame.area();
+                f(frame, area);
+            })
+            .unwrap();
+        }
+    }
+
+    /// Build a checklist with `n` items in a mix of statuses, including a
+    /// multi-byte subject to guard the truncation path.
+    fn checklist_with(n: usize) -> TaskChecklist {
+        let mut cl = TaskChecklist::new();
+        for i in 0..n {
+            cl.add(
+                format!("task-{i}"),
+                format!("Refactor the ünîcode module and wire up subsystem number {i} end-to-end"),
+                Some(format!("refactoring subsystem {i}")),
+            );
+        }
+        // Spread statuses so every icon/style branch renders.
+        for i in 0..n {
+            let status = match i % 4 {
+                0 => ChecklistStatus::Completed,
+                1 => ChecklistStatus::InProgress,
+                2 => ChecklistStatus::Pending,
+                _ => ChecklistStatus::Failed,
+            };
+            cl.update(&format!("task-{i}"), status);
+        }
+        cl
+    }
+
+    /// Mirror `App::draw_inline`'s vertical split so the checklist is exercised
+    /// through the exact bottom-anchored, self-positioning path that crashed.
+    fn split_live_region(area: Rect, think_h: u16, input_h: u16) -> std::rc::Rc<[Rect]> {
+        RLayout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(think_h),
+                Constraint::Length(1),
+                Constraint::Length(input_h),
+                Constraint::Length(2),
+            ])
+            .split(area)
+    }
+
+    #[test]
+    fn safe_render_widget_skips_out_of_bounds_rects() {
+        // Oversized, negatively-offset-equivalent, and zero rects must all be
+        // clipped to the frame instead of panicking.
+        for_each_size(|frame, area| {
+            let oversized = Rect::new(0, 0, area.width + 100, area.height + 100);
+            safe_render_widget(frame, Block::default().borders(Borders::ALL), oversized);
+
+            let below = Rect::new(0, area.height.saturating_sub(1), area.width, 50);
+            safe_render_widget(frame, Paragraph::new("way too tall"), below);
+
+            let right = Rect::new(area.width.saturating_sub(1), 0, 50, area.height);
+            safe_render_widget(frame, Paragraph::new("way too wide"), right);
+
+            let zero = Rect::new(area.width, area.height, 0, 0);
+            safe_render_widget(frame, Paragraph::new("nothing"), zero);
+
+            // clamp_to_frame never returns a rect outside the frame.
+            let clamped = clamp_to_frame(frame, oversized);
+            assert!(clamped.right() <= area.right());
+            assert!(clamped.bottom() <= area.bottom());
+        });
+    }
+
+    #[test]
+    fn task_checklist_full_frame_never_panics() {
+        for n in [0usize, 1, 5, 15, 40] {
+            let cl = checklist_with(n);
+            for_each_size(|frame, area| cl.draw(frame, area));
+        }
+    }
+
+    #[test]
+    fn task_checklist_live_region_split_never_panics() {
+        // The original crash: the bottom-anchored overlay, given the small
+        // streaming row, computed a fixed-height panel that spilled above the
+        // inline viewport. Drive that exact path with a heavy 15-item list.
+        for n in [0usize, 3, 15, 30] {
+            let cl = checklist_with(n);
+            for think_h in [0u16, 1] {
+                for input_h in [1u16, 3, 6, 11] {
+                    for_each_size(|frame, area| {
+                        let rows = split_live_region(area, think_h, input_h);
+                        // Checklist floats over the streaming region (rows[0]).
+                        cl.draw(frame, rows[0]);
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn task_checklist_misplaced_oversized_area_never_panics() {
+        // Adversarial: hand the overlay areas that themselves extend past the
+        // frame (simulating a lagged resize / under-reported viewport). It must
+        // clamp internally and degrade gracefully, never write out of bounds.
+        let cl = checklist_with(15);
+        for_each_size(|frame, area| {
+            let bogus = [
+                Rect::new(0, area.height.saturating_sub(2), area.width, 30),
+                Rect::new(0, 0, area.width + 50, area.height + 50),
+                Rect::new(
+                    area.width.saturating_sub(5),
+                    area.height.saturating_sub(5),
+                    40,
+                    20,
+                ),
+                Rect::new(0, area.height, area.width, 20),
+            ];
+            for b in bogus {
+                cl.draw(frame, b);
+            }
+        });
+    }
+
+    #[test]
+    fn activity_never_panics() {
+        for a11y in [false, true] {
+            let mut act = Activity::new();
+            act.set_a11y(a11y);
+            act.start();
+            act.set_model_name("test-model");
+            act.set_phase(ProcessingPhase::ToolCall);
+            act.set_active_verb(Some("orchestrating".to_string()));
+            for i in 0..12 {
+                act.tool_start(if i % 2 == 0 { "Bash" } else { "Read" }, "some args");
+                act.tool_end("Bash", 42, i % 3 != 0);
+            }
+            act.set_tokens(1234, 5678);
+            act.add_stream_chars(9000);
+            for_each_size(|frame, area| {
+                // Activity draws within whatever single-ish row it's given.
+                let row = Rect::new(area.x, area.y, area.width, area.height.min(6));
+                act.draw(frame, row);
+            });
+        }
+    }
+
+    #[test]
+    fn input_never_panics() {
+        let contents = [
+            "",
+            "short",
+            "a line that is long enough to wrap across narrow terminals repeatedly and then some more",
+            "line one\nline two\nline three\nline four\nline five\nline six\nline seven",
+            "ünîcode ✓ ○ ✗ mixed with ascii and a trailing …",
+        ];
+        for content in contents {
+            for &(w, _h) in SIZES {
+                let mut input = InputComponent::new();
+                input.set_width(w);
+                input.set_content(content);
+                for_each_size(|frame, area| {
+                    let needed = input.needed_height().min(area.height);
+                    let row = Rect::new(area.x, area.y, area.width, needed);
+                    input.draw(frame, row);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn agents_dashboard_never_panics() {
+        for n in [0usize, 1, 6, 20] {
+            let mut agents = Agents::new();
+            for i in 0..n {
+                agents.agent_started(
+                    format!("agent-{i}"),
+                    "explorer",
+                    "test-model",
+                    format!("investigating a fairly long subject line number {i}"),
+                    Some("batch-1".to_string()),
+                );
+                agents.agent_progress(&format!("agent-{i}"), "reading files", i as u32, 100, "");
+            }
+            for selected in [0usize, n.saturating_sub(1), 999] {
+                for_each_size(|frame, area| {
+                    agents.draw_dashboard(frame, area, selected);
+                });
+            }
+        }
+    }
 }
