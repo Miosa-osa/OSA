@@ -45,6 +45,13 @@ impl App {
                     crate::dialogs::model_picker::ModelPickerAction::Cancel => {
                         self.transition(AppState::Idle);
                     }
+                    crate::dialogs::model_picker::ModelPickerAction::ConfigureProviders => {
+                        // Close the picker and open the setup wizard, where the user
+                        // picks a provider and types/pastes the API key in the UI.
+                        // The wizard writes ~/.osa/.env and applies it live.
+                        self.transition(AppState::Idle);
+                        self.force_onboarding();
+                    }
                 }
                 self.model_picker = None;
             }

@@ -23,6 +23,8 @@ const MAX_H: u16 = 28;
 pub enum ModelPickerAction {
     Select { provider: String, model: String },
     Cancel,
+    /// User wants to add a provider / paste an API key — open the setup wizard.
+    ConfigureProviders,
 }
 
 // ── Internal types ───────────────────────────────────────────────────────────
@@ -213,6 +215,11 @@ impl ModelPicker {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        // Ctrl+N — add a provider / paste an API key (opens the setup wizard where
+        // you type the key right in the UI). Checked before the Ctrl/Alt guard.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
+            return Some(ModelPickerAction::ConfigureProviders);
+        }
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return None;
         }
@@ -442,10 +449,10 @@ impl ModelPicker {
             Span::styled(" nav  ", theme.dialog_help()),
             Span::styled("Enter", theme.dialog_help_key()),
             Span::styled(" select  ", theme.dialog_help()),
+            Span::styled("^N", theme.dialog_help_key()),
+            Span::styled(" add key/provider  ", theme.dialog_help()),
             Span::styled("Esc", theme.dialog_help_key()),
-            Span::styled(" cancel  ", theme.dialog_help()),
-            Span::styled("type", theme.dialog_help_key()),
-            Span::styled(" filter", theme.dialog_help()),
+            Span::styled(" cancel", theme.dialog_help()),
         ]);
         frame.render_widget(
             Paragraph::new(help).alignment(Alignment::Center),
