@@ -106,6 +106,14 @@ impl Theme {
         Style::default().fg(self.colors.primary)
     }
 
+    /// Light-blue accent for the live "thinking" indicator (spinner glyph + rotating
+    /// verb) — deliberately distinct from the orange primary accent.
+    pub fn spinner_verb(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(147, 165, 255))
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn tool_name(&self) -> Style {
         Style::default().fg(self.colors.secondary)
     }

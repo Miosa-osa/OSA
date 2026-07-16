@@ -420,14 +420,17 @@ impl Component for Activity {
         // (which tool is running) shows separately as the ✓ tool-result lines.
         let elapsed_str = format_elapsed(elapsed);
         let mut spinner_spans: Vec<Span<'_>> = vec![
-            Span::styled(format!("{} ", spinner_char), theme.spinner()),
-            Span::styled(format!("{}\u{2026}", word), theme.prefix_active()),
+            Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
+            Span::styled(format!("{}\u{2026}", word), theme.spinner_verb()),
             Span::styled(
-                format!(
-                    " ({} \u{00b7} \u{2193} {} tokens)",
-                    elapsed_str,
-                    format_count(tokens)
-                ),
+                // Only surface the "↓ N tokens" segment once tokens are actually
+                // flowing — during the initial thinking phase it reads 0, which looks
+                // broken. Just the elapsed timer until then.
+                if tokens > 0 {
+                    format!(" ({} \u{00b7} \u{2193} {} tokens)", elapsed_str, format_count(tokens))
+                } else {
+                    format!(" ({})", elapsed_str)
+                },
                 theme.faint(),
             ),
         ];

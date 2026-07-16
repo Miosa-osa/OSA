@@ -1,8 +1,11 @@
 use anyhow::Result;
 use crossterm::{
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, Terminal, TerminalOptions, Viewport};
 use std::io::{self, Write};
@@ -82,6 +85,18 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnableBracketedPaste)?;
 
+    // Enable the kitty keyboard protocol's disambiguation so distinct keys like
+    // Shift+Enter (insert newline) are reported as Enter+SHIFT instead of collapsing
+    // to a bare Enter (submit). Supported by ghostty/wezterm/kitty/foot; a no-op on
+    // terminals that don't advertise support, so it's safe to attempt unconditionally
+    // behind the capability probe.
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+
     // ratatui's Viewport::Inline queries the terminal for the cursor position at
     // construction (a DSR request). Some terminals/launch contexts drop the very
     // first query and it times out ("cursor position could not be read"), which
@@ -144,6 +159,7 @@ fn restore_terminal() -> Result<()> {
     let mut stdout = io::stdout();
     // Best-effort: if we crashed while in a modal we may still be on the alt screen.
     let _ = execute!(stdout, LeaveAlternateScreen);
+    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, DisableBracketedPaste);
     disable_raw_mode()?;
     // Land the shell prompt below the inline viewport instead of over it.
