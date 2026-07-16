@@ -53,6 +53,9 @@ config :optimal_system_agent,
   # Skills directory (SKILL.md files)
   skills_dir: Path.expand("~/.osa/skills"),
 
+  # Episodic memory directory (durable task-attempt episodes, JSON per session)
+  episodic_dir: Path.expand("~/.osa/memory/episodic"),
+
   # MCP servers config
   mcp_config_path: Path.expand("~/.osa/mcp.json"),
 

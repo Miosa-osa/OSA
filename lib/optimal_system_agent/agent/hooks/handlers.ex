@@ -45,6 +45,8 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         handler: &session_announce/1, opts: []},
       %{name: "session_cleanup", event: :session_end, priority: 90,
         handler: &session_cleanup/1, opts: []},
+      %{name: "memory_consolidate", event: :session_end, priority: 80,
+        handler: &memory_consolidate/1, opts: []},
 
       # ── pre_tool_use ───────────────────────────────────────────────
       %{name: "spend_guard", event: :pre_tool_use, priority: 8,
@@ -88,7 +90,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
       %{name: "auto_save_session", event: :post_response, priority: 95,
         handler: &auto_save_session/1, opts: []},
       %{name: "auto_skill_creator", event: :post_response, priority: 96,
-        handler: &auto_skill_creator/1, opts: []}
+        handler: &auto_skill_creator/1, opts: []},
+      %{name: "episodic_turn_recorder", event: :post_response, priority: 88,
+        handler: &episodic_turn_recorder/1, opts: []}
     ]
   end
 
@@ -357,6 +361,89 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   end
 
   def episodic_recorder(payload), do: {:ok, payload}
+
+  # Durable episodic recorder — on each completed assistant turn, persist a
+  # distilled task attempt (task + heuristic outcome + Reflexion-style
+  # reflection) into the long-term EpisodicStore tier via the memory
+  # coordinator. Best-effort; skips subagent sessions and empty turns.
+  def episodic_turn_recorder(%{session_id: sid, input: input, response: response} = payload)
+      when is_binary(sid) do
+    task = to_string(input) |> String.trim()
+
+    cond do
+      String.starts_with?(sid, "agent:") ->
+        {:ok, payload}
+
+      task == "" ->
+        {:ok, payload}
+
+      true ->
+        resp = to_string(response)
+        {outcome, reflection} = classify_turn(resp, Map.get(payload, :tools_used, []))
+
+        event = %{
+          kind: :episode,
+          task: String.slice(task, 0, 200),
+          outcome: outcome,
+          reflection: reflection,
+          tags: derive_tags(Map.get(payload, :tools_used, [])),
+          tools: Map.get(payload, :tools_used, []) |> Enum.map(&to_string/1) |> Enum.uniq()
+        }
+
+        OptimalSystemAgent.Agent.Memory.Coordinator.remember(sid, event)
+        {:ok, payload}
+    end
+  rescue
+    _ -> {:ok, payload}
+  end
+
+  def episodic_turn_recorder(payload), do: {:ok, payload}
+
+  # Heuristic outcome + reflection for a completed turn. Cheap and LLM-free:
+  # failure signals in the response text downgrade the outcome.
+  defp classify_turn(response, tools_used) do
+    down = String.downcase(response)
+
+    failure? =
+      Enum.any?(
+        ["i hit an error", "i couldn't", "i could not", "failed to", "unable to", "i wasn't able"],
+        &String.contains?(down, &1)
+      )
+
+    tool_count = tools_used |> Enum.uniq() |> length()
+
+    outcome = if failure?, do: "failure", else: "success"
+
+    reflection =
+      cond do
+        failure? -> "Turn reported a problem; response: " <> String.slice(response, 0, 140)
+        tool_count > 0 -> "Completed using #{tool_count} tool type(s); " <> String.slice(response, 0, 120)
+        true -> "Answered directly: " <> String.slice(response, 0, 140)
+      end
+
+    {outcome, reflection}
+  end
+
+  defp derive_tags(tools_used) do
+    tools_used
+    |> Enum.map(&to_string/1)
+    |> Enum.uniq()
+    |> Enum.take(6)
+  end
+
+  # Session-end consolidation — promote recurring successful episodes into the
+  # semantic skill library (Mem0 extract-on-write). Best-effort.
+  def memory_consolidate(%{session_id: sid} = payload) when is_binary(sid) do
+    unless String.starts_with?(sid, "agent:") do
+      OptimalSystemAgent.Agent.Memory.Coordinator.consolidate(sid)
+    end
+
+    {:ok, payload}
+  rescue
+    _ -> {:ok, payload}
+  end
+
+  def memory_consolidate(payload), do: {:ok, payload}
 
   # ── Compaction observer ────────────────────────────────────────────
 

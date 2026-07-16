@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       check_tui(),
       check_api(),
       check_provider(),
+      check_miosa_cli(),
       check_event_router(),
       check_working_directory(),
       check_postgresql(),
@@ -146,6 +147,23 @@ defmodule OptimalSystemAgent.CLI.Doctor do
           true ->
             {:fail, "Provider", "no provider detected"}
         end
+    end
+  end
+
+  defp check_miosa_cli do
+    # MIOSA CLI (platform account) — installed? logged-in? Optional integration.
+    alias OptimalSystemAgent.MIOSA.CLI, as: MiosaCLI
+
+    cond do
+      not MiosaCLI.installed?() ->
+        {:optional, "MIOSA CLI", "not installed (#{MiosaCLI.install_command()})"}
+
+      not MiosaCLI.auth_configured?() ->
+        {:optional, "MIOSA CLI", "installed but not logged in (#{MiosaCLI.login_command()})"}
+
+      true ->
+        version = MiosaCLI.version() || "installed"
+        {:pass, "MIOSA CLI", "#{version} (logged in)"}
     end
   end
 
