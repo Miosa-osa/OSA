@@ -115,7 +115,10 @@ pub struct App {
     pub sse_reconnecting: bool,
 
     // Pending tool call args (tool_name -> args JSON), used to pair with ToolCallEnd
-    pub pending_tool_args: HashMap<String, String>,
+    /// Per-tool-name FIFO queue of pending args. A Vec (not a single String) so
+    /// several concurrent calls of the SAME tool (e.g. many dir_list) don't
+    /// overwrite each other's args — which showed up as tool lines with no path.
+    pub pending_tool_args: HashMap<String, Vec<String>>,
 
     /// True once we have flushed at least one agent text chunk for the current
     /// turn (so subsequent mid-turn flushes use the header-less continuation

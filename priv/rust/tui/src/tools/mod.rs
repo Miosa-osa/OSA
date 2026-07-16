@@ -91,7 +91,7 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
         }
 
         // Search: LS
-        "ls" | "list_directory" => {
+        "ls" | "list_directory" | "dir_list" | "list_dir" => {
             search::LsRenderer.render(name, args, result, opts)
         }
 
@@ -158,7 +158,7 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
     let theme = crate::style::theme();
     match status {
         ToolStatus::Pending => (
-            "○".to_string(),
+            "\u{23fa}".to_string(), // ⏺ — Claude Code bullet, muted until it runs
             Style::default().fg(theme.colors.muted),
         ),
         ToolStatus::AwaitingPermission => (
@@ -179,13 +179,13 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
             )
         }
         ToolStatus::Success => (
-            "✓".to_string(),
+            "\u{23fa}".to_string(), // ⏺ green — Claude Code style
             Style::default()
                 .fg(theme.colors.success)
                 .add_modifier(Modifier::BOLD),
         ),
         ToolStatus::Error => (
-            "✘".to_string(),
+            "\u{23fa}".to_string(), // ⏺ red — Claude Code style
             Style::default()
                 .fg(theme.colors.error)
                 .add_modifier(Modifier::BOLD),
@@ -279,6 +279,12 @@ pub(crate) fn make_header(
 ) -> Line<'static> {
     let theme = crate::style::theme();
     let (icon, icon_style) = status_icon(status, spinner);
+
+    // Shorten $HOME → ~ so tool lines aren't cluttered with long absolute paths.
+    let detail = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && !detail.is_empty() => detail.replace(&h, "~"),
+        _ => detail.to_string(),
+    };
 
     // Format: ● tool_name(args)
     let display = if !detail.is_empty() {

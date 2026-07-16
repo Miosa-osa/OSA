@@ -111,8 +111,9 @@ impl App {
                 }
                 self.activity.tool_start(&name, &args);
                 self.activity.set_phase(ProcessingPhase::ToolCall);
-                // Stash args so ToolCallEnd can build a rich summary
-                self.pending_tool_args.insert(name.clone(), args);
+                // Stash args (FIFO queue per name) so ToolCallEnd can build a rich
+                // summary even when several same-name calls overlap.
+                self.pending_tool_args.entry(name.clone()).or_default().push(args);
                 self.recompute_layout();
                 debug!("Tool call start: {}", name);
             }
@@ -124,10 +125,13 @@ impl App {
                 self.activity.tool_end(&name, duration_ms, success);
                 self.activity.set_phase(ProcessingPhase::Waiting);
 
-                // Build rich styled tool summary for the chat
+                // Build rich styled tool summary for the chat — pop the OLDEST
+                // pending args for this tool name (FIFO), matching call order.
                 let args = self
                     .pending_tool_args
-                    .remove(&name)
+                    .get_mut(&name)
+                    .filter(|q| !q.is_empty())
+                    .map(|q| q.remove(0))
                     .unwrap_or_default();
                 let status = if success {
                     crate::tools::ToolStatus::Success
