@@ -262,6 +262,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp run_pipeline(messages, tokens_before, severity, max_tok) do
+    # PreCompact hook — fire-and-forget; observers can record/telemetry the compaction.
+    try do
+      OptimalSystemAgent.Agent.Hooks.run_async(:pre_compact, %{
+        phase: :pre,
+        tokens_before: tokens_before,
+        severity: severity
+      })
+    rescue
+      _ -> :ok
+    end
+
     # Determine target: bring usage to 70% for background, 60% for aggressive/emergency
     target_tokens =
       case severity do
@@ -305,6 +316,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # Emit post_compact hook event
       try do
         OptimalSystemAgent.Agent.Hooks.run_async(:post_compact, %{
+          phase: :post,
           tokens_before: tokens_before,
           tokens_after: tokens_after,
           tokens_saved: saved,

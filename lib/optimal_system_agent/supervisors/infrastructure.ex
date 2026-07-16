@@ -51,6 +51,13 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       OptimalSystemAgent.Tools.Cache,
       OptimalSystemAgent.Machines,
 
+      # Background shell mechanism — Registry for bg-id → worker lookup +
+      # DynamicSupervisor for per-command supervised background processes
+      # (shell_execute run_in_background + bash_output polling/kill).
+      {Registry, keys: :unique, name: OptimalSystemAgent.Shell.BackgroundRegistry},
+      {DynamicSupervisor,
+       name: OptimalSystemAgent.Shell.BackgroundSupervisor, strategy: :one_for_one},
+
       # OS template discovery and connection
       OptimalSystemAgent.OS.Registry,
 

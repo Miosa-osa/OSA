@@ -88,6 +88,55 @@ defmodule OptimalSystemAgent.Agents.RegistryTest do
     assert {:project_osa, Path.join([nested, ".osa", "agents"])} in dirs
   end
 
+  test "parses when_to_use frontmatter (snake_case and camelCase)" do
+    dir = tmp_dir()
+
+    File.write!(Path.join(dir, "snake.md"), """
+    ---
+    name: snake
+    description: Snake agent
+    when_to_use: You need the snake path
+    ---
+    Snake prompt.
+    """)
+
+    File.write!(Path.join(dir, "camel.md"), """
+    ---
+    name: camel
+    description: Camel agent
+    whenToUse: You need the camel path
+    ---
+    Camel prompt.
+    """)
+
+    agents = Registry.load_from_paths([{:built_in, dir}])
+
+    assert agents["snake"].when_to_use == "You need the snake path"
+    assert agents["camel"].when_to_use == "You need the camel path"
+  end
+
+  test "ships canonical built-in agent types" do
+    dir = Path.join([File.cwd!(), "priv", "agents"])
+    agents = Registry.load_from_paths([{:built_in, dir}])
+
+    for name <- ["general-purpose", "explore", "plan", "code-review"] do
+      assert Map.has_key?(agents, name), "missing built-in agent type: #{name}"
+    end
+
+    # general-purpose has full tool access (nil allowlist) and is not read-only.
+    assert agents["general-purpose"].tools_allowed == nil
+    assert agents["general-purpose"].permission_tier == :subagent
+
+    # explore / plan / code-review are read-only.
+    assert agents["explore"].permission_tier == :read_only
+    assert agents["plan"].permission_tier == :read_only
+    assert agents["code-review"].permission_tier == :read_only
+
+    # explore targets a cheap (utility) tier; each ships a when_to_use hint.
+    assert agents["explore"].tier == :utility
+    assert agents["plan"].when_to_use != ""
+  end
+
   defp tmp_dir do
     dir = Path.join(System.tmp_dir!(), "osa_agent_registry_#{System.unique_integer([:positive])}")
     File.rm_rf!(dir)

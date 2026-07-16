@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Sandbox
+  alias OptimalSystemAgent.Shell.BackgroundManager
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
   #
@@ -84,24 +85,54 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
           if File.dir?(expanded_cwd), do: expanded_cwd, else: :invalid
       end
 
-    if effective_cwd == :invalid do
-      {:error, "cwd does not exist: #{params["cwd"]}"}
-    else
-      timeout =
-        case System.get_env("OSA_SHELL_TIMEOUT_MS") do
-          nil -> Constants.default_timeout_ms()
-          s -> String.to_integer(s)
-        end
+    cond do
+      effective_cwd == :invalid ->
+        {:error, "cwd does not exist: #{params["cwd"]}"}
 
-      # SANDBOX ROUTING: when a non-host sandbox backend is configured (or
-      # sandbox mode is :required), route the command through Sandbox.Router
-      # instead of raw host exec. Default config (no sandbox, :optional mode)
-      # keeps the existing host execution path — no behavior change.
-      if use_sandbox?() do
-        run_in_sandbox(command, effective_cwd, timeout)
-      else
-        run_command(command, effective_cwd, timeout)
-      end
+      # BACKGROUND: spawn a supervised background process and return a
+      # background_id immediately. The command still passed through the same
+      # validate/check_permissions security pipeline above. Background exec
+      # uses the host path only — sandbox routing is not supported here.
+      truthy?(params["run_in_background"]) ->
+        run_in_background(command, effective_cwd)
+
+      true ->
+        timeout =
+          case System.get_env("OSA_SHELL_TIMEOUT_MS") do
+            nil -> Constants.default_timeout_ms()
+            s -> String.to_integer(s)
+          end
+
+        # SANDBOX ROUTING: when a non-host sandbox backend is configured (or
+        # sandbox mode is :required), route the command through Sandbox.Router
+        # instead of raw host exec. Default config (no sandbox, :optional mode)
+        # keeps the existing host execution path — no behavior change.
+        if use_sandbox?() do
+          run_in_sandbox(command, effective_cwd, timeout)
+        else
+          run_command(command, effective_cwd, timeout)
+        end
+    end
+  end
+
+  # Accept boolean true or the string "true" (some callers stringify args).
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?(_), do: false
+
+  defp run_in_background(command, cwd) do
+    case BackgroundManager.start(command, cwd) do
+      {:ok, id} ->
+        {:ok,
+         "Started background command.\n" <>
+           "- background_id: #{id}\n" <>
+           "- cwd: #{cwd}\n\n" <>
+           "The command is running in the background. Poll its output and status " <>
+           "with the bash_output tool using background_id \"#{id}\". " <>
+           "To stop it, call bash_output with kill=true."}
+
+      {:error, reason} ->
+        {:error, "Failed to start background command: #{reason}"}
     end
   end
 

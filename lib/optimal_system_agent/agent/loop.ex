@@ -377,6 +377,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
       )
     end
 
+    # SessionStart hook — fire-and-forget; announces the new session.
+    fire_session_hook(:session_start, %{
+      session_id: session_id,
+      user_id: state.user_id,
+      channel: state.channel,
+      resumed: restored != %{}
+    })
+
     {:ok, state}
   end
 
@@ -618,21 +626,60 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def terminate(:normal, state) do
+    fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
     :ok
   end
 
   def terminate(:shutdown, state) do
+    fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
     :ok
   end
 
   def terminate({:shutdown, _}, state) do
+    fire_session_end(state)
     Checkpoint.clear_checkpoint(state.session_id)
     :ok
   end
 
-  def terminate(_reason, _state), do: :ok
+  def terminate(reason, state) do
+    fire_session_end(state, reason)
+    :ok
+  end
+
+  # SessionEnd hook — run synchronously so session-cleanup handlers execute
+  # before the process exits. Fully guarded: hook problems never block shutdown.
+  defp fire_session_end(state, reason \\ :normal)
+
+  defp fire_session_end(%{session_id: sid} = state, reason) when is_binary(sid) do
+    try do
+      Hooks.run(:session_end, %{
+        session_id: sid,
+        user_id: Map.get(state, :user_id),
+        channel: Map.get(state, :channel),
+        reason: reason,
+        turn_count: Map.get(state, :turn_count, 0)
+      })
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp fire_session_end(_state, _reason), do: :ok
+
+  # SessionStart hook helper — never blocks or crashes loop init.
+  defp fire_session_hook(event, payload) do
+    Hooks.run_async(event, payload)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   # --- Message Dispatch ---
 

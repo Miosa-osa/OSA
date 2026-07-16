@@ -56,7 +56,10 @@ defmodule OptimalSystemAgent.Agents.Registry do
       rows =
         Enum.map_join(agents, "\n", fn a ->
           tier = a[:tier] || "specialist"
-          "- **#{a.name}** (#{tier}): #{a[:description] || ""}"
+          summary = blank_to_nil(a[:description]) || ""
+          hint = blank_to_nil(a[:when_to_use])
+          base = "- **#{a.name}** (#{tier}): #{summary}"
+          if hint, do: base <> " — Use when: #{hint}", else: base
         end)
 
       """
@@ -209,6 +212,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
          %{
            name: name,
            description: "",
+           when_to_use: "",
            tier: :specialist,
            triggers: [],
            tools_allowed: nil,
@@ -243,6 +247,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
     %{
       name: to_string(name),
       description: to_string(meta["description"] || ""),
+      when_to_use: to_string(first_present(meta, ["when_to_use", "whenToUse"]) || ""),
       tier: parse_tier(meta["tier"]),
       triggers: List.wrap(meta["triggers"] || []) |> Enum.map(&to_string/1),
       tools_allowed: parse_tool_list(first_present(meta, ["tools_allowed", "tools"])),
@@ -271,6 +276,17 @@ defmodule OptimalSystemAgent.Agents.Registry do
       source: source
     }
   end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_to_nil(value), do: value
 
   defp first_present(meta, keys) do
     Enum.find_value(keys, fn key ->

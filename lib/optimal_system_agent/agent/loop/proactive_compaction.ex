@@ -108,6 +108,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         messages
 
       true ->
+        fire_compact_hook(:pre_compact, %{
+          phase: :pre,
+          strategy: :proactive,
+          tokens_before: older_tokens
+        })
+
         case summarize(older) do
           {:ok, summary} ->
             summary_msg = %{
@@ -117,6 +123,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
             compacted = [summary_msg | recent]
             after_tokens = Compactor.estimate_tokens(compacted)
+
+            fire_compact_hook(:post_compact, %{
+              phase: :post,
+              strategy: :proactive,
+              tokens_before: older_tokens,
+              tokens_after: after_tokens,
+              tokens_saved: older_tokens - after_tokens
+            })
 
             emit_event(length(messages), length(compacted), older_tokens, after_tokens)
 
@@ -250,6 +264,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     :ok
   rescue
     _ -> :ok
+  end
+
+  # Fire a compaction lifecycle hook (pre_compact / post_compact). Fire-and-forget.
+  defp fire_compact_hook(event, payload) do
+    OptimalSystemAgent.Agent.Hooks.run_async(event, payload)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp role_of(msg), do: to_string(Map.get(msg, :role) || Map.get(msg, "role") || "")

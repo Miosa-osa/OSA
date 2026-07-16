@@ -34,9 +34,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
 
     ## When to Use
     - Task has multiple independent parts that can run in parallel
-    - A specialized role (explorer, tester, code-reviewer) would do better work
-    - You need codebase context: dispatch role='explorer' first
-    - You need an implementation plan: dispatch role='planner'
+    - A specialized role (explore, code-review, tester) would do better work
+    - You need codebase context fast and cheap: dispatch role='explore' first
+    - You need an implementation plan: dispatch role='plan'
+    - Open-ended multi-step work: dispatch role='general-purpose'
     - Long-running research: use background=true so you can keep working
     - Agent needs your conversation context: use fork=true
 

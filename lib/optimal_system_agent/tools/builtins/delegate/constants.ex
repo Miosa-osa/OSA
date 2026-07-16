@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Constants do
   def tool_name, do: @tool_name
 
   @roles ~w(
+    general-purpose explore plan code-review
     explorer planner architect backend frontend tester debugger
     security-auditor code-reviewer researcher devops doc-writer
     refactorer performance

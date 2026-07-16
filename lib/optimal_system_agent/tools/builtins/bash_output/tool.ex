@@ -1,29 +1,32 @@
-defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
+defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
   @moduledoc """
-  Structured-layout shell_execute tool implementation.
+  Structured-layout entry point for `bash_output`.
 
-  Per-tool directory layout — declarations only, all logic lives in the
-  sibling modules:
+  Polls (or kills) a background shell command started via `shell_execute` with
+  `run_in_background: true`. Interface over the background-shell mechanism in
+  `OptimalSystemAgent.Shell.BackgroundManager`.
 
-    * `ShellExecute.Constants`  — exported atoms and compiled patterns
-    * `ShellExecute.Prompt`     — dynamic prompt builder
-    * `ShellExecute.Handler`    — validate / check_permissions / execute
-    * `ShellExecute.UI`         — render callbacks for the Rust TUI
+  Per-tool directory layout — declarations only; logic lives in the siblings:
+
+    * `BashOutput.Constants` — exported atoms for cross-tool reference
+    * `BashOutput.Prompt`    — dynamic prompt with `safe_ref` cross-tool links
+    * `BashOutput.Handler`   — validate / check_permissions / execute
+    * `BashOutput.UI`        — render callbacks for the Rust TUI
   """
 
   use OptimalSystemAgent.Tools.Behaviour
 
-  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.{Constants, Handler, Prompt, UI}
+  alias OptimalSystemAgent.Tools.Builtins.BashOutput.{Constants, Handler, Prompt, UI}
 
   # ── Identity ──────────────────────────────────────────────────────────
   @impl true
   def name, do: Constants.tool_name()
 
   @impl true
-  def aliases, do: ["shell", "run_command"]
+  def aliases, do: ["background_output", "task_output_bg"]
 
   @impl true
-  def search_hint, do: "execute shell commands: git, mix, npm, cargo, docker, make"
+  def search_hint, do: "poll stdout/stderr and status of a background shell command; kill it"
 
   # ── Schema & description ──────────────────────────────────────────────
   @impl true
@@ -36,23 +39,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
   def parameters do
     %{
       "type" => "object",
+      "required" => ["background_id"],
       "properties" => %{
-        "command" => %{"type" => "string", "description" => "Shell command to execute"},
-        "cwd" => %{
+        "background_id" => %{
           "type" => "string",
           "description" =>
-            "Working directory for the command. Optional; defaults to ~/.osa/workspace."
+            "The background id returned by shell_execute when run_in_background was true."
         },
-        "run_in_background" => %{
+        "kill" => %{
           "type" => "boolean",
           "description" =>
-            "Optional. When true, run the command as a supervised background " <>
-              "process and return a background_id immediately instead of " <>
-              "blocking. Poll its output/status with the bash_output tool. " <>
-              "Defaults to false (foreground)."
+            "Optional. When true, terminate the background command (SIGTERM then " <>
+              "SIGKILL) and return its final output/status. Defaults to false."
         }
-      },
-      "required" => ["command"]
+      }
     }
   end
 
@@ -61,36 +61,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
   def should_defer?, do: false
 
   @impl true
-  # shell_execute is on the hot path — always include in prompt.
   def always_load?, do: true
 
   # ── Execution semantics (per-input) ───────────────────────────────────
   @impl true
-  # NOT concurrency-safe — commands can cd, mutate env, write files.
-  # Conservative: always false, matching flat-layout concurrent?/0 → false.
-  def concurrency_safe?(_input, _ctx), do: false
+  # Reads (kill=false) are a Registry lookup + snapshot — concurrency-safe.
+  # kill=true mutates process state; conservatively not concurrency-safe.
+  def concurrency_safe?(input, _ctx), do: not kill?(input)
 
   @impl true
-  def read_only?(_input, _ctx), do: false
+  def read_only?(input, _ctx), do: not kill?(input)
 
   @impl true
-  # Shells can do anything — destructive by definition.
-  def destructive?(_input, _ctx), do: true
+  def destructive?(input, _ctx), do: kill?(input)
 
   @impl true
-  # Talks directly to the OS — fully open-world.
-  def open_world?(_input, _ctx), do: true
+  def open_world?(_input, _ctx), do: false
 
+  # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true
-  # Long-running shells should be cancelable, not blocking.
-  def interrupt_behavior, do: :cancel
-
-  @impl true
-  def max_result_size_chars, do: 30_000
-
-  # ── Flat-layout compatibility ──────────────────────────────────────────────────
-  @impl true
-  def safety, do: :terminal
+  def safety, do: :read_only
 
   # ── Two-stage permissioning ───────────────────────────────────────────
   @impl true
@@ -109,6 +99,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
 
   # ── Classifier input ──────────────────────────────────────────────────
   @impl true
-  def to_classifier_input(%{"command" => cmd}), do: %{command: cmd}
+  def to_classifier_input(%{"background_id" => id} = input),
+    do: %{background_id: id, kill: kill?(input)}
+
   def to_classifier_input(_), do: ""
+
+  # ── Private ───────────────────────────────────────────────────────────
+  defp kill?(%{"kill" => true}), do: true
+  defp kill?(%{"kill" => "true"}), do: true
+  defp kill?(_), do: false
 end

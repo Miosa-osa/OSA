@@ -76,7 +76,7 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
       table = Hooks.hooks_table_name()
       entries = :ets.lookup(table, :post_response)
 
-      names = Enum.map(entries, fn {_event, name, _priority, _handler} -> name end)
+      names = Enum.map(entries, fn {_event, name, _priority, _handler, _opts} -> name end)
 
       assert hook_name in names,
              "Hook #{hook_name} should appear in ETS after registration"

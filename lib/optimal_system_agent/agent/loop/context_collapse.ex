@@ -97,7 +97,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
           "(saved ~#{div(total_saved, 1024)}KB)"
       )
 
+      # PostCompact hook — overflow-recovery collapse is a form of compaction.
+      fire_compact_hook(:post_compact, %{
+        phase: :post,
+        strategy: :overflow_collapse,
+        attempt: attempt,
+        tokens_saved: total_saved,
+        withheld: length(to_withhold)
+      })
+
       {:ok, collapsed}
     end
+  end
+
+  # Fire a compaction lifecycle hook. Fire-and-forget; never blocks recovery.
+  defp fire_compact_hook(event, payload) do
+    OptimalSystemAgent.Agent.Hooks.run_async(event, payload)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end
