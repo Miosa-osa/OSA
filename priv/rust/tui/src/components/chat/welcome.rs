@@ -66,8 +66,11 @@ pub fn welcome_lines(
     // panes (e.g. many tiled terminals) reflow cleanly instead of clipping.
     // Reserve 4 cols for the "│ " / " │" borders. Floor keeps it readable; the
     // full ASCII logo only fits at ~44+, so it's gated below.
-    let box_width: usize = (width as usize).saturating_sub(4).clamp(20, 52);
-    let show_logo = box_width >= 44;
+    // Widen the box enough to hold the full ASCII logo whenever the terminal
+    // allows it (the compact "O S A" fallback is only for genuinely narrow panes).
+    let logo_w: usize = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(41);
+    let box_width: usize = (width as usize).saturating_sub(4).clamp(20, logo_w.max(52));
+    let show_logo = box_width >= logo_w;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Helper: pad content to box_width and wrap with left+right border

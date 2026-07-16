@@ -70,7 +70,10 @@ impl App {
                 if let Some((tool_count, provider, model)) =
                     self.pending_welcome_banner.take()
                 {
-                    let w = terminal.get_frame().area().width;
+                    // Use the real terminal width so the full ASCII logo shows
+                    // whenever the window is wide enough (the inline frame area can
+                    // lag a resize and under-report the width).
+                    let w = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80);
                     let lines = crate::components::chat::welcome::welcome_lines(
                         w,
                         tool_count,
