@@ -157,6 +157,9 @@ impl App {
         // Ensure any completed tool call is committed to scrollback before the
         // final answer text, preserving chronological order.
         self.chat.flush_pending_tools();
+        // Emit any pending collapsed tool run ("Read N files", …) before the
+        // final answer text.
+        self.flush_collapse();
 
         if self.agent_header_sent {
             // The header was already emitted earlier this turn (either by a
@@ -323,6 +326,8 @@ impl App {
     }
 
     pub(crate) fn submit_prompt(&mut self, text: &str) {
+        // Safety net: commit any leftover collapsed tool run before the new turn.
+        self.flush_collapse();
         self.chat.add_user_message(text);
         if self.state != AppState::Processing {
             self.transition(AppState::Processing);
@@ -406,6 +411,7 @@ impl App {
         );
         self.bg_tasks.push(summary);
         self.status.set_background_count(self.bg_tasks.len());
+        self.status.set_shell_count(self.bg_tasks.len());
         self.toasts.push(
             "Moved to background".into(),
             crate::components::toast::ToastLevel::Info,

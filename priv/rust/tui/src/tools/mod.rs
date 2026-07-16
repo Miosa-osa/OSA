@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod bash;
+pub mod collapse;
 pub mod cron;
 pub mod diagnostics;
 pub mod file;
@@ -153,39 +154,52 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
 
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
+/// The tool/assistant bullet glyph, matching Claude Code's `figures.ts`:
+/// `⏺` (U+23FA) only on macOS, `●` (U+25CF) everywhere else. On Linux the
+/// record-style `⏺` renders as tofu in most fonts, which is exactly why the
+/// bullet looked wrong — real Claude Code shows `●` here.
+pub(crate) fn tool_bullet() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "\u{23fa}" // ⏺
+    } else {
+        "\u{25cf}" // ●
+    }
+}
+
 /// Returns `(icon_string, icon_style)` for a given status.
+///
+/// Colors mirror Claude Code's `ToolUseLoader`: unresolved → dim/default,
+/// error → red, success → green. (`color = isUnresolved ? undefined : isError
+/// ? "error" : "success"`, with `dimColor` while unresolved.)
 pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String, Style) {
     let theme = crate::style::theme();
+    let bullet = tool_bullet().to_string();
     match status {
         ToolStatus::Pending => (
-            "\u{23fa}".to_string(), // ⏺ — Claude Code bullet, muted until it runs
-            Style::default().fg(theme.colors.muted),
+            bullet, // dim until it resolves
+            Style::default().fg(theme.colors.dim),
         ),
         ToolStatus::AwaitingPermission => (
             "◐".to_string(),
             Style::default()
-                .fg(theme.colors.primary)
+                .fg(theme.colors.secondary)
                 .add_modifier(Modifier::BOLD),
         ),
         ToolStatus::Running => {
+            // Claude Code blinks the dimmed circle while a tool is unresolved.
             let icon = spinner
                 .map(|c| c.to_string())
-                .unwrap_or_else(|| "⏺".to_string());
-            (
-                icon,
-                Style::default()
-                    .fg(theme.colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            )
+                .unwrap_or(bullet);
+            (icon, Style::default().fg(theme.colors.muted))
         }
         ToolStatus::Success => (
-            "\u{23fa}".to_string(), // ⏺ green — Claude Code style
+            bullet, // ● green — Claude Code resolved-success color
             Style::default()
                 .fg(theme.colors.success)
                 .add_modifier(Modifier::BOLD),
         ),
         ToolStatus::Error => (
-            "\u{23fa}".to_string(), // ⏺ red — Claude Code style
+            bullet, // ● red — Claude Code error color
             Style::default()
                 .fg(theme.colors.error)
                 .add_modifier(Modifier::BOLD),

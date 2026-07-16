@@ -128,6 +128,22 @@ impl Chat {
         self.has_messages = true;
     }
 
+    /// Push a pre-rendered collapsed tool summary line (e.g. "Read 3 files")
+    /// straight into native scrollback. Reuses the ToolCall message carrier so
+    /// the styled line renders verbatim via `draw_tool_call`.
+    pub fn add_collapsed_tool_summary(&mut self, line: ratatui::text::Line<'static>) {
+        self.scrollback.push(Message::new_tool_call(ToolCallData {
+            name: String::new(),
+            args: String::new(),
+            result: String::new(),
+            duration_ms: 0,
+            success: true,
+            expanded: false,
+            lines: vec![line],
+        }));
+        self.has_messages = true;
+    }
+
     /// Add a survey Q&A summary to the chat.
     pub fn add_survey_summary(&mut self, survey_id: String, pairs: Vec<(String, String)>) {
         self.scrollback.push(Message {

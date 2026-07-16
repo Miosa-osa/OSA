@@ -59,15 +59,17 @@ fn main() -> Result<()> {
     result
 }
 
-/// Inline viewport height for the live region: kept compact (Claude-Code style)
-/// so there's no big empty gap when idle. streaming preview (~2) + thinking/
-/// activity (1) + status (1) + input (1, grows as you type). Finished replies go
-/// to native scrollback, so the live preview does NOT need to be tall.
-pub const LIVE_H_BASE: u16 = 5;
+/// Inline viewport height for the live region (Claude-Code chrome). Sized to fit:
+///   streaming preview (1) + thinking/activity (1) + ctx-hint (1) +
+///   input box (3: top divider + text + bottom divider) + status region
+///   (2: status line + permission/shell line) = 8 rows minimum.
+/// Finished replies go to native scrollback, so the live preview stays compact.
+pub const LIVE_H_BASE: u16 = 8;
 
 /// Clamp the inline viewport height to something sane for the terminal size.
+/// Never exceed `term_rows - 1` so tiny terminals don't overflow the viewport.
 fn compute_viewport_height(term_rows: u16) -> u16 {
-    LIVE_H_BASE.min(term_rows.saturating_sub(1)).max(4)
+    LIVE_H_BASE.min(term_rows.saturating_sub(1).max(1))
 }
 
 fn run(cli: config::cli::Cli) -> Result<()> {

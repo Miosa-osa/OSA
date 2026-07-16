@@ -140,9 +140,9 @@ fn parse_tree_line_prefix(
             "◈".to_string(),
             Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD),
         )
-    } else if line.starts_with('⏺') {
+    } else if line.starts_with('⏺') || line.starts_with('●') {
         (
-            "⏺".to_string(),
+            crate::tools::tool_bullet().to_string(), // ● (Linux) / ⏺ (macOS)
             Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD),
         )
     } else {

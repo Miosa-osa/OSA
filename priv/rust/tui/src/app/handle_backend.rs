@@ -6,6 +6,16 @@ use tracing::{debug, error, info, warn};
 use super::App;
 
 impl App {
+    /// Flush the collapsed-tool accumulator: emit the pending run (e.g. three
+    /// reads → "Read 3 files") as one scrollback line, if any. Called at every
+    /// break site (non-collapsible tool, different kind, interstitial text,
+    /// turn end).
+    pub(super) fn flush_collapse(&mut self) {
+        if let Some(line) = self.collapse.take_summary_line() {
+            self.chat.add_collapsed_tool_summary(line);
+        }
+    }
+
     pub(super) fn handle_backend_event(&mut self, event: BackendEvent) -> bool {
         match event {
             BackendEvent::HealthResult(result) => {
@@ -95,6 +105,10 @@ impl App {
                 // first, so ordering stays: [prior text][prior tool][this text].
                 self.chat.flush_pending_tools();
                 if !self.stream_buf.is_empty() {
+                    // Assistant text separates the previous tool run from this
+                    // one — commit the collapsed summary before the text so the
+                    // scrollback order stays [prior tools][text][this tool].
+                    self.flush_collapse();
                     let text = self.stream_buf.clone();
                     self.chat.clear_streaming();
                     if self.agent_header_sent {
@@ -133,38 +147,56 @@ impl App {
                     .filter(|q| !q.is_empty())
                     .map(|q| q.remove(0))
                     .unwrap_or_default();
-                let status = if success {
-                    crate::tools::ToolStatus::Success
+                // Collapse consecutive same-kind tool calls into one summary
+                // line ("Read N files", "Ran N shell commands", …). Only
+                // NonCollapsible tools (edit/write/web/…) keep full rendering.
+                let kind = crate::tools::collapse::classify(&name, &args);
+                if kind.is_collapsible() {
+                    // A different collapsible kind breaks the run.
+                    if !self.collapse.is_empty() && !self.collapse.family_matches(&kind) {
+                        self.flush_collapse();
+                    }
+                    self.collapse.add(&kind, &args, success);
+                    debug!(
+                        "Tool call end (collapsed): {} ({}ms, success={})",
+                        name, duration_ms, success
+                    );
                 } else {
-                    crate::tools::ToolStatus::Error
-                };
-                let opts = crate::tools::RenderOpts {
-                    status,
-                    width: self.width,
-                    expanded: false,
-                    compact: true,
-                    spinner_frame: None,
-                    duration_ms,
-                    truncated: false,
-                };
-                let lines = crate::tools::render_tool(&name, &args, "", &opts);
-                if !lines.is_empty() {
-                    use crate::components::chat::message::ToolCallData;
-                    self.chat.add_tool_message_rich(ToolCallData {
-                        name: name.clone(),
-                        args,
-                        result: String::new(),
-                        duration_ms,
-                        success,
+                    // Non-collapsible tool: commit any pending collapsed run
+                    // first so ordering stays chronological, then render fully.
+                    self.flush_collapse();
+                    let status = if success {
+                        crate::tools::ToolStatus::Success
+                    } else {
+                        crate::tools::ToolStatus::Error
+                    };
+                    let opts = crate::tools::RenderOpts {
+                        status,
+                        width: self.width,
                         expanded: false,
-                        lines,
-                    });
+                        compact: true,
+                        spinner_frame: None,
+                        duration_ms,
+                        truncated: false,
+                    };
+                    let lines = crate::tools::render_tool(&name, &args, "", &opts);
+                    if !lines.is_empty() {
+                        use crate::components::chat::message::ToolCallData;
+                        self.chat.add_tool_message_rich(ToolCallData {
+                            name: name.clone(),
+                            args,
+                            result: String::new(),
+                            duration_ms,
+                            success,
+                            expanded: false,
+                            lines,
+                        });
+                    }
+                    debug!(
+                        "Tool call end: {} ({}ms, success={})",
+                        name, duration_ms, success
+                    );
                 }
-
-                debug!(
-                    "Tool call end: {} ({}ms, success={})",
-                    name, duration_ms, success
-                );
             }
             BackendEvent::ToolResult {
                 name, result, success,
@@ -966,6 +998,7 @@ impl App {
                     // Commit any completed-but-unflushed tool calls; drop the
                     // partial streaming text deliberately.
                     self.chat.flush_pending_tools();
+                    self.flush_collapse();
                     self.stream_buf.clear();
                     self.thinking_buf.clear();
                     self.agent_header_sent = false;

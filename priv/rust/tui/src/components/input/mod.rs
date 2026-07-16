@@ -108,22 +108,23 @@ impl InputComponent {
         self.completions.set_items(items);
     }
 
-    /// Return the total height this input needs (separator + text lines).
-    /// Single-line: 2. Multiline or wrapped: 2 + extra lines (capped at 8).
+    /// Return the total height this input needs: top divider + text lines +
+    /// bottom divider (Claude-Code frames the prompt with a rule above AND below).
+    /// Single-line: 3. Multiline or wrapped: 2 + extra lines (capped at 11).
     pub fn needed_height(&self) -> u16 {
         if self.content.is_empty() {
-            return 2;
+            return 3; // top divider + 1 text row + bottom divider
         }
         let prompt_len: usize = if self.processing { 4 } else { 2 };
         let avail = (self.width as usize).saturating_sub(prompt_len + 1); // usable chars
         if avail == 0 {
-            return 2;
+            return 3;
         }
         let char_count = self.content.chars().count();
         let wrap_lines = ((char_count + avail - 1) / avail) as u16; // ceil division
         let newline_lines = self.content.lines().count().max(1) as u16;
         let text_lines = wrap_lines.max(newline_lines);
-        (1 + text_lines).min(10) // separator + text, cap at 10
+        (2 + text_lines).min(11) // top divider + text + bottom divider, cap at 11
     }
 
     /// Set processing indicator state (Step 4)
@@ -596,14 +597,29 @@ impl Component for InputComponent {
             return;
         }
 
-        // Separator line
+        // Top divider — full-width `─` rule (Claude-Code style).
         let sep_area = Rect::new(area.x, area.y, area.width, 1);
         let separator =
-            Paragraph::new("\u{2500}".repeat(area.width as usize)).style(theme.header_separator());
+            Paragraph::new("\u{2500}".repeat(area.width as usize)).style(theme.prompt_border());
         frame.render_widget(separator, sep_area);
 
-        // Input line
-        let input_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
+        // Bottom divider — reserve the last row for a matching `─` rule when we
+        // have room for it (top div + >=1 text row + bottom div).
+        let has_bottom = area.height >= 3;
+        if has_bottom {
+            let bot_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+            let bottom = Paragraph::new("\u{2500}".repeat(area.width as usize))
+                .style(theme.prompt_border());
+            frame.render_widget(bottom, bot_area);
+        }
+
+        // Input line(s) — everything between the two dividers.
+        let input_h = if has_bottom {
+            area.height - 2
+        } else {
+            area.height - 1
+        };
+        let input_area = Rect::new(area.x, area.y + 1, area.width, input_h);
 
         // Step 4: Processing-aware prompt
         let (prompt, prompt_len) = if self.processing {

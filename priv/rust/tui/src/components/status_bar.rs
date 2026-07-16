@@ -1,3 +1,4 @@
+use ratatui::layout::{Constraint, Direction, Layout as RLayout};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -6,6 +7,83 @@ use crate::event::Event;
 use crate::style;
 
 use super::{Component, ComponentAction};
+
+/// Tool-permission mode, mirroring Claude Code's `PermissionMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    Default,
+    AcceptEdits,
+    BypassPermissions,
+    Plan,
+}
+
+impl PermissionMode {
+    /// Leading symbol for the permission line (`⏵⏵`, `⏸`, or none).
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            PermissionMode::AcceptEdits | PermissionMode::BypassPermissions => "\u{23F5}\u{23F5}",
+            PermissionMode::Plan => "\u{23F8}",
+            PermissionMode::Default => "",
+        }
+    }
+
+    /// Full title shown on the permission line.
+    pub fn title(&self) -> &'static str {
+        match self {
+            PermissionMode::BypassPermissions => "Bypass permissions",
+            PermissionMode::AcceptEdits => "Accept edits",
+            PermissionMode::Plan => "Plan mode",
+            PermissionMode::Default => "Default",
+        }
+    }
+
+    /// Short title used for the status-line mode chip (e.g. `default`).
+    pub fn short_title(&self) -> &'static str {
+        match self {
+            PermissionMode::BypassPermissions => "bypass",
+            PermissionMode::AcceptEdits => "accept edits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::Default => "default",
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        matches!(self, PermissionMode::Default)
+    }
+
+    /// Rose-pine-mapped color for this mode (matches CC's `getModeColor`).
+    fn color(&self, theme: &style::Theme) -> Color {
+        match self {
+            PermissionMode::AcceptEdits => theme.colors.success, // foam
+            PermissionMode::BypassPermissions => theme.colors.error, // love
+            PermissionMode::Plan => theme.colors.secondary,      // iris
+            PermissionMode::Default => theme.colors.muted,
+        }
+    }
+}
+
+/// Build an 8-cell braille context-usage bar (e.g. `⢿░░░░░░░` at ~4%,
+/// `⣿⣿⣿⣿⣿⣿⣿⢿` near-full). Leading full cells are `⣿`, the boundary partial
+/// cell is `⢿`, trailing empties are `░`. Returns (filled_prefix, empty_suffix)
+/// so the two halves can be styled separately.
+fn braille_bar(ratio: f64, cells: usize) -> (String, String) {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let scaled = ratio * cells as f64;
+    let full = (scaled.floor() as usize).min(cells);
+    let remainder = scaled - full as f64;
+    let has_partial = full < cells && remainder > 0.001;
+
+    let mut filled = String::new();
+    for _ in 0..full {
+        filled.push('\u{28FF}'); // ⣿
+    }
+    if has_partial {
+        filled.push('\u{28BF}'); // ⢿
+    }
+    let used = full + usize::from(has_partial);
+    let empty: String = std::iter::repeat('\u{2591}').take(cells - used).collect(); // ░
+    (filled, empty)
+}
 
 pub struct StatusBar {
     signal: Option<Signal>,
@@ -28,10 +106,18 @@ pub struct StatusBar {
     download_label: String,
     download_pct: u8,
     hands_free: bool,
+    permission_mode: PermissionMode,
+    shell_count: usize,
+    cwd_basename: String,
 }
 
 impl StatusBar {
     pub fn new() -> Self {
+        let cwd_basename = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "~".to_string());
         Self {
             signal: None,
             provider: String::new(),
@@ -53,7 +139,18 @@ impl StatusBar {
             download_label: String::new(),
             download_pct: 0,
             hands_free: false,
+            permission_mode: PermissionMode::Default,
+            shell_count: 0,
+            cwd_basename,
         }
+    }
+
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
+    }
+
+    pub fn set_shell_count(&mut self, count: usize) {
+        self.shell_count = count;
     }
 
     pub fn set_provider_info(&mut self, provider: &str, model: &str) {
@@ -187,6 +284,15 @@ impl Component for StatusBar {
     fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = style::theme();
 
+        // Split into two rows: status line + permission/shell line.
+        let rows = RLayout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+        let row0 = rows[0];
+        let row1 = rows.get(1).copied().unwrap_or(row0);
+        let area = row0; // special-case single-line indicators render into row 0
+
         // Download progress indicator takes top priority
         if !self.download_label.is_empty() {
             let pct = self.download_pct;
@@ -261,133 +367,120 @@ impl Component for StatusBar {
             return;
         }
 
-        if self.active {
-            // Active: provider/model · signal pill · tokens · context · elapsed
-            let mut spans: Vec<Span<'_>> = Vec::new();
+        // ── Row 0: Claude-Code status line ──────────────────────────────
+        //   <glyph> MODEL  cwd │ ▣ mode │ <braille bar> P% ☆ [· signal] [· extras]
+        let mut spans: Vec<Span<'_>> = Vec::new();
 
-            if !self.provider.is_empty() {
-                spans.push(Span::styled(&self.provider, theme.header_provider()));
-                spans.push(Span::styled(" / ", theme.faint()));
-                spans.push(Span::styled(&self.model_name, theme.header_model()));
-            }
+        // Leading glyph.
+        spans.push(Span::styled("\u{27D0} ", theme.status_glyph())); // ⟐
 
-            // Signal pill — always visible when classified
-            self.push_signal_pill(&mut spans, &theme);
-
-            if self.input_tokens > 0 || self.output_tokens > 0 {
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "{}/{} tokens",
-                        Self::format_tokens(self.input_tokens),
-                        Self::format_tokens(self.output_tokens),
-                    ),
-                    theme.progress_label(),
-                ));
-            }
-
-            // Only show context when we have real data (hide the broken 0%)
-            if self.context_estimated > 0 && self.context_max > 0 {
-                let pct = (self.context_utilization * 100.0).round() as u32;
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "ctx {}% ({}/{})",
-                        pct,
-                        Self::format_tokens(self.context_estimated),
-                        Self::format_tokens(self.context_max),
-                    ),
-                    theme.progress_label(),
-                ));
-            }
-
-            if self.elapsed_ms > 0 {
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                let elapsed_label = if self.elapsed_ms >= 60_000 {
-                    let mins = self.elapsed_ms / 60_000;
-                    let secs = (self.elapsed_ms % 60_000) / 1000;
-                    format!("{}m{}s", mins, secs)
-                } else if self.elapsed_ms >= 1_000 {
-                    format!("{:.1}s", self.elapsed_ms as f64 / 1000.0)
-                } else {
-                    format!("{}ms", self.elapsed_ms)
-                };
-                spans.push(Span::styled(elapsed_label, theme.progress_label()));
-            }
-
-            let line = Line::from(spans);
-            frame.render_widget(Paragraph::new(line), area);
+        // MODEL name (fall back to provider) + cwd basename.
+        let model_label = if !self.model_name.is_empty() {
+            self.model_name.as_str()
         } else {
-            // Idle: provider/model · signal pill · tokens with context %
-            let mut spans: Vec<Span<'_>> = Vec::new();
+            self.provider.as_str()
+        };
+        if !model_label.is_empty() {
+            spans.push(Span::styled(model_label.to_string(), theme.header_model()));
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(self.cwd_basename.clone(), theme.header_provider()));
 
-            if !self.provider.is_empty() {
-                spans.push(Span::styled(&self.provider, theme.header_provider()));
-                spans.push(Span::styled(" / ", theme.faint()));
-                spans.push(Span::styled(&self.model_name, theme.header_model()));
-            }
+        // Mode chip: ▣ mode
+        spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+        let mode_color = self.permission_mode.color(&theme);
+        spans.push(Span::styled(
+            "\u{25A3} ".to_string(), // ▣
+            Style::default().fg(mode_color),
+        ));
+        spans.push(Span::styled(
+            self.permission_mode.short_title().to_string(),
+            Style::default().fg(mode_color),
+        ));
 
-            // Signal pill — always visible when classified
-            self.push_signal_pill(&mut spans, &theme);
+        // Braille context-usage bar + percentage.
+        spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+        let (bar_filled, bar_empty) = braille_bar(self.context_utilization, 8);
+        if !bar_filled.is_empty() {
+            spans.push(Span::styled(bar_filled, theme.ctx_bar_fill()));
+        }
+        if !bar_empty.is_empty() {
+            spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
+        }
+        let pct = (self.context_utilization * 100.0).round() as u32;
+        spans.push(Span::styled(format!(" {}%", pct), theme.progress_label()));
 
-            // Token display: show context usage like OpenClaw: "tokens 19.3k/1.0m (2%)"
-            if self.context_estimated > 0 && self.context_max > 0 {
-                let pct = (self.context_utilization * 100.0).round() as u32;
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "tokens {}/{} ({}%)",
-                        Self::format_tokens(self.context_estimated),
-                        Self::format_tokens(self.context_max),
-                        pct,
-                    ),
-                    theme.progress_label(),
+        // Decorative accent.
+        spans.push(Span::styled(" \u{2606}", theme.status_glyph())); // ☆
+
+        // Signal pill — still surfaced when classified.
+        self.push_signal_pill(&mut spans, &theme);
+
+        // Active extras: elapsed time so streaming still shows progress.
+        if self.active && self.elapsed_ms > 0 {
+            let elapsed_label = if self.elapsed_ms >= 60_000 {
+                let mins = self.elapsed_ms / 60_000;
+                let secs = (self.elapsed_ms % 60_000) / 1000;
+                format!("{}m{}s", mins, secs)
+            } else if self.elapsed_ms >= 1_000 {
+                format!("{:.1}s", self.elapsed_ms as f64 / 1000.0)
+            } else {
+                format!("{}ms", self.elapsed_ms)
+            };
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(elapsed_label, theme.progress_label()));
+        }
+
+        if self.hands_free {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(
+                "HF",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(theme.status_bar()),
+            row0,
+        );
+
+        // ── Row 1: permission / shell line ──────────────────────────────
+        //   ⏵⏵ bypass permissions on · N shells
+        let shells = self.shell_count.max(self.bg_count);
+        if !self.permission_mode.is_default() {
+            let mut pspans: Vec<Span<'_>> = Vec::new();
+            let sym = self.permission_mode.symbol();
+            if !sym.is_empty() {
+                pspans.push(Span::styled(
+                    format!("{} ", sym),
+                    Style::default().fg(mode_color),
                 ));
-            } else if self.input_tokens > 0 || self.output_tokens > 0 {
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "{}/{} tokens",
-                        Self::format_tokens(self.input_tokens),
-                        Self::format_tokens(self.output_tokens),
-                    ),
-                    theme.progress_label(),
-                ));
             }
-
-            // Only show context when we have real data (hide the broken 0%)
-            if self.context_estimated > 0 && self.context_max > 0 {
-                let pct = (self.context_utilization * 100.0).round() as u32;
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!(
-                        "ctx {}% ({}/{})",
-                        pct,
-                        Self::format_tokens(self.context_estimated),
-                        Self::format_tokens(self.context_max),
-                    ),
-                    theme.progress_label(),
-                ));
+            pspans.push(Span::styled(
+                format!("{} on", self.permission_mode.title().to_lowercase()),
+                Style::default().fg(mode_color),
+            ));
+            if shells > 0 {
+                pspans.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+                let label = if shells == 1 {
+                    "1 shell".to_string()
+                } else {
+                    format!("{} shells", shells)
+                };
+                pspans.push(Span::styled(label, theme.faint()));
             }
-
-            if self.bg_count > 0 {
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    format!("{} bg", self.bg_count),
-                    theme.faint(),
-                ));
-            }
-
-            if self.hands_free {
-                spans.push(Span::styled(" \u{00b7} ", theme.faint()));
-                spans.push(Span::styled(
-                    "HF",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                ));
-            }
-
-            let line = Line::from(spans);
-            frame.render_widget(Paragraph::new(line), area);
+            frame.render_widget(Paragraph::new(Line::from(pspans)), row1);
+        } else if shells > 0 {
+            // Default mode but shells running — still surface the shell count.
+            let label = if shells == 1 {
+                "1 shell".to_string()
+            } else {
+                format!("{} shells", shells)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(label, theme.faint()))),
+                row1,
+            );
         }
     }
 }

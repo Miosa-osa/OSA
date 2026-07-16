@@ -211,23 +211,27 @@ impl App {
     /// Draw the compact inline live region: streaming preview, thinking/activity,
     /// status, and input. Finalized conversation lives in native scrollback.
     fn draw_inline(&self, frame: &mut Frame, area: Rect) {
-        let input_h = self
-            .input
-            .needed_height()
-            .min(area.height.saturating_sub(2))
-            .max(1);
         let think_h: u16 = if !self.thinking_box.is_empty() {
             1
         } else {
             self.activity.height().min(1)
         };
+        // Chrome overhead below the streaming preview: activity + ctx-hint(1) +
+        // status(2). The input takes whatever is left, clamped to what it needs.
+        let overhead = think_h + 1 + 2;
+        let input_h = self
+            .input
+            .needed_height()
+            .min(area.height.saturating_sub(overhead + 1)) // keep >=1 for streaming
+            .max(1);
         let rows = RLayout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),          // streaming preview
                 Constraint::Length(think_h), // thinking / activity
-                Constraint::Length(1),       // status
-                Constraint::Length(input_h), // input
+                Constraint::Length(1),       // right-aligned "N% context used" hint
+                Constraint::Length(input_h), // input box (top + bottom dividers)
+                Constraint::Length(2),       // status line + permission/shell line
             ])
             .split(area);
 
@@ -237,11 +241,27 @@ impl App {
         } else {
             self.activity.draw(frame, rows[1]);
         }
-        self.status.draw(frame, rows[2]);
+        self.draw_context_hint(frame, rows[2]);
         self.input.draw(frame, rows[3]);
+        self.status.draw(frame, rows[4]);
         if self.toasts.has_toasts() {
             self.toasts.draw(frame, toast_rect(area));
         }
+    }
+
+    /// Right-aligned "N% context used" hint that sits just above the input box's
+    /// top divider (mirrors Claude Code's notification row above the prompt).
+    fn draw_context_hint(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let pct = (self.status.context_utilization() * 100.0).round() as u32;
+        let text = format!("{}% context used", pct);
+        let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+            ratatui::text::Span::styled(text, crate::style::theme().ctx_hint()),
+        ))
+        .alignment(ratatui::layout::Alignment::Right);
+        frame.render_widget(para, area);
     }
 }
 

@@ -166,6 +166,11 @@ impl App {
                     "OFF — permission prompts enabled"
                 };
                 self.sidebar.set_yolo_mode(self.config.skip_permissions);
+                self.status.set_permission_mode(if self.config.skip_permissions {
+                    crate::components::status_bar::PermissionMode::BypassPermissions
+                } else {
+                    crate::components::status_bar::PermissionMode::Default
+                });
                 self.toasts.push(
                     format!("YOLO mode: {}", state),
                     crate::components::toast::ToastLevel::Warning,

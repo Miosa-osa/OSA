@@ -543,6 +543,39 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    // === Claude-Code-style chrome (input box, status line, ctx hint) ===
+
+    /// Full-width `─` rule framing the input box (top & bottom dividers).
+    /// Claude's `promptBorder` medium gray, not the faint header rule.
+    pub fn prompt_border(&self) -> Style {
+        Style::default().fg(self.colors.border)
+    }
+
+    /// Right-aligned "N% context used" hint above the input box.
+    pub fn ctx_hint(&self) -> Style {
+        Style::default().fg(self.colors.muted)
+    }
+
+    /// Filled cells of the braille context-usage bar.
+    pub fn ctx_bar_fill(&self) -> Style {
+        Style::default().fg(self.colors.primary)
+    }
+
+    /// Empty (`░`) cells of the braille context-usage bar.
+    pub fn ctx_bar_empty(&self) -> Style {
+        Style::default().fg(self.colors.muted)
+    }
+
+    /// Separators in the status line: `" │ "` and `" · "`.
+    pub fn status_sep(&self) -> Style {
+        Style::default().fg(self.colors.dim)
+    }
+
+    /// Leading spinner glyph + decorative accent glyphs in the status line.
+    pub fn status_glyph(&self) -> Style {
+        Style::default().fg(self.colors.secondary)
+    }
+
     /// Context bar color based on utilization severity
     pub fn context_bar_color(&self, utilization: f64) -> Color {
         if utilization >= 0.90 {

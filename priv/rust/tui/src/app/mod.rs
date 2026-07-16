@@ -120,6 +120,10 @@ pub struct App {
     /// overwrite each other's args — which showed up as tool lines with no path.
     pub pending_tool_args: HashMap<String, Vec<String>>,
 
+    /// Accumulator for collapsing consecutive same-kind tool calls into one
+    /// scrollback summary line ("Read N files", "Ran N shell commands", …).
+    pub collapse: crate::tools::collapse::Accumulator,
+
     /// True once we have flushed at least one agent text chunk for the current
     /// turn (so subsequent mid-turn flushes use the header-less continuation
     /// message type instead of repeating the "◈ OSA" header).
@@ -182,11 +186,19 @@ impl App {
         let mut sidebar = Sidebar::new();
         sidebar.set_yolo_mode(config.skip_permissions);
 
+        // Seed the status-line permission mode from --dangerously-skip-permissions.
+        let mut status = StatusBar::new();
+        if config.skip_permissions {
+            status.set_permission_mode(
+                crate::components::status_bar::PermissionMode::BypassPermissions,
+            );
+        }
+
         Ok(Self {
             header: Header::new(),
             chat: Chat::new(),
             input: InputComponent::new(),
-            status: StatusBar::new(),
+            status,
             activity: Activity::new(),
             sidebar,
             thinking_box: ThinkingBox::new(),
@@ -234,6 +246,7 @@ impl App {
             sse_reconnecting: false,
 
             pending_tool_args: HashMap::new(),
+            collapse: crate::tools::collapse::Accumulator::default(),
             agent_header_sent: false,
 
             bg_tasks: Vec::new(),

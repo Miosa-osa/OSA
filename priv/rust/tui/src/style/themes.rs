@@ -12,39 +12,44 @@ fn hex(s: &str) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// Dark theme — the exact Claude Code dark palette (`theme.ts` dark block).
+/// Every RGB here is lifted verbatim from Claude Code so the TUI reads as the
+/// real thing: `claude` orange accent, bright green/red status, medium-gray
+/// prompt border, blue-purple suggestions, and Claude's word-level diff colors.
 pub fn dark() -> Theme {
     Theme {
         name: "dark".to_string(),
         colors: ThemeColors {
-            primary: hex("#E5E7EB"),
-            secondary: hex("#06B6D4"),
-            success: hex("#22C55E"),
-            warning: hex("#F59E0B"),
-            error: hex("#EF4444"),
-            muted: hex("#6B7280"),
-            dim: hex("#374151"),
-            border: hex("#4B5563"),
-            msg_border_user: hex("#06B6D4"),
-            msg_border_agent: hex("#E5E7EB"),
-            msg_border_system: hex("#374151"),
-            msg_border_warning: hex("#F59E0B"),
-            msg_border_error: hex("#EF4444"),
-            sidebar_bg: hex("#1F2937"),
-            modal_bg: hex("#111827"),
-            tooltip_bg: hex("#1F2937"),
-            input_bg: hex("#111827"),
-            selection_bg: hex("#374151"),
-            dialog_bg: hex("#1F2937"),
-            button_active_bg: hex("#E5E7EB"),
-            button_active_text: hex("#111827"),
-            grad_a: hex("#E5E7EB"),
-            grad_b: hex("#06B6D4"),
-            diff_del_bg: Color::Rgb(60, 10, 10),
-            diff_add_bg: Color::Rgb(10, 45, 20),
-            diff_del_highlight_fg: Color::Rgb(255, 120, 120),
-            diff_del_highlight_bg: Color::Rgb(100, 20, 20),
-            diff_add_highlight_fg: Color::Rgb(120, 255, 140),
-            diff_add_highlight_bg: Color::Rgb(20, 80, 30),
+            primary: Color::Rgb(215, 119, 87),    // claude orange — accent, spinner, headers, bullet
+            secondary: Color::Rgb(177, 185, 249), // permission blue-purple — user, paths, tool names
+            success: Color::Rgb(78, 186, 101),    // bright green — resolved-success bullet, done
+            warning: Color::Rgb(255, 193, 7),     // bright amber
+            error: Color::Rgb(255, 107, 128),     // bright red — error bullet
+            muted: Color::Rgb(153, 153, 153),     // inactive / secondary text — meta, durations
+            dim: Color::Rgb(80, 80, 80),          // subtle — hints, pending bullet, faint rules
+            border: Color::Rgb(136, 136, 136),    // promptBorder — input-box rule
+            msg_border_user: Color::Rgb(177, 185, 249),
+            msg_border_agent: Color::Rgb(215, 119, 87),
+            msg_border_system: Color::Rgb(80, 80, 80),
+            msg_border_warning: Color::Rgb(255, 193, 7),
+            msg_border_error: Color::Rgb(255, 107, 128),
+            sidebar_bg: Color::Rgb(30, 30, 30),
+            modal_bg: Color::Rgb(20, 20, 20),
+            tooltip_bg: Color::Rgb(30, 30, 30),
+            input_bg: Color::Rgb(24, 24, 24),
+            selection_bg: Color::Rgb(38, 79, 120), // CC dark-mode selection blue
+            dialog_bg: Color::Rgb(30, 30, 30),
+            button_active_bg: Color::Rgb(215, 119, 87),
+            button_active_text: Color::Rgb(0, 0, 0),
+            grad_a: Color::Rgb(215, 119, 87),  // claude
+            grad_b: Color::Rgb(235, 159, 127), // claudeShimmer
+            // Claude Code word-level diff colors (line bg + brighter changed-word bg).
+            diff_del_bg: Color::Rgb(122, 41, 54),
+            diff_add_bg: Color::Rgb(34, 92, 43),
+            diff_del_highlight_fg: Color::Rgb(255, 255, 255),
+            diff_del_highlight_bg: Color::Rgb(179, 89, 107),
+            diff_add_highlight_fg: Color::Rgb(255, 255, 255),
+            diff_add_highlight_bg: Color::Rgb(56, 166, 96),
         },
     }
 }
