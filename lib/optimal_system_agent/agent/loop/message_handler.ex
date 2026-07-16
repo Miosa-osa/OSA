@@ -127,8 +127,24 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     |> maybe_add_visual_observation_directive(message)
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
+    |> maybe_add_progress_ledger_directive(state)
     |> Enum.reverse()
   end
+
+  # Prepend a compact recap of the progress ledger so coherence survives
+  # context resets/compaction. summarize/1 returns {:error, :not_found} until
+  # the first progress_note is recorded, so early turns inject nothing.
+  defp maybe_add_progress_ledger_directive(acc, %{session_id: sid}) when is_binary(sid) do
+    case OptimalSystemAgent.Agent.ProgressLedger.summarize(sid) do
+      {:ok, summary} ->
+        [%{role: "system", content: "[System: Progress ledger recap]\n" <> summary} | acc]
+
+      _ ->
+        acc
+    end
+  end
+
+  defp maybe_add_progress_ledger_directive(acc, _), do: acc
 
   # Detect multi-step tasks and nudge to create a task list
   defp maybe_add_task_directive(acc, message) do

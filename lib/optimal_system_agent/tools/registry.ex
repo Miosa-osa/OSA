@@ -639,6 +639,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "task_stop" => OptimalSystemAgent.Tools.Builtins.TaskStop.Tool,
       "task_output" => OptimalSystemAgent.Tools.Builtins.TaskOutput.Tool,
       "session_search" => OptimalSystemAgent.Tools.Builtins.SessionSearch.Tool,
+      "progress_note" => OptimalSystemAgent.Tools.Builtins.ProgressNote.Tool,
 
       # ── Code / utility ─────────────────────────────────────────────────
       "repl" => OptimalSystemAgent.Tools.Builtins.REPL.Tool,
@@ -656,6 +657,8 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # ── Flat-layout tools (pending migration) ──────────────────────────
       "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
       "list_skills" => OptimalSystemAgent.Tools.Builtins.ListSkills,
+      "save_skill" => OptimalSystemAgent.Tools.Builtins.SaveSkill,
+      "find_skill" => OptimalSystemAgent.Tools.Builtins.FindSkill,
       "computer_use" => OptimalSystemAgent.Tools.Builtins.ComputerUse,
       "verify_loop" => OptimalSystemAgent.Verification.Tools.VerifyLoop,
       "spawn_conversation" => OptimalSystemAgent.Conversations.Tools.SpawnConversation,

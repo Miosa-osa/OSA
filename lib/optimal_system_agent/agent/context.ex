@@ -210,6 +210,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       {task_state_block(state), 1, "task_state"},
       {workflow_block(state), 1, "workflow"},
       {skills_block(state), 2, "skills"},
+      {learned_skills_block(state), 2, "learned_skills"},
       {scratchpad_block(state), 1, "scratchpad"},
       {agent_roles_block(state), 2, "agent_roles"}
     ]
@@ -788,6 +789,33 @@ defmodule OptimalSystemAgent.Agent.Context do
     try do
       message = find_latest_user_message(state.messages)
       OptimalSystemAgent.Tools.Registry.active_skills_context(message)
+    rescue
+      _ -> nil
+    catch
+      :exit, _ -> nil
+    end
+  end
+
+  # Names the top relevant learned skills (from past sessions) in-context so the
+  # agent can pull full bodies on demand via find_skill. Cheap: only titles/slugs.
+  defp learned_skills_block(state) do
+    try do
+      message = find_latest_user_message(state.messages)
+
+      case message && OptimalSystemAgent.Store.SkillLibrary.find_skills(message, limit: 3) do
+        skills when is_list(skills) and skills != [] ->
+          lines =
+            Enum.map_join(skills, "\n", fn s ->
+              "- **#{s["title"]}** (find_skill slug: #{s["slug"]}) — #{s["when_to_use"]}"
+            end)
+
+          "## Learned Skills (from past sessions)\n\n" <>
+            "Verified procedures that may apply. Call `find_skill` to load the full steps:\n" <>
+            lines
+
+        _ ->
+          nil
+      end
     rescue
       _ -> nil
     catch

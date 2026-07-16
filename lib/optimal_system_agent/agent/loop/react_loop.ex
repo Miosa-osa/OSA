@@ -32,6 +32,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Loop.VerificationGate
+  alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
 
@@ -107,6 +109,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     Logger.debug(
       "[loop] do_iteration entered for #{state.session_id}, iteration=#{state.iteration}"
     )
+
+    # Proactive context compaction: shrink history before building context /
+    # calling the model so the window stays under threshold. Complementary to
+    # the reactive ContextCollapse fallback in handle_result/3 (413 retry).
+    state =
+      with cw when is_integer(cw) and cw > 0 <-
+             OptimalSystemAgent.Providers.Registry.context_window(state.model),
+           true <- ProactiveCompaction.should_compact?(state, cw) do
+        %{state | messages: ProactiveCompaction.compact(state.messages)}
+      else
+        _ -> state
+      end
 
     # Start async prefetches while we build context. In fast mode this also
     # grabs cheap workspace/git hints so the first model call is less blind.
@@ -320,6 +334,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           | messages: state.messages ++ [%{role: "assistant", content: content}, verification],
             iteration: state.iteration + 1,
             auto_continues: 2
+        }
+
+        run(state)
+
+      VerificationGate.needs_verification?(state) ->
+        {directive, state} = VerificationGate.build_directive(state)
+
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, directive],
+            iteration: state.iteration + 1
         }
 
         run(state)
