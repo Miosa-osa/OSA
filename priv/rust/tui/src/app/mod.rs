@@ -160,6 +160,18 @@ pub struct App {
     // Welcome banner (tool_count, provider, model) waiting to be pushed into the
     // terminal scrollback by the event loop via insert_before.
     pub pending_welcome_banner: Option<(usize, Option<String>, Option<String>)>,
+
+    // Transcript viewer (Ctrl+O) — additive full-screen reader over the in-memory
+    // conversation. `transcript_log` retains finalized messages as they drain into
+    // native scrollback; `transcript` is the open overlay state (None = closed).
+    pub transcript_log: Vec<crate::dialogs::transcript_viewer::TranscriptEntry>,
+    pub transcript: Option<crate::dialogs::transcript_viewer::TranscriptViewer>,
+
+    // Completion notification: bell / OSC 9 when a turn ends while the user is
+    // likely away. `notify_on_complete` toggles it (off via OSA_NO_NOTIFY);
+    // `last_user_input` tracks the last keypress for the idle heuristic.
+    pub notify_on_complete: bool,
+    pub last_user_input: Option<Instant>,
 }
 
 impl App {
@@ -275,13 +287,21 @@ impl App {
             welcome_injected: false,
             dir_session_resolved: false,
             pending_welcome_banner: None,
+
+            transcript_log: Vec::new(),
+            transcript: None,
+            notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
+            last_user_input: None,
         })
     }
 
     /// True when the app wants a full-height alternate-screen viewport (dialogs,
     /// connecting, onboarding, file picker) instead of the inline live region.
     pub fn wants_full_viewport(&self) -> bool {
-        self.state.is_overlay() || self.state.is_fullscreen() || self.file_picker.is_some()
+        self.state.is_overlay()
+            || self.state.is_fullscreen()
+            || self.file_picker.is_some()
+            || self.transcript.is_some()
     }
 
     pub fn recompute_layout(&mut self) {

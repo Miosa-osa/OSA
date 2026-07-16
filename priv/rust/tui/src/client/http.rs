@@ -576,6 +576,24 @@ impl ApiClient {
         Ok(())
     }
 
+    /// POST /api/v1/permissions/respond — allow and persist an always-allow rule
+    /// for this tool/command. Reuses the permission-response mechanism, adding
+    /// the `allow_always` flag the backend accepts to persist the rule.
+    pub async fn permission_response_always(
+        &self,
+        request_id: &str,
+        allowed: bool,
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "request_id": request_id,
+            "allowed": allowed,
+            "allow_always": true,
+        });
+        // Best-effort: ignore errors if the backend endpoint isn't yet present.
+        let _ = self.post("/api/v1/permissions/respond", &body).await;
+        Ok(())
+    }
+
     // =========================================================================
     // HTTP helpers
     // =========================================================================

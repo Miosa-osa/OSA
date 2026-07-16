@@ -245,14 +245,11 @@ impl Completions {
     // --- private ---
 
     fn apply_filter(&mut self) {
-        let f = self.filter.to_lowercase();
-        self.filtered = self
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| f.is_empty() || item.name.to_lowercase().contains(&f))
-            .map(|(i, _)| i)
-            .collect();
+        // Fuzzy subsequence match + rank (best-first), scoring against the
+        // command name with its leading '/' stripped so "cmp" matches "/compact".
+        self.filtered = crate::util::fuzzy::rank(&self.items, &self.filter, |item| {
+            item.name.strip_prefix('/').unwrap_or(&item.name)
+        });
         self.selected = 0;
         self.scroll_offset = 0;
     }

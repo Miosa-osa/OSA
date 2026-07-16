@@ -828,6 +828,17 @@ impl App {
 
     pub(super) fn copy_last_message(&mut self) {
         if let Some(msg) = self.chat.last_agent_message() {
+            // Try OSC 52 first: it routes the copy through the terminal, so it
+            // works over SSH where arboard (local windowing system) silently
+            // fails. Fall back to arboard when the escape can't be written
+            // (e.g. stdout redirected) so local sessions still copy.
+            if crate::components::osc52::copy(&msg).is_ok() {
+                self.toasts.push(
+                    "Copied to clipboard".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                return;
+            }
             match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(msg)) {
                 Ok(_) => {
                     self.toasts.push(

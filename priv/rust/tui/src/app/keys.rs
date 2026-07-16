@@ -49,6 +49,10 @@ pub struct KeyMap {
     pub half_page_up: KeyBinding,
     pub half_page_down: KeyBinding,
     pub toggle_expand: KeyBinding,
+    /// Ctrl+O — toggle the full-screen transcript viewer (scroll/search/copy).
+    /// The live binding is enforced in `event_loop::dispatch_event`; this entry
+    /// documents it and keeps the keymap authoritative.
+    pub transcript: KeyBinding,
     pub toggle_thinking: KeyBinding,
     pub toggle_background: KeyBinding,
     pub toggle_sidebar: KeyBinding,
@@ -86,6 +90,11 @@ impl Default for KeyMap {
                 KeyCode::Char('o'),
                 KeyModifiers::CONTROL,
                 "expand/collapse",
+            ),
+            transcript: KeyBinding::new(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+                "transcript viewer",
             ),
             toggle_thinking: KeyBinding::new(
                 KeyCode::Char('t'),

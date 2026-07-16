@@ -1,6 +1,8 @@
 // Phase 2+: format_size() and truncate_str_start() — wired when file picker and sidebar use them
 #![allow(dead_code)]
 
+pub mod fuzzy;
+
 /// Truncate a UTF-8 string to at most `max_bytes` bytes, ensuring the cut falls
 /// on a char boundary so the result is always valid UTF-8.
 pub fn truncate_str(s: &str, max_bytes: usize) -> &str {

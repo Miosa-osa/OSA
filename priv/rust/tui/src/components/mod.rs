@@ -6,6 +6,7 @@ pub mod agents;
 pub mod chat;
 pub mod header;
 pub mod input;
+pub mod osc52;
 pub mod status_bar;
 pub mod task_checklist;
 pub mod tasks;

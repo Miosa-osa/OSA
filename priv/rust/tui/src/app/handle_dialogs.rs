@@ -345,6 +345,38 @@ impl App {
                         }
                         self.permissions = None;
                     }
+                    DialogAction::PermissionAllowAlways => {
+                        self.transition(AppState::Idle);
+                        self.toasts.push(
+                            "Permission granted (always)".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                        if let Some(ref d) = self.permissions {
+                            let client = self.client.clone();
+                            let request_id = d.request_id().to_string();
+                            // Reuse the permission-response mechanism; the
+                            // always-allow flag asks the backend to persist a rule.
+                            tokio::spawn(async move {
+                                let _ = client
+                                    .permission_response_always(&request_id, true)
+                                    .await;
+                            });
+                        }
+                        self.permissions = None;
+                    }
+                    DialogAction::PermissionClarify(text) => {
+                        // Release the pending gate, then steer the clarification
+                        // back to the agent as an ordinary message.
+                        if let Some(ref d) = self.permissions {
+                            let client = self.client.clone();
+                            let request_id = d.request_id().to_string();
+                            tokio::spawn(async move {
+                                let _ = client.permission_response(&request_id, false).await;
+                            });
+                        }
+                        self.permissions = None;
+                        self.submit_prompt(&text);
+                    }
                     DialogAction::PermissionDeny => {
                         self.transition(AppState::Idle);
                         self.toasts.push(

@@ -5,7 +5,13 @@ pub mod completions;
 pub mod history;
 pub mod textarea;
 
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
+    KeyboardEnhancementFlags, KeyModifiers, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use std::cell::Cell;
@@ -52,6 +58,20 @@ pub struct InputComponent {
     mic_area: Cell<Option<Rect>>,
     /// Voice recording active
     recording: bool,
+    /// Undo ring — snapshots of (content, cursor) before edits
+    undo_stack: Vec<(String, usize)>,
+    /// Redo ring — snapshots popped by undo
+    redo_stack: Vec<(String, usize)>,
+    /// Reverse-incremental history search state (Ctrl+R)
+    reverse_search: Option<ReverseSearch>,
+}
+
+/// Ctrl+R reverse-incremental history search over persisted input history.
+struct ReverseSearch {
+    /// The incremental search query typed after Ctrl+R.
+    query: String,
+    /// Index into `history.entries()` of the current match, if any.
+    match_idx: Option<usize>,
 }
 
 impl InputComponent {
@@ -59,7 +79,7 @@ impl InputComponent {
         Self {
             content: String::new(),
             cursor: 0,
-            history: history::History::new(100),
+            history: history::History::persistent(),
             focused: true,
             width: 80,
             multiline: false,
@@ -75,6 +95,9 @@ impl InputComponent {
             completions: Completions::new(),
             mic_area: Cell::new(None),
             recording: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            reverse_search: None,
         }
     }
 
@@ -183,6 +206,7 @@ impl InputComponent {
     }
 
     fn insert_char(&mut self, ch: char) {
+        self.snapshot();
         self.content.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
         self.tab_matches.clear();
@@ -208,6 +232,7 @@ impl InputComponent {
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.snapshot();
         self.content.insert_str(self.cursor, s);
         self.cursor += s.len();
         self.tab_matches.clear();
@@ -217,6 +242,7 @@ impl InputComponent {
 
     fn delete_char(&mut self) {
         if self.cursor > 0 {
+            self.snapshot();
             let prev = self.content[..self.cursor]
                 .chars()
                 .last()
@@ -269,6 +295,7 @@ impl InputComponent {
     fn handle_tab(&mut self) -> bool {
         // Step 9: If file search is active, cycle through file matches
         if self.file_search_active && !self.file_matches.is_empty() {
+            self.snapshot();
             let selected = self.file_matches[self.file_match_index].clone();
             // Replace from '@' to cursor with '@selected_path'
             let end = self.cursor;
@@ -287,19 +314,19 @@ impl InputComponent {
 
         if self.tab_matches.is_empty() {
             let prefix = &self.content[1..]; // skip the /
-            self.tab_matches = self
-                .commands
-                .iter()
-                .filter(|cmd| cmd.starts_with(prefix))
-                .map(|cmd| format!("/{}", cmd))
+            // Fuzzy subsequence match + rank (best-first) instead of prefix-only.
+            self.tab_matches = crate::util::fuzzy::rank(&self.commands, prefix, |c| c.as_str())
+                .into_iter()
+                .map(|i| format!("/{}", self.commands[i]))
                 .collect();
             self.tab_index = 0;
         } else if !self.tab_matches.is_empty() {
             self.tab_index = (self.tab_index + 1) % self.tab_matches.len();
         }
 
-        if let Some(match_) = self.tab_matches.get(self.tab_index) {
-            self.content = match_.clone();
+        if let Some(match_) = self.tab_matches.get(self.tab_index).cloned() {
+            self.snapshot();
+            self.content = match_;
             self.cursor = self.content.len();
         }
         true
@@ -343,17 +370,32 @@ impl InputComponent {
             return;
         }
 
-        let query_lower = query.to_lowercase();
-        let mut matches = Vec::new();
-
-        // Walk cwd (bounded to 3 levels deep, max 50 results)
+        // Collect fuzzy-matching candidates, then rank best-first.
+        let mut candidates = Vec::new();
         if let Ok(cwd) = std::env::current_dir() {
-            Self::walk_dir(&cwd, &cwd, &query_lower, 3, &mut matches);
+            Self::walk_dir(&cwd, &cwd, query, 3, &mut candidates);
         }
 
-        matches.sort();
-        matches.truncate(10); // Show at most 10 completions
-        self.file_matches = matches;
+        // Score each candidate by the better of its filename vs. full relative
+        // path match, so a query can hit either the leaf name or the path.
+        let mut scored: Vec<(i32, usize, String)> = candidates
+            .into_iter()
+            .filter_map(|rel| {
+                let name = rel.rsplit(['/', '\\']).next().unwrap_or(&rel);
+                let best = crate::util::fuzzy::score(name, query)
+                    .into_iter()
+                    .chain(crate::util::fuzzy::score(&rel, query))
+                    .max();
+                best.map(|s| (s, rel.chars().count(), rel))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        self.file_matches = scored.into_iter().take(10).map(|(_, _, rel)| rel).collect();
         self.file_match_index = 0;
     }
 
@@ -364,7 +406,7 @@ impl InputComponent {
         depth: usize,
         results: &mut Vec<String>,
     ) {
-        if depth == 0 || results.len() >= 50 {
+        if depth == 0 || results.len() >= 200 {
             return;
         }
         let entries = match std::fs::read_dir(dir) {
@@ -372,7 +414,7 @@ impl InputComponent {
             Err(_) => return,
         };
         for entry in entries.flatten() {
-            if results.len() >= 50 {
+            if results.len() >= 200 {
                 break;
             }
             let path = entry.path();
@@ -393,7 +435,10 @@ impl InputComponent {
                 .to_string_lossy()
                 .to_string();
 
-            if name.to_lowercase().contains(query) || rel.to_lowercase().contains(query) {
+            // Fuzzy subsequence match on either the leaf name or the full path.
+            if crate::util::fuzzy::is_match(&name, query)
+                || crate::util::fuzzy::is_match(&rel, query)
+            {
                 results.push(rel.clone());
             }
 
@@ -401,6 +446,280 @@ impl InputComponent {
                 Self::walk_dir(base, &path, query, depth - 1, results);
             }
         }
+    }
+
+    // ── Composer power-features: word motions, kill-line, undo/redo ──────────
+
+    /// Push the current (content, cursor) onto the undo ring and clear redo.
+    fn snapshot(&mut self) {
+        self.undo_stack.push((self.content.clone(), self.cursor));
+        if self.undo_stack.len() > 100 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Restore editing state after an undo/redo hop.
+    fn restore_state(&mut self, content: String, cursor: usize) {
+        self.content = content;
+        self.cursor = cursor.min(self.content.len());
+        self.multiline = self.content.contains('\n');
+        self.tab_matches.clear();
+        self.file_search_active = false;
+        self.file_matches.clear();
+        self.completions.hide();
+    }
+
+    fn undo(&mut self) -> bool {
+        if let Some((content, cursor)) = self.undo_stack.pop() {
+            self.redo_stack.push((self.content.clone(), self.cursor));
+            self.restore_state(content, cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn redo(&mut self) -> bool {
+        if let Some((content, cursor)) = self.redo_stack.pop() {
+            self.undo_stack.push((self.content.clone(), self.cursor));
+            self.restore_state(content, cursor);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Byte offset of the previous word boundary (skip whitespace, then word).
+    fn word_left(&self) -> usize {
+        let upto = &self.content[..self.cursor];
+        let mut idx = self.cursor;
+        let mut iter = upto.char_indices().rev().peekable();
+        while let Some(&(bi, c)) = iter.peek() {
+            if c.is_whitespace() {
+                idx = bi;
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(bi, c)) = iter.peek() {
+            if !c.is_whitespace() {
+                idx = bi;
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        idx
+    }
+
+    /// Byte offset of the next word boundary (skip whitespace, then word).
+    fn word_right(&self) -> usize {
+        let from = &self.content[self.cursor..];
+        let mut idx = self.cursor;
+        let mut iter = from.char_indices().peekable();
+        while let Some(&(bi, c)) = iter.peek() {
+            if c.is_whitespace() {
+                idx = self.cursor + bi + c.len_utf8();
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        while let Some(&(bi, c)) = iter.peek() {
+            if !c.is_whitespace() {
+                idx = self.cursor + bi + c.len_utf8();
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        idx
+    }
+
+    /// Alt+B — move cursor one word left.
+    fn move_word_left(&mut self) {
+        self.cursor = self.word_left();
+    }
+
+    /// Alt+F — move cursor one word right.
+    fn move_word_right(&mut self) {
+        self.cursor = self.word_right();
+    }
+
+    /// Ctrl+W — delete the word before the cursor.
+    fn delete_word_back(&mut self) {
+        let start = self.word_left();
+        if start < self.cursor {
+            self.snapshot();
+            self.content.drain(start..self.cursor);
+            self.cursor = start;
+            self.after_edit();
+        }
+    }
+
+    /// Ctrl+K — kill from the cursor to the end of the current line. If the
+    /// cursor sits on a newline, kill just that newline.
+    fn kill_to_line_end(&mut self) {
+        let rest = &self.content[self.cursor..];
+        let end = match rest.find('\n') {
+            Some(0) => self.cursor + 1,          // on a newline: remove it
+            Some(n) => self.cursor + n,          // to end of visual line
+            None => self.content.len(),          // last line: to end of buffer
+        };
+        if end > self.cursor {
+            self.snapshot();
+            self.content.drain(self.cursor..end);
+            self.after_edit();
+        }
+    }
+
+    /// Shared bookkeeping after a structural edit (kill/word-delete).
+    fn after_edit(&mut self) {
+        self.tab_matches.clear();
+        if !self.content.contains('\n') {
+            self.multiline = false;
+        }
+        if self.content.starts_with('/') && !self.file_search_active {
+            let filter = &self.content[1..self.cursor.min(self.content.len())];
+            self.completions.update_filter(filter);
+        } else {
+            self.completions.hide();
+        }
+        if self.file_search_active {
+            if self.cursor <= self.file_search_start {
+                self.file_search_active = false;
+                self.file_matches.clear();
+            } else {
+                self.rebuild_file_matches();
+            }
+        }
+    }
+
+    /// Ctrl+G — open the current buffer in `$EDITOR` (then `$VISUAL`, then `vi`),
+    /// read it back on exit. Raw mode / bracketed paste are suspended around the
+    /// child process and restored afterward. Returns Ok(true) if the buffer
+    /// changed. The editor uses its own alternate screen, so the inline viewport
+    /// is preserved on return.
+    fn open_in_editor(&mut self) -> Result<bool, String> {
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "vi".to_string());
+
+        // Support `EDITOR="code --wait"` style values: first token is the program.
+        let mut parts = editor.split_whitespace();
+        let program = parts.next().unwrap_or("vi").to_string();
+        let extra_args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+        // Temp file seeded with the current buffer (markdown for editor niceties).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("osa-compose-{}.md", nanos));
+        std::fs::write(&path, self.content.as_bytes())
+            .map_err(|e| format!("compose: write temp failed: {e}"))?;
+
+        // Suspend the TUI's terminal modes around the child.
+        let mut out = std::io::stdout();
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+        let _ = execute!(out, DisableBracketedPaste);
+        let _ = disable_raw_mode();
+
+        let status = std::process::Command::new(&program)
+            .args(&extra_args)
+            .arg(&path)
+            .status();
+
+        // Restore terminal modes exactly as main.rs set them up.
+        let _ = enable_raw_mode();
+        let _ = execute!(out, EnableBracketedPaste);
+        if matches!(supports_keyboard_enhancement(), Ok(true)) {
+            let _ = execute!(
+                out,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            );
+        }
+
+        let result = match status {
+            Ok(st) if st.success() => match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    // Editors commonly append a trailing newline; drop one.
+                    let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
+                    let changed = text != self.content;
+                    if changed {
+                        self.snapshot();
+                        self.content = text;
+                        self.cursor = self.content.len();
+                        self.multiline = self.content.contains('\n');
+                        self.completions.hide();
+                        self.file_search_active = false;
+                        self.file_matches.clear();
+                        self.tab_matches.clear();
+                    }
+                    Ok(changed)
+                }
+                Err(e) => Err(format!("compose: read back failed: {e}")),
+            },
+            Ok(_) => Ok(false), // editor exited non-zero: keep buffer as-is
+            Err(e) => Err(format!("compose: launch '{program}' failed: {e}")),
+        };
+
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    /// Handle a key while Ctrl+R reverse-search is active.
+    fn handle_reverse_search_key(&mut self, key: KeyEvent) -> ComponentAction {
+        let Some(mut rs) = self.reverse_search.take() else {
+            return ComponentAction::Ignored;
+        };
+        let mut keep = true;
+        let accept = |this: &mut Self, idx: Option<usize>| {
+            if let Some(i) = idx {
+                if let Some(entry) = this.history.entries().get(i).cloned() {
+                    this.content = entry;
+                    this.cursor = this.content.len();
+                    this.multiline = this.content.contains('\n');
+                }
+            }
+        };
+        match (key.code, key.modifiers) {
+            // Ctrl+R again: step to the next-older match.
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                let before = rs.match_idx.unwrap_or(self.history.len());
+                if let Some(i) = self.history.search_backward(&rs.query, before) {
+                    rs.match_idx = Some(i);
+                }
+            }
+            (KeyCode::Esc, _) => {
+                keep = false; // cancel: leave the buffer untouched
+            }
+            (KeyCode::Enter, _) => {
+                accept(self, rs.match_idx);
+                keep = false;
+            }
+            (KeyCode::Left, _) | (KeyCode::Right, _) | (KeyCode::Home, _) | (KeyCode::End, _) => {
+                accept(self, rs.match_idx);
+                keep = false;
+            }
+            (KeyCode::Backspace, _) => {
+                rs.query.pop();
+                rs.match_idx = self.history.search_backward(&rs.query, self.history.len());
+            }
+            (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
+                rs.query.push(c);
+                rs.match_idx = self.history.search_backward(&rs.query, self.history.len());
+            }
+            _ => {} // swallow other keys while searching
+        }
+        if keep {
+            self.reverse_search = Some(rs);
+        }
+        ComponentAction::Consumed
     }
 }
 
@@ -412,6 +731,11 @@ impl Component for InputComponent {
 
         match event {
             Event::Terminal(CrosstermEvent::Key(key)) => {
+                // Ctrl+R reverse-incremental history search owns all keys while active.
+                if self.reverse_search.is_some() {
+                    return self.handle_reverse_search_key(*key);
+                }
+
                 // Route to completions popup first when visible
                 if self.completions.is_visible() {
                     if let Some(action) = self.completions.handle_key(*key) {
@@ -547,6 +871,9 @@ impl Component for InputComponent {
                     }
                     // Ctrl+U: clear
                     (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                        if !self.content.is_empty() {
+                            self.snapshot();
+                        }
                         self.reset();
                         return ComponentAction::Consumed;
                     }
@@ -560,20 +887,68 @@ impl Component for InputComponent {
                         self.cursor = self.content.len();
                         return ComponentAction::Consumed;
                     }
-                    // Step 10: Ctrl+S: stash
-                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        if self.stash() {
-                            return ComponentAction::Emit(AppAction::Toast("Input stashed".into()));
-                        }
+                    // Ctrl+K: kill from cursor to end of line
+                    (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                        self.kill_to_line_end();
                         return ComponentAction::Consumed;
                     }
-                    // Step 10: Ctrl+R: restore stash
+                    // Ctrl+W: delete word before cursor
+                    (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                        self.delete_word_back();
+                        return ComponentAction::Consumed;
+                    }
+                    // Alt+B: move one word left
+                    (KeyCode::Char('b'), KeyModifiers::ALT) => {
+                        self.move_word_left();
+                        return ComponentAction::Consumed;
+                    }
+                    // Alt+F: move one word right
+                    (KeyCode::Char('f'), KeyModifiers::ALT) => {
+                        self.move_word_right();
+                        return ComponentAction::Consumed;
+                    }
+                    // Ctrl+Z: undo
+                    (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                        self.undo();
+                        return ComponentAction::Consumed;
+                    }
+                    // Ctrl+Y: redo
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                        self.redo();
+                        return ComponentAction::Consumed;
+                    }
+                    // Ctrl+G: open the current buffer in $EDITOR
+                    (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                        return match self.open_in_editor() {
+                            Ok(_) => ComponentAction::Consumed,
+                            Err(e) => ComponentAction::Emit(AppAction::Toast(e)),
+                        };
+                    }
+                    // Ctrl+R: enter reverse-incremental history search
                     (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                        if self.restore_stash() {
-                            return ComponentAction::Emit(AppAction::Toast("Input restored".into()));
-                        } else {
-                            return ComponentAction::Emit(AppAction::Toast("Nothing stashed".into()));
+                        if self.history.is_empty() {
+                            return ComponentAction::Emit(AppAction::Toast(
+                                "History is empty".into(),
+                            ));
                         }
+                        self.reverse_search = Some(ReverseSearch {
+                            query: String::new(),
+                            match_idx: None,
+                        });
+                        return ComponentAction::Consumed;
+                    }
+                    // Step 10: Ctrl+S toggles stash (stash when non-empty, restore when empty)
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                        if !self.content.is_empty() {
+                            if self.stash() {
+                                return ComponentAction::Emit(AppAction::Toast(
+                                    "Input stashed".into(),
+                                ));
+                            }
+                        } else if self.restore_stash() {
+                            return ComponentAction::Emit(AppAction::Toast("Input restored".into()));
+                        }
+                        return ComponentAction::Consumed;
                     }
                     // Regular character input
                     (KeyCode::Char(ch), m)
@@ -636,6 +1011,32 @@ impl Component for InputComponent {
         } else {
             theme.faint()
         };
+
+        // Ctrl+R reverse-search overlay replaces the normal input line.
+        if let Some(rs) = &self.reverse_search {
+            let matched = rs
+                .match_idx
+                .and_then(|i| self.history.entries().get(i))
+                .map(|s| s.replace('\n', " \u{23ce} "))
+                .unwrap_or_else(|| "(no match)".to_string());
+            let label = format!("(reverse-i-search)`{}': ", rs.query);
+            let label_cols = label.chars().count();
+            let line = Line::from(vec![
+                Span::styled("\u{276f} ", prompt_style),
+                Span::styled(label, theme.hint()),
+                Span::raw(matched),
+            ]);
+            frame.render_widget(Paragraph::new(line), input_area);
+            if self.focused {
+                let cursor_x = area.x + 2 + label_cols as u16;
+                let cursor_y = area.y + 1;
+                if cursor_x < area.x + area.width {
+                    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+                }
+            }
+            self.mic_area.set(None);
+            return;
+        }
 
         if self.content.is_empty() {
             let placeholder = if self.recording {

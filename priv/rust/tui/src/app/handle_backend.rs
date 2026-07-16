@@ -1,9 +1,16 @@
 use crate::app::state::AppState;
 use crate::components::activity::ProcessingPhase;
 use crate::event::backend::BackendEvent;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use super::App;
+
+/// How long the terminal must be free of keystrokes before a turn-completion
+/// notification is emitted. Approximates "user stepped away / terminal unfocused"
+/// (crossterm focus reporting is not enabled), so quick turns the user is
+/// actively watching stay silent while long unattended ones ping.
+const NOTIFY_IDLE_THRESHOLD: Duration = Duration::from_secs(10);
 
 impl App {
     /// Flush the collapsed-tool accumulator: emit the pending run (e.g. three
@@ -13,6 +20,23 @@ impl App {
     pub(super) fn flush_collapse(&mut self) {
         if let Some(line) = self.collapse.take_summary_line() {
             self.chat.add_collapsed_tool_summary(line);
+        }
+    }
+
+    /// Emit a completion notification (terminal bell + OSC 9 desktop notice) when
+    /// a turn finishes and the user is likely away. Gated by `notify_on_complete`
+    /// (disable with the OSA_NO_NOTIFY env var) and an idle heuristic so turns the
+    /// user is actively watching don't ping.
+    pub(super) fn notify_turn_complete(&mut self) {
+        if !self.notify_on_complete {
+            return;
+        }
+        let idle_enough = self
+            .last_user_input
+            .map(|t| t.elapsed() >= NOTIFY_IDLE_THRESHOLD)
+            .unwrap_or(true);
+        if idle_enough {
+            emit_completion_notification();
         }
     }
 
@@ -82,7 +106,15 @@ impl App {
                 response_type: _,
                 signal,
             } => {
+                let was_processing = self.state.is_processing();
                 self.handle_agent_response(response, signal);
+                // True turn-end edge: `handle_agent_response` flips Processing →
+                // Idle only when the turn actually completes. Fire the completion
+                // notification exactly on that transition (mid-turn agent_response
+                // events stay in Processing, so this never double-pings).
+                if was_processing && !self.state.is_processing() {
+                    self.notify_turn_complete();
+                }
             }
             BackendEvent::ToolCallStart { name, args } => {
                 // Flush any accumulated streaming text as a chat message BEFORE
@@ -1140,4 +1172,16 @@ impl App {
         }
         false
     }
+}
+
+/// Write a completion ping to the terminal: an OSC 9 desktop notification
+/// ("OSA: response ready") for terminals that support it, plus a BEL for those
+/// that don't. Both are control sequences the terminal consumes, so this does
+/// not disturb the ratatui render.
+fn emit_completion_notification() {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    // OSC 9 desktop notification, then a terminal bell.
+    let _ = out.write_all(b"\x1b]9;OSA: response ready\x07\x07");
+    let _ = out.flush();
 }

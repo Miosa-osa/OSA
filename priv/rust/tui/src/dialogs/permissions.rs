@@ -25,10 +25,13 @@ const MIN_H: u16 = 10;
 /// │  ─────────────────────────────────────             │
 /// │  <diff viewport / raw args, scrollable>            │
 /// │                                                     │
-/// │  [ Allow (y) ]  [ Allow Session (s) ]  [ Deny (n) ]│
-/// │  j/k scroll · Tab cycle · Enter confirm            │
+/// │  [ Allow (y) ] [ Session (s) ] [ Always (a) ] [ Deny (n) ]│
+/// │  j/k scroll · Tab cycle · c clarify · Enter confirm │
 /// ╰─────────────────────────────────────────────────────╯
 /// ```
+///
+/// Pressing `c` swaps the button row for a free-text field so the user can
+/// steer the agent with a short clarification instead of a binary decision.
 pub struct Permissions {
     pub tool_name: String,
     pub tool_args: String,
@@ -36,13 +39,23 @@ pub struct Permissions {
     request_id: String,
     pub diff_old: Option<String>,
     pub diff_new: Option<String>,
-    /// 0 = Allow, 1 = Allow Session, 2 = Deny
+    /// 0 = Allow, 1 = Allow Session, 2 = Allow Always, 3 = Deny
     pub selected: usize,
     pub scroll: u16,
+    /// When `true` the dialog is capturing a free-text clarification instead of
+    /// showing the allow/deny buttons.
+    clarify_mode: bool,
+    /// Buffer holding the in-progress clarification text.
+    clarify_input: String,
     /// Measured on each draw call via `Cell` so `handle_key` can clamp page
     /// scrolls without requiring a mutable receiver on `draw`.
     viewport_height: Cell<u16>,
 }
+
+/// Number of allow/deny buttons in the row.
+const BTN_COUNT: usize = 4;
+/// Index of the destructive "Deny" button (danger styling).
+const DENY_IDX: usize = 3;
 
 impl Permissions {
     pub fn new() -> Self {
@@ -54,6 +67,8 @@ impl Permissions {
             diff_new: None,
             selected: 0,
             scroll: 0,
+            clarify_mode: false,
+            clarify_input: String::new(),
             viewport_height: Cell::new(0),
         }
     }
@@ -67,6 +82,8 @@ impl Permissions {
         self.diff_new = None;
         self.scroll = 0;
         self.selected = 0;
+        self.clarify_mode = false;
+        self.clarify_input.clear();
     }
 
     /// Returns the opaque request identifier assigned by the backend.
@@ -87,52 +104,95 @@ impl Permissions {
             return None;
         }
 
-        match key.code {
-            // Quick-keys for each button.
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(DialogAction::PermissionAllow),
-            KeyCode::Char('s') | KeyCode::Char('S') => Some(DialogAction::PermissionAllowSession),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                Some(DialogAction::PermissionDeny)
+        // ── Clarify (free-text) capture mode ─────────────────────────────────
+        // While active, all printable keys feed the buffer so the user can type
+        // an instruction; Enter steers it to the agent, Esc returns to buttons.
+        if self.clarify_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    self.clarify_mode = false;
+                    self.clarify_input.clear();
+                    None
+                }
+                KeyCode::Enter => {
+                    let text = self.clarify_input.trim().to_string();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(DialogAction::PermissionClarify(text))
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.clarify_input.pop();
+                    None
+                }
+                KeyCode::Char(c) => {
+                    self.clarify_input.push(c);
+                    None
+                }
+                _ => None,
             }
+        } else {
+            match key.code {
+                // Quick-keys for each button.
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(DialogAction::PermissionAllow),
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    Some(DialogAction::PermissionAllowSession)
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Some(DialogAction::PermissionAllowAlways)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(DialogAction::PermissionDeny)
+                }
 
-            // Viewport scrolling.
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.scroll = self.scroll.saturating_add(1);
-                None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.scroll = self.scroll.saturating_sub(1);
-                None
-            }
-            KeyCode::PageDown => {
-                let vh = self.viewport_height.get().max(1);
-                self.scroll = self.scroll.saturating_add(vh);
-                None
-            }
-            KeyCode::PageUp => {
-                let vh = self.viewport_height.get().max(1);
-                self.scroll = self.scroll.saturating_sub(vh);
-                None
-            }
+                // Enter free-text clarify mode.
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.clarify_mode = true;
+                    self.clarify_input.clear();
+                    None
+                }
 
-            // Button cycling.
-            KeyCode::Tab | KeyCode::Right => {
-                self.selected = (self.selected + 1) % 3;
-                None
-            }
-            KeyCode::BackTab | KeyCode::Left => {
-                self.selected = self.selected.checked_sub(1).unwrap_or(2);
-                None
-            }
+                // Viewport scrolling.
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.scroll = self.scroll.saturating_add(1);
+                    None
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    None
+                }
+                KeyCode::PageDown => {
+                    let vh = self.viewport_height.get().max(1);
+                    self.scroll = self.scroll.saturating_add(vh);
+                    None
+                }
+                KeyCode::PageUp => {
+                    let vh = self.viewport_height.get().max(1);
+                    self.scroll = self.scroll.saturating_sub(vh);
+                    None
+                }
 
-            // Confirm focused button.
-            KeyCode::Enter => match self.selected {
-                0 => Some(DialogAction::PermissionAllow),
-                1 => Some(DialogAction::PermissionAllowSession),
-                _ => Some(DialogAction::PermissionDeny),
-            },
+                // Button cycling.
+                KeyCode::Tab | KeyCode::Right => {
+                    self.selected = (self.selected + 1) % BTN_COUNT;
+                    None
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    self.selected = self.selected.checked_sub(1).unwrap_or(BTN_COUNT - 1);
+                    None
+                }
 
-            _ => None,
+                // Confirm focused button.
+                KeyCode::Enter => match self.selected {
+                    0 => Some(DialogAction::PermissionAllow),
+                    1 => Some(DialogAction::PermissionAllowSession),
+                    2 => Some(DialogAction::PermissionAllowAlways),
+                    _ => Some(DialogAction::PermissionDeny),
+                },
+
+                _ => None,
+            }
         }
     }
 
@@ -254,42 +314,64 @@ impl Permissions {
             }
         }
 
-        // ── Button row ───────────────────────────────────────────────────────
+        // ── Button row / clarify input ───────────────────────────────────────
         let btn_y = available_bottom.saturating_sub(2);
         if btn_y < inner.y + inner.height {
-            let btn_data: &[(&str, usize)] = &[
-                ("[ Allow (y) ]", 0),
-                ("[ Allow Session (s) ]", 1),
-                ("[ Deny (n) ]", 2),
-            ];
+            if self.clarify_mode {
+                // Free-text field replacing the button row.
+                let field = Line::from(vec![
+                    Span::styled("  › ", Style::default().fg(theme.colors.secondary)),
+                    Span::styled(
+                        self.clarify_input.clone(),
+                        Style::default().fg(theme.colors.primary),
+                    ),
+                    Span::styled("▌", Style::default().fg(theme.colors.secondary)),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(field),
+                    Rect::new(inner.x, btn_y, inner.width, 1),
+                );
+            } else {
+                let btn_data: &[(&str, usize)] = &[
+                    ("[ Allow (y) ]", 0),
+                    ("[ Session (s) ]", 1),
+                    ("[ Always (a) ]", 2),
+                    ("[ Deny (n) ]", DENY_IDX),
+                ];
 
-            let mut btn_spans: Vec<Span> = vec![Span::raw(" ")];
-            for (label, idx) in btn_data {
-                let style = if self.selected == *idx {
-                    if *idx == 2 {
-                        theme.button_danger()
+                let mut btn_spans: Vec<Span> = vec![Span::raw(" ")];
+                for (label, idx) in btn_data {
+                    let style = if self.selected == *idx {
+                        if *idx == DENY_IDX {
+                            theme.button_danger()
+                        } else {
+                            theme.button_active()
+                        }
                     } else {
-                        theme.button_active()
-                    }
-                } else {
-                    theme.button_inactive()
-                };
-                btn_spans.push(Span::styled(label.to_string(), style));
-                btn_spans.push(Span::raw("  "));
-            }
+                        theme.button_inactive()
+                    };
+                    btn_spans.push(Span::styled(label.to_string(), style));
+                    btn_spans.push(Span::raw(" "));
+                }
 
-            frame.render_widget(
-                Paragraph::new(Line::from(btn_spans)),
-                Rect::new(inner.x, btn_y, inner.width, 1),
-            );
+                frame.render_widget(
+                    Paragraph::new(Line::from(btn_spans)),
+                    Rect::new(inner.x, btn_y, inner.width, 1),
+                );
+            }
         }
 
         // ── Hint row ─────────────────────────────────────────────────────────
         let hint_y = available_bottom.saturating_sub(1);
         if hint_y < inner.y + inner.height {
+            let hint = if self.clarify_mode {
+                "  Enter send to agent · Esc cancel clarification"
+            } else {
+                "  y/s/a/n · Tab cycle · c clarify · Enter confirm · Esc deny"
+            };
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "  j/k scroll · Tab cycle · Enter confirm · Esc deny",
+                    hint,
                     Style::default().fg(theme.colors.dim),
                 )),
                 Rect::new(inner.x, hint_y, inner.width, 1),

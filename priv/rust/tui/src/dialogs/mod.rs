@@ -12,6 +12,7 @@ pub mod quit_confirm;
 pub mod reasoning;
 pub mod sessions;
 pub mod survey;
+pub mod transcript_viewer;
 
 /// Actions produced by dialog event handling that bubble up to the app layer.
 #[derive(Debug, Clone)]
@@ -32,6 +33,12 @@ pub enum DialogAction {
     PermissionAllow,
     /// User granted the tool permission for the remainder of the session.
     PermissionAllowSession,
+    /// User granted the tool permission and asked the backend to persist an
+    /// always-allow rule for this tool/command.
+    PermissionAllowAlways,
+    /// User typed a free-text clarification/instruction instead of a binary
+    /// allow/deny; the string is steered back to the agent as a message.
+    PermissionClarify(String),
     /// User denied the tool permission.
     PermissionDeny,
     /// User selected an item from a generic picker.

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::{
+    event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -99,6 +100,16 @@ impl App {
             if !was_full && self.chat.has_pending_scrollback() {
                 let w = terminal.get_frame().area().width;
                 for msg in self.chat.drain_scrollback() {
+                    // Capture a text copy for the on-demand transcript viewer as
+                    // each finalized message flows into native scrollback. This is
+                    // the single choke point every message passes through, so it
+                    // retains the full conversation regardless of which handler
+                    // produced it.
+                    if let Some(entry) =
+                        crate::dialogs::transcript_viewer::entry_from_message(&msg)
+                    {
+                        self.transcript_log.push(entry);
+                    }
                     let h = msg.height(w);
                     if h == 0 {
                         continue;
@@ -117,7 +128,7 @@ impl App {
                 Some(event) => event,
                 None => break, // all senders dropped
             };
-            let mut should_quit = self.update(event);
+            let mut should_quit = self.dispatch_event(event);
 
             // Coalesce: apply every queued event before redrawing. During streaming
             // the backend emits one StreamingToken per token; draining the backlog
@@ -125,7 +136,7 @@ impl App {
             // fast streaming). FIFO order is preserved.
             while !should_quit {
                 match self.event_rx.try_recv() {
-                    Ok(event) => should_quit = self.update(event),
+                    Ok(event) => should_quit = self.dispatch_event(event),
                     Err(_) => break,
                 }
             }
@@ -146,8 +157,79 @@ impl App {
         Ok(())
     }
 
+    /// Route an event through the transcript overlay layer before the normal
+    /// `update` pipeline. This keeps the Ctrl+O reader self-contained: it owns key
+    /// input while open, toggles from the plain chat surface, and records keypress
+    /// activity for the completion-notification idle heuristic.
+    fn dispatch_event(&mut self, event: Event) -> bool {
+        if let Event::Terminal(CrosstermEvent::Key(key)) = &event {
+            if key.kind == KeyEventKind::Press {
+                // Any keypress counts as activity (turn-complete idle heuristic).
+                self.last_user_input = Some(std::time::Instant::now());
+
+                // While open, the transcript overlay is modal over key input.
+                if self.transcript.is_some() {
+                    return self.handle_transcript_key(*key);
+                }
+                // Ctrl+O opens the reader from the normal chat surface only.
+                if is_ctrl_o(key) && self.transcript_can_open() {
+                    self.transcript =
+                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
+                            &self.transcript_log,
+                        ));
+                    return false;
+                }
+            }
+        }
+        self.update(event)
+    }
+
+    /// Whether Ctrl+O should open the transcript reader right now. Declines when
+    /// another overlay owns Ctrl+O (agents panel collapse, file picker, reasoning
+    /// selector, dialogs) or there is nothing to show, so existing bindings and
+    /// the update-layer Ctrl+O handling are left intact.
+    fn transcript_can_open(&self) -> bool {
+        !self.transcript_log.is_empty()
+            && !self.agents.is_active()
+            && self.file_picker.is_none()
+            && self.reasoning_selector.is_none()
+            && matches!(
+                self.state,
+                AppState::Idle | AppState::Processing | AppState::Recording
+            )
+    }
+
+    /// Route a key to the open transcript overlay and act on its result.
+    fn handle_transcript_key(&mut self, key: KeyEvent) -> bool {
+        use crate::dialogs::transcript_viewer::TranscriptAction;
+        // Disjoint field borrows: `transcript` (mut) and `transcript_log` (shared).
+        let action = match self.transcript {
+            Some(ref mut tv) => tv.handle_key(key, &self.transcript_log),
+            None => return false,
+        };
+        match action {
+            TranscriptAction::None => {}
+            TranscriptAction::Close => self.transcript = None,
+            TranscriptAction::Toast(msg) => {
+                self.toasts
+                    .push(msg, crate::components::toast::ToastLevel::Info);
+            }
+        }
+        false
+    }
+
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+
+        // Transcript overlay takes the whole viewport when open (additive reader;
+        // native scrollback is untouched underneath).
+        if let Some(ref tv) = self.transcript {
+            tv.draw(frame, area, &self.transcript_log);
+            if self.toasts.has_toasts() {
+                self.toasts.draw(frame, toast_rect(area));
+            }
+            return;
+        }
 
         if self.wants_full_viewport() {
             frame.render_widget(ratatui::widgets::Clear, area);
@@ -311,6 +393,11 @@ fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
         "failed to rebuild inline viewport after retries: {:?}",
         last_err
     ))
+}
+
+/// True when `key` is Ctrl+O (the transcript-viewer toggle).
+fn is_ctrl_o(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Top-right toast overlay rectangle within `area`.
