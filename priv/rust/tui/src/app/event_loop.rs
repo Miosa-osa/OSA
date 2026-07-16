@@ -19,8 +19,9 @@ type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 impl App {
     pub async fn run(&mut self, mut terminal: Term, inline_h: u16) -> Result<()> {
-        // Spawn terminal event reader
-        let term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+        // Spawn terminal event reader (reassigned when we pause it around an
+        // inline-viewport rebuild — see the switch below).
+        let mut term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
 
         // Spawn tick timer
         let tick_tx = self.event_tx.clone();
@@ -46,9 +47,19 @@ impl App {
             let want_full = self.wants_full_viewport();
             if want_full != was_full {
                 if want_full {
+                    // Full screen (Terminal::new) does NOT query the cursor, so no
+                    // reader contention — switch directly.
                     switch_to_full(&mut terminal)?;
                 } else {
+                    // Rebuilding the inline viewport issues a cursor-position query
+                    // (DSR). The event reader shares stdin and would eat the
+                    // response, timing the query out. Pause the reader, rebuild,
+                    // then respawn it. The pause is a few ms; no input is lost in
+                    // practice (the user just closed a dialog).
+                    term_handle.abort();
+                    let _ = term_handle.await;
                     switch_to_inline(&mut terminal, inline_h)?;
+                    term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                 }
                 was_full = want_full;
             }
@@ -218,13 +229,39 @@ fn switch_to_full(terminal: &mut Term) -> Result<()> {
 /// host terminal's scrollback untouched.
 fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
-    *terminal = Terminal::with_options(
-        CrosstermBackend::new(std::io::stdout()),
-        TerminalOptions {
-            viewport: Viewport::Inline(inline_h),
-        },
-    )?;
-    Ok(())
+
+    // Viewport::Inline queries the cursor (DSR); the first query after leaving the
+    // alt screen can be dropped and time out ("cursor position could not be read"),
+    // which would crash the session on every dialog close. Prime it, then retry the
+    // rebuild instead of aborting.
+    for _ in 0..40 {
+        if crossterm::cursor::position().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let mut last_err = None;
+    for attempt in 0..6u64 {
+        match Terminal::with_options(
+            CrosstermBackend::new(std::io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_h),
+            },
+        ) {
+            Ok(t) => {
+                *terminal = t;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "failed to rebuild inline viewport after retries: {:?}",
+        last_err
+    ))
 }
 
 /// Top-right toast overlay rectangle within `area`.

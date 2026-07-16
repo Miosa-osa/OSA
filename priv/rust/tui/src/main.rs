@@ -76,17 +76,53 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // scrollback and native wheel scrolling. Only bracketed paste is enabled so
     // the Ctrl+V / paste flow keeps working.
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnableBracketedPaste)?;
-    let backend = CrosstermBackend::new(stdout);
+    execute!(io::stdout(), EnableBracketedPaste)?;
+
+    // ratatui's Viewport::Inline queries the terminal for the cursor position at
+    // construction (a DSR request). Some terminals/launch contexts drop the very
+    // first query and it times out ("cursor position could not be read"), which
+    // aborts startup entirely. Prime it first: retry the query until the terminal
+    // actually answers, so ratatui's query lands on a warmed-up terminal.
+    for _ in 0..40 {
+        if crossterm::cursor::position().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
     let (_cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let viewport_h = compute_viewport_height(rows);
-    let terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(viewport_h),
-        },
-    )?;
+
+    // Create the inline viewport, retrying if the cursor query still times out
+    // (intermittent DSR flakiness) instead of aborting the whole TUI.
+    let mut terminal = None;
+    let mut last_err = None;
+    for attempt in 0..6u64 {
+        match Terminal::with_options(
+            CrosstermBackend::new(io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_h),
+            },
+        ) {
+            Ok(t) => {
+                terminal = Some(t);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+            }
+        }
+    }
+    let terminal = match terminal {
+        Some(t) => t,
+        None => {
+            return Err(anyhow::anyhow!(
+                "failed to initialize inline terminal after retries: {:?}",
+                last_err
+            ))
+        }
+    };
 
     // Create tokio runtime
     let runtime = tokio::runtime::Builder::new_multi_thread()
