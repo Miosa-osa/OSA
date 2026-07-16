@@ -1,11 +1,22 @@
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use super::entry::{AgentEntry, AgentStatus, SynthesisState, SwarmStatus};
 use super::Agents;
 
 /// Braille spinner frames for running agents.
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Format elapsed seconds compactly (45s → 2m15s → 1h3m).
+fn fmt_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
 
 impl Agents {
     /// Draw the tree-view agent display.
@@ -251,6 +262,125 @@ impl Agents {
                 );
             }
         }
+    }
+
+    /// Full-screen background-agent dashboard: every tracked agent grouped by
+    /// state (Working / Ready / Completed / Failed) with role, elapsed, tool
+    /// count and tokens. `selected` is an index into the entries list; the
+    /// matching row is highlighted so it can be cancelled.
+    pub fn draw_dashboard(&self, frame: &mut Frame, area: Rect, selected: usize) {
+        let theme = crate::style::theme();
+
+        let running = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
+            .count();
+        let title = format!(
+            " Agent Dashboard — {} total, {} active ",
+            self.entries.len(),
+            running
+        );
+        let block = Block::default()
+            .title(Span::styled(title, theme.section_title()))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.colors.border));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.height < 2 || inner.width < 4 {
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        // Fixed group order with the labels the task calls for. "Ready" maps to
+        // agents that are spawned but not yet running.
+        let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 4] = [
+            ("Working", &|e: &AgentEntry| e.status == AgentStatus::Running),
+            ("Ready", &|e: &AgentEntry| e.status == AgentStatus::Spawning),
+            ("Completed", &|e: &AgentEntry| e.status == AgentStatus::Completed),
+            ("Failed", &|e: &AgentEntry| e.status == AgentStatus::Failed),
+        ];
+
+        for (label, pred) in groups.iter() {
+            let idxs: Vec<usize> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| pred(e))
+                .map(|(i, _)| i)
+                .collect();
+            if idxs.is_empty() {
+                continue;
+            }
+
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("{} ({})", label, idxs.len()),
+                theme.section_title(),
+            )));
+
+            for idx in idxs {
+                let entry = &self.entries[idx];
+                let is_sel = idx == selected;
+
+                let (icon, icon_style) = self.agent_icon(entry);
+                let marker = if is_sel { "▸ " } else { "  " };
+                let name = if entry.subject.is_empty() {
+                    entry.name.clone()
+                } else {
+                    entry.subject.clone()
+                };
+                let name_style = if is_sel {
+                    theme.plan_selected()
+                } else {
+                    theme.agent_name()
+                };
+                let role = if entry.role.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", entry.role)
+                };
+                let meta = format!(
+                    "  {} · {} tool{} · {} tok",
+                    fmt_elapsed(entry.elapsed_secs()),
+                    entry.tool_uses,
+                    if entry.tool_uses == 1 { "" } else { "s" },
+                    fmt_tokens(entry.tokens_used),
+                );
+
+                let mut spans = vec![
+                    Span::styled(marker, theme.plan_selected()),
+                    Span::styled(format!("{} ", icon), icon_style),
+                    Span::styled(name, name_style),
+                ];
+                if !role.is_empty() {
+                    spans.push(Span::styled(role, theme.role_tag()));
+                }
+                spans.push(Span::styled(meta, theme.faint()));
+                lines.push(Line::from(spans));
+            }
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No agents have run yet.",
+                theme.faint(),
+            )));
+        }
+
+        // Footer hint.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "↑/↓ select   c/x cancel selected   Esc/q close",
+            theme.faint(),
+        )));
+
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     /// Return (icon_char, style) for an agent entry based on status.

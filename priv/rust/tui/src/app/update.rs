@@ -103,8 +103,40 @@ impl App {
             AppState::Idle => self.handle_idle_key(key),
             AppState::Processing => self.handle_processing_key(key),
             AppState::Recording => self.handle_recording_key(key),
+            AppState::AgentsDashboard => self.handle_agents_dashboard_key(key),
             _ => false,
         }
+    }
+
+    /// Key handling for the full-screen background-agent dashboard.
+    /// ↑/↓ (and j/k) move the selection, c/x cancel the selected running agent,
+    /// Esc/q close and return to the previous state.
+    fn handle_agents_dashboard_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let count = self.agents.entry_count();
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                self.close_agents_dashboard();
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if count > 0 && self.agents_dashboard_selected > 0 {
+                    self.agents_dashboard_selected -= 1;
+                }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if count > 0 && self.agents_dashboard_selected + 1 < count {
+                    self.agents_dashboard_selected += 1;
+                }
+            }
+            (KeyCode::Char('c'), KeyModifiers::NONE)
+            | (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                self.cancel_selected_agent();
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.close_agents_dashboard();
+            }
+            _ => {}
+        }
+        false
     }
 
     /// Advance the tool-permission mode one step (Shift+Tab). Mirrors Claude
@@ -461,6 +493,7 @@ impl App {
         self.toasts.tick();
         self.activity.tick();
         self.agents.tick();
+        self.task_checklist.tick();
 
         // Poll audio level and elapsed time from active voice capture
         if self.voice.recording {

@@ -172,6 +172,10 @@ pub struct App {
     // `last_user_input` tracks the last keypress for the idle heuristic.
     pub notify_on_complete: bool,
     pub last_user_input: Option<Instant>,
+
+    // Background-agent dashboard (AppState::AgentsDashboard): index of the
+    // currently-selected agent row, for cancel targeting.
+    pub agents_dashboard_selected: usize,
 }
 
 impl App {
@@ -292,6 +296,7 @@ impl App {
             transcript: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
+            agents_dashboard_selected: 0,
         })
     }
 

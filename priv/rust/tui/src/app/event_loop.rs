@@ -244,6 +244,10 @@ impl App {
                         crate::view::connecting::draw_connecting(frame, area);
                     }
                 }
+                AppState::AgentsDashboard => {
+                    self.agents
+                        .draw_dashboard(frame, area, self.agents_dashboard_selected);
+                }
                 _ => {
                     // File picker overlay takes highest modal priority.
                     if let Some(ref picker) = self.file_picker {
@@ -326,6 +330,9 @@ impl App {
         self.draw_context_hint(frame, rows[2]);
         self.input.draw(frame, rows[3]);
         self.status.draw(frame, rows[4]);
+        // Live task checklist floats bottom-right of the streaming/chat region
+        // (Claude Code's todo panel). It self-positions and no-ops when empty.
+        self.task_checklist.draw(frame, rows[0]);
         if self.toasts.has_toasts() {
             self.toasts.draw(frame, toast_rect(area));
         }

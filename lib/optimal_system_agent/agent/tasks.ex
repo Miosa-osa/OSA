@@ -144,12 +144,16 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   @doc "Emit a task_checklist_show event."
   def show_checklist(session_id, server \\ __MODULE__) do
     tasks = get_tasks(session_id, server)
+    data = %{tasks: Enum.map(tasks, &Tracker.task_to_map/1)}
 
     OptimalSystemAgent.Events.Bus.emit(:system_event, %{
       event: :task_checklist_show,
       session_id: session_id,
-      data: %{tasks: Enum.map(tasks, &Tracker.task_to_map/1)}
+      data: data
     })
+
+    # Bridge to the per-session SSE topic so the TUI checklist opens live.
+    broadcast_session_event(session_id, :task_checklist_show, %{data: data})
 
     :ok
   end
@@ -162,8 +166,35 @@ defmodule OptimalSystemAgent.Agent.Tasks do
       data: %{}
     })
 
+    broadcast_session_event(session_id, :task_checklist_hide, %{data: %{}})
+
     :ok
   end
+
+  # Bridge a task event onto the per-session PubSub topic the TUI SSE stream
+  # subscribes to. Additive: the Events.Bus emit above still fires.
+  defp broadcast_session_event(session_id, event, extra)
+       when is_binary(session_id) and is_map(extra) do
+    payload =
+      extra
+      |> Map.put(:type, :system_event)
+      |> Map.put(:event, event)
+      |> Map.put(:session_id, session_id)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, payload}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp broadcast_session_event(_session_id, _event, _extra), do: :ok
 
   @doc "Extract task titles from a text response."
   defdelegate extract_tasks_from_response(text), to: Tracker, as: :extract_from_response

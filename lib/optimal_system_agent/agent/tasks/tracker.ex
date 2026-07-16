@@ -62,6 +62,13 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       session_id: session_id
     })
 
+    # Bridge to the per-session SSE topic so the TUI checklist updates live.
+    broadcast_session_event(session_id, :task_created, %{
+      task_id: task.id,
+      subject: title,
+      active_form: active_form_of(task) || title
+    })
+
     {sessions, {:ok, task.id}}
   end
 
@@ -90,6 +97,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
         subject: t.title,
         active_form: t.metadata[:active_form] || t.title,
         session_id: session_id
+      })
+
+      broadcast_session_event(session_id, :task_created, %{
+        task_id: t.id,
+        subject: t.title,
+        active_form: active_form_of(t) || t.title
       })
     end)
 
@@ -122,6 +135,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           status: "in_progress",
           session_id: session_id
         })
+
+        broadcast_session_event(session_id, :task_updated, %{
+          task_id: task_id,
+          status: "in_progress",
+          active_form: active_form_of(task)
+        })
       end
     )
   end
@@ -151,6 +170,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           task_id: task_id,
           status: "completed",
           session_id: session_id
+        })
+
+        broadcast_session_event(session_id, :task_updated, %{
+          task_id: task_id,
+          status: "completed",
+          active_form: active_form_of(task)
         })
       end
     )
@@ -183,6 +208,12 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           task_id: task_id,
           status: "failed",
           session_id: session_id
+        })
+
+        broadcast_session_event(session_id, :task_updated, %{
+          task_id: task_id,
+          status: "failed",
+          active_form: active_form_of(task)
         })
       end
     )
@@ -460,6 +491,42 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       Map.put(sessions, session_id, tasks)
     end
   end
+
+  # Bridge a task event onto the per-session PubSub topic the TUI SSE stream
+  # subscribes to ("osa:session:#{id}"). Mirrors Orchestrator.emit_event/2:
+  # wraps the payload as a :system_event so the SSE loop derives the sub-event
+  # type (task_created / task_updated / …) via to_string(event). The Events.Bus
+  # emit above still fires — this is additive, not a replacement.
+  defp broadcast_session_event(session_id, event, extra)
+       when is_binary(session_id) and is_map(extra) do
+    payload =
+      extra
+      |> Map.put(:type, :system_event)
+      |> Map.put(:event, event)
+      |> Map.put(:session_id, session_id)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, payload}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp broadcast_session_event(_session_id, _event, _extra), do: :ok
+
+  # Read :active_form from task metadata, tolerating both atom and string keys
+  # (metadata round-trips through JSON persistence, which stringifies keys).
+  defp active_form_of(%Task{metadata: meta}) when is_map(meta) do
+    Map.get(meta, :active_form) || Map.get(meta, "active_form")
+  end
+
+  defp active_form_of(_), do: nil
 
   defp safe_emit(event_type, payload) do
     spawn(fn ->

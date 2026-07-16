@@ -95,6 +95,25 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
            }}
         )
 
+        # Stash the plan + original user input so the plan_approve / plan_edit
+        # commands can resume execution without the client echoing the plan
+        # back, then emit the dedicated `plan_proposed` event the TUI parses to
+        # open its plan_review dialog (a plain agent_response does not).
+        original_input = original_user_input(state.messages)
+        OptimalSystemAgent.Agent.PlanStore.put(state.session_id, plan_text, original_input)
+
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{state.session_id}",
+          {:osa_event,
+           %{
+             type: :system_event,
+             event: :plan_proposed,
+             session_id: state.session_id,
+             plan: plan_text
+           }}
+        )
+
         {:ok, plan_text, state}
 
       {:error, reason} ->
@@ -108,6 +127,22 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   end
 
   # --- Private ---
+
+  # Recover the original user message from the decorated message list so the
+  # plan_approve / plan_edit round-trip can reference it. build_messages/2
+  # appends system pre-directives followed by the user message, so the last
+  # role == "user" entry is the genuine input.
+  defp original_user_input(messages) when is_list(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value("", fn
+      %{role: "user", content: content} when is_binary(content) -> content
+      %{"role" => "user", "content" => content} when is_binary(content) -> content
+      _ -> false
+    end)
+  end
+
+  defp original_user_input(_), do: ""
 
   defp maybe_inject_memory_nudge(message, state) do
     interval = Application.get_env(:optimal_system_agent, :auto_insights_interval, 10)

@@ -438,6 +438,12 @@ impl ApiClient {
         Ok(())
     }
 
+    /// DELETE /api/v1/agents/:id — terminate a running (background) agent session.
+    pub async fn cancel_agent(&self, id: &str) -> Result<()> {
+        let _ = self.delete(&format!("/api/v1/agents/{}", id)).await?;
+        Ok(())
+    }
+
     /// POST /api/v1/sessions/:id/cancel — cancel a running agent loop.
     pub async fn cancel_session(&self, id: &str) -> Result<()> {
         let _ = self

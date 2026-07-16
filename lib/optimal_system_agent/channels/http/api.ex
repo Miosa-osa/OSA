@@ -131,6 +131,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Agent management (definitions, hierarchy, lifecycle) ─────────────
   forward("/agents", to: API.AgentManagementRoutes)
 
+  # ── Agent run dashboard (RunStore view + cancel) ─────────────────────
+  forward("/runs", to: API.RunRoutes)
+
   # ── Settings (read/write ~/.osa/config.json) ─────────────────────────
   forward("/settings", to: API.SettingsRoutes)
 

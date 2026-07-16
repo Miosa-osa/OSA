@@ -14,6 +14,7 @@ pub enum AppState {
     Onboarding,
     Survey,
     Recording,
+    AgentsDashboard,
 }
 
 impl AppState {
@@ -36,6 +37,7 @@ impl AppState {
                 | (Idle, Sessions)
                 | (Idle, Onboarding)
                 | (Idle, Recording)
+                | (Idle, AgentsDashboard)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -44,6 +46,10 @@ impl AppState {
                 | (Processing, Permissions)
                 | (Processing, Survey)
                 | (Processing, Quit)
+                | (Processing, AgentsDashboard)
+                // Agents dashboard returns to whichever state opened it
+                | (AgentsDashboard, Idle)
+                | (AgentsDashboard, Processing)
                 // Survey
                 | (Survey, Processing)
                 | (Survey, Idle)
@@ -74,6 +80,7 @@ impl AppState {
                 | AppState::Sessions
                 | AppState::ModelPicker
                 | AppState::Survey
+                | AppState::AgentsDashboard
         )
     }
 
@@ -106,6 +113,7 @@ impl std::fmt::Display for AppState {
             AppState::Onboarding => write!(f, "Onboarding"),
             AppState::Survey => write!(f, "Survey"),
             AppState::Recording => write!(f, "Recording"),
+            AppState::AgentsDashboard => write!(f, "Agent Dashboard"),
         }
     }
 }

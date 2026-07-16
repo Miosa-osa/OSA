@@ -545,8 +545,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call(:toggle_plan_mode, _from, state) do
-    new_val = not state.plan_mode_enabled
-    {:reply, {:ok, new_val}, %{state | plan_mode_enabled: new_val}}
+    # Route the toggle through the exact same transition as enter/exit so the
+    # three entry points can never disagree about plan_mode_enabled or the
+    # saved pre-entry value. Toggling reports the resulting boolean.
+    {_result, new_state} =
+      if state.plan_mode_enabled do
+        do_exit_plan_mode(state)
+      else
+        do_enter_plan_mode(state)
+      end
+
+    {:reply, {:ok, new_state.plan_mode_enabled}, new_state}
   end
 
   def handle_call(:compact, _from, state) do
@@ -568,37 +577,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, {:ok, stats}, %{state | messages: compacted}}
   end
 
-  def handle_call(:enter_plan_mode, _from, %{plan_mode_enabled: true} = state) do
-    # Already active — idempotent, but refresh the saved pre-entry value.
-    {:reply, {:ok, :already_active}, state}
-  end
-
   def handle_call(:enter_plan_mode, _from, state) do
-    new_state = %{
-      state
-      | plan_mode_enabled: true,
-        # Capture the pre-entry value so exit can restore it precisely.
-        strategy_state:
-          Map.put(state.strategy_state, :plan_mode_pre_entry, state.plan_mode_enabled)
-    }
-
-    {:reply, {:ok, :entered}, new_state}
-  end
-
-  def handle_call(:exit_plan_mode, _from, %{plan_mode_enabled: false} = state) do
-    {:reply, {:ok, :was_not_active}, state}
+    {result, new_state} = do_enter_plan_mode(state)
+    {:reply, {:ok, result}, new_state}
   end
 
   def handle_call(:exit_plan_mode, _from, state) do
-    pre_entry = Map.get(state.strategy_state, :plan_mode_pre_entry, false)
-
-    new_state = %{
-      state
-      | plan_mode_enabled: pre_entry,
-        strategy_state: Map.delete(state.strategy_state, :plan_mode_pre_entry)
-    }
-
-    {:reply, {:ok, :exited}, new_state}
+    {result, new_state} = do_exit_plan_mode(state)
+    {:reply, {:ok, result}, new_state}
   end
 
   def handle_call({:set_permission_tier, tier}, _from, state)
@@ -820,6 +806,42 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
 
   defp should_plan?(state), do: state.plan_mode_enabled and not state.plan_mode
+
+  # Single source of truth for the plan-mode state transition, shared by
+  # :enter_plan_mode, :exit_plan_mode, and :toggle_plan_mode. Returns
+  # `{result, new_state}`.
+  defp do_enter_plan_mode(%{plan_mode_enabled: true} = state) do
+    # Already active — idempotent; leave the saved pre-entry value untouched.
+    {:already_active, state}
+  end
+
+  defp do_enter_plan_mode(state) do
+    new_state = %{
+      state
+      | plan_mode_enabled: true,
+        # Capture the pre-entry value so exit can restore it precisely.
+        strategy_state:
+          Map.put(state.strategy_state, :plan_mode_pre_entry, state.plan_mode_enabled)
+    }
+
+    {:entered, new_state}
+  end
+
+  defp do_exit_plan_mode(%{plan_mode_enabled: false} = state) do
+    {:was_not_active, state}
+  end
+
+  defp do_exit_plan_mode(state) do
+    pre_entry = Map.get(state.strategy_state, :plan_mode_pre_entry, false)
+
+    new_state = %{
+      state
+      | plan_mode_enabled: pre_entry,
+        strategy_state: Map.delete(state.strategy_state, :plan_mode_pre_entry)
+    }
+
+    {:exited, new_state}
+  end
 
   defp apply_overrides(state, opts) do
     state

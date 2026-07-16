@@ -288,6 +288,11 @@ impl App {
                     _ => crate::components::task_checklist::ChecklistStatus::Pending,
                 };
                 self.task_checklist.update(&task_id, checklist_status);
+                // Drive the activity spinner from the active step, like Claude
+                // Code's activeForm. Clears automatically when nothing is in
+                // progress (current_active_form -> None).
+                let verb = self.task_checklist.current_active_form();
+                self.activity.set_active_verb(verb);
             }
             BackendEvent::TaskChecklistShow { tasks } => {
                 self.task_checklist.clear();
@@ -303,10 +308,12 @@ impl App {
                     self.task_checklist.update(&id, status);
                 }
                 self.task_checklist.show();
+                self.activity.set_active_verb(self.task_checklist.current_active_form());
                 self.recompute_layout();
             }
             BackendEvent::TaskChecklistHide => {
                 self.task_checklist.hide();
+                self.activity.set_active_verb(None);
                 self.recompute_layout();
             }
             BackendEvent::CommandsLoaded(result) => match result {

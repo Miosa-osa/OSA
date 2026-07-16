@@ -91,6 +91,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         auto_mode_command?(command) ->
           handle_auto_mode_command(conn, command)
 
+        cmd_name in ~w(plan_approve plan_reject plan_edit) ->
+          handle_plan_command(conn, cmd_name)
+
         cmd_name in @blocked_http_commands ->
           body =
             Jason.encode!(%{
@@ -106,6 +109,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
     end
+  end
+
+  # Plan review round-trip — the TUI plan_review dialog POSTs plan_approve /
+  # plan_reject / plan_edit here. Delegates to Agent.PlanMode, which reads the
+  # stashed plan from PlanStore and resumes/revises execution asynchronously.
+  defp handle_plan_command(conn, cmd_name) do
+    session_id = conn.body_params["session_id"]
+    feedback = conn.body_params["arg"] || ""
+
+    result =
+      cond do
+        not is_binary(session_id) or session_id == "" ->
+          {:error, "Missing session_id for #{cmd_name}."}
+
+        cmd_name == "plan_approve" ->
+          OptimalSystemAgent.Agent.PlanMode.approve(session_id)
+
+        cmd_name == "plan_reject" ->
+          OptimalSystemAgent.Agent.PlanMode.reject(session_id)
+
+        cmd_name == "plan_edit" ->
+          OptimalSystemAgent.Agent.PlanMode.edit(session_id, feedback)
+      end
+
+    output =
+      case result do
+        {:ok, msg} -> msg
+        {:error, msg} -> msg
+      end
+
+    body = Jason.encode!(%{output: output, command: cmd_name})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
 
   # Matches `auto_mode`, `auto_mode on/off`, and `set_permission_mode auto|full`.

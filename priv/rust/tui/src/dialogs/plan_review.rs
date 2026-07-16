@@ -39,6 +39,11 @@ impl PlanReview {
         }
     }
 
+    /// The current plan text (used to seed the input box for the Edit flow).
+    pub fn plan_text(&self) -> &str {
+        &self.plan
+    }
+
     /// Replace the displayed plan and reset scroll/selection.
     pub fn set_plan(&mut self, plan: String) {
         self.plan = plan;

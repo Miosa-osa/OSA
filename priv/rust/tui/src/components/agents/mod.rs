@@ -49,6 +49,32 @@ impl Agents {
         self.active
     }
 
+    /// Number of tracked agent entries (running + finished). Used by the
+    /// full-screen dashboard for selection bounds.
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True if any agent has ever been tracked this session — gates opening the
+    /// dashboard.
+    pub fn has_entries(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    /// Stable id (entry name / agent_id) of the entry at `idx` in dashboard order,
+    /// used to target the backend cancel endpoint.
+    pub fn agent_id_at(&self, idx: usize) -> Option<String> {
+        self.entries.get(idx).map(|e| e.name.clone())
+    }
+
+    /// True when the entry at `idx` is still cancellable (running or spawning).
+    pub fn is_cancellable(&self, idx: usize) -> bool {
+        self.entries
+            .get(idx)
+            .map(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
+            .unwrap_or(false)
+    }
+
     /// Total render height: 0 when inactive, else header + 2*agents + batch headers + optional synth + swarm.
     /// Capped at 30 to prevent degenerate cases.
     pub fn height(&self) -> u16 {
@@ -107,6 +133,8 @@ impl Agents {
                     tool_uses: 0,
                     tokens_used: 0,
                     batch_id: None,
+                    started_at: std::time::Instant::now(),
+                    finished_at: None,
                 });
             }
         }
@@ -134,6 +162,8 @@ impl Agents {
             entry.current_action = String::new();
             entry.tool_uses = 0;
             entry.tokens_used = 0;
+            entry.started_at = std::time::Instant::now();
+            entry.finished_at = None;
             if batch_id.is_some() {
                 entry.batch_id = batch_id;
             }
@@ -148,6 +178,8 @@ impl Agents {
                 tool_uses: 0,
                 tokens_used: 0,
                 batch_id,
+                started_at: std::time::Instant::now(),
+                finished_at: None,
             });
         }
         self.active = true;
@@ -178,6 +210,7 @@ impl Agents {
             entry.current_action = "complete".into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
+            entry.finished_at = Some(std::time::Instant::now());
         }
     }
 
@@ -193,6 +226,20 @@ impl Agents {
             entry.current_action = error.into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
+            entry.finished_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Optimistically flag an agent as cancelled (preserving its recorded
+    /// tool/token counts) so the dashboard reflects the action immediately, even
+    /// before the backend's terminal event lands.
+    pub fn mark_cancelled(&mut self, name: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            if matches!(entry.status, AgentStatus::Running | AgentStatus::Spawning) {
+                entry.status = AgentStatus::Failed;
+                entry.current_action = "cancelled".into();
+                entry.finished_at = Some(std::time::Instant::now());
+            }
         }
     }
 

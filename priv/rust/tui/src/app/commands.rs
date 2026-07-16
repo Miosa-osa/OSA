@@ -157,6 +157,11 @@ impl App {
                     self.toasts.push(msg, crate::components::toast::ToastLevel::Info);
                 }
             }
+            "/agents" => {
+                // Open the full-screen background-agent dashboard (running +
+                // background subagents grouped by state).
+                self.open_agents_dashboard();
+            }
             "/setup" => {
                 self.force_onboarding();
             }

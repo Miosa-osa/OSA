@@ -158,6 +158,11 @@ pub struct Activity {
     /// different verb instead of always "Accomplishing".
     verb_offset: usize,
     start_time: Option<std::time::Instant>,
+    /// When set, overrides the rotating spinner verb with the active task's
+    /// present-continuous form (Claude Code's `activeForm`), so the spinner shows
+    /// the concrete current step (e.g. "Wiring the checklist…") instead of a
+    /// random flavor word. Cleared when no task is in progress.
+    active_verb: Option<String>,
     pub verbosity: Verbosity,
 }
 
@@ -221,6 +226,7 @@ impl Activity {
             phrase_tick: 0,
             verb_offset: 0,
             start_time: None,
+            active_verb: None,
             verbosity: Verbosity::All,
         }
     }
@@ -245,6 +251,14 @@ impl Activity {
         self.active = false;
         self.phase = ProcessingPhase::Waiting;
         self.start_time = None;
+        self.active_verb = None;
+    }
+
+    /// Override the spinner verb with the currently-active task's present-
+    /// continuous form (Claude Code's `activeForm`). Pass `None` to fall back to
+    /// the rotating flavor verbs (no task in progress).
+    pub fn set_active_verb(&mut self, verb: Option<String>) {
+        self.active_verb = verb.filter(|v| !v.trim().is_empty());
     }
 
     /// Set processing phase (auto-activates if inactive)
@@ -404,9 +418,13 @@ impl Component for Activity {
                               "\u{273d}", "\u{273b}", "\u{2736}", "\u{2733}", "\u{2722}", "\u{00b7}"];
         let spinner_char = spinner_frames[(self.phrase_tick as usize) % spinner_frames.len()];
 
-        // Claude Code's 179 rotating verbs. Each request starts on a different one
-        // (verb_offset, set at start) and it switches every ~2s so it feels alive.
-        let word = SPINNER_VERBS[(self.verb_offset + elapsed as usize / 2) % SPINNER_VERBS.len()];
+        // When a task is in progress, show its concrete active step (Claude Code's
+        // activeForm). Otherwise fall back to the 179 rotating flavor verbs — each
+        // request starts on a different one (verb_offset) and switches every ~2s.
+        let word: &str = match self.active_verb.as_deref() {
+            Some(v) => v,
+            None => SPINNER_VERBS[(self.verb_offset + elapsed as usize / 2) % SPINNER_VERBS.len()],
+        };
 
         // Output-token count for the "↓ N tokens" suffix. Fall back to a char-based
         // estimate (~4 chars/token) while streaming if tokens aren't reported yet.

@@ -1,6 +1,3 @@
-// Phase 2+: task checklist constants and tick() — wired when animation lands
-#![allow(dead_code)]
-
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
@@ -53,6 +50,17 @@ impl TaskChecklist {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.status = status;
         }
+    }
+
+    /// The present-continuous `active_form` of the first in-progress task, if any.
+    /// Feeds the activity spinner so it shows the current step (Claude Code's
+    /// activeForm). Returns `None` when nothing is in progress — the caller clears
+    /// the spinner override in that case.
+    pub fn current_active_form(&self) -> Option<String> {
+        self.items
+            .iter()
+            .find(|i| i.status == ChecklistStatus::InProgress)
+            .and_then(|i| i.active_form.clone())
     }
 
     pub fn show(&mut self) {

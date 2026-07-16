@@ -232,83 +232,86 @@ impl App {
     }
 
     pub(super) fn handle_plan_review_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if let Some(ref mut review) = self.plan_review {
-            if let Some(action) = review.handle_key(key) {
-                match action {
-                    DialogAction::PlanApprove => {
-                        self.transition(AppState::Processing);
-                        self.toasts.push(
-                            "Plan approved".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        let client = self.client.clone();
-                        let tx = self.event_tx.clone();
-                        let session_id = self.session_id.clone();
-                        tokio::spawn(async move {
-                            let req = crate::client::types::CommandExecuteRequest {
-                                command: "plan_approve".into(),
-                                arg: String::new(),
-                                session_id,
-                            };
-                            let event = match client.execute_command(&req).await {
-                                Ok(resp) => BackendEvent::CommandResult(Ok(resp)),
-                                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
-                            };
-                            let _ = tx.send(Event::Backend(event));
-                        });
-                        self.plan_review = None;
-                    }
-                    DialogAction::PlanReject => {
-                        self.transition(AppState::Idle);
-                        self.toasts.push(
-                            "Plan rejected".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        let client = self.client.clone();
-                        let tx = self.event_tx.clone();
-                        let session_id = self.session_id.clone();
-                        tokio::spawn(async move {
-                            let req = crate::client::types::CommandExecuteRequest {
-                                command: "plan_reject".into(),
-                                arg: String::new(),
-                                session_id,
-                            };
-                            let event = match client.execute_command(&req).await {
-                                Ok(resp) => BackendEvent::CommandResult(Ok(resp)),
-                                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
-                            };
-                            let _ = tx.send(Event::Backend(event));
-                        });
-                        self.plan_review = None;
-                    }
-                    DialogAction::PlanEdit => {
-                        self.transition(AppState::Idle);
-                        self.toasts.push(
-                            "Plan edit requested".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                        let client = self.client.clone();
-                        let tx = self.event_tx.clone();
-                        let session_id = self.session_id.clone();
-                        tokio::spawn(async move {
-                            let req = crate::client::types::CommandExecuteRequest {
-                                command: "plan_edit".into(),
-                                arg: String::new(),
-                                session_id,
-                            };
-                            let event = match client.execute_command(&req).await {
-                                Ok(resp) => BackendEvent::CommandResult(Ok(resp)),
-                                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
-                            };
-                            let _ = tx.send(Event::Backend(event));
-                        });
-                        self.plan_review = None;
-                    }
-                    _ => {}
-                }
+        // Resolve the action first (mutable borrow of `plan_review`), then act on
+        // `self` freely — avoids overlapping borrows when we touch input/activity.
+        let action = self
+            .plan_review
+            .as_mut()
+            .and_then(|review| review.handle_key(key));
+        let Some(action) = action else {
+            return false;
+        };
+
+        match action {
+            DialogAction::PlanApprove => {
+                // Approve → resume execution. Drive the processing indicator so the
+                // spinner comes back immediately; SSE events resume the turn.
+                self.plan_review = None;
+                self.transition(AppState::Processing);
+                self.activity.start();
+                self.status.set_active(true);
+                self.processing_start = Some(std::time::Instant::now());
+                self.toasts.push(
+                    "Plan approved — resuming".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.send_plan_command("plan_approve", String::new());
             }
+            DialogAction::PlanReject => {
+                self.plan_review = None;
+                self.transition(AppState::Idle);
+                self.toasts.push(
+                    "Plan rejected".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.send_plan_command("plan_reject", String::new());
+            }
+            DialogAction::PlanEdit => {
+                // Edit → seed the input box with the plan text so the user can
+                // revise and re-submit it as the next message (the edited plan
+                // goes back to the agent). Release the backend gate too.
+                let plan_text = self
+                    .plan_review
+                    .as_ref()
+                    .map(|r| r.plan_text().to_string())
+                    .unwrap_or_default();
+                self.plan_review = None;
+                self.transition(AppState::Idle);
+                if !plan_text.is_empty() {
+                    self.input.reset();
+                    self.input.insert_str(&plan_text);
+                }
+                self.toasts.push(
+                    "Edit the plan and press Enter to send it back".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.send_plan_command("plan_edit", String::new());
+            }
+            _ => {}
         }
         false
+    }
+
+    /// Fire a plan-mode command (`plan_approve` / `plan_reject` / `plan_edit`) at
+    /// the backend for the current session, routing the result back as a
+    /// `CommandResult` event.
+    fn send_plan_command(&self, command: &str, arg: String) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let session_id = self.session_id.clone();
+        let command = command.to_string();
+        tokio::spawn(async move {
+            let req = crate::client::types::CommandExecuteRequest {
+                command,
+                arg,
+                session_id,
+            };
+            let event = match client.execute_command(&req).await {
+                Ok(resp) => BackendEvent::CommandResult(Ok(resp)),
+                Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
     }
 
     pub(super) fn handle_permissions_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -519,6 +522,64 @@ impl App {
             }
         }
         false
+    }
+
+    /// Open the full-screen background-agent dashboard. No-op with a hint if no
+    /// agents have run this session.
+    pub(crate) fn open_agents_dashboard(&mut self) {
+        if !self.agents.has_entries() {
+            self.toasts.push(
+                "No agents have run yet".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+            return;
+        }
+        let count = self.agents.entry_count();
+        if self.agents_dashboard_selected >= count {
+            self.agents_dashboard_selected = count.saturating_sub(1);
+        }
+        if self.state.can_transition_to(AppState::AgentsDashboard) {
+            self.transition(AppState::AgentsDashboard);
+        } else {
+            self.toasts.push(
+                "Cannot open the agent dashboard right now".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+        }
+    }
+
+    /// Close the dashboard, returning to whichever state opened it.
+    pub(super) fn close_agents_dashboard(&mut self) {
+        let target = match self.prev_state {
+            Some(AppState::Processing) => AppState::Processing,
+            _ => AppState::Idle,
+        };
+        self.transition(target);
+    }
+
+    /// Cancel the currently-selected running agent via the backend and reflect it
+    /// optimistically in the dashboard.
+    pub(super) fn cancel_selected_agent(&mut self) {
+        let idx = self.agents_dashboard_selected;
+        if !self.agents.is_cancellable(idx) {
+            self.toasts.push(
+                "Selected agent is not running".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+            return;
+        }
+        if let Some(id) = self.agents.agent_id_at(idx) {
+            let client = self.client.clone();
+            let target = id.clone();
+            tokio::spawn(async move {
+                let _ = client.cancel_agent(&target).await;
+            });
+            self.agents.mark_cancelled(&id);
+            self.toasts.push(
+                format!("Cancelling agent {}", id),
+                crate::components::toast::ToastLevel::Warning,
+            );
+        }
     }
 
     pub(super) fn open_command_palette(&mut self) {
