@@ -584,6 +584,26 @@ impl App {
             BackendEvent::ParseWarning { message } => {
                 warn!("SSE parse warning: {}", message);
             }
+            BackendEvent::AutoModePaused { blocked_count, message } => {
+                // The auto-mode guardian paused for human review. Surface a clear
+                // status note telling the user how many dangerous actions were
+                // blocked and how to proceed (/resume or approve).
+                let note = if message.is_empty() {
+                    let n = blocked_count.max(1);
+                    let plural = if n == 1 { "action" } else { "actions" };
+                    format!(
+                        "auto-mode paused: {} dangerous {} blocked — /resume or approve",
+                        n, plural
+                    )
+                } else {
+                    format!("auto-mode paused: {} — /resume or approve", message)
+                };
+                self.chat.add_system_message(&note, "warning");
+                self.toasts.push(
+                    note,
+                    crate::components::toast::ToastLevel::Warning,
+                );
+            }
             BackendEvent::HookBlocked { hook_name, reason } => {
                 self.toasts.push(
                     format!("Blocked by {}: {}", hook_name, reason),

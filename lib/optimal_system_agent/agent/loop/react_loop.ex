@@ -480,8 +480,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       state = inject_post_tool_nudges(state, tool_calls)
 
       case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, state} -> {doom_message, state}
-        {:ok, state} -> run(state)
+        {:halt, doom_message, state} ->
+          {doom_message, state}
+
+        {:ok, state} ->
+          # Auto-mode: if the safety Guardian paused this session after N blocked
+          # dangerous actions, halt the loop and surface a review prompt instead
+          # of recursing into another unattended iteration.
+          if state.permission_tier == :auto and
+               OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
+            blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
+
+            pause_message =
+              "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
+                "Review the blocked calls, then resume to continue."
+
+            {pause_message, state}
+          else
+            run(state)
+          end
       end
     end
   end

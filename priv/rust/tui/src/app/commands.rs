@@ -187,6 +187,32 @@ impl App {
                 // Notify backend to toggle dangerous mode
                 self.execute_backend_command("dangerous_mode", if self.config.skip_permissions { "on" } else { "off" });
             }
+            "/auto" => {
+                // Toggle the backend "auto" permission tier + safety guardian.
+                // The guardian auto-approves safe actions and pauses on dangerous
+                // ones for review. Mirrors /yolo but for the Auto mode.
+                use crate::components::status_bar::PermissionMode;
+                let turning_on = self.status.permission_mode() != PermissionMode::Auto;
+                if turning_on {
+                    self.status.set_permission_mode(PermissionMode::Auto);
+                    // Auto is not a full bypass — keep skip_permissions/YOLO off.
+                    self.config.skip_permissions = false;
+                    self.sidebar.set_yolo_mode(false);
+                } else {
+                    self.status.set_permission_mode(PermissionMode::Default);
+                }
+                let state = if turning_on {
+                    "ON — guardian auto-approves safe actions, pauses on dangerous ones"
+                } else {
+                    "OFF — back to default permission prompts"
+                };
+                self.toasts.push(
+                    format!("Auto mode: {}", state),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                // Notify backend to toggle the auto permission tier.
+                self.execute_backend_command("auto_mode", if turning_on { "on" } else { "off" });
+            }
             "/tools" => {
                 let count = self.header.tool_count();
                 self.toasts.push(
@@ -453,7 +479,7 @@ impl App {
         });
     }
 
-    fn execute_backend_command(&mut self, command: &str, arg: &str) {
+    pub(crate) fn execute_backend_command(&mut self, command: &str, arg: &str) {
         self.transition(AppState::Processing);
         self.activity.start();
         self.status.set_active(true);

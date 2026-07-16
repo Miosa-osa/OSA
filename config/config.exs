@@ -217,6 +217,34 @@ config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 
 config :optimal_system_agent, budget_event_emitter: OptimalSystemAgent.BudgetEmitter
 
+# Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
+# dangerous tool calls and the Guardian pauses unattended execution after
+# `pause_after_blocks` blocked actions. `untrusted_host_allowlist` names the
+# hosts network tools (curl/wget/ssh/…) may reach without raising a caution.
+config :optimal_system_agent, :auto_mode,
+  pause_after_blocks: 3,
+  untrusted_host_allowlist: [
+    "github.com",
+    "raw.githubusercontent.com",
+    "api.github.com",
+    "gitlab.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "registry.npmjs.org",
+    "npmjs.com",
+    "hex.pm",
+    "repo.hex.pm",
+    "crates.io",
+    "static.crates.io",
+    "golang.org",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "anthropic.com",
+    "api.anthropic.com",
+    "openai.com",
+    "api.openai.com"
+  ]
+
 config :logger,
   level: :warning
 

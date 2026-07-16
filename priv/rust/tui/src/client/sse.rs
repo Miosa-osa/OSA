@@ -435,7 +435,8 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "ask_user_question"
         | "survey_answered"
         | "proactive_message"
-        | "proactive_mode_changed" => parse_system_event(data),
+        | "proactive_mode_changed"
+        | "auto_mode_paused" => parse_system_event(data),
 
         "" => None,
 
@@ -1049,6 +1050,24 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             };
             Some(BackendEvent::ProactiveModeChanged {
                 enabled: ev.enabled,
+            })
+        }
+
+        "auto_mode_paused" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                blocked_count: u32,
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("auto_mode_paused", e)),
+            };
+            Some(BackendEvent::AutoModePaused {
+                blocked_count: ev.blocked_count,
+                message: ev.message,
             })
         }
 

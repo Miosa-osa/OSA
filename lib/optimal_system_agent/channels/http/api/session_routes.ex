@@ -209,6 +209,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     json(conn, 200, %{status: "ok", decision: decision})
   end
 
+  # ── POST /sessions/:id/auto_mode/resume ────────────────────────────
+  # Clear a safety-Guardian pause and let the auto-mode loop resume. Resets the
+  # session block counter and pause flag; the caller can then send a new turn.
+  post "/:id/auto_mode/resume" do
+    session_id = conn.params["id"]
+    was_paused = OptimalSystemAgent.Agent.Safety.Guardian.paused?(session_id)
+    OptimalSystemAgent.Agent.Safety.Guardian.resume(session_id)
+
+    json(conn, 200, %{
+      status: "ok",
+      session_id: session_id,
+      was_paused: was_paused,
+      paused: false
+    })
+  end
+
   # ── GET /sessions/:id ──────────────────────────────────────────────
 
   get "/:id" do

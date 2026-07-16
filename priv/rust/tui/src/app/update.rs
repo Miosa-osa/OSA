@@ -119,13 +119,25 @@ impl App {
     /// control that notifies the backend.
     fn cycle_permission_mode(&mut self) {
         use crate::components::status_bar::PermissionMode;
-        let next = self.status.permission_mode().next();
+        let prev = self.status.permission_mode();
+        let next = prev.next();
         self.status.set_permission_mode(next);
 
         // Keep the sidebar YOLO indicator consistent with the bypass display.
         let bypass = matches!(next, PermissionMode::BypassPermissions);
         self.config.skip_permissions = bypass;
         self.sidebar.set_yolo_mode(bypass);
+
+        // Sync the backend "auto" permission tier / safety guardian with the UI
+        // so enforcement matches what's displayed. Toggle on when entering Auto,
+        // off when leaving it (mirrors how /yolo notifies dangerous-mode).
+        let entering_auto = matches!(next, PermissionMode::Auto);
+        let leaving_auto = matches!(prev, PermissionMode::Auto) && !entering_auto;
+        if entering_auto {
+            self.execute_backend_command("auto_mode", "on");
+        } else if leaving_auto {
+            self.execute_backend_command("auto_mode", "off");
+        }
 
         self.toasts.push(
             format!("Permission mode: {}", next.title()),

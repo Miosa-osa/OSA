@@ -153,8 +153,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   defp parse_permission_tier("workspace"), do: :workspace
   defp parse_permission_tier("subagent"), do: :subagent
   defp parse_permission_tier("full"), do: :full
+  defp parse_permission_tier("auto"), do: :auto
 
-  defp parse_permission_tier(tier) when tier in [:read_only, :workspace, :subagent, :full],
+  defp parse_permission_tier(tier) when tier in [:read_only, :workspace, :subagent, :full, :auto],
     do: tier
 
   defp parse_permission_tier(_), do: :subagent

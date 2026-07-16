@@ -12,6 +12,9 @@ use super::{Component, ComponentAction};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
     Default,
+    /// Auto mode — backend "auto" permission tier: the safety guardian
+    /// auto-approves safe actions and pauses on dangerous ones for review.
+    Auto,
     AcceptEdits,
     BypassPermissions,
     Plan,
@@ -23,6 +26,7 @@ impl PermissionMode {
         match self {
             PermissionMode::AcceptEdits | PermissionMode::BypassPermissions => "\u{23F5}\u{23F5}",
             PermissionMode::Plan => "\u{23F8}",
+            PermissionMode::Auto => "\u{25C8}", // ◈
             PermissionMode::Default => "",
         }
     }
@@ -33,6 +37,7 @@ impl PermissionMode {
             PermissionMode::BypassPermissions => "Bypass permissions",
             PermissionMode::AcceptEdits => "Accept edits",
             PermissionMode::Plan => "Plan mode",
+            PermissionMode::Auto => "Auto",
             PermissionMode::Default => "Default",
         }
     }
@@ -43,6 +48,7 @@ impl PermissionMode {
             PermissionMode::BypassPermissions => "bypass",
             PermissionMode::AcceptEdits => "accept edits",
             PermissionMode::Plan => "plan",
+            PermissionMode::Auto => "auto",
             PermissionMode::Default => "default",
         }
     }
@@ -51,11 +57,12 @@ impl PermissionMode {
         matches!(self, PermissionMode::Default)
     }
 
-    /// Advance to the next mode in the Shift+Tab cycle, matching Claude Code's
-    /// order: Default → AcceptEdits → Plan → BypassPermissions → Default.
+    /// Advance to the next mode in the Shift+Tab cycle:
+    /// Default → Auto → AcceptEdits → Plan → BypassPermissions → Default.
     pub fn next(&self) -> PermissionMode {
         match self {
-            PermissionMode::Default => PermissionMode::AcceptEdits,
+            PermissionMode::Default => PermissionMode::Auto,
+            PermissionMode::Auto => PermissionMode::AcceptEdits,
             PermissionMode::AcceptEdits => PermissionMode::Plan,
             PermissionMode::Plan => PermissionMode::BypassPermissions,
             PermissionMode::BypassPermissions => PermissionMode::Default,
@@ -68,6 +75,7 @@ impl PermissionMode {
             PermissionMode::AcceptEdits => theme.colors.success, // foam
             PermissionMode::BypassPermissions => theme.colors.error, // love
             PermissionMode::Plan => theme.colors.secondary,      // iris
+            PermissionMode::Auto => theme.colors.primary,        // accent — distinct auto tier
             PermissionMode::Default => theme.colors.muted,
         }
     }

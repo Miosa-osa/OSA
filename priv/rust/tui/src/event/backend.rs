@@ -153,6 +153,14 @@ pub enum BackendEvent {
         rounds: u32,
     },
 
+    // === Auto Mode (safety guardian) ===
+    /// The auto-mode safety guardian paused the run because it blocked one or
+    /// more dangerous actions that need human review (`/resume` or approve).
+    AutoModePaused {
+        blocked_count: u32,
+        message: String,
+    },
+
     // === Hooks/Budget ===
     HookBlocked { hook_name: String, reason: String },
     BudgetWarning { utilization: f64, message: String },

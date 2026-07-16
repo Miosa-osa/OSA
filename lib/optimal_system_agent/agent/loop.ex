@@ -60,7 +60,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     last_meta: %{iteration_count: 0, tools_used: []},
     explored_files: MapSet.new(),
     exploration_done: false,
-    # :full | :workspace | :read_only | :subagent
+    # :full | :workspace | :read_only | :subagent | :auto
+    # default stays :full; :auto (near-zero-prompt unattended execution gated by
+    # the safety Guardian) is opt-in via /auto_mode or set_permission_mode auto.
     permission_tier: :full,
     # Subagent fields
     parent_session_id: nil,
@@ -198,6 +200,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
           {:ok, :exited | :was_not_active} | {:error, :no_session | term()}
   def exit_plan_mode(session_id) do
     GenServer.call(via(session_id), :exit_plan_mode)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
+  Set the permission tier for a running session
+  (`:full | :workspace | :read_only | :subagent | :auto`).
+
+  Used by the HTTP `/commands/execute` auto-mode toggle and the CLI to flip a
+  session into near-zero-prompt unattended execution and back to `:full`.
+  """
+  @spec set_permission_tier(String.t(), atom()) :: {:ok, atom()} | {:error, :no_session}
+  def set_permission_tier(session_id, tier) do
+    GenServer.call(via(session_id), {:set_permission_tier, tier})
   catch
     :exit, _ -> {:error, :no_session}
   end
@@ -539,7 +555,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call({:set_permission_tier, tier}, _from, state)
-      when tier in [:full, :workspace, :read_only] do
+      when tier in [:full, :workspace, :read_only, :auto] do
     {:reply, {:ok, tier}, %{state | permission_tier: tier}}
   end
 

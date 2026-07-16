@@ -32,6 +32,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   @doc false
   def permission_tier_allows?(:full, _tool), do: true
+  # :auto (unattended auto-mode) allows every tool at the tier gate; the safety
+  # Guardian (policy classifier) decides block/pause per call downstream.
+  def permission_tier_allows?(:auto, _tool), do: true
   def permission_tier_allows?(:read_only, tool), do: tool in @read_only_tools
 
   def permission_tier_allows?(:workspace, tool),
@@ -120,6 +123,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           )
 
           "Blocked: this agent role does not have access to #{tool_call.name}"
+
+        state.permission_tier == :auto ->
+          # Auto-mode: gate the call through the safety Guardian. A nil result
+          # falls through to the :pre_tool_use hooks below — defense in depth.
+          case OptimalSystemAgent.Agent.Safety.Guardian.review(tool_call, state) do
+            {:block, reason} -> "Blocked: #{reason}"
+            {:pause, reason} -> "Blocked (auto-mode paused): #{reason}"
+            {:allow} -> nil
+          end
 
         true ->
           nil

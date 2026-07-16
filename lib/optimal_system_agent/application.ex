@@ -85,6 +85,12 @@ defmodule OptimalSystemAgent.Application do
     # ETS table for structured compression state (previous summary persistence)
     :ets.new(:osa_compactor_state, [:named_table, :public, :set])
 
+    # ETS table for auto-mode safety Guardian state.
+    # Rows: {{session_id, :blocks}, integer_count} and {{session_id, :paused}, true}
+    # Tracks how many dangerous tool calls have been blocked in a session so the
+    # Guardian can pause unattended execution after N blocks (config threshold).
+    :ets.new(:osa_auto_mode, [:named_table, :public, :set])
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 

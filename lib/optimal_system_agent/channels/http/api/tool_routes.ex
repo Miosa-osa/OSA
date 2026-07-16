@@ -87,7 +87,68 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
       cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
-      if cmd_name in @blocked_http_commands do
+      cond do
+        auto_mode_command?(command) ->
+          handle_auto_mode_command(conn, command)
+
+        cmd_name in @blocked_http_commands ->
+          body =
+            Jason.encode!(%{
+              output: "Command '#{cmd_name}' is not available via HTTP.",
+              command: command
+            })
+
+          conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+        true ->
+          execute_cli_command(conn, command)
+      end
+    else
+      _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
+    end
+  end
+
+  # Matches `auto_mode`, `auto_mode on/off`, and `set_permission_mode auto|full`.
+  defp auto_mode_command?(command) do
+    normalized = command |> String.trim() |> String.downcase()
+
+    String.starts_with?(normalized, "auto_mode") or
+      String.starts_with?(normalized, "set_permission_mode")
+  end
+
+  defp handle_auto_mode_command(conn, command) do
+    tokens = command |> String.trim() |> String.downcase() |> String.split()
+
+    session_id =
+      conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+
+    {tier, label} = resolve_auto_mode_tier(tokens)
+
+    output =
+      case OptimalSystemAgent.Agent.Loop.set_permission_tier(session_id, tier) do
+        {:ok, ^tier} ->
+          if tier == :full,
+            do: "Auto-mode disabled — permission tier restored to :full.",
+            else: "Auto-mode enabled — unattended execution gated by the safety Guardian."
+
+        {:error, :no_session} ->
+          "No active session #{session_id} to set permission mode #{label}."
+      end
+
+    body = Jason.encode!(%{output: output, command: command, tier: tier})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  # `off`/`full`/`disable` turns auto-mode off (back to :full); anything else on.
+  defp resolve_auto_mode_tier(tokens) do
+    off? = Enum.any?(tokens, &(&1 in ~w(off full disable disabled stop)))
+    if off?, do: {:full, "full"}, else: {:auto, "auto"}
+  end
+
+  defp execute_cli_command(conn, command) do
+    cmd_name = command |> String.split() |> List.first() |> String.downcase()
+
+    if cmd_name in @blocked_http_commands do
         body =
           Jason.encode!(%{
             output: "Command '#{cmd_name}' is not available via HTTP.",
@@ -125,9 +186,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         body = Jason.encode!(%{output: clean_output, command: command})
         conn |> put_resp_content_type("application/json") |> send_resp(200, body)
       end
-    else
-      _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")
-    end
   end
 
   # ── POST /:name/execute (tools) ────────────────────────────────────
