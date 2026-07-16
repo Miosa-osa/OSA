@@ -12,11 +12,13 @@
 ## Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
 osa
 ```
 
-That's it. The installer auto-detects Elixir/Erlang/Rust and installs anything missing, clones the repo, builds the backend + Rust TUI, and symlinks `osa` to your PATH. First run drops you into an interactive setup wizard (pick a provider, paste a key or pick the local Ollama default, done). Type `osa` from anywhere on disk after that.
+That's it — **no Elixir, Erlang, or Rust required.** The installer detects your OS/arch, downloads the prebuilt release from GitHub (a self-contained Elixir/OTP release that bundles its own runtime, plus the prebuilt Rust TUI), extracts everything to `~/.osa`, and puts the `osa` command on your PATH. First run drops you into an interactive setup wizard (pick a provider, paste a key or pick the local Ollama default, done). Type `osa` from anywhere on disk after that.
+
+> Prefer to build from source? `curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash` installs Elixir/Erlang/Rust as needed and compiles locally.
 
 ```
 ✓ Backend boots in ~2s
@@ -336,11 +338,21 @@ Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) configured 
 
 ## Installation
 
+**Prebuilt (recommended — no toolchains):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
+```
+
+Detects your OS/arch and downloads prebuilt release assets from GitHub Releases — **no Elixir, Erlang, or Rust required.** The release tarball is a self-contained Elixir/OTP release that bundles its own ERTS (built on CI via `MIX_ENV=prod mix release`), and the Rust TUI ships as a prebuilt binary. Everything lands in `~/.osa` and the `osa` command is added to your PATH. Prebuilt targets: **linux-x64** and **macOS arm64**. Pin a version with `OSA_VERSION=v0.4.0`.
+
+**From source (any platform):**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash
 ```
 
-The installer auto-detects your OS and architecture. On **macOS arm64**, **Linux amd64**, and **Linux arm64** it downloads the pre-built single binary from GitHub Releases — no Elixir, Erlang, or Rust required. On other platforms it falls back to a source build (installs Elixir/Erlang/Rust automatically).
+Installs Elixir/Erlang/Rust as needed, then builds the backend + Rust TUI locally.
 
 **Homebrew:** `brew tap miosa-osa/tap && brew install osa`
 

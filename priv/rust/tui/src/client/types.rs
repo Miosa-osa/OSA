@@ -5,19 +5,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// === Health ===
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-    pub version: String,
-    #[serde(default)]
-    pub uptime_seconds: i64,
-    pub provider: String,
-    pub model: String,
-    #[serde(default)]
-    pub context_window: Option<u64>,
-}
+// Protocol-driven payloads live in `generated.rs` (produced from the Elixir
+// source of truth by `mix osa.gen.tui_types`). Re-export them here so the rest
+// of the crate keeps referring to `crate::client::types::*` unchanged, while the
+// covered shapes can no longer drift from the Elixir HTTP API.
+//
+// Covered here: HealthResponse, OrchestrateRequest/Response, SessionInfo,
+// SessionMessage, SessionListResponse, SessionCreateResponse,
+// SessionMessagesResponse, ContextStats, CompactResponse, RecapResponse,
+// RunSummary/RunListResponse/RunCancelResponse, RewindCheckpoint,
+// RewindListResponse, RewindRestoreRequest/Response, ErrorResponse.
+//
+// Everything below is hand-written for payloads codegen does not reach yet.
+pub use super::generated::*;
 
 // === Auth ===
 
@@ -32,32 +32,6 @@ pub struct LoginResponse {
     pub token: String,
     pub refresh_token: String,
     pub expires_in: i32,
-}
-
-// === Orchestrate ===
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OrchestrateRequest {
-    pub input: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_plan: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
-    /// Attachments for vision-capable models: file paths or base64-encoded images.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub images: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OrchestrateResponse {
-    pub session_id: String,
-    pub status: String,
 }
 
 // === Signal ===
@@ -129,21 +103,9 @@ pub struct ToolExecuteResponse {
 }
 
 // === Sessions ===
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub created_at: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub message_count: i32,
-    #[serde(default)]
-    pub messages: Option<Vec<SessionMessage>>,
-    /// Timestamp of the most recent turn (present on /recent listings).
-    #[serde(default)]
-    pub last_active: Option<String>,
-}
+//
+// SessionInfo and SessionMessage are generated (re-exported above). RecentSession
+// is a hand-written listing helper that converts into the generated SessionInfo.
 
 /// A row from GET /api/v1/sessions/recent — past on-disk sessions with real
 /// message counts and titles derived from the first user message.
@@ -173,66 +135,8 @@ impl From<RecentSession> for SessionInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionMessage {
-    pub role: String,
-    pub content: String,
-    #[serde(default)]
-    pub timestamp: Option<String>,
-}
-
-/// GET /api/v1/sessions/:id/context — token-usage breakdown.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ContextStats {
-    #[serde(default)]
-    pub system_tokens: u64,
-    #[serde(default)]
-    pub conversation_tokens: u64,
-    #[serde(default)]
-    pub tool_result_tokens: u64,
-    #[serde(default)]
-    pub max_tokens: u64,
-    #[serde(default)]
-    pub used_tokens: u64,
-}
-
-/// POST /api/v1/sessions/:id/compact — proactive compaction result.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CompactResponse {
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub messages_before: u64,
-    #[serde(default)]
-    pub messages_after: u64,
-    #[serde(default)]
-    pub tokens_before: u64,
-    #[serde(default)]
-    pub tokens_after: u64,
-}
-
-/// GET /api/v1/sessions/:id/recap — short LLM summary of the session.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RecapResponse {
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub recap: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionCreateResponse {
-    pub id: String,
-    /// "created" for a new session, "resumed" when the folder already had one.
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub working_dir: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-}
+// SessionMessage, ContextStats, CompactResponse, RecapResponse and
+// SessionCreateResponse are generated (re-exported at the top of this module).
 
 // === Models ===
 
@@ -626,23 +530,10 @@ pub struct SurveyAnswerEntry {
 }
 
 // === Rewind checkpoints (/rewind) ===
-
-/// A single rewind checkpoint from GET /api/v1/rewind/:session_id — a snapshot
-/// of conversation (and optionally code) taken before a user prompt.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RewindCheckpoint {
-    pub id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub iteration: i64,
-    #[serde(default)]
-    pub message_count: i64,
-    #[serde(default)]
-    pub has_code: bool,
-}
+//
+// RewindCheckpoint, RewindRestoreRequest and RewindRestoreResponse are generated
+// (re-exported at the top of this module). RewindScope is a hand-written client
+// enum that renders into the generated request's `scope: String`.
 
 /// Restore scope for POST /api/v1/rewind/restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -670,28 +561,5 @@ impl RewindScope {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct RewindRestoreRequest {
-    pub session_id: String,
-    pub checkpoint_id: String,
-    pub scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RewindRestoreResponse {
-    #[serde(default)]
-    pub scope: String,
-    #[serde(default)]
-    pub message_count: Option<i64>,
-}
-
-// === Error ===
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    #[serde(default)]
-    pub code: Option<String>,
-    #[serde(default)]
-    pub details: Option<String>,
-}
+// RewindRestoreRequest, RewindRestoreResponse and ErrorResponse are generated
+// (re-exported at the top of this module).

@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
 
     json(conn, 200, %{
       total_tokens: 0,
-      total_cost_usd: Float.round(total_cost_usd, 6),
+      total_cost_usd: round6(total_cost_usd),
       input_tokens: 0,
       output_tokens: 0,
       sessions: ledger_entries,
@@ -58,7 +58,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
       |> Enum.map(fn {session, entries} ->
         %{
           agent: session,
-          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> Float.round(6),
+          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> round6(),
           requests: length(entries),
           tokens_in: entries |> Enum.map(&(&1[:tokens_in] || 0)) |> Enum.sum(),
           tokens_out: entries |> Enum.map(&(&1[:tokens_out] || 0)) |> Enum.sum()
@@ -81,7 +81,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
         %{
           model: model,
           provider: (List.first(entries) || %{})[:provider] || "unknown",
-          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> Float.round(6),
+          cost_usd: entries |> Enum.map(&(&1[:cost_usd] || 0)) |> Enum.sum() |> round6(),
           requests: length(entries),
           tokens_in: entries |> Enum.map(&(&1[:tokens_in] || 0)) |> Enum.sum(),
           tokens_out: entries |> Enum.map(&(&1[:tokens_out] || 0)) |> Enum.sum()
@@ -186,6 +186,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CostRoutes do
   end
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  # Round a money amount to 6 dp. Coerces via `/ 1` first so an integer input
+  # (e.g. a zero sum from `Enum.sum/1` over integer/absent cost fields, or an
+  # integer `monthly_spent` from the Budget GenServer) does not raise
+  # ArgumentError — `Float.round/2` requires a float.
+  defp round6(n) when is_number(n), do: Float.round(n / 1, 6)
+  defp round6(_), do: 0.0
 
   defp fetch_ledger do
     case OptimalSystemAgent.Agent.Budget.get_ledger() do

@@ -1,541 +1,350 @@
-#!/usr/bin/env bash
-# scripts/install.sh — One-line installer for OSA Agent.
+#!/bin/sh
+# scripts/install.sh — OSA one-command installer (zero toolchains).
+#
+# Downloads prebuilt release artifacts from GitHub Releases and wires up the
+# `osa` command. The user needs NO Elixir, Erlang, or Rust: the release tarball
+# bundles its own ERTS (built on CI via `MIX_ENV=prod mix release osagent`) and
+# the Rust TUI ships as a prebuilt binary.
 #
 # Usage:
-#   macOS/Linux: curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.sh | bash
-#   Windows:     irm https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.ps1 | iex
+#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
+#   wget -qO-  https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
 #
-# Supported:
-#   macOS (ARM + Intel), Ubuntu, Debian, Fedora, RHEL/Rocky/Alma,
-#   Arch, Alpine, openSUSE, Amazon Linux, WSL2, Windows (via install.ps1)
+# Environment overrides:
+#   OSA_VERSION   Pin to a release tag (e.g. "v0.4.0"). Default: latest.
+#   OSA_HOME      Install root. Default: $HOME/.osa
 #
-# What it does:
-#   1. Auto-installs ALL prerequisites — no questions asked
-#   2. Clones repo to ~/.osa/agent/ (or updates existing)
-#   3. Installs native build dependencies for Rust TUI
-#   4. Builds the Rust TUI
-#   5. Fetches Elixir dependencies & compiles
-#   6. Installs `osa` and `osagent` to ~/.local/bin
-#   7. Sets up PATH if needed
+# Exit codes:
+#   0 success   1 unsupported platform   2 network error   3 extraction error
+#
+# POSIX sh. No bashisms. Requires: curl or wget, tar, and sha256sum/shasum.
 
-set -euo pipefail
+set -eu
 
-# ── Safe defaults ────────────────────────────────────────────────
-HOME="${HOME:-/root}"
-export LC_ALL="${LC_ALL:-C.UTF-8}"
-export LANG="${LANG:-C.UTF-8}"
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+GITHUB_REPO="Miosa-osa/OSA"
+OSA_HOME="${OSA_HOME:-${HOME}/.osa}"
+RELEASE_DIR="${OSA_HOME}/release"
+BIN_DIR="${OSA_HOME}/bin"
+TUI_BIN="${BIN_DIR}/osagent-tui"
+LAUNCHER="${BIN_DIR}/osa"
+INSTALL_ONE_LINER="curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh"
 
-# sudo helper: skip when already root
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi
-
-# ── Colors ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Pretty output
+# ---------------------------------------------------------------------------
 if [ -t 1 ]; then
-  BOLD='\033[1m'
-  DIM='\033[2m'
-  GREEN='\033[0;32m'
-  YELLOW='\033[0;33m'
-  RED='\033[0;31m'
-  CYAN='\033[0;36m'
-  RESET='\033[0m'
+  BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'
+  YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; RESET='\033[0m'
 else
-  BOLD='' DIM='' GREEN='' YELLOW='' RED='' CYAN='' RESET=''
+  BOLD=''; DIM=''; GREEN=''; YELLOW=''; RED=''; CYAN=''; RESET=''
 fi
 
-info()  { echo -e "${CYAN}→${RESET} $*"; }
-ok()    { echo -e "${GREEN}✓${RESET} $*"; }
-warn()  { echo -e "${YELLOW}⚠${RESET} $*"; }
-fail()  { echo -e "${RED}✗${RESET} $*"; exit 1; }
+info() { printf "${CYAN}  ->${RESET} %s\n" "$*"; }
+ok()   { printf "${GREEN}  ok${RESET} %s\n" "$*"; }
+warn() { printf "${YELLOW}  !! ${RESET}%s\n" "$*" >&2; }
+fail() { printf "${RED}  !! %s${RESET}\n" "$*" >&2; exit "${2:-1}"; }
 
-# ── Config ─────────────────────────────────────────────────────────
-OSA_DIR="${HOME}/.osa"
-INSTALL_DIR="${HOME}/.local/bin"
-REPO_URL="${OSA_REPO_URL:-https://github.com/Miosa-osa/OSA.git}"
-BRANCH="${OSA_BRANCH:-main}"
-AGENT_DIR="${OSA_DIR}/agent"
-
-# Minimum required versions
-MIN_ELIXIR_MAJOR=1
-MIN_ELIXIR_MINOR=17
-MIN_OTP_MAJOR=26
-
-# ── Banner ─────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}  ◈ OSA Agent — Installer${RESET}"
-echo -e "${DIM}  Your OS, Supercharged${RESET}"
-echo ""
-
-# ── Detect OS + package manager ──────────────────────────────────
-detect_os() {
-  case "$(uname -s)" in
-    Darwin) OS="macos"; PKG="brew" ;;
-    Linux)  OS="linux"
-      if   command -v apt-get >/dev/null 2>&1; then PKG="apt"
-      elif command -v dnf     >/dev/null 2>&1; then PKG="dnf"
-      elif command -v pacman  >/dev/null 2>&1; then PKG="pacman"
-      elif command -v apk     >/dev/null 2>&1; then PKG="apk"
-      elif command -v zypper  >/dev/null 2>&1; then PKG="zypper"
-      elif command -v yum     >/dev/null 2>&1; then PKG="yum"
-      else PKG="unknown"
-      fi
-      ;;
-    MINGW*|MSYS*|CYGWIN*) OS="windows"; PKG="unknown" ;;
-    *) fail "Unsupported OS: $(uname -s)" ;;
-  esac
-}
-detect_os
-
-if [ "$OS" = "windows" ]; then
-  warn "Windows detected via Git Bash/MSYS2."
-  info "For best results, use the PowerShell installer instead:"
-  echo ""
-  echo "    irm https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.ps1 | iex"
-  echo ""
-  info "Or use WSL2 (Ubuntu) for a full Linux experience."
-  echo ""
-  # Try to run the PowerShell installer directly if powershell is available
-  if command -v powershell.exe >/dev/null 2>&1; then
-    info "Launching PowerShell installer..."
-    powershell.exe -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.ps1 | iex"
-    exit $?
-  fi
-  fail "Cannot auto-install on Windows from bash. Use the PowerShell command above."
-fi
-
-echo -e "${DIM}  OS: $OS | Package manager: $PKG${RESET}"
-echo ""
-
-# ── Helpers ──────────────────────────────────────────────────────
-check_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-# Check if Elixir version >= 1.17
-check_elixir_version() {
-  local ver major minor
-  ver=$(elixir --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  [ -z "$ver" ] && return 1
-  major=$(echo "$ver" | cut -d. -f1)
-  minor=$(echo "$ver" | cut -d. -f2)
-  if [ "${major:-0}" -lt "$MIN_ELIXIR_MAJOR" ] || \
-     { [ "${major:-0}" -eq "$MIN_ELIXIR_MAJOR" ] && [ "${minor:-0}" -lt "$MIN_ELIXIR_MINOR" ]; }; then
-    return 1
-  fi
-  return 0
-}
-
-# Package install abstraction
-pkg_install() {
-  case "$PKG" in
-    apt)    $SUDO apt-get install -y -qq "$@" ;;
-    dnf)    $SUDO dnf install -y -q "$@" ;;
-    yum)    $SUDO yum install -y -q "$@" ;;
-    pacman) $SUDO pacman -Sy --noconfirm "$@" ;;
-    apk)    $SUDO apk add --no-cache "$@" ;;
-    zypper) $SUDO zypper install -y "$@" ;;
-    *)      return 1 ;;
-  esac
-}
-
-pkg_update() {
-  case "$PKG" in
-    apt)    $SUDO apt-get update -qq ;;
-    dnf|yum) $SUDO dnf check-update -q 2>/dev/null || true ;;
-    pacman) $SUDO pacman -Sy ;;
-    apk)    $SUDO apk update ;;
-    zypper) $SUDO zypper refresh -q ;;
-  esac
-}
-
-# ── Setup locale (Linux) ─────────────────────────────────────────
-if [ "$OS" = "linux" ]; then
-  if ! locale 2>/dev/null | grep -qi "utf-8" 2>/dev/null; then
-    info "Setting up UTF-8 locale..."
-    case "$PKG" in
-      apt)
-        pkg_install locales 2>/dev/null || true
-        $SUDO locale-gen en_US.UTF-8 2>/dev/null || true
-        ;;
-      dnf|yum)
-        pkg_install glibc-langpack-en 2>/dev/null || true
-        ;;
-      apk)
-        # Alpine: musl doesn't have locale-gen, set env vars
-        ;;
-    esac
-    export LANG=en_US.UTF-8
-    export LC_ALL=en_US.UTF-8
-  fi
-fi
-
-# ── Install git if missing ─────────────────────────────────────────
-if ! check_cmd git; then
-  if [ "$OS" = "macos" ]; then
-    info "Installing Xcode Command Line Tools (includes git)..."
-    xcode-select --install 2>/dev/null || true
-    local attempts=0
-    until check_cmd git || [ $attempts -ge 120 ]; do
-      sleep 2
-      attempts=$((attempts + 1))
-    done
-    check_cmd git || fail "git installation timed out. Install Xcode CLT manually: xcode-select --install"
-  elif [ "$OS" = "linux" ]; then
-    info "Installing git..."
-    pkg_update
-    pkg_install git
-  fi
-  check_cmd git || fail "git installation failed."
-  ok "git installed"
-fi
-
-# ── Install curl if missing ────────────────────────────────────────
-if ! check_cmd curl; then
-  info "Installing curl..."
-  pkg_install curl 2>/dev/null || true
-  check_cmd curl || fail "curl is required. Install it manually."
-  ok "curl installed"
-fi
-
-# ── Install Rust if missing ───────────────────────────────────────
-if ! check_cmd cargo; then
-  info "Installing Rust (needed for the TUI)..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
-  . "${HOME}/.cargo/env" 2>/dev/null || true
-  export PATH="${HOME}/.cargo/bin:$PATH"
-  check_cmd cargo || fail "Rust installation failed. Install manually: https://rustup.rs"
-  ok "Rust installed"
-else
-  ok "Rust found: $(rustc --version 2>/dev/null || echo 'unknown')"
-fi
-
-# ── Install Erlang + Elixir ──────────────────────────────────────
-install_elixir_from_prebuilt() {
-  # Download prebuilt Elixir from GitHub releases (works on any OS with OTP installed)
-  local elixir_ver="1.18.3"
-  local otp_major
-  otp_major=$(erl -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' -noshell 2>/dev/null || echo "27")
-  local url="https://github.com/elixir-lang/elixir/releases/download/v${elixir_ver}/elixir-otp-${otp_major}.zip"
-
-  info "Installing Elixir ${elixir_ver} from prebuilt release..."
-  local dest="/usr/local/lib/elixir"
-  $SUDO mkdir -p "$dest"
-  if curl -fsSLo /tmp/elixir.zip "$url" 2>/dev/null; then
-    $SUDO unzip -qo /tmp/elixir.zip -d "$dest"
-    rm -f /tmp/elixir.zip
-    # Symlink binaries
-    for bin in elixir mix iex elixirc; do
-      $SUDO ln -sf "$dest/bin/$bin" /usr/local/bin/"$bin"
-    done
-    ok "Elixir ${elixir_ver} installed from prebuilt"
+_download() {
+  # _download <url> <dest> — curl first, wget fallback. Returns 2 on failure.
+  _url="$1"; _dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 2 -o "$_dest" "$_url" || return 2
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$_dest" "$_url" || return 2
   else
-    fail "Could not download Elixir prebuilt. Install Elixir 1.17+ manually: https://elixir-lang.org/install.html"
+    fail "Neither curl nor wget found. Install one and retry."
   fi
 }
 
-install_erlang_and_elixir() {
-  info "Installing Erlang + Elixir..."
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+printf "\n${BOLD}  OSA — the Optimal System Agent${RESET}\n"
+printf "${DIM}  One-command installer · no Elixir / Erlang / Rust required${RESET}\n\n"
 
-  if [ "$OS" = "macos" ]; then
-    if ! check_cmd brew; then
-      info "Installing Homebrew first..."
-      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-      if [ -f "/opt/homebrew/bin/brew" ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-      elif [ -f "/usr/local/bin/brew" ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-      fi
-    fi
-    brew install erlang elixir
-    ok "Erlang + Elixir installed via Homebrew"
-    return 0
-  fi
+# ---------------------------------------------------------------------------
+# Detect OS + architecture
+# ---------------------------------------------------------------------------
+OS=""
+ARCH=""
+case "$(uname -s)" in
+  Darwin) OS="macos" ;;
+  Linux)  OS="linux" ;;
+  *) fail "Unsupported OS: $(uname -s). OSA supports macOS and Linux." 1 ;;
+esac
 
-  # Linux: install Erlang first, then ensure Elixir version is correct
-  case "$PKG" in
-    apt)
-      pkg_update
-      pkg_install software-properties-common apt-transport-https 2>/dev/null || true
-      # Try system packages first
-      pkg_install erlang elixir 2>/dev/null || {
-        # Fallback: Erlang Solutions
-        info "System packages too old or missing, trying Erlang Solutions..."
-        curl -fsSLo /tmp/erlang-solutions.deb \
-          https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb 2>/dev/null || true
-        if [ -f /tmp/erlang-solutions.deb ]; then
-          $SUDO dpkg -i /tmp/erlang-solutions.deb 2>/dev/null || true
-          rm -f /tmp/erlang-solutions.deb
-          pkg_update
-          pkg_install esl-erlang elixir 2>/dev/null || pkg_install esl-erlang 2>/dev/null
-        fi
-      }
-      ;;
-    dnf|yum)
-      # Enable EPEL if on RHEL/CentOS/Rocky/Alma
-      if [ -f /etc/redhat-release ]; then
-        pkg_install epel-release 2>/dev/null || true
-      fi
-      pkg_install erlang elixir 2>/dev/null || {
-        # Fallback: Erlang Solutions RPM
-        info "System packages too old or missing, trying Erlang Solutions..."
-        curl -fsSLo /tmp/erlang-solutions.rpm \
-          https://packages.erlang-solutions.com/erlang-solutions-2.0-1.noarch.rpm 2>/dev/null || true
-        if [ -f /tmp/erlang-solutions.rpm ]; then
-          $SUDO rpm -Uvh /tmp/erlang-solutions.rpm 2>/dev/null || true
-          rm -f /tmp/erlang-solutions.rpm
-          pkg_install esl-erlang elixir 2>/dev/null || pkg_install esl-erlang 2>/dev/null
-        fi
-      }
-      ;;
-    pacman)
-      pkg_install erlang elixir
-      ;;
-    apk)
-      pkg_install erlang elixir 2>/dev/null || pkg_install erlang 2>/dev/null
-      ;;
-    zypper)
-      pkg_install erlang elixir 2>/dev/null || pkg_install erlang 2>/dev/null
-      ;;
-    *)
-      fail "No supported package manager found. Install Erlang 26+ and Elixir 1.17+ manually."
-      ;;
-  esac
+case "$(uname -m)" in
+  arm64|aarch64) ARCH="arm64" ;;
+  x86_64|amd64)  ARCH="x64" ;;
+  *) fail "Unsupported architecture: $(uname -m)." 1 ;;
+esac
 
-  # Check if Erlang is installed (minimum requirement)
-  if ! check_cmd erl; then
-    fail "Erlang installation failed. Install OTP 26+ manually: https://www.erlang.org/downloads"
-  fi
+PLATFORM="${OS}-${ARCH}"
+info "Detected platform: ${PLATFORM}"
 
-  # Check Elixir version — if missing or too old, install from prebuilt
-  if ! check_cmd elixir || ! check_elixir_version; then
-    local installed_ver=""
-    if check_cmd elixir; then
-      installed_ver=$(elixir --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-      warn "Elixir ${installed_ver} is too old (need 1.17+). Installing prebuilt..."
-    fi
-    # Ensure unzip is available for the prebuilt install
-    check_cmd unzip || pkg_install unzip 2>/dev/null || true
-    install_elixir_from_prebuilt
-  fi
-}
-
-if ! check_cmd elixir || ! check_cmd mix; then
-  install_erlang_and_elixir
-elif ! check_elixir_version; then
-  installed_ver=$(elixir --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  warn "Elixir ${installed_ver} found but need 1.17+. Upgrading..."
-  check_cmd unzip || pkg_install unzip 2>/dev/null || true
-  install_elixir_from_prebuilt
-else
-  ok "Elixir found: $(elixir --version 2>/dev/null | tail -1 || echo 'unknown')"
-fi
-
-# Final verification
-check_cmd elixir || fail "Elixir installation failed. Install Elixir 1.17+ manually."
-check_cmd erl    || fail "Erlang installation failed. Install OTP 26+ manually."
-check_elixir_version || fail "Elixir version too old. Need 1.17+, have: $(elixir --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-
-# ── Local checkout detection (must run BEFORE clone) ─────────────
-# When this script is launched from inside a cloned repo (e.g. via
-# `bin/install`), use the existing checkout instead of cloning anew.
-SCRIPT_SELF="${BASH_SOURCE[0]:-$0}"
-LOCAL_CHECKOUT=""
-if [ -f "$(dirname "$SCRIPT_SELF")/../mix.exs" ] 2>/dev/null; then
-  LOCAL_CHECKOUT="$(cd "$(dirname "$SCRIPT_SELF")/.." && pwd)"
-fi
-
-# ── Clone or update repo ──────────────────────────────────────────
-mkdir -p "$OSA_DIR"
-
-if [ -n "$LOCAL_CHECKOUT" ]; then
-  AGENT_DIR="$LOCAL_CHECKOUT"
-  info "Running from local checkout: $AGENT_DIR"
-elif [ -d "$AGENT_DIR/.git" ]; then
-  info "Updating existing installation..."
-  (cd "$AGENT_DIR" && git pull --ff-only origin "$BRANCH" 2>&1) || true
-  ok "Updated"
-elif [ -d "$AGENT_DIR" ]; then
-  info "Using existing directory: $AGENT_DIR"
-else
-  info "Cloning OSA Agent..."
-  git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$AGENT_DIR" 2>&1 | tail -2
-  ok "Cloned to $AGENT_DIR"
-fi
-
-echo "$AGENT_DIR" > "$OSA_DIR/project_root"
-
-# ── Install native build dependencies ────────────────────────────
-# Required by Rust TUI crates:
-#   arboard  → libxcb (X11 clipboard)
-#   cpal     → libasound (ALSA audio)
-#   syntect  → libonig (Oniguruma regex)
-#   reqwest  → libssl (TLS)
-#   general  → pkg-config, gcc/cc
-
-info "Installing build dependencies..."
-case "$PKG" in
-  apt)
-    pkg_install \
-      build-essential pkg-config \
-      libssl-dev \
-      libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-      libasound2-dev \
-      libonig-dev \
-      2>/dev/null || warn "Some build deps could not be installed (non-fatal)"
-    ;;
-  dnf|yum)
-    pkg_install \
-      gcc gcc-c++ make pkg-config \
-      openssl-devel \
-      libxcb-devel \
-      alsa-lib-devel \
-      oniguruma-devel \
-      2>/dev/null || warn "Some build deps could not be installed (non-fatal)"
-    ;;
-  pacman)
-    pkg_install \
-      base-devel pkg-config \
-      openssl \
-      libxcb \
-      alsa-lib \
-      oniguruma \
-      2>/dev/null || warn "Some build deps could not be installed (non-fatal)"
-    ;;
-  apk)
-    pkg_install \
-      build-base pkgconfig \
-      openssl-dev \
-      libxcb-dev \
-      alsa-lib-dev \
-      oniguruma-dev \
-      2>/dev/null || warn "Some build deps could not be installed (non-fatal)"
-    ;;
-  zypper)
-    pkg_install \
-      -t pattern devel_basis 2>/dev/null || pkg_install gcc gcc-c++ make 2>/dev/null || true
-    pkg_install \
-      pkg-config \
-      libopenssl-devel \
-      libxcb-devel \
-      alsa-devel \
-      oniguruma-devel \
-      2>/dev/null || warn "Some build deps could not be installed (non-fatal)"
+# Only combinations CI publishes assets for.
+case "$PLATFORM" in
+  linux-x64|macos-arm64) : ;;
+  *)
+    warn "No prebuilt binaries are published for ${PLATFORM} yet."
+    warn "Build from source instead:"
+    warn "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | bash"
+    exit 1
     ;;
 esac
-ok "Build dependencies ready"
 
-# ── Build Rust TUI ────────────────────────────────────────────────
-TUI_DIR="$AGENT_DIR/priv/rust/tui"
-if [ ! -d "$TUI_DIR" ]; then
-  fail "TUI source not found at $TUI_DIR"
-fi
+TARBALL="osa-${PLATFORM}.tar.gz"
+TUI_ASSET="osagent-tui-${PLATFORM}"
 
-info "Building TUI (this takes ~60s on first run)..."
-BUILD_LOG="/tmp/osa-tui-build.log"
-if (cd "$TUI_DIR" && cargo build --release 2>&1 | tee "$BUILD_LOG" | grep -E "Compiling|Finished|error" | tail -10); then
-  : # success path
-fi
-if [ ! -f "$TUI_DIR/target/release/osagent" ]; then
-  echo ""
-  warn "TUI build failed. Last 20 lines of build output:"
-  tail -20 "$BUILD_LOG" 2>/dev/null | sed 's/^/    /'
-  echo ""
-  fail "TUI build failed. Check errors above."
-fi
-ok "TUI built"
-rm -f "$BUILD_LOG"
-
-# ── Fetch Elixir deps ─────────────────────────────────────────────
-info "Fetching Elixir dependencies..."
-(cd "$AGENT_DIR" && mix local.hex --force --if-missing >/dev/null 2>&1 || true)
-(cd "$AGENT_DIR" && mix local.rebar --force --if-missing >/dev/null 2>&1 || true)
-(cd "$AGENT_DIR" && mix deps.get 2>&1 | tail -5)
-(cd "$AGENT_DIR" && mix compile 2>&1 | tail -5)
-ok "Dependencies ready"
-
-# ── Install binaries ──────────────────────────────────────────────
-mkdir -p "$INSTALL_DIR"
-chmod +x "$AGENT_DIR/bin/osa"
-
-ln -sf "$AGENT_DIR/bin/osa" "$INSTALL_DIR/osa"
-ln -sf "$AGENT_DIR/bin/osa" "$INSTALL_DIR/osagent"
-ok "Linked osa     → $INSTALL_DIR/osa"
-ok "Linked osagent → $INSTALL_DIR/osagent"
-
-# ── Ensure PATH ───────────────────────────────────────────────────
-path_updated=false
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-  SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
-  case "$SHELL_NAME" in
-    zsh)  SHELL_RC="$HOME/.zshrc" ;;
-    bash) SHELL_RC="$HOME/.bashrc" ;;
-    fish) SHELL_RC="$HOME/.config/fish/config.fish" ;;
-    *)    SHELL_RC="$HOME/.profile" ;;
-  esac
-
-  EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
-  if [ "$SHELL_NAME" = "fish" ]; then
-    EXPORT_LINE='set -gx PATH $HOME/.local/bin $PATH'
+# ---------------------------------------------------------------------------
+# Resolve version (latest or pinned)
+# ---------------------------------------------------------------------------
+if [ -n "${OSA_VERSION:-}" ]; then
+  VERSION="${OSA_VERSION}"
+  info "Using pinned version: ${VERSION}"
+else
+  info "Resolving latest release..."
+  META="$(mktemp "${TMPDIR:-/tmp}/osa-meta.XXXXXX")"
+  if ! _download "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" "$META"; then
+    rm -f "$META"
+    fail "Network error: could not reach the GitHub API." 2
   fi
+  VERSION="$(grep '"tag_name"' "$META" | head -1 \
+    | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+  rm -f "$META"
+  [ -n "$VERSION" ] || fail "Could not determine latest release. Pin with OSA_VERSION=v0.4.0." 2
+  ok "Latest release: ${VERSION}"
+fi
 
-  if [ -f "$SHELL_RC" ] && grep -qF '.local/bin' "$SHELL_RC" 2>/dev/null; then
-    : # Already present
+BASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
+
+# ---------------------------------------------------------------------------
+# Download artifacts to a scratch dir
+# ---------------------------------------------------------------------------
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/osa-install.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+info "Downloading ${TARBALL}..."
+if ! _download "${BASE_URL}/${TARBALL}" "${TMP_DIR}/${TARBALL}"; then
+  warn "URL: ${BASE_URL}/${TARBALL}"
+  warn "See releases: https://github.com/${GITHUB_REPO}/releases"
+  fail "Download failed." 2
+fi
+ok "Downloaded ${TARBALL}"
+
+info "Downloading ${TUI_ASSET}..."
+if ! _download "${BASE_URL}/${TUI_ASSET}" "${TMP_DIR}/${TUI_ASSET}"; then
+  fail "Download failed for ${TUI_ASSET}." 2
+fi
+ok "Downloaded ${TUI_ASSET}"
+
+# ---------------------------------------------------------------------------
+# Verify checksum (best effort — warn if sidecar absent)
+# ---------------------------------------------------------------------------
+info "Verifying checksum..."
+if _download "${BASE_URL}/${TARBALL}.sha256" "${TMP_DIR}/${TARBALL}.sha256" 2>/dev/null; then
+  EXPECTED="$(awk '{print $1}' "${TMP_DIR}/${TARBALL}.sha256")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
   else
-    echo "" >> "$SHELL_RC"
-    echo "# OSA Agent" >> "$SHELL_RC"
-    echo "$EXPORT_LINE" >> "$SHELL_RC"
-    path_updated=true
-    ok "Added ~/.local/bin to PATH in $SHELL_RC"
+    ACTUAL=""
+    warn "No sha256sum/shasum found — skipping verification."
   fi
-
-  # Also write to .profile for non-interactive sessions (root VPS)
-  if [ "$SHELL_NAME" = "bash" ] && [ -f "$HOME/.profile" ]; then
-    if ! grep -qF '.local/bin' "$HOME/.profile" 2>/dev/null; then
-      echo "" >> "$HOME/.profile"
-      echo "# OSA Agent" >> "$HOME/.profile"
-      echo "$EXPORT_LINE" >> "$HOME/.profile"
+  if [ -n "$ACTUAL" ]; then
+    if [ "$ACTUAL" != "$EXPECTED" ]; then
+      fail "Checksum mismatch — download may be corrupted. Aborting." 3
     fi
+    ok "Checksum verified"
+  fi
+else
+  warn "No .sha256 sidecar for this release — skipping verification."
+fi
+
+# ---------------------------------------------------------------------------
+# Extract OTP release into ~/.osa/release (fresh)
+# ---------------------------------------------------------------------------
+info "Installing OTP release to ${RELEASE_DIR}..."
+rm -rf "$RELEASE_DIR"
+mkdir -p "$RELEASE_DIR"
+if ! tar -xzf "${TMP_DIR}/${TARBALL}" -C "$RELEASE_DIR" 2>/dev/null; then
+  fail "Extraction failed." 3
+fi
+
+RELEASE_BIN="${RELEASE_DIR}/bin/osagent"
+[ -x "$RELEASE_BIN" ] || chmod +x "$RELEASE_BIN" 2>/dev/null || true
+[ -f "$RELEASE_BIN" ] || fail "Release wrapper not found at ${RELEASE_BIN}." 3
+ok "Release installed"
+
+# ---------------------------------------------------------------------------
+# Install the Rust TUI binary
+# ---------------------------------------------------------------------------
+mkdir -p "$BIN_DIR"
+cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN"
+chmod +x "$TUI_BIN"
+ok "TUI installed to ${TUI_BIN}"
+
+# Record install layout so tooling can locate the release.
+printf "%s\n" "$RELEASE_DIR" > "${OSA_HOME}/release_root"
+
+# ---------------------------------------------------------------------------
+# Write the `osa` launcher
+#
+# Mirrors bin/osa + ~/.claude/scripts/osa: sources ~/.osa/.env, boots the
+# ERTS-bundled backend (headless `serve`), waits for /health, launches the
+# Rust TUI, and tears the backend down on exit.
+# ---------------------------------------------------------------------------
+info "Writing launcher to ${LAUNCHER}..."
+cat > "$LAUNCHER" <<'LAUNCHER_EOF'
+#!/usr/bin/env bash
+# osa — launcher for the prebuilt OSA install (~/.osa).
+#
+#   osa                 Start backend + TUI (default)
+#   osa setup           Configure provider / API keys
+#   osa serve           Backend only (headless HTTP API)
+#   osa doctor          Health checks
+#   osa version         Print version
+#   osa opencomputers   Manage the MIOSA host connection
+#   osa update          How to update
+set -eu
+
+OSA_HOME="${OSA_HOME:-$HOME/.osa}"
+export OSA_HOME
+RELEASE_BIN="$OSA_HOME/release/bin/osagent"
+TUI_BIN="$OSA_HOME/bin/osagent-tui"
+LOG_DIR="$OSA_HOME/logs"
+mkdir -p "$LOG_DIR"
+
+# Load user config (provider/model/keys) before booting the backend, so
+# config/runtime.exs sees it (mirrors ~/.claude/scripts/osa).
+if [ -f "$OSA_HOME/.env" ]; then
+  set -a
+  . "$OSA_HOME/.env"
+  set +a
+fi
+
+if [ ! -x "$RELEASE_BIN" ]; then
+  echo "OSA is not installed correctly ($RELEASE_BIN missing)." >&2
+  echo "Reinstall: curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh" >&2
+  exit 1
+fi
+
+_http_ok() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf "$1" >/dev/null 2>&1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO /dev/null "$1" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+PORT="${OSA_PORT:-9089}"
+
+case "${1:-}" in
+  version|--version|-v) exec "$RELEASE_BIN" version ;;
+  setup)                exec "$RELEASE_BIN" setup ;;
+  serve)                exec "$RELEASE_BIN" serve ;;
+  doctor)               exec "$RELEASE_BIN" doctor ;;
+  opencomputers)        shift; exec "$RELEASE_BIN" opencomputers "$@" ;;
+  update)
+    echo "To update OSA, re-run the installer:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh"
+    exit 0
+    ;;
+  help|--help|-h)
+    echo ""
+    echo "  OSA Agent — Your OS, Supercharged"
+    echo ""
+    echo "  Usage:"
+    echo "    osa                Start backend + TUI (default)"
+    echo "    osa setup          Configure provider / API keys"
+    echo "    osa serve          Backend only (headless HTTP API)"
+    echo "    osa doctor         Run health checks"
+    echo "    osa version        Print version"
+    echo "    osa opencomputers  Manage the MIOSA host connection"
+    echo "    osa update         Update instructions"
+    echo ""
+    exit 0
+    ;;
+esac
+
+# Default: start the backend (if not already up), then launch the TUI.
+BACKEND_PID=""
+cleanup() {
+  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
+    kill "$BACKEND_PID" 2>/dev/null || true
+    wait "$BACKEND_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if _http_ok "http://localhost:$PORT/health"; then
+  : # backend already running
+else
+  "$RELEASE_BIN" serve >"$LOG_DIR/backend.log" 2>&1 &
+  BACKEND_PID=$!
+  i=0
+  while [ "$i" -lt 40 ]; do
+    if _http_ok "http://localhost:$PORT/health"; then
+      break
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  if ! _http_ok "http://localhost:$PORT/health"; then
+    echo "Backend did not become healthy on :$PORT — see $LOG_DIR/backend.log" >&2
   fi
 fi
 
-# ── Create default config if needed ───────────────────────────────
-mkdir -p "$OSA_DIR/logs"
+EXIT_CODE=0
+"$TUI_BIN" "$@" || EXIT_CODE=$?
+cleanup
+trap - EXIT INT TERM
+exit "$EXIT_CODE"
+LAUNCHER_EOF
+chmod +x "$LAUNCHER"
+ok "Launcher installed"
 
-if [ ! -f "$OSA_DIR/.env" ]; then
-  cat > "$OSA_DIR/.env" <<'ENVEOF'
-# OSA Agent Configuration
-# Uncomment and set your API key for cloud providers:
-# ANTHROPIC_API_KEY=sk-ant-...
-# OPENAI_API_KEY=sk-...
-# GROQ_API_KEY=gsk_...
+# ---------------------------------------------------------------------------
+# Wire PATH
+# ---------------------------------------------------------------------------
+on_path=false
+_IFS="$IFS"; IFS=:
+for dir in $PATH; do
+  if [ "$dir" = "$BIN_DIR" ]; then on_path=true; break; fi
+done
+IFS="$_IFS"
 
-# Default: Ollama (local, no API key needed)
-# OSA_DEFAULT_PROVIDER=ollama
-# OSA_PORT=8089
-ENVEOF
-  ok "Created config template → $OSA_DIR/.env"
+if [ "$on_path" = "false" ]; then
+  SHELL_NAME="$(basename "${SHELL:-/bin/sh}" 2>/dev/null || echo sh)"
+  EXPORT_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
+  case "$SHELL_NAME" in
+    zsh)  RC_FILE="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    bash) if [ -f "$HOME/.bash_profile" ]; then RC_FILE="$HOME/.bash_profile"; else RC_FILE="$HOME/.bashrc"; fi ;;
+    fish) RC_FILE="$HOME/.config/fish/config.fish"; EXPORT_LINE="fish_add_path ${BIN_DIR}" ;;
+    *)    RC_FILE="$HOME/.profile" ;;
+  esac
+  mkdir -p "$(dirname "$RC_FILE")"
+  if [ ! -f "$RC_FILE" ] || ! grep -qF "$BIN_DIR" "$RC_FILE" 2>/dev/null; then
+    printf "\n# OSA Agent\n%s\n" "$EXPORT_LINE" >> "$RC_FILE"
+    ok "Added ${BIN_DIR} to PATH in ${RC_FILE}"
+    RELOAD_HINT="$RC_FILE"
+  fi
 fi
 
-# ── Success ────────────────────────────────────────────────────────
-echo ""
-echo -e "${GREEN}${BOLD}  ◈ OSA Agent installed successfully!${RESET}"
-echo ""
-echo -e "  ${DIM}Locations:${RESET}"
-echo -e "    Agent:    $AGENT_DIR"
-echo -e "    Commands: $INSTALL_DIR/osa, $INSTALL_DIR/osagent"
-echo -e "    Config:   $OSA_DIR/.env"
-echo -e "    Logs:     $OSA_DIR/logs/"
-echo ""
-
-if [ "$path_updated" = true ]; then
-  echo -e "  ${YELLOW}Reload your shell first:${RESET}"
-  echo -e "    ${BOLD}source $SHELL_RC${RESET}"
-  echo ""
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+printf "\n${GREEN}${BOLD}  OSA ${VERSION} installed.${RESET}\n\n"
+if [ -n "${RELOAD_HINT:-}" ]; then
+  printf "  Reload your shell, then run ${BOLD}osa${RESET}:\n"
+  printf "    ${DIM}. %s${RESET}\n\n" "$RELOAD_HINT"
+else
+  printf "  Run ${BOLD}osa${RESET} to start.\n\n"
 fi
-
-echo -e "  ${DIM}Quick start:${RESET}"
-echo -e "    ${BOLD}osa${RESET}             Start backend + TUI (same as osagent)"
-echo -e "    ${BOLD}osa update${RESET}      Pull latest + recompile"
-echo -e "    ${BOLD}osa setup${RESET}       Interactive setup wizard"
-echo -e "    ${DIM}Default: Ollama (local, no key needed)${RESET}"
-echo ""
+printf "  ${DIM}Update later: ${INSTALL_ONE_LINER}${RESET}\n\n"

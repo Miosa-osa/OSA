@@ -57,6 +57,22 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   """
   @spec record(map(), map() | nil) :: map()
   def record(state, usage) do
+    do_record(state, usage)
+  rescue
+    e ->
+      # Accounting is best-effort telemetry — a pricing/emit failure must never
+      # crash the turn. Degrade to the un-updated state (this round-trip's spend
+      # is simply not accumulated) rather than propagating the error into the
+      # ReAct loop.
+      Logger.warning("[Accounting] record failed, skipping this round-trip: #{inspect(e)}")
+      state
+  catch
+    kind, reason ->
+      Logger.warning("[Accounting] record caught #{kind}: #{inspect(reason)} — skipping")
+      state
+  end
+
+  defp do_record(state, usage) do
     norm = normalize_usage(usage)
     turn_cost = Pricing.cost(Map.get(state, :model), norm)
 

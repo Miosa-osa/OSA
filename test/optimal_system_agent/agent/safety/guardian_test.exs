@@ -102,4 +102,74 @@ defmodule OptimalSystemAgent.Agent.Safety.GuardianTest do
       assert Guardian.block_count(other) == 0
     end
   end
+
+  describe "model-based classifier wiring (behind config, additive)" do
+    # Enable the model classifier for the duration of a test, restoring the
+    # original :auto_mode config afterwards. An injected `:assessor` in state
+    # stands in for the live model so the ambiguous branch stays deterministic.
+    defp with_model_classifier(fun) do
+      original = Application.get_env(:optimal_system_agent, :auto_mode, [])
+      enabled = Keyword.put(original, :model_classifier, enabled: true)
+      Application.put_env(:optimal_system_agent, :auto_mode, enabled)
+
+      try do
+        fun.()
+      after
+        Application.put_env(:optimal_system_agent, :auto_mode, original)
+      end
+    end
+
+    defp state_with_assessor(session_id, risk) do
+      assessor = fn name, _args ->
+        %OptimalSystemAgent.Agent.Safety.Verdict{
+          risk: risk,
+          category: :model_flagged,
+          matched_rule: "test",
+          reason: "model says #{risk}",
+          tool: name
+        }
+      end
+
+      session_id |> state() |> Map.put(:assessor, assessor)
+    end
+
+    test "when OFF (default) a rule-safe command the model would flag is allowed",
+         %{session_id: sid} do
+      # No config change: classifier disabled → pure rule path → echo is safe.
+      assert Guardian.review(tool("echo hello"), state_with_assessor(sid, :dangerous)) ==
+               {:allow}
+
+      assert Guardian.block_count(sid) == 0
+    end
+
+    test "when ON a model :dangerous verdict blocks a rule-safe command",
+         %{session_id: sid} do
+      with_model_classifier(fn ->
+        assert {:block, reason} =
+                 Guardian.review(tool("echo hello"), state_with_assessor(sid, :dangerous))
+
+        assert reason =~ "model says dangerous"
+        assert Guardian.block_count(sid) == 1
+      end)
+    end
+
+    test "when ON a model :safe verdict still allows a benign command",
+         %{session_id: sid} do
+      with_model_classifier(fn ->
+        assert Guardian.review(tool("echo hello"), state_with_assessor(sid, :safe)) == {:allow}
+        assert Guardian.block_count(sid) == 0
+      end)
+    end
+
+    test "when ON the rules still block even if the model says safe",
+         %{session_id: sid} do
+      with_model_classifier(fn ->
+        # rm -rf / is a rule fast-path danger; the model can't downgrade it.
+        assert {:block, _reason} =
+                 Guardian.review(tool("rm -rf /"), state_with_assessor(sid, :safe))
+
+        assert Guardian.block_count(sid) == 1
+      end)
+    end
+  end
 end

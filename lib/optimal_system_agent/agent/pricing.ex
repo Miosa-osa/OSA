@@ -97,6 +97,11 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     end
   end
 
+  # Unexpected model type (number, map, tuple, …) — never guess a price and
+  # never raise. A malformed loop state must not crash cost accounting in the
+  # hot path; treat as unknown (nil → $0.0 in cost/2, same as an unknown name).
+  def rates(_), do: nil
+
   @doc """
   Compute the USD cost for one turn's usage against `model`.
 

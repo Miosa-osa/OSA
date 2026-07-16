@@ -24,8 +24,9 @@ defmodule OptimalSystemAgent.Agent.Safety.Guardian do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.Safety.{Classifier, Verdict}
+  alias OptimalSystemAgent.Agent.Safety.{Classifier, ModelClassifier, Verdict}
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Store.SessionTranscript
 
   @table :osa_auto_mode
   @default_pause_after 3
@@ -70,10 +71,12 @@ defmodule OptimalSystemAgent.Agent.Safety.Guardian do
     if count >= threshold do
       mark_paused(session_id)
       emit(:auto_mode_paused, session_id, verdict, %{block_count: count, threshold: threshold})
+      record_denial(session_id, verdict, count, :pause)
 
       {:pause,
        "#{verdict.reason} — #{count} dangerous action(s) blocked, auto-mode paused for review"}
     else
+      record_denial(session_id, verdict, count, :block)
       {:block, verdict.reason}
     end
   end
@@ -87,12 +90,23 @@ defmodule OptimalSystemAgent.Agent.Safety.Guardian do
     end
   end
 
+  # Produce the verdict for a tool call. When the optional model-based classifier
+  # is enabled (`:auto_mode` → `:model_classifier` → `:enabled`), the verdict is
+  # the higher risk of the rules and the model/heuristic assessment — so a
+  # dangerous verdict from EITHER path blocks. When it is off (the default), this
+  # is byte-for-byte the original pure rule-based path.
   defp classify(tool_call, state) do
-    Classifier.classify(
-      Map.get(tool_call, :name),
-      Map.get(tool_call, :arguments, %{}),
-      build_ctx(state)
-    )
+    ctx = build_ctx(state)
+
+    if ModelClassifier.enabled?() do
+      ModelClassifier.classify(tool_call, ctx)
+    else
+      Classifier.classify(
+        Map.get(tool_call, :name),
+        Map.get(tool_call, :arguments, %{}),
+        ctx
+      )
+    end
   end
 
   # ── pause / resume state ─────────────────────────────────────────────
@@ -161,12 +175,43 @@ defmodule OptimalSystemAgent.Agent.Safety.Guardian do
   # Build the classifier ctx from config + state. `ctx` allowlist may be
   # overridden per-session via state.untrusted_host_allowlist.
   defp build_ctx(state) do
-    %{
+    ctx = %{
       untrusted_host_allowlist:
         Map.get(state, :untrusted_host_allowlist) || untrusted_host_allowlist(),
       session_id: Map.get(state, :session_id)
     }
+
+    # Optional deterministic model-assessment hook (tests / custom integrations).
+    case Map.get(state, :assessor) do
+      fun when is_function(fun, 2) -> Map.put(ctx, :assessor, fun)
+      _ -> ctx
+    end
   end
+
+  # ── denial transcript recording ──────────────────────────────────────
+
+  # Record the denial reason to the session transcript so a blocked/paused
+  # action is auditable alongside the conversation. Best-effort and fully
+  # isolated: a missing Repo (bare unit tests) never crashes enforcement, since
+  # `SessionTranscript.save_turn/4` already rescues its own failures.
+  defp record_denial(session_id, %Verdict{} = verdict, count, outcome)
+       when is_binary(session_id) do
+    content =
+      "[auto-mode #{outcome}] #{verdict.reason} " <>
+        "(tool=#{verdict.tool || "?"}, category=#{verdict.category}, " <>
+        "source=#{denial_source(verdict)}, block ##{count})"
+
+    SessionTranscript.save_turn(session_id, "system", content, tool_name: verdict.tool)
+  rescue
+    _ -> {:error, :skipped}
+  catch
+    _, _ -> {:error, :skipped}
+  end
+
+  defp record_denial(_session_id, _verdict, _count, _outcome), do: {:error, :no_session}
+
+  defp denial_source(%Verdict{category: :model_flagged}), do: "model"
+  defp denial_source(%Verdict{}), do: "rules"
 
   # ── ETS helpers (mirror :osa_files_read usage) ───────────────────────
 

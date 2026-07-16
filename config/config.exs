@@ -235,6 +235,16 @@ config :optimal_system_agent, budget_event_emitter: OptimalSystemAgent.BudgetEmi
 # hosts network tools (curl/wget/ssh/…) may reach without raising a caution.
 config :optimal_system_agent, :auto_mode,
   pause_after_blocks: 3,
+  # Optional model-based risk classifier (#34). When `enabled: true`, ambiguous
+  # tool calls the rules did not flag as dangerous are additionally scored by the
+  # LLM (with a pure heuristic fallback), and a dangerous verdict from EITHER the
+  # rules OR the model blocks. OFF by default — rule-based behavior is unchanged.
+  model_classifier: [
+    enabled: false,
+    provider: nil,
+    model: nil,
+    max_tokens: 128
+  ],
   untrusted_host_allowlist: [
     "github.com",
     "raw.githubusercontent.com",

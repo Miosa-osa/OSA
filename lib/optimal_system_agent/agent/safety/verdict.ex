@@ -27,6 +27,7 @@ defmodule OptimalSystemAgent.Agent.Safety.Verdict do
           | :mass_delete
           | :untrusted_network
           | :prompt_injection_driven
+          | :model_flagged
 
   @type t :: %__MODULE__{
           risk: risk(),
