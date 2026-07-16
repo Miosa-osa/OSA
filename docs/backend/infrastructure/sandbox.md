@@ -72,6 +72,80 @@ config :optimal_system_agent,
 
 ---
 
+## Backend selection (`~/.osa/sandbox.json`)
+
+`Sandbox.Router` owns backend selection, config loading, and host-fallback.
+Shell/code execution is routed through the Router whenever a non-host backend
+is configured (or `mode` is `required`); otherwise the existing host execution
+path is used unchanged. **Default is `host` — no behavior change unless you
+opt in.**
+
+Create `~/.osa/sandbox.json` to select and configure a backend:
+
+```json
+{
+  "backend": "miosa",
+  "mode": "required",
+  "miosa":  { "api_key": "…", "size": "medium", "timeout": 60 },
+  "docker": { "image": "osa-sandbox:latest", "memory": "256m", "network": false, "timeout": 30 },
+  "e2b":    { "api_key": "…", "template": "base", "timeout": 60 },
+  "vercel": { "token": "…", "team_id": "…", "project_id": "…", "runtime": "node20", "timeout": 60 }
+}
+```
+
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `backend` | `host` \| `docker` \| `e2b` \| `miosa` \| `vercel` | Which sandbox to route execution through. |
+| `mode` | `optional` (default) \| `required` | `optional` falls back to the host if the backend is unavailable; `required` hard-fails execution instead of falling back (never silently runs on the host). |
+
+**Selection precedence** (see `Sandbox.Router`):
+
+1. Explicit `:sandbox_backend` in application env / `backend` in `sandbox.json`.
+2. Env-var auto-detection — `MIOSA_PLATFORM_API_KEY` → `:miosa` (preferred),
+   `E2B_API_KEY` → `:e2b`, `VERCEL_TOKEN` → `:vercel`.
+3. Otherwise `:host` (no sandbox).
+
+`mode: required` composes with auto-mode: the dangerous-command circuit breaker
+(below) still hard-blocks catastrophic commands in every tier, and everything
+that survives the safety checks runs *inside the sandbox* rather than on the host.
+
+---
+
+## Dangerous-command circuit breaker
+
+`OptimalSystemAgent.Agent.Safety.DangerousCommands` is a **non-bypassable**
+hard blocklist wired as the **first** clause of the tool-execution boundary
+(`Agent.Loop.ToolExecutor`), above the permission-tier gate and the auto-mode
+`Guardian`. It applies in **every** permission tier — including `:full` /
+bypass — and cannot be overridden by config or by the Guardian.
+
+Distinction from the auto-mode policy:
+
+- **`Safety.Rules` / `Classifier` / `Guardian`** — risk-tiered, *allowable*
+  auto-mode policy. Verdicts (`:safe` / `:caution` / `:dangerous`) are enforced
+  per permission tier, with a pause-after-N mechanism.
+- **`Safety.DangerousCommands`** (circuit breaker) — the *never, under any
+  circumstances* subset. Tier-independent, no counter, no allowlist, no toggle.
+
+Always blocked (on shell tools — `shell_execute`/`shell`/`bash`/`run_command`/
+`code_sandbox`/`repl` — and file-delete tools — `file_delete`):
+
+- `rm -rf` targeting a broad root (`/`, `~`, `$HOME`, `/*`, `.`, a bare
+  top-level system dir), incl. `\rm` alias / split-flag / path-prefixed bypasses.
+- `git push --force` / `-f` / `+ref` to a protected branch
+  (`main`, `master`, `production`, `prod`, `release`, `develop`, `staging`),
+  or a bare force-push of the current branch.
+- Fork bombs (`:(){ :|:& };:` and single-char variants).
+- `dd` writing to a block device (`of=/dev/sd…`, `/dev/nvme…`, `/dev/disk…`).
+- `mkfs` / filesystem creation on a device.
+- `DROP DATABASE` / `DROP SCHEMA`; `DROP TABLE` / `TRUNCATE` on a prod identifier.
+- Pipe-to-shell of downloaded content (`curl … | sh`, `wget … | sudo bash`).
+
+`DangerousCommands.blocked?/1` is pure (`{:blocked, reason}` | `:ok`) — no I/O,
+no state — accepting a tool-call map or a raw command/path string.
+
+---
+
 ## Pool
 
 `Sandbox.Pool` maintains a pool of warm sandbox instances per backend type. Configuration:

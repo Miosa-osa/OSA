@@ -10,9 +10,20 @@ defmodule OptimalSystemAgent.Sandbox.Router do
 
       Sandbox.Router.execute("echo hello")
       Sandbox.Router.run_file("/tmp/script.py")
-      Sandbox.Router.backend()      # → :host | :docker | :e2b
+      Sandbox.Router.backend()      # → :host | :docker | :e2b | :miosa | :vercel
       Sandbox.Router.available?()   # → true/false
       Sandbox.Router.mode()         # → :optional | :required
+
+  ## Selection precedence
+
+  1. Explicit `:sandbox_backend` in application env (set directly or loaded from
+     `~/.osa/sandbox.json`).
+  2. Otherwise, env-var auto-detection (see `detect_backend/0`), preferring
+     MIOSA (the recommended default) when several backends are configured.
+  3. Otherwise, `:host` (no sandbox).
+
+  The Router owns selection, config loading, and host-fallback only — each
+  backend is a self-contained module implementing `Sandbox.Behaviour`.
   """
   require Logger
 
@@ -21,8 +32,18 @@ defmodule OptimalSystemAgent.Sandbox.Router do
   @backends %{
     host: Sandbox.Host,
     docker: Sandbox.Docker,
-    e2b: Sandbox.E2B
+    e2b: Sandbox.E2B,
+    miosa: Sandbox.MIOSA,
+    vercel: Sandbox.Vercel
   }
+
+  # Env-var → backend, in preference order. MIOSA (recommended default) wins
+  # when multiple credentials are present.
+  @env_detection [
+    {"MIOSA_PLATFORM_API_KEY", :miosa},
+    {"E2B_API_KEY", :e2b},
+    {"VERCEL_TOKEN", :vercel}
+  ]
 
   @doc "Get the currently configured backend module."
   def backend do
@@ -112,8 +133,36 @@ defmodule OptimalSystemAgent.Sandbox.Router do
             })
           end
 
-          if e2b_key = get_in(config, ["e2b", "api_key"]) do
-            Application.put_env(:optimal_system_agent, :e2b_api_key, e2b_key)
+          if e2b_config = config["e2b"] do
+            if key = e2b_config["api_key"] do
+              Application.put_env(:optimal_system_agent, :e2b_api_key, key)
+            end
+
+            Application.put_env(:optimal_system_agent, :sandbox_e2b, %{
+              template: e2b_config["template"],
+              timeout_ms: to_ms(e2b_config["timeout"])
+            })
+          end
+
+          if miosa_config = config["miosa"] do
+            if key = miosa_config["api_key"] do
+              Application.put_env(:optimal_system_agent, :miosa_platform_api_key, key)
+            end
+
+            Application.put_env(:optimal_system_agent, :sandbox_miosa, %{
+              size: miosa_config["size"],
+              timeout_ms: to_ms(miosa_config["timeout"])
+            })
+          end
+
+          if vercel_config = config["vercel"] do
+            Application.put_env(:optimal_system_agent, :sandbox_vercel, %{
+              token: vercel_config["token"],
+              team_id: vercel_config["team_id"],
+              project_id: vercel_config["project_id"],
+              runtime: vercel_config["runtime"],
+              timeout_ms: to_ms(vercel_config["timeout"])
+            })
           end
 
           Logger.info("[Sandbox] Loaded config: backend=#{backend}")
@@ -176,8 +225,25 @@ defmodule OptimalSystemAgent.Sandbox.Router do
     "Sandbox required but backend #{mod.name()} is not available"
   end
 
+  @doc """
+  Auto-detect a backend from environment variables.
+
+  Returns the first configured backend in preference order (MIOSA preferred),
+  or `:host` when nothing is configured. Only consulted when no explicit
+  `:sandbox_backend` is set in application env / `~/.osa/sandbox.json`.
+  """
+  def detect_backend do
+    Enum.find_value(@env_detection, :host, fn {env, backend} ->
+      if System.get_env(env) not in [nil, ""], do: backend
+    end)
+  end
+
   defp configured_backend do
-    configured = Application.get_env(:optimal_system_agent, :sandbox_backend, :host)
+    configured =
+      case Application.fetch_env(:optimal_system_agent, :sandbox_backend) do
+        {:ok, value} -> value
+        :error -> detect_backend()
+      end
 
     case configured do
       mod when is_atom(mod) and is_map_key(@backends, mod) ->
@@ -211,4 +277,10 @@ defmodule OptimalSystemAgent.Sandbox.Router do
 
   defp normalize_mode(mode) when mode in ["required", :required, true], do: :required
   defp normalize_mode(_mode), do: :optional
+
+  # JSON config expresses timeouts in seconds; backends want milliseconds.
+  defp to_ms(nil), do: nil
+  defp to_ms(secs) when is_integer(secs), do: secs * 1000
+  defp to_ms(secs) when is_float(secs), do: trunc(secs * 1000)
+  defp to_ms(_), do: nil
 end

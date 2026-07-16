@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants
   alias OptimalSystemAgent.Tools.UseContext
+  alias OptimalSystemAgent.Sandbox
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
   #
@@ -92,8 +93,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
           s -> String.to_integer(s)
         end
 
-      run_command(command, effective_cwd, timeout)
+      # SANDBOX ROUTING: when a non-host sandbox backend is configured (or
+      # sandbox mode is :required), route the command through Sandbox.Router
+      # instead of raw host exec. Default config (no sandbox, :optional mode)
+      # keeps the existing host execution path — no behavior change.
+      if use_sandbox?() do
+        run_in_sandbox(command, effective_cwd, timeout)
+      else
+        run_command(command, effective_cwd, timeout)
+      end
     end
+  end
+
+  # Route to the sandbox only when the operator has actually configured one.
+  # Host + :optional (the default) stays on the existing host path so nothing
+  # changes unless a sandbox backend is selected.
+  defp use_sandbox? do
+    Sandbox.Router.required?() or Sandbox.Router.backend() != Sandbox.Host
+  rescue
+    _ -> false
+  end
+
+  defp run_in_sandbox(command, cwd, timeout_ms) do
+    case Sandbox.Router.execute(command, working_dir: cwd, timeout: timeout_ms) do
+      {:ok, output} -> {:ok, maybe_truncate(output)}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, "Sandbox execution error: #{Exception.message(e)}"}
   end
 
   # ── Private: validation helpers ───────────────────────────────────────

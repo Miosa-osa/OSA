@@ -108,8 +108,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       session_id: state.session_id
     }
 
+    # NON-BYPASSABLE circuit-breaker: a hard blocklist of catastrophic commands
+    # (rm -rf /, force-push to protected branches, fork bombs, dd to block
+    # devices, mkfs, DROP DATABASE, curl|sh, …). Evaluated ONCE, before the
+    # tier/guardian cond so it applies in EVERY permission tier — including
+    # :full / bypass — and cannot be bypassed by the auto-mode Guardian.
+    circuit_breaker =
+      OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
+
     tool_result =
       cond do
+        match?({:blocked, _}, circuit_breaker) ->
+          {:blocked, reason} = circuit_breaker
+
+          Logger.error(
+            "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} (tier=#{state.permission_tier}, session: #{state.session_id})"
+          )
+
+          "Blocked: #{reason} (hard safety limit — not overridable in any permission tier)"
+
         not permission_tier_allows?(state.permission_tier, tool_call.name) ->
           Logger.warning(
             "[loop] Permission denied: tier=#{state.permission_tier} blocked #{tool_call.name} (session: #{state.session_id})"
