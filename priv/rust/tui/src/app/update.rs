@@ -230,7 +230,14 @@ impl App {
                 false
             }
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                self.open_command_palette();
+                // Empty input: open the command palette. Otherwise let the composer
+                // handle Ctrl+K (kill-to-end-of-line) so both bindings coexist.
+                if input_empty {
+                    self.open_command_palette();
+                } else {
+                    self.input
+                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                }
                 false
             }
             // / on empty input — type '/' into input to trigger inline completions
