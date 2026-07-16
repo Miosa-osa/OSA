@@ -3,7 +3,7 @@
 > Signal Theory-optimized proactive AI agent. Local-first. Open source. BEAM-powered.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.4.0-orange.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-50-blue.svg)](#50-built-in-tools)

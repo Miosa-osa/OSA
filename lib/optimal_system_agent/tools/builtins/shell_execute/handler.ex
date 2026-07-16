@@ -99,8 +99,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
       true ->
         timeout =
           case System.get_env("OSA_SHELL_TIMEOUT_MS") do
-            nil -> Constants.default_timeout_ms()
-            s -> String.to_integer(s)
+            nil ->
+              Constants.default_timeout_ms()
+
+            s ->
+              # Parse defensively: a typo like "30s"/"5000ms"/"" would otherwise
+              # raise ArgumentError before run_command's rescue, breaking EVERY
+              # shell_execute call with an opaque error until the env var is fixed.
+              case Integer.parse(String.trim(s)) do
+                {n, _} when n > 0 ->
+                  n
+
+                _ ->
+                  Logger.warning(
+                    "[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default"
+                  )
+
+                  Constants.default_timeout_ms()
+              end
           end
 
         # SANDBOX ROUTING: when a non-host sandbox backend is configured (or
@@ -287,10 +303,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp maybe_truncate(output) do
     max = Constants.max_output_bytes()
 
-    if byte_size(output) > max do
-      String.slice(output, 0, max) <> "\n[output truncated at 100KB]"
-    else
-      output
-    end
+    bounded =
+      if byte_size(output) > max do
+        # max is a BYTE budget; String.slice/3 counts CHARACTERS, so multibyte
+        # output could pass ~4x the cap. binary_part keeps the cap honest.
+        binary_part(output, 0, max) <> "\n[output truncated at 100KB]"
+      else
+        output
+      end
+
+    # Coerce to valid UTF-8: raw command bytes (e.g. binary blobs) would
+    # otherwise break the JSON serialization of the tool result downstream.
+    ensure_utf8(bounded)
   end
+
+  defp ensure_utf8(bin) do
+    if String.valid?(bin), do: bin, else: IO.iodata_to_binary(scrub_utf8(bin, []))
+  end
+
+  defp scrub_utf8(<<>>, acc), do: Enum.reverse(acc)
+  defp scrub_utf8(<<c::utf8, rest::binary>>, acc), do: scrub_utf8(rest, [<<c::utf8>> | acc])
+  defp scrub_utf8(<<_bad, rest::binary>>, acc), do: scrub_utf8(rest, [<<0xFFFD::utf8>> | acc])
 end

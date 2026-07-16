@@ -44,7 +44,12 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
         end)
       end)
 
-    File.write!(path, Jason.encode!(sanitized), [:utf8])
+    # Atomic write: write to a temp file then rename. rename(2) is atomic on
+    # POSIX, so a crash mid-write leaves either the intact old file or the
+    # intact new one — never a torn file that fails to decode on resume.
+    tmp = path <> ".tmp"
+    File.write!(tmp, Jason.encode!(sanitized), [:utf8])
+    File.rename!(tmp, path)
 
     Logger.debug(
       "[loop] Checkpoint written for session #{state.session_id} at iteration #{state.iteration}"
@@ -66,12 +71,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
         {:ok, content} ->
           case Jason.decode(content) do
             {:ok, data} ->
+              raw_messages = if is_list(data["messages"]), do: data["messages"], else: []
+
               messages =
-                (data["messages"] || [])
-                |> Enum.map(fn msg when is_map(msg) ->
-                  for {k, v} <- msg, into: %{} do
-                    {String.to_atom(k), v}
-                  end
+                Enum.map(raw_messages, fn
+                  msg when is_map(msg) ->
+                    for {k, v} <- msg, into: %{} do
+                      {safe_key(k), v}
+                    end
+
+                  other ->
+                    other
                 end)
 
               %{
@@ -95,6 +105,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   rescue
     _ -> %{}
   end
+
+  # Bounded key→atom conversion. Message maps only ever use a small fixed set of
+  # atom keys, so to_existing_atom preserves behavior for legitimate files while
+  # capping atom-table growth on a malformed/tampered file with thousands of
+  # distinct keys (which could otherwise exhaust the atom table and crash the VM).
+  defp safe_key(k) when is_binary(k) do
+    try do
+      String.to_existing_atom(k)
+    rescue
+      ArgumentError -> k
+    end
+  end
+
+  defp safe_key(k), do: k
 
   defp sanitize_utf8(binary) when is_binary(binary) do
     case :unicode.characters_to_binary(binary, :utf8) do
@@ -193,7 +217,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
 
     dir = rewind_session_dir(state.session_id)
     File.mkdir_p!(dir)
-    File.write!(Path.join(dir, id <> ".json"), Jason.encode!(entry), [:utf8])
+    # Atomic write-then-rename so a crash never leaves a torn rewind point.
+    path = Path.join(dir, id <> ".json")
+    tmp = path <> ".tmp"
+    File.write!(tmp, Jason.encode!(entry), [:utf8])
+    File.rename!(tmp, path)
 
     prune_rewind(state.session_id)
 
@@ -297,7 +325,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
       {:ok, files} ->
         files
         |> Enum.filter(&String.ends_with?(&1, ".json"))
-        |> Enum.sort(:desc)
+        # Sort by the parsed numeric <millis> prefix (matching
+        # list_rewind_checkpoints) rather than lexically — lexical order only
+        # matches chronological order while digit-widths are equal and is
+        # sensitive to the random suffix, so it could prune a NEWER checkpoint.
+        |> Enum.sort_by(&rewind_file_ms/1, :desc)
         |> Enum.drop(max)
         |> Enum.each(fn f -> File.rm(Path.join(dir, f)) end)
 
@@ -369,11 +401,12 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   # Convert top-level string keys to atoms and message maps' keys to atoms,
   # mirroring restore_checkpoint/1's handling.
   defp atomize_entry(data) when is_map(data) do
+    raw_messages = if is_list(data["messages"]), do: data["messages"], else: []
+
     messages =
-      (data["messages"] || [])
-      |> Enum.map(fn
+      Enum.map(raw_messages, fn
         msg when is_map(msg) ->
-          for {k, v} <- msg, into: %{}, do: {String.to_atom(k), v}
+          for {k, v} <- msg, into: %{}, do: {safe_key(k), v}
 
         other ->
           other
@@ -392,6 +425,16 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
       fs_head: data["fs_head"],
       messages: messages
     }
+  end
+
+  # Parse the numeric <millis> prefix from a rewind checkpoint filename
+  # (`<millis>_<rand>.json`) for chronological ordering. Unparseable names sort
+  # oldest (0) so they are pruned first rather than surviving over real points.
+  defp rewind_file_ms(filename) do
+    case filename |> String.split("_") |> hd() |> Integer.parse() do
+      {ms, _} -> ms
+      :error -> 0
+    end
   end
 
   defp safe_fs_head do

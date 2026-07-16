@@ -25,7 +25,7 @@ impl ToolRenderer for BashRenderer {
 
         // Collapsed header — truncate command to ~50 chars
         let cmd_display: String = if command.len() > 50 {
-            format!("{}…", &command[..50])
+            format!("{}\u{2026}", crate::util::truncate_str(&command, 50))
         } else {
             command.clone()
         };
@@ -44,7 +44,7 @@ impl ToolRenderer for BashRenderer {
                 let first_line = result.lines().next().unwrap_or("").trim();
                 if !first_line.is_empty() {
                     let preview: String = if first_line.len() > 60 {
-                        format!("{}…", &first_line[..60])
+                        format!("{}\u{2026}", crate::util::truncate_str(first_line, 60))
                     } else {
                         first_line.to_string()
                     };

@@ -22,7 +22,7 @@ impl ToolRenderer for McpRenderer {
         };
 
         let detail_display: String = if detail.len() > 55 {
-            format!("{}…", &detail[..55])
+            format!("{}\u{2026}", crate::util::truncate_str(&detail, 55))
         } else {
             detail
         };
@@ -60,7 +60,7 @@ impl ToolRenderer for McpRenderer {
         // Show args summary
         if !args.is_empty() && args != "{}" {
             let args_display: String = if args.len() > 80 {
-                format!("{}…", &args[..80])
+                format!("{}\u{2026}", crate::util::truncate_str(args, 80))
             } else {
                 args.to_string()
             };

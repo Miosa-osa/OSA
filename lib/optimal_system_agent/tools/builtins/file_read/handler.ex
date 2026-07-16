@@ -76,9 +76,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
       offset || limit ->
         read_with_range(expanded, path, offset, limit)
 
+      too_large?(expanded) ->
+        {mb, cap_mb} = size_report(expanded)
+
+        {:error,
+         "#{path} is too large to read whole (#{mb} MB, cap #{cap_mb} MB). " <>
+           "Read a slice with `offset`/`limit`, or use `file_grep` to search inside it."}
+
       true ->
         case File.read(expanded) do
-          {:ok, content} -> {:ok, content}
+          {:ok, content} ->
+            if String.valid?(content) do
+              {:ok, content}
+            else
+              {:error,
+               "#{path} appears to be a binary or non-UTF-8 file; file_read only returns text and images. Use `shell_execute` with an appropriate tool if you need its bytes."}
+            end
+
           {:error, :eisdir} ->
             {:error,
              "#{path} is a directory, not a file. Use `dir_list` instead."}
@@ -91,6 +105,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
             {:error, "Error reading file #{path}: #{reason}"}
         end
     end
+  end
+
+  # True when a whole-file read would exceed the byte cap. Slices (offset/limit)
+  # never reach here, so they remain unbounded-by-lines but streamed.
+  defp too_large?(expanded) do
+    case File.stat(expanded) do
+      {:ok, %{size: size}} -> size > Constants.max_read_bytes()
+      _ -> false
+    end
+  end
+
+  defp size_report(expanded) do
+    mb =
+      case File.stat(expanded) do
+        {:ok, %{size: size}} -> Float.round(size / (1024 * 1024), 1)
+        _ -> 0.0
+      end
+
+    {mb, div(Constants.max_read_bytes(), 1024 * 1024)}
   end
 
   # ── Private ───────────────────────────────────────────────────────────

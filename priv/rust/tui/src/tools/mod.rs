@@ -359,3 +359,101 @@ pub(crate) fn make_result_line(
         ),
     ])
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests: multi-byte-safe header/preview shortening in every tool
+// renderer. Each case feeds a payload whose UTF-8 boundaries do NOT line up
+// with the renderer's fixed byte cut points, so the previous `&s[..N]` byte
+// slices would panic ("byte index N is not a char boundary"). A leading ASCII
+// 'a' shifts the 3-byte '€' run off every multiple-of-3 cut point, guaranteeing
+// a mid-char index at 50/55/57/60/80/120. Passing == no panic.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod render_edge_tests {
+    use super::*;
+
+    /// "a" + `n` euro signs — 1 + 3n bytes, so the fixed cut points all land
+    /// inside a multi-byte char.
+    fn mb(n: usize) -> String {
+        format!("a{}", "\u{20ac}".repeat(n))
+    }
+
+    fn opts(expanded: bool) -> RenderOpts {
+        RenderOpts {
+            status: ToolStatus::Success,
+            width: 80,
+            expanded,
+            compact: false,
+            spinner_frame: None,
+            duration_ms: 1234,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn bash_renderer_multibyte_never_panics() {
+        let args = format!("{{\"command\":\"{}\"}}", mb(40));
+        let result = format!("{}\nsecond line", mb(40));
+        for exp in [false, true] {
+            let _ = bash::BashRenderer.render("Bash", &args, &result, &opts(exp));
+        }
+        // Non-JSON args path too (command = first-chars fallback).
+        let _ = bash::BashRenderer.render("Bash", &mb(40), &mb(40), &opts(false));
+    }
+
+    #[test]
+    fn web_renderer_multibyte_never_panics() {
+        let fetch_args = format!("{{\"url\":\"{}\"}}", mb(40));
+        for exp in [false, true] {
+            let _ = web::WebFetchRenderer.render("WebFetch", &fetch_args, &mb(50), &opts(exp));
+        }
+        let search_args = format!("{{\"query\":\"{}\"}}", mb(10));
+        let search_result = format!(
+            "[{{\"title\":\"{}\",\"url\":\"{}\",\"snippet\":\"{}\"}}]",
+            mb(10),
+            mb(30),
+            mb(60)
+        );
+        for exp in [false, true] {
+            let _ =
+                web::WebSearchRenderer.render("WebSearch", &search_args, &search_result, &opts(exp));
+        }
+    }
+
+    #[test]
+    fn mcp_renderer_multibyte_never_panics() {
+        let name = format!("mcp__server__{}", mb(30));
+        let args = format!("{{\"payload\":\"{}\"}}", mb(40));
+        for exp in [false, true] {
+            let _ = mcp::McpRenderer.render(&name, &args, &mb(40), &opts(exp));
+        }
+    }
+
+    #[test]
+    fn agent_renderer_multibyte_never_panics() {
+        let args = format!("{{\"task\":\"{}\"}}", mb(40));
+        for exp in [false, true] {
+            let _ = agent::AgentRenderer.render("Agent", &args, &mb(40), &opts(exp));
+            let _ = agent::DelegateRenderer.render("Delegate", &args, &mb(40), &opts(exp));
+        }
+    }
+
+    #[test]
+    fn generic_renderer_multibyte_never_panics() {
+        // Nested object with no top-level string value forces the compact-JSON
+        // fallback path (the one that byte-sliced at 60).
+        let args = format!("{{\"k\":{{\"n\":\"{}\"}}}}", mb(40));
+        for exp in [false, true] {
+            let _ = generic::GenericRenderer.render("mystery_tool", &args, &mb(40), &opts(exp));
+        }
+    }
+
+    #[test]
+    fn dispatcher_multibyte_never_panics() {
+        let args = format!("{{\"command\":\"{}\"}}", mb(40));
+        for name in ["Bash", "WebFetch", "mcp__srv__tool", "Agent", "whatever"] {
+            let _ = render_tool(name, &args, &mb(40), &opts(false));
+            let _ = render_tool(name, &args, &mb(40), &opts(true));
+        }
+    }
+}

@@ -73,7 +73,7 @@ fn args_summary(args: &str) -> String {
         // Compact JSON as fallback
         let compact = v.to_string();
         return if compact.len() > 60 {
-            format!("{}…", &compact[..60])
+            format!("{}\u{2026}", crate::util::truncate_str(&compact, 60))
         } else {
             compact
         };

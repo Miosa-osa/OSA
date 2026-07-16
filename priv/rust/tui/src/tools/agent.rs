@@ -18,7 +18,7 @@ impl ToolRenderer for AgentRenderer {
             .unwrap_or_else(|| "agent task".to_string());
 
         let task_display: String = if task_name.len() > 50 {
-            format!("{}…", &task_name[..50])
+            format!("{}\u{2026}", crate::util::truncate_str(&task_name, 50))
         } else {
             task_name.clone()
         };
@@ -169,7 +169,7 @@ impl ToolRenderer for DelegateRenderer {
 
         // Truncate task to 80 chars
         let task_display: String = if task.len() > 80 {
-            format!("{}…", &task[..80])
+            format!("{}\u{2026}", crate::util::truncate_str(&task, 80))
         } else {
             task
         };

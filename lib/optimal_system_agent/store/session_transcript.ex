@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   use Ecto.Schema
   import Ecto.Changeset
   import Ecto.Query
+  require Logger
 
   alias OptimalSystemAgent.Store.Repo
 
@@ -40,11 +41,25 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
     }
 
     case changeset(attrs) |> Repo.insert() do
-      {:ok, record} -> {:ok, record}
-      {:error, changeset} -> {:error, changeset}
+      {:ok, record} ->
+        {:ok, record}
+
+      {:error, changeset} ->
+        # Callers ignore this return value, so log the failure to make otherwise
+        # silent transcript loss (e.g. lock contention) observable.
+        Logger.warning(
+          "[transcript] save_turn failed for session #{inspect(session_id)}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
     end
   rescue
-    e -> {:error, Exception.message(e)}
+    e ->
+      Logger.warning(
+        "[transcript] save_turn raised for session #{inspect(session_id)}: #{Exception.message(e)}"
+      )
+
+      {:error, Exception.message(e)}
   end
 
   @doc """

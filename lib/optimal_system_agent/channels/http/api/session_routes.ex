@@ -161,9 +161,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         # Markdown export
         md_lines =
           Enum.map(transcript, fn t ->
-            role_label = String.capitalize(t.role)
+            role_label = String.capitalize(t.role || "")
             timestamp = t.inserted_at || ""
-            "### #{role_label} (#{timestamp})\n\n#{t.content}\n"
+            "### #{role_label} (#{timestamp})\n\n#{t.content || ""}\n"
           end)
 
         markdown = "# Session Export: #{id}\n\n" <> Enum.join(md_lines, "\n---\n\n")
@@ -467,71 +467,68 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     survey_id = body["survey_id"]
     answers = body["answers"]
 
-    unless survey_id && answers do
+    if is_binary(survey_id) and is_list(answers) do
+      key = {session_id, survey_id}
+      :ets.insert(:osa_survey_answers, {key, answers})
+
+      # Bridge to ask_user tool: if this survey_id matches a pending ask_user question,
+      # send the answer to the waiting process so it can continue.
+      try do
+        case :ets.lookup(:osa_pending_questions, survey_id) do
+          [{^survey_id, %{session_id: _sid} = _pending}] ->
+            # Build the answer text from the survey answers
+            answer_text =
+              Enum.map(answers, fn a ->
+                case a do
+                  %{"free_text" => ft} when is_binary(ft) and ft != "" -> ft
+                  %{"selected" => selected} when is_list(selected) -> Enum.join(selected, ", ")
+                  _ -> ""
+                end
+              end)
+              |> Enum.reject(&(&1 == ""))
+              |> Enum.join("; ")
+
+            # Parse the ref back from the string representation
+            # The ask_user tool stores its ref as inspect(make_ref()), we use it as the survey_id
+            # Send to ALL processes waiting on ask_user (broadcast approach)
+            Phoenix.PubSub.broadcast(
+              OptimalSystemAgent.PubSub,
+              "osa:ask_user:#{survey_id}",
+              {:ask_user_answer, survey_id, answer_text}
+            )
+
+          _ ->
+            :ok
+        end
+      rescue
+        _ -> :ok
+      end
+
+      OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+        event: :survey_answered,
+        session_id: session_id,
+        data: %{
+          survey_id: survey_id,
+          summary:
+            Enum.map(answers, fn a ->
+              answer_text =
+                case a do
+                  %{"free_text" => ft} when is_binary(ft) and ft != "" -> ft
+                  %{"selected" => selected} when is_list(selected) -> Enum.join(selected, ", ")
+                  _ -> ""
+                end
+
+              {(is_map(a) && a["question_text"]) || "", answer_text}
+            end)
+        }
+      })
+
       conn
       |> put_resp_content_type("application/json")
-      |> send_resp(400, Jason.encode!(%{error: "missing survey_id or answers"}))
-      |> halt()
+      |> send_resp(200, Jason.encode!(%{status: "ok"}))
+    else
+      json_error(conn, 400, "invalid_request", "survey_id and answers (array) are required")
     end
-
-    key = {session_id, survey_id}
-    :ets.insert(:osa_survey_answers, {key, answers})
-
-    # Bridge to ask_user tool: if this survey_id matches a pending ask_user question,
-    # send the answer to the waiting process so it can continue.
-    try do
-      case :ets.lookup(:osa_pending_questions, survey_id) do
-        [{^survey_id, %{session_id: _sid} = _pending}] ->
-          # Build the answer text from the survey answers
-          answer_text =
-            Enum.map(answers, fn a ->
-              case a do
-                %{"free_text" => ft} when is_binary(ft) and ft != "" -> ft
-                %{"selected" => selected} when is_list(selected) -> Enum.join(selected, ", ")
-                _ -> ""
-              end
-            end)
-            |> Enum.reject(&(&1 == ""))
-            |> Enum.join("; ")
-
-          # Parse the ref back from the string representation
-          # The ask_user tool stores its ref as inspect(make_ref()), we use it as the survey_id
-          # Send to ALL processes waiting on ask_user (broadcast approach)
-          Phoenix.PubSub.broadcast(
-            OptimalSystemAgent.PubSub,
-            "osa:ask_user:#{survey_id}",
-            {:ask_user_answer, survey_id, answer_text}
-          )
-
-        _ ->
-          :ok
-      end
-    rescue
-      _ -> :ok
-    end
-
-    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
-      event: :survey_answered,
-      session_id: session_id,
-      data: %{
-        survey_id: survey_id,
-        summary:
-          Enum.map(answers, fn a ->
-            answer_text =
-              case a do
-                %{"free_text" => ft} when is_binary(ft) and ft != "" -> ft
-                %{"selected" => selected} -> Enum.join(selected, ", ")
-                _ -> ""
-              end
-
-            {a["question_text"] || "", answer_text}
-          end)
-      }
-    })
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{status: "ok"}))
   end
 
   # ── POST /sessions/:id/survey/skip ───────────────────────────────
@@ -542,19 +539,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
     survey_id = body["survey_id"]
 
-    unless survey_id do
+    if is_binary(survey_id) do
+      key = {session_id, survey_id}
+      :ets.insert(:osa_survey_answers, {key, :skipped})
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, Jason.encode!(%{status: "skipped"}))
+    else
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(400, Jason.encode!(%{error: "missing survey_id"}))
-      |> halt()
     end
-
-    key = {session_id, survey_id}
-    :ets.insert(:osa_survey_answers, {key, :skipped})
-
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{status: "skipped"}))
   end
 
   # ── POST /sessions/:id/proactive ───────────────────────────────
@@ -588,38 +584,37 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
     message = body["message"]
 
-    unless is_binary(message) && message != "" do
+    if is_binary(message) and message != "" do
+      # Check session exists before dispatching async
+      if SessionManager.live_session?(session_id) do
+        # Pre-filter noise before dispatching to the agent loop.
+        # Mirrors the same check done in orchestration_routes.ex.
+        case OptimalSystemAgent.Channels.NoiseFilter.check(message, nil) do
+          {:filtered, _ack} ->
+            resp = Jason.encode!(%{status: "filtered", session_id: session_id})
+            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+
+          {:clarify, prompt} ->
+            resp = Jason.encode!(%{status: "clarify", prompt: prompt, session_id: session_id})
+            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+
+          :pass ->
+            # Fire-and-forget — the loop processes in background.
+            # Client polls GET /sessions/:id/messages for results.
+            # Uses Task.Supervisor to ensure the task survives long LLM calls
+            # (Task.start would create an unsupervised process that may be reaped).
+            SessionManager.process_message_async(session_id, message)
+
+            resp = Jason.encode!(%{status: "processing", session_id: session_id})
+            conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
+        end
+      else
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+      end
+    else
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(400, Jason.encode!(%{error: "missing or empty message"}))
-      |> halt()
-    end
-
-    # Check session exists before dispatching async
-    if SessionManager.live_session?(session_id) do
-      # Pre-filter noise before dispatching to the agent loop.
-      # Mirrors the same check done in orchestration_routes.ex.
-      case OptimalSystemAgent.Channels.NoiseFilter.check(message, nil) do
-        {:filtered, _ack} ->
-          resp = Jason.encode!(%{status: "filtered", session_id: session_id})
-          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
-
-        {:clarify, prompt} ->
-          resp = Jason.encode!(%{status: "clarify", prompt: prompt, session_id: session_id})
-          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
-
-        :pass ->
-          # Fire-and-forget — the loop processes in background.
-          # Client polls GET /sessions/:id/messages for results.
-          # Uses Task.Supervisor to ensure the task survives long LLM calls
-          # (Task.start would create an unsupervised process that may be reaped).
-          SessionManager.process_message_async(session_id, message)
-
-          resp = Jason.encode!(%{status: "processing", session_id: session_id})
-          conn |> put_resp_content_type("application/json") |> send_resp(202, resp)
-      end
-    else
-      json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
     end
   end
 

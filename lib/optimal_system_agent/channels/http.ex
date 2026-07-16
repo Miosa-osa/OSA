@@ -100,9 +100,15 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           # Resolve from provider's default model
           prov = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
-          case OptimalSystemAgent.Providers.Registry.provider_info(prov) do
-            {:ok, info} -> to_string(info.default_model)
+          try do
+            case OptimalSystemAgent.Providers.Registry.provider_info(prov) do
+              {:ok, info} -> to_string(info.default_model)
+              _ -> to_string(prov)
+            end
+          rescue
             _ -> to_string(prov)
+          catch
+            :exit, _ -> to_string(prov)
           end
 
         m ->
@@ -122,7 +128,14 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           Application.get_env(:optimal_system_agent, :start_time, System.system_time(:second))
       )
 
-    context_window = OptimalSystemAgent.Providers.Registry.context_window(model_name)
+    context_window =
+      try do
+        OptimalSystemAgent.Providers.Registry.context_window(model_name)
+      rescue
+        _ -> nil
+      catch
+        :exit, _ -> nil
+      end
 
     body =
       Jason.encode!(%{

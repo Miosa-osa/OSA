@@ -66,7 +66,7 @@ defmodule OptimalSystemAgent.Providers.Google do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
-          {:ok, %{content: content, tool_calls: tool_calls}}
+          {:ok, %{content: content, tool_calls: tool_calls, usage: extract_usage(resp)}}
 
         {:ok, %{status: status, body: resp_body}} ->
           error_msg = extract_error(resp_body)
@@ -220,6 +220,18 @@ defmodule OptimalSystemAgent.Providers.Google do
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error(body), do: inspect(body)
+
+  # Extract token usage from Gemini's usageMetadata so Accounting/Pricing record
+  # real spend. Without this every Gemini turn recorded 0 tokens / $0, leaving
+  # the hard budget cap permanently blind on Google.
+  defp extract_usage(%{"usageMetadata" => meta}) when is_map(meta) do
+    %{
+      input_tokens: meta["promptTokenCount"] || 0,
+      output_tokens: meta["candidatesTokenCount"] || 0
+    }
+  end
+
+  defp extract_usage(_), do: %{}
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()

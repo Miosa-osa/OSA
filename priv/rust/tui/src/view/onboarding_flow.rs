@@ -23,6 +23,81 @@ const SYM_DONE: &str = "\u{2713}";      // ✓  completed step answer
 const SYM_CURSOR: &str = "\u{258c}";    // ▌  text-input cursor bar
 const SYM_BULLET: &str = "\u{2022}";    // •  masked char
 
+/// ANSI Shadow figlet "OSA" wordmark — shared with the welcome banner so the
+/// first-run flow and the returning-user screen read as the same brand.
+const OSA_LOGO: &[&str] = &[
+    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} ",
+    "\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}",
+    "\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
+    "\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}",
+    "\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
+    " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
+];
+
+/// Push a single line, horizontally centred within `col_w`.
+fn push_centered(lines: &mut Vec<Line<'static>>, col_w: u16, text: &str, style: Style) {
+    let pad = (col_w as usize).saturating_sub(text.chars().count()) / 2;
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(pad)),
+        Span::styled(text.to_string(), style),
+    ]));
+}
+
+/// Render a gradient (grad_a -> grad_b) string centred within `col_w`.
+fn push_centered_gradient(lines: &mut Vec<Line<'static>>, col_w: u16, text: &str) {
+    let pad = (col_w as usize).saturating_sub(text.chars().count()) / 2;
+    let grad = crate::style::gradient::theme_gradient(text, true);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(grad.spans.len() + 1);
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.extend(grad.spans);
+    lines.push(Line::from(spans));
+}
+
+/// Branded first-run header: the OSA figlet wordmark rendered in the theme's
+/// blue light->dark gradient, with a compact wordmark fallback on small panes.
+/// Purely additive — it never changes the wizard's step flow.
+fn push_branded_header(
+    lines: &mut Vec<Line<'static>>,
+    col_w: u16,
+    avail_h: u16,
+    theme: &crate::style::Theme,
+) {
+    lines.push(Line::from(""));
+
+    let logo_w = OSA_LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(41);
+    let show_logo = (col_w as usize) >= logo_w && avail_h >= 18;
+
+    if show_logo {
+        for art in OSA_LOGO {
+            push_centered_gradient(lines, col_w, art);
+        }
+        lines.push(Line::from(""));
+        push_centered(
+            lines,
+            col_w,
+            "Agent \u{00b7} first-run setup",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        );
+    } else {
+        // Compact: gradient diamond + wordmark on one line.
+        push_centered_gradient(lines, col_w, &format!("{} OSA", SYM_DIAMOND));
+        push_centered(
+            lines,
+            col_w,
+            "Agent setup",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        );
+    }
+
+    push_centered(
+        lines,
+        col_w,
+        "Let's get you connected \u{2014} about a minute",
+        Style::default().fg(theme.colors.dim),
+    );
+    lines.push(Line::from(""));
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Draw the full-screen conversational onboarding flow.
@@ -42,23 +117,10 @@ pub fn draw_onboarding_flow(frame: &mut Frame, area: Rect, wizard: &OnboardingWi
     // Build all lines for the content panel.
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {}  ", SYM_DIAMOND),
-            Style::default()
-                .fg(theme.colors.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "OSA Agent Setup",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(Line::from(""));
+    // Branded first-run banner: the OSA wordmark in the blue grad_a -> grad_b
+    // gradient, with a compact fallback on short/narrow panes. This is the
+    // first thing a new user sees, so it leads with our identity.
+    push_branded_header(&mut lines, col_w, area.height, &theme);
 
     let step = wizard.flow_step();
     let providers = wizard.flow_providers();
@@ -465,9 +527,10 @@ fn push_model_select(
                 )
             };
 
-            // Truncate long labels so they don't wrap.
-            let display_label = if label.len() > 50 {
-                format!("{}\u{2026}", &label[..49])
+            // Truncate long labels so they don't wrap. Truncate by chars, not
+            // bytes: a model name with multi-byte UTF-8 could put byte 49 mid-char.
+            let display_label = if label.chars().count() > 50 {
+                format!("{}\u{2026}", label.chars().take(49).collect::<String>())
             } else {
                 label.clone()
             };
@@ -550,9 +613,10 @@ fn push_channels(
     let instructions_list = OnboardingWizard::flow_channel_instructions();
 
     if let Some(ch_idx) = wizard.flow_current_channel_setup() {
-        // Token input sub-step for a specific channel
-        let (_, ch_name, _) = channel_list[ch_idx];
-        let instructions = instructions_list[ch_idx];
+        // Token input sub-step for a specific channel. Use .get() so a future
+        // drift between the channel and instruction arrays can't panic here.
+        let ch_name = channel_list.get(ch_idx).map(|(_, n, _)| *n).unwrap_or("Channel");
+        let instructions: &[&str] = instructions_list.get(ch_idx).copied().unwrap_or(&[]);
 
         lines.push(Line::from(vec![
             Span::styled(format!("  {}  ", SYM_OPEN), active_sym),
@@ -869,4 +933,79 @@ fn build_help_line<'a>(
     }
 
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod flow_render_tests {
+    use super::*;
+    use crate::dialogs::onboarding::{OnboardingData, OnboardingWizard};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    // Includes the extreme tiny sizes required by the audit plus a large one.
+    const SIZES: &[(u16, u16)] = &[(1, 1), (10, 3), (20, 5), (60, 20), (200, 60)];
+
+    fn enter(wizard: &mut OnboardingWizard) {
+        let _ = wizard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    }
+
+    fn wizard_with(providers: serde_json::Value) -> OnboardingWizard {
+        let providers = serde_json::from_value(providers).unwrap();
+        OnboardingWizard::new(OnboardingData {
+            providers,
+            system_info: std::collections::HashMap::new(),
+        })
+    }
+
+    fn draw_all_sizes(wizard: &OnboardingWizard) {
+        for &(w, h) in SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                draw_onboarding_flow(f, area, wizard);
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn branded_flow_multibyte_model_never_panics() {
+        // A model label with a multi-byte name so push_model's label shortening
+        // runs on non-ASCII content, plus the branded gradient header.
+        let mut wizard = wizard_with(serde_json::json!([{
+            "id": "custom",
+            "name": "Provider \u{00e9}",
+            "requires_key": false,
+            "models": [
+                { "id": "m1", "name": "\u{20ac}".repeat(60), "ctx": 1000000, "tools": true },
+                { "id": "m2", "name": "gpt\u{2011}4o\u{2011}\u{4e2d}\u{6587}", "ctx": 128000 }
+            ]
+        }]));
+        for _ in 0..8 {
+            draw_all_sizes(&wizard);
+            enter(&mut wizard);
+        }
+    }
+
+    #[test]
+    fn branded_flow_empty_providers_never_panics() {
+        let wizard = wizard_with(serde_json::json!([]));
+        draw_all_sizes(&wizard);
+    }
+
+    #[test]
+    fn branded_flow_channel_token_step_never_panics() {
+        let mut wizard = wizard_with(serde_json::json!([{
+            "id": "custom", "name": "Custom", "requires_key": false,
+            "models": [ { "id": "m1", "name": "model-one", "ctx": 1000 } ]
+        }]));
+        // provider->details->model->verify->channels
+        for _ in 0..4 {
+            enter(&mut wizard);
+        }
+        let _ = wizard.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        enter(&mut wizard); // open first selected channel's token screen
+        draw_all_sizes(&wizard);
+    }
 }

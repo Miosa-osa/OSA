@@ -8,6 +8,14 @@ use std::collections::HashMap;
 
 use crate::client::types::OnboardingProvider;
 
+/// Render a widget into `rect` but clipped to the frame's drawable area, so a
+/// fixed-layout step draw on a very short/narrow terminal degrades gracefully
+/// instead of writing out of bounds and panicking. Single choke point for the
+/// whole wizard dialog.
+fn put<W: ratatui::widgets::Widget>(frame: &mut Frame, widget: W, rect: Rect) {
+    crate::app::event_loop::safe_render_widget(frame, widget, rect);
+}
+
 const DIALOG_W: u16 = 64;
 const DIALOG_H: u16 = 28;
 
@@ -126,6 +134,15 @@ enum VerifyStatus {
 
 impl OnboardingWizard {
     pub fn new(data: OnboardingData) -> Self {
+        // Regression guard: the channel metadata and per-channel instructions
+        // must stay the same length, or the channel-token screen would index
+        // out of bounds. Draw code additionally uses .get() as a runtime guard.
+        debug_assert_eq!(
+            CHANNELS.len(),
+            CHANNEL_INSTRUCTIONS.len(),
+            "CHANNELS and CHANNEL_INSTRUCTIONS must stay in lockstep"
+        );
+
         // Build initial model list from first provider
         let model_list = Self::extract_models(&data.providers, 0);
 
@@ -347,21 +364,30 @@ impl OnboardingWizard {
 
     pub fn flow_api_key_display(&self) -> String {
         if self.api_key_masked {
-            "\u{2022}".repeat(self.api_key.len())
+            // Cap the mask so a stray large paste can't allocate a giant string
+            // on every frame; count chars (not bytes) so multi-byte input is safe.
+            "\u{2022}".repeat(self.api_key.chars().count().min(64))
         } else {
             self.api_key.clone()
         }
     }
 
     pub fn flow_api_key_preview(&self) -> String {
-        if self.api_key.is_empty() {
-            "not set".to_string()
-        } else if self.api_key.len() > 8 {
-            format!(
-                "{}...{}",
-                &self.api_key[..4],
-                &self.api_key[self.api_key.len() - 4..]
-            )
+        Self::masked_key_preview(&self.api_key)
+    }
+
+    /// Char-boundary-safe first-4/last-4 masked preview of a secret. Slicing by
+    /// chars (never bytes) means a key holding multi-byte UTF-8 can never panic
+    /// on a non-char-boundary index.
+    fn masked_key_preview(key: &str) -> String {
+        if key.is_empty() {
+            return "not set".to_string();
+        }
+        let cs: Vec<char> = key.chars().collect();
+        if cs.len() > 8 {
+            let first: String = cs[..4].iter().collect();
+            let last: String = cs[cs.len() - 4..].iter().collect();
+            format!("{}...{}", first, last)
         } else {
             "set".to_string()
         }
@@ -406,7 +432,7 @@ impl OnboardingWizard {
 
     pub fn flow_channel_token_display(&self) -> String {
         if self.channel_token_masked {
-            "\u{2022}".repeat(self.channel_token_input.len())
+            "\u{2022}".repeat(self.channel_token_input.chars().count().min(64))
         } else {
             self.channel_token_input.clone()
         }
@@ -465,10 +491,12 @@ impl OnboardingWizard {
         } else {
             trimmed
         };
-        // Strip surrounding quotes
-        let unquoted = if (value.starts_with('"') && value.ends_with('"'))
-            || (value.starts_with('\'') && value.ends_with('\''))
-            || (value.starts_with('`') && value.ends_with('`'))
+        // Strip surrounding quotes — require at least two bytes so a lone quote
+        // char (value.len()==1) can never produce a reversed &value[1..0] slice.
+        let unquoted = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''))
+                || (value.starts_with('`') && value.ends_with('`')))
         {
             &value[1..value.len() - 1]
         } else {
@@ -480,16 +508,22 @@ impl OnboardingWizard {
     }
 
     /// Returns true if the wizard is on the verify step and needs a health check fired.
+    /// Short-circuits to false when no health-check params can be built (e.g. no
+    /// provider) so the flow never waits on a check that can't run.
     pub fn needs_health_check(&self) -> bool {
-        self.step == 3 && self.verify_status == VerifyStatus::Pending
+        self.step == 3
+            && self.verify_status == VerifyStatus::Pending
+            && self.get_health_check_params().is_some()
     }
 
     /// Handle a paste event (bracketed paste from terminal).
     pub fn handle_paste(&mut self, text: &str) -> Option<OnboardingAction> {
         match self.step {
             1 => {
-                // Details step — paste into API key or URL
-                let cleaned = Self::clean_pasted_key(text);
+                // Details step — paste into API key or URL. Cap to a sane
+                // single-secret length so a stray multi-KB paste can't be stored
+                // whole (keys/tokens/URLs are never multi-KB).
+                let cleaned: String = Self::clean_pasted_key(text).chars().take(512).collect();
                 if self.provider_needs_url() && !self.provider_needs_key() {
                     self.base_url.push_str(&cleaned);
                 } else {
@@ -507,7 +541,8 @@ impl OnboardingWizard {
             4 => {
                 // Channels token input
                 if self.current_channel_setup.is_some() {
-                    let cleaned = Self::clean_pasted_key(text);
+                    let cleaned: String =
+                        Self::clean_pasted_key(text).chars().take(512).collect();
                     self.channel_token_input.push_str(&cleaned);
                 }
                 None
@@ -644,7 +679,14 @@ impl OnboardingWizard {
     fn handle_step_verify(&mut self, key: KeyEvent) -> Option<OnboardingAction> {
         match key.code {
             KeyCode::Enter => {
-                if self.verify_status != VerifyStatus::Pending {
+                // Advance once verification resolves. Also advance immediately when
+                // there is no provider / no buildable health check (e.g. zero
+                // providers returned) so the wizard can never soft-lock waiting on
+                // a check that can't run.
+                if self.verify_status != VerifyStatus::Pending
+                    || self.current_provider().is_none()
+                    || self.get_health_check_params().is_none()
+                {
                     self.advance()
                 } else {
                     None
@@ -711,12 +753,17 @@ impl OnboardingWizard {
                 None
             }
             KeyCode::Char(' ') => {
-                let idx = self.confirm_selected.min(CHANNELS.len() - 1);
-                self.selected_channels[idx] = !self.selected_channels[idx];
+                let idx = self.confirm_selected.min(CHANNELS.len().saturating_sub(1));
+                let mut now_selected = false;
+                if let Some(v) = self.selected_channels.get_mut(idx) {
+                    *v = !*v;
+                    now_selected = *v;
+                }
                 // If we just deselected a channel, remove any saved token for it
-                if !self.selected_channels[idx] {
-                    let channel_id = CHANNELS[idx].0;
-                    self.channel_tokens.remove(channel_id);
+                if !now_selected {
+                    if let Some((channel_id, _, _)) = CHANNELS.get(idx) {
+                        self.channel_tokens.remove(*channel_id);
+                    }
                 }
                 None
             }
@@ -833,14 +880,26 @@ impl OnboardingWizard {
         let y = area.y + area.height.saturating_sub(h) / 2;
         let dialog_rect = Rect::new(x, y, w, h);
 
-        frame.render_widget(Clear, dialog_rect);
+        put(frame, Clear, dialog_rect);
 
+        // Branded title on the top border: the OSA wordmark in the blue
+        // grad_a -> grad_b gradient. Title lives on the border, so it adds no
+        // layout rows and never disturbs the step flow below.
+        let mut title_spans = vec![Span::raw(" ")];
+        title_spans.extend(crate::style::gradient::theme_gradient("\u{25c6} OSA", true).spans);
+        title_spans.push(Span::styled(
+            " Setup ",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.colors.primary))
+            .title(Line::from(title_spans).centered())
             .style(Style::default().bg(theme.colors.dialog_bg));
-        frame.render_widget(block, dialog_rect);
+        put(frame, block, dialog_rect);
 
         let inner = Rect::new(
             dialog_rect.x + 1,
@@ -856,7 +915,7 @@ impl OnboardingWizard {
 
         // Step indicator
         let step_line = self.render_step_indicator();
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(step_line).alignment(Alignment::Center),
             Rect::new(inner.x, cy, inner.width, 1),
         );
@@ -864,7 +923,7 @@ impl OnboardingWizard {
 
         // Separator
         let sep = "\u{2500}".repeat(inner.width as usize);
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(sep.as_str()).style(Style::default().fg(theme.colors.dim)),
             Rect::new(inner.x, cy, inner.width, 1),
         );
@@ -887,7 +946,7 @@ impl OnboardingWizard {
         // Help bar
         let bottom_y = inner.y + inner.height.saturating_sub(1);
         let help = self.render_help_bar(&theme);
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(help).alignment(Alignment::Center),
             Rect::new(inner.x, bottom_y, inner.width, 1),
         );
@@ -999,7 +1058,7 @@ impl OnboardingWizard {
     ) {
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("How do you want to connect?")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1018,7 +1077,7 @@ impl OnboardingWizard {
                     "recommended" => "  \u{2500}\u{2500} Recommended \u{2500}\u{2500}",
                     _ => "  \u{2500}\u{2500} Bring Your Own \u{2500}\u{2500}",
                 };
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new(label).style(Style::default().fg(theme.colors.dim)),
                     Rect::new(area.x, cy, area.width, 1),
                 );
@@ -1036,7 +1095,7 @@ impl OnboardingWizard {
             };
             let dot = if is_selected { "\u{25cf}" } else { "\u{25cb}" };
             let label = format!("    {} {}  ({})", dot, p.name, p.description);
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(label).style(style),
                 Rect::new(area.x, cy, area.width, 1),
             );
@@ -1057,7 +1116,7 @@ impl OnboardingWizard {
             .map(|p| p.name.as_str())
             .unwrap_or("Provider");
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(format!("{} Setup", provider_name))
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1067,7 +1126,7 @@ impl OnboardingWizard {
 
         // Signup URL hint
         if let Some(ref url) = self.current_provider().and_then(|p| p.signup_url.clone()) {
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(format!("  Get your key at: {}", url))
                     .style(Style::default().fg(theme.colors.dim)),
                 Rect::new(area.x, cy, area.width, 1),
@@ -1081,7 +1140,7 @@ impl OnboardingWizard {
                 .and_then(|p| p.env_var.clone())
                 .unwrap_or_else(|| "API_KEY".to_string());
 
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(format!("  {} :", env_label))
                     .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
@@ -1089,11 +1148,11 @@ impl OnboardingWizard {
             cy += 1;
 
             let display = if self.api_key_masked {
-                format!("  {}_", "\u{2022}".repeat(self.api_key.len()))
+                format!("  {}_", "\u{2022}".repeat(self.api_key.chars().count().min(64)))
             } else {
                 format!("  {}_", self.api_key)
             };
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(display).style(
                     Style::default()
                         .fg(theme.colors.primary)
@@ -1105,7 +1164,7 @@ impl OnboardingWizard {
         }
 
         if self.provider_needs_url() {
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new("  Base URL:")
                     .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
@@ -1113,7 +1172,7 @@ impl OnboardingWizard {
             cy += 1;
 
             let url_display = format!("  {}_", self.base_url);
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(url_display).style(
                     Style::default()
                         .fg(theme.colors.primary)
@@ -1132,7 +1191,7 @@ impl OnboardingWizard {
     ) {
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("Select Model")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1142,7 +1201,7 @@ impl OnboardingWizard {
 
         if self.model_list.is_empty() {
             // Manual input
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new("  Model name:")
                     .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
@@ -1150,7 +1209,7 @@ impl OnboardingWizard {
             cy += 1;
 
             let display = format!("  {}_", self.model_input);
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(display).style(
                     Style::default()
                         .fg(theme.colors.primary)
@@ -1174,12 +1233,16 @@ impl OnboardingWizard {
                 };
                 let dot = if is_selected { "\u{25cf}" } else { "\u{25cb}" };
                 let line = format!("  {} {}", dot, label);
-                let truncated = if line.len() > area.width as usize {
-                    format!("{}\u{2026}", &line[..area.width.saturating_sub(1) as usize])
+                // Truncate by chars, not bytes: the leading \u{25cf} dot is 3
+                // bytes and labels can be non-ASCII, so a byte slice at the
+                // width boundary could land mid-char and panic.
+                let truncated = if line.chars().count() > area.width as usize {
+                    let take = area.width.saturating_sub(1) as usize;
+                    format!("{}\u{2026}", line.chars().take(take).collect::<String>())
                 } else {
                     line
                 };
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new(truncated).style(style),
                     Rect::new(area.x, cy, area.width, 1),
                 );
@@ -1196,7 +1259,7 @@ impl OnboardingWizard {
     ) {
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("Verifying Connection")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1209,7 +1272,7 @@ impl OnboardingWizard {
             .map(|p| p.name.as_str())
             .unwrap_or("?");
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(format!("  Provider: {}", provider_name))
                 .style(Style::default().fg(theme.colors.muted)),
             Rect::new(area.x, cy, area.width, 1),
@@ -1218,27 +1281,27 @@ impl OnboardingWizard {
 
         match &self.verify_status {
             VerifyStatus::Pending => {
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new("  \u{25d0} Testing connection...")
                         .style(Style::default().fg(theme.colors.secondary)),
                     Rect::new(area.x, cy, area.width, 1),
                 );
             }
             VerifyStatus::Success { latency_ms } => {
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new(format!("  \u{2713} Connection verified ({}ms)", latency_ms))
                         .style(Style::default().fg(Color::Green)),
                     Rect::new(area.x, cy, area.width, 1),
                 );
             }
             VerifyStatus::Failed { message } => {
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new(format!("  \u{2717} {}", message))
                         .style(Style::default().fg(Color::Red)),
                     Rect::new(area.x, cy, area.width, 1),
                 );
                 cy += 2;
-                frame.render_widget(
+                put(frame, 
                     Paragraph::new("  Press 'r' to retry or Esc to go back")
                         .style(Style::default().fg(theme.colors.dim)),
                     Rect::new(area.x, cy, area.width, 1),
@@ -1260,7 +1323,7 @@ impl OnboardingWizard {
 
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("Connect Channels (optional)")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1268,13 +1331,13 @@ impl OnboardingWizard {
         );
         cy += 2;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  OSA can receive messages from other platforms.")
                 .style(Style::default().fg(theme.colors.muted)),
             Rect::new(area.x, cy, area.width, 1),
         );
         cy += 1;
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Skip this to use terminal only.")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
@@ -1282,7 +1345,7 @@ impl OnboardingWizard {
         cy += 2;
 
         // Use confirm_selected as the channel list cursor when on this step
-        let cursor = self.confirm_selected.min(CHANNELS.len() - 1);
+        let cursor = self.confirm_selected.min(CHANNELS.len().saturating_sub(1));
 
         for (i, (id, name, hint)) in CHANNELS.iter().enumerate() {
             if cy >= area.y + area.height {
@@ -1310,7 +1373,7 @@ impl OnboardingWizard {
                 "  {} [{}] {:<10}  \u{2014} {}{}",
                 cursor_marker, check, name, hint, token_note
             );
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(line).style(style),
                 Rect::new(area.x, cy, area.width, 1),
             );
@@ -1325,12 +1388,14 @@ impl OnboardingWizard {
         theme: &crate::style::Theme,
         channel_idx: usize,
     ) {
-        let (_, name, _) = CHANNELS[channel_idx];
-        let instructions = CHANNEL_INSTRUCTIONS[channel_idx];
+        // Defensive: fall back gracefully if the two const arrays ever drift
+        // out of lockstep instead of indexing out of bounds.
+        let name = CHANNELS.get(channel_idx).map(|(_, n, _)| *n).unwrap_or("Channel");
+        let instructions: &[&str] = CHANNEL_INSTRUCTIONS.get(channel_idx).copied().unwrap_or(&[]);
 
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(format!("{} Setup", name))
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1342,7 +1407,7 @@ impl OnboardingWizard {
             if cy >= area.y + area.height {
                 break;
             }
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(format!("  {}", line))
                     .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(area.x, cy, area.width, 1),
@@ -1351,7 +1416,7 @@ impl OnboardingWizard {
         }
         cy += 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Bot Token:")
                 .style(Style::default().fg(theme.colors.muted)),
             Rect::new(area.x, cy, area.width, 1),
@@ -1359,11 +1424,11 @@ impl OnboardingWizard {
         cy += 1;
 
         let display = if self.channel_token_masked {
-            format!("  {}_", "\u{2022}".repeat(self.channel_token_input.len()))
+            format!("  {}_", "\u{2022}".repeat(self.channel_token_input.chars().count().min(64)))
         } else {
             format!("  {}_", self.channel_token_input)
         };
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(display).style(
                 Style::default()
                     .fg(theme.colors.primary)
@@ -1381,7 +1446,7 @@ impl OnboardingWizard {
     ) {
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("What should I call you?")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1395,7 +1460,7 @@ impl OnboardingWizard {
         } else {
             Style::default().fg(theme.colors.muted)
         };
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Your name:").style(user_label_style),
             Rect::new(area.x, cy, area.width, 1),
         );
@@ -1403,7 +1468,7 @@ impl OnboardingWizard {
 
         let user_cursor = if self.identity_focus == 0 { "_" } else { "" };
         let user_display = format!("  {}{}", self.user_name_input, user_cursor);
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(user_display).style(
                 Style::default()
                     .fg(if self.identity_focus == 0 { theme.colors.primary } else { theme.colors.secondary })
@@ -1419,7 +1484,7 @@ impl OnboardingWizard {
         } else {
             Style::default().fg(theme.colors.muted)
         };
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Name your agent (default: OSA):").style(agent_label_style),
             Rect::new(area.x, cy, area.width, 1),
         );
@@ -1427,7 +1492,7 @@ impl OnboardingWizard {
 
         let agent_cursor = if self.identity_focus == 1 { "_" } else { "" };
         let agent_display = format!("  {}{}", self.agent_name_input, agent_cursor);
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(agent_display).style(
                 Style::default()
                     .fg(if self.identity_focus == 1 { theme.colors.primary } else { theme.colors.secondary })
@@ -1437,7 +1502,7 @@ impl OnboardingWizard {
         );
         cy += 2;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Both are optional. Press Enter to continue.")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
@@ -1452,7 +1517,7 @@ impl OnboardingWizard {
     ) {
         let mut cy = area.y + 1;
 
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("Ready to Go")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
@@ -1476,17 +1541,9 @@ impl OnboardingWizard {
                 .and_then(|p| p.default_model.as_deref())
                 .unwrap_or("\u{2014}")
         };
-        let key_display = if self.api_key.is_empty() {
-            "not set".to_string()
-        } else if self.api_key.len() > 8 {
-            format!(
-                "{}...{}",
-                &self.api_key[..4],
-                &self.api_key[self.api_key.len() - 4..]
-            )
-        } else {
-            "set".to_string()
-        };
+        // Char-boundary-safe preview (reuses the shared helper) so a key with
+        // multi-byte chars can never panic on a byte slice here.
+        let key_display = Self::masked_key_preview(&self.api_key);
 
         // Build channels display string
         let channels_display: String = {
@@ -1534,7 +1591,7 @@ impl OnboardingWizard {
                 ),
                 Span::styled(value.clone(), Style::default().fg(theme.colors.secondary)),
             ]);
-            frame.render_widget(
+            put(frame, 
                 Paragraph::new(line),
                 Rect::new(area.x, cy, area.width, 1),
             );
@@ -1542,7 +1599,7 @@ impl OnboardingWizard {
         }
 
         cy += 1;
-        frame.render_widget(
+        put(frame, 
             Paragraph::new("  Change later: /setup or edit ~/.osa/.env")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
@@ -1566,9 +1623,151 @@ impl OnboardingWizard {
             Span::raw("   "),
             Span::styled("[ Back ]", back_style),
         ]);
-        frame.render_widget(
+        put(frame, 
             Paragraph::new(buttons).alignment(Alignment::Center),
             Rect::new(area.x, btn_y, area.width, 1),
         );
+    }
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    const SIZES: &[(u16, u16)] = &[(1, 1), (10, 3), (40, 12), (64, 28), (200, 60)];
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    /// A provider carrying a long, multi-byte model name so the model-row
+    /// shortening path (leading ● + label) is exercised with mid-char cuts.
+    fn provider_with_multibyte_model() -> OnboardingProvider {
+        serde_json::from_value(serde_json::json!({
+            "id": "custom",
+            "name": "Provider \u{00e9}\u{00e9}\u{00e9}",
+            "description": "multi-byte \u{20ac}\u{20ac}\u{20ac} description",
+            "group": "recommended",
+            "requires_key": false,
+            "models": [
+                { "id": "m1", "name": "\u{20ac}".repeat(60), "ctx": 1000000, "tools": true },
+                { "id": "m2", "name": "gpt\u{2011}4o\u{2011}\u{4e2d}\u{6587}", "ctx": 128000 }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn wizard_with(providers: Vec<OnboardingProvider>) -> OnboardingWizard {
+        OnboardingWizard::new(OnboardingData {
+            providers,
+            system_info: std::collections::HashMap::new(),
+        })
+    }
+
+    fn draw_at_all_sizes(wizard: &OnboardingWizard) {
+        for &(w, h) in SIZES {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                wizard.draw(f, area);
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn draws_every_step_with_multibyte_model_without_panic() {
+        let mut wizard = wizard_with(vec![provider_with_multibyte_model()]);
+        // Walk the whole flow, drawing at every size at every step. Enter
+        // advances; the model step lists the multi-byte labels.
+        for _ in 0..8 {
+            draw_at_all_sizes(&wizard);
+            let _ = wizard.handle_key(key(KeyCode::Enter));
+        }
+    }
+
+    #[test]
+    fn model_step_lists_multibyte_labels_without_panic() {
+        let mut wizard = wizard_with(vec![provider_with_multibyte_model()]);
+        // step0 -> step1 (details) -> step2 (model list)
+        let _ = wizard.handle_key(key(KeyCode::Enter));
+        let _ = wizard.handle_key(key(KeyCode::Enter));
+        assert_eq!(wizard.flow_step(), 2);
+        draw_at_all_sizes(&wizard);
+        // Navigate the list too.
+        let _ = wizard.handle_key(key(KeyCode::Down));
+        draw_at_all_sizes(&wizard);
+    }
+
+    #[test]
+    fn empty_providers_never_soft_locks_or_panics() {
+        let mut wizard = wizard_with(vec![]);
+        // No provider: needs_health_check must be false so the flow can't wait
+        // on an un-buildable check, and drawing every step must not panic.
+        assert!(!wizard.needs_health_check());
+        for _ in 0..10 {
+            draw_at_all_sizes(&wizard);
+            let _ = wizard.handle_key(key(KeyCode::Enter));
+        }
+    }
+
+    #[test]
+    fn lone_quote_paste_does_not_panic() {
+        // clean_pasted_key on a single quote char must not slice &value[1..0].
+        for q in ["\"", "'", "`"] {
+            assert_eq!(OnboardingWizard::clean_pasted_key(q), q);
+        }
+        // And through the live paste path on the key field.
+        let mut wizard = wizard_with(vec![serde_json::from_value(serde_json::json!({
+            "id": "openai", "name": "OpenAI", "requires_key": true,
+        }))
+        .unwrap()]);
+        let _ = wizard.handle_key(key(KeyCode::Enter)); // -> details
+        for q in ["\"", "'", "`"] {
+            let _ = wizard.handle_paste(q);
+        }
+    }
+
+    #[test]
+    fn masked_key_preview_multibyte_never_panics() {
+        for k in [
+            "",
+            "short",
+            "\u{20ac}\u{20ac}\u{20ac}",                        // 9 bytes, 3 chars (<=8 chars)
+            &"\u{20ac}".repeat(12),                            // long multi-byte
+            "sk-aaaa\u{20ac}\u{20ac}\u{20ac}\u{20ac}bbbbcccc", // multi-byte head/tail region
+        ] {
+            let _ = OnboardingWizard::masked_key_preview(k);
+        }
+    }
+
+    #[test]
+    fn large_paste_into_key_is_capped() {
+        let mut wizard = wizard_with(vec![serde_json::from_value(serde_json::json!({
+            "id": "openai", "name": "OpenAI", "requires_key": true,
+        }))
+        .unwrap()]);
+        let _ = wizard.handle_key(key(KeyCode::Enter)); // -> details
+        let huge = "\u{20ac}".repeat(50_000);
+        let _ = wizard.handle_paste(&huge);
+        // Rendering the masked field must not allocate/burn on the whole blob.
+        draw_at_all_sizes(&wizard);
+        assert!(wizard.flow_api_key_display().chars().count() <= 64);
+    }
+
+    #[test]
+    fn channel_token_step_renders_without_panic() {
+        let mut wizard = wizard_with(vec![provider_with_multibyte_model()]);
+        // Advance to channels (step 4): provider(0)->details(1)->model(2)->verify(3)->channels(4)
+        for _ in 0..4 {
+            let _ = wizard.handle_key(key(KeyCode::Enter));
+        }
+        // Toggle a channel on and open its token screen.
+        let _ = wizard.handle_key(key(KeyCode::Char(' ')));
+        let _ = wizard.handle_key(key(KeyCode::Enter));
+        draw_at_all_sizes(&wizard);
     }
 }

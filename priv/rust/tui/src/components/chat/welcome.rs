@@ -44,7 +44,7 @@ pub fn welcome_lines(
             if !home.is_empty() && s.starts_with(&home) {
                 format!("~{}", &s[home.len()..])
             } else if s.len() > 50 {
-                format!("...{}", &s[s.len() - 47..])
+                format!("...{}", crate::util::truncate_str_start(&s, 47))
             } else {
                 s
             }
@@ -211,4 +211,31 @@ fn read_user_name() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod welcome_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn welcome_lines_various_widths_never_panic() {
+        for w in [1u16, 8, 20, 40, 52, 80, 200] {
+            let _ = welcome_lines(w, 12, Some("openai"), Some("gpt-4o"));
+            let _ = welcome_lines(w, 0, None, None);
+        }
+    }
+
+    #[test]
+    fn draw_welcome_never_panics() {
+        for &(w, h) in &[(1u16, 1u16), (10, 3), (52, 20), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                draw_welcome_with_tools(f, area, 12, Some("openai"), Some("gpt-4o"));
+            })
+            .unwrap();
+        }
+    }
 }

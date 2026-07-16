@@ -51,7 +51,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutes do
           json_error(conn, 404, "not_found", "Checkpoint not found")
 
         {:error, reason} ->
-          json_error(conn, 400, "restore_failed", to_string(reason))
+          Logger.warning("[rewind] restore_failed: #{inspect(reason)}")
+          json_error(conn, 400, "restore_failed", "Checkpoint could not be restored")
       end
     else
       {:error, :invalid_scope} ->

@@ -63,9 +63,21 @@ MIN_ELIXIR_MINOR=17
 MIN_OTP_MAJOR=26
 
 # ── Banner ─────────────────────────────────────────────────────────
+# Cyan/blue ASCII logo. Colors are empty when stdout is not a TTY, so this
+# degrades to plain text. The art is emitted via a quoted heredoc so the
+# backslashes are never interpreted.
 echo ""
-echo -e "${BOLD}  ◈ OSA Agent — Installer${RESET}"
-echo -e "${DIM}  Your OS, Supercharged${RESET}"
+printf '%b' "${CYAN}${BOLD}"
+cat <<'OSA_LOGO'
+    ___  ____    _
+   / _ \/ ___|  / \
+  | | | \___ \ / _ \
+  | |_| |___) / ___ \
+   \___/|____/_/   \_\
+OSA_LOGO
+printf '%b' "${RESET}"
+echo -e "${BOLD}  OSA Agent — Installer${RESET}"
+echo -e "${DIM}  Your OS, Supercharged · builds from source${RESET}"
 echo ""
 
 # ── Detect OS + package manager ──────────────────────────────────

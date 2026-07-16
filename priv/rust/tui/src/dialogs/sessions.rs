@@ -357,7 +357,7 @@ impl SessionBrowser {
             // Truncate title
             let max_title = inner.width.saturating_sub(30) as usize;
             let title_display = if title_str.len() > max_title {
-                format!("{}…", &title_str[..max_title.saturating_sub(1)])
+                format!("{}…", crate::util::truncate_str(&title_str, max_title.saturating_sub(1)))
             } else {
                 title_str
             };
@@ -370,7 +370,7 @@ impl SessionBrowser {
                 _ => s.created_at.as_str(),
             };
             let date_display = if date_source.len() >= 10 {
-                date_source[..10].to_string()
+                crate::util::truncate_str(date_source, 10).to_string()
             } else {
                 date_source.to_string()
             };
@@ -428,5 +428,43 @@ impl SessionBrowser {
             Paragraph::new(help).alignment(Alignment::Center),
             Rect::new(inner.x, bottom_y, inner.width, 1),
         );
+    }
+}
+
+#[cfg(test)]
+mod sessions_render_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn sessions_with_multibyte_titles() -> Vec<SessionInfo> {
+        let mk = |id: &str, title: String, date: &str| -> SessionInfo {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "created_at": date,
+                "title": title,
+                "message_count": 3,
+                "last_active": date,
+            }))
+            .unwrap()
+        };
+        vec![
+            mk("s1", "\u{20ac}".repeat(60), "2026-07-17T10:00:00Z"),
+            mk("s2", format!("caf\u{e9} \u{1f600} session"), "2026-07-16T09:00:00Z"),
+            mk("s3", "\u{4e2d}\u{6587}\u{6807}\u{9898}".to_string(), "2026-07-15"),
+        ]
+    }
+
+    #[test]
+    fn sessions_dialog_multibyte_titles_never_panic() {
+        let dialog = SessionBrowser::new(sessions_with_multibyte_titles(), "s1".to_string());
+        for &(w, h) in &[(1u16, 1u16), (10, 3), (30, 10), (80, 24), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                dialog.draw(f, area);
+            })
+            .unwrap();
+        }
     }
 }

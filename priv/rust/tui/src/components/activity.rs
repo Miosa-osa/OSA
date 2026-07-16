@@ -341,7 +341,7 @@ impl Activity {
         let (emoji, verb) = tool_display(name);
         // Truncate args for detail preview
         let detail = if args.len() > 60 {
-            format!("{}...", &args[..57])
+            format!("{}...", crate::util::truncate_str(args, 57))
         } else {
             args.to_string()
         };
@@ -605,5 +605,22 @@ impl Component for Activity {
                 Rect::new(area.x, y, area.width, 1),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn tool_start_multibyte_args_never_panic() {
+        // Args whose byte 57 lands inside a multi-byte char (the old &args[..57]
+        // slice would panic). Leading 'a' shifts the 3-byte '€' run off byte 57.
+        let mb = format!("a{}", "\u{20ac}".repeat(40));
+        let mut act = Activity::new();
+        act.tool_start("Bash", &mb);
+        act.tool_start("Read", "short ascii");
+        act.tool_start("Web", &"\u{1f600}".repeat(30)); // 4-byte emoji run
+        assert!(!act.tool_feed.is_empty());
     }
 }

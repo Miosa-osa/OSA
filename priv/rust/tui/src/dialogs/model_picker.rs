@@ -1104,13 +1104,40 @@ fn clean_pasted_key(raw: &str) -> String {
     } else {
         trimmed
     };
-    let unquoted = if (value.starts_with('"') && value.ends_with('"'))
-        || (value.starts_with('\'') && value.ends_with('\''))
-        || (value.starts_with('`') && value.ends_with('`'))
+    let unquoted = if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))
+            || (value.starts_with('`') && value.ends_with('`')))
     {
         &value[1..value.len().saturating_sub(1)]
     } else {
         value
     };
     unquoted.strip_suffix(';').unwrap_or(unquoted).trim().to_string()
+}
+
+#[cfg(test)]
+mod clean_key_tests {
+    use super::clean_pasted_key;
+
+    #[test]
+    fn lone_quote_char_does_not_panic() {
+        // A single quote char must not slice &value[1..0] (start > end).
+        for q in ["\"", "'", "`"] {
+            assert_eq!(clean_pasted_key(q), q);
+        }
+    }
+
+    #[test]
+    fn strips_paired_quotes_and_export_prefix() {
+        assert_eq!(clean_pasted_key("\"abc\""), "abc");
+        assert_eq!(clean_pasted_key("export KEY=\"secret\""), "secret");
+        assert_eq!(clean_pasted_key("KEY=value"), "value");
+    }
+
+    #[test]
+    fn multibyte_value_does_not_panic() {
+        let _ = clean_pasted_key(&"\u{20ac}".repeat(30));
+        let _ = clean_pasted_key("\"\u{4e2d}\u{6587}\"");
+    }
 }

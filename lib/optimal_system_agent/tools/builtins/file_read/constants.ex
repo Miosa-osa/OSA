@@ -35,4 +35,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Constants do
 
   @max_image_bytes 10 * 1024 * 1024
   def max_image_bytes, do: @max_image_bytes
+
+  # Cap for whole-file plain-text reads. Without a guard, `File.read` on a
+  # multi-GB file allocates the entire contents into one BEAM binary before any
+  # truncation, OOM-pressuring the whole node. Slices via offset/limit are
+  # streamed and unaffected.
+  @max_read_bytes 20 * 1024 * 1024
+  def max_read_bytes, do: @max_read_bytes
 end

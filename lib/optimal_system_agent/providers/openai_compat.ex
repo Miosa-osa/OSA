@@ -164,6 +164,22 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
                {:cont, {req, resp}}
              end
            ) do
+        {:ok, %{status: status} = resp} when status != 200 ->
+          # Non-200: Req still returns {:ok, _} and the error JSON body was fed
+          # to the `into` callback (no `data:` prefix, so no SSE events emitted).
+          # Finalizing here would report an empty SUCCESS, defeating retry-after
+          # handling and provider fallback. Surface it as an error instead.
+          acc = Process.get(stream_key)
+          Process.delete(stream_key)
+
+          if status == 429 do
+            Logger.warning("OpenAI-compat stream HTTP 429 (rate limited)")
+            {:error, {:rate_limited, parse_retry_after(resp.headers)}}
+          else
+            Logger.warning("OpenAI-compat stream HTTP #{status}")
+            {:error, "HTTP #{status}: #{extract_stream_error(acc)}"}
+          end
+
         {:ok, _resp} ->
           acc = Process.get(stream_key)
           Process.delete(stream_key)
@@ -740,6 +756,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp extract_error_message(%{"error" => msg}) when is_binary(msg), do: msg
   defp extract_error_message(body), do: inspect(body)
 
+  # On a non-200 streamed response the error JSON body accumulates in the SSE
+  # buffer (no `data:` prefix). Best-effort decode for a human-readable message.
+  defp extract_stream_error(%{buffer: buf}) when is_binary(buf) and buf != "" do
+    case Jason.decode(buf) do
+      {:ok, decoded} -> extract_error_message(decoded)
+      _ -> String.slice(buf, 0, 500)
+    end
+  end
+
+  defp extract_stream_error(_), do: "streaming request failed"
+
   # Parse the Retry-After header from HTTP 429 responses.
   # Handles both integer seconds and RFC 7231 HTTP-date strings.
   # Returns the number of seconds to wait, or nil if the header is absent/unparseable.
@@ -750,6 +777,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       {"Retry-After", v} -> v
       _ -> nil
     end)
+    |> parse_retry_after_value()
+  end
+
+  # Req 0.5.x delivers response headers as a MAP with list values
+  # (%{"retry-after" => ["30"]}). Without this clause every 429 gets nil and
+  # the provider's Retry-After (incl. HTTP-date form) is ignored.
+  defp parse_retry_after(headers) when is_map(headers) do
+    (headers["retry-after"] || headers["Retry-After"])
+    |> case do
+      [v | _] -> v
+      v when is_binary(v) -> v
+      _ -> nil
+    end
     |> parse_retry_after_value()
   end
 

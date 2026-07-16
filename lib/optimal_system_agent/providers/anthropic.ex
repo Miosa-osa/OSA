@@ -159,7 +159,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
              receive_timeout: timeout,
              into: :self
            ) do
-        {:ok, resp} ->
+        {:ok, %{status: 200} = resp} ->
           collect_stream(resp, callback, %{
             content: "",
             tool_calls: [],
@@ -170,6 +170,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             stream_error: nil,
             stop_reason: nil
           })
+
+        {:ok, %{status: 429} = resp} ->
+          # Rate limited: Req still returns {:ok, _} with the error body streamed
+          # as data chunks (no SSE events), which previously finalized as an empty
+          # SUCCESS. Surface it as an error so Resilience/FallbackChain engage.
+          Logger.warning("Anthropic stream HTTP 429 (rate limited)")
+          drain_self_stream(resp)
+          {:error, {:rate_limited, parse_retry_after(resp.headers)}}
+
+        {:ok, %{status: status} = resp} ->
+          Logger.warning("Anthropic stream HTTP #{status}")
+          drain_self_stream(resp)
+          {:error, "Anthropic stream HTTP #{status}"}
 
         {:error, reason} ->
           Logger.error("Anthropic stream connection failed: #{inspect(reason)}")
@@ -801,7 +814,45 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     end
   end
 
+  # Req 0.5.x returns response headers as a MAP (%{"retry-after" => ["30"]}),
+  # not a keyword list. Without this clause a real 429 falls through to the
+  # catch-all and always waits 60s, ignoring the provider's Retry-After.
+  defp parse_retry_after(headers) when is_map(headers) do
+    case headers["retry-after"] || headers["Retry-After"] do
+      [v | _] -> parse_seconds(v)
+      v when is_binary(v) -> parse_seconds(v)
+      _ -> 60
+    end
+  end
+
   defp parse_retry_after(_), do: 60
+
+  defp parse_seconds(v) when is_binary(v) do
+    case Integer.parse(v) do
+      {seconds, _} -> seconds
+      :error -> 60
+    end
+  end
+
+  defp parse_seconds(_), do: 60
+
+  # Drain a Req `into: :self` streamed response body so mailbox messages tagged
+  # with the response ref don't leak after we've decided to error out on a
+  # non-200 status. Best-effort with a short bound.
+  defp drain_self_stream(resp) do
+    receive do
+      message ->
+        case Req.parse_message(resp, message) do
+          {:ok, parts} ->
+            if Enum.any?(parts, &(&1 == :done)), do: :ok, else: drain_self_stream(resp)
+
+          _ ->
+            drain_self_stream(resp)
+        end
+    after
+      2_000 -> :ok
+    end
+  end
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()

@@ -266,7 +266,7 @@ impl FilePicker {
         let path_str = self.current_dir.to_string_lossy();
         let max_path_w = inner.width.saturating_sub(4) as usize;
         let path_display = if path_str.len() > max_path_w {
-            format!("…{}", &path_str[path_str.len() - max_path_w.saturating_sub(1)..])
+            format!("…{}", crate::util::truncate_str_start(&path_str, max_path_w.saturating_sub(1)))
         } else {
             path_str.to_string()
         };
@@ -349,7 +349,7 @@ impl FilePicker {
             // Truncate name
             let max_name = inner.width.saturating_sub(16) as usize;
             let name_display = if entry.name.len() > max_name {
-                format!("{}…", &entry.name[..max_name.saturating_sub(1)])
+                format!("{}…", crate::util::truncate_str(&entry.name, max_name.saturating_sub(1)))
             } else {
                 entry.name.clone()
             };
@@ -397,5 +397,47 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1}K", bytes as f64 / 1_024.0)
     } else {
         format!("{}B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod picker_render_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    /// Build a directory whose own path AND contents contain multi-byte names,
+    /// so both the path-header and file-name shortening paths are exercised
+    /// with mid-char cuts on a narrow dialog.
+    fn unicode_dir() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("osa_fp_test_\u{4e2d}\u{6587}_{}", std::process::id()));
+        // A deeply-nested unicode path for the from-the-right header shortening.
+        dir.push("caf\u{e9}_\u{20ac}\u{20ac}\u{20ac}_directory_with_a_long_unicode_name");
+        let _ = std::fs::create_dir_all(&dir);
+        let long_name = format!("{}.txt", "\u{20ac}".repeat(40));
+        let _ = std::fs::write(dir.join(&long_name), b"x");
+        let _ = std::fs::write(dir.join("caf\u{e9}_\u{1f600}_file.md"), b"y");
+        dir
+    }
+
+    #[test]
+    fn file_picker_multibyte_entries_and_path_never_panic() {
+        let dir = unicode_dir();
+        let picker = FilePicker::new(dir.clone());
+        for &(w, h) in &[(1u16, 1u16), (10, 3), (24, 8), (60, 20), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                picker.draw(f, area);
+            })
+            .unwrap();
+        }
+        // Best-effort cleanup; ignore errors.
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!(
+            "osa_fp_test_\u{4e2d}\u{6587}_{}",
+            std::process::id()
+        )));
     }
 }

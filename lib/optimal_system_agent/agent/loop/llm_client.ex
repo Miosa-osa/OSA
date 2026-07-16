@@ -134,31 +134,45 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     # Run the stream in a linked task so we can kill it on idle timeout.
     # Uses FallbackChain for automatic provider switching on retryable errors.
+    caller = self()
+
     stream_task =
       Task.async(fn ->
-        case Providers.chat_stream(messages, callback, opts) do
-          {:ok, _} = success ->
-            success
+        res =
+          case Providers.chat_stream(messages, callback, opts) do
+            {:ok, _} = success ->
+              success
 
-          {:error, reason} = error ->
-            # Try fallback chain on retryable errors
-            if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
-              Logger.warning(
-                "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain"
-              )
+            {:error, reason} = error ->
+              # Try fallback chain on retryable errors
+              if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+                Logger.warning(
+                  "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain"
+                )
 
-              case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
-                     messages,
-                     callback,
-                     opts
-                   ) do
-                {:ok, result, _provider} -> {:ok, result}
-                fallback_error -> fallback_error
+                case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
+                       messages,
+                       callback,
+                       opts
+                     ) do
+                  {:ok, result, _provider} -> {:ok, result}
+                  fallback_error -> fallback_error
+                end
+              else
+                error
               end
-            else
-              error
-            end
-        end
+          end
+
+        # Always notify the caller of the task's terminal result. On the success
+        # path the {:llm_stream_done} message has already been enqueued by the
+        # {:done} callback (before chat_stream returns), so the caller consumes
+        # that first and treats this message as a no-op. On the failure path
+        # where no {:done} callback ever fires (401, unknown provider, every
+        # fallback failing), this is the ONLY signal the caller gets — without
+        # it the caller would block on the 1h absolute timeout for an instant
+        # failure.
+        send(caller, {:llm_stream_task_result, res})
+        res
       end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for @idle_timeout_ms
@@ -190,6 +204,33 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
           {:error,
            "LLM stream went silent for #{div(elapsed_ms, 1000)}s — connection likely dropped"}
+
+        {:llm_stream_task_result, {:error, _} = err} ->
+          # The stream task terminated with an error WITHOUT ever firing the
+          # {:done} callback (e.g. 401, unknown provider, all fallbacks failed).
+          # Fail fast instead of blocking on the 1h absolute timeout.
+          Process.unlink(watchdog)
+          Process.exit(watchdog, :normal)
+          Task.shutdown(stream_task, 5_000)
+          err
+
+        {:llm_stream_task_result, {:ok, _}} ->
+          # Success terminal result. The {:done} callback already sent
+          # {:llm_stream_done} which is handled above; if we somehow observe
+          # this first, wait for the stream_done message for the real result.
+          receive do
+            {:llm_stream_done, stream_result} ->
+              Process.unlink(watchdog)
+              Process.exit(watchdog, :normal)
+              Task.shutdown(stream_task, 5_000)
+              {:ok, stream_result}
+          after
+            5_000 ->
+              Process.unlink(watchdog)
+              Process.exit(watchdog, :normal)
+              Task.shutdown(stream_task, 5_000)
+              {:error, "LLM stream completed without a done signal"}
+          end
       after
         # Absolute safety net: 1 hour. Should never fire for legitimate work.
         3_600_000 ->

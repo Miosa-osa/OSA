@@ -404,6 +404,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
     try do
       case Req.post("#{url}/api/chat", req_opts) do
+        {:ok, %{status: status}} when status != 200 ->
+          # Non-200 (commonly 404 for a model that isn't pulled, or 500): the
+          # error body isn't valid NDJSON so finalizing would report an empty
+          # SUCCESS. Surface an error so the registry's fallback path engages.
+          Process.delete(stream_key)
+          Logger.warning("[Ollama] chat_stream HTTP #{status}")
+          {:error, "Ollama stream HTTP #{status}"}
+
         {:ok, _resp} ->
           Logger.debug("[Ollama] chat_stream completed successfully")
           acc = Process.get(stream_key)

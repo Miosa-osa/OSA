@@ -42,10 +42,10 @@ else
   BOLD=''; DIM=''; GREEN=''; YELLOW=''; RED=''; CYAN=''; RESET=''
 fi
 
-info() { printf "${CYAN}  ->${RESET} %s\n" "$*"; }
-ok()   { printf "${GREEN}  ok${RESET} %s\n" "$*"; }
-warn() { printf "${YELLOW}  !! ${RESET}%s\n" "$*" >&2; }
-fail() { printf "${RED}  !! %s${RESET}\n" "$*" >&2; exit "${2:-1}"; }
+info() { printf "  ${CYAN}→${RESET} %s\n" "$*"; }
+ok()   { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
+warn() { printf "  ${YELLOW}!${RESET} %s\n" "$*" >&2; }
+fail() { printf "  ${RED}✗${RESET} %s\n" "$1" >&2; exit "${2:-1}"; }
 
 _download() {
   # _download <url> <dest> — curl first, wget fallback. Returns 2 on failure.
@@ -55,15 +55,26 @@ _download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$_dest" "$_url" || return 2
   else
-    fail "Neither curl nor wget found. Install one and retry."
+    fail "Neither curl nor wget is available — install one (via your system package manager) and re-run the installer."
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Banner
+# Banner — cyan/blue ASCII logo. Colors auto-disable when stdout is not a TTY
+# (BOLD/CYAN/DIM/RESET are empty in that case), so this degrades to plain text.
+# The art is printed with %s so backslashes are never treated as escapes.
 # ---------------------------------------------------------------------------
-printf "\n${BOLD}  OSA — the Optimal System Agent${RESET}\n"
-printf "${DIM}  One-command installer · no Elixir / Erlang / Rust required${RESET}\n\n"
+printf '\n'
+printf '%b' "${CYAN}${BOLD}"
+printf '%s\n' \
+'    ___  ____    _    ' \
+'   / _ \/ ___|  / \   ' \
+'  | | | \___ \ / _ \  ' \
+'  | |_| |___) / ___ \ ' \
+'   \___/|____/_/   \_\'
+printf '%b' "${RESET}"
+printf '%b\n' "${BOLD}  the Optimal System Agent${RESET}"
+printf '%b\n\n' "${DIM}  One-command installer · no Elixir / Erlang / Rust required${RESET}"
 
 # ---------------------------------------------------------------------------
 # Detect OS + architecture
@@ -222,9 +233,17 @@ mkdir -p "$LOG_DIR"
 # Load user config (provider/model/keys) before booting the backend, so
 # config/runtime.exs sees it (mirrors ~/.claude/scripts/osa).
 if [ -f "$OSA_HOME/.env" ]; then
+  # Harden sourcing: a single malformed line (unterminated quote, bare word, or
+  # $UNSET under `set -u`) would otherwise abort the whole launcher under
+  # `set -eu` with a cryptic parse error. Relax the strict flags just for the
+  # sourcing, warn instead of dying, then restore them.
+  set +e
+  set +u
   set -a
-  . "$OSA_HOME/.env"
+  . "$OSA_HOME/.env" 2>/dev/null \
+    || echo "warning: some lines in $OSA_HOME/.env could not be parsed — ignoring them" >&2
   set +a
+  set -eu
 fi
 
 if [ ! -x "$RELEASE_BIN" ]; then
@@ -293,11 +312,24 @@ else
     if _http_ok "http://localhost:$PORT/health"; then
       break
     fi
+    # If serve has already exited, waiting the full window is pointless. The
+    # usual cause is the port being held by another process (bind failure).
+    if [ -n "$BACKEND_PID" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+      break
+    fi
     sleep 0.5
     i=$((i + 1))
   done
   if ! _http_ok "http://localhost:$PORT/health"; then
-    echo "Backend did not become healthy on :$PORT — see $LOG_DIR/backend.log" >&2
+    if [ -n "$BACKEND_PID" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+      echo "OSA backend exited during startup — port $PORT is likely already in use." >&2
+      echo "  - Another OSA instance or process may be bound to :$PORT." >&2
+      echo "  - Start on a different port:  OSA_PORT=<number> osa" >&2
+    else
+      echo "OSA backend did not become healthy on port $PORT within ~20s." >&2
+    fi
+    echo "  - Inspect the log:  $LOG_DIR/backend.log" >&2
+    echo "  - Run diagnostics:  osa doctor" >&2
   fi
 fi
 

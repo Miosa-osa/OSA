@@ -18,7 +18,7 @@ impl ToolRenderer for WebFetchRenderer {
 
         // Truncate URL for header display
         let url_display: String = if url.len() > 60 {
-            format!("{}…", &url[..60])
+            format!("{}\u{2026}", crate::util::truncate_str(&url, 60))
         } else {
             url.clone()
         };
@@ -161,7 +161,7 @@ impl ToolRenderer for WebSearchRenderer {
                 // Snippet (truncate to 120 chars)
                 if !snippet.is_empty() {
                     let snip: String = if snippet.len() > 120 {
-                        format!("{}…", &snippet[..120])
+                        format!("{}\u{2026}", crate::util::truncate_str(&snippet, 120))
                     } else {
                         snippet
                     };

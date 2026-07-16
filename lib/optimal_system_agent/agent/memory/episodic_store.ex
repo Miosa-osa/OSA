@@ -224,7 +224,12 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
 
     case Jason.encode(episodes, pretty: true) do
       {:ok, json} ->
-        File.write!(path, json)
+        # Atomic write-then-rename so a crash mid-write can't truncate the whole
+        # session's episode array (which read_file would then silently drop),
+        # and concurrent appends resolve cleanly last-writer-wins.
+        tmp = path <> ".tmp"
+        File.write!(tmp, json)
+        File.rename!(tmp, path)
         emit_recorded(episode)
         {:ok, episode}
 

@@ -106,37 +106,44 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
              "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
 
           {:ok, new_content, occurrences, stage} ->
-            File.write!(expanded, new_content)
+            # Non-bang write with clean error reporting (mirrors file_write). A
+            # read-only file / read-only mount / ENOSPC otherwise raises File.Error
+            # and surfaces as the opaque blanket registry rescue message.
+            case File.write(expanded, new_content) do
+              {:error, reason} ->
+                {:error, "Cannot write #{display_path}: #{:file.format_error(reason)}"}
 
-            # Emit file_changed hook — fire-and-forget, never crash caller
-            try do
-              OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
-                path: expanded,
-                tool: "file_edit",
-                operation: :edit
-              })
-            rescue
-              _ -> :ok
-            end
+              :ok ->
+                # Emit file_changed hook — fire-and-forget, never crash caller
+                try do
+                  OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
+                    path: expanded,
+                    tool: "file_edit",
+                    operation: :edit
+                  })
+                rescue
+                  _ -> :ok
+                end
 
-            # Generate unified diff (delegates to Utils.Diff for proper unified format)
-            {diff_text, diff_stats} =
-              OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
+                # Generate unified diff (delegates to Utils.Diff for proper unified format)
+                {diff_text, diff_stats} =
+                  OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
 
-            fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
+                fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
 
-            result =
-              if replace_all and occurrences > 1 do
-                "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
-              else
-                "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
-              end
+                result =
+                  if replace_all and occurrences > 1 do
+                    "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
+                  else
+                    "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
+                  end
 
-            # Attach diff metadata for SSE consumers (3-tuple) when diff is non-empty
-            if diff_text != "" do
-              {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
-            else
-              {:ok, result}
+                # Attach diff metadata for SSE consumers (3-tuple) when diff is non-empty
+                if diff_text != "" do
+                  {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
+                else
+                  {:ok, result}
+                end
             end
         end
 

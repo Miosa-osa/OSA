@@ -1203,7 +1203,7 @@ impl App {
                 self.chat.add_system_message(&tagged, &message_type);
                 // Also toast for visibility
                 let preview = if message.len() > 60 {
-                    format!("{}...", &message[..57])
+                    format!("{}...", crate::util::truncate_str(&message, 57))
                 } else {
                     message
                 };

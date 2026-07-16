@@ -288,7 +288,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
        when state.overflow_retries < 2 do
     content = Map.get(resp, :content, "")
     current_max = max_response_tokens()
-    bumped = min(current_max * 2, 16_384)
+    # Clamp so recovery NEVER shrinks the budget below what the model just had
+    # (the default max_response_tokens is now 32_768; a hardcoded 16_384 ceiling
+    # would HALVE it and make truncation loop). Grow-only, doubling up to 64_000.
+    bumped = max(current_max, min(current_max * 2, 64_000))
 
     Logger.info(
       "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
@@ -344,28 +347,80 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     content = Map.get(resp, :content) || ""
     assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
 
-    failed_tool_msgs =
-      Enum.map(tool_calls, fn tc ->
-        %{
-          role: "tool",
-          tool_call_id: tc.id,
-          content:
-            "Error: tool call not executed — the assistant message was truncated by the token " <>
-              "limit, so the arguments may be incomplete. Re-issue this call with complete arguments."
-        }
+    # Reconcile with the streaming tool executor. Complete tool_use blocks are
+    # executed EAGERLY as they stream — BEFORE the terminal stop_reason is known.
+    # So some of this turn's tool calls may have ALREADY run (real side effects
+    # like file_write / shell_execute). Failing them all and asking the model to
+    # re-emit would DUPLICATE those side effects and orphan any still-running
+    # task. Instead: keep the real results for calls that already streamed, and
+    # only fail the trailing call(s) whose arguments the token limit actually cut
+    # off (those never started). Best-effort: on any error, fall back to the
+    # original "fail all + re-emit" behavior.
+    {streamed_msgs_by_id, streamed_ids} =
+      try do
+        case Process.get(:osa_streaming_tool_ctx) do
+          nil ->
+            {%{}, MapSet.new()}
+
+          streaming_ctx ->
+            collected = StreamingToolExecutor.collect_results(streaming_ctx)
+
+            by_id =
+              streaming_ctx.order
+              |> Enum.zip(collected)
+              |> Map.new(fn {id, {tool_msg, _result_str}} -> {id, tool_msg} end)
+
+            {by_id, MapSet.new(streaming_ctx.order)}
+        end
+      rescue
+        _ -> {%{}, MapSet.new()}
+      catch
+        :exit, _ -> {%{}, MapSet.new()}
+      end
+
+    Process.delete(:osa_streaming_tool_ctx)
+
+    truncated_fail = fn tc ->
+      %{
+        role: "tool",
+        tool_call_id: tc.id,
+        content:
+          "Error: tool call not executed — the assistant message was truncated by the token " <>
+            "limit, so the arguments may be incomplete. Re-issue this call with complete arguments."
+      }
+    end
+
+    {tool_msgs, kept_any?} =
+      Enum.map_reduce(tool_calls, false, fn tc, kept? ->
+        if MapSet.member?(streamed_ids, tc.id) do
+          # Already executed during streaming — keep its real result.
+          case Map.get(streamed_msgs_by_id, tc.id) do
+            nil -> {truncated_fail.(tc), kept?}
+            tool_msg -> {tool_msg, true}
+          end
+        else
+          {truncated_fail.(tc), kept?}
+        end
       end)
 
     directive = %{
       role: "system",
       content:
-        "[System: Your previous message was truncated by the token limit before the tool call(s) " <>
-          "finished. None were executed, because their arguments may be incomplete. Re-emit the " <>
-          "complete tool call(s) now.]"
+        if kept_any? do
+          "[System: Your previous message was truncated by the token limit. Any tool call that " <>
+            "had already completed was executed and its result is included above; the trailing " <>
+            "call(s) marked with a truncation error were NOT executed. Re-emit ONLY those " <>
+            "incomplete tool call(s) now.]"
+        else
+          "[System: Your previous message was truncated by the token limit before the tool " <>
+            "call(s) finished. None were executed, because their arguments may be incomplete. " <>
+            "Re-emit the complete tool call(s) now.]"
+        end
     }
 
     state = %{
       state
-      | messages: state.messages ++ [assistant_msg] ++ failed_tool_msgs ++ [directive],
+      | messages: state.messages ++ [assistant_msg] ++ tool_msgs ++ [directive],
         iteration: state.iteration + 1
     }
 

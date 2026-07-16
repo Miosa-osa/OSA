@@ -319,7 +319,7 @@ impl Sidebar {
     fn truncate_session_id(&self, id: &str) -> String {
         // Show last 12 chars prefixed with "…"
         if id.len() > 12 {
-            format!("\u{2026}{}", &id[id.len() - 12..])
+            format!("\u{2026}{}", crate::util::truncate_str_start(id, 12))
         } else {
             id.to_string()
         }

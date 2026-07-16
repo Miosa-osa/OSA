@@ -151,16 +151,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
       true ->
         case File.read(ep) do
           {:ok, content} ->
-            if String.contains?(content, old) do
-              {:valid, dp, ep, old, new, content}
-            else
-              {:error, dp, "old_string not found in file"}
+            cond do
+              not String.contains?(content, old) ->
+                {:error, dp, "old_string not found in file"}
+
+              # Ambiguity guard mirroring single-file file_edit: apply_atomic uses
+              # global: false and would silently rewrite only the FIRST match,
+              # committing a wrong edit. Require a unique match.
+              occurrence_count(content, old) > 1 ->
+                {:error, dp,
+                 "old_string found multiple times — must be unique; add surrounding context"}
+
+              true ->
+                {:valid, dp, ep, old, new, content}
             end
 
           {:error, reason} ->
             {:error, dp, "cannot read file: #{reason}"}
         end
     end
+  end
+
+  defp occurrence_count(content, old) do
+    (content |> String.split(old) |> length()) - 1
   end
 
   # Apply every validated edit atomically: all files change or none do.

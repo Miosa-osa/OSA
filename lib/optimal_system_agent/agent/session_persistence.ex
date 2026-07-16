@@ -28,7 +28,13 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
     case Jason.encode(data) do
       {:ok, json} ->
-        File.write!(path, json)
+        # Atomic write-then-rename: a crash mid-write can never truncate the
+        # session JSON, and overlapping auto_saves (which run outside the single
+        # Loop GenServer) resolve to a clean last-writer-wins instead of
+        # interleaving into corrupt bytes.
+        tmp = path <> ".tmp"
+        File.write!(tmp, json)
+        File.rename!(tmp, path)
         Logger.debug("[session_persist] Saved #{length(messages)} messages for #{session_id}")
         :ok
 
@@ -49,14 +55,21 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     case File.read(path) do
       {:ok, json} ->
         case Jason.decode(json) do
-          {:ok, %{"messages" => messages}} ->
+          {:ok, %{"messages" => messages}} when is_list(messages) ->
+            # Skip-and-keep-going: one malformed (non-map) turn must not fail the
+            # whole session resume. Bound key→atom conversion with
+            # to_existing_atom so a tampered file cannot exhaust the atom table.
             restored =
-              Enum.map(messages, fn msg ->
-                msg
-                |> Map.new(fn {k, v} -> {String.to_atom(k), v} end)
-              end)
+              messages
+              |> Enum.filter(&is_map/1)
+              |> Enum.map(fn m -> Map.new(m, fn {k, v} -> {safe_key(k), v} end) end)
 
             {:ok, restored}
+
+          {:ok, _} ->
+            # Decoded but no usable messages list — treat as an empty session
+            # rather than crashing the resume.
+            {:ok, []}
 
           {:error, reason} ->
             {:error, "JSON decode failed: #{inspect(reason)}"}
@@ -147,6 +160,19 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
     Path.join(@sessions_dir, "#{safe_id}.json")
   end
+
+  # Bounded key→atom conversion. Message maps only ever use a small fixed set of
+  # atom keys, so to_existing_atom preserves behavior for legitimate files while
+  # capping atom-table growth on a malformed/tampered session file.
+  defp safe_key(k) when is_binary(k) do
+    try do
+      String.to_existing_atom(k)
+    rescue
+      ArgumentError -> k
+    end
+  end
+
+  defp safe_key(k), do: k
 
   # Canonical form for a working dir so the same folder always matches (expand ~,
   # strip trailing slash). nil stays nil.

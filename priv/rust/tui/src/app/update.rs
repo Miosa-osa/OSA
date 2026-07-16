@@ -75,11 +75,10 @@ impl App {
                     if paste_is_file_paths(&text) && self.ingest_paste_as_attachments(&text) {
                         return false;
                     }
-                    let capped = if text.len() > super::MAX_MESSAGE_SIZE {
-                        &text[..super::MAX_MESSAGE_SIZE]
-                    } else {
-                        &text
-                    };
+                    // Char-boundary-safe cap: truncate_str floors to a UTF-8
+                    // boundary and returns the whole string when under the limit,
+                    // so a large multi-byte paste can never slice mid-char.
+                    let capped = crate::util::truncate_str(&text, super::MAX_MESSAGE_SIZE);
 
                     let line_count = capped.lines().count();
                     if line_count >= 5 {
