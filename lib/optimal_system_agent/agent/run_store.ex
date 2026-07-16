@@ -13,6 +13,11 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   @table __MODULE__
   @default_runs_dir Path.expand("~/.osa/agent-runs")
 
+  # Cap on retained TERMINAL (completed/failed/cancelled) rows. Without this the
+  # table grows unbounded over long-running/heavy-fan-out sessions, slowing every
+  # tab2list-based read and leaking memory. :running rows are never pruned.
+  @max_terminal_runs 500
+
   @type run :: %{
           agent_id: String.t(),
           parent_session_id: String.t(),
@@ -82,6 +87,31 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     end)
 
     append(agent_id, "STOP status=#{Map.get(result, :status, :completed)}\n\n#{format_result(result)}")
+    prune_terminal()
+    :ok
+  end
+
+  # Keep only the newest @max_terminal_runs terminal rows; :running rows are
+  # always preserved. Bounds table growth over long-lived nodes. Best-effort.
+  defp prune_terminal do
+    ensure_table()
+
+    terminal =
+      @table
+      |> :ets.tab2list()
+      |> Enum.map(fn {_id, run} -> run end)
+      |> Enum.filter(fn run -> run.status in [:completed, :failed, :cancelled] end)
+
+    if length(terminal) > @max_terminal_runs do
+      terminal
+      |> Enum.sort_by(fn run -> DateTime.to_unix(run.started_at, :millisecond) end, :desc)
+      |> Enum.drop(@max_terminal_runs)
+      |> Enum.each(fn run -> :ets.delete(@table, run.agent_id) end)
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc "Get a run by agent id."

@@ -96,10 +96,20 @@ defmodule OptimalSystemAgent.Sandbox.Docker do
 
       Logger.info("[Sandbox.Docker] Running in #{image}: #{String.slice(command, 0, 80)}")
 
+      # `:timeout` is NOT a valid System.cmd/3 option (it raises ArgumentError,
+      # which the rescue below would turn into a blanket failure — making the
+      # Docker backend never run). Enforce the wall-clock timeout via Task.yield
+      # + Task.shutdown, the same pattern host.ex / code_sandbox.ex use.
       try do
-        case System.cmd("docker", docker_args, stderr_to_stdout: true, timeout: timeout) do
-          {output, 0} -> {:ok, output}
-          {output, code} -> {:error, "Container exit code #{code}: #{output}"}
+        task =
+          Task.async(fn ->
+            System.cmd("docker", docker_args, stderr_to_stdout: true)
+          end)
+
+        case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+          {:ok, {output, 0}} -> {:ok, output}
+          {:ok, {output, code}} -> {:error, "Container exit code #{code}: #{output}"}
+          nil -> {:error, "Docker execution timed out after #{timeout}ms"}
         end
       rescue
         e -> {:error, "Docker execution failed: #{Exception.message(e)}"}

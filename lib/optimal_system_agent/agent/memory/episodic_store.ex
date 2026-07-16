@@ -220,14 +220,31 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
     File.mkdir_p!(dir)
     path = session_path(session_id)
 
+    # Serialize the read-modify-write per session so two concurrent record/2
+    # calls can't both read the same base array and clobber each other's episode
+    # (an APPEND under last-writer-wins silently DROPS a just-recorded episode).
+    # :global.trans acquires a cluster-wide lock keyed by the session and runs
+    # the critical section exclusively, retrying until it wins the lock.
+    :global.trans(
+      {{:osa_episodic_append, session_id}, self()},
+      fn -> do_append(path, episode) end
+    )
+  rescue
+    e ->
+      Logger.warning("[episodic_store] append failed: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
+  end
+
+  defp do_append(path, episode) do
     episodes = (read_file(path) ++ [episode]) |> cap()
 
     case Jason.encode(episodes, pretty: true) do
       {:ok, json} ->
         # Atomic write-then-rename so a crash mid-write can't truncate the whole
-        # session's episode array (which read_file would then silently drop),
-        # and concurrent appends resolve cleanly last-writer-wins.
-        tmp = path <> ".tmp"
+        # session's episode array (which read_file would then silently drop).
+        # Unique temp path per writer prevents a shared ".tmp" inode from being
+        # re-truncated mid-flight and torn.
+        tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
         File.write!(tmp, json)
         File.rename!(tmp, path)
         emit_recorded(episode)
@@ -236,10 +253,6 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStore do
       {:error, reason} ->
         {:error, "failed to encode episode: #{inspect(reason)}"}
     end
-  rescue
-    e ->
-      Logger.warning("[episodic_store] append failed: #{Exception.message(e)}")
-      {:error, Exception.message(e)}
   end
 
   # Load episodes: a single session file, or every session file when session_id

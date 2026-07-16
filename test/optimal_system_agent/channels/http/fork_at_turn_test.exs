@@ -34,7 +34,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ForkAtTurnTest do
   end
 
   defp seed(n) do
-    src = "fork-turn-src-#{System.unique_integer([:positive])}"
+    # Collision-proof id: SessionTranscript is backed by persistent SQLite, and
+    # System.unique_integer/1 resets to small ints on each fresh `mix test` BEAM,
+    # so ids like "…-1" collided across runs and this test appended onto a prior
+    # run's leftover turns (seeing 5/7/8 instead of n). Random bytes never collide.
+    src = "fork-turn-src-" <> Base.encode16(:crypto.strong_rand_bytes(10), case: :lower)
     Enum.each(1..n, fn i -> SessionTranscript.save_turn(src, "user", "m#{i}") end)
     src
   end

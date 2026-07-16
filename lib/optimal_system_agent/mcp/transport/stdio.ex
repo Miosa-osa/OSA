@@ -21,6 +21,12 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   use GenServer
   require Logger
 
+  # Hard cap on the unframed inbound buffer. An MCP server that streams a very
+  # large result, or dies/hangs mid-frame without a trailing newline, would
+  # otherwise grow state.buffer without bound and exhaust BEAM memory. When the
+  # accumulated buffer with no newline exceeds this, we drop the oversized frame.
+  @max_frame_bytes 16 * 1024 * 1024
+
   defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil]
 
   # ── Transport API ─────────────────────────────────────────────────────
@@ -94,6 +100,21 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   def handle_info({port, {:data, data}}, %{port: port} = state) do
     {lines, buffer} = split_lines(state.buffer <> data)
     Enum.each(lines, &deliver_line(&1, state))
+
+    # Drop an oversized unframed remainder (no newline yet) instead of letting
+    # the buffer grow without bound and OOM the node.
+    buffer =
+      if byte_size(buffer) > @max_frame_bytes do
+        Logger.warning(
+          "[mcp.stdio] Dropping oversized frame (#{byte_size(buffer)} bytes, no newline) " <>
+            "from #{state.name || "server"}; buffer reset"
+        )
+
+        ""
+      else
+        buffer
+      end
+
     {:noreply, %{state | buffer: buffer}}
   end
 

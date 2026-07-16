@@ -294,23 +294,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSandbox do
           Logger.info("[CodeSandbox] Fallback: running #{executable} unsandboxed")
 
           timeout_ms = timeout * 1_000
-          opts = [stderr_to_stdout: true, cd: tmp_dir]
 
-          opts =
-            if stdin && stdin != "" do
-              Keyword.put(opts, :stdin, stdin)
-            else
-              opts
-            end
+          # NOTE: `:stdin` is NOT a valid System.cmd/3 option — passing it raises
+          # ArgumentError. We therefore never pass it (stdin is unsupported on the
+          # unsandboxed fallback path). Guard the whole call in a try/rescue INSIDE
+          # the Task fn so no unexpected raise can cross the linked Task boundary
+          # and crash the calling tool-executor / react-loop process.
+          if stdin && stdin != "" do
+            Logger.warning(
+              "[CodeSandbox] Fallback path does not support stdin; ignoring provided stdin"
+            )
+          end
+
+          opts = [stderr_to_stdout: true, cd: tmp_dir]
 
           task =
             Task.async(fn ->
-              System.cmd(exe_path, [code_path], opts)
+              try do
+                {:ok, System.cmd(exe_path, [code_path], opts)}
+              rescue
+                e -> {:error, Exception.message(e)}
+              end
             end)
 
           case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-            {:ok, {output, exit_code}} ->
+            {:ok, {:ok, {output, exit_code}}} ->
               format_result("[UNSANDBOXED] " <> output, exit_code)
+
+            {:ok, {:error, msg}} ->
+              {:error, "[UNSANDBOXED] Execution failed: #{msg}"}
 
             nil ->
               {:error, "[UNSANDBOXED] Execution timed out after #{timeout}s"}

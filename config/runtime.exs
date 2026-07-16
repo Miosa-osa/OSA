@@ -165,12 +165,12 @@ config :optimal_system_agent,
 
   # Email (IMAP + SMTP)
   email_imap_host: System.get_env("EMAIL_IMAP_HOST"),
-  email_imap_port: String.to_integer(System.get_env("EMAIL_IMAP_PORT") || "993"),
+  email_imap_port: parse_int.(System.get_env("EMAIL_IMAP_PORT"), 993),
   email_smtp_host: System.get_env("EMAIL_SMTP_HOST"),
-  email_smtp_port: String.to_integer(System.get_env("EMAIL_SMTP_PORT") || "587"),
+  email_smtp_port: parse_int.(System.get_env("EMAIL_SMTP_PORT"), 587),
   email_address: System.get_env("EMAIL_ADDRESS"),
   email_password: System.get_env("EMAIL_PASSWORD"),
-  email_poll_interval: String.to_integer(System.get_env("EMAIL_POLL_INTERVAL") || "15"),
+  email_poll_interval: parse_int.(System.get_env("EMAIL_POLL_INTERVAL"), 15),
   email_allowed_senders: System.get_env("EMAIL_ALLOWED_SENDERS"),
 
   # LINE Messaging API
@@ -335,9 +335,21 @@ config :optimal_system_agent,
          parts = String.split(ip_str, ".")
 
          if length(parts) == 4 do
-           parts
-           |> Enum.map(&String.to_integer/1)
-           |> List.to_tuple()
+           octets =
+             Enum.map(parts, fn part ->
+               case Integer.parse(part) do
+                 {n, ""} when n in 0..255 -> n
+                 _ -> :invalid
+               end
+             end)
+
+           if Enum.any?(octets, &(&1 == :invalid)) do
+             require Logger
+             Logger.warning("[runtime] Invalid OSA_HTTP_IP #{inspect(ip_str)}; falling back to 127.0.0.1")
+             {127, 0, 0, 1}
+           else
+             List.to_tuple(octets)
+           end
          else
            {127, 0, 0, 1}
          end
@@ -473,7 +485,7 @@ database_url = System.get_env("DATABASE_URL")
 if database_url do
   config :optimal_system_agent, OptimalSystemAgent.Platform.Repo,
     url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
+    pool_size: max(parse_int.(System.get_env("POOL_SIZE"), 10), 1)
 
   config :optimal_system_agent,
     ecto_repos: [OptimalSystemAgent.Store.Repo, OptimalSystemAgent.Platform.Repo]

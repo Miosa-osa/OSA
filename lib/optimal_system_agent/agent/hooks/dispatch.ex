@@ -110,14 +110,41 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
   Run all hooks for an event synchronously in the caller's process.
   Returns `{:ok, final_payload}` or `{:blocked, reason}`.
   """
-  @spec run(atom(), map()) :: {:ok, map()} | {:blocked, String.t()}
+  @spec run(atom(), map()) :: {:ok, map()} | {:blocked, String.t()} | {:error, :hooks_unavailable}
   def run(event, payload) do
-    hooks = hooks_for_event(event)
-    started_at = System.monotonic_time(:microsecond)
-    result = run_chain(hooks, payload, event)
-    elapsed_us = System.monotonic_time(:microsecond) - started_at
-    update_metrics(event, elapsed_us, result)
-    result
+    # Fail CLOSED for pre_* events when the pipeline is unreachable. Hooks read
+    # ETS inline (no GenServer on the hot path), and the tables are owned by the
+    # Hooks GenServer — if it dies, ERTS deletes the tables and hooks_for_event
+    # would rescue to [], silently skipping security_check/spend_guard and
+    # letting the tool run (fail-open). For pre_* events that contradicts the
+    # documented fail-closed contract, so we surface :hooks_unavailable instead.
+    if pre_event?(event) and not pipeline_live?() do
+      Logger.error(
+        "[Hooks] pre-event #{event} requested while hook pipeline is unavailable — failing closed"
+      )
+
+      {:error, :hooks_unavailable}
+    else
+      hooks = hooks_for_event(event)
+      started_at = System.monotonic_time(:microsecond)
+      result = run_chain(hooks, payload, event)
+      elapsed_us = System.monotonic_time(:microsecond) - started_at
+      update_metrics(event, elapsed_us, result)
+      result
+    end
+  end
+
+  # A pre_* lifecycle event gates a side effect (tool execution), so it must
+  # fail closed. post_* / other events are best-effort and stay fail-open.
+  defp pre_event?(event) do
+    event |> Atom.to_string() |> String.starts_with?("pre_")
+  end
+
+  # The pipeline is live when the Hooks GenServer that owns the ETS tables is
+  # alive AND the hooks table actually exists.
+  defp pipeline_live? do
+    Process.whereis(OptimalSystemAgent.Agent.Hooks) != nil and
+      :ets.whereis(@hooks_table) != :undefined
   end
 
   @doc """

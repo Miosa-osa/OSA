@@ -239,6 +239,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           end
 
         true ->
+          # DOCUMENTED BOUNDARY (finding-14): in non-:auto tiers the only hard
+          # danger gate is the DangerousCommands circuit-breaker in the
+          # :pre_tool_use security hook, which is SHELL-COMMAND-SHAPED — it
+          # inspects @shell_tools / @delete_tools argument strings. It does NOT
+          # semantically vet remote mcp_* or custom/plugin tools whose danger
+          # lives server-side. Those are trusted at the :full tier by design;
+          # gate them via an explicit per-server allowlist if that is a concern.
           nil
       end
 

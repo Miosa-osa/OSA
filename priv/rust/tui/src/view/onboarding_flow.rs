@@ -75,7 +75,7 @@ fn push_branded_header(
         push_centered(
             lines,
             col_w,
-            "Agent \u{00b7} first-run setup",
+            "Welcome to OSA",
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         );
     } else {
@@ -84,7 +84,7 @@ fn push_branded_header(
         push_centered(
             lines,
             col_w,
-            "Agent setup",
+            "Welcome to OSA",
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         );
     }
@@ -92,7 +92,7 @@ fn push_branded_header(
     push_centered(
         lines,
         col_w,
-        "Let's get you connected \u{2014} about a minute",
+        "Let's get you set up \u{2014} about a minute",
         Style::default().fg(theme.colors.dim),
     );
     lines.push(Line::from(""));
@@ -466,7 +466,7 @@ fn push_details_input(
         lines.push(Line::from(vec![
             Span::raw("     "),
             Span::styled(
-                "No credentials needed for this provider.",
+                "No key needed \u{2014} you're set.",
                 Style::default().fg(theme.colors.dim),
             ),
         ]));
@@ -668,7 +668,7 @@ fn push_channels(
                 Style::default().fg(theme.colors.dim),
             ),
             Span::styled(
-                "OSA can receive messages from other platforms.",
+                "Reach OSA from Telegram, Discord, or Slack.",
                 Style::default().fg(theme.colors.dim),
             ),
         ]));
@@ -816,7 +816,7 @@ fn push_confirm(
 
     lines.push(Line::from(vec![
         Span::raw("     "),
-        Span::styled("  Confirm  ".to_string(), confirm_style),
+        Span::styled("  Let's go  ".to_string(), confirm_style),
         Span::raw("   "),
         Span::styled("  Back  ".to_string(), back_style),
     ]));

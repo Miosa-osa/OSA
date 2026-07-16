@@ -283,9 +283,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     handle_result(result, state, context)
   end
 
-  # Max tokens recovery — response was truncated, bump limit and retry
+  # Max tokens recovery — response was truncated, bump limit and retry.
+  #
+  # GUARD (finding-1 data-loss fix): only handle the no-tool-call truncation
+  # here. If the truncated turn ALSO carries tool calls, those may have already
+  # run eagerly via the StreamingToolExecutor; injecting only the assistant
+  # content and re-running would orphan the completed task and re-execute the
+  # side effect. Let that case fall through to the reconciliation clause below,
+  # which keeps already-streamed results and fails only the truncated call.
   defp handle_result({:ok, %{stop_reason: "max_tokens"} = resp}, state, _context)
-       when state.overflow_retries < 2 do
+       when state.overflow_retries < 2 and
+              (not is_map_key(resp, :tool_calls) or
+                 is_nil(:erlang.map_get(:tool_calls, resp)) or
+                 :erlang.map_get(:tool_calls, resp) == []) do
     content = Map.get(resp, :content, "")
     current_max = max_response_tokens()
     # Clamp so recovery NEVER shrinks the budget below what the model just had

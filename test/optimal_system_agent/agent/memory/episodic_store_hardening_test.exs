@@ -35,7 +35,24 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicStoreHardeningTest do
     assert length(episodes) == 2
 
     # Atomic rename leaves the sibling temp file cleaned up.
-    tmps = File.ls!(dir) |> Enum.filter(&String.ends_with?(&1, ".tmp"))
+    tmps = File.ls!(dir) |> Enum.filter(&String.contains?(&1, ".tmp"))
     assert tmps == []
+  end
+
+  # finding 4: the read-modify-write append is now serialized per session, so
+  # concurrent record/2 calls can't both read the same base array and clobber
+  # each other's episode (last-writer-wins on an APPEND drops an episode).
+  test "concurrent records for the same session lose no episode", %{session: session} do
+    n = 25
+
+    1..n
+    |> Task.async_stream(
+      fn i -> EpisodicStore.record(session, %{task: "task #{i}", outcome: "success"}) end,
+      max_concurrency: n,
+      timeout: 30_000
+    )
+    |> Stream.run()
+
+    assert length(EpisodicStore.list(session)) == n
   end
 end

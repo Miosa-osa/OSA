@@ -141,16 +141,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   end
 
   defp spawn_cleanup_loop do
-    spawn_link(fn -> cleanup_loop() end)
+    # Decouple the periodic reaper from the transient request process that first
+    # created the table. :timer.apply_interval is owned by the :timer server, so
+    # reaping survives any request-process death. spawn_link (the old approach)
+    # linked the reaper to one Plug connection process; when that connection was
+    # killed the reaper died and never respawned, so stale entries accumulated
+    # one-per-IP forever — an unbounded-memory / DoS vector.
+    :timer.apply_interval(@cleanup_interval_ms, __MODULE__, :cleanup_stale, [])
   end
 
-  defp cleanup_loop do
-    Process.sleep(@cleanup_interval_ms)
-    cleanup_stale()
-    cleanup_loop()
-  end
-
-  defp cleanup_stale do
+  @doc false
+  def cleanup_stale do
     cutoff = unix_now() - @stale_threshold_seconds
 
     # Delete any entry whose last_refill timestamp is older than the threshold.

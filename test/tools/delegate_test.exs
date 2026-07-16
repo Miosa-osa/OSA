@@ -178,6 +178,44 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
     end
   end
 
+  # ── Handler: hard delegation-depth ceiling (finding 16) ──────────────────
+  #
+  # ToolFilter strips the delegate tool once depth >= max, but that is heuristic
+  # and lossy — a surviving call must still be denied here to close the fork-bomb
+  # ceiling on every spawn path.
+  describe "Handler.check_permissions/2 depth ceiling" do
+    alias OptimalSystemAgent.Agent.Loop.ToolFilter
+
+    defp depth_ctx(depth) do
+      %{UseContext.empty() | delegation_depth: depth}
+    end
+
+    test "denies delegation at the depth limit" do
+      max = ToolFilter.max_delegation_depth()
+
+      assert {:deny, msg} =
+               Handler.check_permissions(%{"task" => "spawn more"}, depth_ctx(max))
+
+      assert msg =~ "depth limit"
+    end
+
+    test "denies delegation above the depth limit" do
+      max = ToolFilter.max_delegation_depth()
+
+      assert {:deny, msg} =
+               Handler.check_permissions(%{"task" => "spawn more"}, depth_ctx(max + 5))
+
+      assert msg =~ "depth limit"
+    end
+
+    test "allows delegation below the depth limit (not denied for depth)" do
+      max = ToolFilter.max_delegation_depth()
+
+      assert {:allow, _} =
+               Handler.check_permissions(%{"task" => "spawn more"}, depth_ctx(max - 1))
+    end
+  end
+
   # ── Handler: tri-mode delegation policy (primitive #34) ──────────────────
 
   defp policy_ctx(policy, messages) do

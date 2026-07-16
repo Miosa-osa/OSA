@@ -97,27 +97,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         run_in_background(command, effective_cwd)
 
       true ->
-        timeout =
-          case System.get_env("OSA_SHELL_TIMEOUT_MS") do
-            nil ->
-              Constants.default_timeout_ms()
-
-            s ->
-              # Parse defensively: a typo like "30s"/"5000ms"/"" would otherwise
-              # raise ArgumentError before run_command's rescue, breaking EVERY
-              # shell_execute call with an opaque error until the env var is fixed.
-              case Integer.parse(String.trim(s)) do
-                {n, _} when n > 0 ->
-                  n
-
-                _ ->
-                  Logger.warning(
-                    "[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default"
-                  )
-
-                  Constants.default_timeout_ms()
-              end
-          end
+        timeout = parse_timeout_ms(System.get_env("OSA_SHELL_TIMEOUT_MS"))
 
         # SANDBOX ROUTING: when a non-host sandbox backend is configured (or
         # sandbox mode is :required), route the command through Sandbox.Router
@@ -130,6 +110,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         end
     end
   end
+
+  # Resolve the command timeout from OSA_SHELL_TIMEOUT_MS. Pure + defensive so a
+  # typo like "30s"/"5000ms"/"" falls back to the default instead of raising
+  # ArgumentError before run_command's rescue (which would break EVERY shell call
+  # until the env var is fixed). Public so it can be unit-tested without mutating
+  # the process-global env (which flakes under parallel test runs).
+  @doc false
+  def parse_timeout_ms(nil), do: Constants.default_timeout_ms()
+
+  def parse_timeout_ms(s) when is_binary(s) do
+    # Require the value to be a bare positive integer (milliseconds). A trailing
+    # unit like "30s"/"5000ms" must fall back to the default rather than silently
+    # parsing "30s" as 30ms — Integer.parse/1 returns {30, "s"}, so we insist the
+    # remainder is empty.
+    case Integer.parse(String.trim(s)) do
+      {n, ""} when n > 0 ->
+        n
+
+      _ ->
+        Logger.warning("[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default")
+        Constants.default_timeout_ms()
+    end
+  end
+
+  def parse_timeout_ms(_), do: Constants.default_timeout_ms()
 
   # Accept boolean true or the string "true" (some callers stringify args).
   defp truthy?(true), do: true

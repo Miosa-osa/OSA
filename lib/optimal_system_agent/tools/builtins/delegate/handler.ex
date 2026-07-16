@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.DelegationPolicy
+  alias OptimalSystemAgent.Agent.Loop.ToolFilter
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -38,6 +39,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     cond do
       String.trim(task) == "" ->
         {:deny, "Access denied: task description must not be blank"}
+
+      # Hard fork-bomb ceiling (defense-in-depth). ToolFilter strips the delegate
+      # tool once depth >= max, but filtering is heuristic/lossy — a call that
+      # survives filtering (FastPath, budget trimming, hand-crafted) would still
+      # execute and spawn another level. Deny every spawn path (single + fan-out)
+      # here so the depth ceiling is actually enforced, not just advertised.
+      delegation_depth(ctx) >= ToolFilter.max_delegation_depth() ->
+        {:deny, "Access denied: delegation depth limit reached"}
 
       true ->
         check_delegation_policy(input, ctx)

@@ -125,6 +125,14 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
            instructions: content
          }}
     end
+  rescue
+    # One unreadable/malformed SKILL.md (perms 000, broken symlink, removed in
+    # the exists?→read race) must not crash SkillLoader.load_skills and take down
+    # the Registry GenServer. Degrade to :error and skip, mirroring
+    # parse_skill_definition/1's rescue.
+    e ->
+      Logger.warning("[skill_loader] Skipping unreadable skill #{path}: #{Exception.message(e)}")
+      :error
   end
 
   defp parse_skill_definition(path, base_path) do

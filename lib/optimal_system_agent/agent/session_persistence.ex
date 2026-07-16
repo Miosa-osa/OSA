@@ -32,7 +32,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         # session JSON, and overlapping auto_saves (which run outside the single
         # Loop GenServer) resolve to a clean last-writer-wins instead of
         # interleaving into corrupt bytes.
-        tmp = path <> ".tmp"
+        # Unique temp path per writer: concurrent auto_saves each own their own
+        # temp inode so rename(2) gives true whole-file last-writer-wins with no
+        # interleaving (a shared ".tmp" would be re-truncated mid-flight and torn).
+        tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
         File.write!(tmp, json)
         File.rename!(tmp, path)
         Logger.debug("[session_persist] Saved #{length(messages)} messages for #{session_id}")

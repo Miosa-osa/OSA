@@ -113,11 +113,16 @@ defmodule OptimalSystemAgent.Agent.Memory.Coordinator do
   def recall(session_id, query, opts) when is_binary(session_id) and is_binary(query) do
     limit = Keyword.get(opts, :limit, @default_limit)
 
+    # Wrap the CORE tier in safe/2 like the EPISODIC/SEMANTIC tiers below, so a
+    # corrupt/unreadable progress ledger (which can raise inside summarize) can't
+    # escape recall/3 and break its documented best-effort contract.
     core =
-      case ProgressLedger.summarize(session_id) do
-        {:ok, summary} -> summary
-        _ -> nil
-      end
+      safe(fn ->
+        case ProgressLedger.summarize(session_id) do
+          {:ok, summary} -> summary
+          _ -> nil
+        end
+      end, nil)
 
     episodic =
       safe(fn ->

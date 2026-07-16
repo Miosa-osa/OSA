@@ -101,9 +101,15 @@ defmodule OptimalSystemAgent.Orchestrator do
                 Task.await(task, 600_000)
               catch
                 :exit, {:timeout, _} ->
+                  # Reap the async task instead of orphaning it — the underlying
+                  # async_nolink Task keeps running run_subagent with no owner,
+                  # burning tokens. brutal_kill stops the leak. (We still return a
+                  # placeholder so wave ordering is preserved.)
+                  Task.shutdown(task, :brutal_kill)
                   {:ok, "[Agent timed out after 10 minutes]"}
 
                 :exit, reason ->
+                  Task.shutdown(task, :brutal_kill)
                   {:ok, "[Agent crashed: #{inspect(reason)}]"}
               end
 
@@ -395,8 +401,53 @@ defmodule OptimalSystemAgent.Orchestrator do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       start_time = System.monotonic_time(:millisecond)
 
-      result = run_subagent(Map.put(config, :agent_id, subagent_id))
+      # Guard the ENTIRE subagent run (not just the inner Loop): run_subagent's
+      # setup phase (Worktree.create, Tier.model_for, File ops) is unguarded and
+      # can raise/exit. If it does, the parent's BackgroundNotifier would wait
+      # forever and the RunStore entry would stick on :running. Convert any
+      # raise/exit into an {:error, reason} so the failure branch below always
+      # notifies the parent and reaps the run.
+      result =
+        try do
+          run_subagent(Map.put(config, :agent_id, subagent_id))
+        rescue
+          e ->
+            Logger.error(
+              "[Orchestrator] Background subagent #{subagent_id} crashed: #{Exception.message(e)}"
+            )
+
+            {:error, Exception.message(e)}
+        catch
+          :exit, reason ->
+            Logger.error(
+              "[Orchestrator] Background subagent #{subagent_id} exited: #{inspect(reason)}"
+            )
+
+            {:error, {:exit, reason}}
+        end
+
       duration_ms = System.monotonic_time(:millisecond) - start_time
+
+      # If the run raised before it could mark itself terminal, reap the RunStore
+      # entry so GET /runs never sticks on :running.
+      case result do
+        {:error, reason} ->
+          case RunStore.get(subagent_id) do
+            %{status: :running} ->
+              RunStore.complete(subagent_id, %{
+                agent_id: subagent_id,
+                status: :failed,
+                summary: "background agent failed: #{inspect(reason)}",
+                duration_ms: duration_ms
+              })
+
+            _ ->
+              :ok
+          end
+
+        _ ->
+          :ok
+      end
 
       case result do
         {:ok, response} ->

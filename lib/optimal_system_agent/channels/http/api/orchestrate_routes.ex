@@ -34,6 +34,32 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
     ArgumentError -> :ok
   end
 
+  # Cap on retained TERMINAL (completed/failed) swarm rows. Without this every
+  # swarm ever launched accumulates for the life of the node, growing memory and
+  # inflating the /tasks listing + active_count scan. "running" rows are kept.
+  @max_terminal_swarms 500
+
+  defp prune_swarm_terminal do
+    ensure_swarm_table()
+
+    terminal =
+      @swarm_table
+      |> :ets.tab2list()
+      |> Enum.filter(fn {_id, info} -> Map.get(info, :status) in ["completed", "failed"] end)
+
+    if length(terminal) > @max_terminal_swarms do
+      # ISO8601 started_at sorts lexicographically = chronologically; drop oldest.
+      terminal
+      |> Enum.sort_by(fn {_id, info} -> Map.get(info, :started_at, "") end, :desc)
+      |> Enum.drop(@max_terminal_swarms)
+      |> Enum.each(fn {id, _info} -> :ets.delete(@swarm_table, id) end)
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   # POST /api/v1/orchestrate — direct agent loop invocation
   post "/" do
     input = conn.body_params["input"] || ""
@@ -247,6 +273,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
                  started_at: started_at
                }}
             )
+
+            # Bound the registry: evict oldest terminal rows past the cap.
+            prune_swarm_terminal()
 
             # Launch in background
             Task.start(fn ->

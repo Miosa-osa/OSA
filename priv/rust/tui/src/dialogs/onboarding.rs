@@ -34,8 +34,8 @@ const TOTAL_STEPS: usize = 7;
 // Channel definitions: (id, display name, setup hint)
 const CHANNELS: &[(&str, &str, &str)] = &[
     ("telegram", "Telegram", "get token from @BotFather"),
-    ("discord", "Discord", "enter bot token"),
-    ("slack", "Slack", "enter bot token"),
+    ("discord", "Discord", "from the Developer Portal"),
+    ("slack", "Slack", "from api.slack.com/apps"),
 ];
 
 const CHANNEL_INSTRUCTIONS: &[&[&str]] = &[
@@ -979,9 +979,9 @@ impl OnboardingWizard {
         match self.step {
             0 => Line::from(vec![
                 Span::styled("\u{2191}\u{2193}", theme.dialog_help_key()),
-                Span::styled(" select  ", theme.dialog_help()),
+                Span::styled(" navigate  ", theme.dialog_help()),
                 Span::styled("Enter", theme.dialog_help_key()),
-                Span::styled(" next  ", theme.dialog_help()),
+                Span::styled(" select  ", theme.dialog_help()),
                 Span::styled("Esc", theme.dialog_help_key()),
                 Span::styled(" cancel", theme.dialog_help()),
             ]),
@@ -995,9 +995,9 @@ impl OnboardingWizard {
             ]),
             2 => Line::from(vec![
                 Span::styled("\u{2191}\u{2193}", theme.dialog_help_key()),
-                Span::styled(" select  ", theme.dialog_help()),
+                Span::styled(" navigate  ", theme.dialog_help()),
                 Span::styled("Enter", theme.dialog_help_key()),
-                Span::styled(" next  ", theme.dialog_help()),
+                Span::styled(" select  ", theme.dialog_help()),
                 Span::styled("Esc", theme.dialog_help_key()),
                 Span::styled(" back", theme.dialog_help()),
             ]),
@@ -1127,7 +1127,7 @@ impl OnboardingWizard {
         // Signup URL hint
         if let Some(ref url) = self.current_provider().and_then(|p| p.signup_url.clone()) {
             put(frame, 
-                Paragraph::new(format!("  Get your key at: {}", url))
+                Paragraph::new(format!("  Grab a key at {}", url))
                     .style(Style::default().fg(theme.colors.dim)),
                 Rect::new(area.x, cy, area.width, 1),
             );
@@ -1192,7 +1192,7 @@ impl OnboardingWizard {
         let mut cy = area.y + 1;
 
         put(frame, 
-            Paragraph::new("Select Model")
+            Paragraph::new("Choose a model")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
             Rect::new(area.x, cy, area.width, 1),
@@ -1260,7 +1260,7 @@ impl OnboardingWizard {
         let mut cy = area.y + 1;
 
         put(frame, 
-            Paragraph::new("Verifying Connection")
+            Paragraph::new("Verifying connection")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
             Rect::new(area.x, cy, area.width, 1),
@@ -1302,7 +1302,7 @@ impl OnboardingWizard {
                 );
                 cy += 2;
                 put(frame, 
-                    Paragraph::new("  Press 'r' to retry or Esc to go back")
+                    Paragraph::new("  Couldn't connect \u{2014} press r to retry.")
                         .style(Style::default().fg(theme.colors.dim)),
                     Rect::new(area.x, cy, area.width, 1),
                 );
@@ -1324,7 +1324,7 @@ impl OnboardingWizard {
         let mut cy = area.y + 1;
 
         put(frame, 
-            Paragraph::new("Connect Channels (optional)")
+            Paragraph::new("Connect channels (optional)")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
             Rect::new(area.x, cy, area.width, 1),
@@ -1332,13 +1332,13 @@ impl OnboardingWizard {
         cy += 2;
 
         put(frame, 
-            Paragraph::new("  OSA can receive messages from other platforms.")
+            Paragraph::new("  Reach OSA from Telegram, Discord, or Slack.")
                 .style(Style::default().fg(theme.colors.muted)),
             Rect::new(area.x, cy, area.width, 1),
         );
         cy += 1;
         put(frame, 
-            Paragraph::new("  Skip this to use terminal only.")
+            Paragraph::new("  Skip to stay terminal-only.")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
         );
@@ -1485,7 +1485,7 @@ impl OnboardingWizard {
             Style::default().fg(theme.colors.muted)
         };
         put(frame, 
-            Paragraph::new("  Name your agent (default: OSA):").style(agent_label_style),
+            Paragraph::new("  Name your agent (or keep OSA):").style(agent_label_style),
             Rect::new(area.x, cy, area.width, 1),
         );
         cy += 1;
@@ -1503,7 +1503,7 @@ impl OnboardingWizard {
         cy += 2;
 
         put(frame, 
-            Paragraph::new("  Both are optional. Press Enter to continue.")
+            Paragraph::new("  Both optional \u{2014} press Enter to continue.")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
         );
@@ -1518,7 +1518,7 @@ impl OnboardingWizard {
         let mut cy = area.y + 1;
 
         put(frame, 
-            Paragraph::new("Ready to Go")
+            Paragraph::new("Ready to go")
                 .style(theme.banner_title())
                 .alignment(Alignment::Center),
             Rect::new(area.x, cy, area.width, 1),
@@ -1577,7 +1577,7 @@ impl OnboardingWizard {
             ("API Key", key_display),
             ("Channels", channels_display),
             ("Your Name", user_name_display),
-            ("Agent", agent_name_display),
+            ("Agent Name", agent_name_display),
         ];
 
         for (label, value) in &summary {
@@ -1600,7 +1600,7 @@ impl OnboardingWizard {
 
         cy += 1;
         put(frame, 
-            Paragraph::new("  Change later: /setup or edit ~/.osa/.env")
+            Paragraph::new("  Change any of this later with /setup")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
         );
@@ -1619,7 +1619,7 @@ impl OnboardingWizard {
         };
 
         let buttons = Line::from(vec![
-            Span::styled("[ Start Chatting ]", confirm_style),
+            Span::styled("[ Let's go ]", confirm_style),
             Span::raw("   "),
             Span::styled("[ Back ]", back_style),
         ]);

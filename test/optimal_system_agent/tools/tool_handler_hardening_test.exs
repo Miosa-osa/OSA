@@ -106,18 +106,23 @@ defmodule OptimalSystemAgent.Tools.ToolHandlerHardeningTest do
   end
 
   describe "shell_execute timeout parsing (finding 28)" do
-    test "malformed OSA_SHELL_TIMEOUT_MS falls back to default instead of raising" do
-      prev = System.get_env("OSA_SHELL_TIMEOUT_MS")
-      System.put_env("OSA_SHELL_TIMEOUT_MS", "30s")
+    # Test the pure parser directly — no process-global System.put_env, which
+    # flaked under parallel runs (a concurrent shell_execute could observe the
+    # mutated env before on_exit restored it).
+    test "malformed OSA_SHELL_TIMEOUT_MS falls back to the default instead of raising" do
+      default = OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants.default_timeout_ms()
 
-      on_exit(fn ->
-        if prev, do: System.put_env("OSA_SHELL_TIMEOUT_MS", prev), else: System.delete_env("OSA_SHELL_TIMEOUT_MS")
-      end)
-
-      # Pre-fix this raised ArgumentError (String.to_integer("30s")) before the
-      # run_command rescue, breaking EVERY shell call.
-      assert {:ok, out} = ShellExecute.Handler.execute(%{"command" => "echo osa_ok"}, nil)
-      assert out =~ "osa_ok"
+      # Pre-fix, "30s" hit String.to_integer/1 and raised ArgumentError before the
+      # run_command rescue, breaking EVERY shell call until the env var was fixed.
+      assert ShellExecute.Handler.parse_timeout_ms("30s") == default
+      assert ShellExecute.Handler.parse_timeout_ms("") == default
+      assert ShellExecute.Handler.parse_timeout_ms("  ") == default
+      assert ShellExecute.Handler.parse_timeout_ms("-5") == default
+      assert ShellExecute.Handler.parse_timeout_ms("0") == default
+      assert ShellExecute.Handler.parse_timeout_ms(nil) == default
+      # Valid values parse through unchanged.
+      assert ShellExecute.Handler.parse_timeout_ms("5000") == 5000
+      assert ShellExecute.Handler.parse_timeout_ms(" 45000 ") == 45000
     end
   end
 end

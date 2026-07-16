@@ -29,28 +29,36 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
     command = interpolate(command_template, payload)
 
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
+      # `:timeout` is NOT a valid System.cmd/3 option — passing it raises
+      # ArgumentError (previously swallowed, so hooks never ran). Enforce the
+      # timeout with an inner Task.async + Task.yield/Task.shutdown instead.
       try do
-        case System.cmd("sh", ["-c", command],
-               stderr_to_stdout: true,
-               env: build_env(payload),
-               timeout: timeout
-             ) do
-          {output, 0} ->
+        inner =
+          Task.async(fn ->
+            System.cmd("sh", ["-c", command],
+              stderr_to_stdout: true,
+              env: build_env(payload)
+            )
+          end)
+
+        case Task.yield(inner, timeout) || Task.shutdown(inner, :brutal_kill) do
+          {:ok, {output, 0}} ->
             output = String.trim(output)
 
             if output != "" do
               Logger.debug("[shell_hook] #{command} → #{String.slice(output, 0, 200)}")
             end
 
-          {output, code} ->
+          {:ok, {output, code}} ->
             Logger.warning(
               "[shell_hook] #{command} exited #{code}: #{String.slice(output, 0, 200)}"
             )
+
+          nil ->
+            Logger.warning("[shell_hook] Timed out: #{command}")
         end
       rescue
         e -> Logger.warning("[shell_hook] Failed: #{Exception.message(e)}")
-      catch
-        :exit, {:timeout, _} -> Logger.warning("[shell_hook] Timed out: #{command}")
       end
     end)
 
@@ -89,12 +97,22 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
   # ── Private ──────────────────────────────────────────────────────────
 
   defp interpolate(template, payload) when is_map(payload) do
+    # Shell-escape each substituted value so tool/model-influenced payload
+    # fields (e.g. {{result}} containing `; rm -rf ~`) become an inert quoted
+    # literal instead of executable shell. Hook authors who need raw values can
+    # use the OSA_* env vars set by build_env/1.
     Enum.reduce(payload, template, fn {key, value}, acc ->
-      String.replace(acc, "{{#{key}}}", to_string(value))
+      String.replace(acc, "{{#{key}}}", shell_escape(to_string(value)))
     end)
   end
 
   defp interpolate(template, _), do: template
+
+  # Single-quote wrap and escape embedded single quotes: everything between the
+  # quotes is taken literally by the shell, so no metacharacter can execute.
+  defp shell_escape(value) do
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
+  end
 
   # Build environment variables from payload for the shell command
   defp build_env(payload) when is_map(payload) do

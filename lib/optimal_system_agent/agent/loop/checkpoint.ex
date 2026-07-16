@@ -47,7 +47,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     # Atomic write: write to a temp file then rename. rename(2) is atomic on
     # POSIX, so a crash mid-write leaves either the intact old file or the
     # intact new one — never a torn file that fails to decode on resume.
-    tmp = path <> ".tmp"
+    # Unique temp path per writer so a concurrent /rewind restore and periodic
+    # crash-checkpoint never share one ".tmp" inode (which would tear the file).
+    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
     File.write!(tmp, Jason.encode!(sanitized), [:utf8])
     File.rename!(tmp, path)
 
@@ -219,7 +221,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     File.mkdir_p!(dir)
     # Atomic write-then-rename so a crash never leaves a torn rewind point.
     path = Path.join(dir, id <> ".json")
-    tmp = path <> ".tmp"
+    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
     File.write!(tmp, Jason.encode!(entry), [:utf8])
     File.rename!(tmp, path)
 
