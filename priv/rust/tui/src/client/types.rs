@@ -137,6 +137,37 @@ pub struct SessionInfo {
     pub message_count: i32,
     #[serde(default)]
     pub messages: Option<Vec<SessionMessage>>,
+    /// Timestamp of the most recent turn (present on /recent listings).
+    #[serde(default)]
+    pub last_active: Option<String>,
+}
+
+/// A row from GET /api/v1/sessions/recent — past on-disk sessions with real
+/// message counts and titles derived from the first user message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecentSession {
+    pub session_id: String,
+    #[serde(default)]
+    pub message_count: i32,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub last_active: Option<String>,
+    #[serde(default)]
+    pub first_message: Option<String>,
+}
+
+impl From<RecentSession> for SessionInfo {
+    fn from(r: RecentSession) -> Self {
+        SessionInfo {
+            id: r.session_id,
+            created_at: r.started_at.unwrap_or_default(),
+            title: r.first_message.unwrap_or_default(),
+            message_count: r.message_count,
+            messages: None,
+            last_active: r.last_active,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

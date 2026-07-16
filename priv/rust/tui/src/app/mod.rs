@@ -142,6 +142,13 @@ pub struct App {
     // Voice input
     pub voice: VoiceState,
 
+    // Active /goal auto-continue loop (cross-turn keep-going). When Some, each
+    // assistant turn-completion auto-submits a "continue toward the goal" prompt
+    // until the reply says DONE, the user cancels, /goal off, or the cycle cap.
+    pub goal: Option<String>,
+    pub goal_cycle: u32,
+    pub goal_max_cycles: u32,
+
     // Welcome message injected flag
     pub welcome_injected: bool,
     // Set once we've resolved this folder's session on launch (resume-or-create).
@@ -182,6 +189,8 @@ impl App {
             "App initialized: session={}, url={}, term={}x{}, cwd={}",
             session_id, config.base_url, init_w, init_h, working_dir
         );
+
+        let goal_max_cycles = config.goal_max_cycles.max(1);
 
         let mut sidebar = Sidebar::new();
         sidebar.set_yolo_mode(config.skip_permissions);
@@ -255,6 +264,9 @@ impl App {
             command_entries: Vec::new(),
 
             voice: VoiceState::new(),
+            goal: None,
+            goal_cycle: 0,
+            goal_max_cycles,
             welcome_injected: false,
             dir_session_resolved: false,
             pending_welcome_banner: None,

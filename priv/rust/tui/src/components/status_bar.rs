@@ -109,6 +109,8 @@ pub struct StatusBar {
     permission_mode: PermissionMode,
     shell_count: usize,
     cwd_basename: String,
+    /// "goal N/max" indicator when a /goal auto-continue loop is active.
+    goal_label: Option<String>,
 }
 
 impl StatusBar {
@@ -142,7 +144,13 @@ impl StatusBar {
             permission_mode: PermissionMode::Default,
             shell_count: 0,
             cwd_basename,
+            goal_label: None,
         }
+    }
+
+    /// Set (or clear with None) the active-goal indicator, e.g. "goal 3/25".
+    pub fn set_goal_label(&mut self, label: Option<String>) {
+        self.goal_label = label;
     }
 
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
@@ -436,6 +444,15 @@ impl Component for StatusBar {
             spans.push(Span::styled(
                 "HF",
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        // Active /goal auto-continue loop: "◎ goal N/max".
+        if let Some(ref goal_label) = self.goal_label {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(
+                format!("\u{25CE} {}", goal_label),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
         }
 

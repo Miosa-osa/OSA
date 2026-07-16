@@ -112,6 +112,15 @@ impl App {
             "/sessions" => {
                 self.load_sessions();
             }
+            "/resume" => {
+                // Like /sessions, but populated from past on-disk sessions
+                // (real titles/counts) so a prior conversation can be reloaded.
+                self.load_recent_sessions();
+            }
+            "/continue" => {
+                // Directory-scoped resume: reload this folder's saved session.
+                self.continue_session();
+            }
             "/session" => {
                 if arg.is_empty() {
                     self.toasts.push(
@@ -237,6 +246,20 @@ impl App {
                     model, tools, ctx * 100.0, self.session_id
                 );
                 self.chat.add_system_message(&msg, "status");
+            }
+            "/goal" => {
+                // Cross-turn keep-going: agent auto-continues toward a stated
+                // goal until it replies DONE, the cap is hit, or it's cleared.
+                if arg.is_empty() {
+                    self.show_goal_status();
+                } else if arg.eq_ignore_ascii_case("off")
+                    || arg.eq_ignore_ascii_case("stop")
+                    || arg.eq_ignore_ascii_case("clear")
+                {
+                    self.clear_goal(true);
+                } else {
+                    self.set_goal(arg);
+                }
             }
             "/new" => {
                 // Create a new session

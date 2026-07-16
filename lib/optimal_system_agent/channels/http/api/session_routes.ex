@@ -30,21 +30,47 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     {page, per_page} = pagination_params(conn)
 
     live_ids = SessionManager.live_session_ids()
-    all_ids = SessionManager.list_session_ids()
 
-    sessions =
-      Enum.map(all_ids, fn sid ->
-        alive = sid in live_ids
+    # Rich metadata (title/first-prompt, message_count, created_at/last_active)
+    # comes from the persisted transcript store — the same source already used
+    # by GET /sessions/recent. We merge in live-registry alive status on top.
+    rich_sessions =
+      OptimalSystemAgent.Store.SessionTranscript.list_sessions(limit: 500)
+      |> Enum.map(fn s ->
+        sid = s[:session_id]
 
         %{
           id: sid,
-          title: nil,
-          message_count: 0,
-          created_at: nil,
-          last_active: nil,
-          alive: alive
+          title: s[:first_message] || "",
+          message_count: s[:message_count] || 0,
+          created_at: s[:started_at] || "",
+          last_active: s[:last_active] || "",
+          working_dir: s[:working_dir],
+          alive: sid in live_ids
         }
       end)
+
+    known_ids = MapSet.new(rich_sessions, & &1.id)
+
+    # Live in-registry sessions that haven't persisted any turns yet still need
+    # to appear so the TUI can select them. created_at is kept as a non-null
+    # string to satisfy the client's SessionInfo contract.
+    live_only =
+      live_ids
+      |> Enum.reject(&MapSet.member?(known_ids, &1))
+      |> Enum.map(fn sid ->
+        %{
+          id: sid,
+          title: "",
+          message_count: 0,
+          created_at: "",
+          last_active: "",
+          working_dir: nil,
+          alive: true
+        }
+      end)
+
+    sessions = live_only ++ rich_sessions
 
     total = length(sessions)
 
@@ -194,16 +220,21 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     alive = SessionManager.session_exists?(session_id)
 
     if alive do
-      messages = Memory.load_session(session_id) || []
+      # Read this session's real persisted turns from the transcript store
+      # (where t.session_id == id) — NOT the cross-session full-text search,
+      # which keys on content and returns [] for a session id. Same accessor
+      # as GET /:id/messages and GET /:id/transcript.
+      turns = OptimalSystemAgent.Store.SessionTranscript.get_transcript(session_id)
 
       formatted_messages =
-        messages
-        |> Enum.reject(fn m -> m["role"] == "system" end)
-        |> Enum.map(fn m ->
+        turns
+        |> Enum.reject(fn t -> t.role == "system" end)
+        |> Enum.map(fn t ->
           %{
-            role: m["role"],
-            content: m["content"],
-            timestamp: m["timestamp"]
+            role: t.role,
+            content: t.content,
+            tool_name: t.tool_name,
+            timestamp: t.inserted_at
           }
         end)
 
@@ -211,7 +242,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         Jason.encode!(%{
           id: session_id,
           title: nil,
-          message_count: length(messages),
+          message_count: length(formatted_messages),
           created_at: nil,
           last_active: nil,
           alive: alive,
@@ -268,16 +299,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   get "/:id/messages" do
     session_id = conn.params["id"]
-    messages = Memory.load_session(session_id) || []
+
+    # Read the actual persisted turns for THIS session directly from the
+    # transcript store (where t.session_id == id). This is the same proven
+    # accessor used by GET /:id/transcript. It must NOT route through the
+    # cross-session full-text search, which keys on content and ignores the
+    # session_id column (returning []).
+    turns = OptimalSystemAgent.Store.SessionTranscript.get_transcript(session_id)
 
     formatted =
-      messages
-      |> Enum.reject(fn m -> m["role"] == "system" end)
-      |> Enum.map(fn m ->
+      turns
+      |> Enum.reject(fn t -> t.role == "system" end)
+      |> Enum.map(fn t ->
         %{
-          role: m["role"],
-          content: m["content"],
-          timestamp: m["timestamp"]
+          role: t.role,
+          content: t.content,
+          tool_name: t.tool_name,
+          timestamp: t.inserted_at
         }
       end)
 

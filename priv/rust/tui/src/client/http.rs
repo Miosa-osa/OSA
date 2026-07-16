@@ -210,6 +210,25 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/sessions/recent
+    /// Past on-disk sessions with real titles/message counts/last-active times.
+    pub async fn recent_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let resp = self.get("/api/v1/sessions/recent").await?;
+        let wrapper: serde_json::Value = resp.json().await?;
+        let recents: Vec<RecentSession> =
+            serde_json::from_value(wrapper.get("sessions").cloned().unwrap_or_default())?;
+        Ok(recents.into_iter().map(SessionInfo::from).collect())
+    }
+
+    /// POST /api/v1/sessions with { working_dir } — directory-scoped resume.
+    /// Returns the existing session for `working_dir` (status "resumed") if one
+    /// exists on disk, otherwise a freshly created one (status "created").
+    pub async fn resume_for_dir(&self, working_dir: String) -> Result<SessionCreateResponse> {
+        let body = serde_json::json!({ "working_dir": working_dir });
+        let resp = self.post("/api/v1/sessions", &body).await?;
+        Ok(resp.json().await?)
+    }
+
     /// GET /api/v1/sessions/:id
     pub async fn get_session(&self, id: &str) -> Result<SessionInfo> {
         let resp = self.get(&format!("/api/v1/sessions/{}", id)).await?;

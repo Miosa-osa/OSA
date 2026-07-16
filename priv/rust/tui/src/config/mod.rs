@@ -24,6 +24,9 @@ pub struct Config {
     pub sidebar_enabled: bool,
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    /// Max auto-continue cycles for an active /goal before stopping.
+    #[serde(default = "default_goal_max_cycles")]
+    pub goal_max_cycles: u32,
     #[serde(skip)]
     pub profile_dir: PathBuf,
     #[serde(skip)]
@@ -41,11 +44,16 @@ fn default_request_timeout_secs() -> u64 {
     900
 }
 
+fn default_goal_max_cycles() -> u32 {
+    25
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             theme: default_theme(),
             request_timeout_secs: default_request_timeout_secs(),
+            goal_max_cycles: default_goal_max_cycles(),
             sidebar_enabled: false,
             profile_dir: default_profile_dir(),
             base_url: default_base_url(),

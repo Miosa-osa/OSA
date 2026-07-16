@@ -362,11 +362,17 @@ impl SessionBrowser {
                 title_str
             };
 
-            // Date — just the date portion
-            let date_display = if s.created_at.len() >= 10 {
-                s.created_at[..10].to_string()
+            // Date — prefer last-active time (from /recent listings) when
+            // present, otherwise fall back to the creation date. Just the date
+            // portion (YYYY-MM-DD) to keep the column narrow.
+            let date_source = match &s.last_active {
+                Some(la) if !la.is_empty() => la.as_str(),
+                _ => s.created_at.as_str(),
+            };
+            let date_display = if date_source.len() >= 10 {
+                date_source[..10].to_string()
             } else {
-                s.created_at.clone()
+                date_source.to_string()
             };
 
             let msg_count = format!(" {}msg", s.message_count);

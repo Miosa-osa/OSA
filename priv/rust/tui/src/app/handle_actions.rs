@@ -216,6 +216,10 @@ impl App {
             self.status.set_signal(signal);
         }
 
+        // Cross-turn keep-going: if a /goal is active, decide whether to stop
+        // (DONE / cap / cancelled) or auto-submit the next continue prompt.
+        self.maybe_continue_goal();
+
         self.recompute_layout();
     }
 
@@ -375,6 +379,11 @@ impl App {
             "Interrupting...".into(),
             crate::components::toast::ToastLevel::Info,
         );
+
+        // A user interrupt also stops any active /goal auto-continue loop.
+        if self.goal.is_some() {
+            self.clear_goal(true);
+        }
 
         // Immediately clear the agents panel so the UI reflects the interrupt
         self.agents.task_completed();
@@ -577,6 +586,54 @@ impl App {
             let event = match result {
                 Ok(sessions) => BackendEvent::SessionsLoaded(Ok(sessions)),
                 Err(e) => BackendEvent::SessionsLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Open the session browser populated from GET /api/v1/sessions/recent so
+    /// past on-disk sessions show with real titles/counts (used by /resume).
+    pub(crate) fn load_recent_sessions(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = client.recent_sessions().await;
+            let event = match result {
+                Ok(sessions) => BackendEvent::SessionsLoaded(Ok(sessions)),
+                Err(e) => BackendEvent::SessionsLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
+    /// Directory-scoped resume for the current working folder (used by /continue):
+    /// POST /api/v1/sessions with { working_dir }, then switch to the returned
+    /// session and pull its transcript back in via the SessionCreated handler.
+    pub(crate) fn continue_session(&mut self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let working_dir = if self.working_dir.is_empty() {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        } else {
+            Some(self.working_dir.clone())
+        };
+        let working_dir = match working_dir {
+            Some(dir) => dir,
+            None => {
+                self.toasts.push(
+                    "Cannot determine working directory to continue".into(),
+                    crate::components::toast::ToastLevel::Error,
+                );
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            let result = client.resume_for_dir(working_dir).await;
+            let event = match result {
+                Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
+                Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
         });
@@ -955,6 +1012,130 @@ impl App {
             }
         }
         info!("Hands-free voice mode: {}", self.voice.hands_free);
+    }
+
+    // ── /goal auto-continue (cross-turn keep-going) ──────────────────────────
+
+    /// Start (or replace) an active goal and kick off the first work turn.
+    pub(crate) fn set_goal(&mut self, goal: &str) {
+        let goal = goal.trim().to_string();
+        if goal.is_empty() {
+            return;
+        }
+        self.goal = Some(goal.clone());
+        self.goal_cycle = 0;
+        self.refresh_goal_status();
+        self.chat.add_system_message(
+            &format!(
+                "Goal set — auto-continuing until achieved (max {} cycles). Reply DONE to stop. Use /goal off to cancel.\n→ {}",
+                self.goal_max_cycles, goal
+            ),
+            "info",
+        );
+        // Kick off the first turn toward the goal.
+        let prompt = self.goal_continue_prompt(&goal);
+        self.goal_cycle = 1;
+        self.refresh_goal_status();
+        self.submit_prompt(&prompt);
+    }
+
+    /// Clear the active goal (from /goal off, cancel, DONE, or the cycle cap).
+    pub(crate) fn clear_goal(&mut self, notify: bool) {
+        let had_goal = self.goal.is_some();
+        self.goal = None;
+        self.goal_cycle = 0;
+        self.status.set_goal_label(None);
+        if notify && had_goal {
+            self.chat.add_system_message("Goal cleared.", "info");
+        }
+    }
+
+    /// Show the current goal status without changing it.
+    pub(crate) fn show_goal_status(&mut self) {
+        match self.goal.clone() {
+            Some(goal) => {
+                self.chat.add_system_message(
+                    &format!(
+                        "Active goal (cycle {}/{}):\n→ {}",
+                        self.goal_cycle, self.goal_max_cycles, goal
+                    ),
+                    "info",
+                );
+            }
+            None => {
+                self.chat.add_system_message(
+                    "No active goal. Set one with /goal <text>.",
+                    "info",
+                );
+            }
+        }
+    }
+
+    /// The continue prompt sent on each cycle toward the goal.
+    fn goal_continue_prompt(&self, goal: &str) -> String {
+        format!(
+            "Continue toward the goal: {}. When the goal is fully achieved, reply with exactly DONE on its own line and stop.",
+            goal
+        )
+    }
+
+    /// Sync the status-bar "goal N/max" indicator with the current state.
+    fn refresh_goal_status(&mut self) {
+        if self.goal.is_some() {
+            self.status.set_goal_label(Some(format!(
+                "goal {}/{}",
+                self.goal_cycle, self.goal_max_cycles
+            )));
+        } else {
+            self.status.set_goal_label(None);
+        }
+    }
+
+    /// True when the assistant reply signals the goal is achieved (a line that
+    /// trims to exactly "DONE").
+    fn reply_signals_done(reply: &str) -> bool {
+        reply.lines().any(|line| line.trim() == "DONE")
+    }
+
+    /// Called at the end of each assistant turn. If a goal is active, either
+    /// stop (DONE / cap reached) or auto-submit the next continue prompt.
+    pub(super) fn maybe_continue_goal(&mut self) {
+        let goal = match self.goal.clone() {
+            Some(g) => g,
+            None => return,
+        };
+        // Don't auto-continue if the user cancelled this turn.
+        if self.cancelled {
+            self.clear_goal(true);
+            return;
+        }
+
+        let last_reply = self.chat.last_agent_message().unwrap_or_default();
+        if Self::reply_signals_done(&last_reply) {
+            self.chat.add_system_message(
+                &format!("Goal achieved in {} cycle(s). Auto-continue stopped.", self.goal_cycle),
+                "info",
+            );
+            self.clear_goal(false);
+            return;
+        }
+
+        if self.goal_cycle >= self.goal_max_cycles {
+            self.chat.add_system_message(
+                &format!(
+                    "Goal auto-continue reached the {}-cycle cap without a DONE. Stopping. Use /goal <text> to resume.",
+                    self.goal_max_cycles
+                ),
+                "warning",
+            );
+            self.clear_goal(false);
+            return;
+        }
+
+        self.goal_cycle += 1;
+        self.refresh_goal_status();
+        let prompt = self.goal_continue_prompt(&goal);
+        self.submit_prompt(&prompt);
     }
 }
 

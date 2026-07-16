@@ -13,6 +13,22 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
   @warn_threshold_pct 0.80
 
+  # Graded escalation: before any hard halt, the agent is nudged to CHANGE
+  # APPROACH. Each distinct "approaching" signal advances one step in a shared
+  # per-session sequence (reflect -> try something different -> decompose).
+  # After the steps are exhausted, control falls through to the existing hard
+  # halts (identical-call cap, repeated-failure recovery, or the stall halt).
+  @max_graded_escalations 3
+
+  # Stall detection: if the last N tool calls introduce no newly-distinct tool
+  # and perform no file write/edit, the agent is spinning without progress.
+  @stall_window_size 6
+
+  # Tools that represent forward progress on the workspace (a write or edit).
+  @write_edit_tools ~w(file_write file_edit file_create write_file edit_file
+                       apply_patch str_replace str_replace_editor create_file
+                       file_append multi_edit)
+
   @moduledoc """
   Doom loop detection for the agent loop.
 
@@ -49,6 +65,10 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   @spec check(list(), list(), map()) ::
           {:ok, map()} | {:halt, String.t(), map()}
   def check(results, tool_calls, state) do
+    # At most one graded directive is injected per invocation; reset the
+    # per-tick guard so multiple approaching signals don't stack directives.
+    Process.delete(:osa_escalated_this_tick)
+
     # --- Absolute call counter (secondary safety net) ---
     call_count = length(tool_calls)
     new_total = Map.get(state, :total_tool_calls, 0) + call_count
@@ -61,26 +81,27 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     # the calls succeed (model ignores the result and re-issues). The
     # signature-based check below only catches repeated FAILURES; this
     # catches repeated USELESS SUCCESSES (e.g. dir_list of cwd 6× in a row).
-    case check_repeat_calls(tool_calls, state) do
-      {:halt, _, _} = halted ->
-        halted
+    with {:ok, state} <- check_repeat_calls(tool_calls, state),
+         # --- Stall detection ---
+         # No newly-distinct tool and no file write/edit over the last N calls.
+         {:ok, state} <- check_stall(tool_calls, state) do
+      cond do
+        new_total >= @max_total_tool_calls ->
+          handle_call_cap_exceeded(new_total, state)
 
-      {:ok, state} ->
-        cond do
-          new_total >= @max_total_tool_calls ->
-            handle_call_cap_exceeded(new_total, state)
+        new_total >= warn_at and new_total - call_count < warn_at ->
+          Logger.warning(
+            "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
+              "(session: #{state.session_id})"
+          )
 
-          new_total >= warn_at and new_total - call_count < warn_at ->
-            Logger.warning(
-              "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
-                "(session: #{state.session_id})"
-            )
+          check_signatures(results, tool_calls, state)
 
-            check_signatures(results, tool_calls, state)
-
-          true ->
-            check_signatures(results, tool_calls, state)
-        end
+        true ->
+          check_signatures(results, tool_calls, state)
+      end
+    else
+      {:halt, _, _} = halted -> halted
     end
   end
 
@@ -143,6 +164,15 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
         {:halt, msg, state}
 
+      {{tool, _hash}, n} when n == @repeat_threshold - 1 ->
+        # One below the hard identical-call cap: nudge a change of approach
+        # before the next repeat triggers the halt above.
+        graded_escalation(
+          :approaching_identical_repeat,
+          "You have called `#{tool}` with identical arguments #{n} times in a row.",
+          state
+        )
+
       _ ->
         {:ok, state}
     end
@@ -181,15 +211,31 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     state = %{state | recent_failure_signatures: updated_failure_signatures}
 
-    repeated_signature =
-      updated_failure_signatures
-      |> Enum.group_by(& &1)
-      |> Enum.find(fn {_sig, occurrences} -> length(occurrences) >= 3 end)
+    grouped = Enum.group_by(updated_failure_signatures, & &1)
 
-    if repeated_signature do
-      handle_doom_loop(repeated_signature, iteration_signatures, state)
-    else
-      {:ok, state}
+    repeated_signature =
+      Enum.find(grouped, fn {_sig, occurrences} -> length(occurrences) >= 3 end)
+
+    approaching_signature =
+      Enum.find(grouped, fn {_sig, occurrences} -> length(occurrences) == 2 end)
+
+    cond do
+      repeated_signature ->
+        handle_doom_loop(repeated_signature, iteration_signatures, state)
+
+      approaching_signature ->
+        # Same failure signature seen twice — one short of the hard recovery
+        # threshold. Nudge a change of approach before it repeats a third time.
+        {sig, _occurrences} = approaching_signature
+
+        graded_escalation(
+          :approaching_repeated_failure,
+          "The same failure keeps recurring (signature: #{sig}).",
+          state
+        )
+
+      true ->
+        {:ok, state}
     end
   end
 
@@ -372,4 +418,162 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
           "then try a completely different approach. Do NOT retry the same operation."
     end
   end
+
+  # --- Stall detection ---
+  #
+  # Distinct from the identical-call and failure-signature checks: those catch
+  # *repetition*, this catches *non-progress*. If the last `@stall_window_size`
+  # tool calls introduced no newly-distinct tool AND performed no file
+  # write/edit, the agent is spinning. We emit the graded escalation and only
+  # hard-halt once the graded steps are exhausted.
+  defp check_stall(tool_calls, state) do
+    names = Enum.map(tool_calls, & &1.name)
+    seen_before = Map.get(state, :distinct_tools_seen, MapSet.new())
+
+    # Running distinct-tool count after each call this batch, so we can compare
+    # "now" against "@stall_window_size calls ago" to detect a newly-seen tool.
+    {count_entries, distinct_after} =
+      Enum.map_reduce(names, seen_before, fn name, acc ->
+        acc = MapSet.put(acc, name)
+        {MapSet.size(acc), acc}
+      end)
+
+    name_window =
+      (Map.get(state, :recent_tool_names, []) ++ names)
+      |> Enum.take(-@stall_window_size)
+
+    count_log =
+      (Map.get(state, :distinct_count_log, []) ++ count_entries)
+      |> Enum.take(-(@stall_window_size + 1))
+
+    state =
+      state
+      |> Map.put(:distinct_tools_seen, distinct_after)
+      |> Map.put(:recent_tool_names, name_window)
+      |> Map.put(:distinct_count_log, count_log)
+
+    introduced_new_tool? =
+      length(count_log) < @stall_window_size + 1 or
+        List.last(count_log) > List.first(count_log)
+
+    wrote_or_edited? = Enum.any?(name_window, &write_or_edit_tool?/1)
+
+    stalled? =
+      length(name_window) >= @stall_window_size and
+        not introduced_new_tool? and not wrote_or_edited?
+
+    if stalled? do
+      case escalate(
+             :stall,
+             "The last #{@stall_window_size} tool calls made no progress: " <>
+               "no new file was written or edited and no new tool was tried.",
+             state
+           ) do
+        {:escalated, state} ->
+          {:ok, state}
+
+        {:exhausted, state} ->
+          msg =
+            "Stopped: no forward progress in the last #{@stall_window_size} tool calls " <>
+              "(no file writes/edits, no new approach) despite repeated nudges to change approach. " <>
+              "The task appears stuck — reconsider the goal or decompose it into smaller steps."
+
+          Logger.warning("[doom] Stall detected — halting after exhausting graded escalation")
+
+          Bus.emit(:doom_loop_halt, %{
+            session_id: state.session_id,
+            reason: :stall,
+            window: @stall_window_size
+          })
+
+          {:halt, msg, state}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp write_or_edit_tool?(name) do
+    downcased = name |> to_string() |> String.downcase()
+
+    name in @write_edit_tools or
+      String.contains?(downcased, "write") or
+      String.contains?(downcased, "edit") or
+      String.contains?(downcased, "patch")
+  end
+
+  # --- Graded escalation ---
+  #
+  # For "approaching a threshold" callers: nudge the agent, but never halt here
+  # (the existing hard halts remain the backstop). Always returns `{:ok, state}`.
+  defp graded_escalation(reason, context, state) do
+    case escalate(reason, context, state) do
+      {:escalated, state} -> {:ok, state}
+      {:exhausted, state} -> {:ok, state}
+    end
+  end
+
+  # Advances the shared per-session graded sequence and injects the next
+  # directive into the message history. Returns `{:escalated, state}` while
+  # steps remain, or `{:exhausted, state}` once all steps have been used.
+  # At most one directive is injected per `check/3` invocation.
+  defp escalate(reason, context, state) do
+    count = Process.get(:osa_graded_escalation_count, 0)
+
+    cond do
+      count >= @max_graded_escalations ->
+        {:exhausted, state}
+
+      Process.get(:osa_escalated_this_tick, false) ->
+        # A directive was already injected this tick; don't stack another.
+        {:escalated, state}
+
+      true ->
+        step = count + 1
+        Process.put(:osa_graded_escalation_count, step)
+        Process.put(:osa_escalated_this_tick, true)
+
+        directive = %{
+          role: "system",
+          content:
+            "[CHANGE APPROACH — graded nudge #{step}/#{@max_graded_escalations}] " <>
+              context <> " " <> graded_step_instruction(step)
+        }
+
+        Logger.info(
+          "[doom] Graded escalation #{step}/#{@max_graded_escalations} (#{reason}) — " <>
+            "injecting directive (session: #{state.session_id})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :doom_graded_escalation,
+          session_id: state.session_id,
+          step: step,
+          max_steps: @max_graded_escalations,
+          reason: reason
+        })
+
+        messages = Map.get(state, :messages, [])
+        state = Map.put(state, :messages, messages ++ [directive])
+
+        {:escalated, state}
+    end
+  end
+
+  defp graded_step_instruction(1) do
+    "REFLECT before acting: why isn't this working? State the assumption that " <>
+      "might be wrong, then act on that insight — do not simply retry."
+  end
+
+  defp graded_step_instruction(2) do
+    "Reflection wasn't enough. Use a DIFFERENT tool or a fundamentally " <>
+      "different approach than the one you have been repeating."
+  end
+
+  defp graded_step_instruction(3) do
+    "You are still stuck. DECOMPOSE the task into smaller, concrete sub-steps " <>
+      "and tackle only the first one, using a different method than before."
+  end
+
+  defp graded_step_instruction(_), do: "Change your approach now."
 end
