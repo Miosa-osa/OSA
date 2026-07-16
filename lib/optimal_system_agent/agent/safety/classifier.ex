@@ -10,8 +10,8 @@ defmodule OptimalSystemAgent.Agent.Safety.Classifier do
        (`command || path || query || task || first value`).
     2. Runs the pure regex tables in `Rules` for the five command-shaped
        categories and the allowlist-driven `untrusted_network` category.
-    3. Delegates the `prompt_injection_driven` category to the existing
-       `Guardrails.prompt_injection?/1` detector.
+    3. Delegates the `prompt_injection_driven` category to the pure
+       `PromptInjection.prompt_injection?/1` detector.
     4. Returns the single **highest-risk** `Verdict`.
 
   It has **no side effects**: no ETS, no logging, no Bus emits, no config reads
@@ -19,8 +19,7 @@ defmodule OptimalSystemAgent.Agent.Safety.Classifier do
   job of `Guardian`.
   """
 
-  alias OptimalSystemAgent.Agent.Safety.{Rules, Verdict}
-  alias OptimalSystemAgent.Agent.Loop.Guardrails
+  alias OptimalSystemAgent.Agent.Safety.{PromptInjection, Rules, Verdict}
 
   @type ctx :: %{optional(atom()) => any()}
 
@@ -97,7 +96,7 @@ defmodule OptimalSystemAgent.Agent.Safety.Classifier do
     end
   end
 
-  # Prompt-injection is delegated to the existing three-tier detector. We scan
+  # Prompt-injection is delegated to the pure three-tier detector. We scan
   # the primary arg and, defensively, any string values in the args map.
   defp injection_verdict(primary, args, tool) do
     candidates =
@@ -105,7 +104,7 @@ defmodule OptimalSystemAgent.Agent.Safety.Classifier do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    if Enum.any?(candidates, &Guardrails.prompt_injection?/1) do
+    if Enum.any?(candidates, &PromptInjection.prompt_injection?/1) do
       verdict(:prompt_injection_driven, "prompt-injection pattern in tool argument", tool)
     else
       nil

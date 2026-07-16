@@ -36,6 +36,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   # Local/slow provider atoms that need the tool budget cap.
   @local_providers [:ollama, :lmstudio, :llamacpp]
 
+  # Coordinator mode restricts tools to delegation, messaging, and management.
+  @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
+    task_write list_agents list_skills session_search ask_user)
+
   @doc """
   Filter the tool list for the current state and signal weight.
 
@@ -59,6 +63,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
       :max_delegation_depth,
       @default_max_delegation_depth
     )
+  end
+
+  @doc """
+  Restrict the tool list to coordinator-mode tools (delegation, messaging, and
+  management) when `coordinator?` is true; otherwise return `tools` unchanged.
+
+  Applied once at session start so a coordinator session never surfaces
+  execution tools to the LLM.
+  """
+  @spec filter_for_coordinator(list(), boolean()) :: list()
+  def filter_for_coordinator(tools, false), do: tools
+
+  def filter_for_coordinator(tools, true) do
+    Enum.filter(tools, fn tool ->
+      name = tool[:name] || tool.name
+      name in @coordinator_tools
+    end)
   end
 
   # --- Private ---

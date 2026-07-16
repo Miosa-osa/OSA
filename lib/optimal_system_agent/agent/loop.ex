@@ -32,11 +32,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
-  alias OptimalSystemAgent.Agent.Loop.GenreRouter
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Agent.Loop.Survey
   alias OptimalSystemAgent.Agent.Loop.Telemetry
+  alias OptimalSystemAgent.Agent.Loop.ToolFilter
+  alias OptimalSystemAgent.Agent.Loop.TurnPipeline
   alias OptimalSystemAgent.Agent.Hooks
 
   defstruct [
@@ -51,6 +52,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
     overflow_retries: 0,
     recent_failure_signatures: [],
     total_tool_calls: 0,
+    # Doom-loop detection counters — explicit state (formerly process-dict).
+    # See `Loop.DoomLoop` and its sub-detectors for ownership:
+    #   doom_recovery_count     — repeated-failure recovery attempts, reset each turn
+    #   graded_escalation_count — graded "change approach" step, persists per session
+    #   escalated_this_tick     — per-check guard so nudges don't stack in one tick
+    doom_recovery_count: 0,
+    graded_escalation_count: 0,
+    escalated_this_tick: false,
     auto_continues: 0,
     status: :idle,
     tools: [],
@@ -346,7 +355,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       plan_mode: plan_mode,
       turn_count: turn_count,
       tools:
-        filter_tools_for_mode(
+        ToolFilter.filter_for_coordinator(
           Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
           Keyword.get(opts, :coordinator, false)
         ),
@@ -395,119 +404,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call({:process, message, opts}, _from, state) do
-    skip_plan = Keyword.get(opts, :skip_plan, false)
-
-    try do
-      :ets.delete(@cancel_table, state.session_id)
-    rescue
-      ArgumentError -> :ok
+    # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
+    # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
+    # guard, compaction, message build, and genre routing) live in TurnPipeline
+    # as named ordered steps. It returns a terminal reply or hands back a
+    # `:dispatch` signal for plan-mode / ReactLoop execution.
+    case TurnPipeline.run(message, opts, state) do
+      {:reply, reply, state} -> {:reply, reply, state}
+      {:dispatch, state, skip_plan} -> dispatch_message(state, skip_plan)
     end
-
-    state = apply_overrides(state, opts)
-    state = %{state | turn_count: state.turn_count + 1}
-
-    # Budget and turn limit guards — check before any processing
-    limit_error = check_limits(state)
-
-    if limit_error do
-      {:reply, {:error, limit_error}, state}
-    else
-      # Clear per-message process caches
-      Process.delete(:osa_git_info_cache)
-      Process.delete(:osa_doom_recovery_count)
-      Process.delete(:osa_workspace_overview_cache)
-      Process.delete(:osa_system_msg_cache)
-      Process.put(:osa_memory_version, 0)
-
-      # -1. UserPromptSubmit hook — can modify or block the message
-      {message, state} =
-        try do
-          case Hooks.run(:user_prompt_submit, %{
-                 message: message,
-                 session_id: state.session_id,
-                 turn_count: state.turn_count
-               }) do
-            {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
-            {:blocked, _reason} -> {nil, %{state | status: :idle}}
-            _ -> {message, state}
-          end
-        rescue
-          _ -> {message, state}
-        catch
-          :exit, _ -> {message, state}
-        end
-
-      if is_nil(message) do
-        {:reply, {:error, "Message blocked by hook"}, state}
-      else
-        # 0. Prompt injection guard
-        if Guardrails.prompt_injection?(message) do
-          refusal = Guardrails.prompt_extraction_refusal()
-          {:reply, {:ok, refusal}, %{state | status: :idle}}
-        else
-          signal_weight = Keyword.get(opts, :signal_weight, nil)
-          state = %{state | signal_weight: signal_weight}
-
-          # Compact message history if needed
-          compacted =
-            OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages) || state.messages
-
-          state = %{state | messages: compacted}
-
-          # Build decorated message list (nudges + pre-directives + user message)
-          messages_to_append = MessageHandler.build_messages(message, state)
-
-          state = %{
-            state
-            | messages: state.messages ++ messages_to_append,
-              iteration: 0,
-              overflow_retries: 0,
-              auto_continues: 0,
-              status: :thinking,
-              exploration_done: false,
-              # Reset doom loop signatures on each new user turn —
-              # the user explicitly wants to try again, don't carry over old failures
-              recent_failure_signatures: []
-          }
-
-          # Genre routing
-          signal_genre = Keyword.get(opts, :signal_genre, :direct)
-          genre_route = GenreRouter.route_by_genre(signal_genre, message, state)
-
-          case genre_route do
-            {:respond, genre_response} ->
-              state = %{state | status: :idle}
-
-              Bus.emit(:agent_response, %{
-                session_id: state.session_id,
-                response: genre_response,
-                agent: state.session_id
-              })
-
-              Phoenix.PubSub.broadcast(
-                OptimalSystemAgent.PubSub,
-                "osa:session:#{state.session_id}",
-                {:osa_event,
-                 %{
-                   type: :agent_response,
-                   session_id: state.session_id,
-                   response: genre_response,
-                   response_type: "genre"
-                 }}
-              )
-
-              {:reply, {:ok, genre_response}, state}
-
-            :execute_tools ->
-              dispatch_message(state, skip_plan)
-          end
-        end
-      end
-
-      # if message not blocked
-    end
-
-    # if limit_error
   end
 
   @impl true
@@ -843,16 +748,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:exited, new_state}
   end
 
-  defp apply_overrides(state, opts) do
-    state
-    |> maybe_override(:provider, Keyword.get(opts, :provider))
-    |> maybe_override(:model, Keyword.get(opts, :model))
-    |> maybe_override(:working_dir, Keyword.get(opts, :working_dir))
-  end
-
-  defp maybe_override(state, _key, nil), do: state
-  defp maybe_override(state, key, value), do: Map.put(state, key, value)
-
   # --- Backward-compatible delegations ---
 
   @doc false
@@ -869,56 +764,4 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate permission_tier_allows?(tier, tool), to: ToolExecutor
-
-  # Check budget and turn limits. Returns nil if OK, or an error string.
-  defp check_limits(state) do
-    # Budget check
-    budget_error =
-      if state.max_budget_usd do
-        try do
-          budget = OptimalSystemAgent.Budget.get_status()
-          current_cost = (budget[:total_cost_usd] || 0) / 1
-
-          if current_cost >= state.max_budget_usd do
-            Bus.emit(:system_event, %{
-              event: :budget_limit_reached,
-              session_id: state.session_id,
-              current_cost: current_cost,
-              limit: state.max_budget_usd
-            })
-
-            "Budget limit reached ($#{Float.round(current_cost, 4)} / $#{state.max_budget_usd})"
-          end
-        rescue
-          _ -> nil
-        end
-      end
-
-    # Turn check
-    turn_error =
-      if state.max_turns && state.turn_count > state.max_turns do
-        Bus.emit(:system_event, %{
-          event: :turn_limit_reached,
-          session_id: state.session_id,
-          turn_count: state.turn_count,
-          limit: state.max_turns
-        })
-
-        "Turn limit reached (#{state.turn_count}/#{state.max_turns})"
-      end
-
-    budget_error || turn_error
-  end
-
-  # Coordinator mode restricts tools to delegation, messaging, and management
-  @coordinator_tools ~w(delegate send_message tool_search memory_recall memory_save
-    task_write list_agents list_skills session_search ask_user)
-  defp filter_tools_for_mode(tools, false), do: tools
-
-  defp filter_tools_for_mode(tools, true) do
-    Enum.filter(tools, fn tool ->
-      name = tool[:name] || tool.name
-      name in @coordinator_tools
-    end)
-  end
 end

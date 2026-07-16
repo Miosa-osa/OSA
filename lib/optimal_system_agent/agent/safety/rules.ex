@@ -13,7 +13,7 @@ defmodule OptimalSystemAgent.Agent.Safety.Rules do
   every category and returns `{category, label}` for the first hit.
 
   The `prompt_injection_driven` category has no regex table here — it is
-  delegated to `Guardrails.prompt_injection?/1` by the classifier, since that
+  delegated to `PromptInjection.prompt_injection?/1` by the classifier, since that
   detector already implements three-tier unicode-aware analysis.
   """
 

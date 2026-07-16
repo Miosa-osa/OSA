@@ -71,13 +71,80 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   @doc """
   Execute a single tool call — used by parallel Task.async_stream.
   Returns {tool_msg, result_str} tuple.
+
+  Thin orchestrator over the three tool-call concerns, invoked in order:
+
+    1. `approve_tool_call/2`  — circuit-breaker + tier + subagent + Guardian policy
+    2. `run_tool/2`           — pre_tool_use hook pipeline + actual execution
+    3. `finalize_result/5`    — normalize/truncate/image + post hooks + telemetry + events
+
+  The start-of-call telemetry/events fire here (orchestration boundary); the
+  end/result events fire inside `finalize_result/5`.
   """
   def execute_tool_call(tool_call, state) do
-    max_tool_output_bytes =
-      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
-
     arg_hint = tool_call_hint(tool_call.arguments)
 
+    emit_tool_call_start(tool_call, arg_hint, state)
+
+    start_time_tool = System.monotonic_time(:millisecond)
+
+    tool_result =
+      case approve_tool_call(tool_call, state) do
+        {:blocked, message} -> message
+        :allow -> run_tool(tool_call, state)
+      end
+
+    finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool)
+  end
+
+  @doc """
+  Inject system nudge when file_edit/file_write targeted files that weren't read first.
+  Checks the :osa_files_read ETS table for nudge flags set by the read_before_write hook.
+  Nudges max 2 times per session per file to prevent doom loops.
+  """
+  def inject_read_nudges(state, tool_calls) do
+    write_tools = Enum.filter(tool_calls, fn tc -> tc.name in ["file_edit", "file_write"] end)
+
+    if write_tools == [] do
+      state
+    else
+      nudged_paths =
+        write_tools
+        |> Enum.map(fn tc -> tc.arguments["path"] end)
+        |> Enum.filter(fn path ->
+          is_binary(path) and File.exists?(path) and
+            not file_was_read?(state.session_id, path) and
+            get_nudge_count(state.session_id, path) < 2
+        end)
+        |> Enum.uniq()
+
+      if nudged_paths == [] do
+        state
+      else
+        paths_str = Enum.join(nudged_paths, ", ")
+
+        nudge_msg = %{
+          role: "system",
+          content:
+            "[System: You modified #{paths_str} without reading #{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
+              "Always call file_read before file_edit/file_write on existing files to understand current content.]"
+        }
+
+        %{state | messages: state.messages ++ [nudge_msg]}
+      end
+    end
+  rescue
+    e ->
+      Logger.debug("[loop] inject_read_nudges failed (non-critical): #{inspect(e)}")
+      state
+  end
+
+  # --- Private helpers ---
+
+  # Emit the start-of-call telemetry + PubSub event pair. Fired once by the
+  # orchestrator before approval/execution, so it always precedes the paired
+  # :end / :tool_result events emitted from finalize_result/5.
+  defp emit_tool_call_start(tool_call, arg_hint, state) do
     Bus.emit(:tool_call, %{
       name: tool_call.name,
       phase: :start,
@@ -98,25 +165,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          session_id: state.session_id
        }}
     )
+  end
 
-    start_time_tool = System.monotonic_time(:millisecond)
-
-    # Run pre_tool_use hooks sync (security_check/spend_guard can block)
-    pre_payload = %{
-      tool_name: tool_call.name,
-      arguments: tool_call.arguments,
-      session_id: state.session_id
-    }
-
-    # NON-BYPASSABLE circuit-breaker: a hard blocklist of catastrophic commands
-    # (rm -rf /, force-push to protected branches, fork bombs, dd to block
-    # devices, mkfs, DROP DATABASE, curl|sh, …). Evaluated ONCE, before the
-    # tier/guardian cond so it applies in EVERY permission tier — including
-    # :full / bypass — and cannot be bypassed by the auto-mode Guardian.
+  # CONCERN 1 — approval policy.
+  #
+  # Decides whether the call may proceed, WITHOUT running it. Returns
+  # `{:blocked, message}` (the message becomes the tool result verbatim) or
+  # `:allow` (fall through to run_tool/2 and the pre_tool_use hook pipeline).
+  #
+  # Order matters and is preserved exactly:
+  #   1. NON-BYPASSABLE circuit-breaker — a hard blocklist of catastrophic
+  #      commands (rm -rf /, force-push to protected branches, fork bombs, dd to
+  #      block devices, mkfs, DROP DATABASE, curl|sh, …). Evaluated ONCE, before
+  #      the tier/guardian cond so it applies in EVERY permission tier —
+  #      including :full / bypass — and cannot be bypassed by the auto Guardian.
+  #   2. permission tier gate
+  #   3. subagent per-agent allow/deny gate
+  #   4. auto-mode safety Guardian (a nil review falls through to :allow so the
+  #      pre_tool_use hooks still run — defense in depth).
+  defp approve_tool_call(tool_call, state) do
     circuit_breaker =
       OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
 
-    tool_result =
+    decision =
       cond do
         match?({:blocked, _}, circuit_breaker) ->
           {:blocked, reason} = circuit_breaker
@@ -154,43 +225,70 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           nil
       end
 
-    tool_result =
-      if tool_result != nil do
-        tool_result
-      else
-        case run_hooks(:pre_tool_use, pre_payload) do
-          {:blocked, reason} ->
-            "Blocked: #{reason}"
+    case decision do
+      nil -> :allow
+      message -> {:blocked, message}
+    end
+  end
 
-          {:error, :hooks_unavailable} ->
-            # Hooks GenServer is down — fail closed. Never execute a tool when
-            # security_check and spend_guard are unreachable.
-            Logger.error(
-              "[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})"
-            )
+  # CONCERN 2 — execution.
+  #
+  # Runs the pre_tool_use hook pipeline sync (security_check/spend_guard can
+  # block) and then dispatches the tool. Returns the raw tool result: an
+  # `{:image, media_type, b64, path}` tuple, a binary, or a "Blocked:"/"Error:"
+  # string. Only reached when approve_tool_call/2 returned :allow.
+  defp run_tool(tool_call, state) do
+    # Run pre_tool_use hooks sync (security_check/spend_guard can block)
+    pre_payload = %{
+      tool_name: tool_call.name,
+      arguments: tool_call.arguments,
+      session_id: state.session_id
+    }
 
-            "Blocked: security pipeline unavailable"
+    case run_hooks(:pre_tool_use, pre_payload) do
+      {:blocked, reason} ->
+        "Blocked: #{reason}"
 
-          {:ok, %{arguments: modified_args} = _modified_payload} ->
-            # Hook modified the tool arguments — use the modified version
-            enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
-            execute_tool(tool_call.name, enriched_args)
+      {:error, :hooks_unavailable} ->
+        # Hooks GenServer is down — fail closed. Never execute a tool when
+        # security_check and spend_guard are unreachable.
+        Logger.error(
+          "[loop] Blocking tool #{tool_call.name} — pre_tool_use hooks unavailable (session: #{state.session_id})"
+        )
 
-          {:inject_message, content} ->
-            # Hook wants to inject a system message instead of executing the tool.
-            # Store it for the next LLM call via process dict.
-            existing = Process.get(:osa_injected_messages, [])
-            Process.put(:osa_injected_messages, existing ++ [content])
-            # Still execute the tool
-            enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-            execute_tool(tool_call.name, enriched_args)
+        "Blocked: security pipeline unavailable"
 
-          _ ->
-            # Inject session_id so tools like ask_user can register pending state
-            enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-            execute_tool(tool_call.name, enriched_args)
-        end
-      end
+      {:ok, %{arguments: modified_args} = _modified_payload} ->
+        # Hook modified the tool arguments — use the modified version
+        enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
+        execute_tool(tool_call.name, enriched_args)
+
+      {:inject_message, content} ->
+        # Hook wants to inject a system message instead of executing the tool.
+        # Store it for the next LLM call via process dict.
+        existing = Process.get(:osa_injected_messages, [])
+        Process.put(:osa_injected_messages, existing ++ [content])
+        # Still execute the tool
+        enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+        execute_tool(tool_call.name, enriched_args)
+
+      _ ->
+        # Inject session_id so tools like ask_user can register pending state
+        enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+        execute_tool(tool_call.name, enriched_args)
+    end
+  end
+
+  # CONCERN 3 — result finalization.
+  #
+  # Given the raw tool result, does everything downstream of execution:
+  # normalize → output budget → post_tool_use (+ failure) hooks → telemetry →
+  # end/result Bus + PubSub events → RenderBridge → tool message assembly
+  # (image content blocks or truncated text). Returns the {tool_msg, result_str}
+  # contract expected by callers.
+  defp finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool) do
+    max_tool_output_bytes =
+      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
 
     tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
 
@@ -336,50 +434,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
     {tool_msg, result_str}
   end
-
-  @doc """
-  Inject system nudge when file_edit/file_write targeted files that weren't read first.
-  Checks the :osa_files_read ETS table for nudge flags set by the read_before_write hook.
-  Nudges max 2 times per session per file to prevent doom loops.
-  """
-  def inject_read_nudges(state, tool_calls) do
-    write_tools = Enum.filter(tool_calls, fn tc -> tc.name in ["file_edit", "file_write"] end)
-
-    if write_tools == [] do
-      state
-    else
-      nudged_paths =
-        write_tools
-        |> Enum.map(fn tc -> tc.arguments["path"] end)
-        |> Enum.filter(fn path ->
-          is_binary(path) and File.exists?(path) and
-            not file_was_read?(state.session_id, path) and
-            get_nudge_count(state.session_id, path) < 2
-        end)
-        |> Enum.uniq()
-
-      if nudged_paths == [] do
-        state
-      else
-        paths_str = Enum.join(nudged_paths, ", ")
-
-        nudge_msg = %{
-          role: "system",
-          content:
-            "[System: You modified #{paths_str} without reading #{if length(nudged_paths) == 1, do: "it", else: "them"} first. " <>
-              "Always call file_read before file_edit/file_write on existing files to understand current content.]"
-        }
-
-        %{state | messages: state.messages ++ [nudge_msg]}
-      end
-    end
-  rescue
-    e ->
-      Logger.debug("[loop] inject_read_nudges failed (non-critical): #{inspect(e)}")
-      state
-  end
-
-  # --- Private helpers ---
 
   # For file_edit: send full JSON args so TUI can render the diff with
   # old_string/new_string. For other tools: send a short hint.
