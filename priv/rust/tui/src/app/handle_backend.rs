@@ -262,31 +262,16 @@ impl App {
                         tools.len(),
                     );
 
-                    // Inject welcome as first chat message AFTER tools are loaded
-                    // (so tool count is accurate)
+                    // Emit the OSA welcome BANNER (bordered box + ASCII logo) into
+                    // the terminal scrollback once, after tools load so the count
+                    // is accurate. The event loop renders it via insert_before.
                     if !self.welcome_injected && !self.chat.has_messages {
                         self.welcome_injected = true;
-                        let version = env!("CARGO_PKG_VERSION");
-                        let user_name = super::handle_actions::read_user_name_sync();
-                        let greeting = match user_name {
-                            Some(name) => format!("Welcome back, {}!", name),
-                            None => "Welcome!".to_string(),
-                        };
-                        let prov = self.header.provider();
-                        let model = self.header.model_name();
-                        let ctx_label = self.status.context_max_label();
-
-                        let welcome = format!(
-                            "{}\n\n◆ OSA Agent v{}\n{} / {} · {} tools{}\n{}",
-                            greeting,
-                            version,
-                            prov,
-                            model,
+                        self.pending_welcome_banner = Some((
                             tools.len(),
-                            if ctx_label.is_empty() { String::new() } else { format!(" · {}", ctx_label) },
-                            self.working_dir,
-                        );
-                        self.chat.add_system_message(&welcome, "info");
+                            Some(self.header.provider().to_string()),
+                            Some(self.header.model_name().to_string()),
+                        ));
                     }
                 }
                 Err(e) => warn!("Failed to load tools: {}", e),

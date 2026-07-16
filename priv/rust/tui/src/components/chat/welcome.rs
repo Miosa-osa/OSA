@@ -20,6 +20,21 @@ pub fn draw_welcome_with_tools(
     provider: Option<&str>,
     model: Option<&str>,
 ) {
+    let lines = welcome_lines(area.width, tool_count, provider, model);
+    let content_height = lines.len() as u16;
+    let content_area = Rect::new(area.x, area.y, area.width, content_height.min(area.height));
+    frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
+}
+
+/// Build the "Welcome" banner (bordered box + ASCII OSA logo + model/cwd + tips)
+/// as styled lines. Rendered live on the connecting screen AND pushed into the
+/// terminal scrollback as the startup banner (Claude-Code style).
+pub fn welcome_lines(
+    width: u16,
+    tool_count: usize,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Vec<Line<'static>> {
     let theme = style::theme();
 
     let cwd = std::env::current_dir()
@@ -51,7 +66,7 @@ pub fn draw_welcome_with_tools(
     // panes (e.g. many tiled terminals) reflow cleanly instead of clipping.
     // Reserve 4 cols for the "│ " / " │" borders. Floor keeps it readable; the
     // full ASCII logo only fits at ~44+, so it's gated below.
-    let box_width: usize = (area.width as usize).saturating_sub(4).clamp(20, 52);
+    let box_width: usize = (width as usize).saturating_sub(4).clamp(20, 52);
     let show_logo = box_width >= 44;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -161,7 +176,7 @@ pub fn draw_welcome_with_tools(
 
     // Tips (below the box) — pick the longest variant that fits the pane so it
     // never clips mid-word on narrow terminals.
-    let w = area.width as usize;
+    let w = width as usize;
     let tip = if w >= 70 {
         "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette"
     } else if w >= 40 {
@@ -171,18 +186,7 @@ pub fn draw_welcome_with_tools(
     };
     lines.push(Line::from(Span::styled(tip, theme.welcome_tip())));
 
-    // Render at the TOP (not centered)
-    let content_height = lines.len() as u16;
-    let content_area = Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        content_height.min(area.height),
-    );
-
-    let text = Text::from(lines);
-    let paragraph = Paragraph::new(text);
-    frame.render_widget(paragraph, content_area);
+    lines
 }
 
 /// Read user name from ~/.osa/USER.md

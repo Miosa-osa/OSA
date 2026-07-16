@@ -135,6 +135,11 @@ impl Message {
             return h.max(1);
         }
 
+        // Plain (non-markdown) messages — User/System — render inside a
+        // Borders::LEFT block, which insets the text by 1 column (NOT 2). Wrapping
+        // at width-2 here over-counts lines and leaves blank rows in scrollback
+        // ("scroll adds spaces"). Use width-1 to match the actual render.
+        let plain_width = width.saturating_sub(1).max(1);
         let lines: Vec<&str> = self.content.lines().collect();
         let mut height: u16 = 0;
         for line in &lines {
@@ -142,7 +147,7 @@ impl Message {
             let wrapped_lines = if line_len == 0 {
                 1
             } else {
-                (line_len + content_width - 1) / content_width
+                (line_len + plain_width - 1) / plain_width
             };
             height += wrapped_lines;
         }

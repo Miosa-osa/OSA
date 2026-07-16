@@ -64,6 +64,32 @@ impl App {
                 was_full = want_full;
             }
 
+            // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
+            //     scrollback exactly once, before any messages, so it sits at the top.
+            if !was_full {
+                if let Some((tool_count, provider, model)) =
+                    self.pending_welcome_banner.take()
+                {
+                    let w = terminal.get_frame().area().width;
+                    let lines = crate::components::chat::welcome::welcome_lines(
+                        w,
+                        tool_count,
+                        provider.as_deref(),
+                        model.as_deref(),
+                    );
+                    let h = lines.len() as u16;
+                    if h > 0 {
+                        terminal.insert_before(h, |buf| {
+                            ratatui::widgets::Widget::render(
+                                ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines)),
+                                Rect::new(0, 0, w, h),
+                                buf,
+                            );
+                        })?;
+                    }
+                }
+            }
+
             // 2. Flush finalized messages into the terminal's native scrollback.
             //    Only meaningful in inline mode — the alt screen (full mode) has no
             //    persistent scrollback, so queued items wait until we return inline.

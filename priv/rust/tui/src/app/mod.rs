@@ -139,6 +139,9 @@ pub struct App {
     pub welcome_injected: bool,
     // Set once we've resolved this folder's session on launch (resume-or-create).
     pub dir_session_resolved: bool,
+    // Welcome banner (tool_count, provider, model) waiting to be pushed into the
+    // terminal scrollback by the event loop via insert_before.
+    pub pending_welcome_banner: Option<(usize, Option<String>, Option<String>)>,
 }
 
 impl App {
@@ -238,6 +241,7 @@ impl App {
             voice: VoiceState::new(),
             welcome_injected: false,
             dir_session_resolved: false,
+            pending_welcome_banner: None,
         })
     }
 
