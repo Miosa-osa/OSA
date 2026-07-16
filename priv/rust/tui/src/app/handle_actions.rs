@@ -810,16 +810,14 @@ impl App {
     pub(crate) fn create_session(&mut self) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
-        // Tag the session to the current folder so it resumes there next time.
-        let working_dir = if self.working_dir.is_empty() {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        } else {
-            Some(self.working_dir.clone())
-        };
+        // Always start FRESH (Claude-Code semantics): create with no working_dir so
+        // the backend cannot directory-resume the folder's prior conversation. Past
+        // chats for this folder are reachable on demand via /resume (picker) and
+        // /continue (resume latest). The session still gets tagged to the folder at
+        // first-message time (the post_response persistence hook records the
+        // orchestrate working_dir), so it remains resumable later.
         tokio::spawn(async move {
-            let result = client.create_session(working_dir).await;
+            let result = client.create_session(None).await;
             let event = match result {
                 Ok(resp) => BackendEvent::SessionCreated(Ok(resp)),
                 Err(e) => BackendEvent::SessionCreated(Err(e.to_string())),
