@@ -1,4 +1,4 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use tracing::warn;
 
 use super::App;
@@ -22,10 +22,7 @@ impl App {
                 self.handle_key(key)
             }
             Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
-            Event::Terminal(CrosstermEvent::Mouse(mouse)) => {
-                self.handle_mouse(mouse);
-                false
-            }
+            // Mouse events are not captured (the host terminal owns wheel scroll).
             Event::Terminal(CrosstermEvent::Paste(text)) => {
                 // Route paste to onboarding wizard if active
                 if self.state == AppState::Onboarding {
@@ -182,52 +179,9 @@ impl App {
                 }
                 false
             }
-            (KeyCode::Char('j'), KeyModifiers::NONE) if input_empty => {
-                self.chat.scroll_down(1);
-                false
-            }
-            (KeyCode::Char('k'), KeyModifiers::NONE) if input_empty => {
-                self.chat.scroll_up(1);
-                false
-            }
-            (KeyCode::Char('u'), KeyModifiers::NONE) if input_empty => {
-                let half = self.height / 2;
-                self.chat.scroll_up(half);
-                false
-            }
-            (KeyCode::Char('d'), KeyModifiers::NONE) if input_empty => {
-                let half = self.height / 2;
-                self.chat.scroll_down(half);
-                false
-            }
-            // Universal scroll bindings — work regardless of input state. The
-            // vim-style `j`/`k` are only active on empty input, but users
-            // mid-message need scroll too. Shift/Ctrl+Up/Down don't conflict
-            // with input editing or history navigation.
-            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, KeyModifiers::CONTROL) => {
-                self.chat.scroll_up(1);
-                false
-            }
-            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, KeyModifiers::CONTROL) => {
-                self.chat.scroll_down(1);
-                false
-            }
-            (KeyCode::PageUp, _) => {
-                self.chat.scroll_up(self.height.saturating_sub(2));
-                false
-            }
-            (KeyCode::PageDown, _) => {
-                self.chat.scroll_down(self.height.saturating_sub(2));
-                false
-            }
-            (KeyCode::Home, _) if input_empty => {
-                self.chat.scroll_to_top();
-                false
-            }
-            (KeyCode::End, _) if input_empty => {
-                self.chat.scroll_to_bottom();
-                false
-            }
+            // Chat scrolling is delegated to the host terminal's native
+            // scrollback (mouse wheel / terminal keybindings). `j`/`k`/`u`/`d`,
+            // Page/Home/End fall through to the input editor.
             (KeyCode::Char('y'), KeyModifiers::NONE) if input_empty => {
                 self.copy_last_message();
                 false
@@ -253,8 +207,6 @@ impl App {
     }
 
     fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let input_empty = self.input.is_empty();
-
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => {
                 self.cancel_processing();
@@ -294,32 +246,7 @@ impl App {
                 self.recompute_layout();
                 false
             }
-            (KeyCode::Char('j'), KeyModifiers::NONE) if input_empty => {
-                self.chat.scroll_down(1);
-                false
-            }
-            (KeyCode::Char('k'), KeyModifiers::NONE) if input_empty => {
-                self.chat.scroll_up(1);
-                false
-            }
-            // Universal scroll bindings — work regardless of input state.
-            // Mirrors handle_idle_key for a consistent UX while processing.
-            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Up, KeyModifiers::CONTROL) => {
-                self.chat.scroll_up(1);
-                false
-            }
-            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Down, KeyModifiers::CONTROL) => {
-                self.chat.scroll_down(1);
-                false
-            }
-            (KeyCode::PageUp, _) => {
-                self.chat.scroll_up(self.height.saturating_sub(2));
-                false
-            }
-            (KeyCode::PageDown, _) => {
-                self.chat.scroll_down(self.height.saturating_sub(2));
-                false
-            }
+            // Chat scrolling is delegated to the host terminal's native scrollback.
             _ => {
                 let action =
                     self.input
@@ -445,61 +372,6 @@ impl App {
                     self.start_recording();
                 }
             }
-        }
-    }
-
-    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        let areas = crate::view::main_layout::LayoutAreas::compute(
-            ratatui::prelude::Rect::new(0, 0, self.width, self.height),
-            &self.layout,
-            self.tasks.height(),
-            self.agents.height(),
-            self.activity.height(),
-        );
-
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                if mouse.row >= areas.chat.y
-                    && mouse.row < areas.chat.y + areas.chat.height
-                {
-                    self.chat.scroll_up(3);
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                if mouse.row >= areas.chat.y
-                    && mouse.row < areas.chat.y + areas.chat.height
-                {
-                    self.chat.scroll_down(3);
-                }
-            }
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                // Mic button click
-                if let Some(mic) = self.input.mic_area() {
-                    if mouse.column >= mic.x && mouse.column < mic.x + mic.width
-                        && mouse.row >= mic.y && mouse.row < mic.y + mic.height
-                    {
-                        if self.voice.recording {
-                            self.stop_recording();
-                        } else {
-                            self.start_recording();
-                        }
-                        return;
-                    }
-                }
-                if mouse.row >= areas.input.y
-                    && mouse.row < areas.input.y + areas.input.height
-                {
-                    let col = mouse.column.saturating_sub(areas.input.x + 2);
-                    self.input.set_cursor_col(col);
-                }
-                if let Some(sb) = areas.sidebar {
-                    if mouse.column >= sb.x && mouse.column < sb.x + sb.width
-                        && mouse.row >= sb.y && mouse.row < sb.y + sb.height
-                    {
-                    }
-                }
-            }
-            _ => {}
         }
     }
 

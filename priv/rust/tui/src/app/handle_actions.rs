@@ -154,6 +154,9 @@ impl App {
         };
 
         self.chat.clear_streaming();
+        // Ensure any completed tool call is committed to scrollback before the
+        // final answer text, preserving chronological order.
+        self.chat.flush_pending_tools();
 
         if self.agent_header_sent {
             // The header was already emitted earlier this turn (either by a

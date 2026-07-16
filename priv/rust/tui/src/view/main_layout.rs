@@ -2,7 +2,11 @@ use ratatui::prelude::*;
 
 use crate::app::layout::Layout;
 
-/// Computed sub-areas from the layout for the main screen
+/// Computed sub-areas from the layout for the main screen.
+///
+/// Retained for the full-screen layout math; the inline live region computes its
+/// own compact rows, so these helpers are currently unused.
+#[allow(dead_code)]
 pub struct LayoutAreas {
     pub header: Rect,
     pub chat: Rect,
@@ -17,6 +21,7 @@ pub struct LayoutAreas {
     pub toast: Rect,
 }
 
+#[allow(dead_code)]
 impl LayoutAreas {
     pub fn compute(
         area: Rect,

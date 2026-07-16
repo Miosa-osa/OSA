@@ -3,7 +3,8 @@
 
 use std::time::SystemTime;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Wrap};
+use ratatui::buffer::Buffer;
+use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Widget, Wrap};
 use crate::client::types::Signal;
 use crate::style;
 
@@ -161,43 +162,51 @@ impl Message {
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        self.draw_scrolled(frame, area, 0);
+        self.render_to_buffer(area, frame.buffer_mut(), 0);
     }
 
     /// Draw with `scroll_top` lines skipped from the top of the message. Used when
     /// a message is taller than the space above it in the scroll viewport, so its
     /// BOTTOM is shown (adjacent to the message below) instead of always its top.
     pub fn draw_scrolled(&self, frame: &mut Frame, area: Rect, scroll_top: u16) {
+        self.render_to_buffer(area, frame.buffer_mut(), scroll_top);
+    }
+
+    /// Render this message directly into a `Buffer`. This is the primitive used
+    /// both by `terminal.insert_before` (pushing finalized messages into the
+    /// native scrollback) and by the thin `Frame`-based `draw`/`draw_scrolled`
+    /// wrappers above (live preview inside `terminal.draw`).
+    pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer, scroll_top: u16) {
         let theme = style::theme();
 
         match self.msg_type {
-            MessageType::User => self.draw_user(frame, area, &theme, scroll_top),
-            MessageType::Agent => self.draw_agent(frame, area, &theme, scroll_top),
+            MessageType::User => self.draw_user(buf, area, &theme, scroll_top),
+            MessageType::Agent => self.draw_agent(buf, area, &theme, scroll_top),
             MessageType::AgentContinuation => {
-                self.draw_agent_continuation(frame, area, &theme, scroll_top)
+                self.draw_agent_continuation(buf, area, &theme, scroll_top)
             }
             MessageType::SystemInfo => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_system, scroll_top)
+                self.draw_system(buf, area, &theme, theme.colors.msg_border_system, scroll_top)
             }
             MessageType::SystemWarning => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_warning, scroll_top)
+                self.draw_system(buf, area, &theme, theme.colors.msg_border_warning, scroll_top)
             }
             MessageType::SystemError => {
-                self.draw_system(frame, area, &theme, theme.colors.msg_border_error, scroll_top)
+                self.draw_system(buf, area, &theme, theme.colors.msg_border_error, scroll_top)
             }
             MessageType::ToolCall => {
-                self.draw_tool_call(frame, area, &theme)
+                self.draw_tool_call(buf, area, &theme)
             }
             MessageType::Help => {
-                self.draw_help(frame, area, &theme)
+                self.draw_help(buf, area, &theme)
             }
             MessageType::SurveyQA => {
-                self.draw_survey_qa(frame, area, &theme)
+                self.draw_survey_qa(buf, area, &theme)
             }
         }
     }
 
-    fn draw_user(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
+    fn draw_user(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
@@ -211,7 +220,7 @@ impl Message {
             ];
             let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
             let label = build_header_line(left_spans, ts_text, area.width, theme);
-            frame.render_widget(Paragraph::new(label), label_area);
+            Paragraph::new(label).render(label_area, buf);
             y = area.y + 1;
         }
 
@@ -227,11 +236,11 @@ impl Message {
                 .block(block)
                 .wrap(Wrap { trim: false })
                 .scroll((scroll_top.saturating_sub(1), 0));
-            frame.render_widget(paragraph, content_area);
+            paragraph.render(content_area, buf);
         }
     }
 
-    fn draw_agent(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
+    fn draw_agent(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
@@ -258,7 +267,7 @@ impl Message {
 
             let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
             let label = build_header_line(label_spans, ts_text, area.width, theme);
-            frame.render_widget(Paragraph::new(label), label_area);
+            Paragraph::new(label).render(label_area, buf);
             y = area.y + 1;
         }
 
@@ -275,12 +284,12 @@ impl Message {
             let paragraph = Paragraph::new(styled_text)
                 .block(block)
                 .scroll((body_scroll, 0));
-            frame.render_widget(paragraph, content_area);
+            paragraph.render(content_area, buf);
         }
     }
 
     /// Draw a continuation chunk — same left-border style as Agent but no "◈ OSA" header.
-    fn draw_agent_continuation(&self, frame: &mut Frame, area: Rect, theme: &style::Theme, scroll_top: u16) {
+    fn draw_agent_continuation(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme, scroll_top: u16) {
         if area.height == 0 {
             return;
         }
@@ -298,12 +307,12 @@ impl Message {
         let paragraph = Paragraph::new(styled_text)
             .block(block)
             .scroll((scroll_top, 0));
-        frame.render_widget(paragraph, area);
+        paragraph.render(area, buf);
     }
 
     fn draw_system(
         &self,
-        frame: &mut Frame,
+        buf: &mut Buffer,
         area: Rect,
         theme: &style::Theme,
         border_color: Color,
@@ -331,19 +340,19 @@ impl Message {
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((scroll_top, 0));
-        frame.render_widget(paragraph, area);
+        paragraph.render(area, buf);
     }
 
     fn draw_tool_call(
         &self,
-        frame: &mut Frame,
+        buf: &mut Buffer,
         area: Rect,
         theme: &style::Theme,
     ) {
         // Rich tool call: render pre-built styled Lines directly
         if let Some(ref td) = self.tool_data {
             let paragraph = Paragraph::new(td.lines.clone());
-            frame.render_widget(paragraph, area);
+            paragraph.render(area, buf);
             return;
         }
 
@@ -359,10 +368,10 @@ impl Message {
         ))
         .block(block)
         .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
+        paragraph.render(area, buf);
     }
 
-    fn draw_survey_qa(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
+    fn draw_survey_qa(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme) {
         let sd = match self.survey_data {
             Some(ref d) => d,
             None => return,
@@ -380,7 +389,7 @@ impl Message {
             .border_style(Style::default().fg(theme.colors.secondary));
 
         let inner = block.inner(area);
-        frame.render_widget(block, area);
+        block.render(area, buf);
 
         let muted_style = Style::default().fg(theme.colors.muted);
         let answer_style = Style::default()
@@ -400,13 +409,13 @@ impl Message {
         }
 
         let paragraph = Paragraph::new(lines);
-        frame.render_widget(paragraph, inner);
+        paragraph.render(inner, buf);
     }
 
-    fn draw_help(&self, frame: &mut Frame, area: Rect, theme: &style::Theme) {
+    fn draw_help(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme) {
         let lines = build_help_lines(theme);
         let paragraph = Paragraph::new(lines);
-        frame.render_widget(paragraph, area);
+        paragraph.render(area, buf);
     }
 }
 

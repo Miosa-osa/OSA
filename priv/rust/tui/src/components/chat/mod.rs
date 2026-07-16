@@ -1,59 +1,61 @@
-// Phase 2+: add_tool_message (legacy path) — kept for compatibility, replaced by rich path
+// Chat now owns two lanes:
+//   * `scrollback`  — finalized messages queued for the terminal's native
+//                     scrollback (drained by the app loop via `insert_before`).
+//   * `messages`    — only in-progress tool calls awaiting their result; these
+//                     live briefly, then get finalized into `scrollback`.
+// The live inline region renders only `streaming_content` (the reply in flight).
 #![allow(dead_code)]
 
 pub mod message;
 pub mod thinking_box;
 pub mod welcome;
 
-use std::cell::Cell;
-
 use ratatui::prelude::*;
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::client::types::Signal;
 use crate::event::Event;
-use crate::style;
 
 use super::{Component, ComponentAction};
 use message::{Message, MessageType, SurveyQAData, ToolCallData};
 
-/// Chat viewport managing a scrollable list of messages
+/// Chat state for the native-scrollback TUI.
 pub struct Chat {
+    /// In-progress tool calls awaiting their result. Not rendered in the inline
+    /// live region; each is moved to `scrollback` once finalized.
     messages: Vec<Message>,
-    /// Scroll offset (0 = bottom, positive = scrolled up)
-    scroll_offset: u16,
-    /// Viewport dimensions
+    /// Finalized messages queued for the terminal's native scrollback.
+    scrollback: Vec<Message>,
+    /// Viewport dimensions (width used for height measurement / wrapping).
     width: u16,
     height: u16,
-    /// Actual chat-area height from the most recent draw. The cached `height`
-    /// (set on resize) does not subtract the activity-spinner rows that the
-    /// real draw area reserves — using it for scroll bounds left the top of
-    /// long output unreachable until the terminal was enlarged. Captured every
-    /// frame so scroll math matches what is actually on screen.
-    last_viewport_height: Cell<u16>,
-    /// Streaming content (live while processing)
+    /// Streaming content (live while processing).
     streaming_content: Option<String>,
-    /// Whether we have items (vs showing welcome)
+    /// Whether we have produced any content (used to gate the welcome banner).
     pub has_messages: bool,
-    /// Welcome screen metadata (Hermes-style inventory)
+    /// Welcome screen metadata (Hermes-style inventory).
     welcome_provider: Option<String>,
     welcome_model: Option<String>,
     welcome_tool_count: usize,
+    /// Last agent / user text, tracked for /retry and copy-last-message since
+    /// finalized messages are pushed to native scrollback and no longer retained.
+    last_agent_text: Option<String>,
+    last_user_text: Option<String>,
 }
 
 impl Chat {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
-            scroll_offset: 0,
+            scrollback: Vec::new(),
             width: 80,
             height: 20,
-            last_viewport_height: Cell::new(20),
             streaming_content: None,
             has_messages: false,
             welcome_provider: None,
             welcome_model: None,
             welcome_tool_count: 0,
+            last_agent_text: None,
+            last_user_text: None,
         }
     }
 
@@ -63,51 +65,35 @@ impl Chat {
         self.invalidate_cache();
     }
 
-    /// Returns true when the user is at the bottom of the chat (no manual scroll).
-    fn is_at_bottom(&self) -> bool {
-        self.scroll_offset == 0
-    }
-
-    /// Auto-scroll to the bottom, but only when the user hasn't manually scrolled up.
-    fn auto_scroll_to_bottom(&mut self) {
-        if self.is_at_bottom() {
-            self.scroll_offset = 0;
-        }
-    }
+    // ── Enqueue helpers (all route to native scrollback) ──────────────
 
     pub fn add_user_message(&mut self, content: &str) {
-        self.messages.push(Message::new(
-            MessageType::User,
-            content.to_string(),
-            None,
-        ));
+        self.last_user_text = Some(content.to_string());
+        self.scrollback
+            .push(Message::new(MessageType::User, content.to_string(), None));
         self.has_messages = true;
-        // Always jump to bottom when the user sends a new message.
-        self.scroll_to_bottom();
     }
 
     pub fn add_agent_message(&mut self, content: &str, signal: Option<&Signal>) {
-        self.messages.push(Message::new(
+        self.last_agent_text = Some(content.to_string());
+        self.scrollback.push(Message::new(
             MessageType::Agent,
             content.to_string(),
             signal.cloned(),
         ));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
-    /// Add a continuation chunk for the current agent turn — same left-border
-    /// style as an agent message but rendered without the "◈ OSA" header.
-    /// Use this when flushing streaming text that precedes a tool call, so that
-    /// only the very first text block of a turn shows the header.
+    /// Add a continuation chunk — same left-border style as an agent message but
+    /// rendered without the "◈ OSA" header.
     pub fn add_agent_continuation(&mut self, content: &str) {
-        self.messages.push(Message::new(
+        self.last_agent_text = Some(content.to_string());
+        self.scrollback.push(Message::new(
             MessageType::AgentContinuation,
             content.to_string(),
             None,
         ));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
     pub fn add_system_message(&mut self, content: &str, severity: &str) {
@@ -116,38 +102,35 @@ impl Chat {
             "warning" => MessageType::SystemWarning,
             _ => MessageType::SystemInfo,
         };
-        self.messages
+        self.scrollback
             .push(Message::new(msg_type, content.to_string(), None));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
-    /// Add a styled help message (no content needed — rendering is hardcoded).
+    /// Add a styled help message (rendering is hardcoded).
     pub fn add_help_message(&mut self) {
-        self.messages
+        self.scrollback
             .push(Message::new(MessageType::Help, String::new(), None));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
     /// Add an inline tool-call summary to the chat (compact one-liner, legacy).
     pub fn add_tool_message(&mut self, content: &str) {
-        self.messages
+        self.scrollback
             .push(Message::new(MessageType::ToolCall, content.to_string(), None));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
-    /// Add a rich tool-call message with pre-rendered styled Lines.
+    /// Add a rich tool-call message. Held in the live tail (`messages`) until its
+    /// result arrives, then finalized into scrollback.
     pub fn add_tool_message_rich(&mut self, data: ToolCallData) {
         self.messages.push(Message::new_tool_call(data));
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
     /// Add a survey Q&A summary to the chat.
     pub fn add_survey_summary(&mut self, survey_id: String, pairs: Vec<(String, String)>) {
-        self.messages.push(Message {
+        self.scrollback.push(Message {
             msg_type: MessageType::SurveyQA,
             content: String::new(),
             signal: None,
@@ -157,19 +140,16 @@ impl Chat {
             timestamp: None,
         });
         self.has_messages = true;
-        self.auto_scroll_to_bottom();
     }
 
-    /// Attach result data to the last matching tool call and re-render the
-    /// collapsed summary so line-count info appears without needing Ctrl+O.
+    /// Attach result data to the last matching in-progress tool call and
+    /// re-render its collapsed summary so line-count info appears.
     pub fn update_last_tool_result(&mut self, tool_name: &str, result: &str) {
         let width = self.width;
         for msg in self.messages.iter_mut().rev() {
             if let Some(ref mut td) = msg.tool_data {
                 if td.name == tool_name && td.result.is_empty() {
                     td.result = result.to_string();
-                    // Re-render the collapsed view so the summary line reflects
-                    // the now-known line count (Written · N lines / Read · N lines).
                     let status = if td.success {
                         crate::tools::ToolStatus::Success
                     } else {
@@ -192,7 +172,8 @@ impl Chat {
         }
     }
 
-    /// Toggle expand/collapse on the most recent tool call message (Ctrl+O).
+    /// Toggle expand/collapse on the most recent in-progress tool call (Ctrl+O).
+    /// Note: once finalized into native scrollback, tool calls become static.
     pub fn toggle_last_tool_expand(&mut self, width: u16) {
         for msg in self.messages.iter_mut().rev() {
             if let Some(ref mut td) = msg.tool_data {
@@ -218,10 +199,41 @@ impl Chat {
         }
     }
 
+    /// Finalize a specific in-progress tool call (by name) into scrollback.
+    pub fn finalize_tool(&mut self, name: &str) {
+        if let Some(idx) = self
+            .messages
+            .iter()
+            .position(|m| m.tool_data.as_ref().map_or(false, |t| t.name == name))
+        {
+            let msg = self.messages.remove(idx);
+            self.scrollback.push(msg);
+        }
+    }
+
+    /// Move every in-progress tool call into scrollback (turn-end safety net so a
+    /// tool that never emitted a result is still shown).
+    pub fn flush_pending_tools(&mut self) {
+        for msg in self.messages.drain(..) {
+            self.scrollback.push(msg);
+        }
+    }
+
+    // ── Scrollback draining (app loop → insert_before) ────────────────
+
+    pub fn has_pending_scrollback(&self) -> bool {
+        !self.scrollback.is_empty()
+    }
+
+    pub fn drain_scrollback(&mut self) -> Vec<Message> {
+        std::mem::take(&mut self.scrollback)
+    }
+
+    // ── Streaming preview ─────────────────────────────────────────────
+
     pub fn update_streaming(&mut self, content: &str) {
         self.streaming_content = Some(content.to_string());
-        self.has_messages = true; // ensure welcome screen is dismissed
-        self.auto_scroll_to_bottom();
+        self.has_messages = true;
     }
 
     pub fn clear_streaming(&mut self) {
@@ -230,48 +242,26 @@ impl Chat {
 
     pub fn clear(&mut self) {
         self.messages.clear();
+        self.scrollback.clear();
         self.has_messages = false;
         self.streaming_content = None;
-        self.scroll_offset = 0;
+        self.last_agent_text = None;
+        self.last_user_text = None;
     }
 
     pub fn last_agent_message(&self) -> Option<String> {
-        self.messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.msg_type, MessageType::Agent))
-            .map(|m| m.content.clone())
+        self.last_agent_text.clone()
     }
 
     pub fn last_user_message(&self) -> Option<String> {
-        self.messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.msg_type, MessageType::User))
-            .map(|m| m.content.clone())
+        self.last_user_text.clone()
     }
 
-    /// Remove last user+agent exchange (for /undo)
+    /// Historically removed the last user+agent exchange. With native scrollback
+    /// the terminal owns already-printed lines and they cannot be un-printed, so
+    /// this only clears the tracked "last" texts (retry/copy targets).
     pub fn undo_last_exchange(&mut self) {
-        // Remove trailing agent message(s) — including continuation chunks —
-        // then the user message.
-        while let Some(msg) = self.messages.last() {
-            if matches!(
-                msg.msg_type,
-                MessageType::Agent | MessageType::AgentContinuation
-            ) {
-                self.messages.pop();
-            } else {
-                break;
-            }
-        }
-        // Remove the user message
-        if let Some(msg) = self.messages.last() {
-            if matches!(msg.msg_type, MessageType::User) {
-                self.messages.pop();
-            }
-        }
-        self.has_messages = !self.messages.is_empty();
+        self.last_agent_text = None;
     }
 
     pub fn set_welcome_info(&mut self, provider: &str, model: &str, tool_count: usize) {
@@ -280,104 +270,32 @@ impl Chat {
         self.welcome_tool_count = tool_count;
     }
 
-    pub fn scroll_up(&mut self, lines: u16) {
-        let max_scroll = self
-            .compute_content_height()
-            .saturating_sub(self.last_viewport_height.get());
-        self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
-    }
-
-    pub fn scroll_down(&mut self, lines: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-    }
-
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = self
-            .compute_content_height()
-            .saturating_sub(self.last_viewport_height.get());
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
-    }
-
     fn invalidate_cache(&mut self) {
         for msg in &mut self.messages {
             msg.invalidate_cache();
         }
-    }
-
-    /// Public accessor for layout — returns total content height in lines.
-    pub fn content_height(&self) -> u16 {
-        self.compute_content_height()
-    }
-
-    fn compute_content_height(&self) -> u16 {
-        let msg_height: u16 = self
-            .messages
-            .iter()
-            .map(|m| m.height(self.width).saturating_add(1)) // +1 for spacing
-            .sum();
-
-        let streaming_height: u16 = if let Some(ref content) = self.streaming_content {
-            // Measure the real height of the live streaming message so scroll
-            // bounds are accurate and scroll_up() is not incorrectly capped.
-            let streaming_msg = Message::new(
-                MessageType::Agent,
-                format!("{}█", content),
-                None,
-            );
-            streaming_msg.height(self.width).saturating_add(1) // +1 for spacing
-        } else {
-            0
-        };
-
-        msg_height.saturating_add(streaming_height)
-    }
-
-    /// Top-down renderer: messages anchored to the top of the chat area.
-    /// Used when content fits in the viewport (no scrolling needed).
-    fn draw_top_down(&self, frame: &mut Frame, area: Rect) {
-        let mut y = area.y;
-
-        // Render messages top-down
-        for msg in &self.messages {
-            if y >= area.y + area.height {
-                break;
-            }
-
-            let h = msg.height(area.width);
-            let available = (area.y + area.height).saturating_sub(y);
-            let render_h = h.min(available);
-
-            if render_h > 0 {
-                let msg_area = Rect::new(area.x, y, area.width, render_h);
-                msg.draw(frame, msg_area);
-                y += render_h;
-                // spacing
-                if y < area.y + area.height {
-                    y += 1;
-                }
-            }
+        for msg in &mut self.scrollback {
+            msg.invalidate_cache();
         }
+    }
 
-        // Render streaming content after messages
-        if let Some(ref streaming) = self.streaming_content {
-            if y < area.y + area.height {
-                let streaming_msg = Message::new(
-                    MessageType::Agent,
-                    format!("{}█", streaming),
-                    None,
-                );
-                let h = streaming_msg.height(area.width);
-                let available = (area.y + area.height).saturating_sub(y);
-                let render_h = h.min(available);
-
-                if render_h > 0 {
-                    let msg_area = Rect::new(area.x, y, area.width, render_h);
-                    streaming_msg.draw(frame, msg_area);
-                }
-            }
+    /// Render the live streaming preview, bottom-anchored so the newest lines
+    /// stay visible. When idle, the region is left blank (finalized content lives
+    /// in the terminal's native scrollback).
+    pub fn draw_live(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        if let Some(ref s) = self.streaming_content {
+            let msg = Message::new(MessageType::Agent, format!("{}\u{2588}", s), None);
+            let full_h = msg.height(area.width);
+            let h = full_h.min(area.height);
+            let y = area.y + area.height.saturating_sub(h);
+            msg.draw_scrolled(
+                frame,
+                Rect::new(area.x, y, area.width, h),
+                full_h.saturating_sub(h),
+            );
         }
     }
 }
@@ -388,159 +306,8 @@ impl Component for Chat {
     }
 
     fn draw(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-
-        // Record the real viewport height so scroll bounds (scroll_up /
-        // scroll_to_top) clamp against what is actually rendered, not the
-        // cached resize-time height that ignores the activity-spinner rows.
-        self.last_viewport_height.set(area.height);
-
-        if !self.has_messages {
-            welcome::draw_welcome_with_tools(
-                frame,
-                area,
-                self.welcome_tool_count,
-                self.welcome_provider.as_deref(),
-                self.welcome_model.as_deref(),
-            );
-            return;
-        }
-
-        let theme = style::theme();
-        let total_height = self.compute_content_height();
-
-        // When content fits in the viewport, render TOP-DOWN (anchored to top).
-        // When content overflows, render BOTTOM-UP with scroll (anchored to bottom).
-        if total_height <= area.height && self.scroll_offset == 0 {
-            self.draw_top_down(frame, area);
-            return;
-        }
-
-        // Render messages from bottom up, accounting for scroll
-        let mut y = area.y + area.height;
-        let mut remaining_skip = self.scroll_offset;
-
-        // Render streaming content first (at bottom)
-        if let Some(ref streaming) = self.streaming_content {
-            let streaming_msg = Message::new(
-                MessageType::Agent,
-                format!("{}█", streaming),
-                None,
-            );
-            let h = streaming_msg.height(area.width);
-
-            if remaining_skip > 0 {
-                if remaining_skip >= h {
-                    remaining_skip -= h;
-                } else {
-                    let visible_h = h - remaining_skip;
-                    remaining_skip = 0;
-                    if y >= area.y + visible_h {
-                        y -= visible_h;
-                        let msg_area = Rect::new(area.x, y, area.width, visible_h);
-                        streaming_msg.draw(frame, msg_area);
-                    }
-                }
-            } else if y >= area.y + h {
-                y -= h;
-                let msg_area = Rect::new(area.x, y, area.width, h);
-                streaming_msg.draw(frame, msg_area);
-                // spacing
-                if y > area.y {
-                    y -= 1;
-                }
-            }
-        }
-
-        // Render messages in reverse order (bottom-up)
-        for msg in self.messages.iter().rev() {
-            if y <= area.y {
-                break;
-            }
-
-            let h = msg.height(area.width);
-            let total_h = h.saturating_add(1); // include spacing
-
-            if remaining_skip > 0 {
-                if remaining_skip >= total_h {
-                    remaining_skip -= total_h;
-                    continue;
-                } else {
-                    // Partial skip: this message straddles the scroll boundary.
-                    // Render the visible portion (clamped by ratatui).
-                    let visible_h = h.saturating_sub(remaining_skip);
-                    remaining_skip = 0;
-                    let available = y.saturating_sub(area.y);
-                    let render_h = visible_h.min(available);
-                    if render_h > 0 {
-                        y -= render_h;
-                        let msg_area = Rect::new(area.x, y, area.width, render_h);
-                        msg.draw(frame, msg_area);
-                        if y > area.y {
-                            y -= 1;
-                        }
-                    }
-                    continue;
-                }
-            }
-
-            // Clamp to available space instead of breaking on overflow
-            let available = y.saturating_sub(area.y);
-            if available == 0 {
-                break;
-            }
-            let render_h = h.min(available);
-            y -= render_h;
-            let msg_area = Rect::new(area.x, y, area.width, render_h);
-            // If the message is taller than the space above, it's the top of the
-            // viewport — skip its top lines so its BOTTOM shows (not always its top),
-            // which is what makes scrolling through a long single reply work.
-            msg.draw_scrolled(frame, msg_area, h.saturating_sub(render_h));
-            // spacing
-            if y > area.y {
-                y -= 1;
-            }
-        }
-
-        // Scrollbar
-        if total_height > area.height {
-            let max_scroll = total_height.saturating_sub(area.height);
-            let position = max_scroll.saturating_sub(self.scroll_offset) as usize;
-            let mut scrollbar_state = ScrollbarState::default()
-                .content_length(max_scroll as usize)
-                .position(position)
-                .viewport_content_length(area.height as usize);
-
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .thumb_style(theme.scrollbar_thumb())
-                .track_style(theme.scrollbar_track());
-
-            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-        }
-
-        // Scroll position indicator -- shown only when scrolled up (scroll_offset > 0).
-        // scroll_offset equals the number of lines hidden below the current viewport.
-        if self.scroll_offset > 0 && area.height >= 1 {
-            let lines_below = self.scroll_offset;
-            let label = format!(" ↓ {} more ", lines_below);
-            let label_width = label.len() as u16;
-
-            // Position: bottom-right of chat area, 1 col left of the scrollbar track.
-            // Guard against label wider than the usable area.
-            if label_width < area.width.saturating_sub(1) {
-                let indicator_x = area.x + area.width - label_width - 1;
-                let indicator_y = area.y + area.height - 1;
-                let indicator_area = Rect::new(indicator_x, indicator_y, label_width, 1);
-
-                let indicator_style = Style::default()
-                    .fg(theme.colors.button_active_text)
-                    .bg(theme.colors.tooltip_bg)
-                    .add_modifier(Modifier::BOLD);
-
-                frame.render_widget(Paragraph::new(label).style(indicator_style), indicator_area);
-            }
-        }
+        // The chat no longer owns a scroll viewport; the live region is drawn via
+        // `draw_live`. This trait impl remains for the Component contract.
+        self.draw_live(frame, area);
     }
 }

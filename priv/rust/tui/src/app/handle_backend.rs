@@ -90,6 +90,10 @@ impl App {
                 // preamble). Without this, the flag would stay false and the
                 // next non-empty ToolCallStart flush would call add_agent_message
                 // again, emitting a duplicate "◈ OSA" header mid-turn.
+                //
+                // Finalize any still-pending tool call into native scrollback
+                // first, so ordering stays: [prior text][prior tool][this text].
+                self.chat.flush_pending_tools();
                 if !self.stream_buf.is_empty() {
                     let text = self.stream_buf.clone();
                     self.chat.clear_streaming();
@@ -161,10 +165,13 @@ impl App {
             BackendEvent::ToolResult {
                 name, result, success,
             } => {
-                // Attach result to last matching tool message for expand support
+                // Attach result to last matching tool message for expand support,
+                // then finalize the tool into native scrollback. Scrolled-back
+                // tool calls become static (lose Ctrl+O), matching Claude Code.
                 if !result.is_empty() {
                     self.chat.update_last_tool_result(&name, &result);
                 }
+                self.chat.finalize_tool(&name);
                 debug!("Tool result: {} (success={})", name, success);
             }
             BackendEvent::LlmRequest { iteration } => {
@@ -574,7 +581,6 @@ impl App {
                         }
                     }
                     if !messages.is_empty() {
-                        self.chat.scroll_to_bottom();
                         self.toasts.push(
                             format!("Loaded {} messages", messages.len()),
                             crate::components::toast::ToastLevel::Info,
@@ -913,6 +919,9 @@ impl App {
                 if self.cancelled && self.state.is_processing() {
                     info!("Cancel timeout — forcing UI back to Idle");
                     self.chat.clear_streaming();
+                    // Commit any completed-but-unflushed tool calls; drop the
+                    // partial streaming text deliberately.
+                    self.chat.flush_pending_tools();
                     self.stream_buf.clear();
                     self.thinking_buf.clear();
                     self.agent_header_sent = false;

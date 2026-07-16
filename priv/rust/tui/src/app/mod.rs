@@ -241,6 +241,12 @@ impl App {
         })
     }
 
+    /// True when the app wants a full-height alternate-screen viewport (dialogs,
+    /// connecting, onboarding, file picker) instead of the inline live region.
+    pub fn wants_full_viewport(&self) -> bool {
+        self.state.is_overlay() || self.state.is_fullscreen() || self.file_picker.is_some()
+    }
+
     pub fn recompute_layout(&mut self) {
         let task_lines = self.tasks.height();
         let agent_lines = self.agents.height();
