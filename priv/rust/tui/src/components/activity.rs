@@ -154,9 +154,55 @@ pub struct Activity {
     llm_iteration: u32,
     expanded: bool,
     phrase_tick: u32,
+    /// Starting index into SPINNER_VERBS for this request, so each one opens on a
+    /// different verb instead of always "Accomplishing".
+    verb_offset: usize,
     start_time: Option<std::time::Instant>,
     pub verbosity: Verbosity,
 }
+
+/// Rotating counter so consecutive requests pick different starting verbs.
+static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Spinner verbs. A big playful set (seeded from Claude Code's list) PLUS our own
+/// OSA / SORX / Signal-Theory flavored ones so it reads as ours, not a copy.
+const SPINNER_VERBS: &[&str] = &[
+    // — OSA / SORX / Signal Theory (ours) —
+    "Signaling", "Denoising", "Optimizing", "Transducing", "Attenuating", "Homeostating",
+    "Steering", "Resonating", "Modulating", "Amplifying", "Distilling", "Converging",
+    "Pathfinding", "Aligning", "Focusing", "Sharpening", "Cohering", "Phasing",
+    "Correlating", "Maximizing", "Signalizing", "Osafying", "Steersmanning", "Sorxing",
+    // — playful general set —
+    "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming",
+    "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling",
+    "Booping", "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating",
+    "Canoodling", "Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling",
+    "Choreographing", "Churning", "Coalescing", "Cogitating", "Combobulating", "Composing",
+    "Computing", "Concocting", "Considering", "Contemplating", "Cooking", "Crafting",
+    "Creating", "Crunching", "Crystallizing", "Cultivating", "Deciphering", "Deliberating",
+    "Determining", "Discombobulating", "Doing", "Doodling", "Drizzling", "Ebbing",
+    "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating",
+    "Fermenting", "Finagling", "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering",
+    "Forging", "Forming", "Frolicking", "Frosting", "Gallivanting", "Galloping",
+    "Garnishing", "Generating", "Gesticulating", "Germinating", "Grooving", "Gusting",
+    "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
+    "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring",
+    "Infusing", "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening",
+    "Levitating", "Lollygagging", "Manifesting", "Marinating", "Meandering", "Metamorphosing",
+    "Misting", "Moonwalking", "Moseying", "Mulling", "Mustering", "Musing",
+    "Nebulizing", "Nesting", "Noodling", "Nucleating", "Orbiting", "Orchestrating",
+    "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising", "Photosynthesizing",
+    "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating", "Prestidigitating",
+    "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing",
+    "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating", "Scampering",
+    "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering",
+    "Skedaddling", "Sketching", "Slithering", "Smooshing", "Spelunking", "Spinning",
+    "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Synthesizing",
+    "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Transfiguring",
+    "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing",
+    "Waddling", "Wandering", "Warping", "Whirlpooling", "Whirring", "Whisking",
+    "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
+];
 
 impl Activity {
     pub fn new() -> Self {
@@ -173,6 +219,7 @@ impl Activity {
             llm_iteration: 0,
             expanded: false,
             phrase_tick: 0,
+            verb_offset: 0,
             start_time: None,
             verbosity: Verbosity::All,
         }
@@ -189,6 +236,8 @@ impl Activity {
         self.thinking_chars = 0;
         self.llm_iteration = 0;
         self.phrase_tick = 0;
+        self.verb_offset =
+            VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.start_time = Some(std::time::Instant::now());
     }
 
@@ -350,56 +399,38 @@ impl Component for Activity {
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
 
-        // Spinner animation
-        let spinner_frames = ["\u{25cb}", "\u{25d4}", "\u{25d1}", "\u{25d5}", "\u{25cf}"];
-        let spinner_char = spinner_frames[(self.phrase_tick as usize / 2) % spinner_frames.len()];
+        // Star spinner (Claude Code): pulses out then back, ~200ms/frame here.
+        let spinner_frames = ["\u{00b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}",
+                              "\u{273d}", "\u{273b}", "\u{2736}", "\u{2733}", "\u{2722}", "\u{00b7}"];
+        let spinner_char = spinner_frames[(self.phrase_tick as usize) % spinner_frames.len()];
 
-        // Claude-Code-style rotating "thinking" word — switches every ~2s so the
-        // wait feels alive instead of a static "thinking".
-        const THINKING_WORDS: &[&str] = &[
-            "Thinking", "Pondering", "Noodling", "Simmering", "Percolating",
-            "Ruminating", "Cogitating", "Mulling", "Marinating", "Brewing",
-            "Conjuring", "Divining", "Puzzling", "Musing", "Scheming",
-            "Deliberating", "Contemplating", "Wrangling", "Untangling", "Computing",
-        ];
-        let think_word = THINKING_WORDS[(elapsed as usize / 2) % THINKING_WORDS.len()];
+        // Claude Code's 179 rotating verbs. Each request starts on a different one
+        // (verb_offset, set at start) and it switches every ~2s so it feels alive.
+        let word = SPINNER_VERBS[(self.verb_offset + elapsed as usize / 2) % SPINNER_VERBS.len()];
 
-        // Phase-driven spinner line — shows real backend state
-        let elapsed_str = format_elapsed(elapsed);
-        let mut spinner_spans: Vec<Span<'_>> = match self.phase {
-            ProcessingPhase::Waiting => vec![
-                Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                Span::styled(format!("{}\u{2026}", think_word), theme.prefix_active()),
-                Span::styled(format!(" ({})", elapsed_str), theme.faint()),
-            ],
-            ProcessingPhase::Thinking => {
-                let chars = format_count(self.thinking_chars);
-                vec![
-                    Span::styled(format!("\u{1f9e0} {} ", spinner_char), theme.spinner()),
-                    Span::styled(format!("{}\u{2026}", think_word), theme.prefix_active()),
-                    Span::styled(format!(" ({})", elapsed_str), theme.faint()),
-                    Span::styled(format!(" \u{00b7} {} chars", chars), theme.faint()),
-                ]
-            }
-            ProcessingPhase::Streaming => {
-                let chars = format_count(self.stream_chars);
-                vec![
-                    Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                    Span::styled("streaming", theme.prefix_active()),
-                    Span::styled(format!(" ({}, {})", chars, elapsed_str), theme.faint()),
-                ]
-            }
-            ProcessingPhase::ToolCall => vec![
-                Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                Span::styled(format!("tool: {}", self.last_tool_name), theme.prefix_active()),
-                Span::styled(format!(" ({})", elapsed_str), theme.faint()),
-            ],
-            ProcessingPhase::Synthesizing => vec![
-                Span::styled(format!("{} ", spinner_char), theme.spinner()),
-                Span::styled("synthesizing", theme.prefix_active()),
-                Span::styled(format!(" ({})", elapsed_str), theme.faint()),
-            ],
+        // Output-token count for the "↓ N tokens" suffix. Fall back to a char-based
+        // estimate (~4 chars/token) while streaming if tokens aren't reported yet.
+        let tokens = if self.output_tokens > 0 {
+            self.output_tokens as usize
+        } else {
+            (self.stream_chars + self.thinking_chars) / 4
         };
+
+        // Claude-Code line: "✻ Zesting… (28s · ↓ 1.5k tokens)". Sub-phase detail
+        // (which tool is running) shows separately as the ✓ tool-result lines.
+        let elapsed_str = format_elapsed(elapsed);
+        let mut spinner_spans: Vec<Span<'_>> = vec![
+            Span::styled(format!("{} ", spinner_char), theme.spinner()),
+            Span::styled(format!("{}\u{2026}", word), theme.prefix_active()),
+            Span::styled(
+                format!(
+                    " ({} \u{00b7} \u{2193} {} tokens)",
+                    elapsed_str,
+                    format_count(tokens)
+                ),
+                theme.faint(),
+            ),
+        ];
 
         // Model name prefix (e.g. "qwen3-coder:480b ∙ ")
         if !self.model_name.is_empty() {
