@@ -100,6 +100,27 @@ pub enum BackendEvent {
     OrchestratorSynthesizing { agent_count: usize },
     OrchestratorTaskCompleted { task_id: String },
 
+    // === Background Agents (fire-and-forget subagents) ===
+    /// A subagent was launched in the background via `run_background`.
+    BackgroundAgentStarted {
+        agent_id: String,
+        role: String,
+    },
+    /// A background subagent finished successfully; `result` is a short preview.
+    BackgroundAgentCompleted {
+        agent_id: String,
+        role: String,
+        result: String,
+        duration_ms: u64,
+    },
+    /// A background subagent errored out; `error` is the failure reason.
+    BackgroundAgentFailed {
+        agent_id: String,
+        role: String,
+        error: String,
+        duration_ms: u64,
+    },
+
     // === Context ===
     ContextPressure {
         utilization: f64,

@@ -45,10 +45,41 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"task" => task} = args, ctx) do
-    role = Map.get(args, "role") || Map.get(args, "subagent_type")
-    tier_str = Map.get(args, "tier")
     parent_id = resolve_parent_id(args, ctx)
+    parent_depth = delegation_depth(ctx)
 
+    case normalize_tasks(Map.get(args, "tasks")) do
+      [] ->
+        # ── Single-task path (unchanged behaviour) ──────────────────────
+        role = Map.get(args, "role") || Map.get(args, "subagent_type")
+        config = build_config(task, role, args, parent_id, parent_depth)
+
+        config =
+          if Map.get(args, "fork") == true do
+            Map.put(config, :fork_messages, fetch_parent_messages(parent_id))
+          else
+            config
+          end
+
+        if background?(args, config) do
+          dispatch_background(parent_id, config)
+        else
+          dispatch_foreground(config)
+        end
+
+      tasks ->
+        # ── Fan-out path — first-class parallel wave via run_parallel ────
+        dispatch_fanout(task, tasks, args, parent_id, parent_depth)
+    end
+  end
+
+  # ── Private ────────────────────────────────────────────────────────────
+
+  # Build a subagent config from tool args, an explicit child task string, and
+  # a resolved role. Shared by the single-task and fan-out paths so tier floor,
+  # agent-definition lookup, isolation, and depth propagation stay identical.
+  defp build_config(child_task, role, args, parent_id, parent_depth) do
+    tier_str = Map.get(args, "tier")
     agent_def = if role, do: AgentRegistry.get(role), else: nil
 
     raw_tier =
@@ -68,14 +99,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         _ -> nil
       end
 
-    background =
-      case Map.fetch(args, "background") do
-        {:ok, value} -> value == true
-        :error -> (agent_def && agent_def[:background]) || false
-      end
-
-    config = %{
-      task: task,
+    %{
+      task: child_task,
       parent_session_id: parent_id,
       role: role || "agent",
       tier: tier,
@@ -100,24 +125,95 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       isolation: isolation,
       merge_worktree: Map.get(args, "merge_worktree") == true,
       discard_worktree: Map.get(args, "discard_worktree") == true,
-      working_dir: Map.get(args, "cwd") || Map.get(args, "working_dir")
+      working_dir: Map.get(args, "cwd") || Map.get(args, "working_dir"),
+      # Preserve the agent definition's background default so background?/2 can
+      # fall back to it when the caller omits an explicit "background" arg.
+      background: (agent_def && agent_def[:background]) || false,
+      # Parent's depth — Orchestrator.run_subagent increments this for the child
+      # so ToolFilter can strip spawning tools once the max nesting is reached.
+      delegation_depth: parent_depth
     }
+  end
 
-    config =
-      if Map.get(args, "fork") == true do
-        Map.put(config, :fork_messages, fetch_parent_messages(parent_id))
-      else
-        config
-      end
-
-    if background do
-      dispatch_background(parent_id, config)
-    else
-      dispatch_foreground(config)
+  defp background?(args, config) do
+    case Map.fetch(args, "background") do
+      {:ok, value} -> value == true
+      :error -> Map.get(config, :background, false) == true
     end
   end
 
-  # ── Private ────────────────────────────────────────────────────────────
+  # Normalize the optional `tasks:[]` fan-out param into a list of
+  # %{prompt, subagent_type} maps, dropping anything without a usable prompt.
+  defp normalize_tasks(tasks) when is_list(tasks) do
+    tasks
+    |> Enum.map(fn
+      %{"prompt" => p} = t when is_binary(p) ->
+        %{prompt: p, subagent_type: t["subagent_type"] || t["role"]}
+
+      %{"task" => p} = t when is_binary(p) ->
+        %{prompt: p, subagent_type: t["subagent_type"] || t["role"]}
+
+      p when is_binary(p) ->
+        %{prompt: p, subagent_type: nil}
+
+      _ ->
+        nil
+    end)
+    |> Enum.reject(fn
+      nil -> true
+      %{prompt: p} -> String.trim(p) == ""
+    end)
+  end
+
+  defp normalize_tasks(_), do: []
+
+  # Fan out `tasks` as a parallel wave. Reuses the already-wired
+  # Orchestrator.run_parallel/3 (wave + synthesis TUI) with a stable batch_id.
+  defp dispatch_fanout(umbrella_task, tasks, args, parent_id, parent_depth) do
+    batch_id = "batch:#{parent_id}:#{System.unique_integer([:positive])}"
+
+    configs =
+      Enum.map(tasks, fn %{prompt: prompt, subagent_type: st} ->
+        role = st || Map.get(args, "role") || Map.get(args, "subagent_type")
+        build_config(prompt, role, args, parent_id, parent_depth)
+      end)
+
+    results = Orchestrator.run_parallel(parent_id, configs, batch_id: batch_id)
+
+    {:ok, format_fanout(umbrella_task, tasks, results)}
+  end
+
+  defp format_fanout(umbrella_task, tasks, results) do
+    header =
+      "Fan-out of #{length(tasks)} subagent#{if length(tasks) == 1, do: "", else: "s"} for: " <>
+        String.slice(umbrella_task, 0, 120)
+
+    sections =
+      tasks
+      |> Enum.zip(results)
+      |> Enum.with_index(1)
+      |> Enum.map(fn {{task, result}, idx} ->
+        label = task.subagent_type || "agent"
+
+        text =
+          case result do
+            {:ok, str} -> str
+            {:error, reason} -> "Failed: #{inspect(reason)}"
+            other -> inspect(other)
+          end
+
+        "### #{idx}. #{label} — #{String.slice(task.prompt, 0, 80)}\n#{text}"
+      end)
+
+    Enum.join([header | sections], "\n\n")
+  end
+
+  defp delegation_depth(ctx) do
+    case Map.get(ctx, :delegation_depth, 0) do
+      d when is_integer(d) and d >= 0 -> d
+      _ -> 0
+    end
+  end
 
   defp dispatch_foreground(config) do
     case Orchestrator.run_subagent(config) do

@@ -61,6 +61,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
               "Include all context the subagent needs — file paths, requirements, constraints. " <>
               "The subagent has NO access to your conversation history."
         },
+        "tasks" => %{
+          "type" => "array",
+          "description" =>
+            "Optional fan-out: an array of subtasks to run in PARALLEL as a single wave. " <>
+              "Each item is an object with a required 'prompt' and an optional 'subagent_type' " <>
+              "(role) for that worker. When present, the top-level 'task' is the umbrella " <>
+              "description and these subtasks are dispatched concurrently, then their results " <>
+              "are synthesized. Omit for a single delegation.",
+          "items" => %{
+            "type" => "object",
+            "required" => ["prompt"],
+            "properties" => %{
+              "prompt" => %{
+                "type" => "string",
+                "description" =>
+                  "Self-contained task for this worker — include all context it needs."
+              },
+              "subagent_type" => %{
+                "type" => "string",
+                "description" => "Optional role/agent name for this worker (e.g. 'explorer')."
+              }
+            }
+          }
+        },
         "role" => %{
           "type" => "string",
           "description" =>

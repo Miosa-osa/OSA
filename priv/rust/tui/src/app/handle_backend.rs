@@ -563,6 +563,59 @@ impl App {
                 self.recompute_layout();
             }
 
+            // === Background agents (fire-and-forget subagents) ===
+            // Reuse the Agents panel: the background agent's id is its stable
+            // entry key, so completion/failure updates the same row. A toast
+            // announces the lifecycle transition, and completion/failure also
+            // drop a short system note into chat with the result/error preview.
+            BackendEvent::BackgroundAgentStarted { agent_id, role } => {
+                let label = if role.is_empty() { "background".to_string() } else { role.clone() };
+                self.agents.agent_started(
+                    agent_id.clone(),
+                    role,
+                    "",
+                    format!("background: {}", label),
+                    Some("background".to_string()),
+                );
+                self.toasts.push(
+                    format!("Background agent \"{}\" started", label),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.recompute_layout();
+            }
+            BackendEvent::BackgroundAgentCompleted { agent_id, role, result, duration_ms } => {
+                let label = if role.is_empty() { "background".to_string() } else { role };
+                self.agents.agent_completed(&agent_id, 0, 0);
+                let preview: String = result.trim().chars().take(200).collect();
+                let secs = duration_ms as f64 / 1000.0;
+                let note = if preview.is_empty() {
+                    format!("Background agent \"{}\" completed ({:.1}s)", label, secs)
+                } else {
+                    format!("Background agent \"{}\" completed ({:.1}s): {}", label, secs, preview)
+                };
+                self.chat.add_system_message(&note, "info");
+                self.toasts.push(
+                    format!("Background agent \"{}\" completed", label),
+                    crate::components::toast::ToastLevel::Success,
+                );
+                self.recompute_layout();
+            }
+            BackendEvent::BackgroundAgentFailed { agent_id, role, error, duration_ms } => {
+                let label = if role.is_empty() { "background".to_string() } else { role };
+                self.agents.agent_failed(&agent_id, error.clone(), 0, 0);
+                let preview: String = error.trim().chars().take(200).collect();
+                let secs = duration_ms as f64 / 1000.0;
+                self.chat.add_system_message(
+                    &format!("Background agent \"{}\" failed ({:.1}s): {}", label, secs, preview),
+                    "error",
+                );
+                self.toasts.push(
+                    format!("Background agent \"{}\" failed", label),
+                    crate::components::toast::ToastLevel::Error,
+                );
+                self.recompute_layout();
+            }
+
             BackendEvent::SseAuthFailed => {
                 error!("SSE auth failed — attempting token refresh");
                 let client = self.client.clone();

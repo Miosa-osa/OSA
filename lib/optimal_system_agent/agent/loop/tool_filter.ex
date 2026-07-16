@@ -18,6 +18,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   # Minimum signal weight required to include tools in the LLM call.
   @tool_weight_threshold 0.20
 
+  # Maximum delegation nesting depth. A subagent at this depth has its
+  # spawning tools (delegate/create_agent) stripped so it cannot fork more
+  # children — a hard ceiling against fork-bomb / runaway-cost behaviour under
+  # auto-mode. Configurable via
+  #   config :optimal_system_agent, :max_delegation_depth, N
+  @default_max_delegation_depth 3
+
+  # Tools that spawn further agents. Names + declared aliases (Delegate.Tool
+  # aliases and CreateAgent.Tool aliases) — matched by tool name so a rename in
+  # either tool keeps this guard effective as long as the alias list is updated.
+  @spawning_tools ~w(delegate agent subagent spawn_agent create_agent define_agent new_agent)
+
   # Priority tools kept when trimming for local providers.
   @priority_tools ~w(file_read file_write file_edit shell_execute ask_user computer_use memory_recall)
 
@@ -32,13 +44,50 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   @spec filter(list(), map()) :: list()
   def filter(tools, state) do
     tools
+    |> apply_delegation_depth_guard(state)
     |> apply_weight_gate(state)
     |> apply_computer_use_focus(state)
     |> FastPath.select_tools(state)
     |> apply_local_provider_budget(state)
   end
 
+  @doc "Configured maximum delegation nesting depth."
+  @spec max_delegation_depth() :: non_neg_integer()
+  def max_delegation_depth do
+    Application.get_env(
+      :optimal_system_agent,
+      :max_delegation_depth,
+      @default_max_delegation_depth
+    )
+  end
+
   # --- Private ---
+
+  # Depth guard — a child at or beyond the max delegation depth loses its
+  # ability to spawn grandchildren. This is the hard stop that keeps a runaway
+  # orchestrator (especially under auto-mode) from recursively forking agents.
+  defp apply_delegation_depth_guard(tools, state) do
+    depth = Map.get(state, :delegation_depth, 0)
+
+    if is_integer(depth) and depth >= max_delegation_depth() do
+      {stripped, kept} = Enum.split_with(tools, fn t -> tool_name(t) in @spawning_tools end)
+
+      if stripped != [] do
+        Logger.debug(
+          "[loop] delegation_depth=#{depth} >= #{max_delegation_depth()} — stripping spawning tools " <>
+            "(#{stripped |> Enum.map(&tool_name/1) |> Enum.join(", ")})"
+        )
+      end
+
+      kept
+    else
+      tools
+    end
+  end
+
+  defp tool_name(%{name: name}), do: to_string(name)
+  defp tool_name(t) when is_map(t), do: to_string(t[:name] || "")
+  defp tool_name(_), do: ""
 
   defp apply_weight_gate(tools, %{signal_weight: weight}) when is_number(weight) do
     if weight < @tool_weight_threshold do

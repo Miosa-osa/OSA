@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.BackgroundNotifier
+  alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
+  alias OptimalSystemAgent.Events.Bus
 
   @doc """
   Run a subagent to completion and return its result.
@@ -41,8 +44,8 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   Emits wave events for TUI display when wave numbers are present.
   """
-  @spec run_parallel(String.t(), [map()]) :: [{:ok, String.t()} | {:error, term()}]
-  def run_parallel(parent_id, configs) when is_list(configs) do
+  @spec run_parallel(String.t(), [map()], keyword()) :: [{:ok, String.t()} | {:error, term()}]
+  def run_parallel(parent_id, configs, opts \\ []) when is_list(configs) do
     # Group by wave number (default wave 1)
     waves =
       configs
@@ -52,8 +55,12 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     total_waves = length(waves)
 
-    # Create team for task tracking
-    team_id = "team:#{parent_id}:#{System.unique_integer([:positive])}"
+    # Team / batch id for task tracking. A caller-supplied batch_id (e.g. the
+    # delegate fan-out path) is honoured so its wave/synthesis TUI ties to a
+    # stable id; otherwise generate one.
+    team_id =
+      Keyword.get(opts, :batch_id) ||
+        "team:#{parent_id}:#{System.unique_integer([:positive])}"
 
     # Emit task started
     emit_event(parent_id, %{
@@ -69,7 +76,8 @@ defmodule OptimalSystemAgent.Orchestrator do
           emit_event(parent_id, %{
             event: "orchestrator_wave_started",
             wave_number: wave_num,
-            total_waves: total_waves
+            total_waves: total_waves,
+            agent_count: length(indexed_configs)
           })
         end
 
@@ -267,7 +275,12 @@ defmodule OptimalSystemAgent.Orchestrator do
       system_prompt_override: if(full_prompt != "", do: full_prompt, else: nil),
       messages: fork_messages,
       working_dir: working_dir,
-      max_turns: max_iter
+      max_turns: max_iter,
+      # Increment delegation depth for the child. config[:delegation_depth] is
+      # the *parent's* depth (0 for a top-level session, set by the delegate
+      # handler from its UseContext). ToolFilter strips the child's spawning
+      # tools once this reaches the configured max — the fork-bomb ceiling.
+      delegation_depth: Map.get(config, :delegation_depth, 0) + 1
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches
@@ -365,6 +378,10 @@ defmodule OptimalSystemAgent.Orchestrator do
     config = Map.put(config, :parent_session_id, parent_id)
     role = Map.get(config, :role, "background")
 
+    # Ensure a notifier is listening for this parent so the completed/failed
+    # result is injected back into the parent Loop's history (delegate-and-continue).
+    BackgroundNotifier.ensure_started(parent_id)
+
     # Generate the ID upfront so we can return it immediately
     subagent_num = next_subagent_number(parent_id)
     subagent_id = "agent:#{parent_id}:#{subagent_num}"
@@ -455,9 +472,13 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
-    # Get metadata from the subagent for the completion event
+    # Get metadata from the subagent for the completion event. Read the child's
+    # transcript once (it is idle-but-alive at this point) to derive real
+    # commands_run and a natural-language synthesis of what it did.
     {tool_uses, tokens_used} = get_subagent_stats(subagent_id)
     files_changed = changed_files(worktree_info)
+    child_messages = safe_get_messages(subagent_id)
+    commands_run = extract_commands_run(child_messages)
 
     case result do
       {:ok, response} when is_binary(response) ->
@@ -469,7 +490,7 @@ defmodule OptimalSystemAgent.Orchestrator do
             status: :completed,
             summary: response,
             files_changed: files_changed,
-            commands_run: [],
+            commands_run: commands_run,
             tool_count: tool_uses,
             tokens_used: tokens_used,
             duration_ms: duration_ms,
@@ -491,7 +512,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           result: structured
         })
 
-        {:ok, RunStore.format_result(structured)}
+        {:ok, ResultSummarizer.summarize(structured, child_messages)}
 
       {:error, reason} ->
         structured =
@@ -525,7 +546,7 @@ defmodule OptimalSystemAgent.Orchestrator do
             status: :completed,
             summary: inspect(other),
             files_changed: files_changed,
-            commands_run: [],
+            commands_run: commands_run,
             tool_count: tool_uses,
             tokens_used: tokens_used,
             duration_ms: duration_ms,
@@ -543,9 +564,39 @@ defmodule OptimalSystemAgent.Orchestrator do
           tokens_used: tokens_used
         })
 
-        {:ok, inspect(other)}
+        {:ok, ResultSummarizer.summarize(structured, child_messages)}
     end
   end
+
+  # Read the subagent's message history for result shaping. Best-effort — the
+  # child may have already terminated; returns [] on any failure.
+  defp safe_get_messages(subagent_id) do
+    Loop.get_messages(subagent_id)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  # Extract the real shell commands a subagent ran from its transcript, in
+  # order. Replaces the previously hardcoded `commands_run: []`.
+  defp extract_commands_run(messages) when is_list(messages) do
+    messages
+    |> Enum.filter(fn
+      %{role: "assistant", tool_calls: tcs} when is_list(tcs) and tcs != [] -> true
+      _ -> false
+    end)
+    |> Enum.flat_map(fn msg -> msg.tool_calls end)
+    |> Enum.filter(fn tc -> to_string(Map.get(tc, :name, "")) in ~w(shell_execute bash git) end)
+    |> Enum.map(fn tc ->
+      args = Map.get(tc, :arguments, %{})
+      Map.get(args, "command") || Map.get(args, "cmd") || Map.get(args, "args") || ""
+    end)
+    |> Enum.map(&to_string/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp extract_commands_run(_), do: []
 
   defp get_subagent_stats(subagent_id) do
     # Get actual metadata from the Loop GenServer
@@ -649,7 +700,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           agent_name: subagent_id,
           current_action: action,
           tool_uses: tool_count,
-          tokens_used: tool_count * 500,
+          tokens_used: forwarder_tokens(subagent_id),
           description: ""
         })
 
@@ -666,7 +717,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           agent_name: subagent_id,
           current_action: to_string(tool_name),
           tool_uses: new_count,
-          tokens_used: new_count * 500,
+          tokens_used: forwarder_tokens(subagent_id),
           description: ""
         })
 
@@ -693,6 +744,20 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp format_action(tool_name, _), do: to_string(tool_name)
+
+  # Real token count for progress events. The forwarder runs in its own Task
+  # process (not the subagent's Loop), so a synchronous state read is safe and
+  # cannot deadlock. Falls back to 0 rather than a fabricated tool_count*500.
+  defp forwarder_tokens(subagent_id) do
+    case Loop.get_state(subagent_id) do
+      {:ok, %{tokens_used: t}} when is_integer(t) and t >= 0 -> t
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
+  end
 
   defp stop_event_forwarder({:ok, pid}) when is_pid(pid) do
     Process.exit(pid, :normal)

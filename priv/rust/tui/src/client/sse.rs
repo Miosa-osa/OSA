@@ -438,6 +438,76 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "proactive_mode_changed"
         | "auto_mode_paused" => parse_system_event(data),
 
+        // Background (fire-and-forget) subagents. `started` arrives wrapped as a
+        // system_event (has an `event` field); `completed`/`failed` are broadcast
+        // directly with a `type` field and no `event` key, so parse all three here
+        // rather than routing through parse_system_event.
+        "background_agent_started" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent_id: String,
+                #[serde(default)]
+                role: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_agent_started", e)),
+            };
+            Some(BackendEvent::BackgroundAgentStarted {
+                agent_id: ev.agent_id,
+                role: ev.role,
+            })
+        }
+
+        "background_agent_completed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent_id: String,
+                #[serde(default)]
+                role: String,
+                #[serde(default)]
+                result: String,
+                #[serde(default)]
+                duration_ms: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_agent_completed", e)),
+            };
+            Some(BackendEvent::BackgroundAgentCompleted {
+                agent_id: ev.agent_id,
+                role: ev.role,
+                result: ev.result,
+                duration_ms: ev.duration_ms,
+            })
+        }
+
+        "background_agent_failed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent_id: String,
+                #[serde(default)]
+                role: String,
+                #[serde(default)]
+                error: String,
+                #[serde(default)]
+                duration_ms: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_agent_failed", e)),
+            };
+            Some(BackendEvent::BackgroundAgentFailed {
+                agent_id: ev.agent_id,
+                role: ev.role,
+                error: ev.error,
+                duration_ms: ev.duration_ms,
+            })
+        }
+
         "" => None,
 
         other => Some(BackendEvent::ParseWarning {

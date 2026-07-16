@@ -53,6 +53,11 @@ defmodule OptimalSystemAgent.Tools.UseContext do
     :tools,
     :agents,
 
+    # ── Delegation nesting depth (fork-bomb / runaway-cost guard) ─────
+    # 0 for a top-level session; incremented for each subagent generation.
+    # The delegate handler reads this to propagate depth into spawned children.
+    delegation_depth: 0,
+
     # ── Extension point ──────────────────────────────────────────────
     extras: %{}
   ]
@@ -71,6 +76,7 @@ defmodule OptimalSystemAgent.Tools.UseContext do
           always_ask_rules: map(),
           additional_working_dirs: map(),
           permission_tier: permission_tier() | nil,
+          delegation_depth: non_neg_integer(),
           allowed_tools: [String.t()] | nil,
           blocked_tools: [String.t()],
           file_state_cache: map(),
@@ -114,6 +120,7 @@ defmodule OptimalSystemAgent.Tools.UseContext do
       budget_used_usd: Map.get(state, :budget_used_usd, 0.0),
       max_turns: Map.get(state, :max_turns),
       abort_ref: Map.get(state, :abort_ref),
+      delegation_depth: Map.get(state, :delegation_depth, 0),
       emit: Keyword.get(opts, :emit),
       tools: Keyword.get(opts, :tools, []),
       agents: Keyword.get(opts, :agents, []),

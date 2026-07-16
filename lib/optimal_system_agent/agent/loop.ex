@@ -80,7 +80,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     coordinator: false,
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
-    max_turns: nil
+    max_turns: nil,
+    # Delegation nesting depth — 0 for a top-level session, incremented for
+    # each subagent generation. Read by ToolFilter to strip spawning tools at
+    # the max depth (fork-bomb / runaway-cost guard).
+    delegation_depth: 0
   ]
 
   @cancel_table :osa_cancel_flags
@@ -135,6 +139,36 @@ defmodule OptimalSystemAgent.Agent.Loop do
     GenServer.call(via(session_id), :get_metadata)
   rescue
     _ -> %{iteration_count: 0, tools_used: []}
+  end
+
+  @doc """
+  Return the raw message history for a session.
+
+  Used by the Orchestrator to derive real result metadata (commands run,
+  final assistant message) from a subagent after it finishes. Safe to call
+  from another process — never from inside the loop's own callback.
+  """
+  @spec get_messages(String.t()) :: [map()]
+  def get_messages(session_id) do
+    GenServer.call(via(session_id), :get_messages)
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Inject a completed background-agent result into this session's message
+  history so the orchestrator LLM can reason about it on its next turn.
+
+  Mirrors Claude Code's completion notification: the result lands in the
+  parent's transcript as a synthetic user message. Delivered as a cast so it
+  is serialised with the loop's own callbacks and never deadlocks a caller
+  that happens to be the loop process itself.
+  """
+  @spec inject_agent_result(String.t(), String.t()) :: :ok
+  def inject_agent_result(session_id, content) when is_binary(content) do
+    GenServer.cast(via(session_id), {:inject_agent_result, content})
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """
@@ -324,6 +358,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
+      delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       parent_session_id: Keyword.get(opts, :parent_session_id),
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),
@@ -472,6 +507,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, state.last_meta, state}
   end
 
+  def handle_call(:get_messages, _from, state) do
+    {:reply, state.messages, state}
+  end
+
   def handle_call(:get_state, _from, state) do
     uptime = if state.started_at, do: DateTime.diff(DateTime.utc_now(), state.started_at), else: 0
 
@@ -569,6 +608,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:get_strategy, _from, state) do
     {:reply, {:ok, :none, %{}}, state}
+  end
+
+  @impl true
+  def handle_cast({:inject_agent_result, content}, state) do
+    injected = %{role: "user", content: content}
+    {:noreply, %{state | messages: state.messages ++ [injected]}}
   end
 
   @impl true
