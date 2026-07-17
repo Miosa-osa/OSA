@@ -683,8 +683,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # Zhipu / z.ai GLM (OpenAI-compatible; the ollama_cloud route appends a
     # ":cloud" suffix to the model id, which the prefix match below strips —
     # e.g. "glm-5.2:cloud" starts_with "glm-5.2"). Windows are the vendor's
-    # published maximums; GLM-4.6 and the GLM-5 line ship a 200K window.
-    "glm-5.2" => 200_000,
+    # published maximums. GLM-5.2 ships a real 1M-token window (Ollama shows
+    # "976K" only because it displays the count ÷1024); GLM-4.6 is 200K.
+    "glm-5.2" => 1_000_000,
     "glm-5.1" => 200_000,
     "glm-5" => 200_000,
     "glm-4.6" => 200_000,
