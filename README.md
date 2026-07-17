@@ -2,17 +2,15 @@
 
 <img src="assets/OSAIconLogo.png" alt="OSA" width="128" />
 
-# OSA — Optimal System Agent
+# OSA — the Optimal System Agent
 
-**Tell your computer what you need, in plain words — and OSA does it.**
+**OSA finds the signal in your work.** Built on Signal Theory, it classifies
+what you ask, filters the noise, and routes the work to the right model —
+proactively, and on your machine.
 
-OSA is an AI agent that lives on your machine. It reads what you're actually
-asking for and does the real work — writing and running code, handling business
-busywork, researching, organizing your day. One command to install. Runs
+Across your code, your ops, and the everyday busywork, OSA separates what matters
+from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
-
-For developers, it's a coding agent that actually ships. For business owners, it
-runs the work you don't have time for. For everyone, it turns "I need to…" into done.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-v1.0.003-blue.svg)](#)
