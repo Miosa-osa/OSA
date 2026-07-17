@@ -104,6 +104,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
           conn |> put_resp_content_type("application/json") |> send_resp(200, body)
 
+        custom = custom_command(cmd_name) ->
+          handle_custom_command(conn, custom, conn.body_params["arg"] || "")
+
         true ->
           execute_cli_command(conn, command)
       end
@@ -216,6 +219,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   defp resolve_auto_mode_tier(tokens) do
     off? = Enum.any?(tokens, &(&1 in ~w(off full disable disabled stop)))
     if off?, do: {:full, "full"}, else: {:auto, "auto"}
+  end
+
+  # Return a user-defined custom command (`~/.osa/commands/<name>.md`) for
+  # `cmd_name`, but only when it does NOT collide with a built-in CLI command —
+  # a custom file can never shadow a core command like /help or /status.
+  defp custom_command(cmd_name) do
+    builtin? =
+      try do
+        cmd_name in OptimalSystemAgent.Channels.CLI.Commands.list()
+      rescue
+        _ -> false
+      end
+
+    if builtin? do
+      nil
+    else
+      OptimalSystemAgent.Tools.Registry.CommandLoader.get(cmd_name)
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # A custom command expands its Markdown body (with `$ARGUMENTS` / `{{args}}`
+  # substituted) and returns it as a `kind: "prompt"` result. The TUI's command
+  # handler recognises "prompt" and submits the body as the turn's prompt.
+  defp handle_custom_command(conn, cmd, arg) do
+    prompt = OptimalSystemAgent.Tools.Registry.CommandLoader.expand(cmd, arg)
+
+    body =
+      Jason.encode!(%{
+        kind: "prompt",
+        output: prompt,
+        command: cmd.name
+      })
+
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
 
   defp execute_cli_command(conn, command) do
@@ -415,8 +456,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       }
     ]
 
-    # Merge, dedup by name
-    all = cli_entries ++ api_only
+    # User-defined slash commands from ~/.osa/commands/*.md. Tagged "custom" so
+    # the TUI completion menu can visually distinguish them from built-ins.
+    custom_entries =
+      try do
+        OptimalSystemAgent.Tools.Registry.CommandLoader.list_with_descriptions()
+        |> Enum.map(fn {name, desc} ->
+          %{name: name, description: desc, category: "custom"}
+        end)
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    # Merge, dedup by name. Built-ins listed first so a custom command can never
+    # shadow a core command (uniq_by keeps the first occurrence).
+    all = cli_entries ++ api_only ++ custom_entries
     all |> Enum.uniq_by(& &1.name)
   end
 

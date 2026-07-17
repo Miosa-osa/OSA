@@ -112,6 +112,26 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@cyan}#{padded}#{@reset} #{@dim}#{desc}#{@reset}")
     end)
 
+    # User-defined custom commands from ~/.osa/commands/*.md (Claude-Code-style).
+    custom =
+      try do
+        OptimalSystemAgent.Tools.Registry.CommandLoader.list_with_descriptions()
+      rescue
+        _ -> []
+      end
+
+    if custom != [] do
+      IO.puts("")
+      IO.puts("  #{@bold}Custom Commands#{@reset} #{@dim}(~/.osa/commands/)#{@reset}")
+      IO.puts("")
+
+      Enum.each(custom, fn {name, desc} ->
+        padded = String.pad_trailing("/#{name}", 16)
+        truncated = String.slice(desc, 0, 55)
+        IO.puts("  #{@cyan}#{padded}#{@reset} #{@dim}#{truncated}#{@reset}")
+      end)
+    end
+
     IO.puts("")
     session_id
   end
@@ -1065,6 +1085,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     {"TRIGGERS.json", "event-driven tasks fired when something happens"},
     {"config.json", "provider/model, budgets, machines, channels"},
     {"skills/<name>/SKILL.md", "reusable skills OSA can load on demand"},
+    {"commands/<name>.md", "custom /slash commands — body becomes the prompt ($ARGUMENTS)"},
     {"workflows/<id>.json", "multi-step workflow templates"}
   ]
 
