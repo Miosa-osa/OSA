@@ -29,7 +29,17 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
 # Model catalog: no network fetch in tests — deterministic, bundled-only.
+# Point the on-disk cache at a path that never exists so the catalog's tier-1
+# cache lookup (`fresh_cache/0`) always misses and it falls through to the
+# bundled `priv/catalog/models_dev.json`. Without this, a developer machine with
+# a warm `~/.osa/cache/models.json` (a real live fetch, WITH pricing) would win
+# over the bundled snapshot and break the "bundled ships no pricing" guard — the
+# suite would then pass on clean CI but fail locally. Disabling network alone is
+# not enough; the cache tier must be neutralized too.
 config :optimal_system_agent, disable_models_fetch: true
+
+config :optimal_system_agent,
+  models_cache_path: Path.join(System.tmp_dir!(), "osa-test-no-such-models-cache.json")
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false
 # Use a different HTTP port in tests to avoid conflicts

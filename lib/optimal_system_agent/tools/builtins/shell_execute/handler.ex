@@ -396,7 +396,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     # Redirect stdin from the null device so no command can block the port
     # waiting for interactive input (EOF is delivered immediately). stderr is
     # merged into stdout so the caller sees a single combined stream.
-    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1 < " <> null_device()]
+    #
+    # The command is wrapped in a subshell — `( <command> \n ) 2>&1 < NUL` — so
+    # both redirects apply to the WHOLE command, not just its last stage. Without
+    # the group, `foo | wc -l 2>&1 < /dev/null` binds `< /dev/null` to `wc`,
+    # starving it of the pipe's input (it reads the null device instead) and
+    # breaking every pipeline whose final stage reads stdin. The closing `)` sits
+    # on its own line so a trailing `# comment` on the command can't swallow it.
+    wrapped = "( " <> command <> "\n) 2>&1 < " <> null_device()
+    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [wrapped]
 
     port =
       Port.open(

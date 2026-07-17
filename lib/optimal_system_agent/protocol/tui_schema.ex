@@ -76,7 +76,44 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
           f("uptime_seconds", :i64, default: true),
           f("provider", :string),
           f("model", :string),
-          f("context_window", {:option, :u64}, default: true)
+          f("context_window", {:option, :u64}, default: true),
+          f("effort", {:option, :string},
+            default: true,
+            doc:
+              "Current reasoning effort: \"low\" | \"medium\" | \"high\" | \"max\".\n`Option` + `default` keep older backends (which omit it) decodable."
+          ),
+          f("billing", {:option, {:struct, "HealthBilling"}},
+            default: true,
+            doc:
+              "Spend/limit snapshot from the backend Budget. `null` when Budget is\nunavailable; individual limits are `null` when uncapped."
+          )
+        ]
+      },
+      %{
+        name: "HealthBilling",
+        derive: :deserialize,
+        doc: "Billing projection carried on `GET /health` (see tui-statusline-spec).",
+        fields: [
+          f("daily_spent_usd", :f64, default: true),
+          f("daily_limit_usd", {:option, :f64}, default: true),
+          f("monthly_spent_usd", :f64, default: true),
+          f("monthly_limit_usd", {:option, :f64}, default: true),
+          f("currency", :string, default: true),
+          f("subscription", {:option, :string},
+            default: true,
+            doc:
+              "Subscription/plan tier. Always `null` today (OSA has no plan concept),\nbut wired so a chip appears if a plan is ever set."
+          ),
+          f("daily_tokens", :u64,
+            default: true,
+            doc:
+              "Tokens consumed today. Used to render a token-usage chip for providers\nthat don't price in USD (e.g. glm), where a dollar figure is meaningless."
+          ),
+          f("usd_pricing", :bool,
+            default: true,
+            doc:
+              "Whether this provider's spend is denominated in USD. When false, the\nstatus line must never show a `$` figure — show token usage instead."
+          )
         ]
       },
 
@@ -403,7 +440,15 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
   end
 
   defp render_doc(nil, _indent), do: []
-  defp render_doc(doc, indent), do: "#{indent}/// #{doc}\n"
+
+  # A `doc` may contain newlines for a multi-line `///` block; prefix EVERY line
+  # with `<indent>/// ` so continuation lines stay valid doc comments rather than
+  # bare (uncompilable) text in the struct body.
+  defp render_doc(doc, indent) do
+    doc
+    |> String.split("\n")
+    |> Enum.map_join(fn line -> "#{indent}/// #{line}\n" end)
+  end
 
   defp derive_line(:serialize), do: "#[derive(Debug, Clone, Serialize)]"
   defp derive_line(:deserialize), do: "#[derive(Debug, Clone, Deserialize)]"
