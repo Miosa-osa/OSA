@@ -52,6 +52,12 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
   @spec kill(String.t()) :: {:ok, map()} | {:error, :not_found}
   def kill(id), do: with_worker(id, &BackgroundTask.kill/1)
 
+  @doc "Number of background commands currently in the `:running` state."
+  @spec running_count() :: non_neg_integer()
+  def running_count do
+    list() |> Enum.count(&(&1.status == :running))
+  end
+
   @doc "Return snapshots of all currently tracked background commands."
   @spec list() :: [map()]
   def list do

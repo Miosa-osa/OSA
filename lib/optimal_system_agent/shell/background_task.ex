@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     :id,
     :command,
     :cwd,
+    :session_id,
     :port,
     :os_pid,
     :started_at,
@@ -77,6 +78,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     cwd = Keyword.fetch!(opts, :cwd)
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
     retain_ms = Keyword.get(opts, :retain_ms, @default_retain_ms)
+    session_id = Keyword.get(opts, :session_id)
 
     sh = OptimalSystemAgent.OS.Shell.executable()
 
@@ -102,6 +104,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       id: id,
       command: command,
       cwd: cwd,
+      session_id: session_id,
       port: port,
       os_pid: os_pid,
       started_at: DateTime.utc_now(),
@@ -126,6 +129,8 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     status = if state.status == :killed, do: :killed, else: status
 
     state = %{state | status: status, exit_code: code, finished_at: DateTime.utc_now(), port: nil}
+
+    notify_completion(state)
 
     # Retire after the retention window so output stays pollable for a while.
     Process.send_after(self(), :retire, state.retain_ms)
@@ -155,6 +160,8 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       | status: :killed,
         finished_at: state.finished_at || DateTime.utc_now()
     }
+
+    notify_completion(state)
 
     # Ensure the worker is retired even if no exit_status arrives.
     Process.send_after(self(), :retire, state.retain_ms)
@@ -198,6 +205,42 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
   rescue
     _ -> :ok
   end
+
+  # Broadcast a terminal event on the parent session topic so BOTH the
+  # BackgroundNotifier (→ injects "[Background command … completed (exit N)]"
+  # into the parent Loop) and the HTTP SSE loop (→ TUI toast + live count) pick
+  # it up. Guarded so a PubSub failure never crashes the worker before it
+  # schedules :retire. No-op when the command wasn't started with a session.
+  defp notify_completion(%{session_id: nil}), do: :ok
+
+  defp notify_completion(state) do
+    tail = state |> output_string() |> tail_bytes(2000)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :background_command_completed,
+         background_id: state.id,
+         command: state.command,
+         status: state.status,
+         exit_code: state.exit_code,
+         output_tail: tail,
+         session_id: state.session_id,
+         running_count: OptimalSystemAgent.Shell.BackgroundManager.running_count()
+       }}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp tail_bytes(str, n) when byte_size(str) <= n, do: str
+  defp tail_bytes(str, n), do: binary_part(str, byte_size(str) - n, n)
 
   defp output_string(state) do
     state.buffer |> Enum.reverse() |> IO.iodata_to_binary()

@@ -78,6 +78,28 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     {:noreply, state}
   end
 
+  # Background SHELL command completion — same re-entry mechanism as subagents.
+  # Reproduces Claude Code's "Background command '<cmd>' completed (exit code N)"
+  # so the model picks the result up on its next turn without manual polling.
+  def handle_info({:osa_event, %{type: :background_command_completed} = ev}, state) do
+    verb =
+      case ev[:status] do
+        :killed -> "was stopped"
+        :failed -> "failed"
+        _ -> "completed"
+      end
+
+    code = if is_integer(ev[:exit_code]), do: " (exit code #{ev[:exit_code]})", else: ""
+    tail = to_string(ev[:output_tail] || "")
+
+    body =
+      "[Background command '#{ev[:command]}' (#{ev[:background_id]}) #{verb}#{code}]" <>
+        if tail == "", do: "", else: "\n\n#{tail}"
+
+    Loop.inject_agent_result(state.parent_id, body)
+    {:noreply, state}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # --- Private ---

@@ -39,7 +39,10 @@ defmodule OptimalSystemAgent.Agent.Effort do
     },
     max: %{
       thinking_budget: 32_000,
-      max_iterations: 100,
+      # Raised from 100 → 2000 so effort-driven autonomous callers (the
+      # "autonomous" preset uses :max) aren't capped mid-run. Explicit
+      # `:max_iterations` config still wins over this ceiling.
+      max_iterations: 2000,
       max_response_tokens: 32_768,
       tool_budget: 40,
       temperature: 0.8,

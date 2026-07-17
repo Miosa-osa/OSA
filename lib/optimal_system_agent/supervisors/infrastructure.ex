@@ -34,6 +34,12 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       OptimalSystemAgent.Events.Bus,
       OptimalSystemAgent.Events.DLQ,
 
+      # Bridge Bus :system_event → osa:session:<id> PubSub so Bus-only events
+      # (progress notes, steer, monitor fires, push) reach the TUI. Needs both
+      # PubSub and Bus above it; rest_for_one restarts it if Bus restarts (it
+      # re-registers its handler on init).
+      OptimalSystemAgent.Events.TuiForwarder,
+
       # Persistent storage
       OptimalSystemAgent.Store.Repo,
 

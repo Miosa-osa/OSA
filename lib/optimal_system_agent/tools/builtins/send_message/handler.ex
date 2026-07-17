@@ -38,6 +38,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
     target_id = resolve_target(to)
 
     if target_id do
+      # Keep the existing per-agent topic + ETS pending row (drained into the
+      # RECIPIENT agent's LLM context by react_loop) — other code depends on it.
       Phoenix.PubSub.broadcast(
         OptimalSystemAgent.PubSub,
         "osa:agent:#{target_id}",
@@ -51,6 +53,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
       )
 
       store_pending_message(target_id, sender_id, message)
+
+      # ALSO surface it to the human on the recipient's SESSION topic (the one
+      # the TUI streams). Shared contract: %{type: :agent_message, from, text}.
+      # Without this the message only ever reached the recipient's LLM context.
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{target_id}",
+        {:osa_event,
+         %{
+           type: :agent_message,
+           session_id: target_id,
+           from: pretty_name(sender_id),
+           text: message,
+           timestamp: DateTime.utc_now()
+         }}
+      )
 
       {:ok, "Message sent to #{to} (#{target_id})"}
     else
@@ -75,7 +93,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.SendMessage.Handler do
 
   # ── Private ───────────────────────────────────────────────────────────
 
+  # Render a compact @handle from a session id: "agent:parent:smoke-e2e" -> "smoke-e2e".
+  defp pretty_name(id) when is_binary(id) do
+    id |> String.split(":") |> List.last() |> to_string()
+  end
+
+  defp pretty_name(id), do: to_string(id)
+
   defp resolve_target(id_or_name) do
+    # Support "@name" addressing by stripping a leading @ before matching.
+    id_or_name = id_or_name |> to_string() |> String.trim_leading("@")
+
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, id_or_name) do
       [{_pid, _}] ->
         id_or_name

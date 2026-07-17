@@ -68,7 +68,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # ── Stage 3: Execute ──────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"command" => command} = params, _ctx) do
+  def execute(%{"command" => command} = params, ctx) do
     workspace = Path.expand("~/.osa/workspace")
     File.mkdir_p(workspace)
 
@@ -94,7 +94,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
       # validate/check_permissions security pipeline above. Background exec
       # uses the host path only — sandbox routing is not supported here.
       truthy?(params["run_in_background"]) ->
-        run_in_background(command, effective_cwd)
+        run_in_background(command, effective_cwd, ctx)
 
       true ->
         timeout = parse_timeout_ms(System.get_env("OSA_SHELL_TIMEOUT_MS"))
@@ -141,14 +141,41 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp truthy?("true"), do: true
   defp truthy?(_), do: false
 
-  defp run_in_background(command, cwd) do
-    case BackgroundManager.start(command, cwd) do
+  defp run_in_background(command, cwd, ctx) do
+    session_id = ctx && Map.get(ctx, :session_id)
+
+    # Ensure a notifier is listening for this parent session BEFORE the worker
+    # starts, so a fast command's completion broadcast is never missed (the
+    # topic subscription must be live before the worker can exit). This reuses
+    # the same re-entry mechanism the background-subagent path uses.
+    if is_binary(session_id) do
+      OptimalSystemAgent.Agent.BackgroundNotifier.ensure_started(session_id)
+    end
+
+    case BackgroundManager.start(command, cwd, session_id: session_id) do
       {:ok, id} ->
+        # Announce the new background terminal so the TUI's live count updates.
+        if is_binary(session_id) do
+          Phoenix.PubSub.broadcast(
+            OptimalSystemAgent.PubSub,
+            "osa:session:#{session_id}",
+            {:osa_event,
+             %{
+               type: :background_command_started,
+               background_id: id,
+               command: command,
+               session_id: session_id,
+               running_count: BackgroundManager.running_count()
+             }}
+          )
+        end
+
         {:ok,
          "Started background command.\n" <>
            "- background_id: #{id}\n" <>
            "- cwd: #{cwd}\n\n" <>
-           "The command is running in the background. Poll its output and status " <>
+           "The command is running in the background; you'll be notified automatically " <>
+           "when it completes (with its exit code). You can also poll its output and status " <>
            "with the bash_output tool using background_id \"#{id}\". " <>
            "To stop it, call bash_output with kill=true."}
 

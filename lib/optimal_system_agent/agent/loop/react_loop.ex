@@ -43,10 +43,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @cancel_table :osa_cancel_flags
 
   defp max_iterations do
-    configured =
-      Application.get_env(:optimal_system_agent, :max_iterations, Effort.max_iterations())
-
-    min(configured, Effort.max_iterations())
+    # Explicit config wins; otherwise fall back to the effort ceiling. Effort
+    # should RAISE the ceiling for effort-driven callers, never clamp an
+    # explicit `:max_iterations` config down (the old `min/2` made the 200
+    # config knob a no-op, silently capping autonomous runs at ~30 turns).
+    Application.get_env(:optimal_system_agent, :max_iterations) ||
+      Effort.max_iterations()
   end
 
   defp max_response_tokens do
@@ -55,11 +57,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # responses without truncation by default. Override via:
     #   config :optimal_system_agent, :max_response_tokens, <int>
     # if a provider's ceiling is tighter (e.g. some Ollama cloud models).
+    # Explicit config wins (same "config over effort clamp" fix as
+    # max_iterations); otherwise fall back to the effort ceiling.
     Process.get(:osa_bumped_max_tokens) ||
-      min(
-        Application.get_env(:optimal_system_agent, :max_response_tokens, 32_768),
-        Effort.max_response_tokens()
-      )
+      Application.get_env(:optimal_system_agent, :max_response_tokens) ||
+      Effort.max_response_tokens()
   end
 
   @doc """
@@ -597,7 +599,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     fresh_results =
       ToolOrchestrator.dispatch(need_execution, state,
         max_concurrency: 10,
-        timeout_ms: 60_000
+        # Raised from a hardcoded 60s to 300s (config `:tool_timeout_ms`) so a
+        # long build/test/install batched into the parallel path isn't killed
+        # before shell_execute's own 300s default gets to run.
+        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, 300_000)
       )
 
     # Collect streaming tool results (these may already be done). Pair by

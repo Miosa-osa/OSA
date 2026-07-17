@@ -156,12 +156,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def process_message(session_id, message, opts \\ []) do
     # The agent loop runs up to `max_turns` iterations with tool calls and
     # subagents, and is bounded logically by max_turns + max_budget_usd — not
-    # by wall-clock here. The previous 30s default capped every real task far
-    # below the loop's own limits and below the orchestrator's 10-minute
-    # Task.await ceiling, so multi-step work (e.g. codebase exploration) died
-    # with {:timeout}. Default to that same 10-minute ceiling; callers can
-    # still override via opts[:timeout].
-    timeout = Keyword.get(opts, :timeout, 600_000)
+    # by wall-clock here. The previous 30s (then 10-min) default capped every
+    # real task far below the loop's own limits, so multi-step work (e.g.
+    # codebase exploration) or an hours-long autonomous run died with
+    # {:timeout}. The turn is already bounded logically by max_iterations +
+    # max_budget_usd, so the wall-clock is redundant and fatal for long runs:
+    # default to `:infinity`. An explicit opts[:timeout] still wins, and the
+    # global default is tunable via `:agent_turn_timeout_ms`.
+    timeout =
+      Keyword.get(opts, :timeout) ||
+        Application.get_env(:optimal_system_agent, :agent_turn_timeout_ms, :infinity)
+
     GenServer.call(via(session_id), {:process, message, opts}, timeout)
   end
 
@@ -414,6 +419,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def init(opts) do
+    opts = apply_preset(opts)
     extra_tools = Keyword.get(opts, :extra_tools, [])
     session_id = Keyword.fetch!(opts, :session_id)
 
@@ -492,6 +498,32 @@ defmodule OptimalSystemAgent.Agent.Loop do
     })
 
     {:ok, state}
+  end
+
+  # "autonomous" preset (Change H) — one switch that makes an hours-long
+  # hands-off run possible. It ties together the lifted caps: full-auto past the
+  # non-bypassable circuit-breaker (:overdrive), max effort, and stall
+  # escalate-only (hard_halt? already treats :overdrive as escalate-only). The
+  # global caps (max_iterations 2000, doom_loop_max_calls 2000,
+  # agent_turn_timeout_ms :infinity, tool_timeout_ms 300s) are already the
+  # defaults; the OPTIONAL `max_budget_usd` an operator passes is the deliberate,
+  # controlled stop. Explicit opts always win over the preset.
+  @autonomous_preset [
+    permission_mode: :overdrive,
+    effort_level: :max
+  ]
+
+  defp apply_preset(opts) do
+    case Keyword.get(opts, :preset) do
+      preset when preset in [:autonomous, "autonomous"] ->
+        if Keyword.get(opts, :effort_level) == nil,
+          do: OptimalSystemAgent.Agent.Effort.set(:max)
+
+        Keyword.merge(@autonomous_preset, opts)
+
+      _ ->
+        opts
+    end
   end
 
   @impl true
@@ -764,6 +796,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
+    turn_started_ms = System.monotonic_time(:millisecond)
+
     {response, state} =
       try do
         ReactLoop.run(state)
@@ -839,6 +873,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
          session_id: state.session_id,
          response: response,
          response_type: "agent"
+       }}
+    )
+
+    # Persistent "✻ Worked for Xm Ys · N tools" recap line — committed to the
+    # transcript when the turn ends (what the TUI-side Activity timer otherwise
+    # drops). Shared contract: %{type: :turn_recap, elapsed_ms, tools_used}.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :turn_recap,
+         session_id: state.session_id,
+         elapsed_ms: System.monotonic_time(:millisecond) - turn_started_ms,
+         tools_used: Map.get(meta, :tools_used, [])
        }}
     )
 

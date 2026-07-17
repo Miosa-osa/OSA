@@ -85,6 +85,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
             }
           }
         },
+        "name" => %{
+          "type" => "string",
+          "description" =>
+            "Stable teammate handle shown in the UI, e.g. 'smoke-e2e'. Rendered as @name " <>
+              "and used for the agent's id, its completion line (⏺ Teammate @name finished · 2h33m), " <>
+              "and @name addressing. Omit for an auto-numbered agent."
+        },
         "role" => %{
           "type" => "string",
           "description" =>

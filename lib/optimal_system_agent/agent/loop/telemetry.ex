@@ -41,6 +41,12 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       {:osa_event,
        %{
          type: :context_pressure,
+         # `event` mirrors the system_event sub-event convention so the TUI's
+         # parse_system_event/1 (which keys on the `event` field) accepts this
+         # frame. Without it the Rust SSE parser drops the frame and the context
+         # meter stays at 0%. The SSE header stays "context_pressure" because
+         # `type` is not :system_event (see AgentRoutes.sse_loop/2).
+         event: :context_pressure,
          session_id: state.session_id,
          estimated_tokens: estimated,
          max_tokens: max_tok,

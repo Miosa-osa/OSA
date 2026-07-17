@@ -81,10 +81,17 @@ defmodule OptimalSystemAgent.Orchestrator do
           })
         end
 
-        # Spawn all tasks in this wave as async Tasks
+        # Spawn all tasks in this wave as async Tasks. Thread the stable
+        # batch_id (team_id) and wave number into each config so run_subagent
+        # can carry them onto lifecycle events — the TUI groups per-workstream
+        # by batch_id and per-wave.
         tasks =
           Enum.map(indexed_configs, fn {config, original_idx} ->
-            config = Map.put(config, :parent_session_id, parent_id)
+            config =
+              config
+              |> Map.put(:parent_session_id, parent_id)
+              |> Map.put(:batch_id, team_id)
+              |> Map.put(:wave, wave_num)
 
             {original_idx,
              Task.Supervisor.async_nolink(
@@ -93,12 +100,18 @@ defmodule OptimalSystemAgent.Orchestrator do
              )}
           end)
 
-        # Wait for all tasks in this wave (10 min timeout per task)
+        # Wait for all tasks in this wave. Timeout is configurable and defaults
+        # to `:infinity` so a long-running teammate (e.g. a 2h33m job via
+        # delegate `tasks:[]`) is NOT killed at 10 minutes. Callers that want a
+        # bound pass `await_timeout:`; the recommended path for unknown-horizon
+        # work is run_background/2 (unbounded, re-enters via BackgroundNotifier).
+        await_timeout = Keyword.get(opts, :await_timeout, :infinity)
+
         results =
           Enum.map(tasks, fn {original_idx, task} ->
             result =
               try do
-                Task.await(task, 600_000)
+                Task.await(task, await_timeout)
               catch
                 :exit, {:timeout, _} ->
                   # Reap the async task instead of orphaning it — the underlying
@@ -106,7 +119,7 @@ defmodule OptimalSystemAgent.Orchestrator do
                   # burning tokens. brutal_kill stops the leak. (We still return a
                   # placeholder so wave ordering is preserved.)
                   Task.shutdown(task, :brutal_kill)
-                  {:ok, "[Agent timed out after 10 minutes]"}
+                  {:ok, "[Agent timed out]"}
 
                 :exit, reason ->
                   Task.shutdown(task, :brutal_kill)
@@ -159,10 +172,18 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Generate subagent session ID, or honor a caller-provided ID for
     # background/lifecycle tooling that returns the id before execution starts.
+    # An explicit `name` ("@smoke-e2e") yields a stable, human-readable id.
     subagent_id =
       Map.get(config, :agent_id) ||
         Map.get(config, :subagent_id) ||
+        (config[:name] && "agent:#{parent_id}:#{sanitize_name(config[:name])}") ||
         "agent:#{parent_id}:#{next_subagent_number(parent_id)}"
+
+    # Display handle shown in the UI as @name. Falls back to the role.
+    display_name = config[:name] || role
+
+    batch_id = Map.get(config, :batch_id)
+    wave = Map.get(config, :wave)
 
     task_preview = String.slice(task, 0, 80)
 
@@ -195,11 +216,15 @@ defmodule OptimalSystemAgent.Orchestrator do
       :exit, _ -> :ok
     end
 
-    # Emit: agent started
+    # Emit: agent started. Carry display_name + batch_id/wave so the TUI can
+    # label the teammate as @name and group fan-out agents per workstream/wave.
     emit_event(parent_id, %{
       event: "orchestrator_agent_started",
       agent_name: subagent_id,
+      display_name: display_name,
       role: role,
+      batch_id: batch_id,
+      wave: wave,
       model: to_string(model),
       description: task_preview
     })
@@ -299,7 +324,11 @@ defmodule OptimalSystemAgent.Orchestrator do
          ) do
       {:ok, pid} ->
         # Execute the task (blocking call)
-        result = execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info)
+        result =
+          execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
+            display_name: display_name,
+            batch_id: batch_id
+          )
 
         # Fire subagent_stop hook (learning capture, telemetry)
         {tool_uses_final, tokens_final} = get_subagent_stats(subagent_id)
@@ -383,18 +412,22 @@ defmodule OptimalSystemAgent.Orchestrator do
   def run_background(parent_id, config) do
     config = Map.put(config, :parent_session_id, parent_id)
     role = Map.get(config, :role, "background")
+    display_name = config[:name] || role
 
     # Ensure a notifier is listening for this parent so the completed/failed
     # result is injected back into the parent Loop's history (delegate-and-continue).
     BackgroundNotifier.ensure_started(parent_id)
 
-    # Generate the ID upfront so we can return it immediately
-    subagent_num = next_subagent_number(parent_id)
-    subagent_id = "agent:#{parent_id}:#{subagent_num}"
+    # Generate the ID upfront so we can return it immediately. A caller-supplied
+    # `name` yields a stable @handle id.
+    subagent_id =
+      (config[:name] && "agent:#{parent_id}:#{sanitize_name(config[:name])}") ||
+        "agent:#{parent_id}:#{next_subagent_number(parent_id)}"
 
     emit_event(parent_id, %{
       event: "background_agent_started",
       agent_id: subagent_id,
+      display_name: display_name,
       role: role
     })
 
@@ -455,6 +488,7 @@ defmodule OptimalSystemAgent.Orchestrator do
             event: :background_agent_completed,
             session_id: parent_id,
             agent_id: subagent_id,
+            display_name: display_name,
             role: role,
             result: String.slice(response, 0, 500),
             duration_ms: duration_ms
@@ -467,17 +501,21 @@ defmodule OptimalSystemAgent.Orchestrator do
              %{
                type: :background_agent_completed,
                agent_id: subagent_id,
+               display_name: display_name,
                role: role,
                result: String.slice(response, 0, 500),
                duration_ms: duration_ms
              }}
           )
 
+          emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :completed)
+
         {:error, reason} ->
           Bus.emit(:system_event, %{
             event: :background_agent_failed,
             session_id: parent_id,
             agent_id: subagent_id,
+            display_name: display_name,
             role: role,
             error: inspect(reason),
             duration_ms: duration_ms
@@ -490,11 +528,14 @@ defmodule OptimalSystemAgent.Orchestrator do
              %{
                type: :background_agent_failed,
                agent_id: subagent_id,
+               display_name: display_name,
                role: role,
                error: inspect(reason),
                duration_ms: duration_ms
              }}
           )
+
+          emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, nil, :failed)
       end
     end)
 
@@ -505,7 +546,9 @@ defmodule OptimalSystemAgent.Orchestrator do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp execute_and_collect(subagent_id, task, parent_id, role, _max_iter, worktree_info) do
+  defp execute_and_collect(subagent_id, task, parent_id, role, _max_iter, worktree_info, opts \\ []) do
+    display_name = Keyword.get(opts, :display_name) || role
+    batch_id = Keyword.get(opts, :batch_id)
     start_time = System.monotonic_time(:millisecond)
 
     result =
@@ -557,11 +600,16 @@ defmodule OptimalSystemAgent.Orchestrator do
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
+          display_name: display_name,
           status: "completed",
           tool_uses: tool_uses,
           tokens_used: tokens_used,
+          duration_ms: duration_ms,
+          batch_id: batch_id,
           result: structured
         })
+
+        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :completed)
 
         {:ok, ResultSummarizer.summarize(structured, child_messages)}
 
@@ -580,11 +628,16 @@ defmodule OptimalSystemAgent.Orchestrator do
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
+          display_name: display_name,
           status: "failed",
           error: to_string(reason),
           tool_uses: tool_uses,
-          tokens_used: tokens_used
+          tokens_used: tokens_used,
+          duration_ms: duration_ms,
+          batch_id: batch_id
         })
+
+        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :failed)
 
         {:error, reason}
 
@@ -610,13 +663,33 @@ defmodule OptimalSystemAgent.Orchestrator do
         emit_event(parent_id, %{
           event: "orchestrator_agent_completed",
           agent_name: subagent_id,
+          display_name: display_name,
           status: "completed",
           tool_uses: tool_uses,
-          tokens_used: tokens_used
+          tokens_used: tokens_used,
+          duration_ms: duration_ms,
+          batch_id: batch_id
         })
+
+        emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :completed)
 
         {:ok, ResultSummarizer.summarize(structured, child_messages)}
     end
+  end
+
+  # Shared-contract "teammate finished" event on the session topic. The TUI
+  # renders `⏺ Teammate @<display_name> finished · <duration>`. Distinct from
+  # the panel-oriented orchestrator_agent_completed: this carries exactly the
+  # fields the chat-line parser needs.
+  defp emit_agent_finished(parent_id, agent_id, display_name, duration_ms, batch_id, status) do
+    emit_event(parent_id, %{
+      event: "agent_finished",
+      agent_id: agent_id,
+      display_name: display_name,
+      duration_ms: duration_ms,
+      batch_id: batch_id,
+      status: to_string(status)
+    })
   end
 
   # Read the subagent's message history for result shaping. Best-effort — the
@@ -777,8 +850,13 @@ defmodule OptimalSystemAgent.Orchestrator do
       _ ->
         forwarder_loop(subagent_id, parent_id, role, tool_count)
     after
-      # Stop forwarding after 5 minutes (safety net)
-      300_000 -> :ok
+      # Idle safety net: stop forwarding after this many ms of SILENCE (no
+      # events). The timer resets on every received event (the receive is
+      # re-entered on each recursion), so a teammate that keeps streaming
+      # progress stays alive indefinitely — a long-running (2h+) teammate no
+      # longer loses its progress feed at 5 min. run_subagent also explicitly
+      # stops the forwarder on completion, so this is purely a leak guard.
+      Application.get_env(:optimal_system_agent, :forwarder_idle_timeout_ms, 1_800_000) -> :ok
     end
   end
 
@@ -850,5 +928,16 @@ defmodule OptimalSystemAgent.Orchestrator do
   defp next_subagent_number(_parent_id) do
     # Node-unique monotonic integer — no ETS ownership issues, no race conditions.
     System.unique_integer([:positive, :monotonic])
+  end
+
+  # Sanitize a caller-supplied teammate name into a filesystem/id-safe slug.
+  # "@smoke-e2e" / "Smoke E2E" -> "smoke-e2e" / "smoke_e2e".
+  defp sanitize_name(name) do
+    name
+    |> to_string()
+    |> String.trim_leading("@")
+    |> String.downcase()
+    |> then(&Regex.replace(~r/[^a-z0-9_\-]+/, &1, "_"))
+    |> String.slice(0, 48)
   end
 end

@@ -53,6 +53,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler do
     team_id = team_id(args, ctx)
     from = agent_id(args, ctx)
     Team.send_message(team_id, from, to, message)
+    # Best-effort: surface it to the human on the recipient's SESSION topic
+    # (shared contract %{type: :agent_message, from, text}) if the target maps to
+    # a running session. Team mailbox delivery is unchanged.
+    surface_agent_message(to, from, message)
     {:ok, "Message sent to #{to}."}
   end
 
@@ -87,6 +91,44 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  defp surface_agent_message(to, from, message) do
+    target = to |> to_string() |> String.trim_leading("@")
+
+    resolved =
+      case Registry.lookup(OptimalSystemAgent.SessionRegistry, target) do
+        [{_pid, _}] ->
+          target
+
+        [] ->
+          try do
+            OptimalSystemAgent.SessionRegistry
+            |> Registry.select([{{:"$1", :"$2", :"$3"}, [], [:"$1"]}])
+            |> Enum.find(&String.contains?(&1, target))
+          rescue
+            _ -> nil
+          end
+      end
+
+    if resolved do
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{resolved}",
+        {:osa_event,
+         %{
+           type: :agent_message,
+           session_id: resolved,
+           from: from |> to_string() |> String.split(":") |> List.last(),
+           text: message,
+           timestamp: DateTime.utc_now()
+         }}
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp team_id(args, _ctx), do: Map.get(args, "team_id", "default")
 

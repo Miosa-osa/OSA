@@ -7,11 +7,12 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Stall
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature
 
-  @max_total_tool_calls Application.compile_env(
-                          :optimal_system_agent,
-                          :doom_loop_max_calls,
-                          100
-                        )
+  # Runtime-tunable (not compile_env) so the absolute tool-call cap can be
+  # raised for an hours-long autonomous run without recompiling. Default raised
+  # to 2000 — a genuine backstop just above realistic multi-hour volume, not a
+  # premature stop at 100.
+  defp max_total_tool_calls,
+    do: Application.get_env(:optimal_system_agent, :doom_loop_max_calls, 2000)
 
   @warn_threshold_pct 0.80
 
@@ -61,14 +62,19 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   def check(results, tool_calls, state) do
     # At most one graded directive is injected per invocation; reset the
     # per-tick guard so multiple approaching signals don't stack directives.
-    state = %{state | escalated_this_tick: false}
+    # Defensive: the delegate/orchestrate path builds a loop state that may omit
+    # the doom-loop counters, so use Map.put (not %{state | ...}, which raises
+    # KeyError when the key is absent). Mirrors the Map.get/Map.put style the
+    # sub-detectors (stall/identical_call/escalation) already use.
+    state = Map.put(state, :escalated_this_tick, false)
 
     # --- Absolute call counter (secondary safety net) ---
     call_count = length(tool_calls)
     new_total = Map.get(state, :total_tool_calls, 0) + call_count
-    state = %{state | total_tool_calls: new_total}
+    state = Map.put(state, :total_tool_calls, new_total)
 
-    warn_at = trunc(@max_total_tool_calls * @warn_threshold_pct)
+    max_calls = max_total_tool_calls()
+    warn_at = trunc(max_calls * @warn_threshold_pct)
 
     # --- Identical-call detection ---
     # Catches the model spamming the same tool+args back-to-back even when the
@@ -79,12 +85,12 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
          # No newly-distinct tool and no file write/edit over the last N calls.
          {:ok, state} <- Stall.check(tool_calls, state) do
       cond do
-        new_total >= @max_total_tool_calls ->
-          handle_call_cap_exceeded(new_total, state)
+        new_total >= max_calls ->
+          handle_call_cap_exceeded(new_total, max_calls, state)
 
         new_total >= warn_at and new_total - call_count < warn_at ->
           Logger.warning(
-            "[doom] Approaching tool call limit (#{new_total}/#{@max_total_tool_calls}) " <>
+            "[doom] Approaching tool call limit (#{new_total}/#{max_calls}) " <>
               "(session: #{state.session_id})"
           )
 
@@ -100,10 +106,10 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
   # --- Private ---
 
-  defp handle_call_cap_exceeded(total, state) do
+  defp handle_call_cap_exceeded(total, max_calls, state) do
     cap_message =
       """
-      I've reached the session tool call limit (#{total}/#{@max_total_tool_calls}) and am stopping to avoid runaway execution.
+      I've reached the session tool call limit (#{total}/#{max_calls}) and am stopping to avoid runaway execution.
 
       This limit exists as a safety net independent of error-pattern detection.
 
@@ -114,14 +120,14 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
       |> String.trim()
 
     Logger.warning(
-      "[loop] Tool call cap exceeded: #{total}/#{@max_total_tool_calls} (session: #{state.session_id})"
+      "[loop] Tool call cap exceeded: #{total}/#{max_calls} (session: #{state.session_id})"
     )
 
     Bus.emit(:system_event, %{
       event: :tool_call_cap_exceeded,
       session_id: state.session_id,
       total_tool_calls: total,
-      max_tool_calls: @max_total_tool_calls
+      max_tool_calls: max_calls
     })
 
     Phoenix.PubSub.broadcast(
@@ -132,7 +138,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
          type: :tool_call_cap_exceeded,
          session_id: state.session_id,
          total_tool_calls: total,
-         max_tool_calls: @max_total_tool_calls
+         max_tool_calls: max_calls
        }}
     )
 

@@ -121,7 +121,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   # Build a subagent config from tool args, an explicit child task string, and
   # a resolved role. Shared by the single-task and fan-out paths so tier floor,
   # agent-definition lookup, isolation, and depth propagation stay identical.
-  defp build_config(child_task, role, args, parent_id, parent_depth) do
+  defp build_config(child_task, role, args, parent_id, parent_depth, name \\ nil) do
     tier_str = Map.get(args, "tier")
     agent_def = if role, do: AgentRegistry.get(role), else: nil
 
@@ -146,6 +146,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       task: child_task,
       parent_session_id: parent_id,
       role: role || "agent",
+      # Stable UI handle → @name id + "Teammate @name finished" line. Per-task
+      # name (fan-out) wins over a top-level "name" arg.
+      name: name || Map.get(args, "name"),
       tier: tier,
       model: Map.get(args, "model") || (agent_def && agent_def[:model]),
       provider: Map.get(args, "provider") || (agent_def && agent_def[:provider]),
@@ -191,13 +194,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     tasks
     |> Enum.map(fn
       %{"prompt" => p} = t when is_binary(p) ->
-        %{prompt: p, subagent_type: t["subagent_type"] || t["role"]}
+        %{prompt: p, subagent_type: t["subagent_type"] || t["role"], name: t["name"]}
 
       %{"task" => p} = t when is_binary(p) ->
-        %{prompt: p, subagent_type: t["subagent_type"] || t["role"]}
+        %{prompt: p, subagent_type: t["subagent_type"] || t["role"], name: t["name"]}
 
       p when is_binary(p) ->
-        %{prompt: p, subagent_type: nil}
+        %{prompt: p, subagent_type: nil, name: nil}
 
       _ ->
         nil
@@ -216,12 +219,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     batch_id = "batch:#{parent_id}:#{System.unique_integer([:positive])}"
 
     configs =
-      Enum.map(tasks, fn %{prompt: prompt, subagent_type: st} ->
+      Enum.map(tasks, fn %{prompt: prompt, subagent_type: st} = t ->
         role = st || Map.get(args, "role") || Map.get(args, "subagent_type")
-        build_config(prompt, role, args, parent_id, parent_depth)
+        build_config(prompt, role, args, parent_id, parent_depth, Map.get(t, :name))
       end)
 
-    results = Orchestrator.run_parallel(parent_id, configs, batch_id: batch_id)
+    # await_timeout defaults to :infinity in run_parallel so long teammates
+    # aren't killed at 10 min; an optional timeout_ms arg bounds it.
+    parallel_opts =
+      [batch_id: batch_id] ++
+        case parse_timeout_ms(Map.get(args, "timeout_ms")) do
+          nil -> []
+          ms -> [await_timeout: ms]
+        end
+
+    results = Orchestrator.run_parallel(parent_id, configs, parallel_opts)
 
     {:ok, format_fanout(umbrella_task, tasks, results)}
   end
@@ -275,6 +287,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   defp resolve_parent_id(_args, %UseContext{session_id: sid}) when is_binary(sid), do: sid
   defp resolve_parent_id(args, _ctx), do: Map.get(args, "__session_id__", "unknown")
+
+  defp parse_timeout_ms(nil), do: nil
+  defp parse_timeout_ms(ms) when is_integer(ms) and ms > 0, do: ms
+
+  defp parse_timeout_ms(ms) when is_binary(ms) do
+    case Integer.parse(ms) do
+      {n, _} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp parse_timeout_ms(_), do: nil
 
   defp parse_tier("elite"), do: :elite
   defp parse_tier("specialist"), do: :specialist
