@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Handler do
   the command is fast (<100ms) and not interruptible in a meaningful way.
   """
 
+  alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Tools.Builtins.PushNotification.Constants
   alias OptimalSystemAgent.Tools.UseContext
   require Logger
@@ -59,14 +60,40 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Handler do
 
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"title" => title, "body" => body} = input, _ctx) do
+  def execute(%{"title" => title, "body" => body} = input, ctx) do
     urgency = Map.get(input, "urgency", Constants.default_urgency())
 
-    case platform() do
-      :macos -> send_macos(title, body)
-      :linux -> send_linux(title, body, urgency)
-      :other -> send_fallback(title, body, urgency)
+    result =
+      case platform() do
+        :macos -> send_macos(title, body)
+        :linux -> send_linux(title, body, urgency)
+        :other -> send_fallback(title, body, urgency)
+      end
+
+    # Surface the notification in the TUI as well (in addition to the OS-level
+    # notifier). The TuiForwarder allowlists `push_notification` and bridges this
+    # Bus :system_event onto the session topic the TUI streams.
+    maybe_emit_event(ctx, title, body, urgency)
+
+    result
+  end
+
+  defp maybe_emit_event(ctx, title, body, urgency) do
+    session_id = ctx && Map.get(ctx, :session_id)
+
+    if is_binary(session_id) do
+      Bus.emit(:system_event, %{
+        event: :push_notification,
+        session_id: session_id,
+        title: title,
+        body: body,
+        urgency: urgency
+      })
     end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ── Platform detection ─────────────────────────────────────────────────

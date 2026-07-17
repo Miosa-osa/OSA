@@ -179,8 +179,22 @@ defmodule OptimalSystemAgent.Teams.Manager do
   @doc """
   Spawn an agent within a team.
 
-  Starts an `OptimalSystemAgent.Agent.Loop` under the SessionSupervisor,
-  registers it in the team's ETS agents table.
+  When a `:task` (non-empty string) and a `:parent_session_id` are supplied,
+  this dispatches a real `OptimalSystemAgent.Agent.Loop` via the proven
+  `Orchestrator.run_background/2` path — the child runs asynchronously, streams
+  lifecycle events (`background_agent_started/completed`, `agent_finished`) to the
+  parent session, and re-enters the parent Loop on completion. The team member
+  is also announced to the parent session as an `agent_message` so it surfaces in
+  the TUI. Without a task/parent, only a roster record is registered (data-only).
+
+  Registers the agent (real id from the dispatched run, or a generated one) in the
+  team's ETS agents table.
+
+  Options:
+    - `:task`              — task description; when present the member is dispatched
+    - `:parent_session_id` — session that receives the member's lifecycle events
+    - `:task_id`           — shared task-board id this member is working
+    - `:tier` / `:provider` / `:model` — model resolution overrides
 
   Returns `{:ok, agent_state}` or `{:error, reason}`.
   """
@@ -188,7 +202,6 @@ defmodule OptimalSystemAgent.Teams.Manager do
           {:ok, AgentState.t()} | {:error, term()}
   def spawn_agent(team_id, name, role, opts \\ []) do
     with {:ok, _meta} <- fetch_meta(team_id) do
-      agent_id = "agent:#{team_id}:#{System.unique_integer([:positive, :monotonic])}"
       tier = Keyword.get(opts, :tier, :specialist)
 
       provider =
@@ -199,12 +212,72 @@ defmodule OptimalSystemAgent.Teams.Manager do
         Keyword.get(opts, :model) ||
           OptimalSystemAgent.Agent.Tier.model_for(tier, provider)
 
-      agent_state = AgentState.new(agent_id, name, role, model)
-      AgentState.put(team_id, agent_state)
+      task = Keyword.get(opts, :task)
+      parent = Keyword.get(opts, :parent_session_id)
 
-      Logger.info("[Manager:#{team_id}] Spawned agent #{agent_id} (#{role}/#{model})")
-      {:ok, agent_state}
+      if is_binary(task) and String.trim(task) != "" and is_binary(parent) do
+        dispatch_agent(team_id, name, role, model, tier, provider, task, parent, opts)
+      else
+        register_agent_record(team_id, name, role, model, opts)
+      end
     end
+  end
+
+  # Start a real subagent Loop in the background and record it against the team.
+  defp dispatch_agent(team_id, name, role, model, tier, provider, task, parent, opts) do
+    config = %{
+      role: role,
+      name: name,
+      tier: tier,
+      provider: provider,
+      model: model,
+      task: task,
+      batch_id: "team:#{team_id}"
+    }
+
+    {:ok, agent_id} = OptimalSystemAgent.Orchestrator.run_background(parent, config)
+
+    agent_state = %{
+      AgentState.new(agent_id, name, role, model)
+      | status: :working,
+        task_id: Keyword.get(opts, :task_id)
+    }
+
+    AgentState.put(team_id, agent_state)
+
+    # Announce the member on the parent session topic so the human sees the team
+    # forming (shared :agent_message contract, same as send_message).
+    announce_member(parent, role, task)
+
+    Logger.info("[Manager:#{team_id}] Dispatched agent #{agent_id} (#{role}/#{model})")
+    {:ok, agent_state}
+  end
+
+  # Register a roster record only (no live Loop) — legacy data-only behaviour.
+  defp register_agent_record(team_id, name, role, model, _opts) do
+    agent_id = "agent:#{team_id}:#{System.unique_integer([:positive, :monotonic])}"
+    agent_state = AgentState.new(agent_id, name, role, model)
+    AgentState.put(team_id, agent_state)
+
+    Logger.info("[Manager:#{team_id}] Registered agent #{agent_id} (#{role}/#{model})")
+    {:ok, agent_state}
+  end
+
+  defp announce_member(parent, role, task) do
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent}",
+      {:osa_event,
+       %{
+         type: :agent_message,
+         session_id: parent,
+         from: role,
+         text: "Team member @#{role} dispatched: #{String.slice(task, 0, 120)}",
+         timestamp: DateTime.utc_now()
+       }}
+    )
+  rescue
+    _ -> :ok
   end
 
   @doc "List all agents in a team."

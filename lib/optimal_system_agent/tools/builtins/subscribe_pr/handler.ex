@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Handler do
   alias OptimalSystemAgent.Tools.Builtins.SubscribePr.Constants
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Agent.Scheduler
+  alias OptimalSystemAgent.Events.Bus
   require Logger
 
   @spec validate(map(), UseContext.t()) ::
@@ -75,7 +76,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Handler do
 
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"pr_url" => url} = input, _ctx) do
+  def execute(%{"pr_url" => url} = input, ctx) do
     events = Map.get(input, "events", Constants.default_events())
 
     interval_min =
@@ -105,6 +106,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Handler do
 
     case register_job(job) do
       {:ok, _registered} ->
+        # Surface the registration in the TUI. The TuiForwarder allowlists
+        # `subscribe_pr_registered` and bridges this Bus :system_event onto the
+        # session topic the TUI streams.
+        maybe_emit_registered(ctx, url, events, job_id, interval_min)
+
         {:ok,
          "PR subscription registered (job_id=#{job_id}): " <>
            "watching #{url} for #{Enum.join(events, ", ")} " <>
@@ -113,6 +119,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.SubscribePr.Handler do
       {:error, reason} ->
         {:error, "Failed to register PR subscription: #{inspect(reason)}"}
     end
+  end
+
+  defp maybe_emit_registered(ctx, url, events, job_id, interval_min) do
+    session_id = ctx && Map.get(ctx, :session_id)
+
+    if is_binary(session_id) do
+      Bus.emit(:system_event, %{
+        event: :subscribe_pr_registered,
+        session_id: session_id,
+        pr_url: url,
+        events: events,
+        job_id: job_id,
+        poll_interval_minutes: interval_min
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────

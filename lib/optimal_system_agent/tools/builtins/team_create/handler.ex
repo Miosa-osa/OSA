@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Handler do
   """
 
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
+  alias OptimalSystemAgent.Team
   alias OptimalSystemAgent.Teams.Manager
   alias OptimalSystemAgent.Tools.Builtins.TeamCreate.Constants
   alias OptimalSystemAgent.Tools.UseContext
@@ -66,7 +67,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Handler do
   # ── Stage 3: Execute ──────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(input, _ctx) do
+  def execute(input, ctx) do
     name = Map.fetch!(input, "name")
     members = Map.fetch!(input, "members")
     goal = Map.get(input, "goal")
@@ -87,13 +88,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Handler do
     case result do
       {:ok, meta} ->
         team_id = meta.team_id
-        spawn_members(team_id, members)
+        parent_session = ctx && Map.get(ctx, :session_id)
+        # Dispatch live members only when there is a concrete goal AND a parent
+        # session to route their lifecycle/message events to; otherwise register
+        # a data-only roster. Either way the shared task board is populated.
+        dispatch? = is_binary(goal) and String.trim(goal) != "" and is_binary(parent_session)
+        spawn_members(team_id, members, goal, parent_session, dispatch?)
 
         goal_note = if goal, do: " Goal: #{goal}.", else: ""
+        dispatch_note = if dispatch?, do: " Dispatched #{length(members)} member(s).", else: ""
         member_list = Enum.join(members, ", ")
 
         {:ok,
-         "Team created. team_id=#{team_id} name=#{name} members=[#{member_list}]#{goal_note}"}
+         "Team created. team_id=#{team_id} name=#{name} members=[#{member_list}]#{goal_note}#{dispatch_note}"}
 
       {:error, :team_not_found} ->
         {:error, "Parent team not found: #{parent_id}"}
@@ -174,10 +181,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Handler do
     end
   end
 
-  defp spawn_members(team_id, members) do
+  # Seed the shared task board (one task per member) and spawn each member.
+  # `Team.create_task/2` is called here so the board `team_tasks` reads is really
+  # populated; when dispatching, the member claims its task.
+  defp spawn_members(team_id, members, goal, parent_session, dispatch?) do
     Enum.each(members, fn role ->
-      # Use the role name as the agent display name; tier defaults to :specialist
-      Manager.spawn_agent(team_id, role, role)
+      description =
+        if dispatch?, do: "As #{role}: #{goal}", else: "#{role} — awaiting assignment"
+
+      task = Team.create_task(team_id, %{description: description, role: role})
+
+      # Only pass a :task (which triggers a live Loop) when dispatching.
+      dispatch_task = if dispatch?, do: description, else: nil
+
+      case Manager.spawn_agent(team_id, role, role,
+             parent_session_id: parent_session,
+             task: dispatch_task,
+             task_id: task.id
+           ) do
+        {:ok, %{agent_id: agent_id}} when dispatch? ->
+          Team.claim_task(team_id, task.id, agent_id)
+
+        _ ->
+          :ok
+      end
     end)
   end
 
