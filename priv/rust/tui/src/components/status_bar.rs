@@ -156,6 +156,11 @@ pub struct StatusBar {
     cwd_basename: String,
     /// "goal N/max" indicator when a /goal auto-continue loop is active.
     goal_label: Option<String>,
+    /// Reasoning effort ("low"|"medium"|"high"|"max") from `/health.effort`.
+    /// None ⇒ backend didn't report it ⇒ the chip is omitted.
+    effort: Option<String>,
+    /// Billing snapshot from `/health.billing`. None ⇒ omit the spend chip.
+    billing: Option<crate::client::types::HealthBilling>,
 }
 
 impl StatusBar {
@@ -190,7 +195,20 @@ impl StatusBar {
             shell_count: 0,
             cwd_basename,
             goal_label: None,
+            effort: None,
+            billing: None,
         }
+    }
+
+    /// Set (or clear with None) the reasoning-effort chip.
+    pub fn set_effort(&mut self, effort: Option<String>) {
+        // Normalize away blanks so an empty string never renders "effort:".
+        self.effort = effort.filter(|s| !s.trim().is_empty());
+    }
+
+    /// Set (or clear with None) the billing spend/limit chip.
+    pub fn set_billing(&mut self, billing: Option<crate::client::types::HealthBilling>) {
+        self.billing = billing;
     }
 
     /// Set (or clear with None) the active-goal indicator, e.g. "goal 3/25".
@@ -301,6 +319,28 @@ impl StatusBar {
         } else {
             n.to_string()
         }
+    }
+
+    /// Compact USD rendering: `$10` for whole amounts, `$0.42` otherwise. Keeps
+    /// the billing chip terse so it survives on narrow panes.
+    fn format_usd(amount: f64) -> String {
+        if (amount.fract()).abs() < 0.005 {
+            format!("${}", amount.round() as i64)
+        } else {
+            format!("${:.2}", amount)
+        }
+    }
+
+    /// Build the billing chip text, e.g. `$0.42/$10 today` (or `$0.42 today`
+    /// when there's no daily cap). Returns None when there's no billing data.
+    fn billing_label(&self) -> Option<String> {
+        let b = self.billing.as_ref()?;
+        let spent = Self::format_usd(b.daily_spent_usd);
+        let label = match b.daily_limit_usd {
+            Some(limit) => format!("{}/{} today", spent, Self::format_usd(limit)),
+            None => format!("{} today", spent),
+        };
+        Some(label)
     }
 
     /// Push signal mode pill + genre label into a span list.
@@ -503,6 +543,44 @@ impl Component for StatusBar {
                 format!("\u{25CE} {}", goal_label),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
+        }
+
+        // Reasoning-effort chip (`effort:medium`). Faint for low/medium; the
+        // heavier high/max tiers get the accent color so a costly setting is
+        // visible at a glance. Omitted entirely when the backend didn't report.
+        if let Some(ref effort) = self.effort {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            let heavy = matches!(effort.as_str(), "high" | "max");
+            let style = if heavy {
+                Style::default()
+                    .fg(theme.colors.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme.faint()
+            };
+            spans.push(Span::styled(format!("effort:{}", effort), style));
+        }
+
+        // Billing chip (`$0.42/$10 today`). Omitted when billing is absent.
+        if let Some(billing_label) = self.billing_label() {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(billing_label, theme.progress_label()));
+
+            // Subscription/plan tier — only when non-null (always null today,
+            // so effectively skipped, but wired for the day a plan exists).
+            if let Some(plan) = self
+                .billing
+                .as_ref()
+                .and_then(|b| b.subscription.as_ref())
+                .filter(|p| !p.trim().is_empty())
+            {
+                spans.push(Span::styled(
+                    format!(" {}", plan),
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
         }
 
         // Persistent OSA version chip (single build-time source — never stale).

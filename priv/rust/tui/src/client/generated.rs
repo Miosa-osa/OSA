@@ -25,6 +25,33 @@ pub struct HealthResponse {
     pub model: String,
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Current reasoning effort: "low" | "medium" | "high" | "max".
+    /// `Option` + `default` keep older backends (which omit it) decodable.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Spend/limit snapshot from the backend Budget. `null` when Budget is
+    /// unavailable; individual limits are `null` when uncapped.
+    #[serde(default)]
+    pub billing: Option<HealthBilling>,
+}
+
+/// Billing projection carried on `GET /health` (see tui-statusline-spec).
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthBilling {
+    #[serde(default)]
+    pub daily_spent_usd: f64,
+    #[serde(default)]
+    pub daily_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub monthly_spent_usd: f64,
+    #[serde(default)]
+    pub monthly_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub currency: String,
+    /// Subscription/plan tier. Always `null` today (OSA has no plan concept),
+    /// but wired so a chip appears if a plan is ever set.
+    #[serde(default)]
+    pub subscription: Option<String>,
 }
 
 // === Orchestrate — POST /api/v1/orchestrate ===

@@ -40,6 +40,12 @@ impl App {
                 if let Some(ctx) = health.context_window {
                     self.status.set_context(0.0, 0, ctx);
                 }
+
+                // Claude-Code-style status-line extras: reasoning effort +
+                // spend/limits. Both are Option — a field the backend didn't
+                // send simply leaves its chip off (no "effort:" / "$" shown).
+                self.status.set_effort(health.effort.clone());
+                self.status.set_billing(health.billing.clone());
                 // Skip banner — go straight to Idle (no jarring screen switch)
                 if self.state == AppState::Connecting {
                     self.transition(AppState::Idle);
