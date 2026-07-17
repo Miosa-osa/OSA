@@ -51,7 +51,6 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 │   ├── OptimalSystemAgent.Agent.Scheduler
 │   ├── OptimalSystemAgent.Agent.Compactor
 │   ├── OptimalSystemAgent.Agent.Cortex
-│   ├── OptimalSystemAgent.Agent.ProactiveMode
 │   └── OptimalSystemAgent.Webhooks.Dispatcher
 ├── OptimalSystemAgent.Supervisors.Extensions  (one_for_one, conditionally populated)
 ├── OptimalSystemAgent.Channels.Starter

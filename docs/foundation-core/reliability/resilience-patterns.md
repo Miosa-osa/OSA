@@ -116,7 +116,6 @@ Memory, Budget, or Hooks. Each service restarts in isolation.
 | `Agent.Scheduler` | GenServer | Cron-style task scheduling |
 | `Agent.Compactor` | GenServer | Context window compaction |
 | `Agent.Cortex` | GenServer | Cross-session synthesis |
-| `Agent.ProactiveMode` | GenServer | Autonomous outreach |
 | `Webhooks.Dispatcher` | GenServer | Outbound webhook delivery |
 
 ### Extensions Supervisor: `one_for_one`

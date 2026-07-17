@@ -96,7 +96,6 @@ graph TD
         A12["Agent.Scheduler [GS]"]
         A13["Agent.Compactor [GS]"]
         A14["Agent.Cortex [GS]"]
-        A15["Agent.ProactiveMode [GS]"]
         A16["Webhooks.Dispatcher [GS]"]
     end
 
@@ -114,7 +113,6 @@ graph TD
     AgentSvc --> A12
     AgentSvc --> A13
     AgentSvc --> A14
-    AgentSvc --> A15
     AgentSvc --> A16
 
     subgraph ExtChildren["Extensions Children (one_for_one)"]

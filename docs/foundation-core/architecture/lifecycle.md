@@ -129,8 +129,7 @@ All 15 agent service GenServers start in order:
 12. `Agent.Scheduler` — loads scheduled tasks from SQLite, starts timer
 13. `Agent.Compactor` — initializes compaction state
 14. `Agent.Cortex` — initializes multi-provider synthesis state
-15. `Agent.ProactiveMode` — loads proactive trigger configuration
-16. `Webhooks.Dispatcher` — loads configured webhook endpoints
+15. `Webhooks.Dispatcher` — loads configured webhook endpoints
 
 ---
 

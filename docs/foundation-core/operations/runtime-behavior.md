@@ -90,7 +90,6 @@ Supervisors.AgentServices  (one_for_one)
 ├── Agent.Scheduler
 ├── Agent.Compactor
 ├── Agent.Cortex
-├── Agent.ProactiveMode
 └── Webhooks.Dispatcher
 ```
 

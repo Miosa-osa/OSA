@@ -96,7 +96,7 @@ sequenceDiagram
         AgentSvc->>AgentSvc: start Agent.Memory.KnowledgeBridge
         AgentSvc->>AgentSvc: start Vault.Supervisor
         AgentSvc->>AgentSvc: start Agent.Scheduler, Compactor, Cortex
-        AgentSvc->>AgentSvc: start Agent.ProactiveMode, Webhooks.Dispatcher
+        AgentSvc->>AgentSvc: start Webhooks.Dispatcher
         AgentSvc-->>App: {:ok, pid}
 
         App->>Ext: start Supervisors.Extensions (one_for_one)

@@ -462,7 +462,7 @@ TOCTOU race with `gr_param`'s internal ETS tables).
 | `channel_error` | Channel adapters | Telemetry.Metrics |
 | `ask_user_question` | Agent.Loop | EventStream, SSE clients |
 | `survey_answered` | HTTP endpoint | Agent.Loop (ETS poll) |
-| `algedonic_alert` | DLQ, FailureModes | ProactiveMode, Fleet, Telemetry |
+| `algedonic_alert` | DLQ, FailureModes | Fleet, Telemetry |
 | `signal_classified` | Events.Classifier | Agent.Loop, EventStream |
 
 ---

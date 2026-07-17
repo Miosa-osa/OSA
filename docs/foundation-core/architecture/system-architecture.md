@@ -127,7 +127,6 @@ Supervisors.AgentServices  (one_for_one)
 ├── Agent.Scheduler          (scheduled task runner)
 ├── Agent.Compactor          (context window compaction)
 ├── Agent.Cortex             (multi-provider synthesis)
-├── Agent.ProactiveMode      (proactive task initiation)
 └── Webhooks.Dispatcher      (outbound webhook delivery)
 ```
 
@@ -236,7 +235,6 @@ graph TD
   AGSVC --> SCHED["Agent.Scheduler"]
   AGSVC --> COMP["Agent.Compactor"]
   AGSVC --> CORTEX["Agent.Cortex"]
-  AGSVC --> PROACT["Agent.ProactiveMode"]
   AGSVC --> WHOOK["Webhooks.Dispatcher"]
 
   EXT --> TREAS["[Treasury]\nopt-in"]

@@ -251,20 +251,29 @@ generated but not validated is not a complete orchestration result.
 
 ## 9. Proactive, Not Reactive by Default
 
-The `ProactiveMode` GenServer and the `Intelligence.Supervisor` (with its five
-communication modules) treat OSA as an actor, not just a responder. The scheduler
-fires cron-style triggers that cause the agent to take autonomous actions — not
-because a user asked, but because the system detected a condition that warrants
-action.
+`Agent.Scheduler` and `Agent.Scheduler.HeartbeatExecutor` treat OSA as an actor,
+not just a responder. The scheduler fires cron-style triggers that cause the agent
+to take actions — not because a user asked, but because a scheduled condition
+fired. Inside the agent loop, `Agent.Loop.ProactiveCompaction` acts ahead of need
+too: it compacts context *before* the window overflows rather than only reacting
+to a 413.
 
 This is architecturally significant: OSA is designed as a *viable system* (see
 [Purpose](purpose.md)) with System 4 (intelligence) and System 5 (policy)
-functions. It monitors its environment and acts. This is not an add-on feature —
-it is a design goal that shapes how the supervision tree is structured and why the
-Scheduler is in AgentServices rather than Extensions.
+functions. It monitors its environment and acts. This shapes how the supervision
+tree is structured and why the Scheduler is in AgentServices rather than
+Extensions.
+
+> **Planned, not yet built:** a single autonomous-outreach coordinator
+> (historically referred to as `ProactiveMode`) that would greet users on
+> session start, react to alerts with autonomous LLM calls, and maintain an
+> activity log **does not exist in `lib/`**. Today "proactive" behavior is the
+> scheduler/heartbeat pair above, `Agent.Loop.ProactiveCompaction`, and a
+> per-session `POST /sessions/:id/proactive` toggle (`SessionManager.set_proactive/1`).
+> See [../../features/proactive-mode.md](../../features/proactive-mode.md).
 
 **Rule:** Proactive behavior is a first-class capability, not a plugin. The
-scheduler, heartbeat, and intelligence modules are always started, not opt-in.
+scheduler and heartbeat executor are always started, not opt-in.
 
 ---
 

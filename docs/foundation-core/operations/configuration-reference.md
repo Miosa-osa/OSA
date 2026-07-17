@@ -75,8 +75,8 @@ These keys live under `:optimal_system_agent` application config. Set them in `c
 | Compaction warn | `compaction_warn` | `0.80` | Context usage fraction that triggers a warning-level compaction. |
 | Compaction aggressive | `compaction_aggressive` | `0.85` | Context usage fraction that triggers aggressive sliding-window compression. |
 | Compaction emergency | `compaction_emergency` | `0.95` | Context usage fraction that triggers emergency compaction (most of history dropped). |
-| Proactive interval | `proactive_interval` | `1800000` (30 min) | Milliseconds between proactive monitor checks. |
-| Proactive mode | `proactive_mode` | `false` | Enable autonomous greetings and background work. |
+| Proactive interval | `proactive_interval` | `1800000` (30 min) | Defined in `config.exs` but **inert** — no consumer reads it. Intended interval between proactive checks for the planned autonomous mode. See [proactive-mode.md](../../features/proactive-mode.md). |
+| Proactive mode | `proactive_mode` | `false` | Defined in `config.exs` but **inert** — there is no `Agent.ProactiveMode` module to read it. Reserved for the planned autonomous greetings/background-work feature. |
 | Plan mode | `OSA_PLAN_MODE` env | `false` | When `true`, agent presents a plan for approval before executing. |
 
 ## Extended Thinking

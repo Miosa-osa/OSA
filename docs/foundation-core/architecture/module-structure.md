@@ -73,7 +73,7 @@ context building, LLM calls, tool execution, and memory persistence.
 | `tier.ex` | `Agent.Tier` | Provider tier assignment (opus/sonnet/haiku equivalents per provider). |
 | `soul.ex` | `Soul` | Loads and caches `SYSTEM.md` into `persistent_term` at boot. |
 | `prompt_loader.ex` | `PromptLoader` | Loads prompt templates from `priv/prompts/` into `persistent_term`. |
-| `proactive_mode.ex` | `Agent.ProactiveMode` | Proactive task initiation without user prompts. |
+| `loop/proactive_compaction.ex` | `Agent.Loop.ProactiveCompaction` | Proactive context-window compaction — summarizes history before the window overflows. |
 | `heartbeat_state.ex` | `Agent.HeartbeatState` | Session liveness tracking. |
 | `progress.ex` | `Agent.Progress` | Progress reporting for long-running operations. |
 | `introspection.ex` | `Agent.Introspection` | Self-reflection and meta-reasoning capabilities. |

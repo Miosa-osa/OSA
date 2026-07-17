@@ -73,7 +73,6 @@ graph TB
         SignalCoach["Intelligence.CommCoach"]
         SignalProfiler["Intelligence.CommProfiler"]
         ConvTracker["Intelligence.ConversationTracker"]
-        ProactiveMode["Agent.ProactiveMode"]
         Machines["Machines"]
         Commands["Commands"]
     end

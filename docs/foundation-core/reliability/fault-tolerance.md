@@ -98,7 +98,7 @@ AgentServices supervisor children (all :one_for_one):
   Agent.Hooks                Agent.Learning           MiosaKnowledge.Store
   Agent.Memory.KnowledgeBridge                        Vault.Supervisor
   Agent.Scheduler            Agent.Compactor          Agent.Cortex
-  Agent.ProactiveMode        Webhooks.Dispatcher
+  Webhooks.Dispatcher
 ```
 
 `Vault.Supervisor` is itself a `:one_for_one` supervisor with two children:

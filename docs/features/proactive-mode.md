@@ -2,9 +2,11 @@
 
 > **⚠️ STATUS: PLANNED / NOT YET IMPLEMENTED.** As of v1.0.3 the
 > `OptimalSystemAgent.Agent.ProactiveMode` GenServer described in this document
-> **does not exist** in `lib/`. There is no ProactiveMode module, no
-> `proactive_mode` config key, no `~/.osa/data/proactive_log.jsonl` activity log,
-> and no autonomous cron/heartbeat/trigger scheduler. The only "proactive" code
+> **does not exist** in `lib/`. There is no ProactiveMode module and no
+> `~/.osa/data/proactive_log.jsonl` activity log; the `proactive_mode` /
+> `proactive_interval` keys are defined in `config.exs` but are **inert** (no
+> code reads them), and there is no autonomous cron/heartbeat/trigger scheduler
+> wired to a proactive coordinator. The only "proactive" code
 > that ships today is unrelated: `Agent.Loop.ProactiveCompaction` (automatic
 > context-window compaction) and a per-session `POST /sessions/:id/proactive`
 > HTTP toggle (`SessionManager.set_proactive/1`) that flags a single session — it

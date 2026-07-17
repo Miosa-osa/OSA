@@ -1,6 +1,30 @@
 # Infrastructure: Intelligence (Proactive Mode)
 
-`Agent.ProactiveMode` is the central coordinator for OSA's autonomous behaviour. It gates all background-initiated LLM calls through rate limiting, budget enforcement, and permission tier checks, and delivers notifications to the active user session.
+> **⚠ PLANNED / NOT IMPLEMENTED.** The `OptimalSystemAgent.Agent.ProactiveMode`
+> GenServer described throughout this document **does not exist** in `lib/`.
+> There is no `ProactiveMode` module, no `proactive_mode` config key, no
+> `~/.osa/data/proactive_log.jsonl` activity log, and no autonomous
+> cron/heartbeat/trigger scheduler wired to a proactive coordinator. This page
+> describes an intended design, not shipped behavior.
+>
+> **What actually ships today (all unrelated to a single coordinator):**
+> - `Agent.Loop.ProactiveCompaction` — proactive context-window compaction inside
+>   the agent loop (config: `proactive_compaction_enabled`,
+>   `proactive_compaction_threshold`, `proactive_compaction_keep_turns`). Not a
+>   supervised process.
+> - `POST /sessions/:id/proactive` → `SessionManager.set_proactive/1` — a
+>   per-session toggle that flags one session.
+> - `Agent.Scheduler` + `Agent.Scheduler.HeartbeatExecutor` — real AgentServices
+>   children that run scheduled/heartbeat work (but do not route through any
+>   `ProactiveMode`).
+> - A passive CLI handler (`Events.register_proactive_handler/1`) that renders
+>   `:proactive_message` bus events if any are emitted — no supervised producer
+>   emits them today.
+>
+> See [../../features/proactive-mode.md](../../features/proactive-mode.md) for the
+> canonical planned-feature spec.
+
+`Agent.ProactiveMode` **would be** the central coordinator for OSA's autonomous behaviour. It **would** gate all background-initiated LLM calls through rate limiting, budget enforcement, and permission tier checks, and deliver notifications to the active user session.
 
 ---
 

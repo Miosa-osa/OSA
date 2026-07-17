@@ -154,7 +154,6 @@ Supervisors.AgentServices  (one_for_one)
 ├── Agent.Scheduler          — Cron-style task scheduling
 ├── Agent.Compactor          — Context window compaction
 ├── Agent.Cortex             — Cortex synthesis (cross-session insights)
-├── Agent.ProactiveMode      — Proactive agent behavior engine
 └── Webhooks.Dispatcher      — Outbound webhook delivery
 ```
 

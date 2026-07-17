@@ -385,14 +385,19 @@ Built-in hooks:
 | Responsibility | Multi-provider synthesis. Fans a prompt out to multiple LLM providers in parallel and synthesizes the responses into a single answer. Used for high-stakes queries where cross-provider validation is desired. |
 | Key interfaces | `Cortex.synthesize/2` |
 
-### Agent.ProactiveMode
+### Proactive behavior (what ships today)
+
+> There is **no** `Agent.ProactiveMode` GenServer in the codebase. A single
+> autonomous-outreach coordinator was never built. The proactive capabilities
+> that actually ship are two unrelated, narrower mechanisms:
 
 | | |
 |---|---|
-| Type | GenServer |
-| Module | `OptimalSystemAgent.Agent.ProactiveMode` |
-| Responsibility | Enables the agent to initiate actions without user prompts. Monitors triggers (schedule, event, condition) and dispatches proactive tasks to sessions. |
-| Key interfaces | `ProactiveMode.enable/1`, `ProactiveMode.disable/1`, `ProactiveMode.status/0` |
+| Context compaction | `OptimalSystemAgent.Agent.Loop.ProactiveCompaction` — runs inside the agent loop (not a supervised process). It watches context utilization each iteration and rewrites message history *before* the window overflows, once the token count crosses a configurable fraction of the model window (default `0.75`). Config: `proactive_compaction_enabled`, `proactive_compaction_threshold`, `proactive_compaction_keep_turns`. |
+| Per-session toggle | `POST /sessions/:id/proactive` → `SessionManager.set_proactive/1` flags a single session. Scope is one session; there is no global daemon, cron/heartbeat trigger engine, or activity log behind it. |
+
+Scheduled/heartbeat work is handled separately by `Agent.Scheduler` and
+`Agent.Scheduler.HeartbeatExecutor` (both real AgentServices children).
 
 ### Webhooks.Dispatcher
 

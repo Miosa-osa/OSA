@@ -12,14 +12,13 @@ mix osa.chat
 
 `CLI.start/0` is the entry point. It:
 
-1. Clears the screen and prints the OSA banner (version, model, tool count, soul status, proactive mode flag).
+1. Clears the screen and prints the OSA banner (version, model, tool count, soul status).
 2. Starts a new `Agent.Loop` session under `SessionSupervisor` with a random `cli_<hex>` session ID.
 3. Registers a `Permission` hook for the session.
 4. Registers Bus event handlers for orchestrator events and task tracker events.
 5. Initialises ETS tables for history (`:cli_history`) and active-request tracking (`:cli_active_request`).
-6. Registers the async response handler and the proactive mode handler.
-7. Calls `ProactiveMode.set_active_session/1` and optionally emits a greeting.
-8. Enters the main `loop/1`.
+6. Registers the async response handler and the proactive-message handler (`Events.register_proactive_handler/1`).
+7. Enters the main `loop/1`.
 
 ---
 
@@ -160,7 +159,7 @@ Unknown command suggestion uses inline Levenshtein distance with a maximum edit 
 
 ## Proactive Mode Integration
 
-The CLI registers a Bus handler for `:proactive_message` system events on session startup. Messages are prefixed by type:
+The CLI registers a Bus handler (`Events.register_proactive_handler/1`) for `:proactive_message` events on session startup. When such an event arrives, the message is rendered prefixed by type:
 
 | Type | Prefix colour |
 |------|--------------|
@@ -169,7 +168,12 @@ The CLI registers a Bus handler for `:proactive_message` system events on sessio
 | `:work_failed` | `✗ OSA` yellow |
 | `:greeting` | `OSA` cyan |
 
-On startup, `ProactiveMode.greeting/1` is called asynchronously in a `TaskSupervisor` child.
+> **Note:** this handler is a passive *consumer*. There is no `Agent.ProactiveMode`
+> GenServer and no `ProactiveMode.set_active_session/1` or `ProactiveMode.greeting/1`
+> call — those do not exist in `lib/`. No supervised producer emits
+> `:proactive_message` events today, so this handler is dormant unless another
+> component publishes one. Autonomous greetings/outreach are planned; see
+> [../../features/proactive-mode.md](../../features/proactive-mode.md).
 
 ---
 

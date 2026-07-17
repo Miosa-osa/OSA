@@ -65,7 +65,6 @@ graph TD
     AgentSvc --> Scheduler["Agent.Scheduler"]
     AgentSvc --> Compactor["Agent.Compactor"]
     AgentSvc --> Cortex["Agent.Cortex"]
-    AgentSvc --> ProactiveMode["Agent.ProactiveMode"]
     AgentSvc --> WebhooksDispatcher["Webhooks.Dispatcher"]
 
     VaultSup --> FactStore["Vault.FactStore"]
