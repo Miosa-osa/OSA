@@ -165,6 +165,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
           "type" => "boolean",
           "description" =>
             "When using worktree isolation, discard dirty worktree changes instead of preserving them."
+        },
+        "reconcile" => %{
+          "type" => "boolean",
+          "description" =>
+            "Fan-out only: after the parallel wave finishes, run one coordinator agent " <>
+              "that reads all workstream reports and reconciles them into a single integrated " <>
+              "deliverable (the all-hands closeout) — resolving conflicts and deduping overlap. " <>
+              "Defaults to false (plain concatenation of results)."
+        },
+        "coordinator_role" => %{
+          "type" => "string",
+          "description" =>
+            "Optional role/agent name for the reconcile coordinator (e.g. 'architect'). " <>
+              "Defaults to a generic coordinator. Only used when reconcile is true."
         }
       }
     }

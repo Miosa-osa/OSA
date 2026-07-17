@@ -235,7 +235,69 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
     results = Orchestrator.run_parallel(parent_id, configs, parallel_opts)
 
-    {:ok, format_fanout(umbrella_task, tasks, results)}
+    if reconcile?(args) and Enum.any?(results, &match?({:ok, _}, &1)) do
+      dispatch_reconcile(umbrella_task, tasks, results, args, parent_id, parent_depth)
+    else
+      {:ok, format_fanout(umbrella_task, tasks, results)}
+    end
+  end
+
+  # Opt-in coordinator closeout (all-hands pattern). After the parallel wave
+  # finishes, run ONE more subagent that reads every workstream report and
+  # produces a single reconciled/merged deliverable — resolving conflicts,
+  # deduping overlap, and listing follow-ups. Reuses run_subagent (so it shows
+  # up as its own agent in the fleet TUI). Falls back to plain concatenation if
+  # the coordinator itself fails, so a reconcile pass never loses the raw work.
+  defp reconcile?(args), do: Map.get(args, "reconcile") == true
+
+  defp dispatch_reconcile(umbrella_task, tasks, results, args, parent_id, parent_depth) do
+    reports = format_fanout(umbrella_task, tasks, results)
+    coord_role = Map.get(args, "coordinator_role") || Map.get(args, "role") || "coordinator"
+    coord_task = reconcile_prompt(umbrella_task, length(tasks), reports)
+
+    coord_config =
+      build_config(coord_task, coord_role, args, parent_id, parent_depth, "coordinator")
+      # The coordinator reconciles the text reports; it must not inherit the
+      # workstreams' worktree isolation or merge/discard flags.
+      |> Map.merge(%{isolation: nil, merge_worktree: false, discard_worktree: false})
+
+    case Orchestrator.run_subagent(coord_config) do
+      {:ok, summary} ->
+        {:ok, format_reconciled(umbrella_task, tasks, summary, results)}
+
+      _ ->
+        {:ok, format_fanout(umbrella_task, tasks, results)}
+    end
+  end
+
+  defp reconcile_prompt(umbrella_task, n, reports) do
+    """
+    You are the coordinator for #{n} parallel workstream#{if n == 1, do: "", else: "s"} \
+    that ran to complete this overall goal:
+
+    #{umbrella_task}
+
+    Read all of the workstream reports below and produce ONE integrated result.
+    Reconcile any conflicts, dedupe overlapping work, note anything that is still
+    inconsistent or incomplete, and end with a short list of follow-ups. Do NOT
+    just concatenate the reports — synthesize them into a single coherent deliverable.
+
+    ## Workstream reports
+    #{reports}
+    """
+  end
+
+  defp format_reconciled(umbrella_task, tasks, summary, results) do
+    header =
+      "Reconciled closeout of #{length(tasks)} workstream#{if length(tasks) == 1, do: "", else: "s"} for: " <>
+        String.slice(umbrella_task, 0, 120)
+
+    appendix = format_fanout(umbrella_task, tasks, results)
+
+    Enum.join(
+      [header, "## Coordinator summary\n#{summary}", "## Per-workstream reports (appendix)\n#{appendix}"],
+      "\n\n"
+    )
   end
 
   defp format_fanout(umbrella_task, tasks, results) do
