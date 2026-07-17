@@ -62,6 +62,12 @@ pub struct CommandEntry {
     pub description: String,
     #[serde(default)]
     pub category: Option<String>,
+    /// Backend tool names this command needs to be useful. Empty (the default,
+    /// and the case for every legacy/ungated command) means "always available".
+    /// The TUI hides a command from the `/` palette and `/help` until every
+    /// listed tool is present in the session, so there are no dead commands.
+    #[serde(default)]
+    pub required_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

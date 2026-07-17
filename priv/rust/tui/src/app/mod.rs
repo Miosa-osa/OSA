@@ -5,13 +5,14 @@ pub mod focus;
 mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
+pub mod key_normalize;
 pub mod keys;
 pub mod layout;
 pub mod state;
 pub mod update;
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -187,6 +188,12 @@ pub struct App {
 
     // Commands from backend
     pub command_entries: Vec<crate::client::types::CommandEntry>,
+
+    // Names of the tools currently available in this session (from GET /tools).
+    // Drives capability-gating: a command whose `required_tools` are not all
+    // present here is hidden from the `/` palette and `/help`. Empty until the
+    // first ToolsLoaded arrives, during which nothing is gated (fail-open).
+    pub available_tools: HashSet<String>,
 
     // Voice input
     pub voice: VoiceState,
@@ -379,6 +386,7 @@ impl App {
             backend_spawn_attempted: false,
             health_retry_count: 0,
             command_entries: Vec::new(),
+            available_tools: HashSet::new(),
 
             voice: VoiceState::new(),
             goal: None,

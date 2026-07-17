@@ -355,19 +355,20 @@ impl App {
                     }
                 };
                 merge_tui_native_commands(&mut commands);
-                // Carry the category through so the `/` completion popup can tag
-                // user-defined "custom" commands (~/.osa/commands/*.md) distinctly
-                // from built-ins.
-                let with_cat: Vec<(String, String, Option<String>)> = commands
-                    .iter()
-                    .map(|c| (c.name.clone(), c.description.clone(), c.category.clone()))
-                    .collect();
-                self.input.set_command_items(with_cat);
                 self.command_entries = commands;
+                // Rebuild the `/` completion popup, filtered to capability-available
+                // commands and carrying the category so user-defined "custom"
+                // commands (~/.osa/commands/*.md) stay tagged distinctly.
+                self.refresh_command_completions();
             }
             BackendEvent::ToolsLoaded(result) => match result {
                 Ok(tools) => {
                     self.header.set_tool_count(tools.len());
+                    // Refresh the capability-gate: commands whose required tools are
+                    // now present become visible; those still missing stay hidden.
+                    self.available_tools =
+                        tools.iter().map(|t| t.name.clone()).collect();
+                    self.refresh_command_completions();
                     self.sidebar.set_tool_count(tools.len());
                     self.chat.set_welcome_info(
                         self.header.provider(),
@@ -1438,6 +1439,31 @@ fn emit_completion_notification() {
 /// TUI-only affordance. Names are slash-less — the completions layer prepends
 /// the `/` — so they must NOT carry a leading `/` here (a leading slash produced
 /// bogus `//steer` popup entries before).
+impl App {
+    /// Whether a command with these `required_tools` should be shown, given the
+    /// tools available in the current session. Fail-open: an ungated command
+    /// (empty list) always shows, and before the first ToolsLoaded arrives
+    /// (`available_tools` empty) nothing is gated so `/` works immediately.
+    pub(crate) fn command_capability_met(&self, required: &[String]) -> bool {
+        required.is_empty()
+            || self.available_tools.is_empty()
+            || required.iter().all(|t| self.available_tools.contains(t))
+    }
+
+    /// Rebuild the inline `/` completion items from `command_entries`, filtered to
+    /// only capability-available commands. Called whenever the command list OR the
+    /// available-tool set changes, so the palette never lists a dead command.
+    pub(crate) fn refresh_command_completions(&mut self) {
+        let items: Vec<(String, String, Option<String>)> = self
+            .command_entries
+            .iter()
+            .filter(|c| self.command_capability_met(&c.required_tools))
+            .map(|c| (c.name.clone(), c.description.clone(), c.category.clone()))
+            .collect();
+        self.input.set_command_items(items);
+    }
+}
+
 fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEntry>) {
     use crate::client::types::CommandEntry;
     for &(name, desc) in crate::app::commands::BUILTIN_SLASH_COMMANDS {
@@ -1449,6 +1475,9 @@ fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEnt
                 name: name.to_string(),
                 description: desc.to_string(),
                 category: Some("agent".to_string()),
+                // TUI-native commands are handled locally and are always
+                // available — no backend capability to gate on.
+                required_tools: Vec::new(),
             });
         }
     }

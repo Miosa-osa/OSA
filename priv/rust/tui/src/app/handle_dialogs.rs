@@ -972,9 +972,13 @@ impl App {
         // /api/v1/commands), fetched once at startup into `command_entries` and
         // also used to drive the inline `/` completions. No hardcoded list — new
         // backend commands appear here automatically.
+        // Capability-gated: hide commands whose required tools aren't present in
+        // this session, so `/help` never offers a dead command (mirrors the
+        // inline `/` completions filter).
         let items: Vec<PaletteItem> = self
             .command_entries
             .iter()
+            .filter(|c| self.command_capability_met(&c.required_tools))
             .map(|c| PaletteItem {
                 name: c.name.clone(),
                 description: c.description.clone(),

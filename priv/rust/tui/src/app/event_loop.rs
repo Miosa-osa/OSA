@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{Event as CrosstermEvent, KeyEvent, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -623,9 +623,11 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
     Ok(())
 }
 
-/// True when `key` is Ctrl+O (the transcript-viewer toggle).
+/// True when `key` is Ctrl+O (the transcript-viewer toggle). Delegates to the
+/// single key-normalization layer so terminal-modifier quirks are decided in one
+/// place.
 fn is_ctrl_o(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL)
+    crate::app::key_normalize::is_ctrl_o(key)
 }
 
 /// Top-right toast overlay rectangle within `area`.

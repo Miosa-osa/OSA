@@ -81,13 +81,14 @@ impl KeyBinding {
     }
 }
 
-/// True when `event` is the Shift+Tab permission-mode cycle. Terminals disagree
-/// on how they encode Shift+Tab: most emit `KeyCode::BackTab` (sometimes with a
-/// stray SHIFT modifier, sometimes NONE), a few report `Tab`+SHIFT. Accept all
-/// of them so the cycle fires consistently across terminals.
+/// True when `event` is the Shift+Tab permission-mode cycle.
+///
+/// The cross-terminal encoding quirk lives in the single key-normalization
+/// layer ([`crate::app::key_normalize`]); this thin delegate keeps the historical
+/// `keys::is_permission_cycle` call sites working while the decision is made in
+/// one place.
 pub fn is_permission_cycle(event: &KeyEvent) -> bool {
-    matches!(event.code, KeyCode::BackTab)
-        || (event.code == KeyCode::Tab && event.modifiers.contains(KeyModifiers::SHIFT))
+    crate::app::key_normalize::is_permission_cycle(event)
 }
 
 /// All key bindings — 22 bindings matching Go keymap

@@ -888,25 +888,14 @@ impl Component for InputComponent {
                 }
 
                 match (key.code, key.modifiers) {
-                    // Shift+Enter or Alt+Enter: insert a newline (enters multiline
-                    // mode). This is the ONLY way to add a line break — plain Enter
-                    // always submits (Claude Code convention). Match on `contains`
-                    // rather than exact equality so a terminal that attaches extra
-                    // modifier bits (e.g. SHIFT+KEYPAD under the kitty protocol)
-                    // still disambiguates to a newline instead of a submit.
-                    (KeyCode::Enter, m)
-                        if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::SHIFT) =>
-                    {
-                        self.multiline = true;
-                        self.insert_char('\n');
-                        return ComponentAction::Consumed;
-                    }
-                    // Ctrl+J: guaranteed-portable hard newline. Shift+Enter is
-                    // terminal-dependent; Ctrl+J inserts a line break on EVERY
-                    // terminal (Claude Code's chat:newline fallback). Only reached
-                    // when the terminal delivers Ctrl+J as Char('j')+CONTROL rather
-                    // than folding it into Enter.
-                    (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                    // Insert a newline (enters multiline mode) rather than submit.
+                    // Shift+Enter / Alt+Enter / Ctrl+J all mean "newline, don't
+                    // submit", but terminals encode them differently — the single
+                    // key-normalization layer owns that quirk so this stays
+                    // consistent cross-terminal. Plain Enter always submits (Claude
+                    // Code convention); the portable Ctrl+J fallback covers
+                    // terminals where Shift+Enter collapses to a bare Enter.
+                    _ if crate::app::key_normalize::is_insert_newline(key) => {
                         self.multiline = true;
                         self.insert_char('\n');
                         return ComponentAction::Consumed;

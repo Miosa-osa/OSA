@@ -84,6 +84,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # Commands that must NOT be executed via HTTP (they kill the process or block)
   @blocked_http_commands ~w(exit quit setup)
 
+  # Capability-gated slash commands: a command name → the backend tool(s) that
+  # must exist in the current session for it to be useful. Commands absent from
+  # this map require nothing and are ALWAYS available (empty `required_tools`),
+  # keeping the change fully backward-compatible. The TUI hides a command from
+  # the `/` palette and `/help` until every listed tool is present, so there are
+  # no "dead" commands pointing at capabilities the session doesn't have.
+  @command_capabilities %{
+    "memory" => ["memory_recall"],
+    "mem-search" => ["memory_recall"],
+    "mem-recall" => ["memory_recall"],
+    "mem-save" => ["memory_save"],
+    "desktop" => ["computer_use"]
+  }
+
+  # Tool names a slash command requires; `[]` (always available) when ungated.
+  defp required_tools_for(name), do: Map.get(@command_capabilities, name, [])
+
   post "/execute" do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
       cmd_name = command |> String.split() |> List.first() |> String.downcase()
@@ -440,19 +457,46 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     cli_entries =
       Enum.map(cli_commands, fn {name, desc} ->
         category = categorize_command(name)
-        %{name: name, description: desc, category: category}
+
+        %{
+          name: name,
+          description: desc,
+          category: category,
+          required_tools: required_tools_for(name)
+        }
       end)
 
     # Add API-only commands not in the CLI
     api_only = [
-      %{name: "mem-search", description: "Search persistent memory", category: "memory"},
-      %{name: "mem-save", description: "Save a note to persistent memory", category: "memory"},
-      %{name: "mem-recall", description: "Recall recent memory entries", category: "memory"},
-      %{name: "reload", description: "Reload skills and configuration", category: "system"},
+      %{
+        name: "mem-search",
+        description: "Search persistent memory",
+        category: "memory",
+        required_tools: required_tools_for("mem-search")
+      },
+      %{
+        name: "mem-save",
+        description: "Save a note to persistent memory",
+        category: "memory",
+        required_tools: required_tools_for("mem-save")
+      },
+      %{
+        name: "mem-recall",
+        description: "Recall recent memory entries",
+        category: "memory",
+        required_tools: required_tools_for("mem-recall")
+      },
+      %{
+        name: "reload",
+        description: "Reload skills and configuration",
+        category: "system",
+        required_tools: []
+      },
       %{
         name: "debug",
         description: "Enable debug logging for the current session",
-        category: "dev"
+        category: "dev",
+        required_tools: []
       }
     ]
 
@@ -462,7 +506,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       try do
         OptimalSystemAgent.Tools.Registry.CommandLoader.list_with_descriptions()
         |> Enum.map(fn {name, desc} ->
-          %{name: name, description: desc, category: "custom"}
+          %{name: name, description: desc, category: "custom", required_tools: []}
         end)
       rescue
         _ -> []
