@@ -68,11 +68,13 @@ being passed to `execute/1`:
 ## YAML (yaml_elixir)
 
 **Library:** [`yaml_elixir`](https://hex.pm/packages/yaml_elixir)
-**Use:** Skill definitions (SKILL.md frontmatter), MCP server configuration,
-application configuration overlays.
+**Use:** Skill definitions (`SKILL.md` frontmatter), custom command definitions,
+and vault entries — all of which use a YAML frontmatter block.
 
-YAML is used for human-authored configuration files. It is not used for
-machine-generated data at runtime.
+YAML in OSA is used **only** for the frontmatter of human-authored markdown files.
+It is *not* used for OSA's runtime configuration: the primary config file is
+`~/.osa/config.json` (JSON, see below) and MCP servers are configured in
+`~/.osa/mcp.json` (also JSON). There is no `config.yaml`.
 
 ### Parsing Frontmatter
 
@@ -111,29 +113,18 @@ tools:
 ---
 ```
 
-### MCP Configuration
+### Runtime Configuration Is JSON, Not YAML
 
-```yaml
-# ~/.osa/mcp.json is JSON, not YAML, but the pattern is similar
-# Application config overlays use YAML in some deployment setups:
-
-# osa_config.yaml
-providers:
-  default: anthropic
-  fallback_chain:
-    - anthropic
-    - groq
-    - ollama
-
-budget:
-  daily_limit_usd: 100.0
-  monthly_limit_usd: 1000.0
-```
-
-### Parsing Application Config
+OSA's runtime configuration is **JSON**, read from `~/.osa/config.json` (see
+`OptimalSystemAgent.Machines`, which resolves `Path.join(config_dir(), "config.json")`).
+MCP servers are configured in `~/.osa/mcp.json`, also JSON. There is no
+`config.yaml` / `osa_config.yaml` overlay — YAML appears only in the frontmatter
+of skill, command, and vault markdown files.
 
 ```elixir
-{:ok, config} = YamlElixir.read_from_file("~/.osa/config.yaml")
+# Runtime config is loaded as JSON:
+{:ok, raw}  = File.read(Path.join(config_dir(), "config.json"))
+{:ok, config} = Jason.decode(raw)
 providers = get_in(config, ["providers", "fallback_chain"])
 ```
 
@@ -285,7 +276,7 @@ end
 | LLM tool arguments | JSON | LLM output is always JSON |
 | Database `:map` fields | JSON (via Ecto) | Automatic via ecto_sqlite3 |
 | Skill/command definitions | Markdown + YAML frontmatter | Human-authored, readable |
-| Application config overlays | YAML | Human-authored, multi-line friendly |
+| Runtime configuration (`~/.osa/config.json`, `mcp.json`) | JSON | Machine-read config, `Jason` everywhere |
 | Session conversation history | JSONL | Append-only, streamable |
 | Long-term memory | JSONL | Append-only, grep-friendly |
 | Learning capture | JSONL | Append-only, streaming analysis |

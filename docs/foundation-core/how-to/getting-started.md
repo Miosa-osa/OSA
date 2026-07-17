@@ -11,13 +11,15 @@ This guide takes you from zero to a running agent in under ten minutes.
 | Requirement | Minimum version | Notes |
 |-------------|----------------|-------|
 | Elixir | 1.17 | `elixir --version` |
-| Erlang/OTP | 27 | Ships with Elixir on most installers |
+| Erlang/OTP | 26 | Ships with Elixir on most installers |
 | Git | any recent | For cloning the repository |
 | Node.js | 18 LTS | Required only for the Tauri desktop app |
-| Rust / Cargo | stable | Required only for the Tauri desktop app |
+| Rust / Cargo | stable | Required for the TUI and the Tauri desktop app |
 
-Elixir 1.17 requires Erlang/OTP 26 or 27. OTP 27 is recommended. The mix.exs
-constraint is `~> 1.17` so later patch releases are accepted automatically.
+Elixir 1.17 runs on Erlang/OTP 26 or 27, but OSA pins **OTP 26** (26.2.5 in the
+release CI) — OTP 27 has Mix-release bugs and `erlexec` is pinned to a
+pre-OTP-27 version in `mix.exs`. The mix.exs Elixir constraint is `~> 1.17` so
+later patch releases are accepted automatically.
 
 Node.js and Rust are optional. Skip them if you only need the CLI or HTTP API.
 
@@ -32,17 +34,17 @@ brew install elixir
 # asdf (cross-platform)
 asdf plugin add elixir
 asdf plugin add erlang
-asdf install erlang 27.2
-asdf install elixir 1.17.3-otp-27
-asdf global erlang 27.2
-asdf global elixir 1.17.3-otp-27
+asdf install erlang 26.2.5
+asdf install elixir 1.17.3-otp-26
+asdf global erlang 26.2.5
+asdf global elixir 1.17.3-otp-26
 ```
 
 Verify:
 
 ```sh
 elixir --version
-# Erlang/OTP 27 [erts-15.x] ... Elixir 1.17.x (compiled with Erlang/OTP 27)
+# Erlang/OTP 26 [erts-14.x] ... Elixir 1.17.x (compiled with Erlang/OTP 26)
 ```
 
 ---

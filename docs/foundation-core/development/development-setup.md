@@ -6,7 +6,7 @@ Audience: contributors setting up OSA for local development and testing.
 
 ### Elixir and Erlang/OTP
 
-OSA requires Elixir 1.17+ and OTP 27. The release CI uses Elixir 1.17.3 and OTP 27.2.
+OSA requires Elixir 1.17+ and OTP 26. The release CI uses Elixir 1.17.3 and OTP 26.2.5. OTP 27 is **not** supported for release builds — it has Mix-release bugs and `erlexec` is pinned to a pre-OTP-27 version in `mix.exs` (see [CI/CD Pipeline](ci-cd.md)).
 
 The recommended way to manage Elixir versions is `asdf` or `mise`.
 
@@ -14,22 +14,22 @@ With `asdf`:
 ```bash
 asdf plugin add erlang
 asdf plugin add elixir
-asdf install erlang 27.2
-asdf install elixir 1.17.3-otp-27
-asdf local erlang 27.2
-asdf local elixir 1.17.3-otp-27
+asdf install erlang 26.2.5
+asdf install elixir 1.17.3-otp-26
+asdf local erlang 26.2.5
+asdf local elixir 1.17.3-otp-26
 ```
 
 With `mise`:
 ```bash
-mise use erlang@27.2
-mise use elixir@1.17.3-otp-27
+mise use erlang@26.2.5
+mise use elixir@1.17.3-otp-26
 ```
 
 Verify:
 ```bash
 elixir --version
-# Erlang/OTP 27 [erts-15.x] ... Elixir 1.17.3 (compiled with Erlang/OTP 27)
+# Erlang/OTP 26 [erts-14.x] ... Elixir 1.17.3 (compiled with Erlang/OTP 26)
 ```
 
 ### Go (for the tokenizer sidecar)

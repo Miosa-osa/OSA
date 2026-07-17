@@ -8,133 +8,126 @@ OSA has two GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | File | Trigger |
 |---------|------|---------|
-| Release | `release.yml` | Push of a `v*` tag |
-| Update Homebrew Tap | `update-homebrew.yml` | GitHub release published |
+| Release | `release.yml` | Push of a `v*.*.*` tag |
+| Pull Request Labeler | `labeler.yml` | Pull request opened/updated |
 
-There is no continuous integration workflow that runs on pull requests or pushes to `main`. Contributors must verify `mix test` and `mix format` locally before opening a PR.
+`labeler.yml` only applies path-based labels to PRs — it builds nothing. There is no continuous-integration workflow that runs the test suite on pull requests or pushes to `main`. Contributors must verify `mix test` and `mix format` locally before opening a PR.
 
 ## Release Workflow (`release.yml`)
 
+### Strategy
+
+Each release ships **prebuilt, zero-toolchain artifacts** so end users need no language toolchain installed:
+
+- A self-contained Elixir **OTP release** assembled with `mix release osagent`. `include_erts` defaults to `true`, so the tarball bundles its own ERTS — the machine needs no Erlang or Elixir installed.
+- The prebuilt **Rust TUI** binary (`priv/rust/tui`, built with `cargo build --release`).
+
+Both are uploaded as GitHub Release assets so `scripts/install.sh` / `scripts/install.ps1` can download them directly.
+
 ### Trigger
 
-Any push to a tag matching `v*`:
+Any push to a tag matching `v*.*.*`:
 
 ```bash
-git tag v1.0.002
-git push origin v1.0.002
+git tag v1.0.003
+git push origin v1.0.003
 ```
 
 ### Environment Versions
 
 ```yaml
-OTP_VERSION:    "27.2"
-ELIXIR_VERSION: "1.17.3"
-GO_VERSION:     "1.22"
 MIX_ENV:        prod
+ELIXIR_VERSION: "1.17.3"
+OTP_VERSION:    "26.2.5"
 ```
+
+OTP is pinned to **26.2.5**, not 27. OTP 27 has Mix-release bugs (`TypedStruct.MixProject` / `Decimal.Error` "already compiled" during the dep walk) and `erlexec` is pinned to `2.0.6` (the last pre-OTP-27 release) in `mix.exs`. The build stays on OTP 26 until those land.
 
 ### Jobs
 
-#### `create-release`
+Three platform build jobs run in parallel, followed by a `publish` job.
 
-Runs on `ubuntu-latest`. Creates the GitHub release object with auto-generated release notes. This job must complete before `build` jobs start.
+| Job | Runner | Artifact |
+|-----|--------|----------|
+| `build-linux-x64` | `ubuntu-22.04` | `osa-linux-x64.tar.gz` + `osagent-tui-linux-x64` |
+| `build-macos-arm64` | `macos-14` (Apple Silicon) | `osa-macos-arm64.tar.gz` + `osagent-tui-macos-arm64` |
+| `build-windows-x64` | `windows-latest` | `osa-windows-x64.zip` + `osagent-tui-windows-x64.exe` |
 
-#### `build` (matrix)
-
-Builds release tarballs for four targets in parallel:
-
-| Target | Runner | GOOS | GOARCH |
-|--------|--------|------|--------|
-| `darwin-arm64` | `macos-14` | `darwin` | `arm64` |
-| `darwin-amd64` | `macos-14` | `darwin` | `amd64` |
-| `linux-amd64` | `ubuntu-latest` | `linux` | `amd64` |
-| `linux-arm64` | `ubuntu-latest` | `linux` | `arm64` |
+Linux x64 is the primary target. macOS and Windows are secondary — the `publish` job attaches their assets if present but does not fail the release if one of them fails to build.
 
 Each build job runs these steps:
 
 1. Checkout source at the tag.
-2. Set up Erlang/OTP 27.2 and Elixir 1.17.3 via `erlef/setup-beam@v1`.
-3. Set up Go 1.22 via `actions/setup-go@v5`.
-4. Build the Go tokenizer: `CGO_ENABLED=0 go build -o osa-tokenizer .` with the target `GOOS`/`GOARCH` set.
+2. Set up Erlang/OTP 26.2.5 and Elixir 1.17.3 via `erlef/setup-beam@v1`.
+3. Restore the `deps` + `_build` cache (keyed on `mix.lock`).
+4. On Linux, install the system libraries the Rust TUI links against (`pkg-config`, `libssl-dev`, the `libxcb*` set, `libasound2-dev`, `libonig-dev`). macOS and Windows runners ship Rust and these libraries already.
 5. Install Elixir production deps: `mix deps.get --only prod`.
-6. Compile: `mix compile`.
-7. Assemble release: `mix release osagent`.
-8. Package tarball: `tar -czf osa-{platform}.tar.gz .` from `_build/prod/rel/osagent/`.
-9. Upload tarball to the GitHub release via `gh release upload`.
+6. **Stamp the version from the git tag** (see below).
+7. Assemble the OTP release: `MIX_ENV=prod mix release osagent --overwrite`.
+8. Package the release: `tar -czf osa-{platform}.tar.gz` from `_build/prod/rel/osagent/` (Windows packages a `.zip` via `Compress-Archive` so `install.ps1`'s `Expand-Archive` works).
+9. Build the Rust TUI: `cargo build --release` in `priv/rust/tui`, then copy the binary to `dist/osagent-tui-{platform}`.
+10. Upload everything in `dist/` as a workflow artifact.
 
-Tarball naming convention: `osa-{platform}.tar.gz` (Windows ships `osa-windows-x64.zip`). Each asset has a `.sha256` sidecar. The version is not part of the filename — it lives in the release tag path.
+### Version Stamping
 
-Examples:
-- `osa-macos-arm64.tar.gz`
-- `osa-linux-x64.tar.gz`
+The git tag is the single source of truth for the version:
+
+- The **tag itself** (padded display form, e.g. `v1.0.003`) is authoritative for the tag name and the GitHub Release title — those stay padded.
+- For the **build**, the tag is normalized to valid semver (strip a leading zero from the patch: `v1.0.003` → `1.0.3`). semver forbids leading zeros, so `mix`/`cargo` would reject `1.0.003`. The normalized value is exported as `OSA_VERSION`, written into the `VERSION` file that `mix.exs` reads at compile time, and the in-app display re-pads it at render time so the operator still reads the padded form everywhere.
+
+Any cached, stale `optimal_system_agent.app` is deleted before `mix release` so a restored build cache cannot ship an old `vsn` to `Application.spec/2`.
+
+### `publish` Job
+
+Runs on `ubuntu-22.04` after all three build jobs (`needs: [build-linux-x64, build-macos-arm64, build-windows-x64]`, `if: always()` so a single failed platform does not sink the release). It:
+
+1. Downloads every build artifact.
+2. Flattens them into `release-assets/` and computes a `.sha256` sidecar for each archive (`*.tar.gz`, `*.zip`) so `install.sh` / `install.ps1` can verify integrity.
+3. Creates the GitHub Release via `softprops/action-gh-release@v2` with `generate_release_notes: true`. A tag containing `-` is marked `prerelease`.
 
 ### Artifact Storage
 
-Tarballs are attached directly to the GitHub release. There is no separate artifact store or registry.
-
-## Update Homebrew Tap Workflow (`update-homebrew.yml`)
-
-### Trigger
-
-When a GitHub release is published (fires after `release.yml` completes and the release is no longer a draft).
-
-### Steps
-
-1. Extract the version from the release tag.
-2. Wait 30 seconds for release assets to become available.
-3. Download all four tarballs and compute `sha256` checksums.
-4. Checkout `Miosa-osa/homebrew-tap` using the `HOMEBREW_TAP_TOKEN` secret.
-5. Render the Homebrew formulas `Formula/osa.rb`, `Formula/osagent.rb`, and `Formula/miosa.rb` with current version and checksums.
-6. Commit and push to the tap repository.
-
-Each formula installs the release tarball into `libexec/` and symlinks `osa`, `osagent`, and `miosa` to `libexec/bin/osagent`. The `test do` block asserts all three entrypoints print a version string.
-
-### Required Secrets
-
-| Secret | Purpose |
-|--------|---------|
-| `HOMEBREW_TAP_TOKEN` | GitHub PAT with write access to `Miosa-osa/homebrew-tap` |
-| `GITHUB_TOKEN` | Automatically provided by Actions for reading release assets |
+Assets are attached directly to the GitHub Release. There is no separate artifact store or container registry.
 
 ## Releasing a New Version
 
-1. Update the `VERSION` file:
+1. Update the `VERSION` file (current: `1.0.3`):
    ```bash
-   echo "1.0.002" > VERSION
+   echo "1.0.3" > VERSION
    git add VERSION
-   git commit -m "[chore] Bump version to 1.0.002"
+   git commit -m "[chore] Bump version to 1.0.3"
    ```
 2. Push the commit to `main`.
-3. Tag and push:
+3. Tag (padded display form) and push:
    ```bash
-   git tag v1.0.002
+   git tag v1.0.003
    git push origin main
-   git push origin v1.0.002
+   git push origin v1.0.003
    ```
 4. Watch the `Release` workflow at `github.com/Miosa-osa/OSA/actions`.
-5. After the release is marked published, the Homebrew tap workflow runs automatically.
+5. When the three build jobs finish, `publish` attaches the assets and creates the Release.
 
 ## What Is Not Automated
 
-- **Test runs on PRs** — no CI job runs tests automatically. Contributors run `mix test` locally.
+- **Test runs on PRs** — no CI job runs the suite automatically. Contributors run `mix test` locally.
 - **Linting** — `mix format` is not enforced by CI. Run it before committing.
+- **Homebrew tap** — there is no `update-homebrew.yml` workflow. Distribution is via the GitHub Release assets and the `install.sh` / `install.ps1` scripts.
+- **Go tokenizer** — the release CI does not build one. `mix.exs` copies a *pre-built* `priv/go/tokenizer/osa-tokenizer` binary into the release only if it is already present; when absent, OSA falls back to a heuristic token count at runtime.
 - **Docker image publishing** — the `Dockerfile` is provided for self-hosting but no image is pushed to a registry as part of the release pipeline.
-- **Windows builds** — the release matrix covers macOS and Linux only. Windows users run OSA under WSL2 or use the Elixir source directly.
 
 ## Local Release Verification
 
 To verify a release locally before tagging:
 
 ```bash
-# Build tokenizer
-cd priv/go/tokenizer && CGO_ENABLED=0 go build -o osa-tokenizer . && cd ../../..
-
-# Assemble release
+# Assemble the OTP release
 MIX_ENV=prod mix deps.get --only prod
-MIX_ENV=prod mix compile
-MIX_ENV=prod mix release osagent
+MIX_ENV=prod mix release osagent --overwrite
 
 # Test the binary
 ./_build/prod/rel/osagent/bin/osagent version
-# Expected: osagent v1.0.002
+# Expected: osagent v1.0.3
+
+# Build the Rust TUI
+cd priv/rust/tui && cargo build --release && cd -
 ```

@@ -107,7 +107,7 @@ docker compose exec ollama ollama pull qwen2.5:7b
 
 ## From Source
 
-Requires Elixir 1.17+ and OTP 27+ on the host.
+Requires Elixir 1.17+ and OTP 26 (26.2.5, matching the release CI) on the host. OTP 27 is not supported for release builds. Note that a prebuilt OTP release bundles its own ERTS, so hosts running a downloaded release asset need no Erlang/Elixir installed — this requirement applies only to building from source.
 
 ```bash
 git clone https://github.com/Miosa-osa/OSA.git

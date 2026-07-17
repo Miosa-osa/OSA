@@ -1,8 +1,19 @@
 # Proactive Mode
 
-Proactive mode is the primary orchestrator of autonomous work in OSA. When enabled, OSA operates independently — greeting users on session start, reacting to system alerts with autonomous LLM calls, executing scheduled cron jobs, and maintaining an activity log accessible at any time.
+> **⚠️ STATUS: PLANNED / NOT YET IMPLEMENTED.** As of v1.0.3 the
+> `OptimalSystemAgent.Agent.ProactiveMode` GenServer described in this document
+> **does not exist** in `lib/`. There is no ProactiveMode module, no
+> `proactive_mode` config key, no `~/.osa/data/proactive_log.jsonl` activity log,
+> and no autonomous cron/heartbeat/trigger scheduler. The only "proactive" code
+> that ships today is unrelated: `Agent.Loop.ProactiveCompaction` (automatic
+> context-window compaction) and a per-session `POST /sessions/:id/proactive`
+> HTTP toggle (`SessionManager.set_proactive/1`) that flags a single session — it
+> does **not** dispatch autonomous work. Everything below describes the *intended*
+> design of an autonomous-work orchestrator, not shipping behavior.
 
-Disabled by default. Toggle with `/proactive on|off` or via the HTTP API.
+Proactive mode is intended to be the primary orchestrator of autonomous work in OSA. When enabled, OSA would operate independently — greeting users on session start, reacting to system alerts with autonomous LLM calls, executing scheduled cron jobs, and maintaining an activity log accessible at any time.
+
+Disabled by default. Planned toggle: `/proactive on|off` or via the HTTP API.
 
 ---
 

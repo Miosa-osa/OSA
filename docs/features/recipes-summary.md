@@ -2,13 +2,22 @@
 
 **Date:** March 6, 2026  
 **Tested by:** Javaris  
-**Status:** ✅ Fully operational — 12 recipes, fresh-session flow, context warning
+**Status:** ⚠️ SUPERSEDED — describes a runtime that is **not present in the current tree**
+
+> **⚠️ This dated report does not reflect the shipping code (v1.0.3).** It references a
+> module `lib/optimal_system_agent/recipes/recipe.ex` and a `/recipe` TUI flow that
+> **do not exist** in `lib/` today — there is no `Recipe` module, no `/recipe`
+> command, and no loader for the recipe JSON files. The recipe JSON definitions do
+> exist on disk (`priv/recipes/*.json`, `examples/workflows/*.json`), but nothing
+> loads or runs them. Treat the "✅ Pass" results below as describing a
+> **planned/not-yet-implemented** system, retained only as a historical record of
+> intended behavior. See [recipes.md](recipes.md) for the current status.
 
 ---
 
 ## Overview
 
-The Recipe system (`lib/optimal_system_agent/recipes/recipe.ex`, ~380 lines) provides structured multi-step workflows for complex tasks like code reviews, debugging, and app scaffolding.
+The Recipe system was intended to live at `lib/optimal_system_agent/recipes/recipe.ex` (~380 lines) and provide structured multi-step workflows for complex tasks like code reviews, debugging, and app scaffolding. **That module is not present in the current tree** — the description below is the planned design, not shipping behavior.
 
 ## Test Results
 

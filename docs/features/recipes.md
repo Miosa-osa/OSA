@@ -1,8 +1,16 @@
 # OSA Recipe System — Reference Guide
 
+> **⚠️ STATUS: PLANNED / NOT YET IMPLEMENTED.** As of v1.0.3 there is **no recipe
+> loader, runner, or `/recipe` command in `lib/`** — no `Recipe` module exists and
+> nothing reads the recipe files. The recipe **JSON definitions do exist** on disk
+> (`priv/recipes/*.json`, `examples/workflows/*.json`), but they are inert data with
+> no code to execute them. Everything below describes the *intended* design of the
+> recipe system, not shipping behavior. The `/recipe`, `/recipe <slug>`, and
+> `/recipe-create` commands are not wired up.
+
 > Recipes are multi-step guided workflows that run in a **fresh session** with full context available.  
-> Run any recipe with: `/recipe <slug>`  
-> List all recipes with: `/recipe`
+> Run any recipe with: `/recipe <slug>` *(planned)*  
+> List all recipes with: `/recipe` *(planned)*
 
 ---
 
@@ -192,9 +200,13 @@ The slug (used in `/recipe <slug>`) is the filename without `.json`.
 
 ---
 
-## Recipe System — Production Readiness Grade
+## Recipe System — Production Readiness Grade (aspirational)
 
-**Overall: B+ (82/100)**
+> The grades below describe the *design intent* for the planned recipe runtime.
+> They are **not** an assessment of shipping code — no recipe runtime exists yet
+> (see the status banner at the top of this document).
+
+**Target: B+ (82/100)**
 
 | Area | Score | Notes |
 |---|---|---|
