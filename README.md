@@ -46,16 +46,33 @@ osa doctor
 
 The Homebrew package also installs compatible `osagent` and `miosa` command aliases.
 
+`osa` is the one command. The first run warms the backend as a background
+daemon and drops you into the TUI; that daemon **survives TUI exit**, so every
+`osa` after that attaches instantly. Stop it any time with `osa stop`.
+
 Common entry points:
 
 | Command | What it does |
 |---|---|
-| `osa` | Backend + TUI (default) |
+| `osa` | Attach the TUI (warms the backend daemon if needed) |
+| `osa overdrive` | Launch in **overdrive (full auto)** — skips approval prompts |
+| `osa continue` | Resume the newest session in this directory |
+| `osa resume [id]` | Resume a specific session (or pick one) |
+| `osa stop` | Stop the background backend daemon |
 | `osa setup` | Re-run the setup wizard (switch provider, change key) |
-| `osa update` | Pull latest, rebuild |
-| `osa serve` | Backend only, no TUI (HTTP API on :9089) |
+| `osa update` | Update in place, show what's new, then launch |
 | `osa doctor` | Health checks |
+| `osa serve` | Backend only, no TUI (HTTP API on :9089) |
+| `osa version` | Print version |
+| `osa help` | Full command + flag reference |
 | `osa --dev` | Dev profile, port 19001 |
+
+Flags forwarded to the TUI: `--overdrive` (same as `osa overdrive`;
+`--dangerously-skip-permissions` is a silent alias), `--continue`,
+`--resume [id]`, `--permission-mode <ask|auto-edit|plan|overdrive>`.
+
+> **Overdrive (full auto)** runs OSA without approval prompts. Entering it shows
+> a red warning and a one-time confirmation — only use it in a directory you trust.
 
 Override the port with `OSA_HTTP_PORT=<n>` in `~/.osa/.env` (default 9089).
 
@@ -386,13 +403,24 @@ Supported providers: Ollama (local/free), Anthropic (OAuth or API key), OpenAI, 
 ### Subcommands
 
 ```
-osa              Start (backend + TUI)
-osa setup        Re-run setup wizard
-osa serve        Headless backend (HTTP API on :9089)
-osa update       Pull latest + recompile
-osa doctor       Health checks
-osa version      Print version
+osa                Attach the TUI (warms the backend daemon if needed)
+osa overdrive      Launch in overdrive (full auto) — no approval prompts
+osa continue       Resume the newest session in this directory
+osa resume [id]    Resume a specific session (or pick one)
+osa stop           Stop the background backend daemon
+osa setup          Re-run setup wizard
+osa update         Update in place, show what's new, then launch
+osa doctor         Health checks
+osa serve          Headless backend (HTTP API on :9089)
+osa version        Print version
+osa help           Full command + flag reference
 ```
+
+The backend runs as a warm background daemon that outlives the TUI, so a second
+`osa` attaches with no cold start. `osa stop` shuts it down; it also idles down
+when unused. `osa update` downloads the latest prebuilt release + TUI, verifies
+its checksum, swaps them in atomically under `~/.osa`, prints the version delta
+and release notes, and then relaunches.
 
 ### CLI Commands (25)
 

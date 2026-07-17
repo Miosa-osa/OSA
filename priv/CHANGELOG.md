@@ -1,0 +1,186 @@
+# Changelog
+
+All notable changes to OptimalSystemAgent are documented here.
+
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+
+---
+
+## [Unreleased]
+
+### Added
+- **Dynamic Agent Scaling (1-50)**: ComplexityScaler maps complexity score (1-10) to Fibonacci agent counts. User intent detection ("use 25 agents") overrides auto-scaling. Removed hardcoded 10-agent caps.
+- **3-Tier Graduated Confidence Routing** (`agent/orchestrator/agent_runner.ex`): HIGH (>=4.0) uses named agent prompt, MEDIUM (2.0-4.0) blends dynamic framing with agent expertise, LOW (<2.0) generates pure dynamic prompt. All agents get ALL tools, skills, environment context, memory, and dependency context.
+- **Complexity Scoring** (`agent/orchestrator/complexity.ex`): Returns numeric 1-10 score instead of binary simple/complex. New return shapes: `{:simple, score}` and `{:complex, score, sub_tasks}`.
+- **Bus→Trigger Bridge** (`agent/scheduler.ex`): Triggers with an `"event"` field auto-register as bus event handlers. Internal events now fire triggers.
+- **ProactiveMonitor Auto-Dispatch**: Critical alerts automatically spawn agents via `Agent.Loop.process_message` (max 3 to avoid flood).
+- **Ollama Cloud Frontrunner Models**: kimi-k2.5:cloud (elite), qwen3-coder:480b-cloud (specialist), qwen3:8b-cloud (utility) in tier system.
+- **Ollama `available_models/0`**: Model selector now shows ALL installed Ollama models instead of just the auto-detected default.
+- **LLM Retry with Backoff** (`agent_runner.ex`): Exponential backoff for transient failures (429, 500, 502, 503, timeouts). Safe tool execution wrapping.
+- **TUI Word Wrapping** (`render/markdown.rs`): Plain paragraphs, list items, and blockquotes now word-wrap to terminal width instead of overflowing.
+- **Integration Stress Tests** (27 tests): Real LLM tests covering math reasoning, structured JSON, code gen, multi-turn context, instruction following, safety, complexity analysis, agent prompts, scaling pipeline, tier mapping, agent selection quality.
+
+### Fixed
+- HTTP 500 on `/api/v1/models` — `context_window` ETS lookup crash wrapped in try/rescue
+- Atom table exhaustion risk in `scheduler.ex` — `String.to_atom` replaced with `String.to_existing_atom` for user-supplied event names
+- Unused module attributes in `comm_coach.ex` removed (fixes `--warnings-as-errors`)
+- Stale `:builder` role in `decomposer.ex` → `:backend`
+
+### Changed
+- Tier ceilings raised: elite→50, specialist→30, utility→10 (was 10/6/3)
+- `Roster.max_agents/0` now configurable via `:max_agents` app env (default 50, was hardcoded 10)
+- `Complexity.analyze/2` accepts opts including `:max_agents`
+- `Decomposer.decompose_task/2` accepts opts, returns `complexity_score` in metadata
+
+- **Parallel Tool Execution** (`agent/loop.ex`): Tool calls from a single LLM response now execute concurrently via `Task.async_stream` (max 10 concurrency, 60s timeout). Results are collected and appended in original order. Pre-tool hooks (security_check, spend_guard) run synchronously per-tool inside each parallel task; post-tool hooks fire async.
+- **Doom Loop Detection** (`agent/loop.ex`): Agent tracks `consecutive_failures` and `last_tool_signature`. If the same set of tools fails 3 consecutive iterations, the agent halts with an explanation instead of looping indefinitely. Emits `:doom_loop_detected` system event for observability.
+- **Destructive Git Protection** (`security/shell_policy.ex`): 7 new regex patterns block `git push --force/-f`, `git reset --hard`, `git clean -f*`, `git checkout -- .`, `git branch -D`, and `--no-verify` flags. Safe git operations (push, commit, checkout branch) remain allowed.
+- **TUI Onboarding Wizard**: 8-step first-run setup directly in the terminal
+  - Step 1: Agent name
+  - Step 2: User profile (name + work context → writes USER.md)
+  - Step 3: OS template / use case selection (auto-discovers .osa-manifest.json projects)
+  - Step 4: LLM provider (18 providers, Local/Cloud grouping, scrollable list)
+  - Step 5: API key input (masked, auto-skipped for Ollama)
+  - Step 6: Machine/skill group toggles (communication, productivity, research)
+  - Step 7: Channel selection (Telegram, WhatsApp, Discord, Slack)
+  - Step 8: Review summary + confirm → writes config.json, IDENTITY.md, USER.md, SOUL.md
+  - Post-setup health checks (doctor_checks) included in setup response
+  - Error handling: setup failures display on confirm screen with retry
+  - Fail-open: if backend unreachable during check, wizard is skipped gracefully
+- **Backend onboarding API** (unauthenticated, alongside /health):
+  - `GET /onboarding/status` → needs_onboarding, system_info, providers, templates, machines, channels
+  - `POST /onboarding/setup` → writes all config, runs doctor checks, returns results
+  - Headless `write_setup/1` public function for programmatic setup
+  - `providers_list/0`, `templates_list/0`, `machines_list/0`, `channels_list/0` data accessors
+- **TUI Phase 4**: Mouse scroll, smart model switching, provider recognition
+  - Mouse wheel scrolls chat viewport and model picker
+  - `/model <provider>` opens picker filtered to that provider (18 providers recognized)
+  - `/model` shows `Current: provider / model` (was model-only)
+  - `/model <provider>/<name>` direct switch, `/model <name>` defaults to Ollama
+- Competitive intelligence docs (`docs/competitors/`)
+- Feature matrix comparing 14 competitors
+- 5-phase roadmap with gap analysis
+- Changelog structure
+
+### Changed
+- `mix osa.serve` no longer runs interactive onboarding — logs hint to use TUI or `mix osa.setup`
+
+---
+
+## [0.9.0] - 2026-02-27
+
+### Added
+- **Data pipeline hardening**: 7 security/correctness fixes from review
+- **Channel onboarding**: guided first-run setup for each messaging platform
+- **WhatsApp Web sidecar**: experimental WhatsApp integration
+- **SQLite message persistence**: messages survive restarts
+- **Formatter pass**: consistent code formatting across codebase
+
+### Fixed
+- 5 model switching edge cases (`/model`, `/tiers`)
+- Tool process instructions + GLM-4 model matching
+- `runtime.exs` configuration fix
+
+---
+
+## [0.8.0] - 2026-02-26
+
+### Added
+- **12-feature extension**:
+  - Request integrity (HMAC-SHA256 + nonce deduplication)
+  - Per-agent budget governance
+  - Persistent task queue with atomic leasing
+  - CloudEvents protocol support
+  - Fleet management (opt-in) with registry and health monitoring
+  - Heartbeat state persistence with quiet hours
+  - WASM sandbox (experimental)
+  - Treasury governance (deposits, withdrawals, reservations)
+  - Business skills (wallet operations)
+  - Task value appraiser with role-based costing
+  - Crypto wallet integration (mock, Base USDC, Ethereum, Solana)
+  - OTA updater with TUF verification
+
+---
+
+## [0.7.0] - 2026-02-25
+
+### Added
+- **Agent dispatch system**: 22+ agents with tier assignments
+- **9-role orchestration**: lead, backend, frontend, data, design, infra, qa, red_team, services
+- **Wave execution**: 5-phase dependency-aware orchestration
+- **10 swarm presets**: code-analysis, full-stack, debug, performance-audit, security-audit, documentation, adaptive-debug, adaptive-feature, concurrent-migration, ai-pipeline
+- **Tier-aware model routing**: elite/opus, specialist/sonnet, utility/haiku
+- **Hook pipeline**: 7 events, 16+ built-in hooks
+- **SICA learning engine**: OBSERVE → REFLECT → PROPOSE → TEST → INTEGRATE
+- **VIGIL error taxonomy**: structured error recovery
+- **Cortex knowledge synthesis**: cross-session topic tracking
+
+---
+
+## [0.6.0] - 2026-02-24
+
+### Added
+- **Signal Theory framework**: 5-tuple classification (Mode, Genre, Type, Format, Weight)
+- **Two-tier noise filtering**: deterministic (<1ms) + LLM fallback (~200ms)
+- **Communication intelligence**: profiler, coach, conversation tracker, contact detector, proactive monitor
+- **Context management**: 4-tier token-budgeted assembly
+- **3-zone progressive compaction**: hot/warm/cold with importance weighting
+
+---
+
+## [0.5.0] - 2026-02-23
+
+### Added
+- **18 LLM providers**: Anthropic, OpenAI, Google, Ollama, Groq, Fireworks, Together, Replicate, DeepSeek, OpenRouter, Perplexity, Qwen, Zhipu, Moonshot, VolcEngine, Baichuan
+- **Provider auto-detection**: env vars → API keys → Ollama fallback
+- **Tool gating**: model size and capability-aware tool dispatch
+- **.env loading**: project root + `~/.osa/.env`
+- **Ollama integration**: auto-detect largest tool-capable model
+
+---
+
+## [0.4.0] - 2026-02-22
+
+### Added
+- **Swarm system**: orchestrator, patterns, intelligence, mailbox, worker, planner, PACT framework
+- **4 swarm patterns**: parallel, pipeline, debate, review_loop
+- **5 swarm roles**: coordinator, researcher, implementer, reviewer, synthesizer
+- **Inter-agent messaging**: mailbox-based communication
+
+---
+
+## [0.3.0] - 2026-02-21
+
+### Added
+- **12+ messaging channels**: CLI, HTTP, Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, QQ, DingTalk, Feishu
+- **Channel manager**: auto-start configured channels
+- **Channel onboarding**: first-run configuration per platform
+- **HTTP API**: Plug/Bandit on port 8089 with REST endpoints
+- **SDK contracts**: Agent, Config, Hook, Message, Permission, Session, Tool
+
+---
+
+## [0.2.0] - 2026-02-20
+
+### Added
+- **9 built-in skills**: file_read, file_write, shell_execute, web_search, memory_save, orchestrate, create_skill, budget_status, wallet_ops
+- **Skill system**: Behaviour callbacks, Registry, SKILL.md format, MCP integration
+- **Memory system**: 3-store architecture (session JSONL, long-term MEMORY.md, episodic ETS)
+- **Session management**: JSONL persistence, resume, registry
+
+---
+
+## [0.1.0] - 2026-02-19
+
+### Added
+- **Core agent loop**: ReAct stateful agent with message processing
+- **OTP application**: supervisor tree with 25+ subsystems
+- **Event bus**: goldrush-compiled zero-overhead routing
+- **CLI**: interactive terminal with markdown rendering, spinner, readline
+- **Onboarding**: first-run wizard (agent name, profile, provider, channels)
+- **Docker sandbox**: warm container pool, executor, resource limits
+- **Go sidecars**: tokenizer, git, sysmon
+- **Python sidecar**: embeddings
+- **Sidecar management**: lifecycle, circuit breaker, health polling
+- **30+ slash commands**: /help, /status, /model, /skills, /memory, /agents, /tiers, etc.

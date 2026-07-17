@@ -110,6 +110,11 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // The overdrive confirmation is a modal overlay with the highest key
+        // priority — nothing else may run while it awaits a yes/no.
+        if self.overdrive_confirm.is_some() {
+            return self.handle_overdrive_confirm_key(key);
+        }
         // File picker and reasoning selector are overlays that take priority
         // regardless of the current app state.
         if self.file_picker.is_some() {
@@ -171,42 +176,121 @@ impl App {
         false
     }
 
-    /// Advance the tool-permission mode one step (Shift+Tab). Mirrors Claude
-    /// Code's cycle: Default → AcceptEdits → Plan → BypassPermissions → Default.
+    /// Advance the tool-permission mode one step (Shift+Tab). OSA's cycle is
+    /// `ask → auto-edit → plan → overdrive (full auto) → ask`.
     ///
-    /// The status line reflects the active mode. Reaching BypassPermissions
-    /// keeps `config.skip_permissions` and the sidebar YOLO indicator in sync so
-    /// the display is internally consistent with `/yolo`. Full backend
-    /// enforcement (dangerous-mode sync, AcceptEdits auto-approve of edit
-    /// prompts, Plan read-only gating) is not wired yet — those modes currently
-    /// change only the displayed state; `/yolo` remains the authoritative bypass
-    /// control that notifies the backend.
+    /// Every transition notifies the backend (`permission_mode <token>`) so its
+    /// enforcement tracks the displayed mode. Entering **overdrive** the first
+    /// time on this install pops a red confirm dialog (reusing the QuitConfirm
+    /// pattern); once acknowledged it enters directly. Overdrive keeps
+    /// `config.skip_permissions`, the sidebar indicator, and the backend
+    /// `dangerous_mode` toggle in lockstep so it converges with `/yolo`.
     fn cycle_permission_mode(&mut self) {
-        use crate::components::status_bar::PermissionMode;
         let prev = self.status.permission_mode();
         let next = prev.next();
-        self.status.set_permission_mode(next);
 
-        // Keep the sidebar YOLO indicator consistent with the bypass display.
-        let bypass = matches!(next, PermissionMode::BypassPermissions);
-        self.config.skip_permissions = bypass;
-        self.sidebar.set_yolo_mode(bypass);
-
-        // Sync the backend "auto" permission tier / safety guardian with the UI
-        // so enforcement matches what's displayed. Toggle on when entering Auto,
-        // off when leaving it (mirrors how /yolo notifies dangerous-mode).
-        let entering_auto = matches!(next, PermissionMode::Auto);
-        let leaving_auto = matches!(prev, PermissionMode::Auto) && !entering_auto;
-        if entering_auto {
-            self.execute_backend_command("auto_mode", "on");
-        } else if leaving_auto {
-            self.execute_backend_command("auto_mode", "off");
+        // Entering overdrive: gate behind a one-time confirmation.
+        if next.is_overdrive() {
+            if self.overdrive_acked() {
+                self.enter_overdrive();
+            } else {
+                // Park the request behind the confirm dialog; keep the current
+                // mode on screen until the user decides.
+                self.overdrive_prev_mode = prev;
+                self.overdrive_confirm =
+                    Some(crate::dialogs::overdrive_confirm::OverdriveConfirm::new());
+            }
+            return;
         }
 
+        // Leaving overdrive: clear the bypass state + tell the backend.
+        if prev.is_overdrive() {
+            self.config.skip_permissions = false;
+            self.sidebar.set_yolo_mode(false);
+            self.spawn_backend_command("dangerous_mode", "off");
+        }
+
+        self.status.set_permission_mode(next);
+        self.spawn_backend_command("permission_mode", next.backend_token());
         self.toasts.push(
             format!("Permission mode: {}", next.title()),
             crate::components::toast::ToastLevel::Info,
         );
+        self.announce_a11y(&format!("permission mode: {}", next.short_title()));
+    }
+
+    /// Commit to overdrive (full auto): mode + bypass flag + sidebar + backend
+    /// `dangerous_mode on`, with a loud red warning toast. Shared by the
+    /// confirm-accept path and the already-acked fast path.
+    pub(crate) fn enter_overdrive(&mut self) {
+        use crate::components::status_bar::PermissionMode;
+        self.status.set_permission_mode(PermissionMode::BypassPermissions);
+        self.config.skip_permissions = true;
+        self.sidebar.set_yolo_mode(true);
+        self.spawn_backend_command("dangerous_mode", "on");
+        self.spawn_backend_command("permission_mode", "overdrive");
+        self.toasts.push(
+            "Overdrive (full auto) ON — every tool runs without prompts".into(),
+            crate::components::toast::ToastLevel::Warning,
+        );
+        self.announce_a11y("permission mode: overdrive full auto, no prompts");
+    }
+
+    /// Path to the one-shot overdrive acknowledgement marker (per install/profile).
+    fn overdrive_ack_path(&self) -> std::path::PathBuf {
+        self.config.profile_dir.join(".overdrive_ack")
+    }
+
+    /// Whether the user has already confirmed overdrive once on this install.
+    pub(crate) fn overdrive_acked(&self) -> bool {
+        self.overdrive_ack_path().exists()
+    }
+
+    /// Persist the overdrive acknowledgement so the confirm only shows once.
+    fn set_overdrive_acked(&self) {
+        let path = self.overdrive_ack_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, b"acknowledged\n");
+    }
+
+    /// Handle a key while the overdrive confirmation overlay is open.
+    fn handle_overdrive_confirm_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        if let Some(dialog) = self.overdrive_confirm.as_mut() {
+            if let Some(decision) = dialog.handle_key(key) {
+                self.overdrive_confirm = None;
+                if decision {
+                    self.set_overdrive_acked();
+                    self.enter_overdrive();
+                } else {
+                    // Cancelled — revert to whatever mode was active before.
+                    let prev = self.overdrive_prev_mode;
+                    self.status.set_permission_mode(prev);
+                    self.toasts.push(
+                        "Overdrive cancelled".into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
+            }
+        }
+        false
+    }
+
+    /// Fire-and-forget backend command that must NOT disturb the UI state
+    /// (unlike `execute_backend_command`, which flips into Processing). Used for
+    /// lightweight mode toggles on every Shift+Tab.
+    pub(crate) fn spawn_backend_command(&self, command: &str, arg: &str) {
+        let client = self.client.clone();
+        let session_id = self.session_id.clone();
+        let req = crate::client::types::CommandExecuteRequest {
+            command: command.to_string(),
+            arg: arg.to_string(),
+            session_id,
+        };
+        tokio::spawn(async move {
+            let _ = client.execute_command(&req).await;
+        });
     }
 
     fn handle_idle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -377,11 +461,16 @@ impl App {
                 self.copy_last_message();
                 false
             }
-            // @ key: open file picker to insert a file path into input
-            (KeyCode::Char('@'), KeyModifiers::NONE) => {
-                self.open_file_picker();
+            // Ctrl+R on an empty composer expands the last tool result inline
+            // (parity with Claude Code's verbose-expand). With text present it
+            // falls through to the composer's reverse-i-search, so both survive.
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) if input_empty => {
+                self.chat.toggle_last_tool_expand(self.width);
                 false
             }
+            // '@' is handled inline by the composer (fuzzy file/dir mention
+            // dropdown) — let it fall through to the input rather than opening a
+            // separate modal, so the path is inserted in place.
             _ => {
                 let action =
                     self.input
@@ -439,6 +528,12 @@ impl App {
                 } else {
                     self.chat.toggle_last_tool_expand(self.width);
                 }
+                false
+            }
+            // Ctrl+R on an empty composer expands the last tool result (parity
+            // with Ctrl+O / CC verbose-expand); with text it reaches reverse-search.
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) if self.input.is_empty() => {
+                self.chat.toggle_last_tool_expand(self.width);
                 false
             }
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => {

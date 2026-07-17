@@ -115,6 +115,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   forward("/skills", to: API.ToolRoutes)
   forward("/commands", to: API.ToolRoutes)
 
+  # ── Interactive permission round-trip (POST /permissions/respond) ────
+  forward("/permissions", to: API.ToolRoutes)
+
   # ── Scheduled Tasks ─────────────────────────────────────────────────
   forward("/scheduled-tasks", to: API.SchedulerRoutes)
 
@@ -194,6 +197,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
       _ ->
         json_error(conn, 400, "invalid_request", "Missing required field: message")
     end
+  end
+
+  # ── Lifecycle: doctor / version / release-notes ─────────────────────
+  # Structured health report for the TUI /doctor panel (mirrors the CLI report).
+  get "/doctor" do
+    body = safe_json_encode(OptimalSystemAgent.CLI.Doctor.report())
+
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(200, body)
+  end
+
+  # Version-check: current vs latest release tag (no install performed).
+  get "/version" do
+    body = safe_json_encode(OptimalSystemAgent.ReleaseNotes.version_status())
+
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(200, body)
+  end
+
+  # What's-new resource. `?n=<count>` controls how many entries (default 3).
+  get "/release-notes" do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    n =
+      case Integer.parse(to_string(conn.query_params["n"] || "3")) do
+        {count, _} when count > 0 -> min(count, 20)
+        _ -> 3
+      end
+
+    entries = OptimalSystemAgent.ReleaseNotes.entries() |> Enum.take(n)
+
+    body =
+      safe_json_encode(%{
+        current: OptimalSystemAgent.ReleaseNotes.current_version(),
+        latest: OptimalSystemAgent.ReleaseNotes.latest(),
+        entries: entries,
+        text: OptimalSystemAgent.ReleaseNotes.latest_text(n)
+      })
+
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(200, body)
   end
 
   # ── Catch-all ────────────────────────────────────────────────────────

@@ -18,13 +18,17 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     File.mkdir_p!(@sessions_dir)
     path = session_path(session_id)
 
-    data = %{
-      session_id: session_id,
-      working_dir: normalize_dir(working_dir),
-      message_count: length(messages),
-      saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      messages: sanitize_messages(messages)
-    }
+    data =
+      %{
+        session_id: session_id,
+        working_dir: normalize_dir(working_dir),
+        message_count: length(messages),
+        saved_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        messages: sanitize_messages(messages)
+      }
+      # Preserve user-set metadata (title/tags from /rename and /tag) so an
+      # auto_save that only carries messages never clobbers it.
+      |> merge_preserved_metadata(path)
 
     case Jason.encode(data) do
       {:ok, json} ->
@@ -100,17 +104,31 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:ok, files} ->
         files
         |> Enum.filter(&String.ends_with?(&1, ".json"))
-        |> Enum.map(fn file ->
+        |> Enum.flat_map(fn file ->
           path = Path.join(@sessions_dir, file)
           session_id = String.trim_trailing(file, ".json")
-          stat = File.stat!(path)
 
-          %{
-            session_id: session_id,
-            working_dir: read_working_dir(path),
-            size: stat.size,
-            modified_at: stat.mtime
-          }
+          # Per-file try: a session file removed/renamed by a concurrent writer
+          # (e.g. a live session auto-saving) must skip that one entry, not wipe
+          # the whole listing.
+          case File.stat(path) do
+            {:ok, stat} ->
+              meta = read_meta(path)
+
+              [
+                %{
+                  session_id: session_id,
+                  working_dir: meta.working_dir,
+                  title: meta.title,
+                  tags: meta.tags,
+                  size: stat.size,
+                  modified_at: to_naive(stat.mtime)
+                }
+              ]
+
+            {:error, _} ->
+              []
+          end
         end)
         |> then(fn sessions ->
           if filter_dir,
@@ -139,6 +157,38 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   def delete(session_id) do
     path = session_path(session_id)
     File.rm(path)
+  end
+
+  @doc """
+  Merge friendly metadata (e.g. `%{title: ..., tags: [...]}`) into a saved
+  session record. Creates the record if none exists yet so `/rename` and `/tag`
+  work before the first message is saved. Returns `:ok` or `{:error, reason}`.
+  """
+  def update_metadata(session_id, fields) when is_map(fields) do
+    File.mkdir_p!(@sessions_dir)
+    path = session_path(session_id)
+
+    existing =
+      case File.read(path) do
+        {:ok, json} ->
+          case Jason.decode(json) do
+            {:ok, data} when is_map(data) -> data
+            _ -> base_record(session_id)
+          end
+
+        _ ->
+          base_record(session_id)
+      end
+
+    string_fields = Map.new(fields, fn {k, v} -> {to_string(k), v} end)
+    write_json(path, Map.merge(existing, string_fields))
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  @doc "Read a single session's metadata (title, tags, working_dir)."
+  def get_metadata(session_id) do
+    read_meta(session_path(session_id))
   end
 
   @doc "Auto-save session state (called from hooks)."
@@ -190,13 +240,82 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   defp normalize_dir(_), do: nil
 
-  # Cheaply read just the working_dir field from a saved session file.
-  defp read_working_dir(path) do
+  # Cheaply read display metadata (working_dir, title, tags) from a session file.
+  defp read_meta(path) do
     with {:ok, json} <- File.read(path),
-         {:ok, %{"working_dir" => dir}} <- Jason.decode(json) do
-      dir
+         {:ok, data} when is_map(data) <- Jason.decode(json) do
+      %{
+        working_dir: data["working_dir"],
+        title: data["title"],
+        tags: normalize_tags(data["tags"])
+      }
     else
-      _ -> nil
+      _ -> %{working_dir: nil, title: nil, tags: []}
+    end
+  end
+
+  defp normalize_tags(tags) when is_list(tags), do: tags
+  defp normalize_tags(_), do: []
+
+  # File.stat mtime is an Erlang datetime tuple ({{y,m,d},{h,mi,s}}); convert to
+  # NaiveDateTime so the {:desc, NaiveDateTime} sort (and callers that render the
+  # date) work. Previously the raw tuple made the sort raise, and the blanket
+  # rescue turned the whole listing into [] — leaving /resume permanently empty.
+  defp to_naive({{_, _, _}, {_, _, _}} = erl_dt) do
+    case NaiveDateTime.from_erl(erl_dt) do
+      {:ok, ndt} -> ndt
+      _ -> ~N[1970-01-01 00:00:00]
+    end
+  end
+
+  defp to_naive(%NaiveDateTime{} = ndt), do: ndt
+  defp to_naive(_), do: ~N[1970-01-01 00:00:00]
+
+  # A minimal record used when metadata is set before any messages are saved.
+  defp base_record(session_id) do
+    %{
+      "session_id" => session_id,
+      "working_dir" => nil,
+      "message_count" => 0,
+      "saved_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+      "messages" => []
+    }
+  end
+
+  # Read the title/tags from an existing record (if any) and re-apply them onto
+  # a freshly-built save payload, keeping them stable across message-only saves.
+  defp merge_preserved_metadata(data, path) do
+    case File.read(path) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, existing} when is_map(existing) ->
+            Enum.reduce(["title", "tags"], data, fn key, acc ->
+              case Map.get(existing, key) do
+                nil -> acc
+                val -> Map.put(acc, key, val)
+              end
+            end)
+
+          _ ->
+            data
+        end
+
+      _ ->
+        data
+    end
+  end
+
+  # Atomic JSON write (temp-then-rename), shared by save/3 and update_metadata/2.
+  defp write_json(path, data) do
+    case Jason.encode(data) do
+      {:ok, json} ->
+        tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
+        File.write!(tmp, json)
+        File.rename!(tmp, path)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

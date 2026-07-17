@@ -9,8 +9,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.Loop.DurableLog
+  alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
+  alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
@@ -28,6 +30,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     file_write file_edit multi_file_edit file_create file_delete file_move
     git task_write memory_write memory_save download create_skill
   )
+
+  # Edit/write tools auto-approved in :accept_edits permission mode. Narrower
+  # than @workspace_tools: file_delete/file_move and git stay gated (ask/tier)
+  # because they are destructive beyond a single-file edit.
+  @edit_tools ~w(file_write file_edit multi_file_edit file_create)
 
   # Tools ALWAYS blocked for subagents — prevents recursion, shared state
   # corruption, and user-facing actions from non-user-facing processes.
@@ -99,8 +106,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
       tool_result =
         case approve_tool_call(tool_call, state) do
-          {:blocked, message} -> message
-          :allow -> run_tool(tool_call, state)
+          {:blocked, message} ->
+            message
+
+          :allow ->
+            run_tool(tool_call, state)
+
+          {:ask, request_id, summary} ->
+            # DEFAULT 'ask' mode: park the executing process, emit a
+            # permission_required event, and resume once the TUI dialog POSTs a
+            # decision to /api/v1/permissions/respond (or the wait aborts).
+            case await_permission(tool_call, state, request_id, summary) do
+              :allow -> run_tool(tool_call, state)
+              {:blocked, message} -> message
+              # Reject-with-steer: the user's clarify text becomes the tool
+              # result verbatim, feeding their correction back into the turn.
+              {:steer, text} -> text
+            end
         end
 
       finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool)
@@ -187,55 +209,93 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # CONCERN 1 — approval policy.
   #
   # Decides whether the call may proceed, WITHOUT running it. Returns
-  # `{:blocked, message}` (the message becomes the tool result verbatim) or
-  # `:allow` (fall through to run_tool/2 and the pre_tool_use hook pipeline).
+  # `:allow` (fall through to run_tool/2), `{:blocked, message}` (the message
+  # becomes the tool result verbatim), or `{:ask, request_id, summary}` (park
+  # the executing process and wait for an interactive decision — DEFAULT ask
+  # mode). Public (@doc false) so the permission stack can be unit-tested.
   #
   # Order matters and is preserved exactly:
   #   1. NON-BYPASSABLE circuit-breaker — a hard blocklist of catastrophic
-  #      commands (rm -rf /, force-push to protected branches, fork bombs, dd to
-  #      block devices, mkfs, DROP DATABASE, curl|sh, …). Evaluated ONCE, before
-  #      the tier/guardian cond so it applies in EVERY permission tier —
-  #      including :full / bypass — and cannot be bypassed by the auto Guardian.
-  #   2. permission tier gate
-  #   3. subagent per-agent allow/deny gate
-  #   4. auto-mode safety Guardian (a nil review falls through to :allow so the
-  #      pre_tool_use hooks still run — defense in depth).
-  defp approve_tool_call(tool_call, state) do
+  #      commands (fork bombs, dd to block devices, mkfs, force-push to
+  #      protected branches, …). Evaluated ONCE, before everything else, so it
+  #      applies in EVERY permission mode — including :overdrive — and cannot be
+  #      bypassed.
+  #   2. permission_mode gate (higher-level selector, this commit):
+  #        :overdrive    → allow all (full auto), circuit-breaker aside
+  #        :plan         → deny mutating tools (read-only planning)
+  #        :accept_edits → auto-allow edit/write tools, else fall to tier+ask
+  #        :ask (default)→ current tier + Guardian, then interactive prompt for
+  #                        mutating tools not covered by a saved rule
+  #   3. permission tier gate / subagent gate / auto-mode Guardian (unchanged)
+  #   4. saved-rule check + interactive ask (maybe_ask/2)
+  @doc false
+  def approve_tool_call(tool_call, state) do
     circuit_breaker =
       OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
 
-    decision =
+    mode = Map.get(state, :permission_mode, :ask)
+
+    cond do
+      match?({:blocked, _}, circuit_breaker) ->
+        {:blocked, reason} = circuit_breaker
+
+        Logger.error(
+          "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} (mode=#{mode}, tier=#{state.permission_tier}, session: #{state.session_id})"
+        )
+
+        {:blocked,
+         "Blocked: #{reason} (hard safety limit — not overridable in any permission mode)"}
+
+      # Overdrive / bypass (full auto): everything past the circuit-breaker runs.
+      mode in [:overdrive, :bypass] ->
+        :allow
+
+      # Plan mode: read-only. Any tool that is not in the read-only set would
+      # change state, so it is denied while planning.
+      mode == :plan and not permission_tier_allows?(:read_only, tool_call.name) ->
+        {:blocked,
+         "Blocked: plan mode is read-only — #{tool_call.name} would change state. " <>
+           "Switch to auto-edit, ask, or overdrive (full auto) to make changes."}
+
+      # Accept-edits: single-file edit/write tools are auto-approved; anything
+      # else (shell, delete/move, git, risky tools) falls through to tier + ask.
+      mode == :accept_edits and tool_call.name in @edit_tools ->
+        :allow
+
+      true ->
+        approve_by_tier(tool_call, state)
+    end
+  end
+
+  # Existing tier + subagent + auto-Guardian gate. Returns `:allow` |
+  # `{:blocked, msg}` | `{:ask, ...}` — on a tier "allow", defers to maybe_ask/2
+  # for saved-rule enforcement and the interactive prompt.
+  defp approve_by_tier(tool_call, state) do
+    tier_decision =
       cond do
-        match?({:blocked, _}, circuit_breaker) ->
-          {:blocked, reason} = circuit_breaker
-
-          Logger.error(
-            "[loop] CIRCUIT-BREAKER blocked #{tool_call.name}: #{reason} (tier=#{state.permission_tier}, session: #{state.session_id})"
-          )
-
-          "Blocked: #{reason} (hard safety limit — not overridable in any permission tier)"
-
         not permission_tier_allows?(state.permission_tier, tool_call.name) ->
           Logger.warning(
             "[loop] Permission denied: tier=#{state.permission_tier} blocked #{tool_call.name} (session: #{state.session_id})"
           )
 
-          "Blocked: #{state.permission_tier} mode — #{tool_call.name} is not permitted at this permission level"
+          {:blocked,
+           "Blocked: #{state.permission_tier} mode — #{tool_call.name} is not permitted at this permission level"}
 
         state.permission_tier == :subagent and not subagent_tool_allowed?(tool_call.name, state) ->
           Logger.warning(
             "[loop] Subagent tool denied: #{tool_call.name} blocked by agent definition (session: #{state.session_id})"
           )
 
-          "Blocked: this agent role does not have access to #{tool_call.name}"
+          {:blocked, "Blocked: this agent role does not have access to #{tool_call.name}"}
 
         state.permission_tier == :auto ->
-          # Auto-mode: gate the call through the safety Guardian. A nil result
-          # falls through to the :pre_tool_use hooks below — defense in depth.
+          # Auto-mode: gate the call through the safety Guardian. An {:allow}
+          # falls through to maybe_ask/2 (defense in depth: saved rules still
+          # apply, but auto-mode never opens the interactive prompt).
           case OptimalSystemAgent.Agent.Safety.Guardian.review(tool_call, state) do
-            {:block, reason} -> "Blocked: #{reason}"
-            {:pause, reason} -> "Blocked (auto-mode paused): #{reason}"
-            {:allow} -> nil
+            {:block, reason} -> {:blocked, "Blocked: #{reason}"}
+            {:pause, reason} -> {:blocked, "Blocked (auto-mode paused): #{reason}"}
+            {:allow} -> :tier_ok
           end
 
         true ->
@@ -246,13 +306,150 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           # semantically vet remote mcp_* or custom/plugin tools whose danger
           # lives server-side. Those are trusted at the :full tier by design;
           # gate them via an explicit per-server allowlist if that is a concern.
-          nil
+          :tier_ok
       end
 
-    case decision do
-      nil -> :allow
-      message -> {:blocked, message}
+    case tier_decision do
+      {:blocked, _} = blocked -> blocked
+      :tier_ok -> maybe_ask(tool_call, state)
     end
+  end
+
+  # The tier permitted the call. Enforce saved allow/deny rules, then decide
+  # whether an interactive prompt is required.
+  #
+  # Read-only tools never prompt (no side effects). For mutating tools:
+  #   - saved "allow"/"deny" rule short-circuits (no prompt)
+  #   - "allow for this session" grant short-circuits
+  #   - otherwise, when interactive permissions are enabled, PARK and ask; when
+  #     disabled (e.g. the test suite, or unattended non-TUI channels) the tier
+  #     decision stands and the call is allowed — preserving prior behavior.
+  defp maybe_ask(tool_call, state) do
+    cond do
+      permission_tier_allows?(:read_only, tool_call.name) ->
+        :allow
+
+      true ->
+        args = Map.get(tool_call, :arguments) || %{}
+
+        case Permissions.check(tool_call.name, args) do
+          :allow ->
+            :allow
+
+          :deny ->
+            {:blocked, "Blocked: #{tool_call.name} is denied by a saved permission rule"}
+
+          :ask ->
+            cond do
+              not interactive_permissions?() -> :allow
+              PermissionBroker.session_allowed?(state.session_id, tool_call.name) -> :allow
+              true -> {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call)}
+            end
+        end
+    end
+  end
+
+  defp interactive_permissions? do
+    Application.get_env(:optimal_system_agent, :interactive_permissions, true)
+  end
+
+  defp permission_summary(tool_call) do
+    %{
+      tool: tool_call.name,
+      args: tool_call_hint(Map.get(tool_call, :arguments) || %{})
+    }
+  end
+
+  # Emit `permission_required` (mirrors the plan_proposed emit path) then block
+  # on PermissionBroker until the client responds / the wait aborts, and map the
+  # decision onto an execution outcome.
+  defp await_permission(tool_call, state, request_id, summary) do
+    emit_permission_required(state, request_id, tool_call, summary)
+
+    case PermissionBroker.await(state.session_id, request_id) do
+      {:ok, %{decision: decision, note: note}} ->
+        apply_permission_decision(decision, note, tool_call, state)
+
+      {:error, :timeout} ->
+        {:blocked,
+         "Blocked: permission request for #{tool_call.name} timed out with no response — not run"}
+
+      {:error, :cancelled} ->
+        {:blocked, "Blocked: #{tool_call.name} cancelled before approval"}
+    end
+  end
+
+  @doc false
+  # Map a normalized permission decision onto an execution outcome. Public
+  # (@doc false) so the allow-always / reject-with-steer wiring is unit-testable
+  # without driving a full HTTP round-trip.
+  #   :allow_once    → run once
+  #   :allow_session → remember for the session, run
+  #   :allow_always  → persist an allow rule (future calls short-circuit), run
+  #   :deny          → block once
+  #   :deny_always   → persist a deny rule, block
+  #   :clarify       → reject-with-steer: feed the note back into the turn
+  def apply_permission_decision(decision, note, tool_call, state) do
+    case decision do
+      :allow_once ->
+        :allow
+
+      :allow_session ->
+        PermissionBroker.allow_for_session(state.session_id, tool_call.name)
+        :allow
+
+      :allow_always ->
+        Permissions.save_rule(tool_call.name, :allow_always)
+        :allow
+
+      :deny ->
+        {:blocked, "Blocked: you declined to run #{tool_call.name}"}
+
+      :deny_always ->
+        Permissions.save_rule(tool_call.name, :deny_always)
+        {:blocked, "Blocked: #{tool_call.name} denied and saved as a standing rule"}
+
+      :clarify ->
+        case String.trim(note || "") do
+          "" -> {:blocked, "Blocked: you asked to reconsider #{tool_call.name}"}
+          steer -> {:steer, steer}
+        end
+    end
+  end
+
+  defp emit_permission_required(state, request_id, tool_call, summary) do
+    payload = %{
+      type: :system_event,
+      event: :permission_required,
+      session_id: state.session_id,
+      request_id: request_id,
+      tool: tool_call.name,
+      args: summary
+    }
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event, payload}
+    )
+
+    Bus.emit(
+      :system_event,
+      %{
+        event: :permission_required,
+        session_id: state.session_id,
+        request_id: request_id,
+        tool: tool_call.name,
+        args: summary
+      },
+      Observability.annotate(state, source: "agent.tool_executor")
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # CONCERN 2 — execution.

@@ -10,8 +10,15 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
   Tests that verify the token budget calculation mirror the arithmetic in
   context.ex directly so they serve as living documentation of that contract.
+
+  Runs `async: false`: the "provider-specific system message format" describe
+  block mutates the global `:default_provider` Application env to `:anthropic`.
+  As an async test that write leaks into any concurrently-scheduled async test
+  that reads the provider (e.g. Integration.ConversationTest's Context.build),
+  flipping its system-message content from a string to Anthropic cache blocks.
+  Serializing this module keeps the global mutation out of the async window.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Context
 

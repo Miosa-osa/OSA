@@ -189,8 +189,10 @@ $TuiBin = Join-Path $BinDir 'osagent-tui.exe'
 Copy-Item -LiteralPath $tuiPath -Destination $TuiBin -Force
 Write-Ok "TUI installed to $TuiBin"
 
-# Record install layout so tooling can locate the release.
+# Record install layout so tooling can locate the release, and stamp the
+# installed version so `osa update` can compare against the latest release.
 Set-Content -LiteralPath (Join-Path $OsaHome 'release_root') -Value $ReleaseDir -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $OsaHome 'version') -Value $Version -Encoding ASCII
 
 # Clean up scratch dir now that everything is copied in.
 Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
@@ -199,9 +201,9 @@ Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 # Write the launcher pair: osa.cmd (thin shim) + osa.ps1 (real launcher).
 #
 # osa.cmd lets `osa` work from cmd.exe and any PATH lookup; it hands off to
-# osa.ps1, which mirrors the POSIX launcher: loads ~/.osa/.env, boots the
-# ERTS-bundled backend (headless `serve`), waits for /health, launches the
-# Rust TUI, and tears the backend down on exit.
+# osa.ps1, which mirrors the POSIX launcher: loads ~/.osa/.env, warms the
+# ERTS-bundled backend as a BACKGROUND DAEMON that survives TUI exit, waits for
+# /health, launches the Rust TUI, and owns overdrive + a real in-place update.
 # ---------------------------------------------------------------------------
 Write-Info "Writing launcher to $BinDir\osa.cmd + osa.ps1..."
 
@@ -213,32 +215,46 @@ Set-Content -LiteralPath (Join-Path $BinDir 'osa.cmd') -Value $osaCmd -Encoding 
 
 $osaPs1 = @'
 #Requires -Version 5.1
-# osa.ps1 — launcher for the prebuilt OSA install (%USERPROFILE%\.osa).
+# osa.ps1 — the one command to run OSA (prebuilt install under %USERPROFILE%\.osa).
 #
-#   osa                 Start backend + TUI (default)
+#   osa                 Attach the TUI (warms the backend daemon if needed)
+#   osa overdrive       Launch in overdrive (full auto) — no approval prompts
+#   osa continue        Resume the newest session in this directory
+#   osa resume [id]     Resume a specific session (or pick one)
+#   osa stop            Stop the background backend daemon
 #   osa setup           Configure provider / API keys
-#   osa serve           Backend only (headless HTTP API)
-#   osa doctor          Health checks
+#   osa update          Update in place, show what's new, then launch
+#   osa doctor          Run backend health checks
+#   osa serve           Run the backend in the foreground (headless API)
 #   osa version         Print version
 #   osa opencomputers   Manage the MIOSA host connection
-#   osa update          How to update
+#   osa help            Show this help
 $ErrorActionPreference = 'Stop'
+try {
+  [Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
+$Repo = 'Miosa-osa/OSA'
 
 # Resolve install root from this script's location (bin dir's parent),
 # honoring an explicit OSA_HOME override.
 if ($env:OSA_HOME) { $OsaHome = $env:OSA_HOME } else { $OsaHome = Split-Path -Parent $PSScriptRoot }
 $env:OSA_HOME = $OsaHome
 
-$ReleaseBat = Join-Path $OsaHome 'release\bin\osagent.bat'
-$TuiBin     = Join-Path $OsaHome 'bin\osagent-tui.exe'
-$LogDir     = Join-Path $OsaHome 'logs'
-$EnvFile    = Join-Path $OsaHome '.env'
+$ReleaseBat  = Join-Path $OsaHome 'release\bin\osagent.bat'
+$TuiBin      = Join-Path $OsaHome 'bin\osagent-tui.exe'
+$LogDir      = Join-Path $OsaHome 'logs'
+$RunDir      = Join-Path $OsaHome 'run'
+$PidFile     = Join-Path $RunDir 'backend.pid'
+$EnvFile     = Join-Path $OsaHome '.env'
+$VersionFile = Join-Path $OsaHome 'version'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 
 # Load user config (provider/model/keys) before booting the backend, mirroring
 # the POSIX launcher which sources ~/.osa/.env. A .env is shell KEY=VALUE format,
-# not PowerShell, so parse it line-by-line (dot-sourcing it would throw parse
-# errors on Windows). A single malformed line is skipped, not fatal.
+# not PowerShell, so parse it line-by-line. A malformed line is skipped.
 if (Test-Path $EnvFile) {
   foreach ($line in Get-Content -LiteralPath $EnvFile) {
     $t = $line.Trim()
@@ -253,7 +269,7 @@ if (Test-Path $EnvFile) {
 
 if (-not (Test-Path $ReleaseBat)) {
   Write-Host "OSA is not installed correctly ($ReleaseBat missing)." -ForegroundColor Red
-  Write-Host "Reinstall: irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex" -ForegroundColor Red
+  Write-Host "Reinstall: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Red
   exit 1
 }
 
@@ -268,9 +284,231 @@ function Test-Health {
   } catch { return $false }
 }
 
-# Subcommands dispatch straight to the release wrapper.
-$cmd  = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$rest = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
+function Get-DaemonProcess {
+  # Return the live daemon Process, or $null (pidfile first).
+  if (Test-Path $PidFile) {
+    $p = (Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($p) {
+      $proc = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue
+      if ($proc) { return $proc }
+    }
+  }
+  return $null
+}
+
+function Stop-Daemon {
+  $proc = Get-DaemonProcess
+  if (-not $proc) {
+    Write-Host "  No OSA backend is running on :$Port." -ForegroundColor DarkGray
+    Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+    return
+  }
+  Write-Host "  -> Stopping OSA backend (pid $($proc.Id))..." -ForegroundColor Cyan
+  # /T kills the whole tree (the .bat wrapper spawns erl as a child); fall back
+  # to Stop-Process if taskkill is unavailable.
+  try { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null } catch { }
+  Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+  Write-Host "  [ok] Backend stopped." -ForegroundColor Green
+}
+
+function Start-Daemon {
+  # Detached background daemon that SURVIVES this launcher and the TUI.
+  $backendLog = Join-Path $LogDir 'backend.log'
+  Write-Host "  -> Starting OSA backend on :$Port (background daemon)" -ForegroundColor Cyan
+  $proc = Start-Process -FilePath $ReleaseBat -ArgumentList 'serve' `
+    -PassThru -WindowStyle Hidden -RedirectStandardOutput $backendLog
+  Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding ASCII
+  return $proc
+}
+
+function Wait-Health {
+  param($Proc, [int]$Max = 40)
+  $frames = '|','/','-','\'
+  for ($i = 0; $i -lt ($Max * 2); $i++) {
+    if (Test-Health $HealthUrl) { Write-Host "`r  " -NoNewline; return 0 }
+    if ($Proc -and $Proc.HasExited) { return 2 }
+    Write-Host ("`r  {0} warming OSA backend..." -f $frames[$i % 4]) -NoNewline -ForegroundColor Cyan
+    Start-Sleep -Milliseconds 500
+  }
+  Write-Host "`r  " -NoNewline
+  return 1
+}
+
+function Warn-Overdrive {
+  Write-Host "  [!] OVERDRIVE (full auto) - OSA will act without asking for approval." -ForegroundColor Red
+  Write-Host "      Only use this in a directory you trust. Confirm inside the TUI to proceed." -ForegroundColor DarkGray
+}
+
+function Show-Help {
+  Write-Host ""
+  Write-Host "    ___  ____    _   "  -ForegroundColor Cyan
+  Write-Host "   / _ \/ ___|  / \     OSA - the Optimal System Agent" -ForegroundColor Cyan
+  Write-Host "  | | | \___ \ / _ \    Your OS, supercharged." -ForegroundColor Cyan
+  Write-Host "  | |_| |___) / ___ \"  -ForegroundColor Cyan
+  Write-Host "   \___/|____/_/   \_\" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "  Usage: osa [command] [flags]"
+  Write-Host ""
+  Write-Host "  Commands"
+  Write-Host "    osa                  Attach the TUI (warms the backend daemon if needed)"
+  Write-Host "    osa overdrive        Launch in overdrive (full auto) - skips approval prompts"
+  Write-Host "    osa continue         Resume the newest session in this folder"
+  Write-Host "    osa resume [id]      Resume a specific session (or pick one)"
+  Write-Host "    osa stop             Stop the background backend daemon"
+  Write-Host "    osa setup            Configure provider / API keys"
+  Write-Host "    osa update           Update in place, show what's new, then launch"
+  Write-Host "    osa doctor           Run backend health checks"
+  Write-Host "    osa serve            Run the backend in the foreground (headless API)"
+  Write-Host "    osa version          Print version"
+  Write-Host "    osa opencomputers    Manage the MIOSA host connection"
+  Write-Host "    osa help             Show this help"
+  Write-Host ""
+  Write-Host "  Flags (forwarded to the TUI)"
+  Write-Host "    --overdrive                  Full-auto mode (same as osa overdrive)"
+  Write-Host "    --continue                   Resume newest session here"
+  Write-Host "    --resume [id]                Resume a session"
+  Write-Host "    --permission-mode <mode>     ask . auto-edit . plan . overdrive"
+  Write-Host ""
+  Write-Host "  The backend keeps running in the background so the next osa is instant." -ForegroundColor DarkGray
+  Write-Host "  Stop it any time with osa stop; it also idles down when unused." -ForegroundColor DarkGray
+  Write-Host ""
+}
+
+function Update-Osa {
+  # Real in-place update: download the prebuilt release + TUI, verify sha256,
+  # atomically swap under ~/.osa, print the delta + what's new, then return.
+  $platform = 'windows-x64'
+  $zip = "osa-$platform.zip"
+  $tuiAsset = "osagent-tui-$platform.exe"
+
+  $cur = if (Test-Path $VersionFile) { (Get-Content -Raw -LiteralPath $VersionFile).Trim() } else { 'unknown' }
+  Write-Host "  -> Current version: $cur" -ForegroundColor Cyan
+  Write-Host "  -> Checking for updates..." -ForegroundColor Cyan
+
+  try {
+    $meta = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
+      -UseBasicParsing -Headers @{ 'User-Agent' = 'osa-updater' }
+  } catch {
+    Write-Host "  [x] Could not reach the GitHub API. Try again later." -ForegroundColor Red
+    return 2
+  }
+  $latest = $meta.tag_name
+  $notes  = $meta.body
+  if (-not $latest) { Write-Host "  [x] Could not determine the latest release." -ForegroundColor Red; return 2 }
+  if ($latest -eq $cur) { Write-Host "  [ok] Already up to date ($cur)" -ForegroundColor Green; return 0 }
+  Write-Host "  -> New version available: $latest" -ForegroundColor Cyan
+
+  $base = "https://github.com/$Repo/releases/download/$latest"
+  $tmp = Join-Path $env:TEMP ("osa-update-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  $zipPath = Join-Path $tmp $zip
+  $tuiPath = Join-Path $tmp $tuiAsset
+
+  try {
+    Write-Host "  -> Downloading $zip..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "$base/$zip" -OutFile $zipPath -UseBasicParsing
+    Write-Host "  -> Downloading $tuiAsset..." -ForegroundColor Cyan
+    Invoke-WebRequest -Uri "$base/$tuiAsset" -OutFile $tuiPath -UseBasicParsing
+  } catch {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Download failed. Your existing install is untouched." -ForegroundColor Red
+    return 2
+  }
+
+  Write-Host "  -> Verifying checksum..." -ForegroundColor Cyan
+  $sidecar = Join-Path $tmp "$zip.sha256"
+  $haveSidecar = $true
+  try { Invoke-WebRequest -Uri "$base/$zip.sha256" -OutFile $sidecar -UseBasicParsing } catch { $haveSidecar = $false }
+  if ($haveSidecar) {
+    $expected = ((Get-Content -Raw -LiteralPath $sidecar).Trim() -split '\s+')[0]
+    $actual   = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash
+    if ($actual -ine $expected) {
+      Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+      Write-Host "  [x] Checksum mismatch - aborting update." -ForegroundColor Red
+      return 3
+    }
+    Write-Host "  [ok] Checksum verified" -ForegroundColor Green
+  } else {
+    Write-Host "  [!] No .sha256 sidecar - skipping verification." -ForegroundColor Yellow
+  }
+
+  Write-Host "  -> Installing update..." -ForegroundColor Cyan
+  Stop-Daemon | Out-Null
+
+  $newRel = Join-Path $OsaHome 'release.new'
+  if (Test-Path $newRel) { Remove-Item -Recurse -Force $newRel }
+  New-Item -ItemType Directory -Force -Path $newRel | Out-Null
+  try {
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $newRel -Force
+  } catch {
+    Remove-Item -Recurse -Force $tmp, $newRel -ErrorAction SilentlyContinue
+    Write-Host "  [x] Extraction failed - your existing install is untouched." -ForegroundColor Red
+    return 3
+  }
+  if (-not (Test-Path (Join-Path $newRel 'bin\osagent.bat'))) {
+    Remove-Item -Recurse -Force $tmp, $newRel -ErrorAction SilentlyContinue
+    Write-Host "  [x] Bad release archive - aborting." -ForegroundColor Red
+    return 3
+  }
+
+  $relDir = Join-Path $OsaHome 'release'
+  $relOld = Join-Path $OsaHome 'release.old'
+  if (Test-Path $relOld) { Remove-Item -Recurse -Force $relOld }
+  if (Test-Path $relDir) { Move-Item -LiteralPath $relDir -Destination $relOld }
+  Move-Item -LiteralPath $newRel -Destination $relDir
+  if (Test-Path $relOld) { Remove-Item -Recurse -Force $relOld -ErrorAction SilentlyContinue }
+
+  Copy-Item -LiteralPath $tuiPath -Destination "$TuiBin.new" -Force
+  Move-Item -LiteralPath "$TuiBin.new" -Destination $TuiBin -Force
+
+  Set-Content -LiteralPath (Join-Path $OsaHome 'release_root') -Value $relDir -Encoding ASCII
+  Set-Content -LiteralPath $VersionFile -Value $latest -Encoding ASCII
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+
+  Write-Host ""
+  Write-Host "  [ok] Updated $cur -> $latest" -ForegroundColor Green
+  Write-Host ""
+  Write-Host "  What's new"
+  if ($notes) {
+    ($notes -split "`n" | Select-Object -First 30) | ForEach-Object { Write-Host ("    " + $_.TrimEnd()) }
+  } else {
+    Write-Host "    See https://github.com/$Repo/releases/tag/$latest" -ForegroundColor Cyan
+  }
+  Write-Host ""
+  if ([Environment]::UserInteractive) {
+    Read-Host "  Press Enter to launch OSA" | Out-Null
+  }
+  return 0
+}
+
+# ── Subcommand pre-translation (verbs -> TUI flags, then fall through) ──
+function Drop-First($arr) { if ($arr.Count -le 1) { @() } else { @($arr[1..($arr.Count - 1)]) } }
+
+$argList = @($args)
+$overdrive = $false
+if ($argList.Count -ge 1) {
+  switch ($argList[0]) {
+    'overdrive' { $overdrive = $true; $argList = @(Drop-First $argList) + '--overdrive' }
+    'continue'  { $argList = @(Drop-First $argList) + '--continue' }
+    'resume' {
+      $r = Drop-First $argList
+      if ($r.Count -ge 1 -and -not ([string]$r[0]).StartsWith('-')) {
+        $rid = $r[0]; $r = Drop-First $r
+        $argList = @($r) + '--resume' + $rid
+      } else {
+        $argList = @($r) + '--resume'
+      }
+    }
+  }
+}
+foreach ($a in $argList) {
+  if ($a -in @('--overdrive', '--dangerously-skip-permissions', '--yolo')) { $overdrive = $true }
+}
+
+# ── Subcommand dispatch ───────────────────────────────────────────
+$cmd  = if ($argList.Count -ge 1) { [string]$argList[0] } else { '' }
+$rest = Drop-First $argList
 
 switch -Exact ($cmd) {
   { $_ -in @('version', '--version', '-v') } { & $ReleaseBat version; exit $LASTEXITCODE }
@@ -278,62 +516,47 @@ switch -Exact ($cmd) {
   'serve'  { & $ReleaseBat serve;  exit $LASTEXITCODE }
   'doctor' { & $ReleaseBat doctor; exit $LASTEXITCODE }
   'opencomputers' { & $ReleaseBat opencomputers @rest; exit $LASTEXITCODE }
+  'stop'   { Stop-Daemon; exit 0 }
   'update' {
-    Write-Host "To update OSA, re-run the installer:"
-    Write-Host "  irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex"
-    exit 0
+    $urc = Update-Osa
+    if ($urc -ne 0) { exit $urc }
+    # fall through to launch on success
   }
-  { $_ -in @('help', '--help', '-h') } {
-    Write-Host ""
-    Write-Host "  OSA Agent - Your OS, Supercharged"
-    Write-Host ""
-    Write-Host "  Usage:"
-    Write-Host "    osa                Start backend + TUI (default)"
-    Write-Host "    osa setup          Configure provider / API keys"
-    Write-Host "    osa serve          Backend only (headless HTTP API)"
-    Write-Host "    osa doctor         Run health checks"
-    Write-Host "    osa version        Print version"
-    Write-Host "    osa opencomputers  Manage the MIOSA host connection"
-    Write-Host "    osa update         Update instructions"
-    Write-Host ""
-    exit 0
-  }
+  { $_ -in @('help', '--help', '-h') } { Show-Help; exit 0 }
 }
 
-# Default: start the backend (if not already up), then launch the TUI.
-$backend  = $null
-$exitCode = 0
-try {
-  if (-not (Test-Health $HealthUrl)) {
-    $backendLog = Join-Path $LogDir 'backend.log'
-    $backend = Start-Process -FilePath $ReleaseBat -ArgumentList 'serve' `
-      -PassThru -WindowStyle Hidden -RedirectStandardOutput $backendLog
-    for ($i = 0; $i -lt 40; $i++) {
-      if (Test-Health $HealthUrl) { break }
-      # If serve has already exited, waiting the full window is pointless. The
-      # usual cause is the port being held by another process (bind failure).
-      if ($backend.HasExited) {
-        Write-Host "OSA backend exited during startup - port $Port is likely already in use." -ForegroundColor Yellow
-        Write-Host "  - Another OSA instance or process may be bound to :$Port." -ForegroundColor Yellow
-        Write-Host "  - Start on a different port:  `$env:OSA_PORT=<number>; osa" -ForegroundColor Yellow
-        break
-      }
-      Start-Sleep -Milliseconds 500
-    }
-    if (-not (Test-Health $HealthUrl)) {
-      Write-Host "  - Inspect the log:  $backendLog"
-      Write-Host "  - Run diagnostics:  osa doctor"
-    }
+# ── Default: warm the daemon (attach instantly if healthy), then TUI ──
+if (Test-Health $HealthUrl) {
+  Write-Host "  Backend already running on :$Port - attaching." -ForegroundColor DarkGray
+} else {
+  # Clear a stale pidfile whose process is gone.
+  if ((Test-Path $PidFile) -and -not (Get-DaemonProcess)) {
+    Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
   }
-
-  & $TuiBin @args
-  $exitCode = $LASTEXITCODE
-} finally {
-  if ($backend -and -not $backend.HasExited) {
-    Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
+  $backend = Start-Daemon
+  $rc = Wait-Health $backend 40
+  if ($rc -eq 2) {
+    Write-Host "  [x] Backend exited during startup - port $Port may already be in use." -ForegroundColor Red
+    Write-Host "      Start on another port:  `$env:OSA_PORT=<n>; osa   (or run: osa stop)" -ForegroundColor DarkGray
+    Write-Host "      Inspect the log: $(Join-Path $LogDir 'backend.log')" -ForegroundColor DarkGray
+    Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+    exit 1
+  } elseif ($rc -eq 1) {
+    Write-Host "  [x] Backend did not become healthy on :$Port in time." -ForegroundColor Red
+    Write-Host "      Inspect the log: $(Join-Path $LogDir 'backend.log')   .   Run: osa doctor" -ForegroundColor DarkGray
+    exit 1
   }
+  Write-Host "  Backend ready. It stays warm in the background - run osa stop to shut it down." -ForegroundColor DarkGray
 }
-exit $exitCode
+
+# Show the overdrive warning right before handing off to the TUI.
+if ($overdrive) { Warn-Overdrive }
+
+# Launch the TUI. The backend daemon deliberately OUTLIVES this process, so the
+# next `osa` attaches instantly. No cleanup - that is the whole point.
+$env:OSA_URL = "http://localhost:$Port"
+& $TuiBin @argList
+exit $LASTEXITCODE
 '@
 Set-Content -LiteralPath (Join-Path $BinDir 'osa.ps1') -Value $osaPs1 -Encoding UTF8
 Write-Ok 'Launcher installed'
@@ -374,5 +597,5 @@ if ($pathHint) {
   Write-Host '  Run osa to start.'
 }
 Write-Host ''
-Write-Host "  Update later: $InstallOneLiner" -ForegroundColor DarkGray
+Write-Host "  Update later: run 'osa update' (in-place). Or reinstall: $InstallOneLiner" -ForegroundColor DarkGray
 Write-Host ''

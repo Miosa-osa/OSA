@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     GET  /commands           — list all commands
     GET  /commands?q=term    — fuzzy-search commands + skills, ranked by relevance
     POST /commands/execute
+    POST /permissions/respond — resume a parked interactive permission request
   """
   use Plug.Router
   import OptimalSystemAgent.Channels.HTTP.API.Shared
@@ -157,6 +158,43 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     session_id =
       conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
 
+    # A `set_permission_mode <mode>` naming one of the higher-level modes (the
+    # Shift+Tab cycle: ask / accept-edits / plan / overdrive) sets permission_MODE.
+    # `auto_mode` and `set_permission_mode auto|full` keep their historical
+    # meaning — the unattended :auto tier / restore-to-:full.
+    case classify_permission_mode(tokens) do
+      {:mode, mode} -> apply_permission_mode(conn, session_id, command, mode)
+      :tier -> apply_auto_mode_tier(conn, session_id, command, tokens)
+    end
+  end
+
+  # Recognise an explicit permission-mode token. `auto`/`full`/`off` deliberately
+  # fall through to the tier path (unchanged behavior).
+  defp classify_permission_mode(tokens) do
+    cond do
+      Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) -> {:mode, :overdrive}
+      Enum.any?(tokens, &(&1 in ~w(accept-edits accept_edits auto-edit auto_edit edits))) ->
+        {:mode, :accept_edits}
+
+      Enum.any?(tokens, &(&1 in ~w(plan plan-mode plan_mode))) -> {:mode, :plan}
+      Enum.any?(tokens, &(&1 in ~w(ask default prompt))) -> {:mode, :ask}
+      true -> :tier
+    end
+  end
+
+  defp apply_permission_mode(conn, session_id, command, mode) do
+    output =
+      case OptimalSystemAgent.Agent.Loop.set_permission_mode(session_id, mode) do
+        {:ok, ^mode} -> "Permission mode set to #{mode}."
+        {:error, :invalid_mode} -> "Unknown permission mode."
+        {:error, :no_session} -> "No active session #{session_id} to set permission mode."
+      end
+
+    body = Jason.encode!(%{output: output, command: command, mode: mode})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  defp apply_auto_mode_tier(conn, session_id, command, tokens) do
     {tier, label} = resolve_auto_mode_tier(tokens)
 
     output =
@@ -282,6 +320,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     end
   end
 
+  # ── POST /respond (permissions) ────────────────────────────────────
+  # The TUI permission dialog POSTs its decision here to resume the parked
+  # tool call. `decision` ∈ allow | session | always | deny | deny_always |
+  # clarify (aliases accepted); `note` carries clarify/steer text. Reaches the
+  # blocked executing process via PermissionBroker's ETS response table.
+  post "/respond" do
+    request_id = conn.body_params["request_id"]
+    decision = conn.body_params["decision"] || conn.body_params["response"]
+
+    note =
+      conn.body_params["note"] || conn.body_params["clarify"] || conn.body_params["arg"]
+
+    cond do
+      not (is_binary(request_id) and request_id != "") ->
+        json_error(conn, 400, "invalid_request", "Missing required field: request_id")
+
+      not (is_binary(decision) and decision != "") ->
+        json_error(conn, 400, "invalid_request", "Missing required field: decision")
+
+      true ->
+        OptimalSystemAgent.Agent.Loop.PermissionBroker.respond(
+          request_id,
+          %{"decision" => decision, "note" => note}
+        )
+
+        body =
+          Jason.encode!(%{status: "ok", request_id: request_id, decision: decision})
+
+        conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+    end
+  end
+
   match _ do
     json_error(conn, 404, "not_found", "Tool endpoint not found")
   end
@@ -352,11 +422,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   defp categorize_command(name) do
     cond do
-      name in ~w(help status version doctor exit) -> "system"
-      name in ~w(clear new compact) -> "session"
-      name in ~w(model login logout) -> "config"
-      name in ~w(context cost) -> "info"
-      name in ~w(sessions export) -> "data"
+      name in ~w(help status version doctor exit release-notes) -> "system"
+      name in ~w(clear new compact init) -> "session"
+      name in ~w(model login logout sandbox permissions) -> "config"
+      name in ~w(context cost mcp files) -> "info"
+      name in ~w(sessions export copy rename tag) -> "data"
       name in ~w(agents tools skills memory) -> "browse"
       name in ~w(tasks plan coordinator effort fast) -> "workflow"
       true -> "commands"

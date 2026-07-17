@@ -783,7 +783,23 @@ impl App {
                         //    conversation if it has one, else stay on a fresh blank session.
                         if !self.dir_session_resolved {
                             self.dir_session_resolved = true;
-                            self.create_session();
+                            // Honour launch flags: --continue resumes this folder's
+                            // newest session; --resume <id> loads that session;
+                            // --resume (no id) opens the session browser; otherwise
+                            // start fresh.
+                            if self.startup_continue {
+                                self.continue_session();
+                            } else if let Some(resume) = self.startup_resume.take() {
+                                match resume {
+                                    Some(id) => self.switch_session(&id),
+                                    None => {
+                                        self.create_session();
+                                        self.load_recent_sessions();
+                                    }
+                                }
+                            } else {
+                                self.create_session();
+                            }
                         }
                     }
                 }
@@ -1124,10 +1140,12 @@ impl App {
                     }
                 }
             }
-            BackendEvent::PermissionRequired { tool, args, request_id: _ } => {
+            BackendEvent::PermissionRequired { tool, args, request_id } => {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
+                // Carry the backend-assigned request_id so the user's decision can
+                // resume the exact parked tool call via POST /permissions/respond.
                 let mut dialog = crate::dialogs::permissions::Permissions::new();
-                dialog.set_tool(tool, args, String::new());
+                dialog.set_tool(tool, args, request_id);
                 self.permissions = Some(dialog);
                 if self.state.can_transition_to(AppState::Permissions) {
                     self.transition(AppState::Permissions);

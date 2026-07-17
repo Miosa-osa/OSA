@@ -85,6 +85,16 @@ pub struct App {
     pub config_editor: Option<ConfigEditor>,
     pub file_picker: Option<FilePicker>,
     pub survey: Option<crate::dialogs::survey::SurveyDialog>,
+    /// One-shot overdrive (full-auto) entry confirmation overlay. When Some, it
+    /// takes key priority; `overdrive_prev_mode` is the mode to revert to on
+    /// cancel.
+    pub overdrive_confirm: Option<crate::dialogs::overdrive_confirm::OverdriveConfirm>,
+    pub overdrive_prev_mode: crate::components::status_bar::PermissionMode,
+    /// `-c`/`--continue`: resume this folder's newest session on launch.
+    pub startup_continue: bool,
+    /// `--resume [id]`: Some(Some(id)) load that id; Some(None) open the session
+    /// browser at startup; None = not requested. Consumed once at resolution.
+    pub startup_resume: Option<Option<String>>,
 
     // State
     pub state: AppState,
@@ -194,7 +204,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(config: Config, _cli: Cli) -> Result<Self> {
+    pub async fn new(config: Config, cli: Cli) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         // Create API client
@@ -230,12 +240,35 @@ impl App {
         let mut sidebar = Sidebar::new();
         sidebar.set_yolo_mode(config.skip_permissions);
 
-        // Seed the status-line permission mode from --dangerously-skip-permissions.
+        // Seed the status-line permission mode from launch flags. `--overdrive`
+        // / `--dangerously-skip-permissions` (folded into config.skip_permissions)
+        // wins and lands in overdrive; otherwise honour an explicit
+        // `--permission-mode <mode>`. Mirrors the skip_permissions seeding.
+        use crate::components::status_bar::PermissionMode;
         let mut status = StatusBar::new();
-        if config.skip_permissions {
-            status.set_permission_mode(
-                crate::components::status_bar::PermissionMode::BypassPermissions,
-            );
+        let seeded_mode = if config.skip_permissions {
+            PermissionMode::BypassPermissions
+        } else {
+            match cli.permission_mode.as_deref() {
+                Some("plan") => PermissionMode::Plan,
+                Some("accept-edits") | Some("auto-edit") | Some("acceptedits") => {
+                    PermissionMode::AcceptEdits
+                }
+                Some("auto") => PermissionMode::Auto,
+                Some("overdrive") | Some("bypass") | Some("bypasspermissions") => {
+                    PermissionMode::BypassPermissions
+                }
+                _ => PermissionMode::Default,
+            }
+        };
+        if !seeded_mode.is_default() {
+            status.set_permission_mode(seeded_mode);
+        }
+        // An overdrive seed implies the bypass flag + sidebar indicator, exactly
+        // like --dangerously-skip-permissions.
+        let overdrive_seeded = seeded_mode.is_overdrive();
+        if overdrive_seeded {
+            sidebar.set_yolo_mode(true);
         }
 
         Ok(Self {
@@ -263,6 +296,10 @@ impl App {
             config_editor: None,
             file_picker: None,
             survey: None,
+            overdrive_confirm: None,
+            overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
+            startup_continue: cli.continue_last,
+            startup_resume: cli.resume.clone(),
 
             state: AppState::Connecting,
             prev_state: None,
@@ -327,6 +364,7 @@ impl App {
             || self.file_picker.is_some()
             || self.transcript.is_some()
             || self.config_editor.is_some()
+            || self.overdrive_confirm.is_some()
     }
 
     pub fn recompute_layout(&mut self) {

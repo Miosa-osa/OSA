@@ -276,8 +276,11 @@ impl App {
                 }
                 _ => {
                     // Config editor and file picker overlays take highest modal
-                    // priority (drawn over whatever state is underneath).
-                    if let Some(ref editor) = self.config_editor {
+                    // priority (drawn over whatever state is underneath). The
+                    // overdrive confirm sits above even those.
+                    if let Some(ref d) = self.overdrive_confirm {
+                        d.draw(frame, area);
+                    } else if let Some(ref editor) = self.config_editor {
                         editor.draw(frame, area);
                     } else if let Some(ref picker) = self.file_picker {
                         picker.draw(frame, area);

@@ -199,58 +199,77 @@ cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN"
 chmod +x "$TUI_BIN"
 ok "TUI installed to ${TUI_BIN}"
 
-# Record install layout so tooling can locate the release.
+# Record install layout so tooling can locate the release, and stamp the
+# installed version so `osa update` can compare against the latest release
+# without booting the (slow) ERTS release just to read its vsn.
 printf "%s\n" "$RELEASE_DIR" > "${OSA_HOME}/release_root"
+printf "%s\n" "$VERSION" > "${OSA_HOME}/version"
 
 # ---------------------------------------------------------------------------
 # Write the `osa` launcher
 #
-# Mirrors bin/osa + ~/.claude/scripts/osa: sources ~/.osa/.env, boots the
-# ERTS-bundled backend (headless `serve`), waits for /health, launches the
-# Rust TUI, and tears the backend down on exit.
+# `osa` is the ONE command: it warms a background ERTS backend daemon (which
+# SURVIVES TUI exit, so the next `osa` is instant), waits for /health, and
+# launches the Rust TUI. It also owns overdrive (full auto), a real in-place
+# `osa update`, `osa stop`, and a first-class `osa help`.
 # ---------------------------------------------------------------------------
 info "Writing launcher to ${LAUNCHER}..."
 cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 #!/usr/bin/env bash
-# osa — launcher for the prebuilt OSA install (~/.osa).
+# osa — the one command to run OSA (prebuilt install under ~/.osa).
 #
-#   osa                 Start backend + TUI (default)
-#   osa setup           Configure provider / API keys
-#   osa serve           Backend only (headless HTTP API)
-#   osa doctor          Health checks
-#   osa version         Print version
-#   osa opencomputers   Manage the MIOSA host connection
-#   osa update          How to update
+# Commands:
+#   osa                    Attach the TUI (warms the backend daemon if needed)
+#   osa overdrive          Launch in overdrive (full auto) — no approval prompts
+#   osa continue           Resume the newest session in this directory
+#   osa resume [id]        Resume a specific session (or pick one)
+#   osa stop               Stop the background backend daemon
+#   osa setup              Configure provider / API keys
+#   osa update             Update in place, show what's new, then launch
+#   osa doctor             Run backend health checks
+#   osa serve              Run the backend in the foreground (headless API)
+#   osa version            Print version
+#   osa opencomputers ...  Manage the MIOSA host connection
+#   osa help               Show this help
 set -eu
 
+GITHUB_REPO="Miosa-osa/OSA"
 OSA_HOME="${OSA_HOME:-$HOME/.osa}"
 export OSA_HOME
 RELEASE_BIN="$OSA_HOME/release/bin/osagent"
 TUI_BIN="$OSA_HOME/bin/osagent-tui"
 LOG_DIR="$OSA_HOME/logs"
-mkdir -p "$LOG_DIR"
+RUN_DIR="$OSA_HOME/run"
+PID_FILE="$RUN_DIR/backend.pid"
+PORT_FILE="$RUN_DIR/backend.port"
+LOG_FILE="$LOG_DIR/backend.log"
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+# ── Colors (OSA blue identity) ───────────────────────────────────
+if [ -t 1 ]; then
+  BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'
+  YELLOW='\033[0;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; RESET='\033[0m'
+else
+  BOLD=''; DIM=''; GREEN=''; YELLOW=''; RED=''; CYAN=''; RESET=''
+fi
 
 # Load user config (provider/model/keys) before booting the backend, so
-# config/runtime.exs sees it (mirrors ~/.claude/scripts/osa).
+# config/runtime.exs sees it. A single malformed .env line is warned, not fatal.
 if [ -f "$OSA_HOME/.env" ]; then
-  # Harden sourcing: a single malformed line (unterminated quote, bare word, or
-  # $UNSET under `set -u`) would otherwise abort the whole launcher under
-  # `set -eu` with a cryptic parse error. Relax the strict flags just for the
-  # sourcing, warn instead of dying, then restore them.
-  set +e
-  set +u
-  set -a
+  set +e; set +u; set -a
   . "$OSA_HOME/.env" 2>/dev/null \
     || echo "warning: some lines in $OSA_HOME/.env could not be parsed — ignoring them" >&2
-  set +a
-  set -eu
+  set +a; set -eu
 fi
 
 if [ ! -x "$RELEASE_BIN" ]; then
   echo "OSA is not installed correctly ($RELEASE_BIN missing)." >&2
-  echo "Reinstall: curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh" >&2
+  echo "Reinstall: curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
   exit 1
 fi
+
+PORT="${OSA_PORT:-9089}"
+HEALTH_URL="http://localhost:${PORT}/health"
 
 _http_ok() {
   if command -v curl >/dev/null 2>&1; then
@@ -262,82 +281,350 @@ _http_ok() {
   fi
 }
 
-PORT="${OSA_PORT:-9089}"
+_download() {
+  # _download <url> <dest> — curl first, wget fallback. Returns 2 on failure.
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1" || return 2
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1" || return 2
+  else
+    echo "Neither curl nor wget is available." >&2; return 2
+  fi
+}
 
+backend_healthy() { _http_ok "$HEALTH_URL"; }
+
+daemon_pid() {
+  # Echo the live daemon PID, or nothing (pidfile first, then port listener).
+  pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"; return 0
+    fi
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti ":${PORT}" -sTCP:LISTEN 2>/dev/null | head -1
+  fi
+}
+
+clear_stale_pid() {
+  if [ -f "$PID_FILE" ]; then
+    p="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; then
+      rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    fi
+  fi
+}
+
+stop_daemon() {
+  pid="$(daemon_pid)"
+  if [ -z "$pid" ]; then
+    printf "  ${DIM}No OSA backend is running on :%s.${RESET}\n" "$PORT"
+    rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    return 0
+  fi
+  printf "  ${CYAN}→${RESET} Stopping OSA backend (pid %s)…\n" "$pid"
+  # Prefer a process-group kill (the daemon is a setsid group leader, so this
+  # also reaps the BEAM/erl child the release wrapper spawns); fall back to pid.
+  kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  n=0
+  while [ "$n" -lt 20 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25; n=$((n + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+  printf "  ${GREEN}✓${RESET} Backend stopped.\n"
+}
+
+# Spinner while waiting for /health. 0 healthy, 1 timeout, 2 died.
+# Re-reads the pidfile each tick so daemon death is caught even before the
+# child has finished writing its PID. ASCII frames stay clean through `cut`.
+wait_health() {
+  max="${1:-40}"
+  frames='|/-\'; i=0; n=0; ticks=$((max * 2))
+  while [ "$n" -lt "$ticks" ]; do
+    if backend_healthy; then
+      [ -t 2 ] && printf '\r\033[K' >&2
+      return 0
+    fi
+    wpid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$wpid" ] && ! kill -0 "$wpid" 2>/dev/null; then
+      [ -t 2 ] && printf '\r\033[K' >&2
+      return 2
+    fi
+    if [ -t 2 ]; then
+      f=$(printf '%s' "$frames" | cut -c $((i % 4 + 1)))
+      printf '\r  %b%s%b warming OSA backend…' "$CYAN" "$f" "$RESET" >&2
+      i=$((i + 1))
+    fi
+    sleep 0.5; n=$((n + 1))
+  done
+  [ -t 2 ] && printf '\r\033[K' >&2
+  return 1
+}
+
+# Start the backend as a detached warm daemon (survives TUI exit + terminal
+# close), recording the real PID so `osa stop` can reach it.
+start_daemon() {
+  : > "$LOG_FILE"
+  printf "  ${CYAN}→${RESET} Starting OSA backend on :%s ${DIM}(background daemon)${RESET}\n" "$PORT"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid sh -c 'echo $$ > "'"$PID_FILE"'"; exec "'"$RELEASE_BIN"'" serve' \
+      >"$LOG_FILE" 2>&1 < /dev/null &
+  else
+    nohup "$RELEASE_BIN" serve >"$LOG_FILE" 2>&1 < /dev/null &
+    echo $! > "$PID_FILE"
+    disown 2>/dev/null || true
+  fi
+  echo "$PORT" > "$PORT_FILE"
+}
+
+warn_overdrive() {
+  printf "  ${RED}${BOLD}⚠ OVERDRIVE (full auto)${RESET}${RED} — OSA will act without asking for approval.${RESET}\n" >&2
+  printf "  ${DIM}  Only use this in a directory you trust. Confirm inside the TUI to proceed.${RESET}\n" >&2
+}
+
+print_help() {
+  printf '\n'
+  printf "${CYAN}${BOLD}    ___  ____    _   ${RESET}\n"
+  printf "${CYAN}${BOLD}   / _ \\/ ___|  / \\  ${RESET}   ${BOLD}OSA${RESET} — the Optimal System Agent\n"
+  printf "${CYAN}${BOLD}  | | | \\___ \\ / _ \\ ${RESET}   ${DIM}Your OS, supercharged.${RESET}\n"
+  printf "${CYAN}${BOLD}  | |_| |___) / ___ \\${RESET}\n"
+  printf "${CYAN}${BOLD}   \\___/|____/_/   \\_\\${RESET}\n"
+  printf '\n'
+  printf "  ${BOLD}Usage:${RESET} ${CYAN}osa${RESET} ${DIM}[command] [flags]${RESET}\n\n"
+  printf "  ${BOLD}Commands${RESET}\n"
+  printf "    ${CYAN}osa${RESET}                  Attach the TUI ${DIM}(warms the backend daemon if needed)${RESET}\n"
+  printf "    ${CYAN}osa overdrive${RESET}        Launch in ${RED}overdrive (full auto)${RESET} ${DIM}— skips approval prompts${RESET}\n"
+  printf "    ${CYAN}osa continue${RESET}         Resume the newest session in this folder\n"
+  printf "    ${CYAN}osa resume${RESET} ${DIM}[id]${RESET}      Resume a specific session ${DIM}(or pick one)${RESET}\n"
+  printf "    ${CYAN}osa stop${RESET}             Stop the background backend daemon\n"
+  printf "    ${CYAN}osa setup${RESET}            Configure provider / API keys\n"
+  printf "    ${CYAN}osa update${RESET}           Update in place, show what's new, then launch\n"
+  printf "    ${CYAN}osa doctor${RESET}           Run backend health checks\n"
+  printf "    ${CYAN}osa serve${RESET}            Run the backend in the foreground ${DIM}(headless API)${RESET}\n"
+  printf "    ${CYAN}osa version${RESET}          Print version\n"
+  printf "    ${CYAN}osa opencomputers${RESET}    Manage the MIOSA host connection\n"
+  printf "    ${CYAN}osa help${RESET}             Show this help\n"
+  printf '\n'
+  printf "  ${BOLD}Flags${RESET} ${DIM}(forwarded to the TUI)${RESET}\n"
+  printf "    ${CYAN}--overdrive${RESET}                     Full-auto mode ${DIM}(same as ${RESET}${CYAN}osa overdrive${RESET}${DIM})${RESET}\n"
+  printf "    ${CYAN}--continue${RESET}                      Resume newest session here\n"
+  printf "    ${CYAN}--resume${RESET} ${DIM}[id]${RESET}                 Resume a session\n"
+  printf "    ${CYAN}--permission-mode${RESET} ${DIM}<mode>${RESET}      ask · auto-edit · plan · overdrive\n"
+  printf '\n'
+  printf "  ${DIM}The backend keeps running in the background so the next ${RESET}${CYAN}osa${RESET}${DIM} is instant.\n"
+  printf "  ${DIM}Stop it any time with ${RESET}${CYAN}osa stop${RESET}${DIM}; it also idles down when unused.${RESET}\n"
+  printf '\n'
+}
+
+# ── Real in-place update: download prebuilt release + TUI, verify sha256,
+# atomically swap under ~/.osa, print the delta + what's new, then launch. ──
+do_update() {
+  os=""; arch=""
+  case "$(uname -s)" in
+    Darwin) os="macos" ;;
+    Linux)  os="linux" ;;
+    *) printf "  ${RED}✗${RESET} Unsupported OS for auto-update: %s\n" "$(uname -s)" >&2; return 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64|amd64)  arch="x64" ;;
+    *) printf "  ${RED}✗${RESET} Unsupported arch for auto-update: %s\n" "$(uname -m)" >&2; return 1 ;;
+  esac
+  platform="${os}-${arch}"
+  tarball="osa-${platform}.tar.gz"
+  tui_asset="osagent-tui-${platform}"
+
+  cur="$(cat "$OSA_HOME/version" 2>/dev/null || echo unknown)"
+  printf "  ${CYAN}→${RESET} Current version: %s\n" "$cur"
+  printf "  ${CYAN}→${RESET} Checking for updates…\n"
+
+  meta="$(mktemp "${TMPDIR:-/tmp}/osa-meta.XXXXXX")"
+  if ! _download "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" "$meta"; then
+    rm -f "$meta"
+    printf "  ${RED}✗${RESET} Could not reach the GitHub API. Try again later.\n" >&2
+    return 2
+  fi
+
+  # Extract tag + release notes. python3 handles the multiline JSON body
+  # robustly; fall back to grep/sed for the tag alone.
+  if command -v python3 >/dev/null 2>&1; then
+    latest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("tag_name","") or "")' "$meta" 2>/dev/null)"
+    notes="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("body","") or "")' "$meta" 2>/dev/null)"
+  else
+    latest="$(grep '"tag_name"' "$meta" | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+    notes=""
+  fi
+  rm -f "$meta"
+
+  if [ -z "$latest" ]; then
+    printf "  ${RED}✗${RESET} Could not determine the latest release.\n" >&2
+    return 2
+  fi
+  if [ "$latest" = "$cur" ]; then
+    printf "  ${GREEN}✓${RESET} Already up to date ${DIM}(%s)${RESET}\n" "$cur"
+    return 0
+  fi
+  printf "  ${CYAN}→${RESET} New version available: ${BOLD}%s${RESET}\n" "$latest"
+
+  base="https://github.com/${GITHUB_REPO}/releases/download/${latest}"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/osa-update.XXXXXX")"
+
+  printf "  ${CYAN}→${RESET} Downloading %s…\n" "$tarball"
+  if ! _download "${base}/${tarball}" "${tmp}/${tarball}"; then
+    rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tarball" >&2; return 2
+  fi
+  printf "  ${CYAN}→${RESET} Downloading %s…\n" "$tui_asset"
+  if ! _download "${base}/${tui_asset}" "${tmp}/${tui_asset}"; then
+    rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tui_asset" >&2; return 2
+  fi
+
+  # Verify the tarball checksum (mandatory when the sidecar exists).
+  printf "  ${CYAN}→${RESET} Verifying checksum…\n"
+  if _download "${base}/${tarball}.sha256" "${tmp}/${tarball}.sha256" 2>/dev/null; then
+    expected="$(awk '{print $1}' "${tmp}/${tarball}.sha256")"
+    actual=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "${tmp}/${tarball}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "${tmp}/${tarball}" | awk '{print $1}')"
+    fi
+    if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
+      rm -rf "$tmp"
+      printf "  ${RED}✗${RESET} Checksum mismatch — aborting update.\n" >&2
+      return 3
+    fi
+    [ -n "$actual" ] && printf "  ${GREEN}✓${RESET} Checksum verified\n"
+  else
+    printf "  ${YELLOW}!${RESET} No .sha256 sidecar — skipping verification.\n" >&2
+  fi
+
+  # Extract the new release beside the current one (same filesystem → atomic
+  # rename), then swap. Stop the old daemon first so it releases the old files.
+  printf "  ${CYAN}→${RESET} Installing update…\n"
+  stop_daemon >/dev/null 2>&1 || true
+
+  new_rel="$OSA_HOME/release.new"
+  rm -rf "$new_rel"; mkdir -p "$new_rel"
+  if ! tar -xzf "${tmp}/${tarball}" -C "$new_rel" 2>/dev/null; then
+    rm -rf "$tmp" "$new_rel"
+    printf "  ${RED}✗${RESET} Extraction failed — your existing install is untouched.\n" >&2
+    return 3
+  fi
+  [ -f "$new_rel/bin/osagent" ] || { rm -rf "$tmp" "$new_rel"; printf "  ${RED}✗${RESET} Bad release archive — aborting.\n" >&2; return 3; }
+  chmod +x "$new_rel/bin/osagent" 2>/dev/null || true
+
+  # Atomic swap of the release dir.
+  rm -rf "$OSA_HOME/release.old"
+  mv "$OSA_HOME/release" "$OSA_HOME/release.old" 2>/dev/null || true
+  mv "$new_rel" "$OSA_HOME/release"
+  rm -rf "$OSA_HOME/release.old"
+
+  # Atomic swap of the TUI binary.
+  cp "${tmp}/${tui_asset}" "${TUI_BIN}.new"
+  chmod +x "${TUI_BIN}.new"
+  mv "${TUI_BIN}.new" "$TUI_BIN"
+
+  printf "%s\n" "$OSA_HOME/release" > "$OSA_HOME/release_root"
+  printf "%s\n" "$latest" > "$OSA_HOME/version"
+  rm -rf "$tmp"
+
+  printf '\n'
+  printf "  ${GREEN}${BOLD}✓ Updated ${RESET}${DIM}%s${RESET} → ${BOLD}%s${RESET}\n" "$cur" "$latest"
+  printf '\n'
+  printf "  ${BOLD}What's new${RESET}\n"
+  if [ -n "$notes" ]; then
+    printf '%s\n' "$notes" | sed 's/^/    /' | head -30
+  else
+    printf "    See ${CYAN}https://github.com/%s/releases/tag/%s${RESET}\n" "$GITHUB_REPO" "$latest"
+  fi
+  printf '\n'
+  if [ -t 0 ]; then
+    printf "  ${DIM}Press Enter to launch OSA…${RESET} "
+    read -r _ || true
+  fi
+  return 0
+}
+
+# ── Subcommand pre-translation (verbs → TUI flags, then fall through) ──
+OVERDRIVE=0
+case "${1:-}" in
+  overdrive)
+    OVERDRIVE=1; shift; set -- "$@" "--overdrive"
+    ;;
+  continue)
+    shift; set -- "$@" "--continue"
+    ;;
+  resume)
+    shift
+    if [ -n "${1:-}" ] && [ "${1#-}" = "${1:-}" ]; then
+      rid="$1"; shift; set -- "$@" "--resume" "$rid"
+    else
+      set -- "$@" "--resume"
+    fi
+    ;;
+esac
+
+for a in "$@"; do
+  case "$a" in
+    --overdrive|--dangerously-skip-permissions|--yolo) OVERDRIVE=1 ;;
+  esac
+done
+
+# ── Subcommand dispatch ───────────────────────────────────────────
 case "${1:-}" in
   version|--version|-v) exec "$RELEASE_BIN" version ;;
   setup)                exec "$RELEASE_BIN" setup ;;
   serve)                exec "$RELEASE_BIN" serve ;;
   doctor)               exec "$RELEASE_BIN" doctor ;;
   opencomputers)        shift; exec "$RELEASE_BIN" opencomputers "$@" ;;
+  stop)                 stop_daemon; exit 0 ;;
   update)
-    echo "To update OSA, re-run the installer:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh"
-    exit 0
+    shift || true
+    do_update || exit $?
+    # fall through to launch on success
     ;;
-  help|--help|-h)
-    echo ""
-    echo "  OSA Agent — Your OS, Supercharged"
-    echo ""
-    echo "  Usage:"
-    echo "    osa                Start backend + TUI (default)"
-    echo "    osa setup          Configure provider / API keys"
-    echo "    osa serve          Backend only (headless HTTP API)"
-    echo "    osa doctor         Run health checks"
-    echo "    osa version        Print version"
-    echo "    osa opencomputers  Manage the MIOSA host connection"
-    echo "    osa update         Update instructions"
-    echo ""
-    exit 0
-    ;;
+  help|--help|-h)       print_help; exit 0 ;;
 esac
 
-# Default: start the backend (if not already up), then launch the TUI.
-BACKEND_PID=""
-cleanup() {
-  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
-    kill "$BACKEND_PID" 2>/dev/null || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-if _http_ok "http://localhost:$PORT/health"; then
-  : # backend already running
+# ── Default: warm the daemon (attach instantly if healthy), then TUI ──
+if backend_healthy; then
+  printf "  ${DIM}Backend already running on :%s — attaching.${RESET}\n" "$PORT"
 else
-  "$RELEASE_BIN" serve >"$LOG_DIR/backend.log" 2>&1 &
-  BACKEND_PID=$!
-  i=0
-  while [ "$i" -lt 40 ]; do
-    if _http_ok "http://localhost:$PORT/health"; then
-      break
-    fi
-    # If serve has already exited, waiting the full window is pointless. The
-    # usual cause is the port being held by another process (bind failure).
-    if [ -n "$BACKEND_PID" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-      break
-    fi
-    sleep 0.5
-    i=$((i + 1))
-  done
-  if ! _http_ok "http://localhost:$PORT/health"; then
-    if [ -n "$BACKEND_PID" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-      echo "OSA backend exited during startup — port $PORT is likely already in use." >&2
-      echo "  - Another OSA instance or process may be bound to :$PORT." >&2
-      echo "  - Start on a different port:  OSA_PORT=<number> osa" >&2
+  clear_stale_pid
+  start_daemon
+  rc=0
+  wait_health 40 || rc=$?
+  if [ "${rc:-0}" -eq 2 ]; then
+    if command -v lsof >/dev/null 2>&1 && lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+      printf "  ${RED}✗${RESET} Backend exited during startup — port %s is already in use.\n" "$PORT" >&2
+      printf "  ${DIM}  Start on another port:${RESET} ${CYAN}OSA_PORT=<n> osa${RESET}${DIM}, or ${RESET}${CYAN}osa stop${RESET}${DIM} first.${RESET}\n" >&2
     else
-      echo "OSA backend did not become healthy on port $PORT within ~20s." >&2
+      printf "  ${RED}✗${RESET} Backend exited during startup.\n" >&2
     fi
-    echo "  - Inspect the log:  $LOG_DIR/backend.log" >&2
-    echo "  - Run diagnostics:  osa doctor" >&2
+    printf "  ${DIM}  Inspect the log: %s${RESET}\n" "$LOG_FILE" >&2
+    rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    exit 1
+  elif [ "${rc:-0}" -eq 1 ]; then
+    printf "  ${RED}✗${RESET} Backend did not become healthy on :%s in time.\n" "$PORT" >&2
+    printf "  ${DIM}  Inspect the log: %s   ·   Run: ${RESET}${CYAN}osa doctor${RESET}\n" "$LOG_FILE" >&2
+    exit 1
   fi
+  printf "  ${DIM}Backend ready. It stays warm in the background — ${RESET}${CYAN}osa stop${RESET}${DIM} to shut it down.${RESET}\n"
 fi
 
-EXIT_CODE=0
-"$TUI_BIN" "$@" || EXIT_CODE=$?
-cleanup
-trap - EXIT INT TERM
-exit "$EXIT_CODE"
+# Show the overdrive warning right before handing off to the TUI.
+[ "$OVERDRIVE" -eq 1 ] && warn_overdrive
+
+# Launch the TUI. The backend daemon deliberately OUTLIVES this process, so the
+# next `osa` attaches instantly. No cleanup trap — that is the whole point.
+export OSA_URL="http://localhost:${PORT}"
+exec "$TUI_BIN" "$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 ok "Launcher installed"
@@ -379,4 +666,4 @@ if [ -n "${RELOAD_HINT:-}" ]; then
 else
   printf "  Run ${BOLD}osa${RESET} to start.\n\n"
 fi
-printf "  ${DIM}Update later: ${INSTALL_ONE_LINER}${RESET}\n\n"
+printf "  ${DIM}Update later: run ${RESET}${BOLD}osa update${RESET}${DIM} (in-place). Or reinstall: ${INSTALL_ONE_LINER}${RESET}\n\n"

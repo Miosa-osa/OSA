@@ -76,6 +76,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # default stays :full; :auto (near-zero-prompt unattended execution gated by
     # the safety Guardian) is opt-in via /auto_mode or set_permission_mode auto.
     permission_tier: :full,
+    # Higher-level permission MODE selector (Shift+Tab cycle: ask → accept_edits
+    # → plan → overdrive). Gates tool calls in ToolExecutor.approve_tool_call/2
+    # BEFORE the tier cond:
+    #   :ask (default) → tier + Guardian, then interactive prompt for mutating
+    #                    tools (the round-trip the TUI permission dialog drives)
+    #   :accept_edits  → auto-allow single-file edit/write, else ask/tier
+    #   :plan          → read-only (deny mutating tools)
+    #   :overdrive     → allow all past the non-bypassable circuit-breaker
+    permission_mode: :ask,
     # Subagent fields
     parent_session_id: nil,
     allowed_tools: nil,
@@ -309,6 +318,30 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
+  Set the higher-level permission mode for a running session
+  (`:ask | :accept_edits | :plan | :overdrive`). `:bypass` is accepted as a
+  silent alias for `:overdrive`.
+
+  Used by the HTTP `set_permission_mode <mode>` command (the Shift+Tab cycle and
+  `/overdrive`) so the ToolExecutor gate takes effect server-side.
+  """
+  @spec set_permission_mode(String.t(), atom()) ::
+          {:ok, atom()} | {:error, :invalid_mode | :no_session}
+  def set_permission_mode(session_id, mode) do
+    GenServer.call(via(session_id), {:set_permission_mode, mode})
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc "Get the current permission mode for a running session."
+  @spec get_permission_mode(String.t()) :: {:ok, atom()} | {:error, :no_session}
+  def get_permission_mode(session_id) do
+    GenServer.call(via(session_id), {:get_permission_mode})
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
   Cancel a running agent loop for the given session.
 
   Sets a flag in an ETS table that ReactLoop.run/1 checks at each iteration.
@@ -414,6 +447,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
+      permission_mode: Keyword.get(opts, :permission_mode, :ask),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       delegation_policy: Keyword.get(opts, :delegation_policy),
       parent_session_id: Keyword.get(opts, :parent_session_id),
@@ -572,6 +606,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call({:get_permission_tier}, _from, state) do
     {:reply, {:ok, state.permission_tier}, state}
+  end
+
+  # :bypass is a silent alias for :overdrive (the '--dangerously-skip-permissions'
+  # entrypoint), so both resolve to the same server-side gate.
+  def handle_call({:set_permission_mode, :bypass}, from, state) do
+    handle_call({:set_permission_mode, :overdrive}, from, state)
+  end
+
+  def handle_call({:set_permission_mode, mode}, _from, state)
+      when mode in [:ask, :accept_edits, :plan, :overdrive] do
+    {:reply, {:ok, mode}, %{state | permission_mode: mode}}
+  end
+
+  def handle_call({:set_permission_mode, _mode}, _from, state) do
+    {:reply, {:error, :invalid_mode}, state}
+  end
+
+  def handle_call({:get_permission_mode}, _from, state) do
+    {:reply, {:ok, state.permission_mode}, state}
   end
 
   def handle_call({:set_strategy, _strategy_name}, _from, state) do

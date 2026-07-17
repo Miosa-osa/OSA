@@ -9,10 +9,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.{Compactor, Loop, Tasks}
+  alias OptimalSystemAgent.Agent.{Compactor, ContextDiscovery, Loop, SessionPersistence, Tasks}
   alias OptimalSystemAgent.Budget
-  alias OptimalSystemAgent.Channels.CLI.{Renderer, Session, TaskDisplay}
+  alias OptimalSystemAgent.Channels.CLI.{MessageQueue, Renderer, Session, TaskDisplay}
+  alias OptimalSystemAgent.ContextRefs.Parser, as: ContextRefsParser
+  alias OptimalSystemAgent.MCP
   alias OptimalSystemAgent.Memory
+  alias OptimalSystemAgent.Permissions
+  alias OptimalSystemAgent.Sandbox.Router, as: SandboxRouter
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
 
   @reset IO.ANSI.reset()
@@ -41,7 +45,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "plan" => {"Toggle plan mode", :cmd_plan},
     "doctor" => {"Run health check", :cmd_doctor},
     "export" => {"Export conversation as markdown", :cmd_export},
-    "version" => {"Show version info", :cmd_version},
+    "version" => {"Show version and check for updates", :cmd_version},
+    "release-notes" => {"Show what's new in this release", :cmd_release_notes},
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
     "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
@@ -54,8 +59,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "channels" => {"Show connected messaging channels", :cmd_channels},
     "resume" => {"Resume a previous session", :cmd_resume},
     "persona" => {"Show or switch persona preset", :cmd_persona},
+    "mcp" => {"List MCP servers and connection status", :cmd_mcp},
+    "init" => {"Scan the project and write an AGENTS.md guide", :cmd_init},
+    "copy" => {"Copy the last assistant reply", :cmd_copy},
+    "files" => {"List files currently in context", :cmd_files},
+    "rename" => {"Rename the current session", :cmd_rename},
+    "tag" => {"Tag the current session for search", :cmd_tag},
+    "sandbox" => {"Show or switch the sandbox backend", :cmd_sandbox},
     "exit" => {"Exit OSA", :cmd_exit}
   }
+
+  @init_guide "AGENTS.md"
 
   @doc "List all command names (for autocomplete)."
   def list, do: Map.keys(@commands) |> Enum.sort()
@@ -546,16 +560,61 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   end
 
   def cmd_version(_args, session_id) do
-    version = Application.spec(:optimal_system_agent, :vsn) |> to_string()
+    alias OptimalSystemAgent.ReleaseNotes
 
-    try do
-      {hash, 0} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
-      IO.puts("\n  #{@bold}OSA#{@reset} #{@dim}v#{version} (#{String.trim(hash)})#{@reset}\n")
-    rescue
+    version = ReleaseNotes.current_version()
+
+    hash =
+      try do
+        case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+          {h, 0} -> " (#{String.trim(h)})"
+          _ -> ""
+        end
+      rescue
+        _ -> ""
+      end
+
+    IO.puts("\n  #{@bold}OSA#{@reset} #{@dim}v#{version}#{hash}#{@reset}")
+
+    # Version-check: compare against the latest known release tag.
+    case ReleaseNotes.version_status() do
+      %{update_available: true, latest: latest} ->
+        IO.puts(
+          "  #{@yellow}↑#{@reset} #{@bold}v#{latest}#{@reset} #{@dim}available — run#{@reset} " <>
+            "#{@cyan}osa update#{@reset} #{@dim}to upgrade, then#{@reset} #{@cyan}/release-notes#{@reset}"
+        )
+
+      %{latest: latest} ->
+        IO.puts("  #{@green}✓#{@reset} #{@dim}up to date (latest v#{latest})#{@reset}")
+
       _ ->
-        IO.puts("\n  #{@bold}OSA#{@reset} #{@dim}v#{version}#{@reset}\n")
+        :ok
     end
 
+    IO.puts("")
+    session_id
+  end
+
+  def cmd_release_notes(args, session_id) do
+    alias OptimalSystemAgent.ReleaseNotes
+
+    n =
+      case Integer.parse(String.trim(args)) do
+        {count, _} when count > 0 -> min(count, 10)
+        _ -> 1
+      end
+
+    IO.puts("")
+    IO.puts("  #{@bold}What's New#{@reset} #{@dim}(OSA v#{ReleaseNotes.current_version()})#{@reset}")
+    IO.puts("")
+
+    text = ReleaseNotes.latest_text(n)
+
+    text
+    |> String.split("\n")
+    |> Enum.each(fn line -> IO.puts("  #{line}") end)
+
+    IO.puts("")
     session_id
   end
 
@@ -1107,14 +1166,25 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         end
 
         IO.puts("")
-        IO.puts("  #{@dim}Usage: /permissions remove <tool_name>#{@reset}")
+        IO.puts("  #{@dim}Usage: /permissions add <tool> <allow|deny> | remove <tool>#{@reset}")
 
       "remove " <> tool_name ->
-        OptimalSystemAgent.Permissions.remove_rule(String.trim(tool_name))
+        Permissions.remove_rule(String.trim(tool_name))
         IO.puts("  #{IO.ANSI.green()}✓#{@reset} Removed rule for #{String.trim(tool_name)}")
 
+      "add " <> rest ->
+        case String.split(String.trim(rest), ~r/\s+/, parts: 2) do
+          [tool, action] when action in ["allow", "deny"] and tool != "" ->
+            decision = if action == "allow", do: :allow_always, else: :deny_always
+            Permissions.save_rule(tool, decision)
+            IO.puts("  #{IO.ANSI.green()}✓#{@reset} Added rule: #{tool} → #{action}")
+
+          _ ->
+            IO.puts("  #{@dim}Usage: /permissions add <tool> <allow|deny>#{@reset}")
+        end
+
       _ ->
-        IO.puts("  #{@dim}Usage: /permissions [remove <tool>]#{@reset}")
+        IO.puts("  #{@dim}Usage: /permissions [add <tool> <allow|deny> | remove <tool>]#{@reset}")
     end
 
     IO.puts("")
@@ -1202,5 +1272,373 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
     session_id
+  end
+
+  # ── MCP Servers ──────────────────────────────────────────────────────
+
+  def cmd_mcp(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}MCP Servers#{@reset}")
+    IO.puts("")
+
+    running =
+      try do
+        MCP.Client.Manager.list_servers()
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    cond do
+      running != [] ->
+        Enum.each(running, fn s ->
+          {icon, label} = mcp_status_display(s[:status])
+          tools = s[:tool_count] || 0
+
+          IO.puts(
+            "  #{icon} #{@cyan}#{String.pad_trailing(to_string(s[:name]), 20)}#{@reset}" <>
+              " #{@dim}#{s[:transport]} · #{label} · #{tools} tools#{@reset}"
+          )
+        end)
+
+        IO.puts("")
+        IO.puts("  #{@dim}#{length(running)} server(s)#{@reset}")
+
+      true ->
+        configured =
+          case MCP.Config.load() do
+            {:ok, list} -> list
+            _ -> []
+          end
+
+        if configured == [] do
+          IO.puts("  #{@dim}No MCP servers configured.#{@reset}")
+          IO.puts("  #{@dim}Add servers to #{MCP.Config.config_path()}#{@reset}")
+        else
+          Enum.each(configured, fn s ->
+            IO.puts(
+              "  #{@dim}○#{@reset} #{@cyan}#{String.pad_trailing(s.name, 20)}#{@reset}" <>
+                " #{@dim}#{s.transport} · not started#{@reset}"
+            )
+          end)
+
+          IO.puts("")
+          IO.puts("  #{@dim}#{length(configured)} server(s) configured (manager offline)#{@reset}")
+        end
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp mcp_status_display(status) do
+    case status do
+      s when s in [:ready, :connected, :running] -> {"#{@green}●#{@reset}", "connected"}
+      s when s in [:initializing, :connecting, :starting] -> {"#{@yellow}◐#{@reset}", "connecting"}
+      :disabled -> {"#{@dim}○#{@reset}", "disabled"}
+      :down -> {"#{@red}○#{@reset}", "down"}
+      other -> {"#{@dim}○#{@reset}", to_string(other || "unknown")}
+    end
+  end
+
+  # ── Project Init (seed AGENTS.md generation) ─────────────────────────
+
+  def cmd_init(_args, session_id) do
+    IO.puts("")
+    path = Path.join(File.cwd!(), @init_guide)
+    prompt = init_prompt()
+
+    if File.exists?(path) do
+      IO.puts("  #{@dim}#{@init_guide} already exists — a fresh scan will refresh it.#{@reset}")
+    end
+
+    if seed_session_prompt(session_id, prompt) do
+      IO.puts(
+        "  #{@green}✓#{@reset} Scanning project — OSA will write #{@bold}#{@init_guide}#{@reset}" <>
+          " with the detected stack, conventions, and build commands."
+      )
+    else
+      IO.puts("  #{@dim}Submit this prompt to generate #{@init_guide}:#{@reset}")
+      IO.puts("")
+      IO.puts("  #{prompt}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  @doc "The canned prompt used by /init to generate OSA's own project guide."
+  def init_prompt do
+    """
+    Analyze this project and create a concise #{@init_guide} guide at the repository \
+    root that helps an AI coding agent work here effectively.
+
+    Scan the working directory to detect the tech stack and languages, the \
+    build/test/lint commands, the directory layout, key conventions, and any \
+    important gotchas. Then write #{@init_guide} with these sections: Overview, \
+    Tech Stack, Build & Test Commands, Project Layout, Conventions, and Gotchas. \
+    Keep it factual and under ~200 lines. Do not invent details you cannot verify \
+    from the codebase.
+    """
+    |> String.trim()
+  end
+
+  # Enqueue the seed prompt onto the session's live message queue so the agent
+  # actually runs it. Returns true when a live queue accepted it, false when no
+  # queue exists (e.g. HTTP one-shot) so the caller can surface the prompt text.
+  defp seed_session_prompt(session_id, prompt) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, {:mq, session_id}) do
+      [{_pid, _}] ->
+        MessageQueue.enqueue(session_id, prompt)
+        true
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  end
+
+  # ── Copy last assistant reply ────────────────────────────────────────
+
+  def cmd_copy(_args, session_id) do
+    IO.puts("")
+
+    last =
+      session_id
+      |> Loop.get_messages()
+      |> Enum.reverse()
+      |> Enum.find(fn m -> (m[:role] || m["role"]) in ["assistant", :assistant] end)
+
+    content = if last, do: extract_text(last[:content] || last["content"]), else: nil
+
+    if is_binary(content) and String.trim(content) != "" do
+      # The TUI copies captured stdout to the clipboard, so emit the raw reply.
+      IO.puts(content)
+    else
+      IO.puts("  #{@dim}No assistant reply to copy yet.#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp extract_text(content) when is_binary(content), do: content
+
+  defp extract_text(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{"text" => t} when is_binary(t) -> t
+      %{text: t} when is_binary(t) -> t
+      t when is_binary(t) -> t
+      _ -> ""
+    end)
+    |> Enum.join("")
+  end
+
+  defp extract_text(_), do: ""
+
+  # ── Files in context ─────────────────────────────────────────────────
+
+  def cmd_files(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}Files in Context#{@reset}")
+    IO.puts("")
+
+    guide_loaded? =
+      try do
+        is_binary(ContextDiscovery.discover(File.cwd!()))
+      rescue
+        _ -> false
+      end
+
+    ref_files =
+      session_id
+      |> Loop.get_messages()
+      |> Enum.filter(fn m -> (m[:role] || m["role"]) in ["user", :user] end)
+      |> Enum.flat_map(fn m ->
+        text = extract_text(m[:content] || m["content"])
+        {_cleaned, refs} = ContextRefsParser.parse(text)
+        for {:file, p, _range} <- refs, do: p
+      end)
+      |> Enum.uniq()
+
+    if not guide_loaded? and ref_files == [] do
+      IO.puts("  #{@dim}No files referenced in this session yet.#{@reset}")
+      IO.puts("  #{@dim}Reference files with @file:path, or /init to scaffold a guide.#{@reset}")
+    else
+      if guide_loaded? do
+        IO.puts("  #{@green}●#{@reset} #{@dim}project guide (auto-loaded)#{@reset}")
+      end
+
+      Enum.each(ref_files, fn p ->
+        IO.puts("  #{@cyan}#{p}#{@reset} #{@dim}#{file_size_label(p)}#{@reset}")
+      end)
+
+      IO.puts("")
+      IO.puts("  #{@dim}#{length(ref_files)} file reference(s)#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp file_size_label(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} -> "#{size} bytes"
+      _ -> "not found"
+    end
+  end
+
+  # ── Session rename / tag (persisted metadata) ────────────────────────
+
+  def cmd_rename(args, session_id) do
+    title = String.trim(args)
+    IO.puts("")
+
+    if title == "" do
+      case SessionPersistence.get_metadata(session_id) do
+        %{title: t} when is_binary(t) and t != "" ->
+          IO.puts("  #{@bold}Session title:#{@reset} #{t}")
+
+        _ ->
+          IO.puts("  #{@dim}No title set. Usage: /rename <title>#{@reset}")
+      end
+    else
+      persist_session_metadata(session_id, %{title: title})
+      IO.puts("  #{@green}✓#{@reset} Session renamed to #{@bold}#{title}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  def cmd_tag(args, session_id) do
+    tag = String.trim(args)
+    IO.puts("")
+
+    existing =
+      case SessionPersistence.get_metadata(session_id) do
+        %{tags: tags} when is_list(tags) -> tags
+        _ -> []
+      end
+
+    cond do
+      tag == "" and existing == [] ->
+        IO.puts("  #{@dim}No tags. Usage: /tag <name>#{@reset}")
+
+      tag == "" ->
+        IO.puts("  #{@bold}Tags:#{@reset} #{Enum.join(existing, ", ")}")
+
+      true ->
+        updated = (existing ++ [tag]) |> Enum.uniq()
+        persist_session_metadata(session_id, %{tags: updated})
+        IO.puts("  #{@green}✓#{@reset} Tagged #{@bold}#{tag}#{@reset} (#{Enum.join(updated, ", ")})")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp persist_session_metadata(session_id, fields) do
+    case SessionPersistence.update_metadata(session_id, fields) do
+      :ok ->
+        :ok
+
+      {:error, :not_found} ->
+        # No saved file yet — snapshot live messages first, then retry.
+        SessionPersistence.auto_save(session_id)
+        SessionPersistence.update_metadata(session_id, fields)
+
+      other ->
+        other
+    end
+  end
+
+  # ── Sandbox backend switch ───────────────────────────────────────────
+
+  @sandbox_backends ~w(host docker e2b miosa vercel)
+
+  def cmd_sandbox(args, session_id) do
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        show_sandbox_status()
+
+      name ->
+        switch_sandbox(String.downcase(name))
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp show_sandbox_status do
+    active = SandboxRouter.backend_name()
+
+    IO.puts("  #{@bold}Sandbox Backends#{@reset}")
+    IO.puts("")
+
+    Enum.each(SandboxRouter.list_backends(), fn b ->
+      marker = if b.display_name == active, do: "#{@green}*#{@reset}", else: " "
+
+      avail =
+        if b.available,
+          do: "#{@green}available#{@reset}",
+          else: "#{@dim}unavailable#{@reset}"
+
+      IO.puts(
+        "  #{marker} #{@cyan}#{String.pad_trailing(to_string(b.name), 10)}#{@reset}" <>
+          " #{@dim}#{b.display_name}#{@reset} — #{avail}"
+      )
+    end)
+
+    IO.puts("")
+    IO.puts("  #{@dim}Active: #{active} · mode: #{SandboxRouter.mode()}#{@reset}")
+    IO.puts("  #{@dim}Usage: /sandbox <#{Enum.join(@sandbox_backends, "|")}>#{@reset}")
+  end
+
+  defp switch_sandbox(name) do
+    if name in @sandbox_backends do
+      backend = String.to_existing_atom(name)
+      Application.put_env(:optimal_system_agent, :sandbox_backend, backend)
+      persist_sandbox_backend(name)
+      IO.puts("  #{@green}✓#{@reset} Sandbox backend set to #{@bold}#{name}#{@reset}")
+    else
+      IO.puts("  #{@yellow}error: unknown backend '#{name}'#{@reset}")
+      IO.puts("  #{@dim}Valid: #{Enum.join(@sandbox_backends, ", ")}#{@reset}")
+    end
+  end
+
+  defp persist_sandbox_backend(backend) do
+    path = sandbox_config_path()
+
+    existing =
+      case File.read(path) do
+        {:ok, json} ->
+          case Jason.decode(json) do
+            {:ok, m} when is_map(m) -> m
+            _ -> %{}
+          end
+
+        _ ->
+          %{}
+      end
+
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Jason.encode!(Map.put(existing, "backend", backend), pretty: true))
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp sandbox_config_path do
+    Application.get_env(
+      :optimal_system_agent,
+      :sandbox_config_file,
+      Path.expand("~/.osa/sandbox.json")
+    )
   end
 end

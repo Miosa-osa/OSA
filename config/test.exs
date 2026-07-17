@@ -29,3 +29,14 @@ config :optimal_system_agent,
 # Disable OpenComputers supervisor in tests — FrameRouter and PtyExecutor are
 # started explicitly per test so named process conflicts are avoided.
 config :optimal_system_agent, open_computers_enabled: false
+
+# Interactive permission prompts (default 'ask' mode round-trip) are OFF in the
+# test suite: no TUI is attached to respond, so a mutating tool must not park.
+# The permission round-trip is exercised by its own tests, which flip this on
+# explicitly. With it off, the tier decision stands (prior behavior preserved).
+config :optimal_system_agent, interactive_permissions: false
+
+# Isolate the saved permission-rule store so save_rule/2 tests never touch the
+# real ~/.osa/permissions.json.
+config :optimal_system_agent,
+  permissions_file: Path.join(System.tmp_dir!(), "osa-test-permissions.json")

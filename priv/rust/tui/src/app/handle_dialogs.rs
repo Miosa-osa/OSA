@@ -402,6 +402,9 @@ impl App {
         false
     }
 
+    /// Modal directory browser. `@` now drives the inline composer mention
+    /// dropdown instead, so this is retained for programmatic / future use.
+    #[allow(dead_code)]
     pub(crate) fn open_file_picker(&mut self) {
         let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         self.file_picker = Some(crate::dialogs::file_picker::FilePicker::new(start_dir));
@@ -818,6 +821,10 @@ impl App {
     }
 
     pub(super) fn open_command_palette(&mut self) {
+        // Single source of truth: the backend command registry (GET
+        // /api/v1/commands), fetched once at startup into `command_entries` and
+        // also used to drive the inline `/` completions. No hardcoded list — new
+        // backend commands appear here automatically.
         let items: Vec<PaletteItem> = self
             .command_entries
             .iter()
@@ -828,18 +835,7 @@ impl App {
             })
             .collect();
 
-        // Add built-in commands
-        let mut all_items = vec![
-            PaletteItem { name: "help".into(), description: "Show help".into(), category: "system".into() },
-            PaletteItem { name: "clear".into(), description: "Clear chat".into(), category: "system".into() },
-            PaletteItem { name: "models".into(), description: "Browse models".into(), category: "system".into() },
-            PaletteItem { name: "sessions".into(), description: "Browse sessions".into(), category: "system".into() },
-            PaletteItem { name: "theme".into(), description: "Switch theme".into(), category: "system".into() },
-            PaletteItem { name: "exit".into(), description: "Quit".into(), category: "system".into() },
-        ];
-        all_items.extend(items);
-
-        self.palette.open(all_items);
+        self.palette.open(items);
         self.transition(AppState::Palette);
     }
 }

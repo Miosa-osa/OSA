@@ -510,11 +510,17 @@ impl InputComponent {
                 continue;
             }
 
-            let rel = path
+            let is_dir = path.is_dir();
+            let mut rel = path
                 .strip_prefix(base)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
+            // Mark directories with a trailing '/' so the mention dropdown
+            // distinguishes them from files (and inserts a browsable path).
+            if is_dir {
+                rel.push('/');
+            }
 
             // Fuzzy subsequence match on either the leaf name or the full path.
             if crate::util::fuzzy::is_match(&name, query)
@@ -523,7 +529,7 @@ impl InputComponent {
                 results.push(rel.clone());
             }
 
-            if path.is_dir() {
+            if is_dir {
                 Self::walk_dir(base, &path, query, depth - 1, results);
             }
         }
@@ -1118,20 +1124,62 @@ impl Component for InputComponent {
             return;
         }
 
+        // Shell mode: a leading '!' routes the line to OSA's bash tool on submit.
+        // Recolor the frame with OSA blue and flag it with a "shell" badge so the
+        // switch is obvious while typing.
+        let shell_mode = self.content.starts_with('!');
+        let divider_style = if shell_mode {
+            Style::default().fg(theme.colors.primary)
+        } else {
+            theme.prompt_border()
+        };
+
         // Top divider — full-width `─` rule (Claude-Code style).
         let sep_area = Rect::new(area.x, area.y, area.width, 1);
         let separator =
-            Paragraph::new("\u{2500}".repeat(area.width as usize)).style(theme.prompt_border());
+            Paragraph::new("\u{2500}".repeat(area.width as usize)).style(divider_style);
         frame.render_widget(separator, sep_area);
+
+        // Right-aligned "shell" badge on the top divider while in shell mode.
+        if shell_mode {
+            let badge = " shell ";
+            let bw = badge.chars().count() as u16;
+            if area.width > bw + 4 {
+                let badge_area = Rect::new(area.x + area.width - bw - 1, area.y, bw, 1);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(badge, theme.button_active())),
+                    badge_area,
+                );
+            }
+        }
 
         // Bottom divider — reserve the last row for a matching `─` rule when we
         // have room for it (top div + >=1 text row + bottom div).
         let has_bottom = area.height >= 3;
         if has_bottom {
             let bot_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-            let bottom = Paragraph::new("\u{2500}".repeat(area.width as usize))
-                .style(theme.prompt_border());
+            let bottom =
+                Paragraph::new("\u{2500}".repeat(area.width as usize)).style(divider_style);
             frame.render_widget(bottom, bot_area);
+
+            // Always-visible prefix hint, right-aligned on the bottom divider so
+            // OSA's composer affordances are discoverable at a glance. Advertises
+            // only prefixes that actually work.
+            let hint = if (area.width as usize) >= 74 {
+                "  / commands \u{00b7} @ files \u{00b7} ! shell \u{00b7} \u{21e7}\u{23ce} newline \u{00b7} ^K palette  "
+            } else if (area.width as usize) >= 44 {
+                "  / cmds \u{00b7} @ files \u{00b7} ! shell  "
+            } else {
+                ""
+            };
+            let hw = hint.chars().count() as u16;
+            if hw > 0 && area.width > hw + 2 {
+                let hint_area = Rect::new(area.x + area.width - hw, bot_area.y, hw, 1);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(hint, theme.hint())),
+                    hint_area,
+                );
+            }
         }
 
         // Input line(s) — everything between the two dividers.
@@ -1208,7 +1256,7 @@ impl Component for InputComponent {
             let placeholder = if self.recording {
                 "\u{25C9} Recording... press Enter to stop, Esc to cancel"
             } else {
-                "Type a message..."
+                "Ask OSA anything \u{2014} / for commands, @ to add files, ! to run shell"
             };
             let placeholder_style = if self.recording {
                 Style::default().fg(Color::Red)

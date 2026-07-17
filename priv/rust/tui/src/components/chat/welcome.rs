@@ -189,6 +189,16 @@ pub fn welcome_lines(
     };
     lines.push(Line::from(Span::styled(tip, theme.welcome_tip())));
 
+    // Resume affordance — OSA verbs, so picking up prior work is discoverable.
+    let resume_hint = if w >= 70 {
+        "  Pick up earlier work  \u{00b7}  /continue this folder  \u{00b7}  /resume to browse"
+    } else if w >= 40 {
+        "  /continue  \u{00b7}  /resume earlier work"
+    } else {
+        "  /resume"
+    };
+    lines.push(Line::from(Span::styled(resume_hint, theme.faint())));
+
     lines
 }
 

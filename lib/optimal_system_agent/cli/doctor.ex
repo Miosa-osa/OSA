@@ -13,27 +13,16 @@ defmodule OptimalSystemAgent.CLI.Doctor do
 
   @doc "Run all health checks and print the report."
   def run do
-    Application.load(@app)
-
-    # Start minimal deps for HTTP checks
-    {:ok, _} = Application.ensure_all_started(:req)
+    # Best-effort: works whether or not the OTP app is already running (the
+    # TUI calls this in-process, the CLI subcommand from a cold VM).
+    _ = Application.load(@app)
+    _ = Application.ensure_all_started(:req)
 
     IO.puts("")
     IO.puts("OSA Health Check")
     IO.puts(@separator)
 
-    checks = [
-      check_runtime(),
-      check_cli(),
-      check_tui(),
-      check_api(),
-      check_provider(),
-      check_miosa_cli(),
-      check_event_router(),
-      check_working_directory(),
-      check_postgresql(),
-      check_amqp()
-    ]
+    checks = checks()
 
     Enum.each(checks, &print_check/1)
 
@@ -50,6 +39,117 @@ defmodule OptimalSystemAgent.CLI.Doctor do
     IO.puts(status_line)
     IO.puts("")
   end
+
+  @doc """
+  Run every health check and return the raw `[{status, name, detail}]` list.
+
+  `status` is one of `:pass | :fail | :optional`. Shared by both the printed
+  CLI report (`run/0`) and the structured `/doctor` HTTP endpoint (`report/0`),
+  so the TUI and the terminal always see the same diagnostics.
+  """
+  @spec checks() :: [{:pass | :fail | :optional, String.t(), String.t()}]
+  def checks do
+    _ = Application.ensure_all_started(:req)
+
+    [
+      check_runtime(),
+      check_version(),
+      check_cli(),
+      check_tui(),
+      check_api(),
+      check_config(),
+      check_provider(),
+      check_miosa_cli(),
+      check_event_router(),
+      check_working_directory(),
+      check_postgresql(),
+      check_amqp()
+    ] ++ onboarding_checks()
+  end
+
+  @doc """
+  Structured, JSON-friendly health report for the `/doctor` HTTP endpoint.
+
+  Returns `%{ready: bool, status: "ready"|"not_ready", failed: n, checks: [...]}`
+  where each check is `%{name, status, detail}` with a string `status`.
+  """
+  @spec report() :: %{
+          ready: boolean(),
+          status: String.t(),
+          failed: non_neg_integer(),
+          checks: [%{name: String.t(), status: String.t(), detail: String.t()}]
+        }
+  def report do
+    results = checks()
+    failed = Enum.count(results, fn {status, _, _} -> status == :fail end)
+
+    %{
+      ready: failed == 0,
+      status: if(failed == 0, do: "ready", else: "not_ready"),
+      failed: failed,
+      checks:
+        Enum.map(results, fn {status, name, detail} ->
+          %{name: name, status: to_string(status), detail: detail}
+        end)
+    }
+  end
+
+  # Fold Onboarding.doctor_checks/0 (config file + workspace templates) into the
+  # unified check list so `.env` presence + seeded workspace show up in both the
+  # CLI report and the TUI panel.
+  defp onboarding_checks do
+    OptimalSystemAgent.Onboarding.doctor_checks()
+    |> Enum.map(fn
+      {:ok, label} -> {:pass, "Workspace", label}
+      {:error, label, hint} -> {:fail, "Workspace", "#{label} — #{hint}"}
+      {:error, label} -> {:fail, "Workspace", label}
+    end)
+  rescue
+    _ -> []
+  end
+
+  defp check_version do
+    vsn =
+      case Application.spec(@app, :vsn) do
+        nil -> read_version_file()
+        vsn -> to_string(vsn)
+      end
+
+    {:pass, "Version", "OSA v#{vsn}"}
+  end
+
+  defp read_version_file do
+    case File.read(Path.expand("VERSION")) do
+      {:ok, v} -> String.trim(v)
+      _ -> "unknown"
+    end
+  end
+
+  # Config + provider keys: at least one provider credential (or local Ollama)
+  # should be reachable. Purely local check — never dials out.
+  defp check_config do
+    env_file = Path.join(Path.expand("~/.osa"), ".env")
+
+    key_vars =
+      ~w(MIOSA_API_KEY OLLAMA_API_KEY OPENROUTER_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GROQ_API_KEY)
+
+    configured_keys = Enum.filter(key_vars, fn v -> present?(System.get_env(v)) end)
+
+    cond do
+      not File.exists?(env_file) ->
+        {:fail, "Config", "~/.osa/.env missing — run setup"}
+
+      configured_keys != [] ->
+        {:pass, "Config", "#{length(configured_keys)} provider key(s) set"}
+
+      true ->
+        {:optional, "Config", ".env present, no cloud keys (local Ollama ok)"}
+    end
+  end
+
+  defp present?(nil), do: false
+  defp present?(""), do: false
+  defp present?(v) when is_binary(v), do: true
 
   # ── Check Implementations ──────────────────────────────────────
 

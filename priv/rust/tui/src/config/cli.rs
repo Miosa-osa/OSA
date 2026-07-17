@@ -17,8 +17,18 @@ pub struct Cli {
     pub setup: bool,
     pub no_color: bool,
     pub version: bool,
-    /// Skip all tool permission prompts — auto-approve everything
+    /// Enter overdrive (full auto): skip all tool permission prompts. Canonical
+    /// spelling is `--overdrive`; `--dangerously-skip-permissions` is a silent
+    /// hidden alias kept for muscle memory / scripts.
     pub dangerously_skip_permissions: bool,
+    /// `-c` / `--continue`: resume this directory's most recent session.
+    pub continue_last: bool,
+    /// `--resume [id]`: `Some(Some(id))` resumes a specific session; `Some(None)`
+    /// (flag with no id) opens the session browser at startup; `None` = not set.
+    pub resume: Option<Option<String>>,
+    /// `--permission-mode <mode>`: seed the initial mode
+    /// (ask|auto-edit|plan|auto|overdrive|bypass|default).
+    pub permission_mode: Option<String>,
 }
 
 impl Cli {
@@ -30,6 +40,9 @@ impl Cli {
             no_color: false,
             version: false,
             dangerously_skip_permissions: false,
+            continue_last: false,
+            resume: None,
+            permission_mode: None,
         };
 
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,8 +59,26 @@ impl Cli {
                 "--setup" => cli.setup = true,
                 "--no-color" => cli.no_color = true,
                 "--version" | "-V" => cli.version = true,
-                "--dangerously-skip-permissions" | "--yolo" => {
+                // Canonical overdrive flag + hidden legacy aliases.
+                "--overdrive" | "--dangerously-skip-permissions" | "--yolo" => {
                     cli.dangerously_skip_permissions = true;
+                }
+                "-c" | "--continue" => cli.continue_last = true,
+                "--resume" => {
+                    // Optional session id: only consume the next token if it
+                    // isn't itself a flag.
+                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                        i += 1;
+                        cli.resume = Some(Some(args[i].clone()));
+                    } else {
+                        cli.resume = Some(None);
+                    }
+                }
+                "--permission-mode" => {
+                    i += 1;
+                    if i < args.len() {
+                        cli.permission_mode = Some(args[i].to_ascii_lowercase());
+                    }
                 }
                 _ => {}
             }

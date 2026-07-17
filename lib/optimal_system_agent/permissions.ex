@@ -9,7 +9,14 @@ defmodule OptimalSystemAgent.Permissions do
   "allow always" rule exists, the prompt is skipped entirely.
   """
 
-  @permissions_file Path.expand("~/.osa/permissions.json")
+  @default_permissions_file Path.expand("~/.osa/permissions.json")
+
+  # Resolved at call time (not compile time) so tests can redirect the rule
+  # store to a tmp path via `config :optimal_system_agent, :permissions_file`
+  # and never touch the real ~/.osa file.
+  defp permissions_file do
+    Application.get_env(:optimal_system_agent, :permissions_file, @default_permissions_file)
+  end
 
   @doc """
   Check if a tool call is pre-approved by saved rules.
@@ -129,7 +136,7 @@ defmodule OptimalSystemAgent.Permissions do
   end
 
   defp load_rules do
-    case File.read(@permissions_file) do
+    case File.read(permissions_file()) do
       {:ok, content} ->
         case Jason.decode(content) do
           {:ok, rules} when is_map(rules) -> rules
@@ -144,11 +151,12 @@ defmodule OptimalSystemAgent.Permissions do
   end
 
   defp write_rules(rules) do
-    dir = Path.dirname(@permissions_file)
+    file = permissions_file()
+    dir = Path.dirname(file)
     File.mkdir_p!(dir)
 
     content = Jason.encode!(rules, pretty: true)
-    File.write!(@permissions_file, content)
+    File.write!(file, content)
   rescue
     _ -> :ok
   end

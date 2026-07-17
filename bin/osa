@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# bin/osa — One command to start OSA.
+# bin/osa — the one command to run OSA (source checkout).
 #
-# Starts the Elixir backend in the background, waits for it to be healthy,
-# launches the Rust TUI, and tears down the backend when you quit.
+# `osa` is seamless: no separate backend to babysit, no bin/ to remember.
+# The first `osa` warms a background ERTS backend (a daemon that survives TUI
+# exit), then drops you into the TUI. Every `osa` after that attaches instantly.
 #
-# Subcommands:
-#   osa                    Start backend + TUI (default)
+# Commands:
+#   osa                    Attach the TUI (warms the backend daemon if needed)
+#   osa overdrive          Launch in overdrive (full auto) — no approval prompts
+#   osa continue           Resume the newest session in this directory
+#   osa resume [id]        Resume a specific session (or pick one)
+#   osa stop               Stop the background backend daemon
 #   osa setup              Run the setup wizard
-#   osa update             Pull latest, recompile, rebuild TUI
-#   osa serve              Start backend only (headless HTTP API)
-#   osa doctor             Run health checks
+#   osa update             Update in place, show what's new, then launch
+#   osa doctor             Run backend health checks
+#   osa serve              Run the backend in the foreground (headless API)
 #   osa version            Print version
-#   osa --dev              Dev profile + port 19001
+#   osa help               Show this help
+#
+# Flags (passed through to the TUI):
+#   --overdrive                        Full-auto mode (same as `osa overdrive`)
+#   --dangerously-skip-permissions     Silent alias for --overdrive
+#   --continue                         Resume newest session here
+#   --resume [id]                      Resume a session
+#   --permission-mode <mode>           ask | auto-edit | plan | overdrive
+#   --dev                              Dev profile (port 19001)
 
 set -euo pipefail
 
@@ -27,7 +40,7 @@ else
   SUDO="sudo"
 fi
 
-# ── Colors ─────────────────────────────────────────────────────────
+# ── Colors (OSA blue identity) ───────────────────────────────────
 if [ -t 1 ]; then
   BOLD='\033[1m'
   DIM='\033[2m'
@@ -35,9 +48,10 @@ if [ -t 1 ]; then
   YELLOW='\033[0;33m'
   RED='\033[0;31m'
   CYAN='\033[0;36m'
+  BLUE='\033[0;34m'
   RESET='\033[0m'
 else
-  BOLD='' DIM='' GREEN='' YELLOW='' RED='' CYAN='' RESET=''
+  BOLD='' DIM='' GREEN='' YELLOW='' RED='' CYAN='' BLUE='' RESET=''
 fi
 
 # ── Detect package manager ───────────────────────────────────────
@@ -103,16 +117,257 @@ elif [ -f "${HOME}/.osa/project_root" ]; then
   ROOT="$(cat "${HOME}/.osa/project_root")"
 else
   echo -e "${RED}Error: Cannot find OSA project root.${RESET}"
-  echo "Run the installer: curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.sh | bash"
+  echo "Run the installer: curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh"
   exit 1
 fi
 
 TUI_DIR="$ROOT/priv/rust/tui"
 TUI_BIN="$TUI_DIR/target/release/osagent"
-LOG_DIR="${HOME}/.osa/logs"
-BACKEND_PID=""
+OSA_HOME="${OSA_HOME:-${HOME}/.osa}"
+LOG_DIR="$OSA_HOME/logs"
+RUN_DIR="$OSA_HOME/run"
+PID_FILE="$RUN_DIR/backend.pid"
+PORT_FILE="$RUN_DIR/backend.port"
+LOG_FILE="$LOG_DIR/backend.log"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+# ── Resolve backend port (honor --dev anywhere in args) ──────────
+PORT="${OSA_PORT:-9089}"
+for _a in "$@"; do
+  [ "$_a" = "--dev" ] && PORT="${OSA_PORT:-19001}"
+done
+HEALTH_URL="http://localhost:${PORT}/health"
+
+# ── Daemon helpers ────────────────────────────────────────────────
+backend_healthy() { _http_ok "$HEALTH_URL"; }
+
+daemon_pid() {
+  # Echo the live daemon PID, or nothing. Prefers the pidfile, falls back to
+  # whatever is listening on our port (covers daemons started out-of-band).
+  local pid=""
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"; return 0
+    fi
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti ":${PORT}" -sTCP:LISTEN 2>/dev/null | head -1
+  fi
+}
+
+clear_stale_pid() {
+  # Drop a pidfile whose process is gone and whose port is dead.
+  if [ -f "$PID_FILE" ]; then
+    local pid; pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    fi
+  fi
+}
+
+stop_daemon() {
+  local pid; pid="$(daemon_pid)"
+  if [ -z "$pid" ]; then
+    echo -e "${DIM}No OSA backend is running on :${PORT}.${RESET}"
+    rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    return 0
+  fi
+  echo -e "${CYAN}→${RESET} Stopping OSA backend (pid ${pid})…"
+  # Prefer a process-group kill (the daemon is a setsid group leader, so this
+  # also reaps the BEAM/erl child that mix spawns); fall back to the bare pid.
+  kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  local n=0
+  while [ $n -lt 20 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25; n=$((n + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+  echo -e "${GREEN}✓${RESET} Backend stopped."
+}
+
+# Spinner while waiting for /health. Returns 0 healthy, 1 timeout, 2 died.
+# Re-reads the pidfile each tick so daemon death is caught even before the
+# child has finished writing its PID.
+wait_health() {
+  local max="${1:-90}"
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) i=0 n=0 pid
+  local ticks=$((max * 2))
+  while [ $n -lt $ticks ]; do
+    if backend_healthy; then
+      [ -t 2 ] && printf '\r\033[K' >&2
+      return 0
+    fi
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      [ -t 2 ] && printf '\r\033[K' >&2
+      return 2
+    fi
+    if [ -t 2 ]; then
+      printf '\r  %b%s%b warming OSA backend…' "$CYAN" "${frames[$((i % 10))]}" "$RESET" >&2
+      i=$((i + 1))
+    fi
+    sleep 0.5
+    n=$((n + 1))
+  done
+  [ -t 2 ] && printf '\r\033[K' >&2
+  return 1
+}
+
+# Start the backend as a detached warm daemon (survives TUI exit + terminal
+# close). Records the real backend PID so `osa stop` can reach it.
+start_daemon() {
+  : > "$LOG_FILE"
+  echo -e "${CYAN}→${RESET} Starting OSA backend on :${PORT} ${DIM}(background daemon)${RESET}"
+  if command -v setsid >/dev/null 2>&1; then
+    # The child writes its own PID (which `exec` preserves through to mix), so
+    # the pidfile always points at the live backend regardless of setsid fork.
+    setsid bash -c 'echo $$ > "'"$PID_FILE"'"; cd "'"$ROOT"'"; exec mix osa.serve' \
+      >"$LOG_FILE" 2>&1 < /dev/null &
+  else
+    ( cd "$ROOT" && nohup mix osa.serve >"$LOG_FILE" 2>&1 < /dev/null & echo $! > "$PID_FILE" )
+    disown 2>/dev/null || true
+  fi
+  echo "$PORT" > "$PORT_FILE"
+}
+
+# ── Help ──────────────────────────────────────────────────────────
+print_help() {
+  echo ""
+  echo -e "${CYAN}${BOLD}    ___  ____    _   ${RESET}"
+  echo -e "${CYAN}${BOLD}   / _ \\/ ___|  / \\  ${RESET}   ${BOLD}OSA${RESET} — the Optimal System Agent"
+  echo -e "${CYAN}${BOLD}  | | | \\___ \\ / _ \\ ${RESET}   ${DIM}Your OS, supercharged.${RESET}"
+  echo -e "${CYAN}${BOLD}  | |_| |___) / ___ \\${RESET}"
+  echo -e "${CYAN}${BOLD}   \\___/|____/_/   \\_\\${RESET}"
+  echo ""
+  echo -e "  ${BOLD}Usage:${RESET} ${CYAN}osa${RESET} ${DIM}[command] [flags]${RESET}"
+  echo ""
+  echo -e "  ${BOLD}Commands${RESET}"
+  echo -e "    ${CYAN}osa${RESET}                  Attach the TUI ${DIM}(warms the backend daemon if needed)${RESET}"
+  echo -e "    ${CYAN}osa overdrive${RESET}        Launch in ${RED}overdrive (full auto)${RESET} ${DIM}— skips approval prompts${RESET}"
+  echo -e "    ${CYAN}osa continue${RESET}         Resume the newest session in this folder"
+  echo -e "    ${CYAN}osa resume${RESET} ${DIM}[id]${RESET}      Resume a specific session ${DIM}(or pick one)${RESET}"
+  echo -e "    ${CYAN}osa stop${RESET}             Stop the background backend daemon"
+  echo -e "    ${CYAN}osa setup${RESET}            Run the setup wizard ${DIM}(provider / API keys)${RESET}"
+  echo -e "    ${CYAN}osa update${RESET}           Update in place, show what's new, then launch"
+  echo -e "    ${CYAN}osa doctor${RESET}           Run backend health checks"
+  echo -e "    ${CYAN}osa serve${RESET}            Run the backend in the foreground ${DIM}(headless API)${RESET}"
+  echo -e "    ${CYAN}osa version${RESET}          Print version"
+  echo -e "    ${CYAN}osa help${RESET}             Show this help"
+  echo ""
+  echo -e "  ${BOLD}Flags${RESET} ${DIM}(forwarded to the TUI)${RESET}"
+  echo -e "    ${CYAN}--overdrive${RESET}                     Full-auto mode ${DIM}(same as ${RESET}${CYAN}osa overdrive${RESET}${DIM})${RESET}"
+  echo -e "    ${CYAN}--continue${RESET}                      Resume newest session here"
+  echo -e "    ${CYAN}--resume${RESET} ${DIM}[id]${RESET}                 Resume a session"
+  echo -e "    ${CYAN}--permission-mode${RESET} ${DIM}<mode>${RESET}      ask · auto-edit · plan · overdrive"
+  echo -e "    ${CYAN}--dev${RESET}                           Dev profile ${DIM}(port 19001)${RESET}"
+  echo ""
+  echo -e "  ${DIM}The backend keeps running in the background so the next ${RESET}${CYAN}osa${RESET}${DIM} is instant."
+  echo -e "  ${DIM}Stop it any time with ${RESET}${CYAN}osa stop${RESET}${DIM}; it also idles down when unused.${RESET}"
+  echo ""
+}
+
+# Red warning before entering overdrive (the TUI shows the one-time confirm).
+warn_overdrive() {
+  echo -e "${RED}${BOLD}  ⚠ OVERDRIVE (full auto)${RESET}${RED} — OSA will act without asking for approval.${RESET}" >&2
+  echo -e "${DIM}    Only use this in a directory you trust. Confirm inside the TUI to proceed.${RESET}" >&2
+}
+
+# ── Update (source checkout): git pull + rebuild, show what's new ─
+do_update_source() {
+  echo -e "${CYAN}→${RESET} Updating OSA ${DIM}(source checkout: $ROOT)${RESET}"
+  local old_ver new_ver
+  old_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)"
+
+  if [ -d "$ROOT/.git" ] && command -v git >/dev/null 2>&1; then
+    echo -e "${CYAN}→${RESET} Fetching latest…"
+    ( cd "$ROOT" && git fetch --quiet --tags origin 2>/dev/null ) || \
+      echo -e "${YELLOW}⚠${RESET} git fetch failed — updating from local tree."
+    if ! ( cd "$ROOT" && git pull --ff-only --quiet origin main 2>/dev/null ); then
+      echo -e "${YELLOW}⚠${RESET} Could not fast-forward (local changes?). Continuing with current tree."
+    fi
+    echo ""
+    echo -e "  ${BOLD}What's new${RESET}"
+    ( cd "$ROOT" && git log --oneline -8 2>/dev/null | sed 's/^/    · /' ) || true
+    echo ""
+  else
+    echo -e "${YELLOW}⚠${RESET} Not a git checkout — rebuilding from the current tree."
+  fi
+
+  echo -e "${CYAN}→${RESET} Fetching dependencies…"
+  ( cd "$ROOT" && mix deps.get 2>&1 | tail -3 ) || true
+  echo -e "${CYAN}→${RESET} Compiling…"
+  ( cd "$ROOT" && mix compile 2>&1 | tail -3 ) || true
+  if [ -f "$TUI_DIR/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+    echo -e "${CYAN}→${RESET} Rebuilding TUI…"
+    ( cd "$TUI_DIR" && cargo build --release 2>&1 | grep -E "Compiling|Finished|error" | tail -3 ) || true
+  fi
+
+  new_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo "$old_ver")"
+  echo ""
+  if [ "$old_ver" = "$new_ver" ]; then
+    echo -e "${GREEN}✓${RESET} Up to date ${DIM}(v${new_ver})${RESET}"
+  else
+    echo -e "${GREEN}✓${RESET} Updated ${DIM}v${old_ver}${RESET} → ${BOLD}v${new_ver}${RESET}"
+  fi
+
+  # Show the newest release-notes entry from the bundled CHANGELOG resource.
+  print_release_notes
+
+  # A fresh backend must pick up the new build.
+  stop_daemon >/dev/null 2>&1 || true
+
+  echo ""
+  if [ -t 0 ]; then
+    printf "  %bPress Enter to launch OSA…%b " "$DIM" "$RESET" >&2
+    read -r _ || true
+  fi
+}
+
+# Print the first version section of the bundled CHANGELOG (capped), so an
+# updated user sees what's new without leaving the launcher.
+print_release_notes() {
+  local changelog="$ROOT/priv/CHANGELOG.md"
+  [ -f "$changelog" ] || changelog="$ROOT/docs/operations/changelog.md"
+  [ -f "$changelog" ] || return 0
+
+  echo ""
+  echo -e "  ${BOLD}What's new${RESET}"
+  awk '
+    /^## \[/ { hdr++; if (hdr > 1) exit }
+    hdr >= 1 && shown < 24 { print "    " $0; shown++ }
+  ' "$changelog" 2>/dev/null || true
+}
+
+# ── Subcommand pre-translation (verbs → TUI flags, then launch) ───
+OVERDRIVE=0
+case "${1:-}" in
+  overdrive)
+    OVERDRIVE=1; shift; set -- "$@" "--overdrive"
+    ;;
+  continue)
+    shift; set -- "$@" "--continue"
+    ;;
+  resume)
+    shift
+    if [ -n "${1:-}" ] && [ "${1#-}" = "${1:-}" ]; then
+      _rid="$1"; shift; set -- "$@" "--resume" "$_rid"
+    else
+      set -- "$@" "--resume"
+    fi
+    ;;
+esac
+
+# Any explicit full-auto flag also trips the warning.
+for _a in "$@"; do
+  case "$_a" in
+    --overdrive|--dangerously-skip-permissions|--yolo) OVERDRIVE=1 ;;
+  esac
+done
 
 # ── Subcommand dispatch ───────────────────────────────────────────
 case "${1:-}" in
@@ -131,32 +386,19 @@ case "${1:-}" in
     exit $?
     ;;
 
-  update)
-    echo -e "${CYAN}→${RESET} Updating OSA Agent..."
-    echo -e "${DIM}  Project: $ROOT${RESET}"
-
-    echo -e "${CYAN}→${RESET} Pulling latest..."
-    (cd "$ROOT" && git pull --ff-only origin main 2>&1) || echo -e "${RED}  git pull failed — continuing anyway${RESET}"
-
-    echo -e "${CYAN}→${RESET} Fetching dependencies..."
-    (cd "$ROOT" && mix deps.get 2>&1 | tail -3)
-    echo -e "${CYAN}→${RESET} Compiling (--force)..."
-    (cd "$ROOT" && mix compile --force 2>&1 | tail -5)
-
-    if [ -f "$TUI_DIR/Cargo.toml" ]; then
-      echo -e "${CYAN}→${RESET} Rebuilding TUI..."
-      if ! (cd "$TUI_DIR" && cargo build --release 2>&1 | grep -E "Compiling|Finished|error" | tail -5); then
-        echo -e "${YELLOW}⚠${RESET} TUI rebuild had warnings — check above"
-      fi
-    fi
-
-    echo ""
-    echo -e "${GREEN}✓ Update complete.${RESET} Restart with: ${BOLD}osa${RESET}"
+  stop)
+    stop_daemon
     exit 0
     ;;
 
+  update)
+    shift || true
+    do_update_source
+    # fall through to the default launch
+    ;;
+
   serve)
-    echo -e "${CYAN}→${RESET} Starting backend (headless)..."
+    echo -e "${CYAN}→${RESET} Starting backend (foreground)..."
     (cd "$ROOT" && mix local.hex --force --if-missing >/dev/null 2>&1 || true)
     (cd "$ROOT" && mix local.rebar --force --if-missing >/dev/null 2>&1 || true)
     (cd "$ROOT" && mix deps.get --quiet 2>&1 | tail -3)
@@ -167,7 +409,7 @@ case "${1:-}" in
   doctor)
     (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.doctor()" 2>/dev/null) || \
       (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run()" 2>/dev/null) || \
-      echo "Doctor command not available. Try: mix osa.chat then type /doctor"
+      echo "Doctor command not available. Try: osa then type /doctor"
     exit 0
     ;;
 
@@ -178,43 +420,20 @@ case "${1:-}" in
     ;;
 
   help|--help|-h)
-    echo ""
-    echo -e "${BOLD}  OSA Agent${RESET} — Your OS, Supercharged"
-    echo ""
-    echo -e "  ${BOLD}Usage:${RESET}"
-    echo -e "    ${CYAN}osa${RESET}              Start backend + TUI (default)"
-    echo -e "    ${CYAN}osa setup${RESET}        Run the setup wizard"
-    echo -e "    ${CYAN}osa update${RESET}       Pull latest, recompile, rebuild TUI"
-    echo -e "    ${CYAN}osa serve${RESET}        Start backend only (headless HTTP API)"
-    echo -e "    ${CYAN}osa doctor${RESET}       Run health checks"
-    echo -e "    ${CYAN}osa version${RESET}      Print version"
-    echo -e "    ${CYAN}osa opencomputers${RESET} Manage MIOSA host connection"
-    echo ""
-    echo -e "  ${BOLD}Options:${RESET}"
-    echo -e "    ${CYAN}--dev${RESET}            Dev profile (port 19001)"
-    echo ""
+    print_help
     exit 0
     ;;
 esac
 
-# ── Default: start backend + TUI ─────────────────────────────────
-
-cleanup() {
-  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
-    kill "$BACKEND_PID" 2>/dev/null
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
+# ── Default: warm the daemon, then launch the TUI ────────────────
 
 detect_pkg
 
-# ── Auto-install missing dependencies ────────────────────────────
+# ── Auto-install missing dependencies (first run on a source checkout) ──
 
 # Install native build deps for Rust TUI on Linux
 install_linux_build_deps() {
   [ "$(uname -s)" = "Linux" ] || return 0
-  # Quick check: if TUI binary already exists, skip
   [ -f "$TUI_BIN" ] && return 0
 
   echo -e "${CYAN}→${RESET} Checking build dependencies..."
@@ -311,7 +530,6 @@ if ! command -v mix >/dev/null 2>&1; then
       brew install erlang elixir
       ;;
     Linux)
-      # Install Erlang from system packages
       case "$PKG" in
         apt) $SUDO apt-get update -qq; pkg_install erlang 2>/dev/null || true ;;
         dnf|yum) pkg_install epel-release 2>/dev/null || true; pkg_install erlang 2>/dev/null || true ;;
@@ -319,7 +537,6 @@ if ! command -v mix >/dev/null 2>&1; then
         apk) pkg_install erlang 2>/dev/null || true ;;
         zypper) pkg_install erlang 2>/dev/null || true ;;
       esac
-      # Try system Elixir, then prebuilt if version is wrong
       pkg_install elixir 2>/dev/null || true
       if ! command -v mix >/dev/null 2>&1 || ! check_elixir_version; then
         install_elixir_prebuilt || {
@@ -334,7 +551,6 @@ if ! command -v mix >/dev/null 2>&1; then
     exit 1
   fi
   echo -e "${GREEN}✓${RESET} Elixir ready"
-  # First-time setup
   echo -e "${CYAN}→${RESET} Fetching dependencies..."
   (cd "$ROOT" && mix local.hex --force --if-missing >/dev/null 2>&1 || true)
   (cd "$ROOT" && mix local.rebar --force --if-missing >/dev/null 2>&1 || true)
@@ -380,110 +596,49 @@ if [ "$(uname -s)" = "Linux" ] && [ -n "${DISPLAY:-}" ]; then
   export OSA_COMPUTER_USE="${OSA_COMPUTER_USE:-true}"
 fi
 
-# Determine port (strip --dev from args passed to TUI)
-PORT="${OSA_PORT:-9089}"
+# Build the TUI arg list (strip --dev, which is a launcher-only concern).
 TUI_ARGS=()
 for arg in "$@"; do
-  if [ "$arg" = "--dev" ]; then
-    PORT="${OSA_PORT:-19001}"
-  else
-    TUI_ARGS+=("$arg")
-  fi
+  [ "$arg" = "--dev" ] && continue
+  TUI_ARGS+=("$arg")
 done
 
-# Check if backend is already running
-URL="http://localhost:${PORT}/health"
-if _http_ok "$URL"; then
-  echo -e "${DIM}Backend already running on :${PORT}${RESET}"
+# ── Warm the backend daemon (attach instantly if already healthy) ──
+if backend_healthy; then
+  echo -e "${DIM}Backend already running on :${PORT} — attaching.${RESET}"
 else
-  # Kill anything on our port — try each available tool, only act when the
-  # port is actually in use. Each branch is gated on a real probe so we
-  # don't shell out spurious kill commands on a clean boot. Loops up to
-  # 5s to confirm the port is actually freed (kernel TIME_WAIT can hold
-  # an addr for a beat after kill).
-  _wait_port_free() {
-    local p="$1" tries=0
-    while [ $tries -lt 10 ]; do
-      if command -v lsof >/dev/null 2>&1; then
-        lsof -i ":${p}" -sTCP:LISTEN >/dev/null 2>&1 || return 0
-      else
-        return 0
-      fi
-      sleep 0.5
-      tries=$((tries + 1))
-    done
-    return 1
-  }
-
-  if command -v lsof >/dev/null 2>&1; then
-    if lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-      echo -e "${DIM}Port ${PORT} in use. Killing previous instance…${RESET}"
-      lsof -ti ":${PORT}" -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
-      _wait_port_free "$PORT" || echo -e "${YELLOW}⚠${RESET} Port ${PORT} still in use after 5s — backend may fail."
+  clear_stale_pid
+  start_daemon
+  rc=0
+  wait_health 90 || rc=$?
+  if [ "${rc:-0}" -eq 2 ]; then
+    echo -e "${RED}✗ Backend exited during startup.${RESET}"
+    if command -v lsof >/dev/null 2>&1 && lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo -e "  ${DIM}Port ${PORT} is already in use. Try:${RESET} ${CYAN}OSA_PORT=<n> osa${RESET} ${DIM}or${RESET} ${CYAN}osa stop${RESET}"
     fi
-  elif command -v fuser >/dev/null 2>&1; then
-    if fuser -s "${PORT}/tcp" 2>/dev/null; then
-      echo -e "${DIM}Port ${PORT} in use. Killing previous instance…${RESET}"
-      fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
-      sleep 1
-    fi
-  elif command -v ss >/dev/null 2>&1; then
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-      echo -e "${YELLOW}⚠${RESET} Port ${PORT} in use but cannot kill (no lsof/fuser). May fail to start."
-    fi
-  fi
-
-  export MIX_ENV="${MIX_ENV:-dev}"
-  LOG_FILE="$LOG_DIR/backend.log"
-  : > "$LOG_FILE"
-  echo -e "${CYAN}→${RESET} Starting backend on :${PORT}..."
-
-  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-    (cd "$ROOT" && elixir --no-halt \
-      -e "Application.put_env(:elixir, :ansi_enabled, false)" \
-      -S mix osa.serve) </dev/null >"$LOG_FILE" 2>&1 &
-  else
-    (cd "$ROOT" && mix osa.serve) >"$LOG_FILE" 2>&1 &
-  fi
-  BACKEND_PID=$!
-fi
-
-# Wait for health (90s for cold compile on slow VPS)
-attempts=0
-max_attempts=90
-
-while [ $attempts -lt $max_attempts ]; do
-  if _http_ok "$URL"; then
-    break
-  fi
-  if [ -n "$BACKEND_PID" ] && ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo -e "${RED}✗ Backend process exited unexpectedly.${RESET}"
     echo "  Last log lines:"
-    tail -15 "$LOG_DIR/backend.log" 2>/dev/null | sed 's/^/    /'
+    tail -15 "$LOG_FILE" 2>/dev/null | sed 's/^/    /'
+    rm -f "$PID_FILE" "$PORT_FILE" 2>/dev/null || true
+    exit 1
+  elif [ "${rc:-0}" -eq 1 ]; then
+    echo -e "${RED}✗ Backend did not become healthy on :${PORT} in time.${RESET}"
+    echo "  Last log lines:"
+    tail -15 "$LOG_FILE" 2>/dev/null | sed 's/^/    /'
     exit 1
   fi
-  attempts=$((attempts + 1))
-  sleep 1
-done
-
-if [ $attempts -eq $max_attempts ]; then
-  echo -e "${RED}✗ Backend did not become healthy after ${max_attempts}s.${RESET}"
-  echo "  Last log lines:"
-  tail -15 "$LOG_DIR/backend.log" 2>/dev/null | sed 's/^/    /'
-  exit 1
+  echo -e "${DIM}Backend ready. It stays warm in the background — ${RESET}${CYAN}osa stop${RESET}${DIM} to shut it down.${RESET}"
 fi
 
 # First-run: if no ~/.osa/.env exists, run the setup wizard
-if [ ! -f "$HOME/.osa/.env" ]; then
+if [ ! -f "$OSA_HOME/.env" ]; then
   echo -e "${CYAN}→${RESET} First-time setup..."
-  (cd "$ROOT" && mix osa.setup.wizard)
-  wizard_exit=$?
-
-  if [ $wizard_exit -ne 0 ]; then
+  (cd "$ROOT" && mix osa.setup.wizard) || \
     echo -e "${YELLOW}⚠${RESET} Setup skipped. Run 'osa setup' later to configure."
-  fi
 fi
 
-# Launch TUI
+# Show the overdrive warning right before handing off to the TUI.
+[ "$OVERDRIVE" -eq 1 ] && warn_overdrive
+
+# Launch the TUI. The backend daemon deliberately outlives this process.
 export OSA_URL="http://localhost:${PORT}"
 exec "$TUI_BIN" ${TUI_ARGS[@]+"${TUI_ARGS[@]}"}

@@ -6,6 +6,7 @@ pub mod config_editor;
 pub mod file_picker;
 pub mod model_picker;
 pub mod onboarding;
+pub mod overdrive_confirm;
 pub mod permissions;
 pub mod picker;
 pub mod plan_review;

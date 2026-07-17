@@ -81,6 +81,13 @@ config :optimal_system_agent,
   http_port: 9089,
   require_auth: false,
 
+  # Interactive permission prompts. When true (default), the DEFAULT :ask mode
+  # pauses for approval on mutating tools not covered by a saved rule — emitting
+  # `permission_required` and parking until the client POSTs to
+  # /api/v1/permissions/respond. Set false for unattended/headless use where no
+  # responder is attached (the test env sets this off).
+  interactive_permissions: true,
+
   # ---------------------------------------------------------------------------
   # Sandbox — Docker container isolation for skill execution
   # ---------------------------------------------------------------------------

@@ -611,23 +611,32 @@ impl ApiClient {
 
     // -- Permissions --
 
-    /// POST /api/v1/permissions/respond — send Allow/Deny decision back to backend.
+    /// POST /api/v1/permissions/respond — resume the parked tool call with the
+    /// user's Allow/Deny decision. `request_id` is the opaque id carried on the
+    /// `permission_required` SSE event; the backend uses it to release the exact
+    /// call the agent loop is blocked on.
     ///
-    /// TODO: backend endpoint `/api/v1/permissions/respond` does not yet exist.
-    /// This sends the correct payload; wire backend when the route is implemented.
+    /// A missing/unreachable endpoint is tolerated (the decision is best-effort)
+    /// so an older backend never wedges the UI, but transport-level failures are
+    /// still logged by the caller when it cares about the result.
     pub async fn permission_response(&self, request_id: &str, allowed: bool) -> Result<()> {
         let body = serde_json::json!({
             "request_id": request_id,
             "allowed": allowed,
         });
-        // Best-effort: ignore errors if the backend endpoint isn't yet present.
-        let _ = self.post("/api/v1/permissions/respond", &body).await;
-        Ok(())
+        match self.post("/api/v1/permissions/respond", &body).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!("permission respond failed (best-effort): {}", e);
+                Ok(())
+            }
+        }
     }
 
     /// POST /api/v1/permissions/respond — allow and persist an always-allow rule
     /// for this tool/command. Reuses the permission-response mechanism, adding
-    /// the `allow_always` flag the backend accepts to persist the rule.
+    /// the `allow_always` flag the backend consumes to call `Permissions.save_rule/2`
+    /// so future invocations short-circuit without prompting.
     pub async fn permission_response_always(
         &self,
         request_id: &str,
@@ -638,9 +647,13 @@ impl ApiClient {
             "allowed": allowed,
             "allow_always": true,
         });
-        // Best-effort: ignore errors if the backend endpoint isn't yet present.
-        let _ = self.post("/api/v1/permissions/respond", &body).await;
-        Ok(())
+        match self.post("/api/v1/permissions/respond", &body).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!("permission respond (always) failed (best-effort): {}", e);
+                Ok(())
+            }
+        }
     }
 
     // =========================================================================

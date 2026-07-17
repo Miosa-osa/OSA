@@ -8,15 +8,23 @@ use crate::style;
 
 use super::{Component, ComponentAction};
 
-/// Tool-permission mode, mirroring Claude Code's `PermissionMode`.
+/// Tool-permission mode. OSA's Shift+Tab cycle is
+/// `ask → auto-edit → plan → overdrive (full auto)`. `Auto` is retained as a
+/// separate tier driven by the `/auto` command (the safety guardian) but is not
+/// part of the Shift+Tab cycle. `BypassPermissions` is OSA's **overdrive** mode —
+/// full auto, no prompts — and is always glossed "(full auto)" and shown in red.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
+    /// "ask" — the default: pause and prompt on each gated tool call.
     Default,
     /// Auto mode — backend "auto" permission tier: the safety guardian
     /// auto-approves safe actions and pauses on dangerous ones for review.
     Auto,
+    /// "auto-edit" — auto-approve edit/write tools, still prompt for shell/risky.
     AcceptEdits,
+    /// "overdrive (full auto)" — bypass every prompt. Dangerous; red.
     BypassPermissions,
+    /// "plan" — read-only, no mutating execution.
     Plan,
 }
 
@@ -31,25 +39,39 @@ impl PermissionMode {
         }
     }
 
-    /// Full title shown on the permission line.
+    /// Full title shown on the permission line. Overdrive always carries its
+    /// "(full auto)" gloss so the mode is never ambiguous.
     pub fn title(&self) -> &'static str {
         match self {
-            PermissionMode::BypassPermissions => "Bypass permissions",
-            PermissionMode::AcceptEdits => "Accept edits",
+            PermissionMode::BypassPermissions => "Overdrive (full auto)",
+            PermissionMode::AcceptEdits => "Auto-edit",
             PermissionMode::Plan => "Plan mode",
             PermissionMode::Auto => "Auto",
-            PermissionMode::Default => "Default",
+            PermissionMode::Default => "Ask",
         }
     }
 
-    /// Short title used for the status-line mode chip (e.g. `default`).
+    /// Short title used for the status-line mode chip. Overdrive keeps its
+    /// "(full auto)" gloss here too.
     pub fn short_title(&self) -> &'static str {
         match self {
-            PermissionMode::BypassPermissions => "bypass",
-            PermissionMode::AcceptEdits => "accept edits",
+            PermissionMode::BypassPermissions => "overdrive (full auto)",
+            PermissionMode::AcceptEdits => "auto-edit",
             PermissionMode::Plan => "plan",
             PermissionMode::Auto => "auto",
-            PermissionMode::Default => "default",
+            PermissionMode::Default => "ask",
+        }
+    }
+
+    /// Canonical backend token for this mode, sent to the server on every
+    /// transition so its enforcement matches the displayed mode.
+    pub fn backend_token(&self) -> &'static str {
+        match self {
+            PermissionMode::BypassPermissions => "overdrive",
+            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::Auto => "auto",
+            PermissionMode::Default => "ask",
         }
     }
 
@@ -57,11 +79,17 @@ impl PermissionMode {
         matches!(self, PermissionMode::Default)
     }
 
+    /// Whether this is OSA's overdrive (full-auto / bypass) mode.
+    pub fn is_overdrive(&self) -> bool {
+        matches!(self, PermissionMode::BypassPermissions)
+    }
+
     /// Advance to the next mode in the Shift+Tab cycle:
-    /// Default → Auto → AcceptEdits → Plan → BypassPermissions → Default.
+    /// `ask → auto-edit → plan → overdrive → ask`. `Auto` (set via `/auto`) is
+    /// not part of the cycle; from Auto, Shift+Tab drops into `auto-edit`.
     pub fn next(&self) -> PermissionMode {
         match self {
-            PermissionMode::Default => PermissionMode::Auto,
+            PermissionMode::Default => PermissionMode::AcceptEdits,
             PermissionMode::Auto => PermissionMode::AcceptEdits,
             PermissionMode::AcceptEdits => PermissionMode::Plan,
             PermissionMode::Plan => PermissionMode::BypassPermissions,
@@ -69,14 +97,12 @@ impl PermissionMode {
         }
     }
 
-    /// Rose-pine-mapped color for this mode (matches CC's `getModeColor`).
+    /// Mode color: OSA blue for the ask/auto-edit/plan/auto tiers, red for
+    /// overdrive (full auto).
     fn color(&self, theme: &style::Theme) -> Color {
         match self {
-            PermissionMode::AcceptEdits => theme.colors.success, // foam
-            PermissionMode::BypassPermissions => theme.colors.error, // love
-            PermissionMode::Plan => theme.colors.secondary,      // iris
-            PermissionMode::Auto => theme.colors.primary,        // accent — distinct auto tier
-            PermissionMode::Default => theme.colors.muted,
+            PermissionMode::BypassPermissions => theme.colors.error, // overdrive — red
+            _ => theme.colors.primary,                               // OSA blue
         }
     }
 }

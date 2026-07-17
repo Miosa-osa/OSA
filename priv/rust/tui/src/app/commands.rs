@@ -194,30 +194,30 @@ impl App {
                 self.toasts
                     .push(msg.to_string(), crate::components::toast::ToastLevel::Info);
             }
-            "/yolo" | "/dangerous" => {
-                self.config.skip_permissions = !self.config.skip_permissions;
-                let state = if self.config.skip_permissions {
-                    "ON — auto-approving all tools"
+            "/overdrive" | "/yolo" | "/dangerous" => {
+                // Overdrive (full auto) toggle. Turning ON the first time on this
+                // install routes through the one-time red confirm (shared with the
+                // Shift+Tab cycle); afterward it enters directly. Turning OFF
+                // returns to ask mode and notifies the backend.
+                if self.status.permission_mode().is_overdrive() {
+                    self.status.set_permission_mode(
+                        crate::components::status_bar::PermissionMode::Default,
+                    );
+                    self.config.skip_permissions = false;
+                    self.sidebar.set_yolo_mode(false);
+                    self.spawn_backend_command("dangerous_mode", "off");
+                    self.toasts.push(
+                        "Overdrive OFF — permission prompts enabled".into(),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                    self.announce_a11y("permission mode: ask (permission prompts enabled)");
+                } else if self.overdrive_acked() {
+                    self.enter_overdrive();
                 } else {
-                    "OFF — permission prompts enabled"
-                };
-                self.sidebar.set_yolo_mode(self.config.skip_permissions);
-                self.status.set_permission_mode(if self.config.skip_permissions {
-                    crate::components::status_bar::PermissionMode::BypassPermissions
-                } else {
-                    crate::components::status_bar::PermissionMode::Default
-                });
-                self.toasts.push(
-                    format!("YOLO mode: {}", state),
-                    crate::components::toast::ToastLevel::Warning,
-                );
-                self.announce_a11y(if self.config.skip_permissions {
-                    "permission mode: bypass (auto-approving all tools)"
-                } else {
-                    "permission mode: default (permission prompts enabled)"
-                });
-                // Notify backend to toggle dangerous mode
-                self.execute_backend_command("dangerous_mode", if self.config.skip_permissions { "on" } else { "off" });
+                    self.overdrive_prev_mode = self.status.permission_mode();
+                    self.overdrive_confirm =
+                        Some(crate::dialogs::overdrive_confirm::OverdriveConfirm::new());
+                }
             }
             "/auto" => {
                 // Toggle the backend "auto" permission tier + safety guardian.
@@ -351,7 +351,13 @@ impl App {
                 self.execute_backend_command("memory", arg);
             }
             "/doctor" => {
+                // Backend diagnostics — rendered into chat via CommandResult.
                 self.execute_backend_command("doctor", "");
+            }
+            "/cost" => {
+                // Cost & token accounting (Budget.get_status) — rendered into chat
+                // via CommandResult, matching the CLI breakdown.
+                self.execute_backend_command("cost", "");
             }
             "/config" => {
                 // Open the unified full-screen settings editor.
