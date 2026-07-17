@@ -133,7 +133,7 @@ ProactiveMode.greeting("sess-abc")
 
 ## Alert Handling
 
-`handle_alert/1` is called by `ProactiveMonitor` when a monitoring condition triggers:
+`handle_alert/1` would be called by `ProactiveMonitor` when a monitoring condition triggers (note: `ProactiveMonitor` is itself part of the unbuilt Signal Theory intelligence subsystem — it does not exist in `lib/`):
 
 ```elixir
 ProactiveMode.handle_alert(%{

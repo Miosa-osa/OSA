@@ -14,7 +14,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **3-Tier Graduated Confidence Routing** (`agent/orchestrator/agent_runner.ex`): HIGH (>=4.0) uses named agent prompt, MEDIUM (2.0-4.0) blends dynamic framing with agent expertise, LOW (<2.0) generates pure dynamic prompt. All agents get ALL tools, skills, environment context, memory, and dependency context.
 - **Complexity Scoring** (`agent/orchestrator/complexity.ex`): Returns numeric 1-10 score instead of binary simple/complex. New return shapes: `{:simple, score}` and `{:complex, score, sub_tasks}`.
 - **Bus→Trigger Bridge** (`agent/scheduler.ex`): Triggers with an `"event"` field auto-register as bus event handlers. Internal events now fire triggers.
-- **ProactiveMonitor Auto-Dispatch**: Critical alerts automatically spawn agents via `Agent.Loop.process_message` (max 3 to avoid flood).
+- **ProactiveMonitor Auto-Dispatch** _(PLANNED — not implemented; no `ProactiveMonitor` module exists in `lib/`)_: intended so critical alerts automatically spawn agents via `Agent.Loop.process_message` (max 3 to avoid flood).
 - **Ollama Cloud Frontrunner Models**: kimi-k2.5:cloud (elite), qwen3-coder:480b-cloud (specialist), qwen3:8b-cloud (utility) in tier system.
 - **Ollama `available_models/0`**: Model selector now shows ALL installed Ollama models instead of just the auto-detected default.
 - **LLM Retry with Backoff** (`agent_runner.ex`): Exponential backoff for transient failures (429, 500, 502, 503, timeouts). Safe tool execution wrapping.

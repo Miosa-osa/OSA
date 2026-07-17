@@ -73,7 +73,15 @@ This eliminates 40-60% of messages that would waste LLM tokens on other agents.
 
 ## Communication Intelligence
 
-OSA has 5 communication intelligence modules:
+> **⚠ STATUS: PLANNED / NOT IMPLEMENTED.** The five "Communication Intelligence"
+> modules described below — `CommProfiler`, `CommCoach`, `ConversationTracker`,
+> `ContactDetector`, and `ProactiveMonitor` — **do not exist** in `lib/`. There is
+> no `intelligence/` directory and no `Intelligence.Supervisor` process. What
+> actually ships for Signal Theory lives under `signal/`: `Signal.Classifier`
+> (5-tuple classification), `Signal.MessageClassifier`, and `Signal.Persistence`.
+> Everything in this section describes an *intended* design, not shipping behavior.
+
+OSA is designed around 5 communication intelligence modules (none built yet):
 
 ### 1. CommProfiler
 Learns per-contact communication patterns:
@@ -138,7 +146,7 @@ As a user, Signal Theory means:
 - **Less noise** in responses — no filler phrases, no unnecessary hedging
 - **Right format** — tables when tables are needed, code when code is needed
 - **Right depth** — brief for simple questions, detailed for complex ones
-- **Proactive intelligence** — OSA notices when you're frustrated or drifting
+- **Proactive intelligence** _(planned)_ — OSA is intended to notice when you're frustrated or drifting (depends on the unbuilt `ProactiveMonitor`)
 - **Efficient token use** — noise is filtered before it reaches the LLM
 
 ## Modules
@@ -147,8 +155,12 @@ As a user, Signal Theory means:
 |--------|------|---------|
 | Signal Classifier | `signal/classifier.ex` | 5-tuple classification with LLM + caching |
 | Noise Filter | `signal/noise_filter.ex` | Two-tier noise elimination |
-| CommProfiler | `intelligence/comm_profiler.ex` | Per-contact pattern learning |
-| CommCoach | `intelligence/comm_coach.ex` | Outbound quality scoring |
-| ConversationTracker | `intelligence/conversation_tracker.ex` | 4-level depth tracking |
-| ContactDetector | `intelligence/contact_detector.ex` | Sub-ms contact recognition |
-| ProactiveMonitor | `intelligence/proactive_monitor.ex` | Engagement monitoring |
+| CommProfiler | _(planned — `intelligence/comm_profiler.ex` not in `lib/`)_ | Per-contact pattern learning |
+| CommCoach | _(planned — `intelligence/comm_coach.ex` not in `lib/`)_ | Outbound quality scoring |
+| ConversationTracker | _(planned — `intelligence/conversation_tracker.ex` not in `lib/`)_ | 4-level depth tracking |
+| ContactDetector | _(planned — `intelligence/contact_detector.ex` not in `lib/`)_ | Sub-ms contact recognition |
+| ProactiveMonitor | _(planned — `intelligence/proactive_monitor.ex` not in `lib/`)_ | Engagement monitoring |
+
+> The `intelligence/` rows above are **planned / not implemented** — no
+> `intelligence/` directory exists in `lib/`. `Signal Classifier` and `Noise Filter`
+> reflect the shipping `signal/` modules.

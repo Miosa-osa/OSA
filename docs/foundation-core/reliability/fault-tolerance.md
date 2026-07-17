@@ -107,12 +107,13 @@ AgentServices supervisor children (all :one_for_one):
 ### `Supervisors.Extensions` — `:one_for_one`
 
 All extensions are independent. Crash isolation prevents a broken sidecar from
-affecting the intelligence subsystem or swarm coordinator:
+affecting the swarm coordinator or other extension children:
 
 ```
 Extensions supervisor children (conditional):
-  Intelligence.Supervisor    — always started; CommProfiler, CommCoach,
-                               ConversationTracker, ProactiveMonitor
+  Intelligence.Supervisor    — PLANNED / NOT IMPLEMENTED (no intelligence/ dir in
+                               lib/; not started). Would supervise CommProfiler,
+                               CommCoach, ConversationTracker, ProactiveMonitor
   Agent.Orchestrator.Mailbox — ETS-backed swarm mailbox (always started)
   Agent.Orchestrator.SwarmMode — swarm coordinator GenServer (always started)
   SwarmMode.AgentPool        — DynamicSupervisor, max_children: 50

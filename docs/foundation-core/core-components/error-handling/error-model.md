@@ -52,7 +52,7 @@ Some optional modules are designed to degrade without affecting core operation:
 | Python sidecar (embeddings) | Memory search falls back to keyword retrieval |
 | Go tokenizer | Token counting falls back to word-count heuristic |
 | Platform DB (`Platform.Repo`) | Disabled entirely when `DATABASE_URL` is not set |
-| Intelligence subsystem | `ConversationTracker`, `ContactDetector` remain dormant |
+| Intelligence subsystem _(planned — not implemented)_ | `ConversationTracker`, `ContactDetector` are not in `lib/`; when built they are intended to remain dormant until wired |
 | MCP servers | Failed servers are skipped; their tools are absent |
 | `Events.Stream` | Stream append failures are caught and logged; Bus dispatch continues |
 

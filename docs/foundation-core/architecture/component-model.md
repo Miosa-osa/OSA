@@ -421,14 +421,22 @@ Scheduled/heartbeat work is handled separately by `Agent.Scheduler` and
 | Responsibility | Organization-level budget management. Aggregates spend across sessions and enforces team/org-level limits. Opt-in via `OSA_TREASURY_ENABLED=true`. |
 | Condition | `OSA_TREASURY_ENABLED=true` |
 
-### Intelligence.Supervisor
+### Intelligence.Supervisor — PLANNED / NOT IMPLEMENTED
+
+> **⚠ This subsystem does not exist in `lib/`.** There is no `intelligence/`
+> directory, no `OptimalSystemAgent.Intelligence.Supervisor`, and the
+> `Supervisors.Extensions` supervisor does **not** start any such child. The
+> `ConversationTracker`, `ContactDetector`, and `ProactiveMonitor` modules are
+> unbuilt. The table below describes an intended design only. Shipping Signal
+> Theory code lives under `signal/` (`Signal.Classifier`, `Signal.MessageClassifier`,
+> `Signal.Persistence`).
 
 | | |
 |---|---|
-| Type | Supervisor |
-| Module | `OptimalSystemAgent.Intelligence.Supervisor` |
-| Responsibility | Umbrella for Signal Theory intelligence processes. Children start dormant and activate when wired to session data. `ConversationTracker` tracks conversation depth per session; `Context.runtime_block` uses it. |
-| Children | `ConversationTracker`, `ContactDetector`, `ProactiveMonitor` |
+| Type | Supervisor (planned) |
+| Module | `OptimalSystemAgent.Intelligence.Supervisor` _(not present in `lib/`)_ |
+| Responsibility | _Intended:_ umbrella for Signal Theory intelligence processes. Children would start dormant and activate when wired to session data; `ConversationTracker` would track conversation depth per session. |
+| Children | `ConversationTracker`, `ContactDetector`, `ProactiveMonitor` _(none implemented)_ |
 
 ### Orchestrator.Mailbox
 

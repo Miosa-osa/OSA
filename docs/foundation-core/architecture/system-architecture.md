@@ -145,10 +145,10 @@ and are independent from each other.
 ```
 Supervisors.Extensions  (one_for_one)
 ├── [MiosaBudget.Treasury]                 (OSA_TREASURY_ENABLED=true)
-├── Intelligence.Supervisor                (always, dormant until wired)
-│   ├── Intelligence.ConversationTracker
-│   ├── Intelligence.ContactDetector
-│   └── Intelligence.ProactiveMonitor
+├── Intelligence.Supervisor                (PLANNED — not in lib/; not started)
+│   ├── Intelligence.ConversationTracker    (planned — not implemented)
+│   ├── Intelligence.ContactDetector        (planned — not implemented)
+│   └── Intelligence.ProactiveMonitor       (planned — not implemented)
 ├── Agent.Orchestrator.Mailbox             (always — ETS table for swarm)
 ├── Agent.Orchestrator.SwarmMode           (always — GenServer)
 ├── DynamicSupervisor  (SwarmMode.AgentPool, max_children: 50)

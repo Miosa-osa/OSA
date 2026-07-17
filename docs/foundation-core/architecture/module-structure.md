@@ -386,7 +386,7 @@ registers these at boot, alongside user-defined markdown commands from `~/.osa/c
 | `security/` | 2 | `ShellPolicy` (dangerous command blocklist), `Guardrails` (prompt injection) |
 | `signal/` | 1 | `Signal` — delegation shim to `MiosaSignal` package |
 | `telemetry/` | 1 | `Telemetry.Metrics` — tool timing aggregation |
-| `intelligence/` | 6 | Signal Theory intelligence: ConversationTracker, ContactDetector, ProactiveMonitor |
+| `intelligence/` | 0 | **PLANNED — not implemented.** No `intelligence/` directory exists in `lib/`. Signal Theory intelligence modules (ConversationTracker, ContactDetector, ProactiveMonitor, CommProfiler, CommCoach) are unbuilt; shipping Signal Theory code lives under `signal/`. |
 | `fleet/` | 3 | Fleet supervisor, registry, sentinel model |
 | `sidecar/` | 3 | Sidecar.Manager, circuit breaker, process monitor |
 | `go/` | 3 | Go.Tokenizer, Go.Git, Go.Sysmon (Port-based wrappers) |

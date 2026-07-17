@@ -70,9 +70,9 @@ graph TB
         AgentCortex["Agent.Cortex"]
         VaultSup["Vault.Supervisor"]
         VaultFacts["Vault.FactStore"]
-        SignalCoach["Intelligence.CommCoach"]
-        SignalProfiler["Intelligence.CommProfiler"]
-        ConvTracker["Intelligence.ConversationTracker"]
+        SignalCoach["Intelligence.CommCoach (planned)"]
+        SignalProfiler["Intelligence.CommProfiler (planned)"]
+        ConvTracker["Intelligence.ConversationTracker (planned)"]
         Machines["Machines"]
         Commands["Commands"]
     end
@@ -166,6 +166,10 @@ graph TB
     ChanCLI --> EventsBus
     ChanHTTP --> EventsBus
 ```
+
+> **Note:** The `Intelligence.*` nodes (`CommCoach`, `CommProfiler`,
+> `ConversationTracker`) are **planned / not implemented** — no `intelligence/`
+> directory exists in `lib/`. They are shown for design completeness only.
 
 ---
 

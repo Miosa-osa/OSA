@@ -71,7 +71,7 @@ graph TD
     VaultSup --> Observer["Vault.Observer"]
 
     %% Extensions children (one_for_one, conditional)
-    Ext --> IntelSup["Intelligence.Supervisor<br/><b>strategy: one_for_one</b><br/><i>always started</i>"]
+    Ext --> IntelSup["Intelligence.Supervisor<br/><b>strategy: one_for_one</b><br/><i>PLANNED — not in lib/</i>"]
     Ext --> OrcMailbox["Agent.Orchestrator.Mailbox<br/><i>ETS-backed, always started</i>"]
     Ext --> SwarmMode["Agent.Orchestrator.SwarmMode<br/><i>always started</i>"]
     Ext --> AgentPool["DynamicSupervisor<br/>name: SwarmMode.AgentPool<br/>max_children: 50"]
@@ -90,10 +90,10 @@ graph TD
     Ext --> Updater["System.Updater<br/><i>conditional: update_enabled</i>"]
     Ext --> AMQP["Platform.AMQP<br/><i>conditional: AMQP_URL present</i>"]
 
-    IntelSup --> CommProfiler["Intelligence.CommProfiler"]
-    IntelSup --> CommCoach["Intelligence.CommCoach"]
-    IntelSup --> ConvTracker["Intelligence.ConversationTracker"]
-    IntelSup --> ProactiveMonitor["Intelligence.ProactiveMonitor"]
+    IntelSup --> CommProfiler["Intelligence.CommProfiler (planned)"]
+    IntelSup --> CommCoach["Intelligence.CommCoach (planned)"]
+    IntelSup --> ConvTracker["Intelligence.ConversationTracker (planned)"]
+    IntelSup --> ProactiveMonitor["Intelligence.ProactiveMonitor (planned)"]
 
     FleetSup --> FleetAgentReg["Registry<br/>name: Fleet.AgentRegistry<br/>keys: :unique"]
     FleetSup --> SentinelPool["DynamicSupervisor<br/>name: Fleet.SentinelPool"]
@@ -105,6 +105,12 @@ graph TD
     SandboxSup --> SandboxReg["Sandbox.Registry"]
     SandboxSup --> SandboxSprites["Sandbox.Sprites<br/><i>conditional: sprites mode</i>"]
 ```
+
+> **Note:** `Intelligence.Supervisor` and its children (`CommProfiler`,
+> `CommCoach`, `ConversationTracker`, `ProactiveMonitor`) are **planned / not
+> implemented**. No `intelligence/` directory exists in `lib/` and
+> `Supervisors.Extensions` does not start this supervisor. Shown for design
+> completeness only.
 
 ---
 

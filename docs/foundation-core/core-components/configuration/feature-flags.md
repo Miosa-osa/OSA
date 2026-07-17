@@ -26,7 +26,7 @@ Always-on extensions (started unconditionally, dormant until wired):
 
 | Feature | Notes |
 |---------|-------|
-| Intelligence | `ConversationTracker`, `ContactDetector`, `ProactiveMonitor` |
+| Intelligence | **PLANNED / NOT IMPLEMENTED** — `ConversationTracker`, `ContactDetector`, `ProactiveMonitor` do not exist in `lib/`; no `Intelligence.Supervisor` is started |
 | Swarm | `Mailbox`, `SwarmMode`, `AgentPool` (max 50 children) |
 
 ## Sandbox
