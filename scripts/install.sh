@@ -102,7 +102,7 @@ case "$PLATFORM" in
   *)
     warn "No prebuilt binaries are published for ${PLATFORM} yet."
     warn "Build from source instead:"
-    warn "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | bash"
+    warn "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install-source.sh | bash"
     exit 1
     ;;
 esac

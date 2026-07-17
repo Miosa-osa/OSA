@@ -6,6 +6,7 @@
 erl_crash.dump
 *.ez
 optimal_system_agent-*.tar
+xref_graph.dot
 .env
 *.db
 *.db-journal

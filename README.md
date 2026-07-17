@@ -75,7 +75,7 @@ osa           # launch
 **From source (any platform, installs toolchains as needed):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/install.sh | bash          # macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install-source.sh | bash  # macOS / Linux
 irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install-source.ps1 | iex  # Windows
 ```
 
