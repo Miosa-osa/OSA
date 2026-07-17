@@ -104,6 +104,20 @@ defmodule OptimalSystemAgent.Agent.Hooks.Dispatch do
     ArgumentError -> :ok
   end
 
+  @doc """
+  Remove every registered hook for `event` with `name` (all priorities).
+  Used to unregister dynamically-added hooks; primarily so tests that register
+  a hook (especially a blocking one) don't leak it into the global table and
+  contaminate later `run/2` calls.
+  """
+  @spec remove(atom(), String.t()) :: :ok
+  def remove(event, name) do
+    :ets.match_delete(@hooks_table, {event, name, :_, :_, :_})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   # ── Execution ───────────────────────────────────────────────────────
 
   @doc """

@@ -5,9 +5,29 @@ defmodule OptimalSystemAgent.Agent.HooksTest do
 
   setup do
     case Process.whereis(Hooks) do
-      nil -> {:ok, %{available: false}}
-      _pid -> {:ok, %{available: true}}
+      nil ->
+        {:ok, %{available: false}}
+
+      _pid ->
+        # Snapshot the global hook registry; on exit remove anything this test
+        # added (e.g. a {:block,…} hook) so it can't leak into other tests'
+        # Hooks.run/2 and block their passthroughs under random ordering.
+        baseline = hook_key_set()
+
+        on_exit(fn ->
+          for {event, name} <- MapSet.difference(hook_key_set(), baseline) do
+            Hooks.unregister(event, name)
+          end
+        end)
+
+        {:ok, %{available: true}}
     end
+  end
+
+  defp hook_key_set do
+    Hooks.list_hooks()
+    |> Enum.flat_map(fn {event, hooks} -> Enum.map(hooks, &{event, &1.name}) end)
+    |> MapSet.new()
   end
 
   # ---------------------------------------------------------------------------

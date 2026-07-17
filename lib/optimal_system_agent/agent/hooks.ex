@@ -161,10 +161,21 @@ defmodule OptimalSystemAgent.Agent.Hooks do
     {:ok, %{}}
   end
 
+  @doc "Remove a dynamically-registered hook by event + name (synchronous)."
+  def unregister(event, name) do
+    GenServer.call(__MODULE__, {:unregister, event, name})
+  end
+
   @impl true
   def handle_cast({:register, event, name, handler, priority, opts}, state) do
     Dispatch.insert(event, name, handler, priority, opts)
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:unregister, event, name}, _from, state) do
+    Dispatch.remove(event, name)
+    {:reply, :ok, state}
   end
 
   # ── Registration helpers ───────────────────────────────────────────

@@ -15,9 +15,28 @@ defmodule OptimalSystemAgent.Agent.HooksETSTest do
 
   setup do
     case Process.whereis(Hooks) do
-      nil -> {:ok, %{available: false}}
-      _pid -> {:ok, %{available: true}}
+      nil ->
+        {:ok, %{available: false}}
+
+      _pid ->
+        # Remove any hook this test registers into the global ETS table on exit
+        # so a leaked {:block,…} hook never contaminates other tests.
+        baseline = hook_key_set()
+
+        on_exit(fn ->
+          for {event, name} <- MapSet.difference(hook_key_set(), baseline) do
+            Hooks.unregister(event, name)
+          end
+        end)
+
+        {:ok, %{available: true}}
     end
+  end
+
+  defp hook_key_set do
+    Hooks.list_hooks()
+    |> Enum.flat_map(fn {event, hooks} -> Enum.map(hooks, &{event, &1.name}) end)
+    |> MapSet.new()
   end
 
   # ── ETS Table Existence ─────────────────────────────────────────
