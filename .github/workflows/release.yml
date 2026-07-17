@@ -253,7 +253,13 @@ jobs:
   # present, skipped if the build failed (fail_on_unmatched_files defaults
   # to false).
   publish:
-    needs: build-linux-x64
+    # Wait for ALL platform builds so every artifact is present before attaching
+    # (previously only needed linux-x64, which raced: publish ran the instant
+    # linux finished and missed the windows artifact that landed seconds later).
+    # if: always() keeps the release going even if one platform fails — it
+    # attaches whatever artifacts did get produced.
+    needs: [build-linux-x64, build-macos-arm64, build-windows-x64]
+    if: always()
     runs-on: ubuntu-22.04
     permissions:
       contents: write  # required to create the GitHub Release
