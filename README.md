@@ -2,13 +2,20 @@
 
 <img src="assets/OSAIconLogo.png" alt="OSA" width="128" />
 
-# OSA — the Optimal System Agent
+# OSA — Optimal System Agent
 
-**A fast, reliable, long-running AI coding agent that lives in your terminal.**
-One command to install and run. No toolchains. Your machine, your data, any model.
+**Tell your computer what you need, in plain words — and OSA does it.**
+
+OSA is an AI agent that lives on your machine. It reads what you're actually
+asking for and does the real work — writing and running code, handling business
+busywork, researching, organizing your day. One command to install. Runs
+locally. Works with any model.
+
+For developers, it's a coding agent that actually ships. For business owners, it
+runs the work you don't have time for. For everyone, it turns "I need to…" into done.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.003-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-60-blue.svg)](#built-in-tools)
@@ -43,7 +50,7 @@ setup wizard — pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.0` (`$env:OSA_VERSION = "v1.0.0"` on
+specific release with `OSA_VERSION=v1.0.002` (`$env:OSA_VERSION = "v1.0.002"` on
 Windows).
 
 ```
