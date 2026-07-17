@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="desktop/static/OSAIconLogo.png" alt="OSA" width="128" />
+<img src="assets/OSAIconLogo.png" alt="OSA" width="128" />
 
 # OSA — the Optimal System Agent
 
@@ -589,7 +589,6 @@ interact with any GUI application.
 |---|---|
 | **Rust TUI** | Primary terminal UI — onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions |
 | **Elixir CLI** | REPL — streaming, task display, diff view, Ctrl+R search, multi-line input |
-| **Desktop GUI** | Tauri 2 + SvelteKit 5 — chat, agents, tasks, memory, signals, settings, usage tracking |
 | **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
 | **Telegram** | Long-polling, typing indicators, markdown conversion |
 | **Discord** | Webhook mode, token validation |
@@ -726,7 +725,7 @@ OSA/
 │   ├── agents/                      # built-in agent role definitions
 │   └── skills/                      # built-in skills (hot-loadable)
 │
-├── desktop/                         # optional Command Center — Tauri 2 + SvelteKit GUI
+├── desktop/                         # legacy/experimental GUI (WIP — not part of the shipped agent)
 ├── test/                            # ExUnit test suite
 ├── docs/                            # additional documentation
 └── .github/workflows/               # release automation

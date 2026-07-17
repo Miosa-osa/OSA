@@ -1,5 +1,9 @@
 # OSA Desktop
 
+> **Legacy / experimental (WIP).** This desktop GUI is not part of the shipped
+> OSA agent and is not actively maintained. The supported way to run OSA is the
+> terminal app — see the main [README](../README.md). Kept here for future work.
+
 > Your AI agent, running locally on your machine.
 
 OSA Desktop is the native GUI for [OSA](https://github.com/Miosa-osa/OptimalSystemAgent) — an Elixir/OTP AI agent platform. It runs on your machine, connects to a local OSA backend, and gives you full control over multi-agent orchestration, 18 LLM providers, memory, scheduling, and knowledge graphs. No cloud required.
