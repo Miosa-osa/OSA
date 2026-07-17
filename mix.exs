@@ -51,7 +51,12 @@ defmodule OptimalSystemAgent.MixProject do
         # breaks compile on OTP 26. We pin OTP 26 because OTP 27 has Mix release
         # bugs (TypedStruct.MixProject + Decimal.Error already compiled). When
         # OTP 27 Mix issues are resolved upstream, this pin can be relaxed.
-        {:erlexec, "== 2.0.6"}
+        {:erlexec, "== 2.0.6"},
+        # bcrypt_elixir compiles a C NIF via a Unix Makefile and does NOT build on
+        # the Windows CI runner (no compatible C toolchain). Password-hash auth is
+        # optional (Windows uses token auth); exclude it on win32 so the release
+        # assembles. Nothing in lib/ calls Bcrypt directly.
+        {:bcrypt_elixir, "~> 3.0", only: :prod, optional: true}
       ]
     end
   end
@@ -97,8 +102,8 @@ defmodule OptimalSystemAgent.MixProject do
       # Platform database — PostgreSQL for multi-tenant data
       {:postgrex, "~> 0.19"},
 
-      # Password hashing (only needed for platform multi-tenant auth in prod)
-      {:bcrypt_elixir, "~> 3.0", only: :prod, optional: true},
+      # Password hashing (prod-only, optional) — moved to unix_only_deps/0 because
+      # its C NIF does not build on the Windows CI runner. Present on Linux/macOS.
 
       # AMQP — RabbitMQ publisher for Go worker events (optional)
       {:amqp, "~> 4.1", optional: true},

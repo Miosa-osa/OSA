@@ -85,6 +85,52 @@ irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install-source.
 
 ---
 
+## How it works
+
+OSA is two programs that cooperate on your machine:
+
+- **The engine** — an Elixir/OTP application. This is the brain: the agent
+  loop, the tools, the LLM providers, memory, permissions, and persistence.
+  Because it runs on the BEAM, thousands of lightweight processes — turns,
+  sub-agents, hooks, streams — run concurrently and supervise each other, so one
+  failure never takes the whole agent down.
+- **The interface** — a Rust TUI built on ratatui. This is what you see and type
+  into: the composer, the streaming message view, dialogs, the agent tree.
+
+The two halves talk over a small **HTTP + SSE API bound to `127.0.0.1`** (port
+9089 by default). The TUI never reaches the internet directly — it only speaks
+to your local engine, and the engine is the only thing that talks to model
+providers. Nothing leaves your machine unless a tool you approved makes it
+happen.
+
+The single `osa` command ties them together. The first launch starts the engine
+as a **warm background daemon** and attaches the TUI to it. That daemon
+**outlives the TUI**, so every `osa` after the first attaches instantly — no
+cold start. `osa stop` shuts it down.
+
+**The life of a turn:**
+
+```
+you type a message
+   │  HTTP POST → 127.0.0.1:9089
+   ▼
+engine classifies the signal, builds context, picks a model tier
+   │
+   ▼
+ReAct loop:  think → call a tool → observe → repeat
+   │         every tool clears a permission check first
+   │         (ask · auto-edit · plan · overdrive)
+   ▼
+tokens, tool results, and diffs stream back over SSE — live — into the TUI
+```
+
+Everything the agent produces — reasoning, tool calls, file diffs, sub-agent
+activity — is streamed as it happens, so the TUI always mirrors the engine's
+real state. For the full pipeline (compaction, fallback chains, hooks,
+guardrails) see [Architecture](#architecture) below.
+
+---
+
 ## What OSA does
 
 `osa` is the one command you run. The first launch warms the backend as a
@@ -624,37 +670,66 @@ auto-promoted to skills by the SICA engine.
 
 ---
 
-## Project Structure
+## Project layout
+
+A map of the repository for anyone wanting to read or contribute. The two halves
+from [How it works](#how-it-works) are `lib/` (the Elixir engine) and
+`priv/rust/tui/` (the Rust interface).
 
 ```
-lib/optimal_system_agent/       # 200+ Elixir modules
-  agent/                        # ReAct loop, context, memory, effort, worktree, compactor, hooks
-  agent/loop/                   # Core loop: react_loop, tool_executor, streaming_tool_executor,
-                                # context_collapse, tool_result_storage, llm_client, guardrails
-  channels/cli/                 # CLI: commands, permissions, spinner, renderer, line_editor,
-                                # message_queue, diff_renderer, agent_tree, task_display
-  channels/http/                # HTTP API: 20+ route modules, SSE streaming, auth, rate limiter
-  events/                       # Bus (Goldrush compiled BEAM bytecode), PubSub, DLQ
-  providers/                    # 7 providers + fallback chain + credential pool
-  tools/builtins/               # 60 built-in tools, schema validation, deferred loading
-  memory/                       # Store (SQLite + ETS), auto_extract, SICA learning, FTS5 search
-  sandbox/                      # Router + host/docker/e2b/vercel/miosa backends
-  mcp/                          # MCP client + server, protocol, transports
-  telemetry/                    # Per-tool and per-provider execution metrics
-  swarm/                        # Parallel, pipeline, debate, review_loop coordinators
-  budget/                       # Token cost tracking, treasury
-  signal/                       # Signal classifier, noise filter
-  store/                        # Ecto repo, schemas, migrations (SQLite + PostgreSQL)
-  supervisors/                  # OTP supervision trees
-
-priv/
-  rust/tui/                     # Rust TUI (ratatui + crossterm)
-  prompts/                      # System prompt templates
-  agents/                       # Agent role definitions
-  skills/                       # Built-in skills (hot-loadable)
-  swarms/                       # Swarm pattern presets
-
-desktop/                        # Command Center — Tauri 2 + SvelteKit 5
+OSA/
+├── bin/                              # osa launcher, local installer, version-bump
+├── config/                          # Elixir build + runtime config (dev / prod / test / runtime.exs)
+├── scripts/                         # install / update / TUI-launch scripts (sh + ps1)
+│
+├── lib/optimal_system_agent/        # THE ENGINE — 200+ Elixir modules
+│   ├── agent/                       #   the brain: turn orchestration + agent state
+│   │   ├── loop/                    #     the ReAct turn loop, tool executor, steer/cancel,
+│   │   │                            #     guardrails, genre routing, doom-loop detection
+│   │   ├── safety/                  #     dangerous-command guard, prompt-injection detection, verdicts
+│   │   ├── hooks/                   #     lifecycle hook dispatch (25 events)
+│   │   ├── orchestrator/            #     multi-agent orchestration
+│   │   ├── scheduler/               #     cron jobs + proactive triggers
+│   │   ├── tasks/                   #     shared task lists across agents
+│   │   ├── memory/                  #     per-agent working memory
+│   │   └── compactor.ex, effort.ex, worktree.ex, plan_mode.ex …
+│   ├── channels/                    #   how you reach OSA
+│   │   ├── http/                    #     the local HTTP/SSE API the TUI talks to (auth, rate limiter)
+│   │   ├── cli/                     #     in-terminal rendering: commands, diffs, agent tree, line editor
+│   │   └── telegram.ex, slack.ex, discord.ex, whatsapp.ex, matrix.ex …  # optional messaging channels
+│   ├── providers/                   #   LLM providers (Ollama, Anthropic, OpenAI…) + fallback chain,
+│   │                                #   credential pool, health checks, resilience
+│   ├── tools/builtins/              #   the 60 built-in tools: file, shell, search, web, delegate…
+│   ├── signal/                      #   signal classifier — routes each message by intent + complexity
+│   ├── memory/                      #   long-term memory, learning, skill generation (SICA / VIGIL)
+│   ├── store/                       #   Ecto schemas + repo (SQLite): sessions, messages, patterns, skills
+│   ├── mcp/                         #   Model Context Protocol client + server (protocol, transports)
+│   ├── sandbox/                     #   pluggable code-execution backends (host / docker / e2b / vercel / miosa)
+│   ├── open_computers/              #   computer-use: desktop-control adapters + session runtime
+│   ├── swarm/                       #   multi-agent patterns (parallel / pipeline / debate / review-loop)
+│   ├── events/                      #   event bus (Goldrush), pub/sub, dead-letter queue
+│   ├── runtime/                     #   session manager
+│   ├── supervisors/                 #   OTP supervision trees
+│   ├── telemetry/                   #   per-tool and per-provider metrics
+│   └── soul/ · budget/ · skills/    #   agent identity, cost tracking, skill registry
+│
+├── priv/
+│   ├── rust/tui/src/                # THE INTERFACE — terminal UI (Rust + ratatui)
+│   │   ├── app/                     #   event loop, key handling, actions, layout
+│   │   ├── client/                  #   HTTP + SSE client that talks to the engine
+│   │   ├── components/              #   composer, message list, sidebar, agent tree
+│   │   ├── dialogs/                 #   onboarding wizard, model picker, permission prompts
+│   │   ├── config/                  #   TUI config + keybindings
+│   │   ├── render/ · view/          #   frame rendering
+│   │   └── style/                   #   OSA theme + palette
+│   ├── prompts/                     # system prompt templates
+│   ├── agents/                      # built-in agent role definitions
+│   └── skills/                      # built-in skills (hot-loadable)
+│
+├── desktop/                         # optional Command Center — Tauri 2 + SvelteKit GUI
+├── test/                            # ExUnit test suite
+├── docs/                            # additional documentation
+└── .github/workflows/               # release automation
 ```
 
 ---
