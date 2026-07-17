@@ -3,15 +3,21 @@
 # Usage: osa
 set -e
 
-PROJECT_DIR="/Users/rhl/Desktop/MIOSA/code/OSAorigin"
+# Resolve project root from this script's location (scripts/ lives under root).
+SCRIPT="${BASH_SOURCE[0]:-$0}"
+[ -L "$SCRIPT" ] && SCRIPT="$(readlink -f "$SCRIPT")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TUI_BIN="$PROJECT_DIR/priv/rust/tui/target/release/osagent"
 PORT=9089
 PID_FILE="/tmp/osa-backend.pid"
 
 # ── Build TUI if needed ─────────────────────────────────────────────
+# Stamp OSA_VERSION from the repo VERSION file so the version baked into the
+# binary matches the release (else it falls back to Cargo.toml's 1.0.0).
 if [ ! -f "$TUI_BIN" ]; then
   echo "Building Rust TUI (first time only)..."
-  (cd "$PROJECT_DIR/priv/rust/tui" && cargo build --release 2>&1)
+  (cd "$PROJECT_DIR/priv/rust/tui" && OSA_VERSION="$(cat "$PROJECT_DIR/VERSION" 2>/dev/null || true)" cargo build --release 2>&1)
 fi
 
 # ── Kill any stale backend on the port ──────────────────────────────
