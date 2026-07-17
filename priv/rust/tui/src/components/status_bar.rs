@@ -331,10 +331,17 @@ impl StatusBar {
         }
     }
 
-    /// Build the billing chip text, e.g. `$0.42/$10 today` (or `$0.42 today`
-    /// when there's no daily cap). Returns None when there's no billing data.
+    /// Build the billing chip text. For USD-priced providers this is a spend
+    /// chip, e.g. `$0.42/$10 today` (or `$0.42 today` when there's no daily
+    /// cap). For non-USD providers (e.g. glm) a dollar figure is meaningless, so
+    /// we render token usage instead, e.g. `12.4k tok today`. Returns None when
+    /// there's no billing data.
     fn billing_label(&self) -> Option<String> {
         let b = self.billing.as_ref()?;
+        if !b.usd_pricing {
+            // Non-USD provider: never show a `$` figure — show token usage.
+            return Some(format!("{} tok today", Self::format_tokens(b.daily_tokens)));
+        }
         let spent = Self::format_usd(b.daily_spent_usd);
         let label = match b.daily_limit_usd {
             Some(limit) => format!("{}/{} today", spent, Self::format_usd(limit)),

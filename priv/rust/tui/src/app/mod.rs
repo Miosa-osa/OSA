@@ -174,6 +174,12 @@ pub struct App {
     /// `background_command_completed` event. Feeds the status-bar shell chip and
     /// the "N background terminals" summary.
     pub bg_shell_count: usize,
+    /// Number of FOREGROUND shell commands currently running in this turn (a
+    /// `bash`/`shell_execute` tool call in flight WITHOUT run_in_background).
+    /// When > 0, Ctrl+B detaches the running command to the background instead
+    /// of backgrounding the whole turn. Incremented on the tool-call start,
+    /// decremented on its end.
+    pub active_fg_shell_count: usize,
 
     // Backend auto-start
     pub backend_spawn_attempted: bool,
@@ -369,6 +375,7 @@ impl App {
             bg_tasks: Vec::new(),
             bg_task_seq: 0,
             bg_shell_count: 0,
+            active_fg_shell_count: 0,
             backend_spawn_attempted: false,
             health_retry_count: 0,
             command_entries: Vec::new(),

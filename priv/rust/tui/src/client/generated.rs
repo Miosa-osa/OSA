@@ -52,6 +52,14 @@ pub struct HealthBilling {
     /// but wired so a chip appears if a plan is ever set.
     #[serde(default)]
     pub subscription: Option<String>,
+    /// Tokens consumed today. Used to render a token-usage chip for providers
+    /// that don't price in USD (e.g. glm), where a dollar figure is meaningless.
+    #[serde(default)]
+    pub daily_tokens: u64,
+    /// Whether this provider's spend is denominated in USD. When false, the
+    /// status line must never show a `$` figure — show token usage instead.
+    #[serde(default)]
+    pub usd_pricing: bool,
 }
 
 // === Orchestrate — POST /api/v1/orchestrate ===

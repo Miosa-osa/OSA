@@ -466,6 +466,9 @@ impl App {
         self.stream_buf.clear();
         self.thinking_buf.clear();
         self.agent_header_sent = false;
+        // Fresh turn — no foreground shell in flight yet. Guards against a stale
+        // count if a prior turn ended without a matching tool-call-end.
+        self.active_fg_shell_count = 0;
 
         // Send to backend
         let client = self.client.clone();
@@ -561,6 +564,41 @@ impl App {
         self.status.set_background_count(self.bg_running_count());
         self.agents
             .set_bg_summary(self.bg_running_count() + self.bg_shell_count);
+    }
+
+    /// Ctrl+B dispatcher. When a FOREGROUND shell command is running in this turn
+    /// (Claude-Code parity), detach just that command to the background — it keeps
+    /// running, joins the background panel, and notifies on completion. Otherwise
+    /// fall back to backgrounding the whole turn.
+    pub(super) fn background_or_detach(&mut self) {
+        if self.state != AppState::Processing {
+            return;
+        }
+        if self.active_fg_shell_count > 0 {
+            self.detach_foreground_shell();
+        } else {
+            self.background_task();
+        }
+    }
+
+    /// Ask the backend to promote the running foreground shell command to a
+    /// supervised background task. Fire-and-forget: the result comes back as a
+    /// `ShellDetached` backend event (toast + background-count update).
+    fn detach_foreground_shell(&mut self) {
+        self.toasts.push(
+            "Moving command to background…".into(),
+            crate::components::toast::ToastLevel::Info,
+        );
+        let client = self.client.clone();
+        let session_id = self.session_id.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .detach_shell(&session_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Event::Backend(BackendEvent::ShellDetached(result)));
+        });
     }
 
     /// Ctrl+B — push the running turn to the background. The turn is NOT

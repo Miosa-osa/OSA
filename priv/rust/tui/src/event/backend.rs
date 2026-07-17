@@ -142,6 +142,10 @@ pub enum BackendEvent {
         command: String,
         task_id: String,
     },
+    /// Result of a Ctrl+B mid-run detach request (POST /sessions/:id/detach-shell).
+    /// `Ok(background_id)` when the running foreground command was promoted to the
+    /// background; `Err(reason)` when there was nothing to detach (or it failed).
+    ShellDetached(Result<String, String>),
     /// End-of-turn recap. Persisted as a permanent `✻ Worked for {elapsed}` line
     /// so the elapsed timer survives past the live activity spinner.
     TurnRecap {

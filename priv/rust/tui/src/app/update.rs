@@ -592,7 +592,7 @@ impl App {
                 false
             }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-                self.background_task();
+                self.background_or_detach();
                 false
             }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {

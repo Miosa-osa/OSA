@@ -423,9 +423,17 @@ impl App {
         let stepped = ((stream_rows.min(MAX_STREAM_PREVIEW) + STEP - 1) / STEP) * STEP;
         let stream_preview = stepped.clamp(STEP, MAX_STREAM_PREVIEW);
 
+        // `agents_h` MUST be added here too: `draw_inline` reserves a dedicated
+        // agents-panel row, so if the streaming viewport the event loop builds
+        // omits it, the terminal viewport ends up shorter than the layout
+        // `draw_inline` produces. That height disagreement makes the rebuild
+        // logic (`desired_inline_h != cur_inline_h`) thrash and leaves a ghost
+        // copy of the live-region chrome — the second Thinking box + composer the
+        // user saw stacked. Counting it in both branches keeps them in lockstep.
         let want = OVERHEAD
             .saturating_add(input_needed)
-            .saturating_add(stream_preview);
+            .saturating_add(stream_preview)
+            .saturating_add(agents_h);
         let hi = term_rows.saturating_sub(1).max(1);
         want.clamp(base, hi)
     }

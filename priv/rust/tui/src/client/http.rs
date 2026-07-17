@@ -484,6 +484,28 @@ impl ApiClient {
         Ok(())
     }
 
+    /// POST /api/v1/sessions/:id/detach-shell — promote the foreground shell
+    /// command currently running in this session to a supervised background task
+    /// (TUI Ctrl+B mid-run). Returns the new background_id on success; errors
+    /// (e.g. 404 no_active_command) surface as `Err` for the caller to toast.
+    pub async fn detach_shell(&self, id: &str) -> Result<String> {
+        let resp = self
+            .post(
+                &format!("/api/v1/sessions/{}/detach-shell", id),
+                &serde_json::json!({}),
+            )
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            background_id: String,
+        }
+
+        let parsed: Resp = resp.json().await?;
+        Ok(parsed.background_id)
+    }
+
     /// POST /api/v1/sessions/:id/steer — inject a mid-turn steer directive into
     /// a RUNNING turn (primitive #32). The backend folds the text into the live
     /// ReAct loop at its next step boundary so the agent adapts without the turn

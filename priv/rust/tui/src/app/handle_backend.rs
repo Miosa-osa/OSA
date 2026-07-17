@@ -157,11 +157,17 @@ impl App {
                 }
                 self.activity.tool_start(&name, &args);
                 self.activity.set_phase(ProcessingPhase::ToolCall);
-                // A `bash` call with run_in_background counts as a live background
+                // A shell call with run_in_background counts as a live background
                 // terminal until its `background_command_completed` event lands.
-                if is_background_bash(&name, &args) {
-                    self.bg_shell_count += 1;
-                    self.refresh_bg_indicators();
+                // A shell call WITHOUT it is a foreground command that Ctrl+B can
+                // detach to the background mid-run.
+                if is_shell_tool(&name) {
+                    if is_run_in_background(&args) {
+                        self.bg_shell_count += 1;
+                        self.refresh_bg_indicators();
+                    } else {
+                        self.active_fg_shell_count += 1;
+                    }
                 }
                 // Stash args (FIFO queue per name) so ToolCallEnd can build a rich
                 // summary even when several same-name calls overlap.
@@ -185,6 +191,14 @@ impl App {
                     .filter(|q| !q.is_empty())
                     .map(|q| q.remove(0))
                     .unwrap_or_default();
+                // A foreground shell command just ended — it's no longer
+                // detachable. (A run_in_background shell was never counted here.)
+                if is_shell_tool(&name)
+                    && !is_run_in_background(&args)
+                    && self.active_fg_shell_count > 0
+                {
+                    self.active_fg_shell_count -= 1;
+                }
                 // Collapse consecutive same-kind tool calls into one summary
                 // line ("Read N files", "Ran N shell commands", …). Only
                 // NonCollapsible tools (edit/write/web/…) keep full rendering.
@@ -778,20 +792,68 @@ impl App {
                 self.toasts.push(note, level);
                 self.recompute_layout();
             }
-            BackendEvent::TurnRecap { elapsed_ms, tools_used } => {
-                // Freeze the live elapsed timer into a permanent scrollback line so
-                // it survives past the activity spinner (which clears on turn end).
-                let mut line =
-                    format!("\u{273b} Worked for {}", crate::util::fmt_elapsed(elapsed_ms / 1000));
-                if !tools_used.is_empty() {
-                    line.push_str(&format!(
-                        " \u{00b7} {} tool{}",
-                        tools_used.len(),
-                        if tools_used.len() == 1 { "" } else { "s" }
-                    ));
+            BackendEvent::ShellDetached(result) => {
+                match result {
+                    Ok(background_id) => {
+                        // The command is now a live background terminal. Count it
+                        // here (its foreground tool-call was never counted as bg);
+                        // the later `background_command_completed` event will
+                        // decrement the count and raise the completion toast.
+                        self.bg_shell_count += 1;
+                        self.refresh_bg_indicators();
+                        let label = if background_id.trim().is_empty() {
+                            "command".to_string()
+                        } else {
+                            background_id
+                        };
+                        self.toasts.push(
+                            format!("Moved to background ({}) \u{00b7} /bg to list", label),
+                            crate::components::toast::ToastLevel::Success,
+                        );
+                        self.announce_a11y("command moved to background");
+                    }
+                    Err(_) => {
+                        // Nothing to detach — the command almost certainly finished
+                        // between the keypress and the request; its result lands in
+                        // scrollback through the normal path.
+                        self.toasts.push(
+                            "Nothing to move to background — the command already finished".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
                 }
-                self.chat.add_system_message(&line, "info");
                 self.recompute_layout();
+            }
+            BackendEvent::TurnRecap { elapsed_ms, tools_used } => {
+                // Only surface the recap when the turn did substantive, user-visible
+                // work — a real tool ran (shell/file/web/dir/git/…) OR the turn took
+                // a noticeable amount of wall-clock time. Internal bookkeeping tools
+                // (memory_save / memory_recall) auto-fire every turn, so counting
+                // them would slap a "Worked for 3s · 1 tool" line under trivial chat
+                // like "Yeah?". They are filtered out here.
+                let elapsed_secs = elapsed_ms / 1000;
+                let tool_count = crate::util::substantive_tool_count(&tools_used);
+                if tool_count > 0 || elapsed_secs > 10 {
+                    let mut text =
+                        format!("\u{273b} Worked for {}", crate::util::fmt_elapsed(elapsed_secs));
+                    if tool_count > 0 {
+                        text.push_str(&format!(
+                            " \u{00b7} {} tool{}",
+                            tool_count,
+                            if tool_count == 1 { "" } else { "s" }
+                        ));
+                    }
+                    // Render as a single, height-1 line snug under the message. The
+                    // system-message carrier floors height at 2 rows (message.rs),
+                    // which left an orphan blank line under the recap; the collapsed
+                    // tool-summary carrier is exactly one row, so no empty gap.
+                    let line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                        text,
+                        crate::style::theme().faint(),
+                    ));
+                    self.chat.add_collapsed_tool_summary(line);
+                    self.recompute_layout();
+                }
             }
 
             BackendEvent::SseAuthFailed => {
@@ -1338,12 +1400,19 @@ impl App {
     }
 }
 
-/// True when a `bash` tool call requests background execution (`run_in_background`
-/// in its JSON args). Mirrors the detection in `tools/bash.rs`.
-fn is_background_bash(name: &str, args: &str) -> bool {
-    if !name.eq_ignore_ascii_case("bash") {
-        return false;
-    }
+/// Names OSA uses for a shell-command tool. The model may invoke any alias
+/// (`bash`, `shell`, `shell_execute`, …); all map to the same background/detach
+/// machinery, so foreground/background tracking must recognise every form.
+fn is_shell_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "bash" | "shell" | "shell_execute" | "run_command" | "run_bash_command"
+    )
+}
+
+/// True when a shell tool call's JSON args request background execution
+/// (`run_in_background: true`). Mirrors the detection in `tools/bash.rs`.
+fn is_run_in_background(args: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(args)
         .ok()
         .and_then(|v| v.get("run_in_background").and_then(|b| b.as_bool()))

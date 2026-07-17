@@ -30,6 +30,27 @@ pub fn fmt_elapsed(secs: u64) -> String {
     }
 }
 
+/// True for internal bookkeeping tools that fire automatically every turn
+/// (memory persistence / recall) and therefore must NOT, on their own, trigger
+/// the end-of-turn "✻ Worked for …" recap. Without this gate a trivial reply
+/// like "Yeah?" still prints "Worked for 3s · 1 tool" because a memory tool
+/// auto-fired. Everything else — shell_execute, file_read/write/edit,
+/// web_search/fetch, dir_list, git, … — is substantive, user-visible work and
+/// counts toward the recap.
+pub fn is_internal_tool(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    n.starts_with("memory")
+}
+
+/// Count the substantive (user-visible) tools in a turn's tool list, excluding
+/// internal bookkeeping tools (see [`is_internal_tool`]).
+pub fn substantive_tool_count<S: AsRef<str>>(tools: &[S]) -> usize {
+    tools
+        .iter()
+        .filter(|t| !is_internal_tool(t.as_ref()))
+        .count()
+}
+
 /// Take the last `max_bytes` bytes of a UTF-8 string, advancing the start
 /// index forward until it lands on a char boundary.
 pub fn truncate_str_start(s: &str, max_bytes: usize) -> &str {

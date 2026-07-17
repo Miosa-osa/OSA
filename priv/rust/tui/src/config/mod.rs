@@ -42,12 +42,12 @@ pub fn set_runtime_version(version: &str) {
 }
 
 /// The *display* form of the version. When the backend has reported its version
-/// (via `GET /health`), that value is shown verbatim — it is the canonical,
-/// human-facing string from the app's root `VERSION` file (e.g. `1.0.3`) and is
-/// the single source of truth, so the UI can never drift from the running
-/// backend. Only when no backend version is known yet do we fall back to the
-/// crate's compile-time semver, zero-padding the patch to three digits
-/// (1.0.1 -> 1.0.001) so the placeholder reads consistently.
+/// (via `GET /health`), that value is the canonical source of truth — it is the
+/// human-facing string from the app's root `VERSION` file (e.g. `1.0.3`), so the
+/// UI can never drift from the running backend. Its patch component is
+/// zero-padded to three digits (1.0.3 -> 1.0.003) so the human-facing display
+/// convention stays consistent. Only when no backend version is known yet do we
+/// fall back to the crate's compile-time semver, padded the same way.
 ///
 /// Use this for every user-facing surface: the status-bar chip, the welcome
 /// banner, the `/version` command, and `--version`. Use [`osa_version`] for
@@ -55,7 +55,10 @@ pub fn set_runtime_version(version: &str) {
 pub fn osa_version_display() -> String {
     if let Ok(slot) = RUNTIME_VERSION.read() {
         if let Some(ref v) = *slot {
-            return v.clone();
+            // Pad the backend-reported version too so the human-facing display
+            // convention (1.0.3 -> 1.0.003) is consistent regardless of whether
+            // the version came from the backend or the compile-time fallback.
+            return pad_version_display(v);
         }
     }
     pad_version_display(osa_version())
