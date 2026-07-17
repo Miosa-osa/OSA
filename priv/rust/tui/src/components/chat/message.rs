@@ -26,7 +26,7 @@ pub enum MessageType {
 }
 
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
-const HELP_LINE_COUNT: u16 = 32;
+const HELP_LINE_COUNT: u16 = 47;
 
 /// Stored tool call metadata for rich rendering.
 #[derive(Clone)]
@@ -561,14 +561,28 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
     ];
 
     let shortcuts: &[(&str, &str)] = &[
-        ("  Ctrl+K", "Command palette"),
-        ("  /", "Inline command list"),
+        ("  Ctrl+K", "Command palette (empty input)"),
+        ("  /", "Slash command list"),
+        ("  @", "File-path reference"),
+        ("  ?", "This help (empty input)"),
         ("  Ctrl+N", "New session"),
         ("  Ctrl+L", "Toggle sidebar"),
-        ("  Ctrl+O", "Expand/collapse tool call"),
-        ("  Esc", "Interrupt (stops all agents)"),
-        ("  Ctrl+C x2", "Force interrupt"),
-        ("  Shift+Enter", "Multiline input"),
+        ("  Ctrl+O", "Transcript / expand tool call"),
+        ("  Ctrl+R", "Reverse history search"),
+        ("  Esc", "Clear input / interrupt turn"),
+        ("  Esc Esc", "Edit a previous message (rewind)"),
+        ("  Ctrl+C x2", "Force interrupt / quit"),
+        ("  Ctrl+D", "Exit (empty input)"),
+        ("  Shift+Enter", "Newline (Ctrl+J also works)"),
+        ("  Ctrl+A/E", "Line start / end"),
+        ("  Ctrl+U/K/W", "Kill line / to-end / word"),
+        ("  Ctrl+D (edit)", "Delete char forward"),
+        ("  Alt+B/F", "Word left / right"),
+        ("  Ctrl+Z/Y", "Undo / redo"),
+        ("  Ctrl+G", "Compose in $EDITOR"),
+        ("  Ctrl+S", "Stash / restore input"),
+        ("  Shift+Tab", "Cycle permission mode"),
+        ("  Up/Down", "History / line nav"),
         ("  j/k", "Scroll (input empty)"),
         ("  PgUp/PgDn", "Page scroll"),
         ("  Shift+drag", "Select text to copy"),
@@ -617,4 +631,25 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::{build_help_lines, HELP_LINE_COUNT};
+
+    /// The fixed-height help message (`Message::height` returns HELP_LINE_COUNT
+    /// for `MessageType::Help`) must exactly match the number of lines actually
+    /// built, or the overlay clips its last rows / leaves blank ones.
+    #[test]
+    fn help_line_count_matches_built_lines() {
+        let theme = crate::style::theme();
+        let lines = build_help_lines(&theme);
+        assert_eq!(
+            lines.len(),
+            HELP_LINE_COUNT as usize,
+            "HELP_LINE_COUNT ({}) must equal built help lines ({})",
+            HELP_LINE_COUNT,
+            lines.len()
+        );
+    }
 }

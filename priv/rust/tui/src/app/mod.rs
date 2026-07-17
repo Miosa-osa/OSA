@@ -46,6 +46,7 @@ use crate::dialogs::sessions::SessionBrowser;
 use crate::event::Event;
 
 use self::focus::FocusStack;
+use self::keys::EscTracker;
 use self::keys::KeyMap;
 use self::layout::Layout;
 use self::state::AppState;
@@ -186,6 +187,10 @@ pub struct App {
     // turn completion. /steer inserts at the front (priority). Parity with
     // Claude Code / Hermes "keep typing while busy".
     pub message_queue: Vec<String>,
+
+    // Esc-vs-Esc-Esc detector. A single Esc performs the context cancel; two
+    // Escs within the window open the rewind picker (Claude Code double-Esc).
+    pub esc_tracker: EscTracker,
 }
 
 impl App {
@@ -310,6 +315,7 @@ impl App {
             last_user_input: None,
             agents_dashboard_selected: 0,
             message_queue: Vec::new(),
+            esc_tracker: EscTracker::default(),
         })
     }
 

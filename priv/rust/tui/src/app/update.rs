@@ -210,6 +210,12 @@ impl App {
     }
 
     fn handle_idle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Any non-Esc key breaks a pending double-Esc pair so a stale first Esc
+        // can never combine with a much later one.
+        if key.code != KeyCode::Esc {
+            self.esc_tracker.reset();
+        }
+
         // Shift+Tab cycles the tool-permission mode (Default → AcceptEdits →
         // Plan → BypassPermissions → Default), matching Claude Code.
         if crate::app::keys::is_permission_cycle(&key) {
@@ -220,6 +226,50 @@ impl App {
         let input_empty = self.input.is_empty();
 
         match (key.code, key.modifiers) {
+            // Esc — context-appropriate cancel, with a time-gated double-press
+            // chord. Single Esc: clear the composer when it holds text (Claude
+            // Code semantics); no-op when empty. Double Esc (two within the
+            // window, no key between): open the rewind / jump-to-previous-message
+            // picker — OSA's equivalent of Claude Code's "press esc twice to go
+            // up a few messages". The @-file dropdown, when open, gets the Esc
+            // first (dismiss) and never starts a chord.
+            (KeyCode::Esc, _) => {
+                if self.input.file_search_active() {
+                    self.input
+                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+                    self.esc_tracker.reset();
+                    return false;
+                }
+                let now = std::time::Instant::now();
+                if self.esc_tracker.press(now) {
+                    // Completed a double-Esc → open the rewind picker.
+                    self.load_rewind_checkpoints();
+                } else if !input_empty {
+                    self.input.reset();
+                    self.recompute_layout();
+                    self.toasts.push(
+                        "Input cleared \u{2014} press Esc again to edit a previous message".into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                } else {
+                    self.toasts.push(
+                        "Press Esc again to edit a previous message".into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
+                false
+            }
+            // ? on empty input — open the keyboard-shortcut / help overlay
+            // (Claude Code '?'). With text already present it inserts a literal
+            // '?' via the composer (the fall-through arm), so typing a question
+            // mark mid-message still works.
+            (KeyCode::Char('?'), m)
+                if input_empty
+                    && (m == KeyModifiers::NONE || m == KeyModifiers::SHIFT) =>
+            {
+                self.show_help();
+                false
+            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if input_empty => {
                 self.transition(AppState::Quit);
                 false

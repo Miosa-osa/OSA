@@ -115,6 +115,18 @@ impl InputComponent {
         &self.content
     }
 
+    /// Current cursor byte offset. Exposed for tests and cursor-edge decisions.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Whether the `@`-file-reference search dropdown is currently active. The
+    /// app checks this so a plain Esc can be routed to the input (to dismiss the
+    /// dropdown) instead of triggering the global single/double-Esc handling.
+    pub fn file_search_active(&self) -> bool {
+        self.file_search_active
+    }
+
     pub fn is_empty(&self) -> bool {
         self.content.trim().is_empty()
     }
@@ -628,6 +640,23 @@ impl InputComponent {
         }
     }
 
+    /// Ctrl+D (readline delete-forward) — remove the character under the cursor.
+    /// A no-op at end-of-buffer. The idle handler only routes Ctrl+D here when
+    /// the buffer is non-empty (empty Ctrl+D is EOF/quit), so this never fights
+    /// the exit binding.
+    fn delete_forward_char(&mut self) {
+        if self.cursor < self.content.len() {
+            self.snapshot();
+            let next = self.content[self.cursor..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.content.drain(self.cursor..self.cursor + next);
+            self.after_edit();
+        }
+    }
+
     /// Ctrl+K — kill from the cursor to the end of the current line. If the
     /// cursor sits on a newline, kill just that newline.
     fn kill_to_line_end(&mut self) {
@@ -842,6 +871,16 @@ impl Component for InputComponent {
                         self.insert_char('\n');
                         return ComponentAction::Consumed;
                     }
+                    // Ctrl+J: guaranteed-portable hard newline. Shift+Enter is
+                    // terminal-dependent; Ctrl+J inserts a line break on EVERY
+                    // terminal (Claude Code's chat:newline fallback). Only reached
+                    // when the terminal delivers Ctrl+J as Char('j')+CONTROL rather
+                    // than folding it into Enter.
+                    (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                        self.multiline = true;
+                        self.insert_char('\n');
+                        return ComponentAction::Consumed;
+                    }
                     // Escape cancels file search if active
                     (KeyCode::Esc, KeyModifiers::NONE) if self.file_search_active => {
                         self.file_search_active = false;
@@ -894,18 +933,39 @@ impl Component for InputComponent {
                         return ComponentAction::Consumed;
                     }
                     // Multiline: Up/Down move the CURSOR between lines (preserving
-                    // column) rather than recalling history. History recall stays
-                    // for single-line / empty input (handled by the arms below).
+                    // column). At the TOP edge (cursor on the first line) Up
+                    // crosses into history recall; at the BOTTOM edge Down does —
+                    // matching Claude Code, where history is reached only from the
+                    // buffer edge. Single-line / empty input recall via the arms
+                    // below.
                     (KeyCode::Up, KeyModifiers::NONE)
                         if self.multiline || self.content.contains('\n') =>
                     {
-                        self.move_cursor_up();
+                        if up_crosses_to_history(&self.content, self.cursor) {
+                            if let Some(text) = self.history.prev() {
+                                self.content = text.to_string();
+                                self.cursor = self.content.len();
+                                self.multiline = self.content.contains('\n');
+                            }
+                        } else {
+                            self.move_cursor_up();
+                        }
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Down, KeyModifiers::NONE)
                         if self.multiline || self.content.contains('\n') =>
                     {
-                        self.move_cursor_down();
+                        if down_crosses_to_history(&self.content, self.cursor) {
+                            if let Some(text) = self.history.next() {
+                                self.content = text.to_string();
+                                self.cursor = self.content.len();
+                                self.multiline = self.content.contains('\n');
+                            }
+                            // else: already at newest / not navigating — stay put
+                            // (cursor is at the buffer end), never wipe the draft.
+                        } else {
+                            self.move_cursor_down();
+                        }
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Left, KeyModifiers::NONE) => {
@@ -974,6 +1034,13 @@ impl Component for InputComponent {
                     // Ctrl+W: delete word before cursor
                     (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                         self.delete_word_back();
+                        return ComponentAction::Consumed;
+                    }
+                    // Ctrl+D: delete the char under the cursor (readline
+                    // delete-forward). The idle handler routes Ctrl+D here only
+                    // when the buffer is non-empty; empty Ctrl+D is EOF/quit.
+                    (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                        self.delete_forward_char();
                         return ComponentAction::Consumed;
                     }
                     // Alt+B: move one word left
@@ -1229,7 +1296,7 @@ impl Component for InputComponent {
 
         // Stash indicator
         if self.stash.is_some() && self.content.is_empty() {
-            let hint = "[Ctrl+R to restore stash]";
+            let hint = "[Ctrl+S to restore stash]";
             let hint_width = hint.len() as u16;
             if input_area.width > hint_width + 10 {
                 let hint_area = Rect::new(
@@ -1335,6 +1402,37 @@ impl InputComponent {
     }
 }
 
+/// True when the cursor sits on the FIRST visual line of `content` (no newline
+/// before it). Pure + unit-testable geometry helper.
+fn cursor_on_first_line(content: &str, cursor: usize) -> bool {
+    let c = cursor.min(content.len());
+    !content[..c].contains('\n')
+}
+
+/// True when the cursor sits on the LAST visual line of `content` (no newline
+/// after it). Pure + unit-testable geometry helper.
+fn cursor_on_last_line(content: &str, cursor: usize) -> bool {
+    let c = cursor.min(content.len());
+    !content[c..].contains('\n')
+}
+
+/// Decision for an Up press inside a MULTILINE buffer: cross into history
+/// recall only at the very top-of-buffer edge (cursor at offset 0). Anywhere
+/// else the caret moves up a line first, so a single stray Up can never replace
+/// an in-progress draft — the user must deliberately reach the top-left corner
+/// and press Up again (shell-style). Pure + unit-testable.
+fn up_crosses_to_history(content: &str, cursor: usize) -> bool {
+    cursor == 0 && cursor_on_first_line(content, cursor)
+}
+
+/// Decision for a Down press inside a MULTILINE buffer: cross into history at
+/// the very end-of-buffer edge. Combined with `History::next()` (which yields
+/// nothing unless already navigating), a genuine multiline draft is never
+/// clobbered. Pure + unit-testable.
+fn down_crosses_to_history(content: &str, cursor: usize) -> bool {
+    cursor >= content.len() && cursor_on_last_line(content, cursor)
+}
+
 /// True when `tok` is an attachment chip token like "[Image #3]" or "[File #12]".
 fn is_chip_token(tok: &str) -> bool {
     let inner = match tok.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
@@ -1375,4 +1473,161 @@ fn chip_spans(text: &str, chip_style: Style) -> Vec<Span<'static>> {
         spans.push(Span::raw(rest.to_string()));
     }
     spans
+}
+
+#[cfg(test)]
+mod input_edit_tests {
+    use super::*;
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, mods)))
+    }
+
+    /// Build an input with `content` and the cursor placed at byte `cursor`.
+    fn at(content: &str, cursor: usize) -> InputComponent {
+        let mut input = InputComponent::new();
+        input.content = content.to_string();
+        input.cursor = cursor.min(input.content.len());
+        input.multiline = input.content.contains('\n');
+        input
+    }
+
+    // ── Ctrl+U / Ctrl+K / Ctrl+W kill operations ────────────────────────────
+
+    #[test]
+    fn ctrl_u_clears_whole_buffer() {
+        let mut input = at("hello world", 11);
+        input.handle_event(&key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_end_of_line() {
+        // Cursor after "hello " (byte 6) — kill to end of the line.
+        let mut input = at("hello world", 6);
+        input.handle_event(&key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello ");
+        assert_eq!(input.cursor(), 6);
+    }
+
+    #[test]
+    fn ctrl_k_on_multiline_kills_only_current_line() {
+        // "abc\ndef", cursor at byte 4 (start of "def") — kill to end of that line.
+        let mut input = at("abc\ndef", 4);
+        input.handle_event(&key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "abc\n");
+        assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn ctrl_k_on_newline_removes_the_newline() {
+        // Cursor sits ON the newline (byte 3 in "abc\ndef") — remove just it.
+        let mut input = at("abc\ndef", 3);
+        input.handle_event(&key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "abcdef");
+        assert_eq!(input.cursor(), 3);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_before_cursor() {
+        let mut input = at("hello world", 11);
+        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello ");
+        assert_eq!(input.cursor(), 6);
+    }
+
+    #[test]
+    fn ctrl_w_skips_trailing_whitespace() {
+        let mut input = at("hello world   ", 14);
+        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello ");
+    }
+
+    #[test]
+    fn ctrl_d_deletes_char_forward() {
+        let mut input = at("hello", 0);
+        input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "ello");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_d_at_end_is_noop() {
+        let mut input = at("hello", 5);
+        input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello");
+        assert_eq!(input.cursor(), 5);
+    }
+
+    #[test]
+    fn edits_are_utf8_safe() {
+        // Multi-byte content: "héllo" ('é' is 2 bytes). Cursor at end.
+        let mut input = at("héllo", "héllo".len());
+        input.handle_event(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "");
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_not_submit() {
+        let mut input = at("abc", 3);
+        let action = input.handle_event(&key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert!(matches!(action, ComponentAction::Consumed));
+        assert_eq!(input.value(), "abc\n");
+    }
+
+    // ── Up/Down history-vs-linenav decision at buffer edges ──────────────────
+
+    #[test]
+    fn first_last_line_geometry() {
+        let content = "one\ntwo\nthree";
+        assert!(cursor_on_first_line(content, 0));
+        assert!(cursor_on_first_line(content, 3)); // still on line 0 (before \n)
+        assert!(!cursor_on_first_line(content, 4)); // start of "two"
+        assert!(!cursor_on_last_line(content, 4));
+        assert!(cursor_on_last_line(content, 8)); // start of "three"
+        assert!(cursor_on_last_line(content, content.len()));
+    }
+
+    #[test]
+    fn up_crosses_to_history_only_at_top_left_edge() {
+        let content = "one\ntwo";
+        // At offset 0 (very top-left) → cross into history.
+        assert!(up_crosses_to_history(content, 0));
+        // Mid first line (offset 2) → NOT yet; caret moves first.
+        assert!(!up_crosses_to_history(content, 2));
+        // On a later line → never crosses on Up.
+        assert!(!up_crosses_to_history(content, 5));
+    }
+
+    #[test]
+    fn down_crosses_to_history_only_at_bottom_end_edge() {
+        let content = "one\ntwo";
+        // At the very end → cross into history.
+        assert!(down_crosses_to_history(content, content.len()));
+        // Mid last line → not yet.
+        assert!(!down_crosses_to_history(content, 5));
+        // On the first line → never crosses on Down.
+        assert!(!down_crosses_to_history(content, 1));
+    }
+
+    #[test]
+    fn down_at_bottom_edge_without_history_nav_preserves_draft() {
+        // A genuine multiline draft; not navigating history. Down at the bottom
+        // must NOT wipe it (History::next yields nothing when not navigating).
+        let mut input = at("line one\nline two", "line one\nline two".len());
+        input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(input.value(), "line one\nline two");
+    }
+
+    #[test]
+    fn up_mid_buffer_moves_caret_not_history() {
+        // Cursor on the second line; Up moves the caret up, leaving text intact.
+        let mut input = at("line one\nline two", 12); // within "line two"
+        input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(input.value(), "line one\nline two");
+        // Caret moved onto the first line.
+        assert!(cursor_on_first_line(input.value(), input.cursor()));
+    }
 }
