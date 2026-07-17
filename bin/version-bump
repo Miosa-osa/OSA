@@ -47,13 +47,26 @@ NEW="${MAJOR}.${MINOR}.${PATCH}"
 
 echo "$NEW" > "$VERSION_FILE"
 
-echo "$CURRENT → $NEW"
+# Keep the Rust TUI crate version in lockstep — single source of truth.
+# Cargo/SemVer forbid leading zeros, so the crate version stays plain SemVer.
+CARGO_TOML="$ROOT/priv/rust/tui/Cargo.toml"
+if [ -f "$CARGO_TOML" ]; then
+  # Replace only the first (package) version line, portably (GNU + BSD).
+  awk -v v="$NEW" 'BEGIN{d=0} /^version = "[0-9]+\.[0-9]+\.[0-9]+"/ && !d {sub(/"[0-9]+\.[0-9]+\.[0-9]+"/, "\"" v "\""); d=1} {print}' "$CARGO_TOML" > "$CARGO_TOML.tmp" && mv "$CARGO_TOML.tmp" "$CARGO_TOML"
+fi
+
+# Release tags use the project's zero-padded patch convention (v1.0.003), while
+# VERSION / Cargo stay plain SemVer (1.0.3), which mix + cargo require.
+PADDED_PATCH=$(printf "%03d" "$PATCH")
+TAG="v${MAJOR}.${MINOR}.${PADDED_PATCH}"
+
+echo "$CURRENT → $NEW  (tag ${TAG})"
 
 cd "$ROOT"
-git add VERSION
-git commit -m "bump: v${NEW}"
-git tag "v${NEW}"
+git add VERSION "$CARGO_TOML"
+git commit -m "bump: ${TAG}"
+git tag "$TAG"
 
 echo ""
-echo "Tagged v${NEW}. Push with:"
+echo "Tagged ${TAG}. Push with:"
 echo "  git push origin main --tags"
