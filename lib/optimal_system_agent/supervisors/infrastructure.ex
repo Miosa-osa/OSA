@@ -43,6 +43,11 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # Provider health / circuit breaker — must start before Registry
       OptimalSystemAgent.Providers.HealthChecker,
 
+      # Model catalog (models.dev-style) — owns :osa_models_catalog ETS.
+      # Started before Registry so context_window/available_models resolve
+      # against it. Network refresh runs in the background (non-blocking).
+      OptimalSystemAgent.Providers.Catalog,
+
       # LLM providers (goldrush-compiled :osa_provider_router)
       OptimalSystemAgent.Providers.Registry,
 

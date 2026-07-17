@@ -70,6 +70,50 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     baichuan: %{
       default_url: "https://api.baichuan-ai.com/v1",
       default_model: "Baichuan4"
+    },
+
+    # ── Newly routed OpenAI-compatible providers ──────────────────────────
+    # These were offered by onboarding + declared in runtime.exs provider_map
+    # but had no registry routing, so selecting them crashed with
+    # "Unknown provider: …". All are OpenAI-compatible, so one config each
+    # (base_url + default_model) is enough to route them through this module.
+
+    # MIOSA / Optimal — custom + trained models, run-your-own-harness.
+    miosa: %{
+      default_url: "https://optimal.miosa.ai/v1",
+      default_model: "nemotron-3-miosa"
+    },
+    # xAI Grok
+    xai: %{
+      default_url: "https://api.x.ai/v1",
+      default_model: "grok-4"
+    },
+    # Cerebras — ultra-fast inference
+    cerebras: %{
+      default_url: "https://api.cerebras.ai/v1",
+      default_model: "llama-3.3-70b"
+    },
+    # SambaNova
+    sambanova: %{
+      default_url: "https://api.sambanova.ai/v1",
+      default_model: "Meta-Llama-3.3-70B-Instruct"
+    },
+    # Hyperbolic
+    hyperbolic: %{
+      default_url: "https://api.hyperbolic.xyz/v1",
+      default_model: "meta-llama/Llama-3.3-70B-Instruct"
+    },
+    # LM Studio — local, OpenAI-compatible server (no key needed)
+    lmstudio: %{
+      default_url: "http://localhost:1234/v1",
+      default_model: "local-model",
+      keyless: true
+    },
+    # llama.cpp server — local, OpenAI-compatible (no key needed)
+    llamacpp: %{
+      default_url: "http://localhost:8080/v1",
+      default_model: "local-model",
+      keyless: true
     }
   }
 
@@ -89,7 +133,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat(provider, messages, opts \\ []) do
     config = get_config!(provider)
 
-    api_key = Application.get_env(:optimal_system_agent, :"#{provider}_api_key")
+    api_key = resolve_api_key(provider, config)
 
     model =
       Keyword.get(opts, :model) ||
@@ -116,7 +160,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def chat_stream(provider, messages, callback, opts \\ []) do
     config = get_config!(provider)
 
-    api_key = Application.get_env(:optimal_system_agent, :"#{provider}_api_key")
+    api_key = resolve_api_key(provider, config)
 
     model =
       Keyword.get(opts, :model) ||
@@ -136,6 +180,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
       other ->
         other
+    end
+  end
+
+  # Resolve the API key for a provider. Local, keyless servers (LM Studio,
+  # llama.cpp) accept any bearer token, so when none is configured we substitute
+  # a harmless placeholder rather than short-circuiting with
+  # "API key not configured" — this keeps the local OpenAI-compatible path usable.
+  defp resolve_api_key(provider, config) do
+    case Application.get_env(:optimal_system_agent, :"#{provider}_api_key") do
+      key when is_binary(key) and key != "" ->
+        key
+
+      _ ->
+        if Map.get(config, :keyless, false), do: "not-needed", else: nil
     end
   end
 

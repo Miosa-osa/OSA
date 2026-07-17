@@ -28,6 +28,8 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
+# Model catalog: no network fetch in tests — deterministic, bundled-only.
+config :optimal_system_agent, disable_models_fetch: true
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false
 # Use a different HTTP port in tests to avoid conflicts

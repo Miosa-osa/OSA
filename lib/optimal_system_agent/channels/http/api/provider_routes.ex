@@ -64,7 +64,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
           configured: configured,
           connected: configured,
           default_model: default_model,
-          available_models: available_models
+          available_models: available_models,
+          # Rich per-model metadata (ctx, pricing, tool_call, reasoning) from
+          # the models.dev-style catalog, for the TUI model-picker. Empty when
+          # the catalog has no entry for this provider (e.g. local Ollama).
+          models: catalog_models(provider)
         }
       end)
 
@@ -229,6 +233,28 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
     end
   rescue
     e -> Logger.warning("[Providers] Config write error: #{Exception.message(e)}")
+  end
+
+  # Detailed model metadata from the catalog for the TUI model-picker.
+  defp catalog_models(provider) do
+    OptimalSystemAgent.Providers.Catalog.models(provider)
+    |> Enum.map(fn m ->
+      %{
+        id: m.model_id,
+        name: m.name,
+        context_window: m.ctx,
+        max_output: m.max_output,
+        tool_call: m.tool_call,
+        reasoning: m.reasoning,
+        attachment: m.attachment,
+        cost: m.cost,
+        modalities: m.modalities
+      }
+    end)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp provider_type(:ollama), do: "local"

@@ -101,20 +101,28 @@ defmodule OptimalSystemAgent.Onboarding do
       %{
         id: "miosa",
         name: "MIOSA",
-        description: "Recommended — Optimal agent, fully managed",
+        description: "Custom + trained models, run your own harness",
         group: "recommended",
         requires_key: true,
         env_var: "MIOSA_API_KEY",
         default_model: "nemotron-3-miosa",
         base_url: "https://optimal.miosa.ai/v1",
         signup_url: "https://miosa.ai/settings/keys",
+        # MIOSA Cloud is gated during early access. Surfaced at the top of the
+        # picker so users can discover it, but marked coming_soon so the UI can
+        # render a badge and health_check returns a friendly notice (not a hard
+        # failure) instead of pretending the endpoint is live.
+        availability: :limited,
+        status: "coming_soon",
+        badge: "Limited access — request at miosa.ai",
         models: :dynamic
       },
       %{
         id: "ollama_cloud",
         name: "Ollama Cloud",
-        description: "Fast, no GPU needed",
-        group: "bring_your_own",
+        description: "No GPU needed — recommended",
+        group: "recommended",
+        recommended: true,
         requires_key: true,
         # Key is optional: a signed-in local Ollama daemon proxies `:cloud`
         # models via device identity (no key). The picker treats this provider
@@ -218,7 +226,7 @@ defmodule OptimalSystemAgent.Onboarding do
       %{
         id: "ollama_local",
         name: "Ollama Local",
-        description: "Privacy-first — runs on your machine",
+        description: "Private — needs a local GPU",
         group: "bring_your_own",
         requires_key: false,
         env_var: nil,
@@ -231,12 +239,15 @@ defmodule OptimalSystemAgent.Onboarding do
         id: "openrouter",
         name: "OpenRouter",
         description: "One key → 200+ models",
-        group: "bring_your_own",
+        group: "recommended",
         requires_key: true,
         env_var: "OPENROUTER_API_KEY",
         default_model: "anthropic/claude-sonnet-4-20250514",
         base_url: "https://openrouter.ai/api/v1",
         signup_url: "https://openrouter.ai/keys",
+        # Any vendor/model id may be entered free-text; model_list/2 also fetches
+        # the live OpenRouter catalog. These are curated defaults/fallbacks.
+        allow_free_text: true,
         models: [
           %{
             id: "anthropic/claude-sonnet-4-6",
@@ -400,16 +411,101 @@ defmodule OptimalSystemAgent.Onboarding do
           {:ok, []}
         end
 
-      _ ->
-        # Return hardcoded catalog
-        provider = Enum.find(providers_list(), &(&1.id == provider_id))
+      "openrouter" ->
+        # Live catalog (ctx + pricing + tool support). Falls back to the
+        # curated list if the network call fails so the picker still works.
+        case fetch_openrouter_models() do
+          {:ok, models} when models != [] -> {:ok, models}
+          _ -> {:ok, hardcoded_models(provider_id)}
+        end
 
-        case provider do
-          %{models: models} when is_list(models) -> {:ok, models}
-          _ -> {:ok, []}
+      _ ->
+        # Static providers (anthropic, openai, …): prefer the refreshable
+        # Catalog (models.dev-style), fall back to the curated hardcoded list.
+        case catalog_model_maps(provider_id) do
+          [] -> {:ok, hardcoded_models(provider_id)}
+          models -> {:ok, models}
         end
     end
   end
+
+  # Curated per-provider models from the onboarding catalog (fallback source).
+  defp hardcoded_models(provider_id) do
+    case Enum.find(providers_list(), &(&1.id == provider_id)) do
+      %{models: models} when is_list(models) -> models
+      _ -> []
+    end
+  end
+
+  # Onboarding-shaped model maps sourced from Providers.Catalog. Maps an
+  # onboarding provider id to its catalog provider id (they coincide for the
+  # static providers). Returns [] when the Catalog has no entry.
+  defp catalog_model_maps(provider_id) do
+    OptimalSystemAgent.Providers.Catalog.models(provider_id)
+    |> Enum.map(fn m ->
+      %{
+        id: m.model_id,
+        name: m.name || m.model_id,
+        ctx: m.ctx || 0,
+        tools: m.tool_call,
+        reasoning: m.reasoning,
+        cost: m.cost
+      }
+    end)
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  # Live OpenRouter model catalog. Parses context length, pricing, and tool
+  # support (from supported_parameters) into onboarding-shaped maps.
+  defp fetch_openrouter_models do
+    case Req.get("https://openrouter.ai/api/v1/models", receive_timeout: 10_000, retry: false) do
+      {:ok, %{status: 200, body: %{"data" => models}}} when is_list(models) ->
+        parsed =
+          Enum.map(models, fn m ->
+            supported = m["supported_parameters"] || []
+            pricing = m["pricing"] || %{}
+
+            %{
+              id: m["id"] || "unknown",
+              name: m["name"] || m["id"] || "unknown",
+              ctx: m["context_length"] || 0,
+              tools: "tools" in supported or "tool_choice" in supported,
+              cost: %{
+                input: parse_price(pricing["prompt"]),
+                output: parse_price(pricing["completion"])
+              }
+            }
+          end)
+
+        {:ok, parsed}
+
+      {:ok, %{status: status}} ->
+        {:error, "OpenRouter returned #{status}"}
+
+      {:error, reason} ->
+        {:error, "Can't reach OpenRouter: #{inspect(reason)}"}
+    end
+  rescue
+    e -> {:error, "OpenRouter fetch failed: #{Exception.message(e)}"}
+  end
+
+  # OpenRouter prices are per-token USD strings (e.g. "0.000003"). Convert to a
+  # per-million-token float to match the catalog's cost convention; nil if absent.
+  defp parse_price(nil), do: nil
+  defp parse_price(""), do: nil
+
+  defp parse_price(str) when is_binary(str) do
+    case Float.parse(str) do
+      {v, _} -> Float.round(v * 1_000_000, 4)
+      :error -> nil
+    end
+  end
+
+  defp parse_price(n) when is_number(n), do: Float.round(n * 1_000_000, 4)
+  defp parse_price(_), do: nil
 
   @doc """
   Verify connection to a provider by sending a minimal test request.
@@ -417,6 +513,19 @@ defmodule OptimalSystemAgent.Onboarding do
   Returns {:ok, result_map} on success or {:error, error_map} on failure.
   """
   @spec health_check(map()) :: {:ok, map()} | {:error, map()}
+  def health_check(%{"provider" => "miosa"} = _params) do
+    # MIOSA Cloud is gated during early access. Return a friendly, non-failing
+    # notice so the TUI can show "coming soon" rather than a red connection
+    # error — the endpoint is real but access is limited.
+    {:ok,
+     %{
+       status: "coming_soon",
+       availability: "limited",
+       message: "MIOSA Cloud is in limited early access. Request access at miosa.ai.",
+       signup_url: "https://miosa.ai/settings/keys"
+     }}
+  end
+
   def health_check(params) do
     provider = Map.get(params, "provider", "ollama")
     api_key = Map.get(params, "api_key")

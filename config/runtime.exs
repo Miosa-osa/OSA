@@ -99,6 +99,11 @@ default_provider =
   cond do
     env = System.get_env("OSA_DEFAULT_PROVIDER") -> Map.get(provider_map, env, :ollama)
     System.get_env("MIOSA_API_KEY") -> :miosa
+    # Ollama Cloud is the MAIN recommended path (no local GPU needed). An
+    # OLLAMA_API_KEY (or an ollama.com OLLAMA_URL) routes through the native
+    # Ollama provider pinned to the cloud endpoint.
+    System.get_env("OLLAMA_API_KEY") -> :ollama
+    (u = System.get_env("OLLAMA_URL")) && String.contains?(u, "ollama.com") -> :ollama
     System.get_env("ANTHROPIC_API_KEY") -> :anthropic
     System.get_env("OPENAI_API_KEY") -> :openai
     System.get_env("GROQ_API_KEY") -> :groq
@@ -214,9 +219,15 @@ config :optimal_system_agent,
 
   # Ollama overrides (OLLAMA_API_KEY required for cloud instances)
   # Falls back to config.exs values (Ollama Cloud + nemotron-3-super:cloud) when no env var set.
+  # When an Ollama Cloud key is present but no explicit URL, pin to the
+  # cloud endpoint (no GPU needed). Otherwise use the local default.
   ollama_url:
     System.get_env("OLLAMA_URL") ||
-      Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434"),
+      if(System.get_env("OLLAMA_API_KEY"),
+        do: "https://ollama.com",
+        else:
+          Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+      ),
   ollama_model:
     System.get_env("OLLAMA_MODEL") ||
       Application.compile_env(:optimal_system_agent, :ollama_model, "nemotron-3-super:cloud"),
@@ -356,7 +367,11 @@ config :optimal_system_agent,
 
            if Enum.any?(octets, &(&1 == :invalid)) do
              require Logger
-             Logger.warning("[runtime] Invalid OSA_HTTP_IP #{inspect(ip_str)}; falling back to 127.0.0.1")
+
+             Logger.warning(
+               "[runtime] Invalid OSA_HTTP_IP #{inspect(ip_str)}; falling back to 127.0.0.1"
+             )
+
              {127, 0, 0, 1}
            else
              List.to_tuple(octets)

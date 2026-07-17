@@ -88,6 +88,15 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     channel_tokens = configure_channels()
     write_config(provider_id, api_key, default_model, nil, channel_tokens)
 
+    Prompt.note(
+      "Make OSA yours — edit files in ~/.osa/:\n" <>
+        "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
+        "  HEARTBEAT.md            recurring proactive tasks\n" <>
+        "  skills/ · workflows/    custom skills & playbooks\n" <>
+        "Starter templates are in the examples/ folder.",
+      "Customize"
+    )
+
     Prompt.outro("Setup complete! Run 'osa' to start chatting.")
   end
 
@@ -113,6 +122,15 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
 
     channel_tokens = configure_channels()
     write_config(provider_id, api_key, model, base_url, channel_tokens)
+
+    Prompt.note(
+      "Make OSA yours — edit files in ~/.osa/:\n" <>
+        "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
+        "  HEARTBEAT.md            recurring proactive tasks\n" <>
+        "  skills/ · workflows/    custom skills & playbooks\n" <>
+        "Starter templates are in the examples/ folder.",
+      "Customize"
+    )
 
     Prompt.outro("Setup complete! Run 'osa' to start chatting.")
   end

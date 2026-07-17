@@ -135,6 +135,23 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         :exit, _ -> nil
       end
 
+    # Active reasoning/effort level (:low | :medium | :high | :max). Settings
+    # cascade resolves session → local → project → user → app default.
+    effort =
+      try do
+        OptimalSystemAgent.Agent.Effort.current() |> to_string()
+      rescue
+        _ -> "medium"
+      catch
+        :exit, _ -> "medium"
+      end
+
+    # Billing / budget snapshot. OSA has no subscription/plan concept in code,
+    # so `subscription` is always nil — the only spend model is the local
+    # Budget GenServer (daily/monthly USD spend + limits). Returns nil entirely
+    # if the Budget process is unavailable.
+    billing = health_billing()
+
     body =
       Jason.encode!(%{
         status: "ok",
@@ -142,7 +159,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         uptime_seconds: uptime,
         provider: provider,
         model: model_name,
-        context_window: context_window
+        context_window: context_window,
+        effort: effort,
+        billing: billing
       })
 
     conn
@@ -705,4 +724,32 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   )
 
   defp allowed_health_check_providers, do: @allowed_health_check_providers
+
+  # ── Health billing snapshot ─────────────────────────────────────────
+  # Projects the Budget GenServer status into the /health `billing` object.
+  # `subscription` is intentionally nil: OSA tracks only local USD spend and
+  # has no subscription/plan concept. Returns nil if Budget is unavailable so
+  # the field degrades gracefully rather than raising.
+  defp health_billing do
+    case OptimalSystemAgent.Budget.get_status() do
+      {:ok, status} when is_map(status) -> billing_from_status(status)
+      status when is_map(status) -> billing_from_status(status)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp billing_from_status(status) do
+    %{
+      daily_spent_usd: Map.get(status, :daily_spent, 0.0),
+      daily_limit_usd: Map.get(status, :daily_limit),
+      monthly_spent_usd: Map.get(status, :monthly_spent, 0.0),
+      monthly_limit_usd: Map.get(status, :monthly_limit),
+      currency: "USD",
+      subscription: nil
+    }
+  end
 end

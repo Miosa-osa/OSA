@@ -69,6 +69,15 @@ defmodule OptimalSystemAgent.CLI.Setup do
         # Step 5: Write config
         write_config(provider, api_key)
 
+        Prompt.note(
+          "Make OSA yours — edit files in ~/.osa/:\n" <>
+            "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
+            "  HEARTBEAT.md            recurring proactive tasks\n" <>
+            "  skills/ · workflows/    custom skills & playbooks\n" <>
+            "Starter templates are in the examples/ folder.",
+          "Customize"
+        )
+
         Prompt.outro("Setup complete — start chatting!")
         :ok
       end

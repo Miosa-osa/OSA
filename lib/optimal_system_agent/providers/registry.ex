@@ -76,7 +76,23 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  moonshot: {:compat, :moonshot},
                  zhipu: {:compat, :zhipu},
                  volcengine: {:compat, :volcengine},
-                 baichuan: {:compat, :baichuan}
+                 baichuan: {:compat, :baichuan},
+
+                 # Newly routed providers — previously offered by onboarding /
+                 # declared in runtime.exs but missing routing here (the
+                 # "Unknown provider: miosa" crash). All OpenAI-compatible.
+                 miosa: {:compat, :miosa},
+                 xai: {:compat, :xai},
+                 cerebras: {:compat, :cerebras},
+                 sambanova: {:compat, :sambanova},
+                 hyperbolic: {:compat, :hyperbolic},
+                 lmstudio: {:compat, :lmstudio},
+                 llamacpp: {:compat, :llamacpp},
+
+                 # Ollama Cloud — distinct entry reusing the native Ollama
+                 # provider (pinned to ollama.com via OLLAMA_URL). Keeps the
+                 # native /api/chat device-identity path (keyless when signed in).
+                 ollama_cloud: Providers.Ollama
                },
                if Mix.env() == :test do
                  %{mock: OptimalSystemAgent.Test.MockProvider}
@@ -139,12 +155,12 @@ defmodule OptimalSystemAgent.Providers.Registry do
            name: provider,
            module: @compat,
            default_model: @compat.default_model(prov),
-           available_models: @compat.available_models(prov),
+           available_models: catalog_models_for(provider) || @compat.available_models(prov),
            configured?: provider_configured?(provider)
          }}
 
       module when is_atom(module) ->
-        models =
+        fallback_models =
           if function_exported?(module, :available_models, 0) do
             module.available_models()
           else
@@ -156,7 +172,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
            name: provider,
            module: module,
            default_model: module.default_model(),
-           available_models: models,
+           available_models: catalog_models_for(provider) || fallback_models,
            configured?: provider_configured?(provider)
          }}
     end
@@ -307,7 +323,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # Same-provider retry (backoff, retry-after aware) runs *before* any
     # model/provider fallback. Only once these retries are exhausted do we
     # drop to the configured fallback chain below.
-    retried = Resilience.with_retry(fn -> apply_provider(module, messages, opts) end, retry_opts(provider))
+    retried =
+      Resilience.with_retry(
+        fn -> apply_provider(module, messages, opts) end,
+        retry_opts(provider)
+      )
 
     case retried do
       {:ok, _} = result ->
@@ -412,8 +432,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
         # 2. Same-provider sync fallback (a plain request sometimes succeeds
         #    where a stream-only hiccup did not), then the model/provider chain.
         case fallback_sync_stream(module, messages, callback, opts) do
-          :ok -> :ok
-          {:error, sync_reason} -> stream_fallback_chain(provider, messages, callback, opts, sync_reason)
+          :ok ->
+            :ok
+
+          {:error, sync_reason} ->
+            stream_fallback_chain(provider, messages, callback, opts, sync_reason)
         end
     end
   end
@@ -470,7 +493,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # True when the module can stream natively (so it is worth wrapping in the
   # same-provider retry loop rather than dropping straight to sync).
   defp stream_capable?({:compat, _provider}), do: true
-  defp stream_capable?(module) when is_atom(module), do: function_exported?(module, :chat_stream, 3)
+
+  defp stream_capable?(module) when is_atom(module),
+    do: function_exported?(module, :chat_stream, 3)
 
   # A single native streaming attempt — NO sync fallback. Returns
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
@@ -611,11 +636,16 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @doc """
   Return the context window size (in tokens) for a given model.
 
-  Falls back to `:max_context_tokens` app env, then 128_000.
-  Ollama models use `num_ctx` from the model info endpoint when available,
-  otherwise fall back to a conservative 8_192.
+  Resolution order:
+    1. `Providers.Catalog` (models.dev-style, refreshable source of truth)
+    2. Static `@fallback_context_windows` table (offline safety net)
+    3. Ollama `/api/show` `num_ctx` (for local models)
+    4. `:max_context_tokens` app env, then 128_000
+
+  The static table is retained only as a fallback for when the Catalog is
+  unavailable (e.g. GenServer not started) or does not yet know a model.
   """
-  @model_context_windows %{
+  @fallback_context_windows %{
     # Anthropic — all Claude 4.x models have 1M context
     "claude-opus-4-6" => 1_000_000,
     "claude-sonnet-4-6" => 1_000_000,
@@ -654,11 +684,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
-    case Map.get(@model_context_windows, model) do
+    case catalog_context_window(model) || Map.get(@fallback_context_windows, model) do
       nil ->
         # Try prefix match for Ollama models and variants
         matched =
-          Enum.find(@model_context_windows, fn {key, _v} ->
+          Enum.find(@fallback_context_windows, fn {key, _v} ->
             String.starts_with?(model, key)
           end)
 
@@ -681,6 +711,30 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   def context_window(_),
     do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+
+  # Model ids for a provider from the Catalog, or nil when the Catalog has no
+  # entry for it (so the caller falls back to the per-module list). Never raises.
+  defp catalog_models_for(provider) do
+    case OptimalSystemAgent.Providers.Catalog.models(provider) do
+      [] -> nil
+      models -> Enum.map(models, & &1.model_id)
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # Catalog lookup (models.dev-style). Never raises: the Catalog reads a public
+  # ETS table and returns nil when the table is absent or the model is unknown,
+  # so callers cleanly fall through to the static table / Ollama probe.
+  defp catalog_context_window(model) do
+    OptimalSystemAgent.Providers.Catalog.context_window(model)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
 
   # Sentinel cached for models whose context length could not be resolved from
   # Ollama (unreachable, non-200, or no context_length key). Caching the miss —
@@ -766,6 +820,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
     case Req.get(url <> "/api/version", receive_timeout: 2_000, retry: false) do
       {:ok, %{status: status}} when status in 200..299 -> true
       _ -> false
+    end
+  end
+
+  # Ollama Cloud is configured when an OLLAMA_API_KEY is present OR a signed-in
+  # local Ollama daemon can proxy :cloud models via device identity.
+  def provider_configured?(:ollama_cloud) do
+    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+      key when is_binary(key) and key != "" -> true
+      _ -> provider_configured?(:ollama)
     end
   end
 
