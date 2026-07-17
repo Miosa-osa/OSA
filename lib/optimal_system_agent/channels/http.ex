@@ -115,11 +115,9 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           to_string(m)
       end
 
-    version =
-      case Application.spec(:optimal_system_agent, :vsn) do
-        nil -> "0.2.5"
-        vsn -> to_string(vsn)
-      end
+    # Single source of truth: OSA_VERSION (CI-stamped) → app spec → VERSION file.
+    # Never a hardcoded literal, so a tagged release always reports its real tag.
+    version = OptimalSystemAgent.ReleaseNotes.current_version()
 
     uptime =
       max(

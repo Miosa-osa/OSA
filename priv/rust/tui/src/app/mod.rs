@@ -56,6 +56,25 @@ use crate::voice::VoiceState;
 pub const HEALTH_RETRY_DELAY: Duration = Duration::from_secs(5);
 pub const MAX_MESSAGE_SIZE: usize = 100_000;
 
+/// A foreground turn the user pushed to the background with Ctrl+B.
+///
+/// Backgrounding is not a dead-end: the turn keeps running on the backend (the
+/// session SSE stream stays connected and the final answer still lands in
+/// scrollback), and this handle is the real return path — `/bg` lists these,
+/// `/fg` brings the most recent running one back to the live activity view.
+#[derive(Debug, Clone)]
+pub struct BackgroundTask {
+    /// Stable 1-based label for this session, shown as "[N]".
+    pub id: usize,
+    /// Short human summary — the prompt that started the turn, truncated.
+    pub summary: String,
+    /// When the underlying turn started. Restored into `processing_start` on
+    /// bring-back so the live elapsed timer stays accurate.
+    pub started_at: Instant,
+    /// Flipped true once the backgrounded turn's answer arrives.
+    pub done: bool,
+}
+
 // Some fields initialized but not yet read directly (accessed via render pipeline or Phase 3+)
 #[allow(dead_code)]
 pub struct App {
@@ -145,8 +164,11 @@ pub struct App {
     /// message type instead of repeating the "◈ OSA" header).
     pub agent_header_sent: bool,
 
-    // Background tasks
-    pub bg_tasks: Vec<String>,
+    // Background tasks (Ctrl+B). See `BackgroundTask` — each is a real handle
+    // with a bring-back (`/fg`) path, not a one-way dead-end.
+    pub bg_tasks: Vec<BackgroundTask>,
+    /// Monotonic id source so each backgrounded turn gets a stable "[N]" label.
+    pub bg_task_seq: usize,
 
     // Backend auto-start
     pub backend_spawn_attempted: bool,
@@ -333,6 +355,7 @@ impl App {
             agent_header_sent: false,
 
             bg_tasks: Vec::new(),
+            bg_task_seq: 0,
             backend_spawn_attempted: false,
             health_retry_count: 0,
             command_entries: Vec::new(),

@@ -428,7 +428,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       name in ~w(context cost mcp files) -> "info"
       name in ~w(sessions export copy rename tag) -> "data"
       name in ~w(agents tools skills memory) -> "browse"
-      name in ~w(tasks plan coordinator effort fast) -> "workflow"
+      name in ~w(tasks plan coordinator effort fast steer bg) -> "workflow"
       true -> "commands"
     end
   end

@@ -10,6 +10,17 @@ use tracing::debug;
 
 use crate::config::cli::Cli;
 
+/// Single source of truth for the OSA version, resolved at compile time.
+///
+/// Prefers `OSA_VERSION` (stamped by the release CI from the git tag) and falls
+/// back to the crate's `Cargo.toml` version so a plain `cargo build` still shows
+/// a correct, non-empty semver. Never hardcode a version string anywhere else —
+/// call this so the status bar, banner, `/version`, and `--version` can never
+/// drift apart or go stale.
+pub fn osa_version() -> &'static str {
+    option_env!("OSA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 fn home_dir() -> PathBuf {
     // Resolve the real home dir cross-platform: BaseDirs honors USERPROFILE /
     // HOMEDRIVE+HOMEPATH on Windows (where HOME is normally unset), and $HOME on

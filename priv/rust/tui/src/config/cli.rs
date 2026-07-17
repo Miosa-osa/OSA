@@ -86,7 +86,8 @@ impl Cli {
         }
 
         if cli.version {
-            println!("osagent {}", env!("CARGO_PKG_VERSION"));
+            // Single source of truth (tag-stamped OSA_VERSION, else Cargo semver).
+            println!("osagent {}", crate::config::osa_version());
             std::process::exit(0);
         }
 

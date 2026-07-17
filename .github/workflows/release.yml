@@ -61,10 +61,29 @@ jobs:
           mix local.rebar --force
           mix deps.get --only prod
 
+      # ── Stamp the version from the git tag (single source of truth) ─────
+      # The tag (e.g. v1.0.0) is authoritative. Strip the leading "v" to a
+      # plain semver, expose it as OSA_VERSION for the build steps below, and
+      # write it into the VERSION file that mix.exs reads at compile time so the
+      # OTP release reports the tag version. Any cached, stale .app is dropped
+      # so `mix release` regenerates it with the stamped version — otherwise a
+      # restored build cache could ship an old vsn to Application.spec/2.
+      # Runs after the cache restore so the purge sticks.
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
+          printf '%s\n' "${OSA_VERSION}" > VERSION
+          find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
+          echo "Stamped OSA release version ${OSA_VERSION}"
+
       # Self-contained OTP release. include_erts defaults to true, so the
       # tarball carries its own ERTS — the user needs no Erlang/Elixir.
       - name: Build OTP release (osagent)
         run: MIX_ENV=prod mix release osagent --overwrite
+        env:
+          OSA_VERSION: ${{ env.OSA_VERSION }}
 
       - name: Package OTP release tarball
         run: |
@@ -72,6 +91,8 @@ jobs:
           tar -czf "dist/osa-linux-x64.tar.gz" -C _build/prod/rel/osagent .
 
       - name: Build Rust TUI
+        env:
+          OSA_VERSION: ${{ env.OSA_VERSION }}
         run: |
           cd priv/rust/tui
           cargo build --release
@@ -114,8 +135,20 @@ jobs:
           mix local.rebar --force
           mix deps.get --only prod
 
+      # Stamp the tag version — see the linux job for the rationale.
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
+          printf '%s\n' "${OSA_VERSION}" > VERSION
+          find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
+          echo "Stamped OSA release version ${OSA_VERSION}"
+
       - name: Build OTP release (osagent)
         run: MIX_ENV=prod mix release osagent --overwrite
+        env:
+          OSA_VERSION: ${{ env.OSA_VERSION }}
 
       - name: Package OTP release tarball
         run: |
@@ -125,6 +158,8 @@ jobs:
       # Rust ships preinstalled on the macos-14 runner. openssl/oniguruma
       # come from the toolchain / vendored crates, so no brew step is needed.
       - name: Build Rust TUI
+        env:
+          OSA_VERSION: ${{ env.OSA_VERSION }}
         run: |
           cd priv/rust/tui
           cargo build --release
@@ -167,6 +202,17 @@ jobs:
           mix local.rebar --force
           mix deps.get --only prod
 
+      # Stamp the tag version — see the linux job for the rationale. `shell: bash`
+      # uses the Git-for-Windows bash that ships on the runner.
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
+          printf '%s\n' "${OSA_VERSION}" > VERSION
+          find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
+          echo "Stamped OSA release version ${OSA_VERSION}"
+
       # Self-contained OTP release. include_erts defaults to true, so the zip
       # carries its own ERTS — the user needs no Erlang/Elixir. Requires the
       # mix.exs :windows executable + erlexec fixes to assemble on Windows.
@@ -174,6 +220,7 @@ jobs:
         run: mix release osagent --overwrite
         env:
           MIX_ENV: prod
+          OSA_VERSION: ${{ env.OSA_VERSION }}
 
       # Package as a .zip (not tar.gz) so install.ps1's Expand-Archive works.
       - name: Package OTP release zip
@@ -186,6 +233,8 @@ jobs:
       # vendored crates; CI-compile is the acceptance bar (no runtime claim).
       - name: Build Rust TUI
         shell: pwsh
+        env:
+          OSA_VERSION: ${{ env.OSA_VERSION }}
         run: |
           Push-Location priv\rust\tui
           cargo build --release

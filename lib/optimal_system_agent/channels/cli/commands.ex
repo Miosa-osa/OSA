@@ -39,7 +39,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
     "skills" => {"List available skills", :cmd_skills},
-    "agents" => {"List available agent roles", :cmd_agents},
+    "agents" => {"Runtime agent dashboard — live subagent runs and roles", :cmd_agents},
+    "bg" => {"List background work — subagent runs and background commands", :cmd_bg},
+    "steer" => {"Inject a directive into the running turn (mid-turn steer)", :cmd_steer},
     "sessions" => {"List recent sessions", :cmd_sessions},
     "tasks" => {"Show current tasks", :cmd_tasks},
     "plan" => {"Toggle plan mode", :cmd_plan},
@@ -441,15 +443,37 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     session_id
   end
 
+  # Runtime agent dashboard: live/recent subagent RUNS first (what the agent is
+  # actually doing right now), then the available agent ROLES it can spawn.
   def cmd_agents(_args, session_id) do
     IO.puts("")
-    IO.puts("  #{@bold}Agent Roles#{@reset}")
+    IO.puts("  #{@bold}Agent Dashboard#{@reset}")
     IO.puts("")
+
+    runs = safe_run_list()
+
+    if runs != [] do
+      IO.puts("  #{@dim}Live & recent runs#{@reset}")
+
+      Enum.each(runs, fn run ->
+        id = to_string(Map.get(run, :agent_id, "?"))
+        role = to_string(Map.get(run, :role, "agent"))
+        status = to_string(Map.get(run, :status, "?"))
+        icon = run_status_icon(status)
+        padded = String.pad_trailing(id, 20)
+
+        IO.puts("  #{icon} #{@cyan}#{padded}#{@reset} #{@dim}#{role} · #{status}#{@reset}")
+      end)
+
+      IO.puts("")
+    end
 
     try do
       agents = OptimalSystemAgent.Agents.Registry.list()
 
       if is_list(agents) and length(agents) > 0 do
+        IO.puts("  #{@dim}Available roles#{@reset}")
+
         Enum.each(agents, fn agent ->
           name = agent[:name] || agent[:role] || "?"
           tier = agent[:tier] || :specialist
@@ -464,17 +488,117 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         end)
 
         IO.puts("")
-        IO.puts("  #{@dim}#{length(agents)} agents available#{@reset}")
+        IO.puts("  #{@dim}#{length(runs)} run(s) · #{length(agents)} role(s)#{@reset}")
       else
-        IO.puts("  #{@dim}No agent roles defined#{@reset}")
+        if runs == [], do: IO.puts("  #{@dim}No agent runs or roles yet#{@reset}")
       end
     rescue
       _ ->
-        IO.puts("  #{@dim}Agent registry not available#{@reset}")
+        if runs == [], do: IO.puts("  #{@dim}Agent registry not available#{@reset}")
     end
 
     IO.puts("")
     session_id
+  end
+
+  # ── /bg — background work (subagent runs + background commands) ───────
+
+  def cmd_bg(_args, session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}Background Work#{@reset}")
+    IO.puts("")
+
+    runs = safe_run_list()
+
+    bg_cmds =
+      try do
+        OptimalSystemAgent.Shell.BackgroundManager.list()
+      rescue
+        _ -> []
+      catch
+        :exit, _ -> []
+      end
+
+    if runs == [] and bg_cmds == [] do
+      IO.puts("  #{@dim}No background runs or commands.#{@reset}")
+    else
+      Enum.each(runs, fn run ->
+        id = to_string(Map.get(run, :agent_id, "?"))
+        role = to_string(Map.get(run, :role, "agent"))
+        status = to_string(Map.get(run, :status, "?"))
+        icon = run_status_icon(status)
+        padded = String.pad_trailing(id, 20)
+        IO.puts("  #{icon} #{@cyan}#{padded}#{@reset} #{@dim}#{role} · #{status}#{@reset}")
+      end)
+
+      Enum.each(bg_cmds, fn c ->
+        id = to_string(Map.get(c, :id, "?"))
+        status = to_string(Map.get(c, :status, "?"))
+        icon = run_status_icon(status)
+        padded = String.pad_trailing(id, 20)
+        IO.puts("  #{icon} #{@cyan}#{padded}#{@reset} #{@dim}shell · #{status}#{@reset}")
+      end)
+
+      IO.puts("")
+      IO.puts("  #{@dim}#{length(runs)} run(s) · #{length(bg_cmds)} command(s)#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp safe_run_list do
+    OptimalSystemAgent.Agent.RunStore.list(limit: 20)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  defp run_status_icon(status) do
+    case to_string(status) do
+      s when s in ["running", "active", "starting"] -> "#{@yellow}◐#{@reset}"
+      s when s in ["done", "completed", "ok"] -> "#{@green}●#{@reset}"
+      s when s in ["failed", "error"] -> "#{@red}○#{@reset}"
+      "killed" -> "#{@red}○#{@reset}"
+      "cancelled" -> "#{@dim}○#{@reset}"
+      _ -> "#{@dim}○#{@reset}"
+    end
+  end
+
+  # ── /steer — inject a directive into the running turn ────────────────
+
+  def cmd_steer(args, session_id) do
+    alias OptimalSystemAgent.Agent.Loop
+    alias OptimalSystemAgent.Runtime.SessionManager
+
+    IO.puts("")
+    text = String.trim(args)
+
+    cond do
+      text == "" ->
+        IO.puts("  #{@dim}Usage: /steer <directive>#{@reset}")
+        IO.puts("  #{@dim}Folds guidance into the RUNNING turn without cancelling it.#{@reset}")
+
+      SessionManager.live_session?(session_id) ->
+        Loop.steer(session_id, text)
+
+        IO.puts(
+          "  #{@green}✓#{@reset} Steer queued — the agent folds it in at its next step boundary"
+        )
+
+      true ->
+        # No live turn: still queue it (drains on the next turn) so nothing is lost.
+        Loop.steer(session_id, text)
+        IO.puts("  #{@dim}No turn running — directive queued for the next step.#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: could not steer#{@reset}\n")
+      session_id
   end
 
   def cmd_sessions(_args, session_id) do

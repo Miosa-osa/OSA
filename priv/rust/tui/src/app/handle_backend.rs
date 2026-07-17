@@ -316,17 +316,26 @@ impl App {
                 self.activity.set_active_verb(None);
                 self.recompute_layout();
             }
-            BackendEvent::CommandsLoaded(result) => match result {
-                Ok(commands) => {
-                    let with_desc: Vec<(String, String)> = commands
-                        .iter()
-                        .map(|c| (c.name.clone(), c.description.clone()))
-                        .collect();
-                    self.input.set_commands_with_descriptions(with_desc);
-                    self.command_entries = commands;
-                }
-                Err(e) => warn!("Failed to load commands: {}", e),
-            },
+            BackendEvent::CommandsLoaded(result) => {
+                // Merge the backend registry with the TUI-native commands (/steer,
+                // /bg, /fg, /agents, /version) so they always surface in the Ctrl+K
+                // palette and the inline `/` completions — even if the backend
+                // registry doesn't list them, or the fetch failed (offline).
+                let mut commands = match result {
+                    Ok(commands) => commands,
+                    Err(e) => {
+                        warn!("Failed to load commands, using TUI-native set: {}", e);
+                        Vec::new()
+                    }
+                };
+                merge_tui_native_commands(&mut commands);
+                let with_desc: Vec<(String, String)> = commands
+                    .iter()
+                    .map(|c| (c.name.clone(), c.description.clone()))
+                    .collect();
+                self.input.set_commands_with_descriptions(with_desc);
+                self.command_entries = commands;
+            }
             BackendEvent::ToolsLoaded(result) => match result {
                 Ok(tools) => {
                     self.header.set_tool_count(tools.len());
@@ -1250,4 +1259,32 @@ fn emit_completion_notification() {
     // OSC 9 desktop notification, then a terminal bell.
     let _ = out.write_all(b"\x1b]9;OSA: response ready\x07\x07");
     let _ = out.flush();
+}
+
+/// Commands the TUI handles locally (never sent to the backend registry) that
+/// must still appear in the Ctrl+K palette and inline `/` completions. Appended
+/// to whatever the backend `GET /commands` returns, de-duplicated by name (the
+/// backend wins on a name clash), so discoverability never depends on the
+/// backend knowing about a TUI-only affordance.
+fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEntry>) {
+    use crate::client::types::CommandEntry;
+    let native: &[(&str, &str)] = &[
+        ("/steer", "Redirect the agent mid-turn (queues if idle)"),
+        ("/bg", "List background turns (Ctrl+B backgrounds one)"),
+        ("/fg", "Bring a backgrounded turn back to the foreground"),
+        ("/agents", "Background-agent dashboard (running + finished)"),
+        ("/version", "Show OSA version"),
+    ];
+    for &(name, desc) in native {
+        let already = commands
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(name));
+        if !already {
+            commands.push(CommandEntry {
+                name: name.to_string(),
+                description: desc.to_string(),
+                category: Some("agent".to_string()),
+            });
+        }
+    }
 }

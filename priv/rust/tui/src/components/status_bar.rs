@@ -505,14 +505,45 @@ impl Component for StatusBar {
             ));
         }
 
+        // Persistent OSA version chip (single build-time source — never stale).
+        // Right-most element so it's the first to be clipped on narrow panes.
+        spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+        spans.push(Span::styled(
+            format!("v{}", crate::config::osa_version()),
+            theme.faint(),
+        ));
+
         frame.render_widget(
             Paragraph::new(Line::from(spans)).style(theme.status_bar()),
             row0,
         );
 
-        // ── Row 1: permission / shell line ──────────────────────────────
-        //   ⏵⏵ bypass permissions on · N shells
-        let shells = self.shell_count.max(self.bg_count);
+        // ── Row 1: permission / shell / background line ─────────────────
+        //   ⏵⏵ bypass permissions on · N shells · N bg
+        // Shells and backgrounded turns are distinct: shells are running `!`
+        // commands; "N bg" is Ctrl+B'd turns still running (brought back via /fg).
+        let shells = self.shell_count;
+        let bg = self.bg_count;
+
+        // Build the trailing "· N shells · N bg" fragment once, reused below.
+        let mut extras: Vec<Span<'_>> = Vec::new();
+        if shells > 0 {
+            extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+            let label = if shells == 1 {
+                "1 shell".to_string()
+            } else {
+                format!("{} shells", shells)
+            };
+            extras.push(Span::styled(label, theme.faint()));
+        }
+        if bg > 0 {
+            extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+            extras.push(Span::styled(
+                format!("{} bg", bg),
+                Style::default().fg(mode_color),
+            ));
+        }
+
         if !self.permission_mode.is_default() {
             let mut pspans: Vec<Span<'_>> = Vec::new();
             let sym = self.permission_mode.symbol();
@@ -526,27 +557,17 @@ impl Component for StatusBar {
                 format!("{} on", self.permission_mode.title().to_lowercase()),
                 Style::default().fg(mode_color),
             ));
-            if shells > 0 {
-                pspans.push(Span::styled(" \u{00b7} ", theme.status_sep()));
-                let label = if shells == 1 {
-                    "1 shell".to_string()
-                } else {
-                    format!("{} shells", shells)
-                };
-                pspans.push(Span::styled(label, theme.faint()));
-            }
+            pspans.extend(extras);
             frame.render_widget(Paragraph::new(Line::from(pspans)), row1);
-        } else if shells > 0 {
-            // Default mode but shells running — still surface the shell count.
-            let label = if shells == 1 {
-                "1 shell".to_string()
-            } else {
-                format!("{} shells", shells)
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(label, theme.faint()))),
-                row1,
-            );
+        } else if !extras.is_empty() {
+            // Default mode but shells / background turns running — surface them.
+            // Drop the leading " · " separator since there's no mode prefix.
+            if let Some(first) = extras.first() {
+                if first.content.trim() == "\u{00b7}" {
+                    extras.remove(0);
+                }
+            }
+            frame.render_widget(Paragraph::new(Line::from(extras)), row1);
         }
     }
 }

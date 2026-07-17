@@ -191,6 +191,33 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     read_meta(session_path(session_id))
   end
 
+  @doc """
+  Persist the per-session message queue (queued-but-unsent user messages).
+
+  This is a durable *mirror* of the in-memory `MessageQueue` — the live queue
+  stays authoritative and fast, and this write lets queued messages survive a
+  backend restart. `messages` is a plain list of strings. An empty list clears
+  the mirror. Creates the session record if none exists yet.
+  """
+  @spec save_queue(String.t(), [String.t()]) :: :ok | {:error, term()}
+  def save_queue(session_id, messages) when is_list(messages) do
+    strings = for m <- messages, is_binary(m), do: m
+    update_metadata(session_id, %{queued_messages: strings})
+  end
+
+  @doc "Load the persisted per-session message queue as a list of strings ([] if none)."
+  @spec load_queue(String.t()) :: [String.t()]
+  def load_queue(session_id) do
+    with {:ok, json} <- File.read(session_path(session_id)),
+         {:ok, %{"queued_messages" => q}} when is_list(q) <- Jason.decode(json) do
+      for m <- q, is_binary(m), do: m
+    else
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
   @doc "Auto-save session state (called from hooks)."
   def auto_save(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
@@ -289,7 +316,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:ok, json} ->
         case Jason.decode(json) do
           {:ok, existing} when is_map(existing) ->
-            Enum.reduce(["title", "tags"], data, fn key, acc ->
+            Enum.reduce(["title", "tags", "queued_messages"], data, fn key, acc ->
               case Map.get(existing, key) do
                 nil -> acc
                 val -> Map.put(acc, key, val)

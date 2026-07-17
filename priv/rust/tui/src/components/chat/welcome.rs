@@ -111,6 +111,12 @@ pub fn welcome_lines(
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     ));
 
+    // Version subtitle (centered, faint) — single build-time source, never stale.
+    let version_label = format!("OSA v{}", crate::config::osa_version());
+    let version_pad = (box_width.saturating_sub(version_label.len())) / 2;
+    let version_centered = format!("{}{}", " ".repeat(version_pad), version_label);
+    lines.push(make_bordered(&version_centered, theme.faint()));
+
     // Empty line
     lines.push(make_bordered("", Style::default()));
 
@@ -198,6 +204,43 @@ pub fn welcome_lines(
         "  /resume"
     };
     lines.push(Line::from(Span::styled(resume_hint, theme.faint())));
+
+    // First-run cheatsheet — the differentiators, in OSA blue. Responsive so it
+    // never clips mid-word on narrow panes. Teaches the things new users miss:
+    // the type-ahead queue, mid-turn /steer, Esc-to-interrupt, the Ctrl+K
+    // palette, and the Shift+Tab mode cycle (including overdrive).
+    let blue = Style::default().fg(theme.colors.primary);
+    lines.push(Line::from(""));
+    if w >= 70 {
+        lines.push(Line::from(vec![
+            Span::styled("  New here?  ", blue.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Keep typing while OSA works \u{2014} messages queue  \u{00b7}  /steer redirects mid-turn  \u{00b7}  Esc interrupts",
+                theme.welcome_tip(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("             ", blue),
+            Span::styled(
+                "Ctrl+K command palette  \u{00b7}  Shift+Tab cycles modes: ask \u{2192} auto-edit \u{2192} plan \u{2192} overdrive",
+                theme.welcome_tip(),
+            ),
+        ]));
+    } else if w >= 40 {
+        lines.push(Line::from(Span::styled(
+            "  Type to queue  \u{00b7}  /steer mid-turn  \u{00b7}  Esc interrupts",
+            blue,
+        )));
+        lines.push(Line::from(Span::styled(
+            "  Ctrl+K palette  \u{00b7}  Shift+Tab modes (incl overdrive)",
+            blue,
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  /steer \u{00b7} Esc \u{00b7} Ctrl+K \u{00b7} Shift+Tab",
+            blue,
+        )));
+    }
 
     lines
 }

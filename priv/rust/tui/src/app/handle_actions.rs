@@ -141,6 +141,15 @@ impl App {
         response: String,
         signal: Option<crate::client::types::Signal>,
     ) {
+        // If nothing is in the foreground (state is Idle) yet a background turn
+        // is still running, this response belongs to that backgrounded turn —
+        // its output is about to land in scrollback, so retire the handle and
+        // update the running count. (Foregrounded turns were already removed
+        // from `bg_tasks` by `foreground_task`, so this can't double-count.)
+        if !self.state.is_processing() && self.bg_running_count() > 0 {
+            self.complete_background_task();
+        }
+
         // Truncate if too long
         let display_response = if response.len() > super::MAX_MESSAGE_SIZE {
             let truncated = truncate_str(&response, super::MAX_MESSAGE_SIZE);
@@ -521,26 +530,127 @@ impl App {
         });
     }
 
+    /// Number of background turns still running (not yet completed).
+    pub(crate) fn bg_running_count(&self) -> usize {
+        self.bg_tasks.iter().filter(|t| !t.done).count()
+    }
+
+    /// Ctrl+B — push the running turn to the background. The turn is NOT
+    /// cancelled: it keeps running on the backend (the session SSE stream stays
+    /// connected and its final answer still lands in scrollback). We record a
+    /// real handle so `/bg` can list it and `/fg` can bring it back — no
+    /// one-way dead-end.
     pub(super) fn background_task(&mut self) {
         if self.state != AppState::Processing {
             return;
         }
-        let summary = format!(
-            "Background task ({}s)",
-            self.processing_start
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0)
-        );
-        self.bg_tasks.push(summary);
-        self.status.set_background_count(self.bg_tasks.len());
-        self.status.set_shell_count(self.bg_tasks.len());
+        // Summarize with the prompt that started this turn so `/bg` is legible.
+        let summary = self
+            .chat
+            .last_user_message()
+            .map(|m| {
+                let one_line = m.replace('\n', " ");
+                let trimmed = one_line.trim();
+                if trimmed.chars().count() > 60 {
+                    let short: String = trimmed.chars().take(57).collect();
+                    format!("{}...", short)
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "background turn".to_string());
+
+        self.bg_task_seq += 1;
+        let id = self.bg_task_seq;
+        self.bg_tasks.push(crate::app::BackgroundTask {
+            id,
+            summary,
+            // Preserve the real turn start so the timer is accurate on bring-back.
+            started_at: self.processing_start.unwrap_or_else(std::time::Instant::now),
+            done: false,
+        });
+        self.status.set_background_count(self.bg_running_count());
         self.toasts.push(
-            "Moved to background".into(),
+            format!("Backgrounded [{}] — /fg to bring it back · /bg to list", id),
             crate::components::toast::ToastLevel::Info,
         );
-        // Don't cancel processing, just hide the activity
+        self.announce_a11y(&format!(
+            "turn [{}] moved to background; type /fg to bring it back",
+            id
+        ));
+        // Don't cancel processing — just detach the live activity view.
         self.activity.stop();
+        self.status.set_active(false);
         self.transition(AppState::Idle);
+    }
+
+    /// `/fg` (and the agents dashboard bring-back) — re-attach the most recent
+    /// still-running background turn to the foreground activity view. The turn
+    /// never stopped, so this just re-shows the live indicator and restores the
+    /// elapsed timer. If the turn already finished, its answer is in scrollback
+    /// and we say so instead of pretending there's something to resume.
+    pub(crate) fn foreground_task(&mut self) {
+        // Newest running task first.
+        let idx = self
+            .bg_tasks
+            .iter()
+            .rposition(|t| !t.done);
+        let Some(idx) = idx else {
+            // Nothing running. If completed ones exist, their output already
+            // landed in chat; otherwise there was never anything backgrounded.
+            let msg = if self.bg_tasks.is_empty() {
+                "No background tasks"
+            } else {
+                "No running background task — completed output is in the chat above"
+            };
+            self.toasts
+                .push(msg.into(), crate::components::toast::ToastLevel::Info);
+            return;
+        };
+
+        // Can't foreground while another turn is already visibly processing.
+        if self.state == AppState::Processing {
+            self.toasts.push(
+                "A turn is already in the foreground".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+
+        // It's the foreground turn again — drop the background handle so its
+        // eventual completion flows through the normal foreground path (and the
+        // running count reflects reality immediately).
+        let task = self.bg_tasks.remove(idx);
+        // Restore the live view for the still-running backend turn.
+        self.processing_start = Some(task.started_at);
+        self.activity.start();
+        self.activity.set_model_name(self.header.model_name());
+        self.status.set_active(true);
+        self.transition(AppState::Processing);
+        self.status.set_background_count(self.bg_running_count());
+        self.toasts.push(
+            format!("Foregrounded [{}] {}", task.id, task.summary),
+            crate::components::toast::ToastLevel::Info,
+        );
+        self.announce_a11y(&format!("brought background turn [{}] to the foreground", task.id));
+    }
+
+    /// Mark the most recent still-running background turn as complete. Called
+    /// when an agent response arrives while nothing is in the foreground — that
+    /// response belongs to the backgrounded turn, whose output has now landed in
+    /// scrollback. Keeps `/bg` and the status count honest.
+    pub(super) fn complete_background_task(&mut self) {
+        if let Some(task) = self.bg_tasks.iter_mut().rev().find(|t| !t.done) {
+            task.done = true;
+            let id = task.id;
+            self.status.set_background_count(self.bg_running_count());
+            self.toasts.push(
+                format!("Background task [{}] finished — output is above", id),
+                crate::components::toast::ToastLevel::Success,
+            );
+            self.announce_a11y(&format!("background task [{}] finished", id));
+        }
     }
 
     pub fn check_health(&self) {

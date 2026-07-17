@@ -141,21 +141,37 @@ impl App {
                 self.do_logout();
             }
             "/bg" => {
+                // List backgrounded turns with live/done status. Backgrounding
+                // (Ctrl+B) keeps the turn running on the backend; `/fg` brings
+                // the most recent running one back to the foreground.
                 if self.bg_tasks.is_empty() {
                     self.toasts.push(
-                        "No background tasks".into(),
+                        "No background tasks — Ctrl+B backgrounds the running turn".into(),
                         crate::components::toast::ToastLevel::Info,
                     );
                 } else {
-                    let msg = self
-                        .bg_tasks
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| format!("{}. {}", i + 1, t))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.toasts.push(msg, crate::components::toast::ToastLevel::Info);
+                    let mut out = String::from("Background tasks:");
+                    for t in &self.bg_tasks {
+                        let (mark, state) = if t.done {
+                            ("\u{2713}", "done") // ✓
+                        } else {
+                            ("\u{25CF}", "running") // ●
+                        };
+                        out.push_str(&format!(
+                            "\n  {} [{}] {} ({})",
+                            mark, t.id, t.summary, state
+                        ));
+                    }
+                    if self.bg_running_count() > 0 {
+                        out.push_str("\n  /fg brings the most recent running turn back");
+                    }
+                    self.chat.add_system_message(&out, "info");
                 }
+            }
+            "/fg" | "/foreground" => {
+                // Bring the most recent still-running background turn back to the
+                // foreground activity view (BG -> FG return path).
+                self.foreground_task();
             }
             "/agents" => {
                 // Open the full-screen background-agent dashboard (running +
@@ -297,6 +313,18 @@ impl App {
                 let label = format!("{:?}", self.voice.provider);
                 self.toasts.push(
                     format!("Voice: {}", label),
+                    crate::components::toast::ToastLevel::Info,
+                );
+            }
+            "/version" => {
+                // Version from the single build-time source (tag-stamped or Cargo
+                // semver). Rendered into scrollback so it stays visible.
+                self.chat.add_system_message(
+                    &format!("OSA {}", crate::config::osa_version()),
+                    "info",
+                );
+                self.toasts.push(
+                    format!("OSA {}", crate::config::osa_version()),
                     crate::components::toast::ToastLevel::Info,
                 );
             }

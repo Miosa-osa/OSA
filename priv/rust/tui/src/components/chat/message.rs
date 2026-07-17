@@ -26,7 +26,7 @@ pub enum MessageType {
 }
 
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
-const HELP_LINE_COUNT: u16 = 47;
+const HELP_LINE_COUNT: u16 = 52;
 
 /// Stored tool call metadata for rich rendering.
 #[derive(Clone)]
@@ -552,11 +552,16 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  /model <name>", "Switch model"),
         ("  /sessions", "Browse sessions"),
         ("  /session new", "New session"),
+        ("  /steer <text>", "Redirect the agent mid-turn (queues if idle)"),
+        ("  /bg", "List background turns (Ctrl+B backgrounds one)"),
+        ("  /fg", "Bring a backgrounded turn back to the foreground"),
+        ("  /agents", "Background-agent dashboard (running + finished)"),
         ("  /rewind", "Restore code/conversation from a checkpoint"),
         ("  /theme <name>", "Switch theme"),
         ("  /verbose", "Toggle tool detail"),
         ("  /yolo", "Toggle auto-approve (dangerous)"),
         ("  /desktop", "Open desktop GUI in browser"),
+        ("  /version", "Show OSA version"),
         ("  /exit", "Quit"),
     ];
 

@@ -18,12 +18,29 @@ defmodule OptimalSystemAgent.ReleaseNotes do
 
   # ── Version ──────────────────────────────────────────────────────────
 
-  @doc "The running OSA version (app spec → VERSION file → \"unknown\")."
+  @doc """
+  The running OSA version — single source of truth for every reporter.
+
+  Resolution order (first hit wins):
+
+    1. `OSA_VERSION` env — the stamp the release CI injects into the built
+       artifact so a tagged build always reports its exact tag.
+    2. The compiled app spec `:vsn` (derived from the `VERSION` file at build
+       time via `mix.exs`).
+    3. The `VERSION` file on disk (source checkouts).
+    4. `"unknown"`.
+  """
   @spec current_version() :: String.t()
   def current_version do
-    case Application.spec(@app, :vsn) do
-      nil -> read_version_file()
-      vsn -> to_string(vsn)
+    case System.get_env("OSA_VERSION") do
+      v when is_binary(v) and v != "" ->
+        String.trim(v)
+
+      _ ->
+        case Application.spec(@app, :vsn) do
+          nil -> read_version_file()
+          vsn -> to_string(vsn)
+        end
     end
   end
 

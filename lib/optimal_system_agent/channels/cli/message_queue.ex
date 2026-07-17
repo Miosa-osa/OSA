@@ -5,10 +5,21 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
   Rapid-fire user messages within a short window are batched into a single
   API turn. Slash commands bypass the queue entirely. Messages arriving
   while the agent is busy are held until it finishes.
+
+  ## Durability (task #32)
+
+  The `queued` list (messages accepted while the agent is busy) is mirrored to
+  the session store on every mutation via `SessionPersistence.save_queue/2`, and
+  restored on `init/1`. The in-memory queue stays authoritative and fast — the
+  persisted copy is a durable mirror so queued-but-unsent messages survive a
+  backend restart instead of being silently lost. The `pending` debounce batch
+  is intentionally *not* persisted: it flushes within the debounce window and
+  only exists while the agent is idle.
   """
   use GenServer
   require Logger
 
+  alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Channels.CLI.{Commands, Session}
 
   @debounce_ms 300
@@ -55,14 +66,33 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
 
   @impl true
   def init(session_id) do
-    {:ok, %__MODULE__{session_id: session_id}}
+    # Restore any queued-but-unsent messages persisted before a restart. They
+    # come back as {text, []} tuples (opts are transient debounce metadata and
+    # are not mirrored). The agent is assumed idle at startup, so they sit in
+    # `queued` and dispatch on the first `agent_finished`.
+    restored =
+      case restore_queue(session_id) do
+        [] ->
+          []
+
+        msgs ->
+          Logger.info(
+            "[message_queue] restored #{length(msgs)} queued message(s) for #{session_id}"
+          )
+
+          Enum.map(msgs, fn m -> {m, []} end)
+      end
+
+    {:ok, %__MODULE__{session_id: session_id, queued: restored}}
   end
 
   @impl true
   def handle_cast({:enqueue, message, opts}, state) do
     if state.agent_busy do
-      # Agent is working — queue for later
-      {:noreply, %{state | queued: state.queued ++ [{message, opts}]}}
+      # Agent is working — queue for later (and mirror to disk for restart safety)
+      queued = state.queued ++ [{message, opts}]
+      persist_queue(state.session_id, queued)
+      {:noreply, %{state | queued: queued}}
     else
       # Cancel existing debounce timer
       if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
@@ -85,7 +115,8 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
         {:noreply, state}
 
       [{message, opts} | rest] ->
-        # Dispatch next queued message
+        # Dispatch next queued message; shrink the durable mirror to match.
+        persist_queue(state.session_id, rest)
         dispatch_to_agent(message, opts, state.session_id)
         {:noreply, %{state | queued: rest, agent_busy: true}}
     end
@@ -116,6 +147,27 @@ defmodule OptimalSystemAgent.Channels.CLI.MessageQueue do
 
   defp dispatch_to_agent(message, opts, session_id) do
     Session.send_to_agent(message, session_id, opts)
+  end
+
+  # Mirror the queued message texts to the durable session store. Best-effort:
+  # a persistence failure must never crash the live queue.
+  defp persist_queue(session_id, queued) do
+    texts = for {msg, _opts} <- queued, is_binary(msg), do: msg
+    SessionPersistence.save_queue(session_id, texts)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Read back any persisted queue on startup (best-effort → []).
+  defp restore_queue(session_id) do
+    SessionPersistence.load_queue(session_id)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp via(session_id) do
