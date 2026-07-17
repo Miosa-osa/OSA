@@ -260,8 +260,14 @@ impl App {
                             .add_system_message(&resp.output, "error");
                     }
                     "prompt" => {
-                        // Feed output back as prompt
+                        // Feed output back as a prompt (used by custom
+                        // ~/.osa/commands/*.md commands: the expanded body is
+                        // submitted as the turn's prompt). submit_prompt sets
+                        // Processing and starts a real turn — return early so the
+                        // post-match cleanup below does NOT immediately flip us
+                        // back to Idle / stop the spinner.
                         self.submit_prompt(&resp.output);
+                        return;
                     }
                     "action" => {
                         if let Some(action) = resp.action {

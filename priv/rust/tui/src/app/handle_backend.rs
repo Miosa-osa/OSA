@@ -341,11 +341,14 @@ impl App {
                     }
                 };
                 merge_tui_native_commands(&mut commands);
-                let with_desc: Vec<(String, String)> = commands
+                // Carry the category through so the `/` completion popup can tag
+                // user-defined "custom" commands (~/.osa/commands/*.md) distinctly
+                // from built-ins.
+                let with_cat: Vec<(String, String, Option<String>)> = commands
                     .iter()
-                    .map(|c| (c.name.clone(), c.description.clone()))
+                    .map(|c| (c.name.clone(), c.description.clone(), c.category.clone()))
                     .collect();
-                self.input.set_commands_with_descriptions(with_desc);
+                self.input.set_command_items(with_cat);
                 self.command_entries = commands;
             }
             BackendEvent::ToolsLoaded(result) => match result {

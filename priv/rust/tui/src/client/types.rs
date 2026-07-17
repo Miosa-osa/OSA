@@ -73,7 +73,12 @@ pub struct CommandExecuteRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandExecuteResponse {
+    // Some backend command responses only send `{output, command}` (no kind);
+    // default to an empty string so those still deserialize and route to the
+    // plain-info render path rather than failing the whole response.
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub output: String,
     #[serde(default)]
     pub action: Option<String>,

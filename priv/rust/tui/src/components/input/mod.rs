@@ -157,6 +157,23 @@ impl InputComponent {
         self.completions.set_items(items);
     }
 
+    /// Set commands with descriptions AND an optional category for the inline
+    /// completions popup. The category (e.g. "custom" for user-defined
+    /// `~/.osa/commands/*.md` commands) lets the popup tag entries so a
+    /// user-authored command is visually distinguished from a built-in.
+    pub fn set_command_items(&mut self, commands: Vec<(String, String, Option<String>)>) {
+        let items: Vec<CompletionItem> = commands
+            .iter()
+            .map(|(name, desc, category)| CompletionItem {
+                name: format!("/{}", name),
+                description: desc.clone(),
+                category: category.clone(),
+            })
+            .collect();
+        self.commands = commands.iter().map(|(n, _, _)| n.clone()).collect();
+        self.completions.set_items(items);
+    }
+
     /// Return the total height this input needs: top divider + text lines +
     /// bottom divider (Claude-Code frames the prompt with a rule above AND below).
     /// Single-line: 3. Multiline or wrapped: 2 + extra lines (capped at 11).

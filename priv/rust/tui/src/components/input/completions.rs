@@ -151,7 +151,11 @@ impl Completions {
             .filtered
             .iter()
             .filter_map(|&i| self.items.get(i))
-            .map(|item| item.name.len() + 2 + item.description.len() + 4)
+            .map(|item| {
+                // name + gaps + description + optional " custom" tag width
+                let tag = item.category.as_deref().map_or(0, |c| c.len() + 3);
+                item.name.len() + 2 + item.description.len() + 4 + tag
+            })
             .max()
             .unwrap_or(20);
         let popup_width = (longest as u16)
@@ -269,12 +273,27 @@ impl Completions {
             // Fill background for the whole row
             frame.render_widget(Paragraph::new("").style(row_style), row_rect);
 
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw("  "),
                 Span::styled(item.name.clone(), name_style),
                 Span::raw("  "),
                 Span::styled(item.description.clone(), desc_style),
-            ]);
+            ];
+
+            // Tag user-defined "custom" commands (~/.osa/commands/*.md) so they
+            // stand out from built-ins in the popup. Selected rows keep the
+            // selection style for legibility; otherwise use the category accent.
+            if item.category.as_deref() == Some("custom") {
+                let tag_style = if is_selected {
+                    row_style
+                } else {
+                    theme.completion_category()
+                };
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("custom", tag_style));
+            }
+
+            let line = Line::from(spans);
 
             frame.render_widget(Paragraph::new(line).style(row_style), row_rect);
         }
