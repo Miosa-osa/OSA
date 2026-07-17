@@ -92,7 +92,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 ├── Supervisors.AgentServices   (one_for_one)  — memory, hooks, orchestrator, vault
 ├── Supervisors.Extensions      (one_for_one)  — sandbox, fleet, sidecars (opt-in)
 ├── Channels.Starter            Deferred channel boot
-└── Bandit HTTP                 REST API — port 8089
+└── Bandit HTTP                 REST API — port 9089
 ```
 
 ### Key Numbers
@@ -116,8 +116,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 
 | Port | Service |
 |---|---|
-| 8089 | Elixir backend — REST API + SSE + webhook receiver |
-| 9089 | Tauri desktop app sidecar (connects to 8089 on startup) |
+| 9089 | Elixir backend — REST API + SSE + webhook receiver. The Tauri desktop app runs this as a sidecar and connects to it on startup. |
 | 11434 | Ollama local inference (default, optional) |
 
 ---

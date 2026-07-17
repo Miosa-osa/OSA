@@ -60,7 +60,7 @@ cause analysis, reproduction steps where available, and suggested fixes.
 | [UX-002](ux/UX-002-retry-star-broken.md) | Retry/star button not working | Desktop App | Open |
 | [UX-003](ux/UX-003-ollama-not-selectable.md) | Ollama not showing as selectable | Desktop App | Open |
 | [UX-004](ux/UX-004-desktop-ux-issues.md) | General desktop UX issues | Desktop App | Open |
-| [UX-005](ux/UX-005-port-mismatch.md) | Port mismatch 8089 vs 9089 | Desktop/Backend | Open |
+| [UX-005](ux/UX-005-port-mismatch.md) | Port mismatch 8089 vs 9089 | Desktop/Backend | Resolved (both now 9089) |
 
 ### Fixed (4)
 
