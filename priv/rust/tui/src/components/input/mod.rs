@@ -1165,10 +1165,11 @@ impl Component for InputComponent {
             // Always-visible prefix hint, right-aligned on the bottom divider so
             // OSA's composer affordances are discoverable at a glance. Advertises
             // only prefixes that actually work.
-            let hint = if (area.width as usize) >= 74 {
-                "  / commands \u{00b7} @ files \u{00b7} ! shell \u{00b7} \u{21e7}\u{23ce} newline \u{00b7} ^K palette  "
-            } else if (area.width as usize) >= 44 {
-                "  / cmds \u{00b7} @ files \u{00b7} ! shell  "
+            // Keep this minimal — the essentials only, so the composer reads calm
+            // rather than busy. Shell (`!`) / newline / palette stay discoverable
+            // via /help and the welcome hint instead of crowding this line.
+            let hint = if (area.width as usize) >= 60 {
+                "  / commands \u{00b7} @ files  "
             } else {
                 ""
             };
@@ -1256,7 +1257,7 @@ impl Component for InputComponent {
             let placeholder = if self.recording {
                 "\u{25C9} Recording... press Enter to stop, Esc to cancel"
             } else {
-                "Ask OSA anything \u{2014} / for commands, @ to add files, ! to run shell"
+                "Ask OSA anything\u{2026}"
             };
             let placeholder_style = if self.recording {
                 Style::default().fg(Color::Red)
@@ -1316,11 +1317,17 @@ impl Component for InputComponent {
         // Slash command completions popup (draws above input)
         self.completions.draw(frame, area);
 
-        // Step 9: File search dropdown
+        // Step 9: File search dropdown — drawn above the input, growing upward.
+        // It must stay inside the frame's real drawable area: the inline
+        // viewport's frame buffer starts at `bounds.y`, so rows are clamped to
+        // never land above the buffer top (or the input) and each row rect is
+        // clipped to `bounds` before rendering.
+        let bounds = frame.area();
         if self.file_search_active && !self.file_matches.is_empty() && area.height > 3 {
-            // Draw dropdown above the input (going upward from separator)
-            let max_visible = self.file_matches.len().min(5) as u16;
-            let dropdown_y = area.y.saturating_sub(max_visible);
+            // Room available above the input, bounded by the frame's top.
+            let room_above = area.y.saturating_sub(bounds.y);
+            let max_visible = self.file_matches.len().min(5).min(room_above as usize) as u16;
+            let dropdown_y = area.y.saturating_sub(max_visible).max(bounds.y);
             for (i, path) in self.file_matches.iter().take(max_visible as usize).enumerate() {
                 let row_y = dropdown_y + i as u16;
                 if row_y >= area.y {
@@ -1337,7 +1344,11 @@ impl Component for InputComponent {
                 let prefix = if is_selected { "\u{25b8} " } else { "  " };
                 let display = format!("{}{}", prefix, path);
                 let line = Line::from(Span::styled(display, style));
-                let row_area = Rect::new(area.x + 2, row_y, area.width.saturating_sub(4), 1);
+                let row_area =
+                    Rect::new(area.x + 2, row_y, area.width.saturating_sub(4), 1).intersection(bounds);
+                if row_area.width == 0 || row_area.height == 0 {
+                    continue;
+                }
                 frame.render_widget(Paragraph::new(line), row_area);
             }
         }

@@ -27,6 +27,22 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
     rect.intersection(frame.area())
 }
 
+/// Compute the inline-viewport height the live region wants, given the
+/// composer's current needed height. The chrome overhead (streaming preview +
+/// activity + context hint + 2-row status) is a fixed 5 rows, sized so an empty
+/// composer (needed height 3) yields exactly [`crate::LIVE_H_BASE`]. Only the
+/// composer's own height drives growth, so the viewport doesn't churn as
+/// transient activity rows come and go mid-turn. The result is clamped to
+/// `[LIVE_H_BASE, term_rows - 1]` (with the floor lowered on tiny terminals so
+/// the clamp bounds never invert).
+pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
+    const OVERHEAD: u16 = 5;
+    let want = OVERHEAD.saturating_add(input_needed);
+    let hi = term_rows.saturating_sub(1).max(1);
+    let lo = crate::LIVE_H_BASE.min(hi);
+    want.clamp(lo, hi)
+}
+
 /// Render `widget` into `rect` after clipping it to the frame's drawable area.
 /// Skips the draw entirely when nothing survives the clip. This is the single
 /// choke point that guarantees a widget can never index outside the frame
@@ -68,10 +84,19 @@ impl App {
         // The terminal was built Inline; the app boots in Connecting (which wants
         // the full viewport), so the first iteration flips to full before drawing.
         let mut was_full = false;
+        // Current inline-viewport height. The composer grows the live region (up
+        // to ~5 text lines) and a terminal resize reshapes it, so this tracks the
+        // height the viewport is currently built at and is rebuilt when the wanted
+        // height changes. Seeded with the height main.rs constructed the viewport.
+        let mut cur_inline_h = inline_h;
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
             let want_full = self.wants_full_viewport();
+            // Height the inline live region wants right now (grows with the
+            // composer, always clamped to the terminal so it can't overflow).
+            let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
+            let desired_inline_h = self.desired_inline_height(term_rows);
             if want_full != was_full {
                 if want_full {
                     // Full screen (Terminal::new) does NOT query the cursor, so no
@@ -85,10 +110,27 @@ impl App {
                     // practice (the user just closed a dialog).
                     term_handle.abort();
                     let _ = term_handle.await;
-                    switch_to_inline(&mut terminal, inline_h)?;
+                    switch_to_inline(&mut terminal, desired_inline_h)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                    cur_inline_h = desired_inline_h;
                 }
                 was_full = want_full;
+            } else if !was_full && desired_inline_h != cur_inline_h {
+                // Staying inline, but the wanted height changed — the composer
+                // grew/shrank or the terminal was resized. Rebuild the inline
+                // viewport at the new height so it fits (grow) and so ratatui's
+                // in-place inline-resize path (which can misplace the viewport on
+                // a shrink) is bypassed entirely. Clear first so no stale rows of
+                // the previous, differently-sized live region are left behind —
+                // this is what kills the duplicated banners / status lines the
+                // user saw after resizing. Pause the reader around the DSR query,
+                // exactly as the full→inline switch does.
+                let _ = terminal.clear();
+                term_handle.abort();
+                let _ = term_handle.await;
+                rebuild_inline(&mut terminal, desired_inline_h)?;
+                term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                cur_inline_h = desired_inline_h;
             }
 
             // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
@@ -331,6 +373,15 @@ impl App {
         }
     }
 
+    /// Height the inline viewport wants right now. Driven by the composer's
+    /// current needed height (so pressing Shift+Enter visibly grows the live
+    /// region up to ~5 text lines), with a fixed chrome overhead and a clamp to
+    /// the terminal size — see [`live_region_height`]. Kept independent of
+    /// transient activity rows so the viewport doesn't churn mid-turn.
+    pub fn desired_inline_height(&self, term_rows: u16) -> u16 {
+        live_region_height(self.input.needed_height(), term_rows)
+    }
+
     /// Draw the compact inline live region: streaming preview, thinking/activity,
     /// status, and input. Finalized conversation lives in native scrollback.
     fn draw_inline(&self, frame: &mut Frame, area: Rect) {
@@ -358,12 +409,17 @@ impl App {
             ])
             .split(area);
 
+        // Wipe the whole inline region first so no stale rows from a previous,
+        // differently-sized frame bleed through (belt-and-braces against the
+        // duplicated/overlapping banners the user saw after a resize).
+        let bounds = frame.area();
+        frame.render_widget(ratatui::widgets::Clear, bounds);
+
         // Bounds-check every live-region rect against the frame's real drawable
         // area before handing it to a component. The layout is derived from
         // `area`, but a lagged resize or an under-reported inline viewport can
         // leave a row partly outside the frame buffer; clamping keeps each
         // component's internal `render_widget` calls inside the buffer.
-        let bounds = frame.area();
         let a_stream = clamp_to_frame(frame, rows[0]);
         let a_think = clamp_to_frame(frame, rows[1]);
         let a_hint = clamp_to_frame(frame, rows[2]);
@@ -454,6 +510,43 @@ fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
     ))
 }
 
+/// Rebuild the inline viewport at a new height *without* leaving/entering the
+/// alt screen (we're already inline). Used when the live region grows/shrinks or
+/// the terminal is resized. Like [`switch_to_inline`] it primes the cursor query
+/// (DSR) and retries, since the query can be dropped intermittently. The caller
+/// must have paused the terminal event reader first (shared stdin) and should
+/// `terminal.clear()` beforehand so no stale rows of the old-sized region remain.
+fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
+    for _ in 0..40 {
+        if crossterm::cursor::position().is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let mut last_err = None;
+    for attempt in 0..6u64 {
+        match Terminal::with_options(
+            CrosstermBackend::new(std::io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(inline_h),
+            },
+        ) {
+            Ok(t) => {
+                *terminal = t;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "failed to rebuild inline viewport after retries: {:?}",
+        last_err
+    ))
+}
+
 /// True when `key` is Ctrl+O (the transcript-viewer toggle).
 fn is_ctrl_o(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('o')) && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -484,8 +577,10 @@ fn toast_rect(area: Rect) -> Rect {
 #[cfg(test)]
 mod render_tests {
     use super::{clamp_to_frame, safe_render_widget};
+    use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
+    use ratatui::Frame;
     use ratatui::widgets::{Block, Borders, Paragraph};
     use ratatui::Terminal;
 
@@ -677,6 +772,179 @@ mod render_tests {
                 });
             }
         }
+    }
+
+    // ── Reproduction: the slash-completions popup out-of-buffer crash ────────
+    //
+    // The real crash (`index outside of buffer: the area is Rect { x: 0, y: 13,
+    // width: 92, height: 8 } but index is (0, 9)`) only manifests when the frame
+    // buffer's area starts at y > 0 — a genuine inline viewport parked partway
+    // down the terminal. Under a plain `TestBackend` the frame starts at y=0, so
+    // the popup's `saturating_sub` floored to 0 and the panic never reproduced.
+    // Here we build a *real* `Inline` viewport whose top sits at `top` and render
+    // the exact live chrome (input + open slash popup + status bar) through the
+    // same clamped layout as `App::draw_inline`.
+    use crate::components::status_bar::StatusBar;
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Position;
+    use ratatui::{TerminalOptions, Viewport};
+
+    fn sample_commands() -> Vec<(String, String)> {
+        [
+            ("help", "Show all commands"),
+            ("compact", "Compact the conversation to free context"),
+            ("continue", "Continue earlier work in this folder"),
+            ("resume", "Browse and resume a past session"),
+            ("model", "Switch the active model"),
+            ("clear", "Clear the screen"),
+            ("steer", "Redirect the current turn mid-flight"),
+            ("goal", "Set an auto-continue goal loop"),
+            ("permissions", "Edit tool permissions"),
+            ("quit", "Exit OSA"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+    }
+
+    /// Press a single character key into the input.
+    fn press(input: &mut InputComponent, ch: char) {
+        let ev = crate::event::Event::Terminal(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        )));
+        input.handle_event(&ev);
+    }
+
+    /// An input with the slash-completions popup open (content "/…").
+    fn input_with_slash_popup(w: u16) -> InputComponent {
+        let mut input = InputComponent::new();
+        input.set_width(w);
+        input.set_commands_with_descriptions(sample_commands());
+        press(&mut input, '/'); // opens the completions popup (all items match "")
+        input
+    }
+
+    /// Mirror `App::draw_inline`'s clamped vertical split, rendering the input
+    /// (with its popup) and the status bar — the crash-prone live chrome.
+    fn draw_inline_chrome(frame: &mut Frame, input: &InputComponent, status: &StatusBar) {
+        let area = frame.area();
+        let think_h = 1u16;
+        let overhead = think_h + 1 + 2;
+        let input_h = input
+            .needed_height()
+            .min(area.height.saturating_sub(overhead + 1))
+            .max(1);
+        let rows = RLayout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(think_h),
+                Constraint::Length(1),
+                Constraint::Length(input_h),
+                Constraint::Length(2),
+            ])
+            .split(area);
+        input.draw(frame, clamp_to_frame(frame, rows[3]));
+        status.draw(frame, clamp_to_frame(frame, rows[4]));
+    }
+
+    /// Build a real `Inline` viewport whose top sits at `top` and render the
+    /// live chrome into it. Any out-of-buffer write panics the test.
+    fn render_inline(top: u16, w: u16, view_h: u16, input: &InputComponent, status: &StatusBar) {
+        let total_h = top.saturating_add(view_h).saturating_add(4).max(1);
+        let mut backend = TestBackend::new(w, total_h);
+        backend.set_cursor_position(Position { x: 0, y: top }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(view_h),
+            },
+        )
+        .unwrap();
+        term.draw(|frame| draw_inline_chrome(frame, input, status))
+            .unwrap();
+    }
+
+    #[test]
+    fn inline_slash_popup_never_panics_at_offset() {
+        // width 92 (the report) plus narrow panes; viewport heights from tiny to
+        // huge; and the viewport parked at several y-offsets (0 never reproduced
+        // the bug, 13 is the exact report geometry).
+        for &(w, vh) in &[
+            (92u16, 3u16),
+            (92, 5),
+            (92, 8),
+            (92, 10),
+            (92, 200),
+            (40, 8),
+            (20, 5),
+            (10, 3),
+            (1, 1),
+        ] {
+            for &top in &[0u16, 5, 13] {
+                let input = input_with_slash_popup(w);
+                let mut status = StatusBar::new();
+                status.set_width(w);
+                status.set_provider_info("openclaw", "glm-5.2:cloud");
+                status.set_context(0.0, 0, 200_000);
+                render_inline(top, w, vh, &input, &status);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_slash_popup_survives_resize() {
+        // Mirror the app's real resize strategy: on a terminal size change it
+        // rebuilds the inline viewport fresh at a height clamped to the new rows
+        // (via `live_region_height`), then draws. This walks a sequence of sizes
+        // — including a hard shrink and a grow — with the slash popup open. The
+        // viewport is parked at a non-zero offset each time (the geometry that
+        // reproduced the original crash).
+        let sizes = [(92u16, 30u16), (50, 6), (120, 40), (40, 5), (200, 60), (10, 3)];
+        for &(w, rows) in &sizes {
+            let input = input_with_slash_popup(w);
+            let mut status = StatusBar::new();
+            status.set_width(w);
+            status.set_provider_info("openclaw", "glm-5.2:cloud");
+            let view_h = super::live_region_height(input.needed_height(), rows);
+            // Park the viewport as low as it can sit for this terminal.
+            let top = rows.saturating_sub(view_h);
+            render_inline(top, w, view_h, &input, &status);
+        }
+    }
+
+    #[test]
+    fn composer_grows_with_newlines() {
+        // Shift+Enter must visibly add composer rows (up to ~5 text lines).
+        let mut input = InputComponent::new();
+        input.set_width(92);
+        let base = input.needed_height();
+        for _ in 0..4 {
+            input.handle_event(&crate::event::Event::Terminal(CrosstermEvent::Key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            )));
+            press(&mut input, 'x');
+        }
+        let grown = input.needed_height();
+        assert!(
+            grown >= base + 4,
+            "composer should grow with newlines: base={base} grown={grown}"
+        );
+        assert!(grown >= 7, "5-line composer should need >= 7 rows, got {grown}");
+    }
+
+    #[test]
+    fn live_region_height_grows_and_clamps() {
+        use super::live_region_height;
+        // Idle composer (needs 3 rows) → exactly the base height.
+        assert_eq!(live_region_height(3, 40), crate::LIVE_H_BASE);
+        // 5-line composer (needs 7 rows) → grows to fit (overhead 5 + 7 = 12).
+        assert_eq!(live_region_height(7, 40), 12);
+        // Never exceeds term_rows - 1 (tiny terminal).
+        assert_eq!(live_region_height(7, 6), 5);
+        // Never below the base on a roomy terminal.
+        assert!(live_region_height(1, 40) >= crate::LIVE_H_BASE);
     }
 
     #[test]

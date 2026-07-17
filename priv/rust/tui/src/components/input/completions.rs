@@ -133,7 +133,20 @@ impl Completions {
 
         let theme = crate::style::theme();
 
-        // Compute popup dimensions
+        // The popup is bottom-anchored above the input and grows upward. It MUST
+        // stay inside the frame's real drawable area: the inline viewport's frame
+        // buffer starts at `bounds.y` (e.g. y=13 when parked partway down the
+        // terminal), so a naive `area.y - popup_height` lands ABOVE the buffer
+        // top and a popup taller than the viewport spills BELOW its bottom —
+        // either writes outside the buffer and panics ratatui. We therefore fit
+        // the popup to the space available *above the input, within the frame*,
+        // and clip every widget to `bounds` before rendering.
+        let bounds = frame.area();
+        if bounds.width == 0 || bounds.height == 0 {
+            return;
+        }
+
+        // Compute desired popup dimensions.
         let longest = self
             .filtered
             .iter()
@@ -141,44 +154,65 @@ impl Completions {
             .map(|item| item.name.len() + 2 + item.description.len() + 4)
             .max()
             .unwrap_or(20);
-        let popup_width = (longest as u16).max(20).min(60).min(area.width);
+        let popup_width = (longest as u16)
+            .max(20)
+            .min(60)
+            .min(area.width)
+            .min(bounds.width);
 
         let visible_count = self.filtered.len().min(self.max_visible) as u16;
-        let popup_height = visible_count + 2; // border top + bottom
+        let desired_height = visible_count + 2; // border top + bottom
 
-        // Popup appears above the input line (bottom-anchored, grows upward)
-        let popup_y = area.y.saturating_sub(popup_height);
-        let popup_x = area.x;
+        // Room available above the input line, bounded by the frame's top. The
+        // popup can be at most this tall; if there isn't room for even a border
+        // pair + one row, skip drawing rather than overflow.
+        let room_above = area.y.saturating_sub(bounds.y);
+        let popup_height = desired_height.min(room_above);
+        if popup_height < 3 {
+            return;
+        }
+
+        let popup_y = area.y.saturating_sub(popup_height).max(bounds.y);
+        let popup_x = area.x.max(bounds.x).min(bounds.right().saturating_sub(1));
 
         let popup_rect = Rect {
             x: popup_x,
             y: popup_y,
             width: popup_width,
             height: popup_height,
-        };
+        }
+        .intersection(bounds);
+        if popup_rect.width == 0 || popup_rect.height == 0 {
+            return;
+        }
 
-        // Clear background
+        // Clear background + bordered container (both already inside `bounds`).
         frame.render_widget(Clear, popup_rect);
-
-        // Bordered container
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.colors.border));
         frame.render_widget(block, popup_rect);
 
-        // Inner area (inside the border)
+        // Inner area (inside the border) — still clipped to `bounds`.
         let inner = Rect {
             x: popup_rect.x + 1,
             y: popup_rect.y + 1,
             width: popup_rect.width.saturating_sub(2),
             height: popup_rect.height.saturating_sub(2),
-        };
+        }
+        .intersection(bounds);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
+        // Only as many rows as physically fit inside the (possibly shrunken)
+        // inner area — never index a row past the popup's clipped height.
+        let rows_fit = inner.height.min(visible_count);
         let show_scroll_up = self.scroll_offset > 0;
         let show_scroll_down = self.scroll_offset + self.max_visible < self.filtered.len();
 
-        for row in 0..visible_count {
+        for row in 0..rows_fit {
             let list_idx = self.scroll_offset + row as usize;
             let item_idx = match self.filtered.get(list_idx) {
                 Some(&i) => i,
@@ -191,14 +225,18 @@ impl Completions {
 
             let is_selected = list_idx == self.selected;
             let is_first = row == 0;
-            let is_last = row == visible_count - 1;
+            let is_last = row == rows_fit - 1;
 
             let row_rect = Rect {
                 x: inner.x,
                 y: inner.y + row,
                 width: inner.width,
                 height: 1,
-            };
+            }
+            .intersection(bounds);
+            if row_rect.width == 0 || row_rect.height == 0 {
+                continue;
+            }
 
             // Scroll indicator rows
             if is_first && show_scroll_up {

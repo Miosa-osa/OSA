@@ -180,67 +180,20 @@ pub fn welcome_lines(
         Style::default().fg(border_color),
     )));
 
-    // Blank line
-    lines.push(Line::from(""));
-
-    // Tips (below the box) — pick the longest variant that fits the pane so it
-    // never clips mid-word on narrow terminals.
+    // One calm, short hint line below the box — the essentials only. The old
+    // wall of tips + resume affordances + a two-line first-run cheatsheet made
+    // the first screen overwhelming (and overflowed the inline viewport); it's
+    // collapsed to a single responsive line here. Kept in OSA blue.
     let w = width as usize;
+    lines.push(Line::from(""));
     let tip = if w >= 70 {
-        "  Ask, code, schedule, delegate  \u{00b7}  /help commands  \u{00b7}  Ctrl+K palette"
+        "  /help for commands  \u{00b7}  @ to add files  \u{00b7}  Ctrl+K palette  \u{00b7}  Shift+Tab cycles modes"
     } else if w >= 40 {
-        "  /help commands  \u{00b7}  Ctrl+K palette"
+        "  /help  \u{00b7}  @ files  \u{00b7}  Ctrl+K palette"
     } else {
         "  /help  \u{00b7}  Ctrl+K"
     };
     lines.push(Line::from(Span::styled(tip, theme.welcome_tip())));
-
-    // Resume affordance — OSA verbs, so picking up prior work is discoverable.
-    let resume_hint = if w >= 70 {
-        "  Pick up earlier work  \u{00b7}  /continue this folder  \u{00b7}  /resume to browse"
-    } else if w >= 40 {
-        "  /continue  \u{00b7}  /resume earlier work"
-    } else {
-        "  /resume"
-    };
-    lines.push(Line::from(Span::styled(resume_hint, theme.faint())));
-
-    // First-run cheatsheet — the differentiators, in OSA blue. Responsive so it
-    // never clips mid-word on narrow panes. Teaches the things new users miss:
-    // the type-ahead queue, mid-turn /steer, Esc-to-interrupt, the Ctrl+K
-    // palette, and the Shift+Tab mode cycle (including overdrive).
-    let blue = Style::default().fg(theme.colors.primary);
-    lines.push(Line::from(""));
-    if w >= 70 {
-        lines.push(Line::from(vec![
-            Span::styled("  New here?  ", blue.add_modifier(Modifier::BOLD)),
-            Span::styled(
-                "Keep typing while OSA works \u{2014} messages queue  \u{00b7}  /steer redirects mid-turn  \u{00b7}  Esc interrupts",
-                theme.welcome_tip(),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("             ", blue),
-            Span::styled(
-                "Ctrl+K command palette  \u{00b7}  Shift+Tab cycles modes: ask \u{2192} auto-edit \u{2192} plan \u{2192} overdrive",
-                theme.welcome_tip(),
-            ),
-        ]));
-    } else if w >= 40 {
-        lines.push(Line::from(Span::styled(
-            "  Type to queue  \u{00b7}  /steer mid-turn  \u{00b7}  Esc interrupts",
-            blue,
-        )));
-        lines.push(Line::from(Span::styled(
-            "  Ctrl+K palette  \u{00b7}  Shift+Tab modes (incl overdrive)",
-            blue,
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "  /steer \u{00b7} Esc \u{00b7} Ctrl+K \u{00b7} Shift+Tab",
-            blue,
-        )));
-    }
 
     lines
 }
@@ -278,6 +231,39 @@ mod welcome_tests {
             let _ = welcome_lines(w, 12, Some("openai"), Some("gpt-4o"));
             let _ = welcome_lines(w, 0, None, None);
         }
+    }
+
+    #[test]
+    fn welcome_stays_compact() {
+        // The first screen must stay calm: the full banner (logo box + model/cwd
+        // + a single short hint line) fits comfortably. A regression that brings
+        // back the multi-line cheatsheet / wall of tips would push this over.
+        let wide = welcome_lines(92, 12, Some("openclaw"), Some("glm-5.2:cloud"));
+        assert!(
+            wide.len() <= 20,
+            "welcome banner should be compact, got {} lines",
+            wide.len()
+        );
+        // Only a blank + one hint line should follow the bottom border.
+        let non_empty_tail = wide
+            .iter()
+            .rev()
+            .take_while(|l| !l.spans.is_empty())
+            .count();
+        assert!(
+            non_empty_tail <= 1,
+            "expected a single hint line after the box, got {non_empty_tail}"
+        );
+
+        // Narrow panes stay compact too (shorter hint, no cheatsheet).
+        let narrow = welcome_lines(38, 12, None, None);
+        assert!(narrow.len() <= 20, "narrow welcome too tall: {}", narrow.len());
+        let narrow_tail = narrow
+            .iter()
+            .rev()
+            .take_while(|l| !l.spans.is_empty())
+            .count();
+        assert!(narrow_tail <= 1, "narrow tail too busy: {narrow_tail}");
     }
 
     #[test]
