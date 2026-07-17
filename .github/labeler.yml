@@ -1,0 +1,39 @@
+# actions/labeler v5 configuration
+# Maps changed file paths to area/* labels for pull requests.
+
+area/channels:
+  - changed-files:
+      - any-glob-to-any-file: 'lib/optimal_system_agent/channels/**'
+
+area/tui:
+  - changed-files:
+      - any-glob-to-any-file: 'priv/rust/tui/**'
+
+area/priv:
+  - changed-files:
+      - any-glob-to-any-file: 'priv/**'
+      - all-globs-to-all-files: '!priv/rust/tui/**'
+
+area/lib:
+  - changed-files:
+      - any-glob-to-any-file: 'lib/**'
+
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file: 'docs/**'
+
+area/examples:
+  - changed-files:
+      - any-glob-to-any-file: 'examples/**'
+
+area/formula:
+  - changed-files:
+      - any-glob-to-any-file: 'Formula/**'
+
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: '**/*.md'
