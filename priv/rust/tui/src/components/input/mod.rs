@@ -56,6 +56,9 @@ pub struct InputComponent {
     completions: Completions,
     /// Mic button area for click detection
     mic_area: Cell<Option<Rect>>,
+    /// Text/editing area of the composer (the row(s) between the dividers),
+    /// captured on draw for click-to-focus / click-to-position-caret.
+    text_area: Cell<Option<Rect>>,
     /// Voice recording active
     recording: bool,
     /// Undo ring — snapshots of (content, cursor) before edits
@@ -97,6 +100,7 @@ impl InputComponent {
             file_search_start: 0,
             completions: Completions::new(),
             mic_area: Cell::new(None),
+            text_area: Cell::new(None),
             recording: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -869,9 +873,12 @@ impl Component for InputComponent {
                 match (key.code, key.modifiers) {
                     // Shift+Enter or Alt+Enter: insert a newline (enters multiline
                     // mode). This is the ONLY way to add a line break — plain Enter
-                    // always submits (Claude Code convention).
+                    // always submits (Claude Code convention). Match on `contains`
+                    // rather than exact equality so a terminal that attaches extra
+                    // modifier bits (e.g. SHIFT+KEYPAD under the kitty protocol)
+                    // still disambiguates to a newline instead of a submit.
                     (KeyCode::Enter, m)
-                        if m == KeyModifiers::ALT || m == KeyModifiers::SHIFT =>
+                        if m.contains(KeyModifiers::ALT) || m.contains(KeyModifiers::SHIFT) =>
                     {
                         self.multiline = true;
                         self.insert_char('\n');
@@ -1190,6 +1197,9 @@ impl Component for InputComponent {
             area.height - 1
         };
         let input_area = Rect::new(area.x, area.y + 1, area.width, input_h);
+        // Remember where the editable text sits so a mouse click can focus the
+        // composer and position the caret (see `handle_click`).
+        self.text_area.set(Some(input_area));
 
         // Vertical scroll: once the input has grown to its cap, keep the cursor's
         // line visible by scrolling within the box (so Shift+Enter keeps working
@@ -1458,6 +1468,39 @@ impl InputComponent {
     /// Returns the rect of the mic button if it was drawn, for click detection
     pub fn mic_area(&self) -> Option<Rect> {
         self.mic_area.get()
+    }
+
+    /// Handle a left-click at terminal cell `(col, row)`. When the click lands in
+    /// the composer's text area, focus the composer and move the caret to the
+    /// clicked column (best-effort: single-line / first-line accuracy; multiline
+    /// clicks land on the first line, which is still an improvement over no
+    /// mouse support). Returns true when the click was inside the composer.
+    pub fn handle_click(&mut self, col: u16, row: u16) -> bool {
+        let Some(area) = self.text_area.get() else {
+            return false;
+        };
+        if col < area.x
+            || col >= area.x.saturating_add(area.width)
+            || row < area.y
+            || row >= area.y.saturating_add(area.height)
+        {
+            return false;
+        }
+        self.focused = true;
+        if self.content.is_empty() {
+            self.cursor = 0;
+            return true;
+        }
+        // Only reposition within the first visual line — the prompt (`❯ ` /
+        // `◈ ❯ `) offsets the text there. Deeper lines keep the current caret.
+        let prompt_len = if self.processing { 4u16 } else { 2 };
+        if row == area.y {
+            let rel = col
+                .saturating_sub(area.x)
+                .saturating_sub(prompt_len);
+            self.set_cursor_col(rel);
+        }
+        true
     }
 }
 

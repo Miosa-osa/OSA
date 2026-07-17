@@ -3,6 +3,70 @@ use crate::app::state::AppState;
 use crate::event::backend::BackendEvent;
 use crate::event::Event;
 
+/// Built-in slash commands the TUI handles (name WITHOUT the leading `/`, plus a
+/// one-line description). This is the authoritative discovery list for the
+/// inline `/` completions popup and the Ctrl+K palette: it seeds the popup at
+/// startup so `/` works immediately (even before — or without — the backend
+/// `GET /commands` response), and is merged with the backend registry so a
+/// TUI-only affordance is always listed. Names are slash-less because the
+/// completions layer prepends the `/` itself.
+pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("help", "Show the command menu"),
+    ("clear", "Clear the conversation view"),
+    ("model", "Switch the active model"),
+    ("models", "Browse and pick a model"),
+    ("sessions", "Browse sessions"),
+    ("resume", "Resume a past session"),
+    ("continue", "Resume this folder's last session"),
+    ("session", "Show or switch session"),
+    ("new", "Start a fresh session"),
+    ("skill", "List, run, or create a skill"),
+    ("steer", "Redirect the agent mid-turn (queues if idle)"),
+    ("bg", "List background turns (Ctrl+B backgrounds one)"),
+    ("fg", "Bring a backgrounded turn to the foreground"),
+    ("agents", "Background-agent dashboard"),
+    ("rewind", "Restore code/conversation from a checkpoint"),
+    ("fork", "Fork this session, keeping history"),
+    ("compact", "Compact the conversation to free context"),
+    ("recap", "Summarize the session so far"),
+    ("context", "Show the token-usage breakdown"),
+    ("cost", "Show cost & token accounting"),
+    ("status", "Show model, tools, context, session"),
+    ("usage", "Show session context usage"),
+    ("tools", "Show how many tools are available"),
+    ("version", "Show the OSA version"),
+    ("reasoning", "Set the reasoning effort level"),
+    ("verbose", "Cycle tool output detail"),
+    ("theme", "Switch the color theme"),
+    ("config", "Open the settings editor"),
+    ("goal", "Set an auto-continue goal loop"),
+    ("auto", "Toggle the safety-guardian auto mode"),
+    ("overdrive", "Toggle overdrive (full auto)"),
+    ("yolo", "Toggle overdrive (full auto)"),
+    ("memory", "Save or recall a memory"),
+    ("channels", "Show channel connectivity"),
+    ("doctor", "Run backend diagnostics"),
+    ("desktop", "Open the desktop GUI"),
+    ("retry", "Re-send the last prompt"),
+    ("undo", "Drop the last exchange"),
+    ("setup", "Re-run the setup wizard"),
+    ("a11y", "Toggle screen-reader mode"),
+    ("login", "Authenticate with the backend"),
+    ("logout", "Sign out"),
+    ("voice", "Show the voice provider"),
+    ("exit", "Quit OSA"),
+    ("quit", "Quit OSA"),
+];
+
+/// Built-in slash commands as owned `(name, description)` pairs (name WITHOUT the
+/// leading `/`), for seeding the inline completions popup at startup.
+pub(crate) fn builtin_slash_commands() -> Vec<(String, String)> {
+    BUILTIN_SLASH_COMMANDS
+        .iter()
+        .map(|(n, d)| (n.to_string(), d.to_string()))
+        .collect()
+}
+
 /// Known providers for /model routing
 const KNOWN_PROVIDERS: &[&str] = &[
     "ollama",
@@ -39,7 +103,17 @@ impl App {
                 self.transition(AppState::Quit);
             }
             "/help" => {
-                self.show_help();
+                // Open the interactive, filterable command menu (the Ctrl+K
+                // palette) rather than dumping a static wall of text — the menu
+                // IS the help. The full keyboard-shortcut reference is still on
+                // the `?` key for anyone who wants the printed cheatsheet.
+                self.open_command_palette();
+            }
+            "/skill" | "/skills" => {
+                // Skills are backend-managed (list / run / create). Route the
+                // verb + args straight to the backend skill command; empty args
+                // list available skills.
+                self.execute_backend_command("skill", arg);
             }
             "/clear" => {
                 self.chat.clear();

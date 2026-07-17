@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, LeaveAlternateScreen},
@@ -80,11 +80,13 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // Load config
     let cfg = config::Config::load(&cli)?;
 
-    // Setup terminal — NO alt screen, NO mouse capture: the host terminal owns
-    // scrollback and native wheel scrolling. Only bracketed paste is enabled so
-    // the Ctrl+V / paste flow keeps working.
+    // Setup terminal — NO alt screen. Bracketed paste keeps the Ctrl+V / paste
+    // flow working, and mouse capture lets the user click into the composer and
+    // position the caret. Capturing the mouse hands wheel events to the app
+    // instead of the terminal's native scrollback; users reach scrollback with
+    // Shift+wheel (terminal bypass) or the Ctrl+O transcript reader.
     enable_raw_mode()?;
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
 
     // Enable the kitty keyboard protocol's disambiguation so distinct keys like
     // Shift+Enter (insert newline) are reported as Enter+SHIFT instead of collapsing
@@ -134,13 +136,20 @@ fn run(cli: config::cli::Cli) -> Result<()> {
             }
         }
     }
+    // If the inline viewport could not be built (the DSR cursor-position query
+    // was dropped on every attempt — some terminals/launch contexts do this),
+    // degrade gracefully to a full-screen terminal rather than aborting with a
+    // "cursor position could not be read" error in the user's face. `Terminal::new`
+    // does NOT query the cursor, so it always succeeds; the event loop's
+    // viewport reconciliation takes over from there. No visible error, no hang.
     let terminal = match terminal {
         Some(t) => t,
         None => {
-            return Err(anyhow::anyhow!(
-                "failed to initialize inline terminal after retries: {:?}",
+            error!(
+                "inline viewport unavailable ({:?}); falling back to full-screen",
                 last_err
-            ))
+            );
+            Terminal::new(CrosstermBackend::new(io::stdout()))?
         }
     };
 
@@ -161,6 +170,7 @@ fn restore_terminal() -> Result<()> {
     // Best-effort: if we crashed while in a modal we may still be on the alt screen.
     let _ = execute!(stdout, LeaveAlternateScreen);
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout, DisableMouseCapture);
     let _ = execute!(stdout, DisableBracketedPaste);
     disable_raw_mode()?;
     // Land the shell prompt below the inline viewport instead of over it.

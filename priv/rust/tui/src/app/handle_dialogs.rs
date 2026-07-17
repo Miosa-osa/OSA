@@ -762,18 +762,47 @@ impl App {
         false
     }
 
-    /// Open the full-screen background-agent dashboard. No-op with a hint if no
-    /// agents have run this session.
+    /// Build the background-terminal rows shown in the dashboard from the live
+    /// `bg_tasks` (Ctrl+B'd turns), newest last, with live elapsed times.
+    pub(crate) fn dashboard_bg_rows(&self) -> Vec<crate::components::agents::BgTerminalRow> {
+        self.bg_tasks
+            .iter()
+            .map(|t| crate::components::agents::BgTerminalRow {
+                id: t.id,
+                summary: t.summary.clone(),
+                elapsed_secs: std::time::Instant::now()
+                    .saturating_duration_since(t.started_at)
+                    .as_secs(),
+                done: t.done,
+            })
+            .collect()
+    }
+
+    /// Total selectable dashboard rows: sub-agents followed by background
+    /// terminals. Selection indices `< entry_count` address agents; the rest
+    /// address `bg_tasks`.
+    pub(crate) fn dashboard_item_count(&self) -> usize {
+        self.agents.entry_count() + self.bg_tasks.len()
+    }
+
+    /// True when there is anything to manage in the dashboard (agents, Ctrl+B'd
+    /// turns, or running background shell jobs).
+    pub(crate) fn has_dashboard_items(&self) -> bool {
+        self.agents.has_entries() || !self.bg_tasks.is_empty() || self.bg_shell_count > 0
+    }
+
+    /// Open the full-screen management dashboard. No-op with a hint if there is
+    /// no agent or background work to manage this session.
     pub(crate) fn open_agents_dashboard(&mut self) {
-        if !self.agents.has_entries() {
+        if !self.has_dashboard_items() {
             self.toasts.push(
-                "No agents have run yet".into(),
+                "Nothing running to manage yet".into(),
                 crate::components::toast::ToastLevel::Info,
             );
             return;
         }
-        let count = self.agents.entry_count();
-        if self.agents_dashboard_selected >= count {
+        let count = self.dashboard_item_count();
+        if count > 0 && self.agents_dashboard_selected >= count {
             self.agents_dashboard_selected = count.saturating_sub(1);
         }
         if self.state.can_transition_to(AppState::AgentsDashboard) {
@@ -818,6 +847,121 @@ impl App {
                 crate::components::toast::ToastLevel::Warning,
             );
         }
+    }
+
+    /// Dashboard "stop" action: cancel the selected sub-agent (backend
+    /// `task_stop` equivalent) or stop the selected background terminal.
+    pub(super) fn stop_selected_dashboard_item(&mut self) {
+        let sel = self.agents_dashboard_selected;
+        let agents = self.agents.entry_count();
+        if sel < agents {
+            self.cancel_selected_agent();
+        } else {
+            self.stop_background_terminal(sel - agents);
+        }
+    }
+
+    /// Dashboard "view" action: bring the selected background terminal back to the
+    /// foreground (its live output) or, for a sub-agent (which has no separate
+    /// output buffer), surface its latest state as a toast.
+    pub(super) fn view_selected_dashboard_item(&mut self) {
+        let sel = self.agents_dashboard_selected;
+        let agents = self.agents.entry_count();
+        if sel < agents {
+            if let Some(summary) = self.agents.entry_summary_at(sel) {
+                self.toasts
+                    .push(summary, crate::components::toast::ToastLevel::Info);
+            }
+        } else {
+            self.view_background_terminal(sel - agents);
+        }
+    }
+
+    /// Bring the background terminal at `bg_idx` back to the foreground activity
+    /// view (viewing its live output). Mirrors `/fg` but targets a specific row.
+    fn view_background_terminal(&mut self, bg_idx: usize) {
+        let Some(task) = self.bg_tasks.get(bg_idx) else {
+            return;
+        };
+        if task.done {
+            self.toasts.push(
+                "That terminal finished — its output is in the chat above".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+            return;
+        }
+        // A foreground turn is running underneath the dashboard — can't attach a
+        // second live turn to the same session.
+        if self.prev_state == Some(AppState::Processing) {
+            self.toasts.push(
+                "A turn is already in the foreground".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+        let task = self.bg_tasks.remove(bg_idx);
+        self.processing_start = Some(task.started_at);
+        self.activity.start();
+        self.activity.set_model_name(self.header.model_name());
+        self.status.set_active(true);
+        // Leave the dashboard straight into the live foreground view.
+        self.transition(AppState::Processing);
+        self.refresh_bg_indicators();
+        self.recompute_layout();
+        self.toasts.push(
+            format!("Foregrounded [{}] {}", task.id, task.summary),
+            crate::components::toast::ToastLevel::Info,
+        );
+        self.announce_a11y(&format!(
+            "brought background terminal [{}] to the foreground",
+            task.id
+        ));
+    }
+
+    /// Stop the background terminal at `bg_idx`. A Ctrl+B'd turn keeps running in
+    /// the session, so stopping it cancels the session's running turn (the same
+    /// backend path as Esc) and drops the handle. Refused when a foreground turn
+    /// is active underneath, so we never cancel unrelated work.
+    fn stop_background_terminal(&mut self, bg_idx: usize) {
+        let Some(task) = self.bg_tasks.get(bg_idx) else {
+            return;
+        };
+        if task.done {
+            self.toasts.push(
+                "That terminal already finished".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+            return;
+        }
+        if self.prev_state == Some(AppState::Processing) {
+            self.toasts.push(
+                "A foreground turn is active — foreground this terminal first, then stop it".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+        let id = task.id;
+        let client = self.client.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.cancel_session(&session_id).await {
+                tracing::warn!("Background terminal cancel failed: {}", e);
+            }
+        });
+        self.bg_tasks.remove(bg_idx);
+        self.refresh_bg_indicators();
+        // Keep the selection in bounds after removal; close if nothing is left.
+        let count = self.dashboard_item_count();
+        if count == 0 {
+            self.close_agents_dashboard();
+        } else if self.agents_dashboard_selected >= count {
+            self.agents_dashboard_selected = count - 1;
+        }
+        self.toasts.push(
+            format!("Stopped background terminal [{}]", id),
+            crate::components::toast::ToastLevel::Warning,
+        );
+        self.announce_a11y(&format!("stopped background terminal [{}]", id));
     }
 
     pub(super) fn open_command_palette(&mut self) {

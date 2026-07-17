@@ -9,6 +9,7 @@ use crate::event::backend::SpawningAgent;
 use super::{Component, ComponentAction};
 use entry::{AgentEntry, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 pub use entry::AgentStatus;
+pub use entry::BgTerminalRow;
 
 // ─── Batch grouping ──────────────────────────────────────────────────────────
 
@@ -29,6 +30,15 @@ pub struct Agents {
     collapsed: bool,
     synthesis: SynthesisState,
     tick: u64,
+    /// Count of background "terminals" (Ctrl+B'd turns + running background shell
+    /// commands) that aren't tree entries. Drives the always-visible
+    /// "N background terminals · ↓ to manage" summary line. Set by `App`.
+    bg_summary: usize,
+    /// Task-level appraised cost in USD from `orchestrator_task_appraised`. The
+    /// backend does NOT report per-agent cost, so this whole-task estimate is the
+    /// only cost signal available; the dashboard surfaces it and notes the
+    /// per-agent breakdown is absent (rather than fabricating one from tokens).
+    est_cost_usd: Option<f64>,
 }
 
 impl Agents {
@@ -42,7 +52,60 @@ impl Agents {
             collapsed: false,
             synthesis: SynthesisState::Idle,
             tick: 0,
+            bg_summary: 0,
+            est_cost_usd: None,
         }
+    }
+
+    /// Set the combined background-terminals count shown in the summary line.
+    pub fn set_bg_summary(&mut self, count: usize) {
+        self.bg_summary = count;
+    }
+
+    /// Record the task-level appraised cost (USD) surfaced in the dashboard.
+    pub fn set_estimated_cost(&mut self, usd: f64) {
+        self.est_cost_usd = Some(usd);
+    }
+
+    /// Task-level appraised cost in USD, if the backend has appraised the task.
+    pub fn est_cost_usd(&self) -> Option<f64> {
+        self.est_cost_usd
+    }
+
+    /// One-line "name — action" summary for the entry at `idx`, used when the
+    /// dashboard "view" action is invoked on an agent (the TUI keeps no separate
+    /// per-agent output buffer, so this is the richest state available).
+    pub fn entry_summary_at(&self, idx: usize) -> Option<String> {
+        self.entries.get(idx).map(|e| {
+            let who = if e.subject.is_empty() { &e.name } else { &e.subject };
+            let action = match e.status {
+                AgentStatus::Completed => "done".to_string(),
+                AgentStatus::Failed if e.current_action.is_empty() => "failed".to_string(),
+                _ if e.current_action.is_empty() => "starting…".to_string(),
+                _ => e.current_action.clone(),
+            };
+            format!(
+                "{} — {} · {} tool{} · {} tok · {}",
+                who,
+                action,
+                e.tool_uses,
+                if e.tool_uses == 1 { "" } else { "s" },
+                e.tokens_used,
+                crate::util::fmt_elapsed(e.elapsed_secs()),
+            )
+        })
+    }
+
+    /// Number of running/spawning background subagents tracked in the panel
+    /// (tagged with the "background" batch id at spawn time).
+    pub fn background_summary_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| {
+                e.batch_id.as_deref() == Some("background")
+                    && matches!(e.status, AgentStatus::Running | AgentStatus::Spawning)
+            })
+            .count()
     }
 
     pub fn is_active(&self) -> bool {
@@ -78,11 +141,14 @@ impl Agents {
     /// Total render height: 0 when inactive, else header + 2*agents + batch headers + optional synth + swarm.
     /// Capped at 30 to prevent degenerate cases.
     pub fn height(&self) -> u16 {
+        // The background-terminals summary line renders even when the agent tree
+        // is inactive, so it contributes a row on its own.
+        let summary_line = if self.bg_summary > 0 { 1u16 } else { 0 };
         if !self.active {
-            return 0;
+            return summary_line;
         }
         if self.collapsed {
-            return 1;
+            return 1 + summary_line;
         }
         let agent_lines = (self.entries.len() as u16) * 2; // 2 rows per agent
         let batch_header_lines = {
@@ -97,8 +163,9 @@ impl Agents {
             0
         };
         let swarm_lines = if self.swarm.is_some() { 1u16 } else { 0 };
-        // 1 header + batch headers + agents + synth + swarm
-        let total = 1 + batch_header_lines + agent_lines + synth_lines + swarm_lines;
+        // summary + 1 header + batch headers + agents + synth + swarm
+        let total =
+            summary_line + 1 + batch_header_lines + agent_lines + synth_lines + swarm_lines;
         total.min(30)
     }
 
@@ -117,6 +184,7 @@ impl Agents {
         self.swarm = None;
         self.synthesis = SynthesisState::Idle;
         self.collapsed = false;
+        self.est_cost_usd = None;
     }
 
     pub fn on_agents_spawning(&mut self, agents: &[SpawningAgent]) {
@@ -319,6 +387,8 @@ impl Agents {
         self.swarm = None;
         self.synthesis = SynthesisState::Idle;
         self.collapsed = false;
+        self.bg_summary = 0;
+        self.est_cost_usd = None;
     }
 }
 
@@ -328,7 +398,9 @@ impl Component for Agents {
     }
 
     fn draw(&self, frame: &mut Frame, area: Rect) {
-        if !self.active || area.height == 0 || area.width == 0 {
+        // Draw when the agent tree is active OR there's a background-terminals
+        // summary to surface (the summary renders even with no live agents).
+        if (!self.active && self.bg_summary == 0) || area.height == 0 || area.width == 0 {
             return;
         }
         self.draw_tree(frame, area);

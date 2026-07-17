@@ -169,6 +169,11 @@ pub struct App {
     pub bg_tasks: Vec<BackgroundTask>,
     /// Monotonic id source so each backgrounded turn gets a stable "[N]" label.
     pub bg_task_seq: usize,
+    /// Count of running background shell commands (`bash` with run_in_background).
+    /// Incremented on the tool-call start, decremented on the backend's
+    /// `background_command_completed` event. Feeds the status-bar shell chip and
+    /// the "N background terminals" summary.
+    pub bg_shell_count: usize,
 
     // Backend auto-start
     pub backend_spawn_attempted: bool,
@@ -293,10 +298,17 @@ impl App {
             sidebar.set_yolo_mode(true);
         }
 
+        // Seed the inline `/` completions with the built-in command set so the
+        // slash menu is populated and filterable immediately — before (or even
+        // without) the backend `GET /commands` response. The backend registry
+        // merges in / overrides this once it loads.
+        let mut input = InputComponent::new();
+        input.set_commands_with_descriptions(crate::app::commands::builtin_slash_commands());
+
         Ok(Self {
             header: Header::new(),
             chat: Chat::new(),
-            input: InputComponent::new(),
+            input,
             status,
             activity: Activity::new(),
             sidebar,
@@ -356,6 +368,7 @@ impl App {
 
             bg_tasks: Vec::new(),
             bg_task_seq: 0,
+            bg_shell_count: 0,
             backend_spawn_attempted: false,
             health_retry_count: 0,
             command_entries: Vec::new(),

@@ -508,6 +508,90 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        // Multi-agent workflow events (Claude Code parity). Emitted directly on
+        // the session topic with a `type` field (no `event` wrapper), so parse the
+        // frame data directly like the background_agent_* arms above. All new
+        // fields use #[serde(default)] for forward/backward compatibility.
+        "agent_finished" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                display_name: String,
+                #[serde(default)]
+                duration_ms: u64,
+                #[serde(default)]
+                batch_id: Option<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("agent_finished", e)),
+            };
+            Some(BackendEvent::AgentFinished {
+                display_name: ev.display_name,
+                duration_ms: ev.duration_ms,
+                batch_id: ev.batch_id,
+            })
+        }
+
+        "agent_message" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                from: String,
+                #[serde(default)]
+                text: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("agent_message", e)),
+            };
+            Some(BackendEvent::AgentMessage {
+                from: ev.from,
+                text: ev.text,
+            })
+        }
+
+        "background_command_completed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                exit_code: i32,
+                #[serde(default)]
+                command: String,
+                // Backend emits the id as `background_id`; accept both so the
+                // decoded task_id (shown in the completion toast) is populated.
+                #[serde(default, alias = "background_id")]
+                task_id: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("background_command_completed", e)),
+            };
+            Some(BackendEvent::BackgroundCommandCompleted {
+                exit_code: ev.exit_code,
+                command: ev.command,
+                task_id: ev.task_id,
+            })
+        }
+
+        "turn_recap" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                elapsed_ms: u64,
+                #[serde(default)]
+                tools_used: Vec<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("turn_recap", e)),
+            };
+            Some(BackendEvent::TurnRecap {
+                elapsed_ms: ev.elapsed_ms,
+                tools_used: ev.tools_used,
+            })
+        }
+
         "" => None,
 
         other => Some(BackendEvent::ParseWarning {
@@ -1140,6 +1224,12 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 message: ev.message,
             })
         }
+
+        // Multi-agent workflow events may also arrive wrapped as a system_event
+        // (with an `event` field). Delegate to the top-level parser, which builds
+        // them from the same frame data.
+        "agent_finished" | "agent_message" | "background_command_completed"
+        | "turn_recap" => parse_sse_event(base.event.as_str(), data),
 
         other if !other.is_empty() => Some(BackendEvent::ParseWarning {
             message: format!("[sse] unknown system_event: {}", other),

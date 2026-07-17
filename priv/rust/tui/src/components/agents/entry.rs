@@ -36,6 +36,22 @@ impl AgentEntry {
     }
 }
 
+/// A background "terminal" row for the dashboard management view: a Ctrl+B'd
+/// turn kept running on the backend. Built by `App` from its `bg_tasks` and
+/// passed into `draw_dashboard` so the dashboard can list, select, view and stop
+/// background terminals alongside sub-agents.
+#[derive(Debug, Clone)]
+pub struct BgTerminalRow {
+    /// Stable 1-based label shown as "[N]".
+    pub id: usize,
+    /// Short human summary (the prompt that started the turn).
+    pub summary: String,
+    /// Wall-clock elapsed since the turn started.
+    pub elapsed_secs: u64,
+    /// True once the backgrounded turn's answer has landed.
+    pub done: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct WaveInfo {
     pub current: u32,

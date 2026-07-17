@@ -16,6 +16,20 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..idx]
 }
 
+/// Format an elapsed duration (in seconds) compactly and identically across the
+/// agents panel, dashboard, teammate-finished chat lines, background completions,
+/// and the turn recap: `45s → 2m15s → 1h03m`. Shared so every surface renders
+/// h/m/s the same way (a 2h33m run must never print as `9180s`).
+pub fn fmt_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Take the last `max_bytes` bytes of a UTF-8 string, advancing the start
 /// index forward until it lands on a char boundary.
 pub fn truncate_str_start(s: &str, max_bytes: usize) -> &str {

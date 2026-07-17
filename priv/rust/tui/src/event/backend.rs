@@ -121,6 +121,34 @@ pub enum BackendEvent {
         duration_ms: u64,
     },
 
+    // === Multi-agent workflow (Claude Code parity) ===
+    /// A named teammate/sub-agent finished. Rendered as a scrollback line
+    /// `⏺ Teammate @{display_name} finished · {duration}`.
+    AgentFinished {
+        display_name: String,
+        duration_ms: u64,
+        batch_id: Option<String>,
+    },
+    /// An inbound message relayed from another agent to the user. Rendered as
+    /// `› Message from @{from}: {text}`.
+    AgentMessage {
+        from: String,
+        text: String,
+    },
+    /// A background shell command finished. Rendered as a toast + scrollback line
+    /// `Background command '{command}' completed (exit code {exit_code})`.
+    BackgroundCommandCompleted {
+        exit_code: i32,
+        command: String,
+        task_id: String,
+    },
+    /// End-of-turn recap. Persisted as a permanent `✻ Worked for {elapsed}` line
+    /// so the elapsed timer survives past the live activity spinner.
+    TurnRecap {
+        elapsed_ms: u64,
+        tools_used: Vec<String>,
+    },
+
     // === Context ===
     ContextPressure {
         utilization: f64,

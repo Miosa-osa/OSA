@@ -17,6 +17,11 @@ impl App {
                     "Backend healthy: {} v{} ({}/{})",
                     health.status, health.version, health.provider, health.model
                 );
+                // The backend's version is the single source of truth for the
+                // displayed version (its root VERSION file) — record it so the
+                // status bar, welcome banner, and /version never show a stale
+                // compile-time value.
+                crate::config::set_runtime_version(&health.version);
                 self.header
                     .set_provider_info(&health.provider, &health.model);
                 self.status
@@ -535,6 +540,17 @@ impl App {
         self.bg_tasks.iter().filter(|t| !t.done).count()
     }
 
+    /// Refresh every "background work" surface at once: the status-bar shell chip
+    /// (running background bash jobs), the status-bar "N bg" chip (Ctrl+B'd turns),
+    /// and the agents-panel "N background terminals · ↓ to manage" summary line.
+    /// The summary is the combined count so ↓ always has something to manage.
+    pub(crate) fn refresh_bg_indicators(&mut self) {
+        self.status.set_shell_count(self.bg_shell_count);
+        self.status.set_background_count(self.bg_running_count());
+        self.agents
+            .set_bg_summary(self.bg_running_count() + self.bg_shell_count);
+    }
+
     /// Ctrl+B — push the running turn to the background. The turn is NOT
     /// cancelled: it keeps running on the backend (the session SSE stream stays
     /// connected and its final answer still lands in scrollback). We record a
@@ -570,7 +586,7 @@ impl App {
             started_at: self.processing_start.unwrap_or_else(std::time::Instant::now),
             done: false,
         });
-        self.status.set_background_count(self.bg_running_count());
+        self.refresh_bg_indicators();
         self.toasts.push(
             format!("Backgrounded [{}] — /fg to bring it back · /bg to list", id),
             crate::components::toast::ToastLevel::Info,
@@ -628,7 +644,7 @@ impl App {
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);
         self.transition(AppState::Processing);
-        self.status.set_background_count(self.bg_running_count());
+        self.refresh_bg_indicators();
         self.toasts.push(
             format!("Foregrounded [{}] {}", task.id, task.summary),
             crate::components::toast::ToastLevel::Info,
@@ -644,7 +660,7 @@ impl App {
         if let Some(task) = self.bg_tasks.iter_mut().rev().find(|t| !t.done) {
             task.done = true;
             let id = task.id;
-            self.status.set_background_count(self.bg_running_count());
+            self.refresh_bg_indicators();
             self.toasts.push(
                 format!("Background task [{}] finished — output is above", id),
                 crate::components::toast::ToastLevel::Success,

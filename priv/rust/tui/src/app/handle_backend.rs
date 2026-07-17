@@ -157,6 +157,12 @@ impl App {
                 }
                 self.activity.tool_start(&name, &args);
                 self.activity.set_phase(ProcessingPhase::ToolCall);
+                // A `bash` call with run_in_background counts as a live background
+                // terminal until its `background_command_completed` event lands.
+                if is_background_bash(&name, &args) {
+                    self.bg_shell_count += 1;
+                    self.refresh_bg_indicators();
+                }
                 // Stash args (FIFO queue per name) so ToolCallEnd can build a rich
                 // summary even when several same-name calls overlap.
                 self.pending_tool_args.entry(name.clone()).or_default().push(args);
@@ -265,8 +271,14 @@ impl App {
                 estimated_tokens,
                 max_tokens,
             } => {
-                // Normalize at the handler level: backend sends 0-100 percentage
-                let ratio = if utilization > 1.0 { utilization / 100.0 } else { utilization };
+                // Normalize at the handler level: the backend sends utilization as
+                // a 0-100 percentage. If it's absent/zero but the token counts are
+                // present, derive the ratio from estimated/max so the meter still
+                // reflects real usage instead of sticking at 0%.
+                let mut ratio = if utilization > 1.0 { utilization / 100.0 } else { utilization };
+                if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
+                    ratio = estimated_tokens as f64 / max_tokens as f64;
+                }
                 self.status.set_context(ratio, estimated_tokens, max_tokens);
                 self.sidebar.set_context(ratio);
             }
@@ -597,8 +609,13 @@ impl App {
                 self.agents.on_agents_spawning(&agents);
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorTaskAppraised { .. } => {
-                // Appraisal info is informational only; no UI state change needed.
+            BackendEvent::OrchestratorTaskAppraised { estimated_cost_usd, .. } => {
+                // Record the task-level cost estimate so the agents dashboard can
+                // surface it. There is no per-agent cost signal from the backend,
+                // so this whole-task figure is the only cost we can honestly show.
+                if estimated_cost_usd > 0.0 {
+                    self.agents.set_estimated_cost(estimated_cost_usd);
+                }
             }
             BackendEvent::OrchestratorAgentStarted { agent_name, role, model, subject, batch_id } => {
                 self.agents.agent_started(&agent_name, &role, &model, &subject, batch_id);
@@ -676,32 +693,101 @@ impl App {
                 let label = if role.is_empty() { "background".to_string() } else { role };
                 self.agents.agent_completed(&agent_id, 0, 0);
                 let preview: String = result.trim().chars().take(200).collect();
-                let secs = duration_ms as f64 / 1000.0;
+                // Format duration as h/m/s (shared formatter) so a 2h33m run reads
+                // "2h33m", not "9180.0s". Styled as a teammate-finished line.
+                let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
                 let note = if preview.is_empty() {
-                    format!("Background agent \"{}\" completed ({:.1}s)", label, secs)
+                    format!("\u{23fa} Teammate @{} finished \u{00b7} {}", label, elapsed)
                 } else {
-                    format!("Background agent \"{}\" completed ({:.1}s): {}", label, secs, preview)
+                    format!("\u{23fa} Teammate @{} finished \u{00b7} {} \u{2014} {}", label, elapsed, preview)
                 };
                 self.chat.add_system_message(&note, "info");
                 self.toasts.push(
                     format!("Background agent \"{}\" completed", label),
                     crate::components::toast::ToastLevel::Success,
                 );
+                self.refresh_bg_indicators();
                 self.recompute_layout();
             }
             BackendEvent::BackgroundAgentFailed { agent_id, role, error, duration_ms } => {
                 let label = if role.is_empty() { "background".to_string() } else { role };
                 self.agents.agent_failed(&agent_id, error.clone(), 0, 0);
                 let preview: String = error.trim().chars().take(200).collect();
-                let secs = duration_ms as f64 / 1000.0;
+                let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
                 self.chat.add_system_message(
-                    &format!("Background agent \"{}\" failed ({:.1}s): {}", label, secs, preview),
+                    &format!("\u{23fa} Teammate @{} failed \u{00b7} {} \u{2014} {}", label, elapsed, preview),
                     "error",
                 );
                 self.toasts.push(
                     format!("Background agent \"{}\" failed", label),
                     crate::components::toast::ToastLevel::Error,
                 );
+                self.refresh_bg_indicators();
+                self.recompute_layout();
+            }
+
+            // === Multi-agent workflow (Claude Code parity) ===
+            // Teammate/sub-agent lifecycle + inbound messages + background-command
+            // completion + turn recap, decoded from the session SSE stream.
+            BackendEvent::AgentFinished { display_name, duration_ms, .. } => {
+                let name = if display_name.is_empty() {
+                    "agent".to_string()
+                } else {
+                    display_name
+                };
+                self.chat.add_system_message(
+                    &format!(
+                        "\u{23fa} Teammate @{} finished \u{00b7} {}",
+                        name,
+                        crate::util::fmt_elapsed(duration_ms / 1000)
+                    ),
+                    "info",
+                );
+                self.recompute_layout();
+            }
+            BackendEvent::AgentMessage { from, text } => {
+                let who = if from.is_empty() { "agent".to_string() } else { from };
+                self.chat
+                    .add_system_message(&format!("\u{203a} Message from @{}: {}", who, text), "info");
+                self.recompute_layout();
+            }
+            BackendEvent::BackgroundCommandCompleted { exit_code, command, task_id } => {
+                if self.bg_shell_count > 0 {
+                    self.bg_shell_count -= 1;
+                }
+                self.refresh_bg_indicators();
+                // The backend labels the job by id (`background_id`); fall back to
+                // it when the command text is empty so the toast is never a blank
+                // `''` — it always identifies which background command finished.
+                let label = if command.trim().is_empty() {
+                    task_id.clone()
+                } else {
+                    command.clone()
+                };
+                let note =
+                    format!("Background command '{}' completed (exit code {})", label, exit_code);
+                let (severity, level) = if exit_code == 0 {
+                    ("info", crate::components::toast::ToastLevel::Success)
+                } else {
+                    ("error", crate::components::toast::ToastLevel::Error)
+                };
+                self.chat.add_system_message(&note, severity);
+                self.toasts.push(note, level);
+                self.recompute_layout();
+            }
+            BackendEvent::TurnRecap { elapsed_ms, tools_used } => {
+                // Freeze the live elapsed timer into a permanent scrollback line so
+                // it survives past the activity spinner (which clears on turn end).
+                let mut line =
+                    format!("\u{273b} Worked for {}", crate::util::fmt_elapsed(elapsed_ms / 1000));
+                if !tools_used.is_empty() {
+                    line.push_str(&format!(
+                        " \u{00b7} {} tool{}",
+                        tools_used.len(),
+                        if tools_used.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                self.chat.add_system_message(&line, "info");
                 self.recompute_layout();
             }
 
@@ -1249,6 +1335,18 @@ impl App {
     }
 }
 
+/// True when a `bash` tool call requests background execution (`run_in_background`
+/// in its JSON args). Mirrors the detection in `tools/bash.rs`.
+fn is_background_bash(name: &str, args: &str) -> bool {
+    if !name.eq_ignore_ascii_case("bash") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get("run_in_background").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Write a completion ping to the terminal: an OSC 9 desktop notification
 /// ("OSA: response ready") for terminals that support it, plus a BEL for those
 /// that don't. Both are control sequences the terminal consumes, so this does
@@ -1261,21 +1359,16 @@ fn emit_completion_notification() {
     let _ = out.flush();
 }
 
-/// Commands the TUI handles locally (never sent to the backend registry) that
-/// must still appear in the Ctrl+K palette and inline `/` completions. Appended
-/// to whatever the backend `GET /commands` returns, de-duplicated by name (the
-/// backend wins on a name clash), so discoverability never depends on the
-/// backend knowing about a TUI-only affordance.
+/// Commands the TUI handles locally (or wants surfaced) that must appear in the
+/// Ctrl+K palette and inline `/` completions. Appended to whatever the backend
+/// `GET /commands` returns, de-duplicated by name (the backend wins on a name
+/// clash), so discoverability never depends on the backend knowing about a
+/// TUI-only affordance. Names are slash-less — the completions layer prepends
+/// the `/` — so they must NOT carry a leading `/` here (a leading slash produced
+/// bogus `//steer` popup entries before).
 fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEntry>) {
     use crate::client::types::CommandEntry;
-    let native: &[(&str, &str)] = &[
-        ("/steer", "Redirect the agent mid-turn (queues if idle)"),
-        ("/bg", "List background turns (Ctrl+B backgrounds one)"),
-        ("/fg", "Bring a backgrounded turn back to the foreground"),
-        ("/agents", "Background-agent dashboard (running + finished)"),
-        ("/version", "Show OSA version"),
-    ];
-    for &(name, desc) in native {
+    for &(name, desc) in crate::app::commands::BUILTIN_SLASH_COMMANDS {
         let already = commands
             .iter()
             .any(|c| c.name.eq_ignore_ascii_case(name));

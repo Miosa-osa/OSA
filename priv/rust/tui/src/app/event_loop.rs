@@ -35,6 +35,11 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 /// transient activity rows come and go mid-turn. The result is clamped to
 /// `[LIVE_H_BASE, term_rows - 1]` (with the floor lowered on tiny terminals so
 /// the clamp bounds never invert).
+/// Max rows the inline agents panel may occupy so multi-agent activity is
+/// visible without swallowing the compact live region. `Agents::height()`
+/// returns 0 when there's nothing to show, so the row collapses when idle.
+pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
+
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     const OVERHEAD: u16 = 5;
     let want = OVERHEAD.saturating_add(input_needed);
@@ -256,7 +261,7 @@ impl App {
     /// another overlay owns Ctrl+O (agents panel collapse, file picker, reasoning
     /// selector, dialogs) or there is nothing to show, so existing bindings and
     /// the update-layer Ctrl+O handling are left intact.
-    fn transcript_can_open(&self) -> bool {
+    pub(crate) fn transcript_can_open(&self) -> bool {
         !self.transcript_log.is_empty()
             && !self.agents.is_active()
             && self.file_picker.is_none()
@@ -313,8 +318,14 @@ impl App {
                     }
                 }
                 AppState::AgentsDashboard => {
-                    self.agents
-                        .draw_dashboard(frame, area, self.agents_dashboard_selected);
+                    let bg_rows = self.dashboard_bg_rows();
+                    self.agents.draw_dashboard(
+                        frame,
+                        area,
+                        self.agents_dashboard_selected,
+                        &bg_rows,
+                        self.bg_shell_count,
+                    );
                 }
                 _ => {
                     // Config editor and file picker overlays take highest modal
@@ -378,8 +389,45 @@ impl App {
     /// region up to ~5 text lines), with a fixed chrome overhead and a clamp to
     /// the terminal size — see [`live_region_height`]. Kept independent of
     /// transient activity rows so the viewport doesn't churn mid-turn.
+    ///
+    /// While a reply is streaming, the live region additionally grows to fit the
+    /// in-progress message so it renders TOP-TO-BOTTOM in place — tokens landing
+    /// at the bottom, the region auto-scrolling to follow — with the same
+    /// markdown/wrapping render as the finalized transcript message, instead of
+    /// a self-replacing 1-row preview. Growth is quantized into coarse steps so
+    /// the viewport rebuilds only a handful of times per turn (not once per
+    /// line), and is capped so it never swallows the whole terminal.
     pub fn desired_inline_height(&self, term_rows: u16) -> u16 {
-        live_region_height(self.input.needed_height(), term_rows)
+        let input_needed = self.input.needed_height();
+        // Grow the viewport to fit the inline agents panel (multi-agent activity /
+        // background-terminals summary) so it isn't clipped by the fixed chrome.
+        let agents_h = self.agents.height().min(AGENTS_INLINE_CAP);
+        let hi0 = term_rows.saturating_sub(1).max(1);
+        let base = live_region_height(input_needed, term_rows)
+            .saturating_add(agents_h)
+            .min(hi0);
+
+        // Rows the streaming reply currently renders to (0 when idle).
+        let stream_rows = self.chat.streaming_height(self.width);
+        if stream_rows <= 1 {
+            return base;
+        }
+
+        // Chrome below the streaming preview: thinking(1) + ctx-hint(1) +
+        // status(2). The streaming region gets `stream_preview` rows on top.
+        const OVERHEAD: u16 = 4;
+        const MAX_STREAM_PREVIEW: u16 = 18;
+        const STEP: u16 = 6;
+        // Quantize upward to the next STEP so a growing reply changes the
+        // viewport height in a few discrete jumps rather than every new line.
+        let stepped = ((stream_rows.min(MAX_STREAM_PREVIEW) + STEP - 1) / STEP) * STEP;
+        let stream_preview = stepped.clamp(STEP, MAX_STREAM_PREVIEW);
+
+        let want = OVERHEAD
+            .saturating_add(input_needed)
+            .saturating_add(stream_preview);
+        let hi = term_rows.saturating_sub(1).max(1);
+        want.clamp(base, hi)
     }
 
     /// Draw the compact inline live region: streaming preview, thinking/activity,
@@ -390,9 +438,17 @@ impl App {
         } else {
             self.activity.height().min(1)
         };
-        // Chrome overhead below the streaming preview: activity + ctx-hint(1) +
-        // status(2). The input takes whatever is left, clamped to what it needs.
-        let overhead = think_h + 1 + 2;
+        // Inline agents panel: multi-agent tree + "N background terminals" summary.
+        // Height 0 when idle (row collapses); capped so it never swallows the
+        // compact live region, and bounded by what's left after the fixed chrome.
+        let agents_h = {
+            let want = self.agents.height().min(super::event_loop::AGENTS_INLINE_CAP);
+            let reserved = think_h + 1 + 2 + 2; // hint + status + stream/input floor
+            want.min(area.height.saturating_sub(reserved))
+        };
+        // Chrome overhead below the streaming preview: activity + agents + ctx-hint(1)
+        // + status(2). The input takes whatever is left, clamped to what it needs.
+        let overhead = think_h + agents_h + 1 + 2;
         let input_h = self
             .input
             .needed_height()
@@ -401,11 +457,12 @@ impl App {
         let rows = RLayout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),          // streaming preview
-                Constraint::Length(think_h), // thinking / activity
-                Constraint::Length(1),       // right-aligned "N% context used" hint
-                Constraint::Length(input_h), // input box (top + bottom dividers)
-                Constraint::Length(2),       // status line + permission/shell line
+                Constraint::Min(1),           // streaming preview
+                Constraint::Length(think_h),  // thinking / activity
+                Constraint::Length(agents_h), // agents panel / background summary
+                Constraint::Length(1),        // right-aligned "N% context used" hint
+                Constraint::Length(input_h),  // input box (top + bottom dividers)
+                Constraint::Length(2),        // status line + permission/shell line
             ])
             .split(area);
 
@@ -422,9 +479,10 @@ impl App {
         // component's internal `render_widget` calls inside the buffer.
         let a_stream = clamp_to_frame(frame, rows[0]);
         let a_think = clamp_to_frame(frame, rows[1]);
-        let a_hint = clamp_to_frame(frame, rows[2]);
-        let a_input = clamp_to_frame(frame, rows[3]);
-        let a_status = clamp_to_frame(frame, rows[4]);
+        let a_agents = clamp_to_frame(frame, rows[2]);
+        let a_hint = clamp_to_frame(frame, rows[3]);
+        let a_input = clamp_to_frame(frame, rows[4]);
+        let a_status = clamp_to_frame(frame, rows[5]);
 
         self.chat.draw_live(frame, a_stream);
         // In screen-reader mode the boxed thinking display is skipped in favor of
@@ -434,6 +492,8 @@ impl App {
         } else {
             self.activity.draw(frame, a_think);
         }
+        // Multi-agent activity + background-terminals summary (no-ops when empty).
+        self.agents.draw(frame, a_agents);
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
         self.status.draw(frame, a_status);
@@ -504,10 +564,15 @@ fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
             }
         }
     }
-    Err(anyhow::anyhow!(
-        "failed to rebuild inline viewport after retries: {:?}",
-        last_err
-    ))
+    // Every DSR query was dropped. Rather than bubble a "cursor position could
+    // not be read" error up to the user (which aborts the whole session on a
+    // dialog close), degrade to a full-screen terminal — `Terminal::new` never
+    // queries the cursor, so it can't fail. The viewport reconciliation will
+    // recover the inline region on a later iteration if the terminal recovers.
+    info!("inline rebuild failed ({:?}); degrading to full-screen", last_err);
+    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    let _ = terminal.clear();
+    Ok(())
 }
 
 /// Rebuild the inline viewport at a new height *without* leaving/entering the
@@ -541,10 +606,13 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
             }
         }
     }
-    Err(anyhow::anyhow!(
-        "failed to rebuild inline viewport after retries: {:?}",
-        last_err
-    ))
+    // As in `switch_to_inline`: never surface the DSR timeout to the user. If the
+    // cursor query keeps failing, fall back to a full-screen terminal (which does
+    // not query the cursor) so the live-region resize can't crash the session.
+    info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
+    *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    let _ = terminal.clear();
+    Ok(())
 }
 
 /// True when `key` is Ctrl+O (the transcript-viewer toggle).
@@ -948,6 +1016,38 @@ mod render_tests {
     }
 
     #[test]
+    fn agents_inline_panel_never_panics() {
+        // Exercise the inline tree renderer (draw_tree) — now wired into the live
+        // region — with live entries, the background-terminals summary line, and
+        // the "↓ to manage" header hint, across every terminal size and a squeezed
+        // live-region split. Any out-of-bounds write panics the test.
+        for n in [0usize, 1, 4, 12] {
+            for bg in [0usize, 1, 7] {
+                let mut agents = Agents::new();
+                for i in 0..n {
+                    agents.agent_started(
+                        format!("agent-{i}"),
+                        "explorer",
+                        "test-model",
+                        format!("investigating subject number {i}"),
+                        Some("background".to_string()),
+                    );
+                    agents.agent_progress(&format!("agent-{i}"), "reading files", i as u32, 100, "");
+                }
+                agents.set_bg_summary(bg);
+                for_each_size(|frame, area| {
+                    agents.draw(frame, area);
+                    // Also through the squeezed live-region agents row (rows[2]).
+                    let rows = split_live_region(area, 1, 3);
+                    if rows.len() > 2 {
+                        agents.draw(frame, rows[2]);
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
     fn agents_dashboard_never_panics() {
         for n in [0usize, 1, 6, 20] {
             let mut agents = Agents::new();
@@ -961,9 +1061,23 @@ mod render_tests {
                 );
                 agents.agent_progress(&format!("agent-{i}"), "reading files", i as u32, 100, "");
             }
-            for selected in [0usize, n.saturating_sub(1), 999] {
+            let bg_rows = vec![
+                crate::components::agents::BgTerminalRow {
+                    id: 1,
+                    summary: "a backgrounded turn with a long summary line".to_string(),
+                    elapsed_secs: 42,
+                    done: false,
+                },
+                crate::components::agents::BgTerminalRow {
+                    id: 2,
+                    summary: "done turn".to_string(),
+                    elapsed_secs: 7,
+                    done: true,
+                },
+            ];
+            for selected in [0usize, n.saturating_sub(1), n + 1, 999] {
                 for_each_size(|frame, area| {
-                    agents.draw_dashboard(frame, area, selected);
+                    agents.draw_dashboard(frame, area, selected, &bg_rows, 2);
                 });
             }
         }

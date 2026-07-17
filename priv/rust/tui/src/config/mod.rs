@@ -21,18 +21,43 @@ pub fn osa_version() -> &'static str {
     option_env!("OSA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-/// The *display* form of the version: the raw semver with the patch component
-/// zero-padded to a minimum of three digits (1.0.1 -> 1.0.001, 1.0.17 ->
-/// 1.0.017, 1.0.128 -> 1.0.128). Major/minor are left untouched, and any
-/// pre-release/build suffix (`-rc.1`, `+build.5`) is preserved verbatim.
+/// Runtime version reported by the backend `GET /health` response. Once set it
+/// becomes the single source of truth for the displayed version (the backend's
+/// root `VERSION` file — never stale), taking precedence over the compile-time
+/// crate version baked into this binary. Stored behind a process-global lock so
+/// the free `osa_version_display()` (called from the status bar, welcome banner,
+/// and `/version`) can pick it up without threading state through every caller.
+static RUNTIME_VERSION: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Record the backend's reported version (from `GET /health`). Empty / blank
+/// values are ignored so a missing field can never blank the displayed version.
+pub fn set_runtime_version(version: &str) {
+    let v = version.trim();
+    if v.is_empty() {
+        return;
+    }
+    if let Ok(mut slot) = RUNTIME_VERSION.write() {
+        *slot = Some(v.to_string());
+    }
+}
+
+/// The *display* form of the version. When the backend has reported its version
+/// (via `GET /health`), that value is shown verbatim — it is the canonical,
+/// human-facing string from the app's root `VERSION` file (e.g. `1.0.3`) and is
+/// the single source of truth, so the UI can never drift from the running
+/// backend. Only when no backend version is known yet do we fall back to the
+/// crate's compile-time semver, zero-padding the patch to three digits
+/// (1.0.1 -> 1.0.001) so the placeholder reads consistently.
 ///
-/// This is the padded scheme the operator wants to *read* everywhere in the UI,
-/// while the build tools (mix/cargo/`OSA_VERSION`) keep using the raw, valid
-/// semver returned by [`osa_version`] (semver forbids leading zeros). Use this
-/// for every user-facing surface: the status-bar chip, the welcome banner, the
-/// `/version` command, and `--version`. Use [`osa_version`] for anything a
-/// machine parses.
+/// Use this for every user-facing surface: the status-bar chip, the welcome
+/// banner, the `/version` command, and `--version`. Use [`osa_version`] for
+/// anything a machine parses.
 pub fn osa_version_display() -> String {
+    if let Ok(slot) = RUNTIME_VERSION.read() {
+        if let Some(ref v) = *slot {
+            return v.clone();
+        }
+    }
     pad_version_display(osa_version())
 }
 

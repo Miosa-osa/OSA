@@ -256,6 +256,20 @@ impl Chat {
         self.streaming_content = None;
     }
 
+    /// Rendered height, in terminal rows, that the in-progress streaming reply
+    /// occupies at `width` — 0 when nothing is streaming. Computed through the
+    /// exact same `Message` render path `draw_live` uses (markdown + label +
+    /// cursor row), so the inline live region can grow to fit the reply as it
+    /// streams in place instead of churning it through a cramped 1-row preview.
+    pub fn streaming_height(&self, width: u16) -> u16 {
+        match self.streaming_content {
+            Some(ref s) if !s.is_empty() => {
+                Message::new(MessageType::Agent, format!("{}\u{2588}", s), None).height(width)
+            }
+            _ => 0,
+        }
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
         self.scrollback.clear();

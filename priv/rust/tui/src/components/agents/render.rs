@@ -1,22 +1,15 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use super::entry::{AgentEntry, AgentStatus, SynthesisState, SwarmStatus};
+use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SynthesisState, SwarmStatus};
 use super::Agents;
 
 /// Braille spinner frames for running agents.
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// Format elapsed seconds compactly (45s → 2m15s → 1h3m).
-fn fmt_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
+/// Shared h/m/s formatter so the panel, dashboard, teammate lines, background
+/// completions and the turn recap all render durations identically.
+use crate::util::fmt_elapsed;
 
 impl Agents {
     /// Draw the tree-view agent display.
@@ -27,6 +20,29 @@ impl Agents {
 
         let theme = crate::style::theme();
         let mut y = area.y;
+
+        // ── Background-terminals summary ─────────────────────────────────────
+        // Ctrl+B'd turns + running background shell commands aren't tree entries,
+        // so surface them as a one-line "N background terminals · ↓ to manage"
+        // header (matching Claude Code). Rendered even when no agents are active.
+        if self.bg_summary > 0 && y < area.y + area.height {
+            let line = format!(
+                "\u{21e3} {} background terminal{} \u{00b7} \u{2193} to manage",
+                self.bg_summary,
+                if self.bg_summary == 1 { "" } else { "s" }
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(line, theme.faint()))),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            y += 1;
+        }
+
+        // With no live agent tree (panel inactive) the summary line is all there
+        // is to draw.
+        if !self.active {
+            return;
+        }
 
         // ── Header line ─────────────────────────────────────────────────────
         {
@@ -65,6 +81,20 @@ impl Agents {
                 Span::styled(header_text, header_style),
                 Span::styled(collapse_hint, theme.faint()),
             ];
+
+            // Advertise the full-screen dashboard when there are tracked agents.
+            if !self.entries.is_empty() {
+                spans.push(Span::styled(" \u{00b7} \u{2193} to manage", theme.faint()));
+            }
+
+            // Surface the task-level appraised cost when available (the only cost
+            // signal the backend reports — there is no per-agent breakdown).
+            if let Some(cost) = self.est_cost_usd {
+                spans.push(Span::styled(
+                    format!(" \u{00b7} est. {}", fmt_cost(cost)),
+                    theme.faint(),
+                ));
+            }
 
             if let Some(ref w) = self.wave {
                 spans.push(Span::styled("  ", Style::default()));
@@ -264,11 +294,27 @@ impl Agents {
         }
     }
 
-    /// Full-screen background-agent dashboard: every tracked agent grouped by
-    /// state (Working / Ready / Completed / Failed) with role, elapsed, tool
-    /// count and tokens. `selected` is an index into the entries list; the
-    /// matching row is highlighted so it can be cancelled.
-    pub fn draw_dashboard(&self, frame: &mut Frame, area: Rect, selected: usize) {
+    /// Full-screen management dashboard: every tracked sub-agent grouped by state
+    /// (Working / Ready / Completed / Failed) with role, a compact progress
+    /// indicator, elapsed, tool count and tokens — followed by a Background
+    /// Terminals section listing the Ctrl+B'd turns in `bg_rows` and a count of
+    /// running background shell jobs (`shell_jobs`).
+    ///
+    /// `selected` is a unified index across the two lists: `0..entries.len()`
+    /// selects a sub-agent (highlighted for view/stop), and
+    /// `entries.len()..entries.len()+bg_rows.len()` selects a background terminal.
+    ///
+    /// Cost: the backend reports no per-agent cost, so the header shows the
+    /// task-level appraised estimate (when known) and the footer notes that the
+    /// per-agent breakdown is unavailable — no fabricated per-row figure.
+    pub fn draw_dashboard(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        selected: usize,
+        bg_rows: &[BgTerminalRow],
+        shell_jobs: usize,
+    ) {
         let theme = crate::style::theme();
 
         let running = self
@@ -276,11 +322,17 @@ impl Agents {
             .iter()
             .filter(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
             .count();
-        let title = format!(
-            " Agent Dashboard — {} total, {} active ",
+        let bg_running = bg_rows.iter().filter(|r| !r.done).count() + shell_jobs;
+        let mut title = format!(
+            " Agent Dashboard — {} agent{}, {} active · {} background ",
             self.entries.len(),
-            running
+            if self.entries.len() == 1 { "" } else { "s" },
+            running,
+            bg_running,
         );
+        if let Some(cost) = self.est_cost_usd {
+            title = format!("{}· est. {} ", title.trim_end(), fmt_cost(cost));
+        }
         let block = Block::default()
             .title(Span::styled(title, theme.section_title()))
             .borders(Borders::ALL)
@@ -292,6 +344,10 @@ impl Agents {
         if inner.height < 2 || inner.width < 4 {
             return;
         }
+
+        // Busiest agent's token count anchors the relative progress micro-bar so a
+        // row's fill reflects its real share of activity (not a fabricated %).
+        let max_tokens = self.entries.iter().map(|e| e.tokens_used).max().unwrap_or(0);
 
         let mut lines: Vec<Line> = Vec::new();
 
@@ -345,8 +401,12 @@ impl Agents {
                 } else {
                     format!(" [{}]", entry.role)
                 };
+                // Compact progress indicator from the data we actually have: a
+                // token-usage micro-bar (relative to the busiest agent) plus
+                // elapsed/tool/token counts. No per-agent percent or cost exists.
                 let meta = format!(
-                    "  {} · {} tool{} · {} tok",
+                    "  {} {} · {} tool{} · {} tok",
+                    token_bar(entry.tokens_used, max_tokens),
                     fmt_elapsed(entry.elapsed_secs()),
                     entry.tool_uses,
                     if entry.tool_uses == 1 { "" } else { "s" },
@@ -366,17 +426,80 @@ impl Agents {
             }
         }
 
+        // ── Background Terminals section ─────────────────────────────────────
+        if !bg_rows.is_empty() || shell_jobs > 0 {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("Background Terminals ({})", bg_rows.len()),
+                theme.section_title(),
+            )));
+
+            for (pos, row) in bg_rows.iter().enumerate() {
+                let global_idx = self.entries.len() + pos;
+                let is_sel = global_idx == selected;
+                let (icon, icon_style) = if row.done {
+                    ('✓', theme.task_done())
+                } else {
+                    let spin = SPINNER[self.tick as usize % SPINNER.len()];
+                    (spin, theme.spinner())
+                };
+                let marker = if is_sel { "▸ " } else { "  " };
+                let name_style = if is_sel {
+                    theme.plan_selected()
+                } else {
+                    theme.agent_name()
+                };
+                let status = if row.done { "done" } else { "running" };
+                let meta = format!(
+                    "  {} · {}",
+                    fmt_elapsed(row.elapsed_secs),
+                    status,
+                );
+                let spans = vec![
+                    Span::styled(marker, theme.plan_selected()),
+                    Span::styled(format!("{} ", icon), icon_style),
+                    Span::styled(format!("[{}] ", row.id), theme.faint()),
+                    Span::styled(truncate_str(&row.summary, 48), name_style),
+                    Span::styled(meta, theme.faint()),
+                ];
+                lines.push(Line::from(spans));
+            }
+
+            if shell_jobs > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  \u{2699} {} background shell job{} running",
+                        shell_jobs,
+                        if shell_jobs == 1 { "" } else { "s" }
+                    ),
+                    theme.faint(),
+                )));
+            }
+        }
+
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No agents have run yet.",
+                "No agents or background terminals yet.",
                 theme.faint(),
             )));
         }
 
-        // Footer hint.
+        // Cost note: honest about the missing per-agent breakdown.
         lines.push(Line::from(""));
+        let cost_note = match self.est_cost_usd {
+            Some(cost) => format!(
+                "Cost: task est. {} — per-agent cost not reported by backend",
+                fmt_cost(cost)
+            ),
+            None => "Cost: not reported by backend (no per-task or per-agent estimate)".to_string(),
+        };
+        lines.push(Line::from(Span::styled(cost_note, theme.faint())));
+
+        // Footer hint.
         lines.push(Line::from(Span::styled(
-            "↑/↓ select   c/x cancel selected   Esc/q close",
+            "↑/↓ select   enter view   c/x stop   Esc/q close",
             theme.faint(),
         )));
 
@@ -396,6 +519,34 @@ impl Agents {
             AgentStatus::Failed => ('✗', theme.error_text()),
         }
     }
+}
+
+/// Format an appraised cost in USD compactly: 0.0042 → "$0.0042", 1.2 → "$1.20".
+/// Sub-cent estimates keep four decimals so small runs aren't rendered as "$0.00".
+fn fmt_cost(usd: f64) -> String {
+    if usd > 0.0 && usd < 0.01 {
+        format!("${:.4}", usd)
+    } else {
+        format!("${:.2}", usd)
+    }
+}
+
+/// Five-cell token-usage micro-bar visualizing this agent's token count relative
+/// to the busiest agent. This is a real proportion of observed tokens (the only
+/// per-agent progress signal available) — not a fabricated completion percent.
+fn token_bar(tokens: u32, max_tokens: u32) -> String {
+    const CELLS: usize = 5;
+    if max_tokens == 0 {
+        return "[·····]".to_string();
+    }
+    let filled = ((tokens as f64 / max_tokens as f64) * CELLS as f64).round() as usize;
+    let filled = filled.min(CELLS);
+    let mut bar = String::from("[");
+    for i in 0..CELLS {
+        bar.push(if i < filled { '\u{2588}' } else { '\u{00b7}' });
+    }
+    bar.push(']');
+    bar
 }
 
 /// Format token count as compact string: 4213 → "4.2k", 90512 → "90.5k"

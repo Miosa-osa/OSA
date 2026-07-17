@@ -1,4 +1,7 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use tracing::warn;
 
 use super::App;
@@ -49,7 +52,10 @@ impl App {
                 self.handle_key(key)
             }
             Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
-            // Mouse events are not captured (the host terminal owns wheel scroll).
+            Event::Terminal(CrosstermEvent::Mouse(me)) => {
+                self.handle_mouse(me);
+                false
+            }
             Event::Terminal(CrosstermEvent::Paste(text)) => {
                 // Route paste to onboarding wizard if active
                 if self.state == AppState::Onboarding {
@@ -109,6 +115,55 @@ impl App {
         }
     }
 
+    /// Handle a mouse event. Only the plain inline live region is interactive —
+    /// full-screen dialogs/overlays keep keyboard-only control. Left-click focuses
+    /// the composer and positions the caret (or toggles the mic button); a wheel
+    /// scroll-up opens the transcript reader so history is reachable by wheel now
+    /// that mouse capture has taken wheel events from the terminal's scrollback.
+    fn handle_mouse(&mut self, me: MouseEvent) {
+        // While a full-screen view or overlay owns the screen, ignore the mouse
+        // (its geometry doesn't match the inline composer coordinates).
+        if self.wants_full_viewport() || self.transcript.is_some() {
+            return;
+        }
+        match me.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if !self.state.allows_input() {
+                    return;
+                }
+                // Mic button click toggles voice recording.
+                if let Some(mic) = self.input.mic_area() {
+                    if me.column >= mic.x
+                        && me.column < mic.x.saturating_add(mic.width)
+                        && me.row >= mic.y
+                        && me.row < mic.y.saturating_add(mic.height)
+                    {
+                        if self.voice.recording {
+                            self.stop_recording();
+                        } else {
+                            self.start_recording();
+                        }
+                        return;
+                    }
+                }
+                // Otherwise focus the composer / position the caret.
+                self.input.handle_click(me.column, me.row);
+            }
+            // Wheel up opens the transcript reader (history is in native
+            // scrollback we can't scroll programmatically once mouse-captured;
+            // the reader is the in-app way to page back through it).
+            MouseEventKind::ScrollUp => {
+                if self.transcript_can_open() {
+                    self.transcript =
+                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
+                            &self.transcript_log,
+                        ));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         // The overdrive confirmation is a modal overlay with the highest key
         // priority — nothing else may run while it awaits a yes/no.
@@ -145,11 +200,11 @@ impl App {
         }
     }
 
-    /// Key handling for the full-screen background-agent dashboard.
-    /// ↑/↓ (and j/k) move the selection, c/x cancel the selected running agent,
-    /// Esc/q close and return to the previous state.
+    /// Key handling for the full-screen management dashboard.
+    /// ↑/↓ (and j/k) move the selection across sub-agents then background
+    /// terminals, Enter/v views the selected item, c/x stops it, Esc/q close.
     fn handle_agents_dashboard_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let count = self.agents.entry_count();
+        let count = self.dashboard_item_count();
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.close_agents_dashboard();
@@ -164,9 +219,16 @@ impl App {
                     self.agents_dashboard_selected += 1;
                 }
             }
+            (KeyCode::Enter, _) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                if count > 0 {
+                    self.view_selected_dashboard_item();
+                }
+            }
             (KeyCode::Char('c'), KeyModifiers::NONE)
             | (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                self.cancel_selected_agent();
+                if count > 0 {
+                    self.stop_selected_dashboard_item();
+                }
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.close_agents_dashboard();
@@ -466,6 +528,18 @@ impl App {
             // falls through to the composer's reverse-i-search, so both survive.
             (KeyCode::Char('r'), KeyModifiers::CONTROL) if input_empty => {
                 self.chat.toggle_last_tool_expand(self.width);
+                false
+            }
+            // ↓ on an empty composer opens the agent/background dashboard —
+            // Claude Code's "↓ to manage". Only intercepted when there are tracked
+            // agents to manage and no @-file dropdown is open, so it never steals
+            // the composer's history navigation while typing.
+            (KeyCode::Down, KeyModifiers::NONE)
+                if input_empty
+                    && !self.input.file_search_active()
+                    && self.has_dashboard_items() =>
+            {
+                self.open_agents_dashboard();
                 false
             }
             // '@' is handled inline by the composer (fuzzy file/dir mention
