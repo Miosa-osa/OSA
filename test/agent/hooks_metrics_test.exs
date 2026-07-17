@@ -35,6 +35,12 @@ defmodule OptimalSystemAgent.Agent.HooksMetricsTest do
       # Register a blocking hook with a unique name
       hook_name = "metrics_blocker_#{:erlang.unique_integer([:positive])}"
 
+      # Guarantee removal even if an assertion below fails mid-test — otherwise
+      # this priority-1 blocker leaks into every later pre_tool_use hook run.
+      on_exit(fn ->
+        :ets.match_delete(Hooks.hooks_table_name(), {:pre_tool_use, hook_name, :_, :_, :_})
+      end)
+
       Hooks.register(
         :pre_tool_use,
         hook_name,
@@ -51,8 +57,11 @@ defmodule OptimalSystemAgent.Agent.HooksMetricsTest do
       metrics = Hooks.metrics()
       assert metrics[:pre_tool_use].blocks >= 1
 
-      # Clean up — remove the blocking hook so it doesn't affect other tests
-      :ets.match_delete(Hooks.hooks_table_name(), {:pre_tool_use, hook_name, :_, :_})
+      # Clean up — remove the blocking hook so it doesn't affect other tests.
+      # Row shape in the :osa_hooks bag is the 5-tuple {event, name, priority,
+      # handler, opts}; the match pattern MUST have matching arity or nothing is
+      # deleted and this priority-1 blocker leaks into every later pre_tool_use.
+      :ets.match_delete(Hooks.hooks_table_name(), {:pre_tool_use, hook_name, :_, :_, :_})
     end
 
     test "metrics are readable concurrently" do

@@ -23,7 +23,13 @@ defmodule OptimalSystemAgent.MIOSA.IntegrationTest do
     on_exit(fn ->
       restore(:miosa_cli_config_dir, prev_cli_dir)
       restore(:config_dir, prev_config_dir)
-      if prev_env, do: System.put_env("MIOSA_PLATFORM_API_KEY", prev_env)
+      # Fully restore original state: if the key was unset before, DELETE it —
+      # otherwise a test that sets it (e.g. "msk_u_env") leaks MIOSA_PLATFORM_API_KEY
+      # globally, which makes Sandbox.Router.detect_backend/0 select the remote
+      # :miosa backend and routes every later shell_execute to a remote sandbox.
+      if prev_env,
+        do: System.put_env("MIOSA_PLATFORM_API_KEY", prev_env),
+        else: System.delete_env("MIOSA_PLATFORM_API_KEY")
       File.rm_rf(tmp)
     end)
 

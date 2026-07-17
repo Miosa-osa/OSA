@@ -55,6 +55,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     {resolved, symlink_traversal?} = resolve_for_write(expanded)
 
     cond do
+      # Guard on the *pre-resolution* path: a protected dotfile (e.g. ~/.zshrc)
+      # is protected by its name/location, even when it is a symlink pointing
+      # into an otherwise-allowed directory. Without this, symlinked dotfiles
+      # silently bypass the dotfile deny (the resolved target is not a dotfile).
+      dotfile_outside_osa?(expanded) ->
+        {:deny, "Access denied: #{path} is a protected dotfile outside ~/.osa/"}
+
       symlink_traversal? and not write_allowed?(resolved) ->
         {:deny, "Access denied: #{path} resolves through a symlink to a protected location"}
 
@@ -80,6 +87,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
 
     expanded = Path.expand(normalized)
 
+    # Defense-in-depth: re-run the permission guard here so the security
+    # property holds even when execute/2 is invoked directly (bypassing the
+    # LegacyAdapter validate → check_permissions → execute pipeline). Mirrors
+    # check_permissions/2 exactly and fails closed.
+    case execute_guard(path, expanded) do
+      :allow -> do_execute(path, content, expanded)
+      {:deny, msg} -> {:error, msg}
+    end
+  end
+
+  defp execute_guard(orig_path, expanded) do
+    {resolved, symlink_traversal?} = resolve_for_write(expanded)
+
+    cond do
+      dotfile_outside_osa?(expanded) ->
+        {:deny, "Access denied: #{orig_path} is a protected dotfile outside ~/.osa/"}
+
+      symlink_traversal? and not write_allowed?(resolved) ->
+        {:deny, "Access denied: #{orig_path} resolves through a symlink to a protected location"}
+
+      not write_allowed?(resolved) ->
+        {:deny, "Access denied: #{orig_path} is outside allowed paths or targets a protected location"}
+
+      true ->
+        :allow
+    end
+  end
+
+  defp do_execute(path, content, expanded) do
     # Read existing content for diff generation (if file exists)
     old_content =
       case File.read(expanded) do

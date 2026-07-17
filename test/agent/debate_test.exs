@@ -18,10 +18,15 @@ defmodule OptimalSystemAgent.Agent.DebateTest do
     end
 
     test "run/2 is exported" do
+      # function_exported?/3 returns false for a not-yet-loaded module. Under a
+      # random seed this test can run before any other Debate call has forced the
+      # module to load, so ensure it is loaded first (no-op once loaded).
+      Code.ensure_loaded!(Debate)
       assert function_exported?(Debate, :run, 2)
     end
 
     test "run/1 (default opts) is also exported" do
+      Code.ensure_loaded!(Debate)
       assert function_exported?(Debate, :run, 1)
     end
   end

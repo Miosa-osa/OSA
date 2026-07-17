@@ -31,6 +31,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
     live_ids = SessionManager.live_session_ids()
 
+    # Sessions created via POST /sessions are *tracked* (channel-level lifecycle)
+    # before any loop process registers in SessionRegistry and before any turn is
+    # persisted. Include tracked-but-not-live ids so a freshly-created session is
+    # immediately visible in the list. `alive` still reflects true registry liveness.
+    known_runtime_ids = SessionManager.list_session_ids()
+
     # Rich metadata (title/first-prompt, message_count, created_at/last_active)
     # comes from the persisted transcript store — the same source already used
     # by GET /sessions/recent. We merge in live-registry alive status on top.
@@ -56,7 +62,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     # to appear so the TUI can select them. created_at is kept as a non-null
     # string to satisfy the client's SessionInfo contract.
     live_only =
-      live_ids
+      known_runtime_ids
       |> Enum.reject(&MapSet.member?(known_ids, &1))
       |> Enum.map(fn sid ->
         %{
@@ -66,7 +72,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           created_at: "",
           last_active: "",
           working_dir: nil,
-          alive: true
+          alive: sid in live_ids
         }
       end)
 
