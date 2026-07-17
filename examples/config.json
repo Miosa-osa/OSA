@@ -1,68 +1,43 @@
 {
+  "_comment": "OSA config — copy to ~/.osa/config.json. Only the keys shown here are read by OSA; any other key is ignored. Secrets (LLM API keys, channel bot tokens) live in ~/.osa/.env, NOT in this file. See examples/.env.example.",
+  "_comment_provider": "Active LLM provider and model. 'provider' must be one OSA knows (ollama, anthropic, openai, miosa, openrouter, custom). 'model' is the provider-specific model id. The onboarding wizard and the settings API write these two keys, and they are re-read on restart so your choice persists. The matching API key / base URL go in ~/.osa/.env.",
   "provider": "ollama",
-  "ollama": {
-    "url": "http://localhost:11434",
-    "model": "llama3.2:latest"
-  },
-  "anthropic": {
-    "model": "anthropic-model-here"
-  },
-  "openai": {
-    "url": "https://api.openai.com/v1",
-    "model": "gpt-4o"
-  },
+  "model": "llama3.2:latest",
+  "_comment_runtime": "Optional runtime settings surfaced by the settings API.",
+  "working_dir": "~/projects",
+  "agent_name": "OSA Agent",
+  "yolo_mode": false,
+  "log_level": "info",
+  "_comment_machines": "Composable skill sets. The 'core' machine (file/shell/web tools) is always on and cannot be listed here. Set a machine to true to activate its extra skills and prompt guidance. Read by OptimalSystemAgent.Machines.",
   "machines": {
-    "communication": true,
-    "productivity": true,
+    "communication": false,
+    "productivity": false,
     "research": true
   },
-  "agent": {
-    "max_iterations": 20,
-    "temperature": 0.7,
-    "max_tokens": 4096,
-    "noise_filter_threshold": 0.6
+  "_comment_os": "Extra directories OSA is allowed to scan when it maps your system. Read by OptimalSystemAgent.OS.Scanner via os.scan_paths.",
+  "os": {
+    "scan_paths": [
+      "~/projects",
+      "~/Documents"
+    ]
   },
-  "compaction": {
-    "warn_threshold": 0.80,
-    "aggressive_threshold": 0.85,
-    "emergency_threshold": 0.95
-  },
-  "scheduler": {
-    "heartbeat_interval_minutes": 30,
-    "circuit_breaker_max_failures": 3
-  },
-  "http": {
-    "port": 8089,
-    "require_auth": false
-  },
-  "channels": {
-    "telegram": {
-      "enabled": false,
-      "bot_token_env": "TELEGRAM_BOT_TOKEN"
+  "_comment_budgets": "Cost and token guardrails. 'global' applies to everything; add a key named after a specific agent to override it for that agent. Recognized fields: daily_limit_usd, daily_limit_tokens, monthly_limit_usd, monthly_limit_tokens. Read and written by the /budgets API.",
+  "budgets": {
+    "global": {
+      "daily_limit_usd": 10.0,
+      "daily_limit_tokens": 2000000,
+      "monthly_limit_usd": 200.0,
+      "monthly_limit_tokens": 50000000
     },
-    "discord": {
-      "enabled": false,
-      "bot_token_env": "DISCORD_BOT_TOKEN"
-    },
-    "slack": {
-      "enabled": false,
-      "bot_token_env": "SLACK_BOT_TOKEN",
-      "app_token_env": "SLACK_APP_TOKEN"
+    "research-agent": {
+      "daily_limit_usd": 2.0,
+      "daily_limit_tokens": 500000
     }
   },
-  "web_search": {
-    "provider": "brave",
-    "api_key_env": "BRAVE_API_KEY",
-    "max_results": 5
-  },
-  "mcp": {
-    "config_path": "~/.osa/mcp.json"
-  },
-  "paths": {
-    "config_dir": "~/.osa",
-    "skills_dir": "~/.osa/skills",
-    "sessions_dir": "~/.osa/sessions",
-    "data_dir": "~/.osa/data",
-    "bootstrap_dir": "~/.osa"
+  "_comment_channels": "Messaging channels OSA answers on. A channel is treated as 'configured' when its key is present here; the actual bot tokens are read from ~/.osa/.env (see examples/.env.example). Delete a channel key to disable it.",
+  "channels": {
+    "telegram": {},
+    "slack": {},
+    "discord": {}
   }
 }

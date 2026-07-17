@@ -1,28 +1,20 @@
 {
-  "_comment": "OSA Scheduled Jobs — Copy to ~/.osa/CRONS.json to activate",
+  "_comment": "OSA scheduled jobs — copy to ~/.osa/CRONS.json. Every job needs: name, schedule (standard 5-field cron: min hour day-of-month month day-of-week), type, and enabled. 'type' is one of: 'agent' (needs a 'job' string — a task run through the agent loop), 'command' (needs a 'command' string — a shell command with the same safety checks as the shell_execute tool), or 'webhook' (needs a 'url'; optional 'method' [default GET], 'headers', and on failure 'on_failure':'agent' + 'failure_job' to hand off to the agent). 'id' is optional (auto-generated if omitted) but recommended. A job that fails 3 times in a row is auto-disabled (circuit breaker) until you re-enable it.",
   "jobs": [
     {
       "id": "morning-briefing",
       "name": "Morning Briefing",
       "schedule": "0 8 * * 1-5",
       "type": "agent",
-      "job": "Generate my morning briefing: weather, calendar summary, top 3 news items, today's priorities",
+      "job": "Generate my morning briefing: weather, calendar summary, top 3 news items, and today's priorities. Save to ~/.osa/briefings/today.md",
       "enabled": false
     },
     {
-      "id": "pipeline-check",
-      "name": "Sales Pipeline Monitor",
-      "schedule": "*/30 9-17 * * 1-5",
+      "id": "weekly-summary",
+      "name": "Weekly Summary",
+      "schedule": "0 17 * * 5",
       "type": "agent",
-      "job": "Check sales pipeline for stalled deals (>7 days no activity) and overdue follow-ups. Alert me if any found.",
-      "enabled": false
-    },
-    {
-      "id": "inbox-triage",
-      "name": "Email Inbox Triage",
-      "schedule": "0 */2 * * *",
-      "type": "agent",
-      "job": "Check inbox for new emails, classify by urgency, summarize any marked critical",
+      "job": "Generate a weekly summary: tasks completed, key metrics, and priorities for next week. Save to ~/.osa/reports/weekly.md",
       "enabled": false
     },
     {
@@ -30,7 +22,7 @@
       "name": "Disk Space Monitor",
       "schedule": "0 */6 * * *",
       "type": "command",
-      "command": "df -h / | awk 'NR==2 {if ($5+0 > 90) print \"WARNING: Disk usage at \" $5}'",
+      "command": "df -h / | awk 'NR==2 {if ($5+0 > 90) print \"WARNING: disk at \" $5}'",
       "enabled": false
     },
     {
@@ -42,31 +34,7 @@
       "method": "GET",
       "headers": {},
       "on_failure": "agent",
-      "failure_job": "The health check for localhost:8080 failed. Investigate and report.",
-      "enabled": false
-    },
-    {
-      "id": "weekly-summary",
-      "name": "Weekly Summary",
-      "schedule": "0 17 * * 5",
-      "type": "agent",
-      "job": "Generate a weekly summary: tasks completed, deals closed, key metrics, priorities for next week",
-      "enabled": false
-    },
-    {
-      "id": "backup-data",
-      "name": "Backup OSA Data",
-      "schedule": "0 3 * * *",
-      "type": "command",
-      "command": "tar -czf ~/.osa/backups/osa-$(date +%Y%m%d).tar.gz ~/.osa/sessions ~/.osa/data ~/.osa/MEMORY.md",
-      "enabled": false
-    },
-    {
-      "id": "content-ideas",
-      "name": "Content Ideas Research",
-      "schedule": "0 10 * * 1,3,5",
-      "type": "agent",
-      "job": "Search for 5 trending topics in my industry and save content ideas to ~/.osa/data/content-ideas.md",
+      "failure_job": "The health check for localhost:8080 failed. Investigate the likely cause and write a short note to ~/.osa/alerts/health.md",
       "enabled": false
     }
   ]

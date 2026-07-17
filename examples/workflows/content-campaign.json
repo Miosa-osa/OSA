@@ -1,11 +1,11 @@
 {
+  "_comment": "OSA workflow template — copy to ~/.osa/workflows/<id>.json. The loader reads the \"steps\" array; each step has name, description, tools_needed (list of tool names available to that step), and acceptance_criteria. Top-level name/description are documentation.",
   "name": "Content Marketing Campaign",
   "description": "Plan and execute a content marketing campaign from research through promotion and analysis",
   "steps": [
     {
       "name": "Audience Research",
       "description": "Research the target audience: demographics, pain points, content preferences, and where they spend time online. Analyze competitor content and identify gaps.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "web_search",
         "file_write"
@@ -15,7 +15,6 @@
     {
       "name": "Content Strategy & Outline",
       "description": "Define the campaign theme, key messages, content formats (blog, social, email, video), and distribution channels. Create a content calendar with topics and deadlines.",
-      "signal_mode": "BUILD",
       "tools_needed": [
         "file_write"
       ],
@@ -24,7 +23,6 @@
     {
       "name": "Draft Content",
       "description": "Write the first drafts of all content pieces. Focus on value delivery, storytelling, and clear calls to action. Include SEO keywords naturally where applicable.",
-      "signal_mode": "BUILD",
       "tools_needed": [
         "file_write",
         "web_search"
@@ -34,7 +32,6 @@
     {
       "name": "Edit & Refine",
       "description": "Review all drafts for clarity, tone consistency, grammar, and factual accuracy. Optimize headlines, subheadings, and meta descriptions. Add visual suggestions.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "file_read",
         "file_write"
@@ -44,7 +41,6 @@
     {
       "name": "Publish & Schedule",
       "description": "Format content for each platform. Schedule posts according to the content calendar. Set up tracking links and UTM parameters for attribution.",
-      "signal_mode": "EXECUTE",
       "tools_needed": [
         "file_write",
         "shell_execute"
@@ -54,7 +50,6 @@
     {
       "name": "Promote & Distribute",
       "description": "Execute the promotion plan: social media sharing, email newsletter, community posting, outreach to influencers or partners, and paid promotion if budgeted.",
-      "signal_mode": "EXECUTE",
       "tools_needed": [
         "web_search",
         "file_write"
@@ -64,7 +59,6 @@
     {
       "name": "Analyze & Report",
       "description": "After 1-2 weeks, collect performance metrics: views, engagement, shares, conversions, and SEO rankings. Compare against goals. Document learnings for the next campaign.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "web_search",
         "file_write",

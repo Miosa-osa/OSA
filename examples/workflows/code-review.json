@@ -1,11 +1,11 @@
 {
+  "_comment": "OSA workflow template — copy to ~/.osa/workflows/<id>.json. The loader reads the \"steps\" array; each step has name, description, tools_needed (list of tool names available to that step), and acceptance_criteria. Top-level name/description are documentation.",
   "name": "Code Review",
   "description": "Systematic code review workflow: understand changes, check correctness, audit security, review performance, and provide actionable feedback",
   "steps": [
     {
       "name": "Understand the Changes",
       "description": "Read the PR description, related issue/ticket, and the full diff. Understand what problem is being solved, why this approach was chosen, and what the expected behavior changes are.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "file_read",
         "shell_execute"
@@ -15,7 +15,6 @@
     {
       "name": "Check Correctness",
       "description": "Review the logic for bugs, edge cases, and error handling. Verify that the code does what the PR claims. Check boundary conditions, null handling, and data validation.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "file_read"
       ],
@@ -24,7 +23,6 @@
     {
       "name": "Security Audit",
       "description": "Check for security issues: injection vulnerabilities, authentication/authorization gaps, hardcoded secrets, CORS misconfiguration, input sanitization, and unsafe deserialization.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "file_read",
         "web_search"
@@ -34,7 +32,6 @@
     {
       "name": "Performance Review",
       "description": "Check for performance issues: N+1 queries, missing indexes, unnecessary allocations, blocking operations on hot paths, missing caching opportunities, and algorithmic complexity.",
-      "signal_mode": "ANALYZE",
       "tools_needed": [
         "file_read"
       ],
@@ -43,7 +40,6 @@
     {
       "name": "Provide Feedback",
       "description": "Compile all findings into structured review feedback. Categorize issues as CRITICAL (must fix), MAJOR (should fix), MINOR (nice to have), and SUGGESTION (optional improvement). Include positive observations.",
-      "signal_mode": "ASSIST",
       "tools_needed": [
         "file_write"
       ],

@@ -1,12 +1,19 @@
 #!/bin/bash
-# OSA Development Launcher
-# Starts both the Elixir backend and the desktop frontend in one command.
+# OSA Development Launcher (backend-focused)
+#
+# Day-to-day OSA development is the Elixir backend (OTP) on :9089. That is what
+# this script starts by default. The old SvelteKit / Tauri desktop frontend is
+# LEGACY and hidden by default — only start it (--frontend / --tauri) if you are
+# specifically working on that surface.
 #
 # Usage:
-#   ./dev.sh              Start backend + frontend (browser mode)
-#   ./dev.sh --tauri       Start backend + frontend (native Tauri window)
-#   ./dev.sh --backend     Start backend only
-#   ./dev.sh --frontend    Start frontend only
+#   ./dev.sh              Start the backend on :9089  (default)
+#   ./dev.sh --backend    Same as default (explicit)
+#   ./dev.sh --tauri      Backend + LEGACY desktop frontend (native Tauri window)
+#   ./dev.sh --frontend   ONLY the LEGACY desktop frontend (browser mode)
+#
+# Prefer the packaged CLI for a production-style run:   osa
+# Or run the serve task directly:                       mix osa.serve
 
 set -e
 cd "$(dirname "$0")"
@@ -14,31 +21,30 @@ cd "$(dirname "$0")"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
+YELLOW='\033[0;33m'
 DIM='\033[0;90m'
 BOLD='\033[1m'
 NC='\033[0m'
 
 banner() {
   echo ""
-  echo -e "${BLUE}${BOLD}  OSA${NC}${DIM} — Optimal System Agent${NC}"
+  echo -e "${BLUE}${BOLD}  OSA${NC}${DIM} — Optimal System Agent (dev)${NC}"
   echo -e "${DIM}  ─────────────────────────────${NC}"
   echo ""
 }
 
-check_deps() {
-  local missing=0
-
+# Elixir is always required. Node is only needed for the legacy frontend.
+check_backend_deps() {
   if ! command -v elixir &>/dev/null; then
     echo -e "${RED}  Missing: elixir${NC} — install from https://elixir-lang.org/install.html"
-    missing=1
+    echo ""
+    exit 1
   fi
+}
 
+check_frontend_deps() {
   if ! command -v node &>/dev/null; then
     echo -e "${RED}  Missing: node${NC} — install from https://nodejs.org or use nvm"
-    missing=1
-  fi
-
-  if [ "$missing" -eq 1 ]; then
     echo ""
     exit 1
   fi
@@ -63,13 +69,14 @@ start_backend() {
   echo -e "${DIM}  Backend PID: ${BACKEND_PID}${NC}"
 }
 
+# LEGACY: the desktop frontend is no longer the primary surface. Kept as a dev
+# convenience for anyone still working on it.
 start_frontend() {
   local mode="${1:-dev}"
-  echo -e "${GREEN}  Starting frontend...${NC}  ${DIM}(SvelteKit on :5199)${NC}"
+  echo -e "${YELLOW}  [legacy]${NC} ${GREEN}Starting desktop frontend...${NC}  ${DIM}(SvelteKit on :5199)${NC}"
 
   cd desktop
 
-  # Install npm deps if needed
   if [ ! -d node_modules ]; then
     echo -e "${DIM}  Installing npm dependencies...${NC}"
     npm install --silent
@@ -101,22 +108,20 @@ trap cleanup EXIT INT TERM
 # ── Main ──────────────────────────────────────────────────────
 
 banner
-check_deps
 
 case "${1:-}" in
-  --backend)
-    start_backend
-    echo ""
-    echo -e "${GREEN}  Backend running.${NC} Press Ctrl+C to stop."
-    wait
-    ;;
   --frontend)
+    check_frontend_deps
+    echo -e "${YELLOW}  Legacy desktop frontend only (no backend).${NC}"
     start_frontend "${2:-dev}"
     echo ""
     echo -e "${GREEN}  Frontend running.${NC} Press Ctrl+C to stop."
     wait
     ;;
   --tauri)
+    check_backend_deps
+    check_frontend_deps
+    echo -e "${YELLOW}  Backend + legacy desktop frontend (Tauri).${NC}"
     start_backend
     sleep 2
     start_frontend tauri
@@ -124,13 +129,12 @@ case "${1:-}" in
     echo -e "${GREEN}  Both services running.${NC} Press Ctrl+C to stop."
     wait
     ;;
-  *)
+  --backend | "" | *)
+    check_backend_deps
     start_backend
-    sleep 2
-    start_frontend dev
     echo ""
-    echo -e "${GREEN}  Both services running.${NC} Press Ctrl+C to stop."
-    echo -e "${BLUE}  Open http://localhost:5199${NC}"
+    echo -e "${GREEN}  Backend running on :9089.${NC} Press Ctrl+C to stop."
+    echo -e "${DIM}  The desktop frontend is legacy — use ${NC}${BLUE}./dev.sh --tauri${NC}${DIM} if you need it.${NC}"
     wait
     ;;
 esac

@@ -1,10 +1,15 @@
 # Heartbeat Tasks
 
-OSA checks this file every 30 minutes and executes any unchecked items through the agent loop.
-Write tasks as plain English instructions — the agent will use its available tools to complete them.
+OSA checks this file every 30 minutes and runs every unchecked checkbox item (`- [ ] ...`)
+through the agent loop. Write each task as a plain-English instruction on its own `- [ ]` line —
+the agent uses its available tools to complete it. Lines that are not unchecked checkboxes
+(headings, prose, HTML comments) are ignored, so you can freely annotate this file.
+
+When OSA finishes a task it flips that line's checkbox to `- [x]` **in place** and appends a
+completion timestamp — it does not move the line anywhere. Re-check it to `- [ ]` to run it again.
 
 A task that fails 3 times in a row is automatically disabled (circuit breaker).
-To re-enable it, just uncheck it again.
+To re-enable it, flip it back to `- [ ]`.
 
 ---
 
@@ -35,10 +40,10 @@ To re-enable it, just uncheck it again.
 
 ---
 
-## Completed Tasks
+## How Completed Tasks Look
 
-<!-- Tasks move here after completion. The agent marks them automatically. -->
-<!-- Example:
+<!-- After a task runs, OSA marks its checkbox [x] in place and appends a timestamp.
+     A completed line looks like this (it stays where it was written):
 - [x] Generate today's daily briefing (completed 2026-02-24T08:30:00Z)
 - [x] Check sales pipeline for stalled deals (completed 2026-02-24T09:00:00Z)
 -->

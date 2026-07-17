@@ -1,5 +1,10 @@
 # User Profile
 
+<!-- Copy to ~/.osa/USER.md. OSA loads this file at boot and injects it whole into its
+     system prompt (the {{USER_PROFILE}} slot in priv/prompts/SYSTEM.md). It is free-form
+     Markdown — the structure below is just a suggestion. OSA also updates this file itself
+     as it learns about you, so anything you leave blank gets filled in over time. -->
+
 OSA reads this file at startup to personalize its behavior.
 Fill in the sections relevant to you — leave anything blank that does not apply.
 The more context you provide, the less the agent has to infer or ask.

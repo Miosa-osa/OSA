@@ -1,52 +1,66 @@
 {
-  "_comment": "OSA Event Triggers — Copy to ~/.osa/TRIGGERS.json to activate",
+  "_comment": "OSA event triggers — copy to ~/.osa/TRIGGERS.json. A trigger runs a job when an event happens. Each trigger needs: id, name, event, type ('agent' with a 'job' string, or 'command' with a 'command' string), and enabled. There are two ways a trigger fires: (1) INTERNAL BUS — set 'event' to one of OSA's built-in bus events (listed in _valid_bus_events) and the trigger auto-runs whenever that event occurs; (2) EXTERNAL WEBHOOK — POST a JSON body to http://<host>:9089/webhooks/<id> and the trigger whose 'id' matches runs, no matter what 'event' says. For externally-fired triggers 'event' is just a label; a label that is not a built-in bus event logs one harmless 'unknown event' warning when the trigger is enabled and otherwise does nothing. Job templates support {{payload}} (the whole payload as JSON), {{payload.key}} (a single top-level field), and {{timestamp}}. A trigger that fails 3 times in a row is auto-disabled (circuit breaker).",
+  "_valid_bus_events": [
+    "user_message",
+    "agent_response",
+    "tool_call",
+    "tool_result",
+    "channel_connected",
+    "channel_disconnected",
+    "channel_error",
+    "ask_user_question",
+    "survey_answered",
+    "algedonic_alert",
+    "signal_classified",
+    "doom_loop_halt",
+    "auto_mode_blocked",
+    "auto_mode_paused",
+    "system_event"
+  ],
   "triggers": [
     {
+      "_note": "INTERNAL BUS trigger: runs whenever a messaging channel connects.",
+      "id": "on-channel-connect",
+      "name": "Greet on Channel Connect",
+      "event": "channel_connected",
+      "type": "agent",
+      "job": "A channel just connected: {{payload}}. Post a short hello and a one-line note of what I can help with.",
+      "enabled": false
+    },
+    {
+      "_note": "INTERNAL BUS trigger: reacts to a critical (algedonic) alert raised inside OSA.",
+      "id": "on-critical-alert",
+      "name": "Critical Alert Responder",
+      "event": "algedonic_alert",
+      "type": "agent",
+      "job": "A critical alert fired at {{timestamp}}: {{payload}}. Investigate the likely cause, check recent activity, and write findings to ~/.osa/alerts/critical.md",
+      "enabled": false
+    },
+    {
+      "_note": "INTERNAL BUS trigger: a shell command that logs whenever a runaway agent loop is halted.",
+      "id": "on-doom-loop",
+      "name": "Doom Loop Logger",
+      "event": "doom_loop_halt",
+      "type": "command",
+      "command": "echo '{{timestamp}} doom loop halted: {{payload}}' >> ~/.osa/data/doom-loops.log",
+      "enabled": false
+    },
+    {
+      "_note": "EXTERNAL WEBHOOK trigger: fire it with a POST to http://<host>:9089/webhooks/new-lead and a JSON body. The 'event' value is only a label here.",
       "id": "new-lead",
       "name": "New Lead Handler",
-      "event": "webhook:lead_created",
+      "event": "external:new_lead",
       "type": "agent",
-      "job": "A new lead just came in: {{payload}}. Research the company, score the lead, and draft a personalized first response.",
+      "job": "A new lead came in: {{payload}}. Research the company, score the lead 1-10, and draft a personalized first response. Save it to ~/.osa/leads/{{payload.id}}.md",
       "enabled": false
     },
     {
+      "_note": "EXTERNAL WEBHOOK trigger: fire it from CI with a POST to http://<host>:9089/webhooks/deploy-notify.",
       "id": "deploy-notify",
       "name": "Deployment Notification",
-      "event": "webhook:deploy",
+      "event": "external:deploy",
       "type": "command",
-      "command": "echo 'Deployment triggered at {{timestamp}}: {{payload.version}}' >> ~/.osa/data/deploys.log",
-      "enabled": false
-    },
-    {
-      "id": "error-alert",
-      "name": "Error Alert Analyzer",
-      "event": "webhook:error",
-      "type": "agent",
-      "job": "An error alert was triggered: {{payload}}. Analyze the error, check recent changes, and suggest a fix.",
-      "enabled": false
-    },
-    {
-      "id": "ticket-created",
-      "name": "New Support Ticket",
-      "event": "webhook:ticket_created",
-      "type": "agent",
-      "job": "New support ticket received: {{payload}}. Classify priority (P0-P3), check knowledge base for similar issues, draft initial response.",
-      "enabled": false
-    },
-    {
-      "id": "meeting-reminder",
-      "name": "Meeting Prep Trigger",
-      "event": "webhook:calendar_event",
-      "type": "agent",
-      "job": "Meeting starting in 15 minutes: {{payload.title}} with {{payload.attendees}}. Prepare a quick briefing with attendee context and talking points.",
-      "enabled": false
-    },
-    {
-      "id": "commit-review",
-      "name": "Auto Code Review",
-      "event": "webhook:push",
-      "type": "agent",
-      "job": "New commits pushed to {{payload.repository}}: {{payload.commits}}. Do a quick review of the changes — flag any security issues or obvious bugs.",
+      "command": "echo '{{timestamp}} deployed {{payload.version}} to {{payload.environment}}' >> ~/.osa/data/deploys.log",
       "enabled": false
     }
   ]
