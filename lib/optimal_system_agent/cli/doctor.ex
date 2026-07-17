@@ -180,7 +180,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
 
     rust_tui =
       if priv_dir,
-        do: Path.join([priv_dir, "rust", "tui", "target", "release", "osa-tui"]),
+        do: Path.join([priv_dir, "rust", "tui", "target", "release", "osagent"]),
         else: nil
 
     go_tui = if priv_dir, do: Path.join([priv_dir, "go", "tui-v2", "osa"]), else: nil

@@ -6,7 +6,24 @@ config :logger, level: :warning
 # Repo from their own processes and can't do Sandbox.checkout!(), which causes
 # DBConnection.OwnershipError → rest_for_one cascade → flaky "no process" failures.
 # Tests use unique IDs and don't need transaction isolation.
-config :optimal_system_agent, OptimalSystemAgent.Store.Repo, pool_size: 2
+#
+# Isolate the Store.Repo database under the system tmp dir so tests never touch
+# the real ~/.osa/osa.db (matching the durable_log_dir / permissions_file
+# isolation below). Crucially this also gives every run a FRESH database: the
+# suite seeds transcript/session rows keyed by `System.unique_integer/1`, which
+# is only unique *within* a VM instance — against a persistent DB, ids from a
+# prior run collide with leftover rows and corrupt exact-count assertions
+# (e.g. session fork message_count). The file is deleted here, before the Repo
+# connects at boot; migrations recreate the schema on startup.
+test_db_path = Path.join(System.tmp_dir!(), "osa-test.db")
+
+for suffix <- ["", "-shm", "-wal"] do
+  _ = File.rm(test_db_path <> suffix)
+end
+
+config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
+  pool_size: 2,
+  database: test_db_path
 
 # Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.

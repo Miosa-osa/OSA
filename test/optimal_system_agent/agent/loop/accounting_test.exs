@@ -3,6 +3,25 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
 
   alias OptimalSystemAgent.Agent.Loop.Accounting
 
+  # Accounting.record/2 bridges real usage into the *global* Budget ledger
+  # (see Accounting.maybe_bridge_budget/2). These tests deliberately record
+  # large token counts, which would leak accumulated spend into the global
+  # Budget and trip the spend_guard hook in unrelated tests under random
+  # ordering. Zero the global daily/monthly ledger after each test (the ledger
+  # starts at 0 at boot and nothing asserts its accumulated value, so this is a
+  # faithful restore). The synchronous get_status/0 call flushes the reset casts.
+  setup do
+    on_exit(fn ->
+      if Process.whereis(OptimalSystemAgent.Budget) do
+        OptimalSystemAgent.Budget.reset_daily()
+        OptimalSystemAgent.Budget.reset_monthly()
+        OptimalSystemAgent.Budget.get_status()
+      end
+    end)
+
+    :ok
+  end
+
   defp base_state do
     %{
       session_id: "acct-test-#{System.unique_integer([:positive])}",

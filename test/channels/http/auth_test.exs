@@ -183,8 +183,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.AuthTest do
       assert {:error, :invalid_token} = Auth.verify_token(token)
     end
 
-    test "token expiring 1 second from now is still valid" do
-      exp = System.system_time(:second) + 1
+    test "token expiring shortly in the future is still valid" do
+      # Verify a not-yet-expired token validates. Auth.verify_token/1 reads the
+      # real wall clock (System.system_time), so the exp margin must comfortably
+      # exceed the time that can elapse before verify runs — under full-suite CPU
+      # load a 1-second margin races the clock and flakes. 60s preserves the
+      # intent (a token still within its exp window is valid) without the race.
+      exp = System.system_time(:second) + 60
       claims = %{"user_id" => "u1", "exp" => exp}
       token = forge_token(%{"alg" => "HS256", "typ" => "JWT"}, claims, test_secret())
 

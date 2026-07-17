@@ -407,8 +407,7 @@ case "${1:-}" in
     ;;
 
   doctor)
-    (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.doctor()" 2>/dev/null) || \
-      (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run()" 2>/dev/null) || \
+    (cd "$ROOT" && mix run --no-start -e "OptimalSystemAgent.CLI.Doctor.run()" 2>/dev/null) || \
       echo "Doctor command not available. Try: osa then type /doctor"
     exit 0
     ;;

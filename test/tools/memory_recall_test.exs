@@ -210,6 +210,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.MemoryRecallTest do
     end
 
     test "execute/2 exists on shim (structured layout)" do
+      # function_exported?/3 reports false for a module that has not yet been
+      # loaded into memory. Under random test ordering this test can run before
+      # any other test references the shim at runtime, so force the load first.
+      {:module, MemoryRecall} = Code.ensure_loaded(MemoryRecall)
       assert function_exported?(MemoryRecall, :execute, 2)
     end
 

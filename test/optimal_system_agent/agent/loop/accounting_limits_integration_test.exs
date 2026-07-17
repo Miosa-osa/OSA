@@ -9,6 +9,25 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingLimitsIntegrationTest do
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.Limits
 
+  # Accounting.record/2 bridges real usage into the *global* Budget ledger
+  # (see Accounting.maybe_bridge_budget/2). These tests record large, sometimes
+  # uncapped token counts (e.g. 50M+50M), which would leak accumulated spend
+  # into the global Budget and trip the spend_guard hook in unrelated tests
+  # under random ordering. Zero the global daily/monthly ledger after each test
+  # (the ledger starts at 0 at boot and nothing asserts its accumulated value,
+  # so this is a faithful restore). The synchronous get_status/0 flushes casts.
+  setup do
+    on_exit(fn ->
+      if Process.whereis(OptimalSystemAgent.Budget) do
+        OptimalSystemAgent.Budget.reset_daily()
+        OptimalSystemAgent.Budget.reset_monthly()
+        OptimalSystemAgent.Budget.get_status()
+      end
+    end)
+
+    :ok
+  end
+
   # A minimal loop-state map. glm-5.2:cloud → {0.60, 2.20} $/1M tokens.
   defp state(overrides \\ %{}) do
     Map.merge(
