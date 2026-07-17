@@ -137,9 +137,14 @@ Currently shipped patterns: `code-analysis`, `full-stack`, `debug-swarm`, `perfo
 
 ### Development Setup
 
+OSA has two parts: the **Elixir/OTP engine** (`lib/`, the backend + HTTP/SSE API) and
+the **Rust TUI client** (`priv/rust/tui/`, the terminal front end). The `osa` command
+warms the backend as a daemon and attaches the TUI to it.
+
 **Prerequisites:**
 
-- Elixir 1.19+ and OTP 28+
+- Elixir 1.17+ and a matching Erlang/OTP
+- Rust toolchain (`cargo`) — only needed to build the TUI client
 - Ollama (for local testing without API keys)
 - Git
 
@@ -148,15 +153,34 @@ Currently shipped patterns: `code-analysis`, `full-stack`, `debug-swarm`, `perfo
 git clone https://github.com/YOUR_USERNAME/OSA.git
 cd OSA
 
-# Install dependencies and compile
+# Fetch deps, set up the local SQLite DB, and compile the engine
 mix setup
 
-# Run the setup wizard (creates ~/.osa/ config directory)
+# Run the interactive setup wizard (creates the ~/.osa/ config directory)
 mix osa.setup
+```
 
+**Running it locally (from a source checkout):**
+
+```bash
+# Option A — build the TUI once, then use the launcher for the full experience
+(cd priv/rust/tui && cargo build --release)   # or: mix tui
+scripts/install-source.sh                      # build + install the `osa` command
+osa                                            # attach the TUI (warms the backend daemon)
+
+# Option B — run the pieces directly for engine development
+mix osa.serve   # backend only: HTTP/SSE API on http://127.0.0.1:9089 (no TUI)
+mix osa.chat    # interactive CLI chat against the running engine
+```
+
+> The published install path is `scripts/install.sh` (prebuilt release), which is what
+> end users run. For contributor work on a checkout, prefer `mix osa.serve` /
+> `mix osa.chat` or `scripts/install-source.sh` so you test the code you just changed.
+
+```bash
 # Verify everything works
-mix test     # 440 tests, 0 failures
-mix chat     # Interactive CLI
+mix test        # full test suite, 0 failures
+mix format      # apply formatting before committing
 ```
 
 ### Project Structure
@@ -183,7 +207,7 @@ lib/
 │   │   ├── cli/
 │   │   │   ├── line_editor.ex  # Readline (arrow keys, history, Ctrl bindings)
 │   │   │   └── spinner.ex      # Animated spinner (elapsed time, tool tracking)
-│   │   └── http/           # HTTP channel (Bandit + Plug, port 8089)
+│   │   └── http/           # HTTP channel (Bandit + Plug, port 9089)
 │   ├── events/             # Event bus (goldrush-compiled :osa_event_router)
 │   ├── intelligence/       # Communication intelligence (5 modules)
 │   ├── mcp/                # Model Context Protocol client
@@ -208,7 +232,7 @@ priv/
 └── swarms/         # patterns.json (10 swarm patterns)
 
 config/             # Application configuration (config.exs, runtime.exs)
-test/               # 440 tests mirroring lib/ structure
+test/               # test suite mirroring lib/ structure
 docs/               # Documentation
 examples/           # Example skills, configs
 ```
@@ -216,7 +240,7 @@ examples/           # Example skills, configs
 ### Running Tests
 
 ```bash
-mix test                                    # Run all 440 tests
+mix test                                    # Run the full suite
 mix test --cover                            # With coverage report
 mix test test/signal/classifier_test.exs    # Single file
 mix test --only tag:signal                  # By tag

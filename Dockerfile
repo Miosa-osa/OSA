@@ -1,6 +1,6 @@
 FROM elixir:1.17-alpine AS builder
 
-RUN apk add --no-cache build-base git go
+RUN apk add --no-cache build-base git
 
 WORKDIR /app
 
@@ -14,9 +14,6 @@ COPY lib lib
 COPY priv priv
 COPY rel rel
 COPY VERSION ./
-
-# Build Go tokenizer
-RUN cd priv/go/tokenizer && CGO_ENABLED=0 go build -o osa-tokenizer .
 
 RUN MIX_ENV=prod mix compile
 RUN MIX_ENV=prod mix release osagent
@@ -34,8 +31,8 @@ USER osa
 
 ENV MIX_ENV=prod
 
-EXPOSE 8089
+EXPOSE 9089
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8089/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:9089/health || exit 1
 
 CMD ["bin/osagent", "serve"]
