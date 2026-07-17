@@ -12,4 +12,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Constants do
 
   @kinds ~w(file process url command)
   def kinds, do: @kinds
+
+  @modes ~w(once repeat)
+  def modes, do: @modes
 end

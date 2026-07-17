@@ -1,11 +1,15 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Tool do
   @moduledoc  """
-  Cooperative watch tool — blocks until a target changes.
+  Non-blocking background watch tool.
+
+  Registers a supervised watcher (see `Monitor.WatchManager` / `WatchTask`) and
+  returns a `watch_id` immediately — it does NOT block the agent's turn. The
+  watcher streams a notification on each change (or when an optional `condition`
+  is met), supporting `mode: "once"` (fire once) or `"repeat"` (per-occurrence).
 
   Pairs with `cron` (scheduled triggers) and `sleep` (unconditional wait)
-  to give the agent proactive scheduling primitives. Mirrors
-  upstream from the the upstream contract, simplified to
-  the 4 watch kinds OSA cares about.
+  to give the agent proactive scheduling primitives. Simplified to the 4 watch
+  kinds OSA cares about.
   """
 
   use OptimalSystemAgent.Tools.Behaviour
@@ -51,6 +55,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Tool do
           "type" => "integer",
           "description" =>
             "How often to re-sample, in milliseconds. Defaults to #{Constants.default_poll_interval_ms()}."
+        },
+        "mode" => %{
+          "type" => "string",
+          "enum" => Constants.modes(),
+          "description" =>
+            "`once` (default) fires on the first change then retires; `repeat` keeps " <>
+              "watching and notifies on EACH occurrence until duration_seconds elapses."
+        },
+        "condition" => %{
+          "type" => "object",
+          "description" =>
+            "Optional match that reports WHEN a condition is met (rising edge) rather " <>
+              "than on any change. Keys by kind: url {\"status\": 200}; " <>
+              "command {\"exit\": 0} and/or {\"contains\": \"ready\"}; process {\"alive\": false}."
+        },
+        "max_fires" => %{
+          "type" => "integer",
+          "description" =>
+            "In `repeat` mode, stop after this many occurrences (default 100). Ignored for `once`."
         }
       },
       "required" => ["kind", "target"]

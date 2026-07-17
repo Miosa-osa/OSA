@@ -17,18 +17,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Prompt do
         else: "sleep"
 
     """
-    Watch a target until it changes — file mtime, process exit, URL response, or
-    command status. Returns when a change is observed or when the duration expires.
+    Watch a target for changes — file mtime, process exit, URL response, or
+    command status. Registers a background watcher and returns a `watch_id`
+    IMMEDIATELY; it does NOT block your turn. You are notified automatically
+    (the change is injected into the conversation) each time it fires.
 
     Kinds:
-    - `file`     — re-stat path; emit when mtime or size changes
-    - `process`  — check pid liveness; emit on exit
-    - `url`      — periodically GET; emit on status-code transition
-    - `command`  — re-run shell command; emit on exit-code or output change
+    - `file`     — re-stat path; notify when mtime or size changes
+    - `process`  — check pid liveness; notify on exit
+    - `url`      — periodically GET; notify on status-code transition
+    - `command`  — re-run shell command; notify on exit-code or output change
 
-    The agent can call this concurrently with other tools — it doesn't block the
-    main loop. Maximum duration is #{Constants.max_duration_seconds()}s; the
-    poll interval defaults to #{Constants.default_poll_interval_ms()}ms.
+    Modes:
+    - `once`   (default) — notify on the first change, then retire
+    - `repeat`           — keep watching and notify on EACH occurrence
+
+    Optionally pass a `condition` to be told WHEN a state is reached rather than
+    on any change (e.g. url `{"status": 200}`, command `{"exit": 0}`).
+
+    Runs truly in the background — issue it and continue working; the watcher
+    reports back on its own. Maximum duration is #{Constants.max_duration_seconds()}s;
+    the poll interval defaults to #{Constants.default_poll_interval_ms()}ms.
 
     Prefer this over a `#{sleep_name}` + manual re-check when the trigger is
     external (file changes, process exit, HTTP transitions). Use `#{sleep_name}`
