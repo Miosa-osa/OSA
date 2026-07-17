@@ -28,7 +28,26 @@ config :optimal_system_agent,
 
   # Doom loop hard cap — absolute total tool calls per session before forced halt.
   # This is a secondary safety net independent of the sliding-window signature check.
-  doom_loop_max_calls: 100,
+  # Raised to 2000: a genuine backstop just above realistic multi-hour volume,
+  # so an autonomous run isn't killed at 100. Runtime-tunable (get_env).
+  doom_loop_max_calls: 2000,
+
+  # Wall-clock ceiling on a single agent turn (the GenServer.call in
+  # Loop.process_message). `:infinity` because the turn is already bounded
+  # logically by max_iterations + max_budget_usd; a wall-clock cap here just
+  # orphans a still-running hours-long turn. Callers may still pass an explicit
+  # opts[:timeout].
+  agent_turn_timeout_ms: :infinity,
+
+  # Per-tool timeout for the parallel tool-orchestrator path. Raised from the
+  # old hardcoded 60s to 300s to match shell_execute's own default so long
+  # builds/tests/installs in a parallel batch aren't killed early.
+  tool_timeout_ms: 300_000,
+
+  # When false, the stall detector escalates (graded nudges) but never hard-halts
+  # a long read/analysis phase — appropriate for autonomous runs. The "autonomous"
+  # preset sets this false; interactive sessions keep the hard halt.
+  stall_hard_halt: true,
   temperature: 0.7,
   max_tokens: 4096,
 
