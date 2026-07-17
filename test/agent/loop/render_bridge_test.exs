@@ -73,12 +73,26 @@ defmodule OptimalSystemAgent.Agent.Loop.RenderBridgeTest do
   end
 
   setup do
+    # Snapshot the global builtin_tools registry and restore it after each test.
+    # seed_registry/1 merges test-only stub modules into the process-global
+    # persistent_term; without this restore they leak into EVERY later
+    # Loop-starting test and cause :undef when the registry is enumerated.
+    key = {OptimalSystemAgent.Tools.Registry, :builtin_tools}
+    prev = :persistent_term.get(key, :__absent__)
+
     seed_registry(%{
       "good_render_tool" => GoodRenderTool,
       "crashing_render_tool" => CrashingRenderTool,
       "nil_render_tool" => NilRenderTool,
       "exit_render_tool" => ExitRenderTool
     })
+
+    on_exit(fn ->
+      case prev do
+        :__absent__ -> :persistent_term.erase(key)
+        value -> :persistent_term.put(key, value)
+      end
+    end)
 
     :ok
   end

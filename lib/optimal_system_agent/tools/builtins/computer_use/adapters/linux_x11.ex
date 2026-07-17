@@ -121,21 +121,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
   # ── Public Command Generators (tested directly) ──────────────────────
 
   @doc "Generate screenshot command tuple {binary, args}."
+  # Pure command generators (availability is checked at the call site in
+  # screenshot/1). These return the maim invocation form; scrot fallback, when
+  # needed, is selected by the executor, not baked into command generation.
   def screenshot_cmd(%{path: path, region: %{"x" => x, "y" => y, "width" => w, "height" => h}}) do
-    if has_maim?() do
-      {"maim", ["-g", "#{w}x#{h}+#{x}+#{y}", path]}
-    else
-      # scrot doesn't support region capture directly — take full screen
-      {"scrot", [path]}
-    end
+    {"maim", ["-g", "#{w}x#{h}+#{x}+#{y}", path]}
   end
 
   def screenshot_cmd(%{path: path}) do
-    if has_maim?() do
-      {"maim", [path]}
-    else
-      {"scrot", [path]}
-    end
+    {"maim", [path]}
+  end
+
+  @doc """
+  POSIX single-quote escape a string for safe shell interpolation: wrap in
+  single quotes and replace embedded single quotes with the '\\'' sequence.
+  """
+  def shell_escape(str) when is_binary(str) do
+    "'" <> String.replace(str, "'", "'\\''") <> "'"
   end
 
   @doc "Generate click command tuple."
