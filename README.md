@@ -770,20 +770,19 @@ OSA is the intelligence layer of the MIOSA platform:
 | **OSA + Custom Template** | Build your own OS template; OSA provides the intelligence layer |
 | **MIOSA Cloud** | Managed instances with enterprise governance |
 
-### Memory today, and Optimal Engine tomorrow
+### Memory: native, plus Optimal Engine
 
 OSA ships with its **own native memory** — built in, on by default, and fully
 standalone. It works with no external services: long-term recall, episodic
 tracking, the vault, and skill learning all run locally out of the box. Nothing
 extra is required to get persistent, cross-session memory.
 
-**Coming soon: Optimal Engine.** Optimal Engine is a separate knowledge-base and
-"second brain" product from the team — an **optional, recommended** external
-memory and knowledge/data-store layer for the ecosystem that provisions the data
-stores a given use case needs. It's designed to complement OSA's native memory
-with a richer, shared knowledge layer, not to replace it. This integration is
-**planned, not yet shipped** — native memory is what runs today, and Optimal
-Engine will be an opt-in richer layer when it lands.
+**Optimal Engine** is a knowledge-base / "second brain" product in the ecosystem
+— a richer external memory and knowledge/data-store layer you can plug in. It's
+**available today** and ships its **own CLI**: set it up, then tell OSA about it,
+and OSA can leverage Optimal Engine as an external memory/knowledge layer
+alongside its native memory. Native memory works standalone; Optimal Engine is
+the optional, recommended layer when you want a deeper, shared knowledge base.
 
 [miosa.ai](https://miosa.ai) — [GitHub](https://github.com/Miosa-osa/OSA)
 
