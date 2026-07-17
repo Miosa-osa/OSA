@@ -21,6 +21,81 @@ pub fn osa_version() -> &'static str {
     option_env!("OSA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+/// The *display* form of the version: the raw semver with the patch component
+/// zero-padded to a minimum of three digits (1.0.1 -> 1.0.001, 1.0.17 ->
+/// 1.0.017, 1.0.128 -> 1.0.128). Major/minor are left untouched, and any
+/// pre-release/build suffix (`-rc.1`, `+build.5`) is preserved verbatim.
+///
+/// This is the padded scheme the operator wants to *read* everywhere in the UI,
+/// while the build tools (mix/cargo/`OSA_VERSION`) keep using the raw, valid
+/// semver returned by [`osa_version`] (semver forbids leading zeros). Use this
+/// for every user-facing surface: the status-bar chip, the welcome banner, the
+/// `/version` command, and `--version`. Use [`osa_version`] for anything a
+/// machine parses.
+pub fn osa_version_display() -> String {
+    pad_version_display(osa_version())
+}
+
+/// Pad the patch component of a semver string to a minimum width of 3.
+///
+/// The numeric core (`MAJOR.MINOR.PATCH`) is padded; any pre-release/build
+/// metadata introduced by the first `-` or `+` is split off and re-appended
+/// untouched. If the string is not a 3-part core of all-numeric components it
+/// is returned unchanged (so odd/unexpected version strings never get mangled).
+fn pad_version_display(v: &str) -> String {
+    // Peel off pre-release/build metadata so we only touch the numeric core.
+    let (core, suffix) = match v.find(['-', '+']) {
+        Some(i) => (&v[..i], &v[i..]),
+        None => (v, ""),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    let all_numeric = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !all_numeric {
+        return v.to_string();
+    }
+    // `{:0>3}` = fill '0', right-align, min width 3 (pads a 1/2-digit patch,
+    // leaves 3+ digits as-is).
+    format!("{}.{}.{:0>3}{}", parts[0], parts[1], parts[2], suffix)
+}
+
+#[cfg(test)]
+mod version_display_tests {
+    use super::pad_version_display;
+
+    #[test]
+    fn pads_patch_to_three_digits() {
+        assert_eq!(pad_version_display("1.0.0"), "1.0.000");
+        assert_eq!(pad_version_display("1.0.1"), "1.0.001");
+        assert_eq!(pad_version_display("1.0.17"), "1.0.017");
+    }
+
+    #[test]
+    fn leaves_wide_patch_and_major_minor_alone() {
+        assert_eq!(pad_version_display("1.0.128"), "1.0.128");
+        assert_eq!(pad_version_display("2.11.5"), "2.11.005");
+        assert_eq!(pad_version_display("10.20.30"), "10.20.030");
+    }
+
+    #[test]
+    fn preserves_prerelease_and_build_suffix() {
+        assert_eq!(pad_version_display("1.0.2-rc.1"), "1.0.002-rc.1");
+        assert_eq!(pad_version_display("1.0.2+build.5"), "1.0.002+build.5");
+        assert_eq!(pad_version_display("1.0.2-rc.1+build.5"), "1.0.002-rc.1+build.5");
+    }
+
+    #[test]
+    fn passes_through_non_three_part_or_non_numeric() {
+        assert_eq!(pad_version_display("1.0"), "1.0");
+        assert_eq!(pad_version_display("1.0.0.0"), "1.0.0.0");
+        assert_eq!(pad_version_display("nightly"), "nightly");
+        assert_eq!(pad_version_display("1.x.0"), "1.x.0");
+        assert_eq!(pad_version_display(""), "");
+    }
+}
+
 fn home_dir() -> PathBuf {
     // Resolve the real home dir cross-platform: BaseDirs honors USERPROFILE /
     // HOMEDRIVE+HOMEPATH on Windows (where HOME is normally unset), and $HOME on

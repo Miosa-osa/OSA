@@ -4,8 +4,8 @@
 
 # OSA — the Optimal System Agent
 
-**A proactive, local-first AI agent that lives in your terminal.**
-One command to install. No toolchains. Your machine, your data, any model.
+**A fast, reliable, long-running AI coding agent that lives in your terminal.**
+One command to install and run. No toolchains. Your machine, your data, any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](#)
@@ -769,6 +769,21 @@ OSA is the intelligence layer of the MIOSA platform:
 | **OSA + BusinessOS** | Proactive business assistant with CRM, scheduling, revenue alerts |
 | **OSA + Custom Template** | Build your own OS template; OSA provides the intelligence layer |
 | **MIOSA Cloud** | Managed instances with enterprise governance |
+
+### Memory today, and Optimal Engine tomorrow
+
+OSA ships with its **own native memory** — built in, on by default, and fully
+standalone. It works with no external services: long-term recall, episodic
+tracking, the vault, and skill learning all run locally out of the box. Nothing
+extra is required to get persistent, cross-session memory.
+
+**Coming soon: Optimal Engine.** Optimal Engine is a separate knowledge-base and
+"second brain" product from the team — an **optional, recommended** external
+memory and knowledge/data-store layer for the ecosystem that provisions the data
+stores a given use case needs. It's designed to complement OSA's native memory
+with a richer, shared knowledge layer, not to replace it. This integration is
+**planned, not yet shipped** — native memory is what runs today, and Optimal
+Engine will be an opt-in richer layer when it lands.
 
 [miosa.ai](https://miosa.ai) — [GitHub](https://github.com/Miosa-osa/OSA)
 

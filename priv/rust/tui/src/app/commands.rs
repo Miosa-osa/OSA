@@ -320,11 +320,11 @@ impl App {
                 // Version from the single build-time source (tag-stamped or Cargo
                 // semver). Rendered into scrollback so it stays visible.
                 self.chat.add_system_message(
-                    &format!("OSA {}", crate::config::osa_version()),
+                    &format!("OSA {}", crate::config::osa_version_display()),
                     "info",
                 );
                 self.toasts.push(
-                    format!("OSA {}", crate::config::osa_version()),
+                    format!("OSA {}", crate::config::osa_version_display()),
                     crate::components::toast::ToastLevel::Info,
                 );
             }

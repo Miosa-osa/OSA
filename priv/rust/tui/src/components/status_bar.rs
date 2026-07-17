@@ -509,7 +509,7 @@ impl Component for StatusBar {
         // Right-most element so it's the first to be clipped on narrow panes.
         spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
         spans.push(Span::styled(
-            format!("v{}", crate::config::osa_version()),
+            format!("v{}", crate::config::osa_version_display()),
             theme.faint(),
         ));
 

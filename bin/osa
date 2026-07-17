@@ -343,6 +343,26 @@ print_release_notes() {
   ' "$changelog" 2>/dev/null || true
 }
 
+# ── Version display padding ───────────────────────────────────────
+# Pad the patch component to a minimum of 3 digits for DISPLAY only
+# (1.0.1 -> 1.0.001, 1.0.17 -> 1.0.017, 1.0.128 -> 1.0.128). Major/minor and
+# any -pre/+build suffix pass through untouched; a version that isn't a 3-part
+# numeric core is returned unchanged. Mirrors the TUI's osa_version_display()
+# so every surface reads the same padded form. Pure awk/printf — no network or
+# destructive tooling involved.
+pad_version() {
+  printf '%s' "${1:-}" | awk '
+    {
+      v = $0; core = v; suffix = ""
+      if (match(v, /[-+]/)) { core = substr(v, 1, RSTART - 1); suffix = substr(v, RSTART) }
+      n = split(core, p, ".")
+      if (n == 3 && p[1] ~ /^[0-9]+$/ && p[2] ~ /^[0-9]+$/ && p[3] ~ /^[0-9]+$/)
+        printf "%s.%s.%03d%s\n", p[1], p[2], p[3] + 0, suffix
+      else
+        print v
+    }'
+}
+
 # ── Subcommand pre-translation (verbs → TUI flags, then launch) ───
 OVERDRIVE=0
 case "${1:-}" in
@@ -372,10 +392,17 @@ done
 # ── Subcommand dispatch ───────────────────────────────────────────
 case "${1:-}" in
   version|--version|-v)
+    # Display uses the padded patch (1.0.1 -> 1.0.001); the VERSION file itself
+    # stays valid semver for mix/cargo.
     if [ -f "$ROOT/VERSION" ]; then
-      echo "osagent v$(cat "$ROOT/VERSION")"
+      echo "osagent v$(pad_version "$(cat "$ROOT/VERSION")")"
     else
-      (cd "$ROOT" && mix run -e "IO.puts(Application.spec(:optimal_system_agent, :vsn))" 2>/dev/null) || echo "osagent (version unknown)"
+      _v="$(cd "$ROOT" && mix run -e "IO.puts(Application.spec(:optimal_system_agent, :vsn))" 2>/dev/null)"
+      if [ -n "$_v" ]; then
+        echo "osagent v$(pad_version "$_v")"
+      else
+        echo "osagent (version unknown)"
+      fi
     fi
     exit 0
     ;;

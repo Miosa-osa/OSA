@@ -112,7 +112,7 @@ pub fn welcome_lines(
     ));
 
     // Version subtitle (centered, faint) — single build-time source, never stale.
-    let version_label = format!("OSA v{}", crate::config::osa_version());
+    let version_label = format!("OSA v{}", crate::config::osa_version_display());
     let version_pad = (box_width.saturating_sub(version_label.len())) / 2;
     let version_centered = format!("{}{}", " ".repeat(version_pad), version_label);
     lines.push(make_bordered(&version_centered, theme.faint()));

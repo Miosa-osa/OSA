@@ -72,11 +72,26 @@ jobs:
       - name: Stamp version from tag
         shell: bash
         run: |
-          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          # The tag itself (padded display form, e.g. v1.0.002) is authoritative
+          # for the tag name and the GitHub Release title — those stay padded.
+          # For the BUILD we NORMALIZE the tag to valid semver: strip leading
+          # zeros from the patch (v1.0.002 -> 1.0.2). semver forbids leading
+          # zeros, so mix/cargo would reject "1.0.002". The in-app display
+          # re-pads this back to 1.0.00X at render time, so the operator still
+          # reads the padded form everywhere.
+          RAW_VERSION="${GITHUB_REF_NAME#v}"
+          OSA_VERSION="$(printf '%s' "${RAW_VERSION}" | awk '
+            {
+              v = $0; core = v; suffix = ""
+              if (match(v, /[-+]/)) { core = substr(v, 1, RSTART - 1); suffix = substr(v, RSTART) }
+              n = split(core, p, ".")
+              if (n == 3 && p[3] ~ /^[0-9]+$/) printf "%s.%s.%d%s\n", p[1], p[2], p[3] + 0, suffix
+              else print v
+            }')"
           echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
           printf '%s\n' "${OSA_VERSION}" > VERSION
           find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
-          echo "Stamped OSA release version ${OSA_VERSION}"
+          echo "Normalized build version ${OSA_VERSION} from tag ${GITHUB_REF_NAME}"
 
       # Self-contained OTP release. include_erts defaults to true, so the
       # tarball carries its own ERTS — the user needs no Erlang/Elixir.
@@ -139,11 +154,26 @@ jobs:
       - name: Stamp version from tag
         shell: bash
         run: |
-          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          # The tag itself (padded display form, e.g. v1.0.002) is authoritative
+          # for the tag name and the GitHub Release title — those stay padded.
+          # For the BUILD we NORMALIZE the tag to valid semver: strip leading
+          # zeros from the patch (v1.0.002 -> 1.0.2). semver forbids leading
+          # zeros, so mix/cargo would reject "1.0.002". The in-app display
+          # re-pads this back to 1.0.00X at render time, so the operator still
+          # reads the padded form everywhere.
+          RAW_VERSION="${GITHUB_REF_NAME#v}"
+          OSA_VERSION="$(printf '%s' "${RAW_VERSION}" | awk '
+            {
+              v = $0; core = v; suffix = ""
+              if (match(v, /[-+]/)) { core = substr(v, 1, RSTART - 1); suffix = substr(v, RSTART) }
+              n = split(core, p, ".")
+              if (n == 3 && p[3] ~ /^[0-9]+$/) printf "%s.%s.%d%s\n", p[1], p[2], p[3] + 0, suffix
+              else print v
+            }')"
           echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
           printf '%s\n' "${OSA_VERSION}" > VERSION
           find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
-          echo "Stamped OSA release version ${OSA_VERSION}"
+          echo "Normalized build version ${OSA_VERSION} from tag ${GITHUB_REF_NAME}"
 
       - name: Build OTP release (osagent)
         run: MIX_ENV=prod mix release osagent --overwrite
@@ -207,11 +237,26 @@ jobs:
       - name: Stamp version from tag
         shell: bash
         run: |
-          OSA_VERSION="${GITHUB_REF_NAME#v}"
+          # The tag itself (padded display form, e.g. v1.0.002) is authoritative
+          # for the tag name and the GitHub Release title — those stay padded.
+          # For the BUILD we NORMALIZE the tag to valid semver: strip leading
+          # zeros from the patch (v1.0.002 -> 1.0.2). semver forbids leading
+          # zeros, so mix/cargo would reject "1.0.002". The in-app display
+          # re-pads this back to 1.0.00X at render time, so the operator still
+          # reads the padded form everywhere.
+          RAW_VERSION="${GITHUB_REF_NAME#v}"
+          OSA_VERSION="$(printf '%s' "${RAW_VERSION}" | awk '
+            {
+              v = $0; core = v; suffix = ""
+              if (match(v, /[-+]/)) { core = substr(v, 1, RSTART - 1); suffix = substr(v, RSTART) }
+              n = split(core, p, ".")
+              if (n == 3 && p[3] ~ /^[0-9]+$/) printf "%s.%s.%d%s\n", p[1], p[2], p[3] + 0, suffix
+              else print v
+            }')"
           echo "OSA_VERSION=${OSA_VERSION}" >> "$GITHUB_ENV"
           printf '%s\n' "${OSA_VERSION}" > VERSION
           find _build -name 'optimal_system_agent.app' -delete 2>/dev/null || true
-          echo "Stamped OSA release version ${OSA_VERSION}"
+          echo "Normalized build version ${OSA_VERSION} from tag ${GITHUB_REF_NAME}"
 
       # Self-contained OTP release. include_erts defaults to true, so the zip
       # carries its own ERTS — the user needs no Erlang/Elixir. Requires the
