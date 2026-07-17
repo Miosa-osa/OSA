@@ -679,7 +679,17 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "mistral-small-latest" => 128_000,
     # Cohere
     "command-r-plus" => 128_000,
-    "command-r" => 128_000
+    "command-r" => 128_000,
+    # Zhipu / z.ai GLM (OpenAI-compatible; the ollama_cloud route appends a
+    # ":cloud" suffix to the model id, which the prefix match below strips —
+    # e.g. "glm-5.2:cloud" starts_with "glm-5.2"). Windows are the vendor's
+    # published maximums; GLM-4.6 and the GLM-5 line ship a 200K window.
+    "glm-5.2" => 200_000,
+    "glm-5.1" => 200_000,
+    "glm-5" => 200_000,
+    "glm-4.6" => 200_000,
+    "glm-4.5-air" => 128_000,
+    "glm-4.5" => 128_000
   }
 
   @spec context_window(String.t()) :: pos_integer()

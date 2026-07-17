@@ -29,19 +29,39 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   @spec validate(map(), UseContext.t()) ::
           {:ok, map()} | {:error, String.t(), integer()}
   def validate(%{"command" => command} = input, _ctx) when is_binary(command) do
-    # Strip trailing & (background operator) to force foreground execution.
-    normalised = Regex.replace(~r/\s*&\s*$/, command, "")
-    # Strip leading nohup.
-    normalised = Regex.replace(~r/^\s*nohup\s+/, normalised, "")
-    trimmed = String.trim(normalised)
+    raw = String.trim(command)
 
-    if trimmed == "" do
-      # Return as a validation error so the adapter preserves the exact message
-      # string (validation errors are stripped of code: {:error, msg, code} →
-      # {:error, msg}), matching the original direct return of {:error, "Blocked: …"}.
-      {:error, "Blocked: empty command", -32_602}
-    else
-      {:ok, %{input | "command" => trimmed}}
+    cond do
+      raw == "" ->
+        # Return as a validation error so the adapter preserves the exact message
+        # string (validation errors are stripped of code: {:error, msg, code} →
+        # {:error, msg}), matching the original direct return of {:error, "Blocked: …"}.
+        {:error, "Blocked: empty command", -32_602}
+
+      # Reject an obviously incomplete command that ends with a dangling
+      # trailing operator (`&&`, `||`, `|`, or a line-continuation `\`). Left
+      # to run, such a command makes the shell wait for the missing right-hand
+      # side and can hang until the wall-clock timeout — fail fast instead with
+      # an actionable message so the model re-issues a complete command. A lone
+      # trailing `&` is NOT rejected here: it is the background operator and is
+      # stripped below to force foreground execution.
+      dangling_operator?(raw) ->
+        {:error,
+         "Blocked: command ends with a dangling operator (&&, ||, |, or \\) — " <>
+           "re-issue a complete command with a right-hand side.", -32_602}
+
+      true ->
+        # Strip trailing & (background operator) to force foreground execution.
+        normalised = Regex.replace(~r/\s*&\s*$/, command, "")
+        # Strip leading nohup.
+        normalised = Regex.replace(~r/^\s*nohup\s+/, normalised, "")
+        trimmed = String.trim(normalised)
+
+        if trimmed == "" do
+          {:error, "Blocked: empty command", -32_602}
+        else
+          {:ok, %{input | "command" => trimmed}}
+        end
     end
   end
 
@@ -106,10 +126,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         if use_sandbox?() do
           run_in_sandbox(command, effective_cwd, timeout)
         else
-          run_command(command, effective_cwd, timeout)
+          session_id = ctx && Map.get(ctx, :session_id)
+          run_command(command, effective_cwd, timeout, session_id)
         end
     end
   end
+
+  @registry OptimalSystemAgent.Shell.ForegroundRegistry
+
+  @doc """
+  Promote the foreground `shell_execute` command currently running for
+  `session_id` to a supervised background task (TUI Ctrl+B mid-run detach).
+
+  Looks up the process blocked in the foreground receive loop, signals it to
+  hand its live OS process off to `BackgroundManager`, and waits briefly for the
+  new `background_id`. Returns `{:error, :no_active_command}` when nothing is
+  running for the session, or `{:error, :timeout}` if the command finished before
+  the hand-off completed.
+  """
+  @spec detach_foreground(String.t()) ::
+          {:ok, String.t()} | {:error, :no_active_command | :timeout | term()}
+  def detach_foreground(session_id) when is_binary(session_id) do
+    case Registry.lookup(@registry, session_id) do
+      [{pid, _}] ->
+        ref = make_ref()
+        send(pid, {:detach, self(), ref})
+
+        receive do
+          {:detached, ^ref, id} -> {:ok, id}
+          {:detach_failed, ^ref, reason} -> {:error, reason}
+        after
+          3_000 -> {:error, :timeout}
+        end
+
+      [] ->
+        {:error, :no_active_command}
+    end
+  end
+
+  def detach_foreground(_), do: {:error, :no_active_command}
 
   # Resolve the command timeout from OSA_SHELL_TIMEOUT_MS. Pure + defensive so a
   # typo like "30s"/"5000ms"/"" falls back to the default instead of raising
@@ -135,6 +190,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   end
 
   def parse_timeout_ms(_), do: Constants.default_timeout_ms()
+
+  # True when a trimmed command ends with an incomplete/dangling shell operator:
+  #   * `&&` / `||`  — logical connective with no right-hand command
+  #   * `|`          — pipe with no downstream command (a lone `|`, not `||`)
+  #   * `\`          — a trailing line continuation
+  # A single trailing `&` (background operator) is intentionally NOT matched:
+  # it is handled by the background-strip in validate/2.
+  defp dangling_operator?(cmd) when is_binary(cmd) do
+    Regex.match?(~r/(?:&&|\|\|?|\\)\s*$/, cmd)
+  end
+
+  # Null device for redirecting a command's stdin so it can never block waiting
+  # for interactive input (a key cause of silent multi-minute hangs).
+  defp null_device do
+    case :os.type() do
+      {:win32, _} -> "NUL"
+      _ -> "/dev/null"
+    end
+  end
 
   # Accept boolean true or the string "true" (some callers stringify args).
   defp truthy?(true), do: true
@@ -314,12 +388,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   # ── Private: execution ────────────────────────────────────────────────
 
-  defp run_command(command, cwd, timeout_ms) do
+  defp run_command(command, cwd, timeout_ms, session_id \\ nil) do
     # Spawn via Port (not System.cmd) so that on the timeout path we can kill
     # the underlying OS process — and on Windows its whole tree — instead of
     # only shutting down the BEAM task and leaking an orphaned child.
     sh = OptimalSystemAgent.OS.Shell.executable()
-    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1"]
+    # Redirect stdin from the null device so no command can block the port
+    # waiting for interactive input (EOF is delivered immediately). stderr is
+    # merged into stdout so the caller sees a single combined stream.
+    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1 < " <> null_device()]
 
     port =
       Port.open(
@@ -333,24 +410,50 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         _ -> nil
       end
 
+    # Register this process so the TUI (Ctrl+B) can find and detach the running
+    # command mid-flight. Registration is best-effort: if another foreground
+    # command is already registered for the session, this one simply isn't
+    # detachable (unique registry) — it still runs normally.
+    registered? = register_foreground(session_id)
+
+    detach = %{command: command, cwd: cwd, session_id: session_id}
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    collect_command_output(port, os_pid, deadline, timeout_ms, [])
+
+    try do
+      collect_command_output(port, os_pid, deadline, timeout_ms, [], detach)
+    after
+      if registered?, do: Registry.unregister(@registry, session_id)
+    end
   rescue
     e -> {:error, "Shell execution error: #{Exception.message(e)}"}
   end
 
-  defp collect_command_output(port, os_pid, deadline, timeout_ms, acc) do
+  defp register_foreground(session_id) when is_binary(session_id) do
+    case Registry.register(@registry, session_id, nil) do
+      {:ok, _} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp register_foreground(_), do: false
+
+  defp collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
-        collect_command_output(port, os_pid, deadline, timeout_ms, [data | acc])
+        collect_command_output(port, os_pid, deadline, timeout_ms, [data | acc], detach)
 
       {^port, {:exit_status, 0}} ->
         {:ok, maybe_truncate(collected_output(acc))}
 
       {^port, {:exit_status, code}} ->
         {:error, "Exit #{code}:\n#{maybe_truncate(collected_output(acc))}"}
+
+      {:detach, reply_to, ref} ->
+        handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms)
     after
       remaining ->
         kill_os_process(os_pid)
@@ -358,6 +461,94 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         {:error, "Command timed out after #{div(timeout_ms, 1000)}s"}
     end
   end
+
+  # Hand the live OS process off to a supervised BackgroundTask, then return a
+  # "moved to background" result so the current turn completes. The worker takes
+  # over the port (via Port.connect) and later broadcasts a
+  # background_command_completed event just like any other background command.
+  defp handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms) do
+    session_id = detach.session_id
+    output_so_far = collected_output(acc)
+
+    # Ensure a notifier is listening BEFORE the worker can finish, so the
+    # completion is injected back into the Loop (mirrors run_in_background/3).
+    if is_binary(session_id) do
+      OptimalSystemAgent.Agent.BackgroundNotifier.ensure_started(session_id)
+    end
+
+    case BackgroundManager.adopt(
+           command: detach.command,
+           cwd: detach.cwd,
+           session_id: session_id,
+           port: port,
+           os_pid: os_pid,
+           initial: output_so_far
+         ) do
+      {:ok, id, child_pid} ->
+        # Transfer port ownership to the worker, then unlink so THIS process
+        # exiting can never take the port (and its OS child) down. Finally,
+        # forward any port messages already sitting in our mailbox.
+        Port.connect(port, child_pid)
+        safe_unlink(port)
+        forward_pending_port_messages(port, child_pid)
+        broadcast_command_started(session_id, id, detach.command)
+        send(reply_to, {:detached, ref, id})
+
+        {:ok,
+         "Moved to background.\n" <>
+           "- background_id: #{id}\n" <>
+           "- cwd: #{detach.cwd}\n\n" <>
+           "The command keeps running in the background; you'll be notified " <>
+           "automatically when it completes (with its exit code). Poll it with " <>
+           "the bash_output tool using background_id \"#{id}\", or stop it with kill=true."}
+
+      {:error, reason} ->
+        # Adoption failed — keep running in the foreground as if nothing happened.
+        send(reply_to, {:detach_failed, ref, reason})
+        collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach)
+    end
+  end
+
+  defp safe_unlink(port) do
+    :erlang.unlink(port)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # Drain any {port, msg} tuples already delivered to this mailbox (before the
+  # ownership transfer) and forward them to the worker, which handles the same
+  # {port, {:data,…}} / {port, {:exit_status,…}} shapes.
+  defp forward_pending_port_messages(port, child_pid) do
+    receive do
+      {^port, msg} ->
+        send(child_pid, {port, msg})
+        forward_pending_port_messages(port, child_pid)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp broadcast_command_started(session_id, id, command) when is_binary(session_id) do
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event,
+       %{
+         type: :background_command_started,
+         background_id: id,
+         command: command,
+         session_id: session_id,
+         running_count: BackgroundManager.running_count()
+       }}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp broadcast_command_started(_, _, _), do: :ok
 
   defp collected_output(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 

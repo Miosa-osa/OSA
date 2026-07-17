@@ -44,6 +44,31 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
     end
   end
 
+  @doc """
+  Adopt an ALREADY-RUNNING OS process (its live `Port` + os_pid) into a fresh
+  supervised `BackgroundTask`, seeding it with the output collected so far.
+
+  Used to promote an in-flight FOREGROUND `shell_execute` to the background
+  (TUI Ctrl+B). The caller must own the port and, right after this returns
+  `{:ok, id, pid}`, transfer ownership with `Port.connect(port, pid)` so the
+  worker receives the remaining data/exit-status messages.
+
+  Required opts: `:command`, `:cwd`, `:port`, `:os_pid`. Optional: `:session_id`,
+  `:initial` (output already collected), plus the usual `:max_bytes`/`:retain_ms`.
+  """
+  @spec adopt(keyword()) :: {:ok, String.t(), pid()} | {:error, String.t()}
+  def adopt(opts) do
+    id = generate_id()
+    child_opts = [id: id, adopt: true] ++ opts
+    spec = %{id: id, start: {BackgroundTask, :start_link, [child_opts]}, restart: :temporary}
+
+    case DynamicSupervisor.start_child(@supervisor, spec) do
+      {:ok, pid} -> {:ok, id, pid}
+      {:error, {:spawn_failed, msg}} -> {:error, msg}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
   @doc "Poll a background command's accumulated output + status by id."
   @spec output(String.t()) :: {:ok, map()} | {:error, :not_found}
   def output(id), do: with_worker(id, &BackgroundTask.snapshot/1)

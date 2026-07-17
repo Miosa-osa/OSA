@@ -73,6 +73,51 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
 
   @impl true
   def init(opts) do
+    if Keyword.get(opts, :adopt, false) do
+      init_adopt(opts)
+    else
+      init_spawn(opts)
+    end
+  end
+
+  # Adopt an already-running OS process: the caller (a foreground shell_execute
+  # loop) owns the live port and hands it over via `Port.connect/2` right after
+  # start_link returns. We do NOT open a new port — we just record the existing
+  # one and seed the buffer with whatever output was collected before hand-off.
+  # Data/exit-status messages arrive once ownership transfers to us.
+  defp init_adopt(opts) do
+    id = Keyword.fetch!(opts, :id)
+    command = Keyword.fetch!(opts, :command)
+    cwd = Keyword.fetch!(opts, :cwd)
+    port = Keyword.fetch!(opts, :port)
+    os_pid = Keyword.get(opts, :os_pid)
+    session_id = Keyword.get(opts, :session_id)
+    max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
+    retain_ms = Keyword.get(opts, :retain_ms, @default_retain_ms)
+    initial = Keyword.get(opts, :initial, "")
+
+    {buffer, bytes} =
+      if is_binary(initial) and initial != "", do: {[initial], byte_size(initial)}, else: {[], 0}
+
+    state = %__MODULE__{
+      id: id,
+      command: command,
+      cwd: cwd,
+      session_id: session_id,
+      port: port,
+      os_pid: os_pid,
+      started_at: DateTime.utc_now(),
+      max_bytes: max_bytes,
+      retain_ms: retain_ms,
+      buffer: buffer,
+      bytes: bytes,
+      truncated: bytes >= max_bytes
+    }
+
+    {:ok, state}
+  end
+
+  defp init_spawn(opts) do
     id = Keyword.fetch!(opts, :id)
     command = Keyword.fetch!(opts, :command)
     cwd = Keyword.fetch!(opts, :cwd)

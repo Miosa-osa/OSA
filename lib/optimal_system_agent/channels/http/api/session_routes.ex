@@ -440,6 +440,36 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── POST /sessions/:id/detach-shell ────────────────────────────────
+  #
+  # Promote the foreground shell command currently running in this session to a
+  # supervised background task (TUI Ctrl+B mid-run). The command keeps running,
+  # shows up in the background panel, and emits background_command_completed when
+  # done — just like a command started with run_in_background: true.
+  post "/:id/detach-shell" do
+    session_id = conn.params["id"]
+
+    case OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler.detach_foreground(session_id) do
+      {:ok, background_id} ->
+        json(conn, 200, %{
+          status: "detached",
+          background_id: background_id,
+          session_id: session_id
+        })
+
+      {:error, :no_active_command} ->
+        json_error(
+          conn,
+          404,
+          "no_active_command",
+          "No running foreground shell command for session #{session_id}"
+        )
+
+      {:error, reason} ->
+        json_error(conn, 409, "detach_failed", "Could not detach command: #{inspect(reason)}")
+    end
+  end
+
   # ── POST /sessions/:id/steer ───────────────────────────────────────
   #
   # Inject a mid-turn steer directive into a RUNNING turn (primitive #32).

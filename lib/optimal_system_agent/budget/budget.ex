@@ -86,6 +86,39 @@ defmodule OptimalSystemAgent.Budget do
     tokens_in / 1_000_000 * input_rate + tokens_out / 1_000_000 * output_rate
   end
 
+  @doc """
+  True when `provider` has an explicit, non-zero USD per-token rate — i.e. real
+  cost data exists so spend can actually be nonzero.
+
+  Providers without an explicit entry (e.g. GLM/zhipu) and zero-rate providers
+  (Ollama) return false: for these the daily spend is always $0, so a status
+  line should surface token usage instead of a meaningless "$0" figure. The
+  generic default rate used by `calculate_cost/3` for estimation does NOT count
+  as real pricing here.
+  """
+  @spec has_usd_pricing?(atom() | String.t()) :: boolean()
+  def has_usd_pricing?(provider) when is_atom(provider) do
+    case Map.get(@provider_rates, provider) do
+      {input_rate, output_rate} when input_rate > 0 or output_rate > 0 -> true
+      _ -> false
+    end
+  end
+
+  def has_usd_pricing?(provider) when is_binary(provider) do
+    case safe_existing_atom(provider) do
+      nil -> false
+      atom -> has_usd_pricing?(atom)
+    end
+  end
+
+  def has_usd_pricing?(_), do: false
+
+  defp safe_existing_atom(str) do
+    String.to_existing_atom(str)
+  rescue
+    ArgumentError -> nil
+  end
+
   @doc "Manually reset the daily counter."
   def reset_daily do
     GenServer.cast(__MODULE__, :reset_daily)
@@ -105,6 +138,11 @@ defmodule OptimalSystemAgent.Budget do
     state = %{
       daily_spent: 0.0,
       monthly_spent: 0.0,
+      # Token counters (input + output) accumulated over the current day/month.
+      # These are meaningful even when USD spend is $0 (e.g. providers without
+      # per-token pricing such as GLM/Ollama), so the status line can show usage.
+      daily_tokens: 0,
+      monthly_tokens: 0,
       daily_limit:
         Keyword.get(opts, :daily_limit) ||
           Application.get_env(:optimal_system_agent, :daily_budget_usd, @daily_default_usd),
@@ -157,6 +195,8 @@ defmodule OptimalSystemAgent.Budget do
       per_call_limit: state.per_call_limit,
       daily_spent: state.daily_spent,
       monthly_spent: state.monthly_spent,
+      daily_tokens: state.daily_tokens,
+      monthly_tokens: state.monthly_tokens,
       daily_remaining: max(0.0, state.daily_limit - state.daily_spent),
       monthly_remaining: max(0.0, state.monthly_limit - state.monthly_spent),
       daily_reset_at: state.daily_reset_at,
@@ -181,10 +221,14 @@ defmodule OptimalSystemAgent.Budget do
       recorded_at: DateTime.utc_now()
     }
 
+    tokens = max(tokens_in, 0) + max(tokens_out, 0)
+
     state = %{
       state
       | daily_spent: state.daily_spent + cost,
         monthly_spent: state.monthly_spent + cost,
+        daily_tokens: state.daily_tokens + tokens,
+        monthly_tokens: state.monthly_tokens + tokens,
         # Keep at most 10 000 ledger entries in memory
         entries: Enum.take([entry | state.entries], 10_000)
     }
@@ -194,12 +238,14 @@ defmodule OptimalSystemAgent.Budget do
 
   @impl true
   def handle_cast(:reset_daily, state) do
-    {:noreply, %{state | daily_spent: 0.0, daily_reset_at: tomorrow_midnight()}}
+    {:noreply,
+     %{state | daily_spent: 0.0, daily_tokens: 0, daily_reset_at: tomorrow_midnight()}}
   end
 
   @impl true
   def handle_cast(:reset_monthly, state) do
-    {:noreply, %{state | monthly_spent: 0.0, monthly_reset_at: next_month_midnight()}}
+    {:noreply,
+     %{state | monthly_spent: 0.0, monthly_tokens: 0, monthly_reset_at: next_month_midnight()}}
   end
 
   # ---------------------------------------------------------------------------
@@ -213,7 +259,7 @@ defmodule OptimalSystemAgent.Budget do
 
   defp maybe_reset_daily(state, now) do
     if DateTime.compare(now, state.daily_reset_at) == :gt do
-      %{state | daily_spent: 0.0, daily_reset_at: tomorrow_midnight()}
+      %{state | daily_spent: 0.0, daily_tokens: 0, daily_reset_at: tomorrow_midnight()}
     else
       state
     end
@@ -221,7 +267,7 @@ defmodule OptimalSystemAgent.Budget do
 
   defp maybe_reset_monthly(state, now) do
     if DateTime.compare(now, state.monthly_reset_at) == :gt do
-      %{state | monthly_spent: 0.0, monthly_reset_at: next_month_midnight()}
+      %{state | monthly_spent: 0.0, monthly_tokens: 0, monthly_reset_at: next_month_midnight()}
     else
       state
     end

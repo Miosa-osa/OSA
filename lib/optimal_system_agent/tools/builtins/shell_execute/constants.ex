@@ -11,7 +11,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   @max_output_bytes 102_400
   def max_output_bytes, do: @max_output_bytes
 
-  @default_timeout_ms 300_000
+  # Hard wall-clock cap for a single foreground command. Kept intentionally
+  # conservative (2 min) so a hung / input-blocked command can never run for
+  # minutes silently — the run_command timeout path kills the OS process when
+  # this elapses. Override per-call via OSA_SHELL_TIMEOUT_MS.
+  @default_timeout_ms 120_000
   def default_timeout_ms, do: @default_timeout_ms
 
   # Blocked command names — matched at word boundaries across pipes,

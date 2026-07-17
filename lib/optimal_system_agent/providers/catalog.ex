@@ -127,6 +127,25 @@ defmodule OptimalSystemAgent.Providers.Catalog do
 
   def context_window(_), do: nil
 
+  @doc """
+  Cost map for a model looked up across all providers (first match wins), or nil
+  when the model is unknown or carries no pricing (e.g. the bundled snapshot,
+  which ships no cost data). Shape: `%{input:, output:, cache_read:, cache_write:}`
+  in USD per 1M tokens.
+  """
+  @spec cost(String.t()) :: map() | nil
+  def cost(model_id) when is_binary(model_id) do
+    data()
+    |> Enum.find_value(fn {_pid, models} ->
+      case Map.get(models, model_id) do
+        %Model{cost: %{} = c} -> c
+        _ -> nil
+      end
+    end)
+  end
+
+  def cost(_), do: nil
+
   @doc "Trigger a foreground network refresh (respects the disable flag)."
   @spec refresh() :: :ok | {:ok, :disabled} | {:error, term()}
   def refresh do

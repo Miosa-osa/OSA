@@ -150,7 +150,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     # so `subscription` is always nil — the only spend model is the local
     # Budget GenServer (daily/monthly USD spend + limits). Returns nil entirely
     # if the Budget process is unavailable.
-    billing = health_billing()
+    billing = health_billing(provider, model_name)
 
     body =
       Jason.encode!(%{
@@ -730,10 +730,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   # `subscription` is intentionally nil: OSA tracks only local USD spend and
   # has no subscription/plan concept. Returns nil if Budget is unavailable so
   # the field degrades gracefully rather than raising.
-  defp health_billing do
+  defp health_billing(provider, model) do
     case OptimalSystemAgent.Budget.get_status() do
-      {:ok, status} when is_map(status) -> billing_from_status(status)
-      status when is_map(status) -> billing_from_status(status)
+      {:ok, status} when is_map(status) -> billing_from_status(status, provider, model)
+      status when is_map(status) -> billing_from_status(status, provider, model)
       _ -> nil
     end
   rescue
@@ -742,14 +742,51 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     :exit, _ -> nil
   end
 
-  defp billing_from_status(status) do
+  defp billing_from_status(status, provider, model) do
     %{
       daily_spent_usd: Map.get(status, :daily_spent, 0.0),
       daily_limit_usd: Map.get(status, :daily_limit),
       monthly_spent_usd: Map.get(status, :monthly_spent, 0.0),
       monthly_limit_usd: Map.get(status, :monthly_limit),
+      # Tokens used today — meaningful even when USD spend is $0 (providers
+      # without per-token pricing, e.g. GLM/Ollama). The TUI shows this when
+      # `usd_pricing` is false, instead of a meaningless "$0/$50 today".
+      daily_tokens: Map.get(status, :daily_tokens, 0),
+      # True only when the active provider/model has real USD cost data so
+      # spend can actually be nonzero. False → the status line should surface
+      # token usage rather than dollars.
+      usd_pricing: active_usd_pricing?(provider, model),
       currency: "USD",
       subscription: nil
     }
   end
+
+  # True when the active provider has explicit non-zero per-token USD rates, or
+  # the active model carries real (non-zero) pricing in the models.dev catalog.
+  # False for pricing-less providers (GLM/zhipu, Ollama) so spend is known to be
+  # $0 and the TUI can show tokens instead.
+  defp active_usd_pricing?(provider, model) do
+    OptimalSystemAgent.Budget.has_usd_pricing?(provider) or catalog_model_priced?(model)
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp catalog_model_priced?(model) when is_binary(model) do
+    case OptimalSystemAgent.Providers.Catalog.cost(model) do
+      %{input: input, output: output}
+      when (is_number(input) and input > 0) or (is_number(output) and output > 0) ->
+        true
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp catalog_model_priced?(_), do: false
 end

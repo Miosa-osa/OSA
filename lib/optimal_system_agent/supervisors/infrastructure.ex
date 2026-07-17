@@ -69,6 +69,11 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       {DynamicSupervisor,
        name: OptimalSystemAgent.Shell.BackgroundSupervisor, strategy: :one_for_one},
 
+      # Foreground shell registry — session_id → the process currently blocked in
+      # a foreground `shell_execute` receive loop. Lets the TUI (Ctrl+B) promote an
+      # in-flight foreground command to a supervised BackgroundTask mid-run.
+      {Registry, keys: :unique, name: OptimalSystemAgent.Shell.ForegroundRegistry},
+
       # Background watch mechanism — Registry for watch-id → worker lookup +
       # DynamicSupervisor for per-watch supervised watchers (the non-blocking
       # `monitor` tool streams monitor_started/monitor_fired events from these).
