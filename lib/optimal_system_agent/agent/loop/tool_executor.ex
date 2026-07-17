@@ -585,26 +585,54 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         content
 
       {:error, reason} ->
-        case Tools.suggest_fallback_tool(tool_name) do
-          {:ok, alt_tool} ->
-            Logger.info(
-              "[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'"
-            )
+        # Only fall back on tool-availability/dispatch failures. A semantic
+        # domain error (old_string not found, ambiguous/identical match) means
+        # the tool ran and reported a MODEL mistake — retrying a sibling edit
+        # tool with the same args is wasted work and risks running a different
+        # tool on mismatched args. Return the real error instead.
+        if semantic_tool_error?(reason) do
+          "Error: #{reason}"
+        else
+          case Tools.suggest_fallback_tool(tool_name) do
+            {:ok, alt_tool} ->
+              Logger.info(
+                "[loop] Tool '#{tool_name}' failed (#{inspect(reason)}), trying fallback '#{alt_tool}'"
+              )
 
-            case Tools.execute(alt_tool, enriched_args) do
-              {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
-                {:image, mt, b64, p}
+              case Tools.execute(alt_tool, enriched_args) do
+                {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
+                  {:image, mt, b64, p}
 
-              {:ok, alt_content} ->
-                "[used #{alt_tool} as fallback for #{tool_name}]\n#{alt_content}"
+                {:ok, alt_content} ->
+                  "[used #{alt_tool} as fallback for #{tool_name}]\n#{alt_content}"
 
-              {:error, _alt_reason} ->
-                "Error: #{reason}"
-            end
+                {:error, _alt_reason} ->
+                  "Error: #{reason}"
+              end
 
-          :no_alternative ->
-            "Error: #{reason}"
+            :no_alternative ->
+              "Error: #{reason}"
+          end
         end
     end
+  end
+
+  # A semantic/domain tool error (the tool ran and rejected the args) vs. a
+  # tool-availability/dispatch failure (unknown tool / tool crashed). We only
+  # fall back to a sibling tool for the latter.
+  defp semantic_tool_error?(reason) do
+    text = if is_binary(reason), do: reason, else: inspect(reason)
+    down = String.downcase(text)
+
+    String.contains?(down, [
+      "not found in",
+      "old_string not found",
+      "ambiguous",
+      "no match",
+      "not unique",
+      "identical",
+      "already exists",
+      "no changes"
+    ])
   end
 end

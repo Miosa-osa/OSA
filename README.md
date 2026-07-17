@@ -344,7 +344,7 @@ Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) configured 
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
 ```
 
-Detects your OS/arch and downloads prebuilt release assets from GitHub Releases — **no Elixir, Erlang, or Rust required.** The release tarball is a self-contained Elixir/OTP release that bundles its own ERTS (built on CI via `MIX_ENV=prod mix release`), and the Rust TUI ships as a prebuilt binary. Everything lands in `~/.osa` and the `osa` command is added to your PATH. Prebuilt targets: **linux-x64** and **macOS arm64**. Pin a version with `OSA_VERSION=v0.4.0`.
+Detects your OS/arch and downloads prebuilt release assets from GitHub Releases — **no Elixir, Erlang, or Rust required.** The release tarball is a self-contained Elixir/OTP release that bundles its own ERTS (built on CI via `MIX_ENV=prod mix release`), and the Rust TUI ships as a prebuilt binary. Everything lands in `~/.osa` and the `osa` command is added to your PATH. Prebuilt targets: **linux-x64**, **macOS arm64**, and **windows-x64**. Pin a version with `OSA_VERSION=v0.4.0`.
 
 **From source (any platform):**
 
@@ -356,7 +356,14 @@ Installs Elixir/Erlang/Rust as needed, then builds the backend + Rust TUI locall
 
 **Homebrew:** `brew tap miosa-osa/tap && brew install osa`
 
-**Windows:** Download `osa-windows-amd64.exe` from [GitHub Releases](https://github.com/Miosa-osa/OSA/releases/latest) and add it to your PATH.
+**Windows (prebuilt — no toolchains):** in PowerShell,
+
+```powershell
+irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex
+osa
+```
+
+Downloads the prebuilt `windows-x64` release (a self-contained OTP release that bundles its own ERTS, plus the prebuilt Rust TUI), installs everything under `%USERPROFILE%\.osa`, and adds `osa` to your user PATH. Pin a version with `$env:OSA_VERSION = "v0.4.0"`. Prefer to build from source? Run `irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install-source.ps1 | iex` (installs the toolchain via winget and compiles locally).
 
 **Docker:** `docker compose up -d`
 

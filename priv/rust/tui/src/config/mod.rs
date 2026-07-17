@@ -11,9 +11,15 @@ use tracing::debug;
 use crate::config::cli::Cli;
 
 fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+    // Resolve the real home dir cross-platform: BaseDirs honors USERPROFILE /
+    // HOMEDRIVE+HOMEPATH on Windows (where HOME is normally unset), and $HOME on
+    // unix. Fall back to $HOME, then to "." only as a last resort. Without this,
+    // Windows would write config/logs under a per-CWD "./.osa" that never
+    // persists to the user's real profile.
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -122,8 +122,18 @@ defmodule OptimalSystemAgent.Channels.Slack do
   # ── Signature Verification ────────────────────────────────────────────
 
   defp verify_signature(_raw_body, _timestamp, _signature, nil) do
-    # No signing secret configured — skip verification (dev mode)
-    :ok
+    # FAIL CLOSED: the adapter only starts when a bot token is configured, so a
+    # missing signing secret is a misconfiguration, not dev mode. Accepting
+    # unsigned requests would let anyone who knows the URL drive agent turns.
+    Logger.warning(
+      "[Slack] SLACK_SIGNING_SECRET not set — rejecting webhook. Set it to enable Slack."
+    )
+
+    {:error, :signing_secret_not_configured}
+  end
+
+  defp verify_signature(_raw_body, _timestamp, _signature, "") do
+    {:error, :signing_secret_not_configured}
   end
 
   defp verify_signature(raw_body, timestamp, signature, signing_secret) do
@@ -162,26 +172,55 @@ defmodule OptimalSystemAgent.Channels.Slack do
       case event do
         %{"type" => type, "channel" => channel_id, "text" => text, "user" => user_id}
         when type in ["app_mention", "message"] ->
-          session_id = "slack:#{channel_id}"
-          ensure_session(session_id)
-
-          Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-            case Loop.process_message(session_id, text,
-                   channel: :slack,
-                   user_id: "slack:#{user_id}"
-                 ) do
-              {:ok, response} ->
-                send_text(token, channel_id, response)
-
-              {:error, reason} ->
-                Logger.warning("[Slack] Loop error for #{session_id}: #{inspect(reason)}")
-                send_text(token, channel_id, "Something went wrong. Try again.")
-            end
-          end)
+          if channel_allowed?(:slack_allowed_users, [user_id, channel_id]) do
+            deliver_slack(channel_id, user_id, text, token)
+          else
+            Logger.warning("[Slack] Ignoring message from unauthorized user #{inspect(user_id)}")
+            :ok
+          end
 
         _ ->
           :ok
       end
+    end
+  end
+
+  defp deliver_slack(channel_id, user_id, text, token) do
+    session_id = "slack:#{channel_id}"
+    ensure_session(session_id)
+
+    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+      case Loop.process_message(session_id, text,
+             channel: :slack,
+             user_id: "slack:#{user_id}"
+           ) do
+        {:ok, response} ->
+          send_text(token, channel_id, response)
+
+        {:error, reason} ->
+          Logger.warning("[Slack] Loop error for #{session_id}: #{inspect(reason)}")
+          send_text(token, channel_id, "Something went wrong. Try again.")
+      end
+    end)
+  end
+
+  # Per-channel allowlist gate. Empty/unset preserves current open behavior;
+  # when set, only listed ids drive agent turns.
+  defp channel_allowed?(config_key, ids) do
+    case Application.get_env(:optimal_system_agent, config_key) do
+      value when value in [nil, ""] ->
+        true
+
+      str when is_binary(str) ->
+        allowed =
+          str
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+          |> MapSet.new()
+
+        MapSet.size(allowed) == 0 or
+          Enum.any?(ids, fn id -> MapSet.member?(allowed, to_string(id)) end)
     end
   end
 

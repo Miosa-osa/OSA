@@ -562,8 +562,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call({:set_permission_tier, tier}, _from, state)
-      when tier in [:full, :workspace, :read_only, :auto] do
+      when tier in [:full, :workspace, :read_only, :subagent, :auto] do
     {:reply, {:ok, tier}, %{state | permission_tier: tier}}
+  end
+
+  def handle_call({:set_permission_tier, _tier}, _from, state) do
+    {:reply, {:error, :invalid_tier}, state}
   end
 
   def handle_call({:get_permission_tier}, _from, state) do

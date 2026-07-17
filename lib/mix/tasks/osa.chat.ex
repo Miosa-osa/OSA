@@ -25,14 +25,24 @@ defmodule Mix.Tasks.Osa.Chat do
     end
 
     if opts[:continue] do
-      # Find most recent saved session
-      case OptimalSystemAgent.Agent.SessionPersistence.list(limit: 1) do
-        [%{session_id: sid} | _] ->
-          Application.put_env(:optimal_system_agent, :resume_session_id, sid)
+      # cwd-scoped: prefer the most recent session saved for THIS directory so
+      # `--continue` in project A never reopens a session from project B. Fall
+      # back to the global most-recent only when this dir has no saved session.
+      alias OptimalSystemAgent.Agent.SessionPersistence
+      cwd = File.cwd!()
 
-        _ ->
-          :ok
-      end
+      sid =
+        case SessionPersistence.find_latest_for_dir(cwd) do
+          %{session_id: sid} -> sid
+          sid when is_binary(sid) -> sid
+          _ ->
+            case SessionPersistence.list(limit: 1) do
+              [%{session_id: sid} | _] -> sid
+              _ -> nil
+            end
+        end
+
+      if sid, do: Application.put_env(:optimal_system_agent, :resume_session_id, sid)
     end
 
     # Silence all boot logs — the CLI should start clean

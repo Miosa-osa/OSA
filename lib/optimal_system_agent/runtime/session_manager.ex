@@ -127,6 +127,11 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   def ensure_loop(_, _), do: {:error, :invalid_session_id}
 
+  defp maybe_put_working_dir(opts, wd) when is_binary(wd) and wd != "",
+    do: Keyword.put(opts, :working_dir, wd)
+
+  defp maybe_put_working_dir(opts, _), do: opts
+
   @doc "Compatibility arity for existing channel adapters."
   @spec ensure_loop(session_id(), String.t(), channel()) :: :ok | {:error, term()}
   def ensure_loop(session_id, user_id, channel) do
@@ -241,9 +246,15 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     user_id = opts |> Keyword.get(:user_id, "anonymous") |> to_string()
     channel = Keyword.get(opts, :channel, :unknown)
 
+    # Thread working_dir so HTTP/channel sessions persist a real working_dir
+    # (enabling directory-scoped resume) instead of the unset app-env nil.
+    loop_opts =
+      [session_id: session_id, user_id: user_id, channel: channel]
+      |> maybe_put_working_dir(Keyword.get(opts, :working_dir))
+
     case DynamicSupervisor.start_child(
            OptimalSystemAgent.SessionSupervisor,
-           {Loop, session_id: session_id, user_id: user_id, channel: channel}
+           {Loop, loop_opts}
          ) do
       {:ok, _pid} ->
         track_session(session_id, %{user_id: user_id, channel: channel})

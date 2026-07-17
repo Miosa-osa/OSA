@@ -120,7 +120,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Handler do
   end
 
   defp sample(%{"kind" => "command", "target" => cmd}) do
-    case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
+    case OptimalSystemAgent.OS.Shell.cmd(cmd, stderr_to_stdout: true) do
       {output, code} -> {:command, code, output |> String.trim_trailing() |> String.slice(0, 200)}
     end
   rescue

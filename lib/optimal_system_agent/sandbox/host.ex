@@ -18,12 +18,11 @@ defmodule OptimalSystemAgent.Sandbox.Host do
     timeout = Keyword.get(opts, :timeout, 30_000)
     working_dir = Keyword.get(opts, :working_dir)
 
-    args = ["-c", command]
     cmd_opts = [stderr_to_stdout: true]
     cmd_opts = if working_dir, do: [{:cd, working_dir} | cmd_opts], else: cmd_opts
 
     try do
-      task = Task.async(fn -> System.cmd("sh", args, cmd_opts) end)
+      task = Task.async(fn -> OptimalSystemAgent.OS.Shell.cmd(command, cmd_opts) end)
 
       case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
         {:ok, {output, 0}} -> {:ok, output}
@@ -49,9 +48,19 @@ defmodule OptimalSystemAgent.Sandbox.Host do
         ".exs" -> "elixir #{path}"
         ".go" -> "go run #{path}"
         ".rs" -> "cargo script #{path}"
-        _ -> "sh #{path}"
+        ".ps1" -> "powershell -File #{path}"
+        _ -> default_run_command(path)
       end
 
     execute(command, opts)
+  end
+
+  # On Windows there is no `sh`; execute the file directly through cmd. On
+  # Unix keep the previous `sh <path>` behavior.
+  defp default_run_command(path) do
+    case :os.type() do
+      {:win32, _} -> path
+      _ -> "sh #{path}"
+    end
   end
 end

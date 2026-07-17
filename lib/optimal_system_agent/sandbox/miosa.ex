@@ -200,7 +200,8 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
   @impl GenServer
   def handle_call({:exec, command, opts}, _from, state) do
     with {:ok, session, state} <- ensure_session(state, opts) do
-      {:reply, exec_in_session(session, command, timeout(opts)), state}
+      reply = exec_in_session(session, command, timeout(opts))
+      {:reply, reply, maybe_invalidate_session(state, reply)}
     else
       {:error, reason, state} -> {:reply, {:error, reason}, state}
     end
@@ -210,12 +211,32 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
   def handle_call({:run_file, remote, content, run_cmd, opts}, _from, state) do
     with {:ok, session, state} <- ensure_session(state, opts),
          :ok <- write_file(session, remote, content) do
-      {:reply, exec_in_session(session, run_cmd, timeout(opts)), state}
+      reply = exec_in_session(session, run_cmd, timeout(opts))
+      {:reply, reply, maybe_invalidate_session(state, reply)}
     else
-      {:error, reason, state} -> {:reply, {:error, reason}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, maybe_invalidate_session(state, {:error, reason})}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, maybe_invalidate_session(state, {:error, reason})}
     end
   end
+
+  # If a call failed because the remote sandbox is gone (expired/paused/deleted),
+  # clear the cached session so the NEXT call re-provisions instead of retrying
+  # the same dead id forever.
+  defp maybe_invalidate_session(state, {:error, reason}) do
+    if dead_sandbox_error?(reason), do: %{state | session: nil}, else: state
+  end
+
+  defp maybe_invalidate_session(state, _reply), do: state
+
+  defp dead_sandbox_error?(reason) when is_binary(reason) do
+    String.contains?(reason, ["HTTP 404", "HTTP 410", "HTTP 409"]) or
+      String.contains?(reason, ["closed", "econnrefused", "timeout", "nxdomain"])
+  end
+
+  defp dead_sandbox_error?(_), do: false
 
   # Reuse the live session, provisioning one on first use.
   defp ensure_session(%{session: %{} = session} = state, _opts), do: {:ok, session, state}

@@ -51,7 +51,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Exec do
 
       task =
         Task.async(fn ->
-          System.cmd("sh", ["-c", cmd], cd: cwd, env: Map.to_list(env), stderr_to_stdout: false)
+          OptimalSystemAgent.OS.Shell.cmd(cmd,
+            cd: cwd,
+            env: Map.to_list(env),
+            stderr_to_stdout: false
+          )
         end)
 
       case Task.yield(task, timeout) do

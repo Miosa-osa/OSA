@@ -123,6 +123,16 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       name in @delete_tools ->
         check_path(path_text(args))
 
+      # Outbound MCP tools (mcp__<server>__<tool>) may be shell/desktop-command
+      # servers running on the host. We can't know which one is a shell, so scan
+      # their string arguments for the same hard-blocked patterns. The breaker
+      # must apply to mcp_* tools even in :full/bypass tier.
+      String.starts_with?(name, "mcp__") ->
+        case check_command(shell_text(args)) do
+          {:blocked, _} = blocked -> blocked
+          :ok -> check_path(path_text(args))
+        end
+
       true ->
         :ok
     end

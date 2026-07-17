@@ -70,13 +70,31 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   def classify({:http_error, status, _msg}) when status in @non_retryable_statuses, do: :no_retry
   def classify({:http_error, _status, _msg}), do: :no_retry
 
-  # A streaming response that carried an `error` event mid-stream — always
-  # transient from the client's perspective (overloaded / dropped upstream).
+  # A streaming response that carried an `error` event mid-stream is normally
+  # transient and worth retrying. BUT retrying re-invokes native_stream against
+  # the SAME live callback: if the partial already delivered tool_use blocks,
+  # the retry (a fresh API call with NEW tool ids that dedup can't catch) would
+  # double-execute side-effecting tools. So we suppress the in-place retry ONLY
+  # when the partial carries tool_calls, letting stream_with_fallback drop to
+  # the sync same-provider attempt / provider fallback chain instead. Text-only
+  # partials still retry (at worst a cosmetic duplicate prefix).
   def classify({:stream_error, _reason}), do: {:retry, nil}
-  def classify({:stream_error, _reason, _partial}), do: {:retry, nil}
+
+  def classify({:stream_error, _reason, partial}) do
+    if stream_partial_has_tool_calls?(partial), do: :no_retry, else: {:retry, nil}
+  end
 
   def classify(reason) when is_binary(reason), do: classify_string(reason)
   def classify(_), do: :no_retry
+
+  # Does the mid-stream partial already carry tool_use blocks? If so, a retry
+  # would double-execute those tools. Text-only / string partials do not.
+  defp stream_partial_has_tool_calls?(partial) when is_map(partial) do
+    tool_calls = Map.get(partial, :tool_calls) || Map.get(partial, "tool_calls") || []
+    is_list(tool_calls) and tool_calls != []
+  end
+
+  defp stream_partial_has_tool_calls?(_), do: false
 
   defp classify_string(reason) do
     down = String.downcase(reason)

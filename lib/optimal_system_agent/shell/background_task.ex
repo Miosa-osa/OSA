@@ -78,7 +78,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)
     retain_ms = Keyword.get(opts, :retain_ms, @default_retain_ms)
 
-    sh = System.find_executable("sh") || "/bin/sh"
+    sh = OptimalSystemAgent.OS.Shell.executable()
 
     port =
       Port.open(
@@ -87,7 +87,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
           :binary,
           :exit_status,
           :hide,
-          {:args, ["-c", command <> " 2>&1"]},
+          {:args, OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1"]},
           {:cd, cwd}
         ]
       )

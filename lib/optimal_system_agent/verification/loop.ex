@@ -226,7 +226,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
       Task.async(fn ->
         {output, exit_code} =
           try do
-            System.cmd("sh", ["-c", cmd], stderr_to_stdout: true)
+            OptimalSystemAgent.OS.Shell.cmd(cmd, stderr_to_stdout: true)
           rescue
             e -> {"Command error: #{Exception.message(e)}", 1}
           end
@@ -439,7 +439,7 @@ defmodule OptimalSystemAgent.Verification.Loop do
       Enum.each(commands, fn cmd ->
         Logger.info("[Verification.Loop] Applying fix: #{cmd}")
 
-        case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
+        case OptimalSystemAgent.OS.Shell.cmd(cmd, stderr_to_stdout: true) do
           {output, 0} ->
             Logger.debug(
               "[Verification.Loop] Fix command succeeded: #{String.slice(output, 0, 200)}"

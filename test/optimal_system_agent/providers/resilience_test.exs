@@ -44,6 +44,20 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
     test "mid-stream error carrying partial output still retries" do
       assert {:retry, nil} = Resilience.classify({:stream_error, "overloaded_error", "partial"})
     end
+
+    # Regression for #9: retrying re-invokes native_stream against the same live
+    # callback. If the partial already delivered tool_use blocks, the retry would
+    # double-execute side-effecting tools with fresh ids. Suppress the in-place
+    # retry in that case so the fallback chain handles it instead.
+    test "mid-stream error whose partial carries tool_calls does not retry in place" do
+      partial = %{content: "", tool_calls: [%{id: "t1", name: "file_edit", arguments: %{}}]}
+      assert :no_retry = Resilience.classify({:stream_error, "overloaded_error", partial})
+    end
+
+    test "mid-stream error whose partial has no tool_calls still retries" do
+      partial = %{content: "some text", tool_calls: []}
+      assert {:retry, nil} = Resilience.classify({:stream_error, "overloaded_error", partial})
+    end
   end
 
   describe "classify/1 — string reasons (best effort)" do

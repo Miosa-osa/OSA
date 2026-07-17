@@ -24,10 +24,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
 
   def init(opts), do: opts
 
-  # Auth and health routes must be reachable without HMAC signatures —
-  # the client can't sign before it has authenticated.
-  def call(%{path_info: ["api", "v1", "auth" | _]} = conn, _opts), do: conn
-  def call(%{path_info: ["health"]} = conn, _opts), do: conn
+  # Auth, channel-webhook, and health routes must be reachable without HMAC
+  # signatures — the client can't sign before it has authenticated, and channel
+  # webhooks carry their own platform signature. Match on the FULL request_path:
+  # this plug is mounted inside the /api/v1 router where path_info is stripped to
+  # the trailing segments, so path_info-based guards never fire.
+  def call(%{request_path: "/api/v1/auth/" <> _} = conn, _opts), do: conn
+  def call(%{request_path: "/api/v1/auth"} = conn, _opts), do: conn
+  def call(%{request_path: "/api/v1/channels/" <> _} = conn, _opts), do: conn
+  def call(%{request_path: "/health"} = conn, _opts), do: conn
 
   def call(conn, _opts) do
     cond do
@@ -70,7 +75,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
     end
   end
 
-  defp fleet_path?(%{path_info: ["api", "v1", "fleet" | _]}), do: true
+  defp fleet_path?(%{request_path: "/api/v1/fleet/" <> _}), do: true
+  defp fleet_path?(%{request_path: "/api/v1/fleet"}), do: true
   defp fleet_path?(_conn), do: false
 
   @doc "Start the nonce ETS table and reaper. Called from application startup or on first use."
@@ -143,10 +149,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.Integrity do
   end
 
   defp read_cached_body(conn) do
-    # Plug.Parsers caches the raw body if we configure it
-    # Fall back to reading body_params as JSON
-    body = conn.assigns[:raw_body] || Jason.encode!(conn.body_params || %{})
-    {:ok, body}
+    # The CacheBodyReader configured on Plug.Parsers stashes the exact raw bytes
+    # here. When absent (e.g. a bodyless GET, or a body the parser skipped) treat
+    # the body as empty: a request carrying a real body verifies against the
+    # captured bytes, while anything else can only pass if it genuinely signed
+    # over an empty body. We never re-encode body_params (which would never
+    # match the platform's signature).
+    {:ok, conn.assigns[:raw_body] || ""}
   end
 
   defp verify_signature(signature, timestamp, nonce, body) do

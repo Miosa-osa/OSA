@@ -1,9 +1,13 @@
 use std::path::PathBuf;
 
 fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
+    // Cross-platform home resolution (see config/mod.rs::home_dir). BaseDirs
+    // honors USERPROFILE on Windows so logs land under the real profile instead
+    // of a per-CWD "./.osa/logs".
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// OSA Agent TUI CLI arguments

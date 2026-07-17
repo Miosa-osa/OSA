@@ -110,7 +110,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Config do
 
   defp home do
     case System.user_home() do
-      nil -> "/tmp"
+      nil -> System.tmp_dir!()
       h -> h
     end
   end

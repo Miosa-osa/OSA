@@ -194,28 +194,62 @@ defmodule OptimalSystemAgent.Channels.Telegram do
   defp dispatch_update(update, token) do
     with %{"message" => %{"chat" => %{"id" => chat_id}, "text" => text} = msg} <- update do
       from_id = get_in(msg, ["from", "id"]) || chat_id
-      session_id = "telegram:#{chat_id}"
-      user_id = "telegram:#{from_id}"
 
-      # Send typing indicator immediately
-      send_typing(token, chat_id)
-
-      ensure_session(session_id)
-
-      Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
-        case Loop.process_message(session_id, text, channel: :telegram, user_id: user_id) do
-          {:ok, response} ->
-            send_text(token, chat_id, response)
-
-          {:error, reason} ->
-            Logger.warning("[Telegram] Loop error for session #{session_id}: #{inspect(reason)}")
-            send_text(token, chat_id, "Something went wrong. Try again.")
-        end
-      end)
+      if channel_allowed?(:telegram_allowed_chats, [from_id, chat_id]) do
+        deliver_telegram(chat_id, from_id, text, token)
+      else
+        Logger.warning("[Telegram] Ignoring message from unauthorized chat #{inspect(chat_id)}")
+        :ok
+      end
     else
       _ ->
         # Non-text update (photo, sticker, etc.) — silently ignore.
         :ok
+    end
+  end
+
+  defp deliver_telegram(chat_id, from_id, text, token) do
+    session_id = "telegram:#{chat_id}"
+    user_id = "telegram:#{from_id}"
+
+    # Send typing indicator immediately
+    send_typing(token, chat_id)
+
+    ensure_session(session_id)
+
+    Task.Supervisor.start_child(OptimalSystemAgent.Events.TaskSupervisor, fn ->
+      case Loop.process_message(session_id, text, channel: :telegram, user_id: user_id) do
+        {:ok, response} ->
+          send_text(token, chat_id, response)
+
+        {:error, reason} ->
+          Logger.warning("[Telegram] Loop error for session #{session_id}: #{inspect(reason)}")
+          send_text(token, chat_id, "Something went wrong. Try again.")
+      end
+    end)
+  end
+
+  # Per-channel allowlist gate. Empty/unset allowlist preserves the current
+  # open behavior; when the operator sets the env var, only listed ids drive
+  # agent turns. `ids` are compared as strings (config is comma-separated).
+  defp channel_allowed?(config_key, ids) do
+    case Application.get_env(:optimal_system_agent, config_key) do
+      nil ->
+        true
+
+      "" ->
+        true
+
+      str when is_binary(str) ->
+        allowed =
+          str
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+          |> MapSet.new()
+
+        MapSet.size(allowed) == 0 or
+          Enum.any?(ids, fn id -> MapSet.member?(allowed, to_string(id)) end)
     end
   end
 

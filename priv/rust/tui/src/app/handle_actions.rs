@@ -775,13 +775,9 @@ impl App {
                         .map(|p| p.to_path_buf())
                 }),
             // Stored project root
-            std::fs::read_to_string(
-                std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_default()
-                    ).join(".osa/project_root"),
-            )
-            .ok()
-            .map(|s| std::path::PathBuf::from(s.trim())),
+            std::fs::read_to_string(osa_home_dir().join(".osa/project_root"))
+                .ok()
+                .map(|s| std::path::PathBuf::from(s.trim())),
             // CWD
             std::env::current_dir().ok(),
         ];
@@ -790,9 +786,7 @@ impl App {
             if candidate.join("mix.exs").exists() {
                 info!("Auto-starting backend from: {}", candidate.display());
                 let project_dir = candidate;
-                let log_dir = std::path::PathBuf::from(
-                        std::env::var("HOME").unwrap_or_default()
-                    ).join(".osa/logs/backend.log");
+                let log_dir = osa_home_dir().join(".osa/logs/backend.log");
                 std::thread::spawn(move || {
                     let log_file = std::fs::OpenOptions::new()
                         .create(true)
@@ -807,8 +801,19 @@ impl App {
                     let stderr = log_file
                         .map(|f| std::process::Stdio::from(f))
                         .unwrap_or_else(std::process::Stdio::null);
-                    let _ = std::process::Command::new("mix")
-                        .arg("osa.serve")
+                    // On Windows the Elixir launcher is `mix.bat`; CreateProcess
+                    // can't exec a batch file directly, so route through cmd.
+                    // Unix keeps the bare `mix` path (behavior-preserving).
+                    let mut command = if cfg!(windows) {
+                        let mut c = std::process::Command::new("cmd");
+                        c.args(["/C", "mix", "osa.serve"]);
+                        c
+                    } else {
+                        let mut c = std::process::Command::new("mix");
+                        c.arg("osa.serve");
+                        c
+                    };
+                    let _ = command
                         .current_dir(&project_dir)
                         .stdout(stdout)
                         .stderr(stderr)
@@ -1213,10 +1218,21 @@ impl App {
         }
     }
 
-    /// True when the assistant reply signals the goal is achieved (a line that
-    /// trims to exactly "DONE").
+    /// True when the assistant reply signals the goal is achieved. The sentinel
+    /// must be the *last* non-empty line of the reply (or the whole reply),
+    /// matching the `goal_continue_prompt` instruction to "reply with exactly
+    /// DONE on its own line and stop". Requiring the final line avoids false
+    /// positives from an intermediate turn that merely mentions a standalone
+    /// `DONE` line mid-reply — e.g. narrating `echo DONE`, a build-log line, a
+    /// checklist item, quoted code, or restating the instruction itself.
     fn reply_signals_done(reply: &str) -> bool {
-        reply.lines().any(|line| line.trim() == "DONE")
+        reply
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .next_back()
+            .map(|line| line == "DONE")
+            .unwrap_or(false)
     }
 
     /// Called at the end of each assistant turn. If a goal is active, either
@@ -1261,6 +1277,17 @@ impl App {
     }
 }
 
+/// Resolve the user's home dir cross-platform. BaseDirs honors USERPROFILE /
+/// HOMEDRIVE+HOMEPATH on Windows (where $HOME is normally unset) and $HOME on
+/// unix, falling back to $HOME then "." — so backend auto-start paths land under
+/// the real profile instead of the drive root on Windows.
+fn osa_home_dir() -> std::path::PathBuf {
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 /// Read user name from ~/.osa/USER.md (sync, for welcome message)
 pub fn read_user_name_sync() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
@@ -1277,4 +1304,35 @@ pub fn read_user_name_sync() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod goal_done_tests {
+    use super::App;
+
+    #[test]
+    fn done_only_when_final_nonempty_line() {
+        // Whole reply is exactly the sentinel.
+        assert!(App::reply_signals_done("DONE"));
+        assert!(App::reply_signals_done("DONE\n"));
+        // Sentinel as the last non-empty line (trailing whitespace/blanks ok).
+        assert!(App::reply_signals_done("All checks pass.\nDONE"));
+        assert!(App::reply_signals_done("finished\n  DONE  \n\n"));
+    }
+
+    #[test]
+    fn not_done_when_sentinel_is_mid_reply() {
+        // Intermediate turns that merely mention a standalone DONE line must
+        // NOT stop the goal loop prematurely.
+        assert!(!App::reply_signals_done("Running: echo DONE\nNow building..."));
+        assert!(!App::reply_signals_done(
+            "Step 1: DONE\nStep 2: still working on the migration"
+        ));
+        assert!(!App::reply_signals_done(
+            "The instruction says to reply with exactly DONE on its own line.\nContinuing."
+        ));
+        assert!(!App::reply_signals_done(""));
+        assert!(!App::reply_signals_done("done"));
+        assert!(!App::reply_signals_done("DONE deal, moving on"));
+    }
 }

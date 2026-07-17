@@ -35,7 +35,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
       try do
         inner =
           Task.async(fn ->
-            System.cmd("sh", ["-c", command],
+            OptimalSystemAgent.OS.Shell.cmd(command,
               stderr_to_stdout: true,
               env: build_env(payload)
             )

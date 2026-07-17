@@ -239,6 +239,17 @@ config :optimal_system_agent,
   telegram_bot_token: System.get_env("TELEGRAM_BOT_TOKEN"),
   discord_bot_token: System.get_env("DISCORD_BOT_TOKEN"),
   slack_bot_token: System.get_env("SLACK_BOT_TOKEN"),
+  # Channel webhook signing secrets — used to HMAC-verify inbound webhooks.
+  # When a bot token is set but the signing secret is missing, verification
+  # FAILS CLOSED (see slack.ex / channel_routes.ex) so an unauthenticated
+  # party cannot drive agent turns.
+  slack_signing_secret: System.get_env("SLACK_SIGNING_SECRET"),
+  signal_webhook_secret: System.get_env("SIGNAL_WEBHOOK_SECRET"),
+  # Per-channel allowlists (comma-separated ids). Empty = current open behavior
+  # unless the deployment sets these to restrict who can drive agent turns.
+  telegram_allowed_chats: System.get_env("TELEGRAM_ALLOWED_CHATS"),
+  discord_allowed_users: System.get_env("DISCORD_ALLOWED_USERS"),
+  slack_allowed_users: System.get_env("SLACK_ALLOWED_USERS"),
   # Web search
   brave_api_key: System.get_env("BRAVE_API_KEY"),
 

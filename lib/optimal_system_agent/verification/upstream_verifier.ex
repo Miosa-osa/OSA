@@ -162,7 +162,7 @@ defmodule OptimalSystemAgent.Verification.UpstreamVerifier do
   end
 
   defp run_check({:test_command, cmd}) do
-    case System.cmd("sh", ["-c", cmd], stderr_to_stdout: true) do
+    case OptimalSystemAgent.OS.Shell.cmd(cmd, stderr_to_stdout: true) do
       {_output, 0} ->
         {:ok, :test_command_passed}
 

@@ -19,8 +19,14 @@ pub struct History {
 }
 
 fn history_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".osa").join("tui_history"))
+    // Cross-platform home resolution (see config/mod.rs::home_dir). BaseDirs
+    // honors USERPROFILE on Windows, where HOME is normally unset — otherwise
+    // command history is never loaded/persisted and up-arrow recall silently
+    // does nothing for the whole session.
+    let home = directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))?;
+    Some(home.join(".osa").join("tui_history"))
 }
 
 /// Encode a (possibly multi-line) entry into a single storage line.

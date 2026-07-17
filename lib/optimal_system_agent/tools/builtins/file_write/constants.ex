@@ -15,7 +15,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Constants do
   # so users can write to `/tmp/...` paths without their symlink-resolved
   # form `/private/tmp/...` tripping the allowlist.
   @default_allowed_write_paths ["~", "/tmp", "/private/tmp"]
-  def default_allowed_write_paths, do: @default_allowed_write_paths
+  # Computed at runtime so the platform temp dir (e.g. %TEMP% on Windows,
+  # /tmp on Linux) is always writable. The POSIX entries are retained for
+  # unix. On Linux `System.tmp_dir!()` is typically "/tmp" (deduped here).
+  def default_allowed_write_paths do
+    tmp = System.tmp_dir!()
+
+    if tmp in @default_allowed_write_paths,
+      do: @default_allowed_write_paths,
+      else: @default_allowed_write_paths ++ [tmp]
+  end
 
   @blocked_write_paths [
     ".ssh/",

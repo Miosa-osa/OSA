@@ -113,13 +113,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Loop.get_state(session_id) do
       {:ok, state} ->
-        before_tokens = state[:estimated_tokens] || 0
+        before_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
 
         case Loop.compact(session_id) do
           :ok ->
             case Loop.get_state(session_id) do
               {:ok, after_state} ->
-                after_tokens = after_state[:estimated_tokens] || 0
+                after_tokens = after_state[:tokens_used] || after_state[:estimated_tokens] || 0
                 saved = before_tokens - after_tokens
                 pct = if before_tokens > 0, do: round(saved / before_tokens * 100), else: 0
 
@@ -200,8 +200,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Loop.get_state(session_id) do
       {:ok, state} ->
-        iter = state[:iteration_count] || state[:iteration] || 0
-        tokens = state[:estimated_tokens] || 0
+        iter = state[:iteration] || state[:iteration_count] || 0
+        tokens = state[:tokens_used] || state[:estimated_tokens] || 0
         max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
         pct = if max_tokens > 0, do: round(tokens / max_tokens * 100), else: 0
 
@@ -277,7 +277,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Loop.get_state(session_id) do
       {:ok, state} ->
-        total_tokens = state[:estimated_tokens] || 0
+        total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
         conversation_tokens = max(total_tokens - static_tokens, 0)
         available = max(max_tokens - total_tokens, 0)
         pct = if max_tokens > 0, do: round(total_tokens / max_tokens * 100), else: 0

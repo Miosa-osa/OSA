@@ -288,21 +288,75 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # ── Private: execution ────────────────────────────────────────────────
 
   defp run_command(command, cwd, timeout_ms) do
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-c", command],
-          cd: cwd,
-          stderr_to_stdout: true
-        )
-      end)
+    # Spawn via Port (not System.cmd) so that on the timeout path we can kill
+    # the underlying OS process — and on Windows its whole tree — instead of
+    # only shutting down the BEAM task and leaking an orphaned child.
+    sh = OptimalSystemAgent.OS.Shell.executable()
+    args = OptimalSystemAgent.OS.Shell.port_flags() ++ [command <> " 2>&1"]
 
-    case Task.yield(task, timeout_ms) || Task.shutdown(task) do
-      {:ok, {output, 0}} -> {:ok, maybe_truncate(output)}
-      {:ok, {output, code}} -> {:error, "Exit #{code}:\n#{maybe_truncate(output)}"}
-      nil -> {:error, "Command timed out after #{div(timeout_ms, 1000)}s"}
-    end
+    port =
+      Port.open(
+        {:spawn_executable, sh},
+        [:binary, :exit_status, :hide, {:args, args}, {:cd, cwd}]
+      )
+
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _ -> nil
+      end
+
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    collect_command_output(port, os_pid, deadline, timeout_ms, [])
   rescue
     e -> {:error, "Shell execution error: #{Exception.message(e)}"}
+  end
+
+  defp collect_command_output(port, os_pid, deadline, timeout_ms, acc) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        collect_command_output(port, os_pid, deadline, timeout_ms, [data | acc])
+
+      {^port, {:exit_status, 0}} ->
+        {:ok, maybe_truncate(collected_output(acc))}
+
+      {^port, {:exit_status, code}} ->
+        {:error, "Exit #{code}:\n#{maybe_truncate(collected_output(acc))}"}
+    after
+      remaining ->
+        kill_os_process(os_pid)
+        safe_close_port(port)
+        {:error, "Command timed out after #{div(timeout_ms, 1000)}s"}
+    end
+  end
+
+  defp collected_output(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp kill_os_process(nil), do: :ok
+
+  defp kill_os_process(os_pid) do
+    case :os.type() do
+      {:win32, _} ->
+        _ = System.cmd("taskkill", ["/PID", to_string(os_pid), "/T", "/F"], stderr_to_stdout: true)
+
+      _ ->
+        # SIGTERM for a graceful stop, then SIGKILL as a fallback.
+        _ = System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
+        _ = System.cmd("kill", ["-KILL", to_string(os_pid)], stderr_to_stdout: true)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp safe_close_port(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp maybe_truncate(output) do

@@ -27,10 +27,69 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   Returns a list of message maps ready to append to `state.messages`.
   """
   @spec build_messages(String.t(), map()) :: list(map())
-  def build_messages(message, state) do
+  def build_messages(message, state), do: build_messages(message, state, [])
+
+  @doc """
+  Same as `build_messages/2`, but when `images` is a non-empty list the user
+  turn is emitted as structured content blocks (`text` + one `image` block per
+  entry) so vision-capable providers actually receive the image bytes. Each
+  entry is either a filesystem path (read + base64-encoded, media type detected
+  from the extension) or an already-base64 PNG blob (pasted clipboard bytes).
+  """
+  @spec build_messages(String.t(), map(), list()) :: list(map())
+  def build_messages(message, state, images) when is_list(images) do
     message_with_nudge = maybe_inject_memory_nudge(message, state)
     pre_directives = build_pre_directives(message_with_nudge, state)
-    pre_directives ++ [%{role: "user", content: message_with_nudge}]
+
+    user_msg =
+      case build_image_blocks(message_with_nudge, images) do
+        nil -> %{role: "user", content: message_with_nudge}
+        blocks -> %{role: "user", content: blocks}
+      end
+
+    pre_directives ++ [user_msg]
+  end
+
+  defp build_image_blocks(_text, []), do: nil
+
+  defp build_image_blocks(text, images) do
+    image_blocks =
+      images
+      |> Enum.map(&image_entry_to_block/1)
+      |> Enum.reject(&is_nil/1)
+
+    if image_blocks == [], do: nil, else: [%{type: "text", text: text} | image_blocks]
+  end
+
+  defp image_entry_to_block(entry) when is_binary(entry) and entry != "" do
+    if File.exists?(entry) do
+      case File.read(entry) do
+        {:ok, bytes} ->
+          %{
+            type: "image",
+            source: %{type: "base64", media_type: media_type_for(entry), data: Base.encode64(bytes)}
+          }
+
+        _ ->
+          nil
+      end
+    else
+      # Not a path — treat as already-base64 image bytes (clipboard paste = PNG).
+      %{type: "image", source: %{type: "base64", media_type: "image/png", data: entry}}
+    end
+  end
+
+  defp image_entry_to_block(_), do: nil
+
+  defp media_type_for(path) do
+    case path |> Path.extname() |> String.downcase() do
+      ".png" -> "image/png"
+      ".jpg" -> "image/jpeg"
+      ".jpeg" -> "image/jpeg"
+      ".gif" -> "image/gif"
+      ".webp" -> "image/webp"
+      _ -> "image/png"
+    end
   end
 
   @doc """

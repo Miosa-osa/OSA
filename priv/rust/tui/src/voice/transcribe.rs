@@ -92,7 +92,8 @@ impl LocalTranscriber {
     }
 
     /// Download the pre-built whisper-cli binary for this platform
-    async fn ensure_binary(&self, _progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    async fn ensure_binary(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
         let bin = self.whisper_bin();
         if bin.exists() {
             return Ok(bin);

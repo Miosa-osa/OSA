@@ -55,6 +55,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     limit_error = Limits.check(state)
 
     if limit_error do
+      # Broadcast a terminal session event so async clients (Rust TUI / SSE) stop
+      # 'Processing…' immediately with the real cap message instead of spinning
+      # for the full request timeout and false-reporting a timeout.
+      broadcast_terminal(state, limit_error)
       {:reply, {:error, limit_error}, state}
     else
       # Clear per-message process caches
@@ -64,12 +68,15 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       {message, state} = run_user_prompt_submit_hook(message, state)
 
       if is_nil(message) do
+        broadcast_terminal(state, "Message blocked by hook")
         {:reply, {:error, "Message blocked by hook"}, state}
       else
         # 0. Prompt injection guard
         if Guardrails.prompt_injection?(message) do
           refusal = Guardrails.prompt_extraction_refusal()
-          {:reply, {:ok, refusal}, %{state | status: :idle}}
+          state = %{state | status: :idle}
+          broadcast_terminal(state, refusal)
+          {:reply, {:ok, refusal}, state}
         else
           state = prepare_turn(message, opts, state)
           route_genre(message, opts, state, skip_plan)
@@ -79,6 +86,35 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   end
 
   # --- Steps ---
+
+  # Mirror the terminal broadcast that run_and_reply performs on the normal
+  # path, so async clients render the message and leave the Processing state
+  # promptly instead of waiting out the full request timeout.
+  defp broadcast_terminal(state, text) do
+    topic = "osa:session:#{state.session_id}"
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      topic,
+      {:osa_event,
+       %{
+         type: :agent_response,
+         session_id: state.session_id,
+         response: text,
+         response_type: "agent"
+       }}
+    )
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      topic,
+      {:osa_event, %{type: :done, session_id: state.session_id}}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp clear_cancel_flag(state) do
     try do
@@ -142,8 +178,11 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
 
     state = %{state | messages: compacted}
 
-    # Build decorated message list (nudges + pre-directives + user message)
-    messages_to_append = MessageHandler.build_messages(message, state)
+    # Build decorated message list (nudges + pre-directives + user message).
+    # Thread any pasted/attached images so vision requests reach the model as
+    # image content blocks rather than a dead "[Image #N]" text reference.
+    images = Keyword.get(opts, :images, [])
+    messages_to_append = MessageHandler.build_messages(message, state, images)
 
     %{
       state

@@ -600,11 +600,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         timeout_ms: 60_000
       )
 
-    # Collect streaming tool results (these may already be done)
+    # Collect streaming tool results (these may already be done). Pair by
+    # tool_call_id — NOT by position: collect_results returns results in stream
+    # (parse-completion) order, which can differ from the model's final
+    # tool_calls order. A positional zip would stamp one tool_call's result with
+    # another tool_call's id (one id gets two results, another gets none).
     streaming_results =
       if streaming_ctx && StreamingToolExecutor.has_in_flight?(streaming_ctx) do
         collected = StreamingToolExecutor.collect_results(streaming_ctx)
-        Enum.zip(already_streaming, collected) |> Enum.map(fn {tc, result} -> {tc, result} end)
+
+        results_by_id =
+          Map.new(collected, fn {tool_msg, _str} = result ->
+            {tool_msg[:tool_call_id] || tool_msg["tool_call_id"], result}
+          end)
+
+        Enum.map(already_streaming, fn tc ->
+          result =
+            Map.get(
+              results_by_id,
+              tc.id,
+              {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
+               "Error: Tool not executed"}
+            )
+
+          {tc, result}
+        end)
       else
         []
       end

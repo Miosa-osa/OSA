@@ -47,7 +47,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
   alias OptimalSystemAgent.OpenComputers.FrameRouter
 
   @chunk_size_bytes 1_048_576
-  @tmp_prefix "/tmp/miosa_backup_"
+
+  # Runtime temp prefixes so the platform temp dir is used. On Unix
+  # `System.tmp_dir!()` is "/tmp", preserving the previous paths.
+  defp backup_tmp_prefix, do: Path.join(System.tmp_dir!(), "miosa_backup_")
+  defp restore_tmp_prefix, do: Path.join(System.tmp_dir!(), "miosa_restore_")
 
   # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -113,7 +117,18 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
 
   # ── Snapshot implementation ───────────────────────────────────────────────────
 
-  defp run_snapshot(payload) do
+  defp run_snapshot(%{snapshot_id: snapshot_id} = payload) do
+    if match?({:win32, _}, :os.type()) do
+      FrameRouter.send_frame(
+        {:backup_snapshot_failed,
+         %{snapshot_id: snapshot_id, reason: :unsupported_platform, phase: :archiving}}
+      )
+    else
+      do_run_snapshot(payload)
+    end
+  end
+
+  defp do_run_snapshot(payload) do
     %{
       snapshot_id: snapshot_id,
       path: path,
@@ -125,7 +140,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
 
     level = level || 19
     expanded_path = expand_path(path)
-    tmp_dir = @tmp_prefix <> snapshot_id <> "_"
+    tmp_dir = backup_tmp_prefix() <> snapshot_id <> "_"
     chunk_glob = tmp_dir <> "*"
 
     emit_progress(snapshot_id, :archiving, 0, 0)
@@ -269,7 +284,17 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
 
   # ── Restore implementation ────────────────────────────────────────────────────
 
-  defp run_restore(payload) do
+  defp run_restore(%{restore_id: restore_id} = payload) do
+    if match?({:win32, _}, :os.type()) do
+      FrameRouter.send_frame(
+        {:backup_restore_failed, %{restore_id: restore_id, reason: :unsupported_platform}}
+      )
+    else
+      do_run_restore(payload)
+    end
+  end
+
+  defp do_run_restore(payload) do
     %{
       restore_id: restore_id,
       snapshot_id: _snapshot_id,
@@ -281,7 +306,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Backup do
     # Default target_path to ~ if not specified
     target = expand_path(target_path || "~")
 
-    tmp_restore_dir = "/tmp/miosa_restore_#{restore_id}"
+    tmp_restore_dir = restore_tmp_prefix() <> restore_id
     File.mkdir_p!(tmp_restore_dir)
 
     total_chunks = length(chunk_urls)

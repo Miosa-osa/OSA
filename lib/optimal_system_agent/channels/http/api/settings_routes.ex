@@ -36,14 +36,19 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
         json_error(conn, 400, "invalid_request", "Request body must be a non-empty JSON object")
       else
         existing = read_config()
-        updated = Map.merge(existing, sanitize_params(params))
+        sanitized = sanitize_params(params)
+        updated = Map.merge(existing, sanitized)
 
-        apply_runtime_changes(existing, updated)
+        case validate_provider(Map.get(sanitized, "provider")) do
+          :ok ->
+            apply_runtime_changes(existing, updated)
+            write_config(updated)
+            settings = build_settings(updated)
+            json(conn, 200, settings)
 
-        write_config(updated)
-
-        settings = build_settings(updated)
-        json(conn, 200, settings)
+          {:error, msg} ->
+            json_error(conn, 400, "invalid_provider", msg)
+        end
       end
     rescue
       _ -> json_error(conn, 500, "internal_error", "Failed to update settings")
@@ -142,6 +147,33 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
     apply_log_level(existing, updated)
   end
 
+  # Reject unknown providers with a clear error instead of silently applying a
+  # bogus atom (which also grew the atom table).
+  defp validate_provider(nil), do: :ok
+  defp validate_provider(""), do: :ok
+
+  defp validate_provider(provider) when is_binary(provider) do
+    case safe_provider_atom(provider) do
+      {:ok, _} ->
+        :ok
+
+      :error ->
+        known = OptimalSystemAgent.Providers.Registry.list_providers()
+        {:error, "Unknown provider '#{provider}'. Known: #{Enum.map_join(known, ", ", &to_string/1)}"}
+    end
+  end
+
+  defp validate_provider(_), do: {:error, "Provider must be a string"}
+
+  defp safe_provider_atom(provider) when is_binary(provider) do
+    known = OptimalSystemAgent.Providers.Registry.list_providers()
+
+    atom = String.to_existing_atom(provider)
+    if atom in known, do: {:ok, atom}, else: :error
+  rescue
+    ArgumentError -> :error
+  end
+
   defp apply_provider_model(existing, updated) do
     provider_changed = Map.get(existing, "provider") != Map.get(updated, "provider")
     model_changed = Map.get(existing, "model") != Map.get(updated, "model")
@@ -151,15 +183,17 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SettingsRoutes do
       new_model = Map.get(updated, "model")
 
       if is_binary(new_provider) and new_provider != "" do
-        provider_atom =
-          try do
-            String.to_existing_atom(new_provider)
-          rescue
-            _ -> String.to_atom(new_provider)
-          end
+        # Fail closed: only convert to a KNOWN provider atom. Validation in the
+        # PATCH handler already rejected unknown providers, so to_existing_atom
+        # is safe here and never mints new atoms from user input.
+        case safe_provider_atom(new_provider) do
+          {:ok, provider_atom} ->
+            Application.put_env(:optimal_system_agent, :default_provider, provider_atom)
+            Logger.info("[Settings] Provider set to #{new_provider}")
 
-        Application.put_env(:optimal_system_agent, :default_provider, provider_atom)
-        Logger.info("[Settings] Provider set to #{new_provider}")
+          :error ->
+            :ok
+        end
       end
 
       if is_binary(new_model) and new_model != "" do

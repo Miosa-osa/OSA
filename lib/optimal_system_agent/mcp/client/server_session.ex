@@ -30,6 +30,9 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   @initial_backoff_ms 1_000
   @max_backoff_ms 30_000
   @default_call_timeout 60_000
+  # A stdio server whose transport opens but never replies to `initialize`
+  # would otherwise sit in :connecting forever. Bound the handshake.
+  @handshake_timeout_ms 30_000
 
   defstruct [
     :server,
@@ -163,6 +166,18 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     end
   end
 
+  def handle_info({:handshake_timeout, id}, %{init_id: id} = state) when not is_nil(id) do
+    # initialize is still pending after the deadline — the server started but
+    # never completed the handshake. Mark failed and retry with backoff.
+    Logger.warning(
+      "[MCP:#{state.server.name}] initialize timed out after #{@handshake_timeout_ms}ms — retrying"
+    )
+
+    {:noreply, schedule_reconnect(%{state | status: :failed})}
+  end
+
+  def handle_info({:handshake_timeout, _id}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Connection ────────────────────────────────────────────────────────
@@ -202,6 +217,9 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
     case send_msg(state, msg) do
       :ok ->
+        # Arm a handshake deadline so a server that never replies to initialize
+        # is retried with backoff instead of being silently stuck :connecting.
+        Process.send_after(self(), {:handshake_timeout, msg["id"]}, @handshake_timeout_ms)
         %{state | init_id: msg["id"]}
 
       {:error, reason} ->

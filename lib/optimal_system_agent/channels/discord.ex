@@ -147,9 +147,15 @@ defmodule OptimalSystemAgent.Channels.Discord do
       author = update["author"] || %{}
       user_id = author["id"] || channel_id
       # Skip messages from bots (including ourselves) to avoid loops.
-      if author["bot"] == true do
-        :ok
-      else
+      cond do
+        author["bot"] == true ->
+          :ok
+
+        not channel_allowed?(:discord_allowed_users, [user_id, channel_id]) ->
+          Logger.warning("[Discord] Ignoring message from unauthorized user #{inspect(user_id)}")
+          :ok
+
+        true ->
         session_id = "discord:#{channel_id}"
         actor_id = "discord:#{user_id}"
 
@@ -170,6 +176,26 @@ defmodule OptimalSystemAgent.Channels.Discord do
       _ ->
         # Non-text update or unsupported shape — silently ignore.
         :ok
+    end
+  end
+
+  # Per-channel allowlist gate. Empty/unset preserves current open behavior;
+  # when set, only listed ids drive agent turns.
+  defp channel_allowed?(config_key, ids) do
+    case Application.get_env(:optimal_system_agent, config_key) do
+      value when value in [nil, ""] ->
+        true
+
+      str when is_binary(str) ->
+        allowed =
+          str
+          |> String.split(",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+          |> MapSet.new()
+
+        MapSet.size(allowed) == 0 or
+          Enum.any?(ids, fn id -> MapSet.member?(allowed, to_string(id)) end)
     end
   end
 

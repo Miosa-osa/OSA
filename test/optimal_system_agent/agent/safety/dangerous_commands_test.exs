@@ -116,4 +116,32 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsTest do
       assert DC.blocked?(nil) == :ok
     end
   end
+
+  # Regression for the MCP circuit-breaker gap: a dangerous command routed
+  # through an external MCP server (mcp__<server>__<tool>) must still be blocked
+  # by the hard, tier-independent breaker — it previously fell through to :ok.
+  describe "blocked?/1 MCP tool-call scanning" do
+    test "scans string arguments of outbound mcp__ tools for shell dangers" do
+      assert {:blocked, _} =
+               DC.blocked?(%{
+                 name: "mcp__desktop__execute_command",
+                 arguments: %{"command" => ":(){ :|:& };:"}
+               })
+
+      assert {:blocked, _} =
+               DC.blocked?(%{
+                 "name" => "mcp__server__run",
+                 "arguments" => %{"cmd" => "dd if=/dev/zero of=/dev/sda"}
+               })
+    end
+
+    test "scans mcp__ path-style arguments" do
+      assert {:blocked, _} =
+               DC.blocked?(%{name: "mcp__fs__delete", arguments: %{"path" => "/"}})
+    end
+
+    test "allows benign mcp__ tool calls" do
+      assert DC.blocked?(%{name: "mcp__weather__get", arguments: %{"city" => "Paris"}}) == :ok
+    end
+  end
 end

@@ -79,10 +79,16 @@ defmodule OptimalSystemAgent.Channels.CLI do
           end
       end
 
+    # Tag the CLI session with its working directory so it persists a real
+    # working_dir (enabling cwd-scoped --continue / directory-scoped resume)
+    # instead of the unset app-env nil.
+    working_dir = File.cwd!()
+
     {:ok, _pid} =
       DynamicSupervisor.start_child(
         OptimalSystemAgent.SessionSupervisor,
-        {Loop, session_id: session_id, channel: :cli, messages: messages}
+        {Loop,
+         session_id: session_id, channel: :cli, messages: messages, working_dir: working_dir}
       )
 
     Session.register_permission_hook(session_id)

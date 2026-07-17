@@ -34,7 +34,7 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
           name: skill.name,
           description: skill.description,
           triggers: skill.triggers,
-          tools: [],
+          tools: Map.get(skill, :tools, []),
           path: abs_path
         }
 
@@ -195,9 +195,24 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
       priority: priority,
       instructions: String.trim(body),
       source_path: relative_path,
+      tools: normalize_tools(meta["tools"]),
       metadata: metadata
     }
   end
+
+  # A skill's declared tool allowlist may be a YAML list or a comma-separated
+  # string. Normalize to a list of tool-name strings ([] = unrestricted).
+  defp normalize_tools(nil), do: []
+  defp normalize_tools(list) when is_list(list), do: Enum.map(list, &to_string/1)
+
+  defp normalize_tools(str) when is_binary(str) do
+    str
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp normalize_tools(_), do: []
 
   defp build_skill_def_from_content(content, relative_path, category) do
     %{

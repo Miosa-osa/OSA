@@ -672,15 +672,18 @@ impl InputComponent {
     /// changed. The editor uses its own alternate screen, so the inline viewport
     /// is preserved on return.
     fn open_in_editor(&mut self) -> Result<bool, String> {
+        // Out-of-the-box editor: `vi` exists on a default unix box but not on
+        // Windows, where `notepad` is always present. $EDITOR / $VISUAL still win.
+        let default_editor = if cfg!(windows) { "notepad" } else { "vi" };
         let editor = std::env::var("EDITOR")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| "vi".to_string());
+            .unwrap_or_else(|| default_editor.to_string());
 
         // Support `EDITOR="code --wait"` style values: first token is the program.
         let mut parts = editor.split_whitespace();
-        let program = parts.next().unwrap_or("vi").to_string();
+        let program = parts.next().unwrap_or(default_editor).to_string();
         let extra_args: Vec<String> = parts.map(|s| s.to_string()).collect();
 
         // Temp file seeded with the current buffer (markdown for editor niceties).

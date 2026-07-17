@@ -467,10 +467,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       when is_list(blocks) and blocks != [] ->
         thinking_content =
           Enum.map(blocks, fn block ->
-            base = %{"type" => "thinking", "thinking" => block.thinking || block[:thinking]}
+            base = %{"type" => "thinking", "thinking" => block[:thinking] || block["thinking"]}
 
-            if block[:signature] || block.signature,
-              do: Map.put(base, "signature", block.signature || block[:signature]),
+            if block[:signature] || block["signature"],
+              do: Map.put(base, "signature", block[:signature] || block["signature"]),
               else: base
           end)
 
@@ -486,9 +486,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
               Enum.map(tcs, fn tc ->
                 %{
                   "type" => "tool_use",
-                  "id" => tc.id || tc[:id],
-                  "name" => tc.name || tc[:name],
-                  "input" => tc.arguments || tc[:arguments] || %{}
+                  "id" => tc[:id] || tc["id"],
+                  "name" => tc[:name] || tc["name"],
+                  "input" => tc[:arguments] || tc["arguments"] || %{}
                 }
               end)
 
@@ -506,9 +506,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
               %{
                 "type" => "image",
                 "source" => %{
-                  "type" => source.type || source[:type],
-                  "media_type" => source.media_type || source[:media_type],
-                  "data" => source.data || source[:data]
+                  "type" => source[:type] || source["type"],
+                  "media_type" => source[:media_type] || source["media_type"],
+                  "data" => source[:data] || source["data"]
                 }
               }
 
@@ -557,9 +557,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           Enum.map(tool_calls, fn tc ->
             %{
               "type" => "tool_use",
-              "id" => tc.id || tc[:id],
-              "name" => tc.name || tc[:name],
-              "input" => tc.arguments || tc[:arguments] || %{}
+              "id" => tc[:id] || tc["id"],
+              "name" => tc[:name] || tc["name"],
+              "input" => tc[:arguments] || tc["arguments"] || %{}
             }
           end)
 
@@ -573,9 +573,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
               %{
                 "type" => "image",
                 "source" => %{
-                  "type" => source.type || source[:type],
-                  "media_type" => source.media_type || source[:media_type],
-                  "data" => source.data || source[:data]
+                  "type" => source[:type] || source["type"],
+                  "media_type" => source[:media_type] || source["media_type"],
+                  "data" => source[:data] || source["data"]
                 }
               }
 

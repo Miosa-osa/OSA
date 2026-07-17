@@ -116,7 +116,11 @@ defmodule OptimalSystemAgent.MixProject do
     [
       # Traditional OTP release — used by Homebrew and local dev builds.
       osagent: [
-        include_executables_for: [:unix],
+        # Emit BOTH the Unix boot scripts (bin/osagent, bin/osagent.sh) and the
+        # Windows launcher (bin\osagent.bat) so install.ps1 has a boot script to
+        # call. On a Unix build host this only adds the extra .bat; the Unix
+        # scripts are byte-for-byte unchanged.
+        include_executables_for: [:unix, :windows],
         applications: [runtime_tools: :permanent],
         steps: [:assemble, &copy_go_tokenizer/1, &copy_osagent_wrapper/1],
         rel_templates_path: "rel"
@@ -167,21 +171,29 @@ defmodule OptimalSystemAgent.MixProject do
   # Renames the generated release script (bin/osagent → bin/osagent_release)
   # and copies in our wrapper that dispatches subcommands via `eval`.
   defp copy_osagent_wrapper(release) do
-    bin_dir = Path.join(release.path, "bin")
-    release_bin = Path.join(bin_dir, "osagent")
-    renamed_bin = Path.join(bin_dir, "osagent_release")
+    # The custom wrapper is a POSIX `sh` script Windows cannot execute. On a
+    # Windows build host, skip it entirely and let install.ps1 call the stock
+    # bin\osagent.bat launcher (with serve/setup/doctor as release commands).
+    # The Unix path below is unchanged so Linux/macOS never regress.
+    if match?({:win32, _}, :os.type()) do
+      release
+    else
+      bin_dir = Path.join(release.path, "bin")
+      release_bin = Path.join(bin_dir, "osagent")
+      renamed_bin = Path.join(bin_dir, "osagent_release")
 
-    # Rename the release's own boot script
-    if File.exists?(release_bin) do
-      File.rename!(release_bin, renamed_bin)
+      # Rename the release's own boot script
+      if File.exists?(release_bin) do
+        File.rename!(release_bin, renamed_bin)
+      end
+
+      # Write our wrapper
+      wrapper = Path.join(bin_dir, "osagent")
+      File.write!(wrapper, osagent_wrapper_script())
+      File.chmod!(wrapper, 0o755)
+
+      release
     end
-
-    # Write our wrapper
-    wrapper = Path.join(bin_dir, "osagent")
-    File.write!(wrapper, osagent_wrapper_script())
-    File.chmod!(wrapper, 0o755)
-
-    release
   end
 
   defp osagent_wrapper_script do

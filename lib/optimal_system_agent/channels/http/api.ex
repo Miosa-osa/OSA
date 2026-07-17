@@ -72,15 +72,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   plug(OptimalSystemAgent.Channels.HTTP.RateLimiter)
   plug(:validate_content_type)
   plug(:authenticate)
-  plug(OptimalSystemAgent.Channels.HTTP.Integrity)
   plug(:match)
 
   plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json"],
     json_decoder: Jason,
+    body_reader: {OptimalSystemAgent.Channels.HTTP.CacheBodyReader, :read_body, []},
     length: 1_000_000
   )
+
+  # Integrity runs AFTER Plug.Parsers so the raw body has been cached in
+  # conn.assigns[:raw_body] and body_params are fetched — otherwise it would
+  # HMAC a re-encoded body (mismatch) or crash on an unfetched body.
+  plug(OptimalSystemAgent.Channels.HTTP.Integrity)
 
   plug(:dispatch)
 

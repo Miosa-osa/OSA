@@ -126,7 +126,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ClipboardTest do
       :ok
     end
 
-    @tag :unix
+    @tag :macos
     test "emits clipboard_synced on success" do
       Clipboard.handle_frame(
         {:clipboard_copy_to_host, %{req_id: "r5", content: "hello world", mime: "text/plain"}}
@@ -138,7 +138,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.ClipboardTest do
       assert_receive {:outbound_frame, {:clipboard_synced, %{req_id: "r5"}}}, 1_000
     end
 
-    @tag :unix
+    @tag :macos
     test "request_from_host returns clipboard_content" do
       Clipboard.handle_frame({:clipboard_request_from_host, %{req_id: "r6"}})
 

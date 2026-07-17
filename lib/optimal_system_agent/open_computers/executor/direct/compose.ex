@@ -44,7 +44,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Compose do
 
   alias OptimalSystemAgent.OpenComputers.FrameRouter
 
-  @base_tmp "/tmp/miosa-compose"
+  # Computed at runtime so the platform temp dir is used (e.g. %TEMP% on
+  # Windows). On Unix `System.tmp_dir!()` yields "/tmp", preserving prior paths.
+  defp base_tmp, do: Path.join(System.tmp_dir!(), "miosa-compose")
 
   # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -536,13 +538,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Compose do
   end
 
   defp project_tmp_dir(project_id) do
-    Path.join(@base_tmp, project_id)
+    Path.join(base_tmp(), project_id)
   end
 
   defp project_tmp_dir_by_name(name) do
     # When we have only the project name (not ID), we can't determine the exact dir.
     # This is a fallback used by ps when tmp_dir may not exist.
-    Path.join(@base_tmp, name)
+    Path.join(base_tmp(), name)
   end
 
   defp cleanup_tmp(state, project_id) do
