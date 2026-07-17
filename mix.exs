@@ -32,7 +32,31 @@ defmodule OptimalSystemAgent.MixProject do
     ]
   end
 
-  defp deps do
+  defp deps, do: base_deps() ++ unix_only_deps()
+
+  # Dependencies that ship a native (C port) component and only build on Unix.
+  # On Windows these are omitted entirely so `mix release` can assemble; the
+  # runtime code paths that use them are gated behind `:os.type()` checks.
+  defp unix_only_deps do
+    if match?({:win32, _}, :os.type()) do
+      []
+    else
+      [
+        # PTY spawning — used by OpenComputers.Executor.Direct.Pty to open
+        # real interactive shells with full terminal geometry (cols, rows, resize).
+        # erlexec ships a C port program that does NOT build on Windows, so it is
+        # excluded from the win32 dep set. The PTY executor child is likewise not
+        # started on Windows (see OpenComputers.Supervisor).
+        # PINNED to 2.0.6 — later versions use OTP 27 -doc() attribute which
+        # breaks compile on OTP 26. We pin OTP 26 because OTP 27 has Mix release
+        # bugs (TypedStruct.MixProject + Decimal.Error already compiled). When
+        # OTP 27 Mix issues are resolved upstream, this pin can be relaxed.
+        {:erlexec, "== 2.0.6"}
+      ]
+    end
+  end
+
+  defp base_deps do
     [
       # Single-binary packaging — wraps a BEAM release into self-contained executables
       {:burrito, "~> 1.0"},
@@ -88,14 +112,9 @@ defmodule OptimalSystemAgent.MixProject do
 
       # OTP 28: rustler removed — nif.ex uses pure Elixir fallbacks
       # {:rustler, "~> 0.37", optional: true}
-
-      # PTY spawning — used by OpenComputers.Executor.Direct.Pty to open
-      # real interactive shells with full terminal geometry (cols, rows, resize).
-      # PINNED to 2.0.6 — later versions use OTP 27 -doc() attribute which
-      # breaks compile on OTP 26. We pin OTP 26 because OTP 27 has Mix release
-      # bugs (TypedStruct.MixProject + Decimal.Error already compiled). When
-      # OTP 27 Mix issues are resolved upstream, this pin can be relaxed.
-      {:erlexec, "== 2.0.6"}
+      #
+      # NOTE: :erlexec (Unix PTY spawning) lives in unix_only_deps/0 — it is
+      # excluded on Windows because its C port program does not build there.
 
       # miosa_* packages are not standalone deps — their implementations live
       # in this repo. Shim modules in lib/miosa/ satisfy all call sites.

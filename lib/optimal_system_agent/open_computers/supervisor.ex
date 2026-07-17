@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
   """
 
   use Supervisor
+  require Logger
 
   alias OptimalSystemAgent.OpenComputers.{Config, Executor, FrameRouter, Session, Updater}
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller, as: DesktopController
@@ -43,8 +44,8 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
     children = [
       Config,
       FrameRouter,
-      Executor.Supervisor,
-      PtyExecutor,
+      Executor.Supervisor
+    ] ++ pty_children() ++ [
       DesktopController,
       TunnelExecutor,
       # Inference cluster controller — manages exo/MLX processes on this host
@@ -68,5 +69,19 @@ defmodule OptimalSystemAgent.OpenComputers.Supervisor do
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # The PTY executor relies on :erlexec, whose native C port program does not
+  # build on Windows (the dep is excluded from the win32 build entirely — see
+  # mix.exs unix_only_deps/0). On Windows we skip starting this child so the
+  # rest of the OpenComputers subsystem still runs; every other executor is
+  # unaffected. On Unix (Linux/macOS) behavior is unchanged — PtyExecutor starts.
+  defp pty_children do
+    if match?({:win32, _}, :os.type()) do
+      Logger.info("[OpenComputers] PTY/native exec disabled on Windows (erlexec unavailable)")
+      []
+    else
+      [PtyExecutor]
+    end
   end
 end
