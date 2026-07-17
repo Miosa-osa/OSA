@@ -58,6 +58,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "login" => {"Sign in with a provider (e.g. /login anthropic)", :cmd_login},
     "logout" => {"Disconnect OAuth session for a provider", :cmd_logout},
     "setup" => {"Re-run the setup wizard", :cmd_setup},
+    "customize" => {"Make OSA yours — identity, skills, schedules, channels", :cmd_customize},
     "channels" => {"Show connected messaging channels", :cmd_channels},
     "resume" => {"Resume a previous session", :cmd_resume},
     "persona" => {"Show or switch persona preset", :cmd_persona},
@@ -1047,6 +1048,99 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     OptimalSystemAgent.CLI.Setup.run()
     IO.puts("")
     session_id
+  end
+
+  # ── /customize — "make OSA yours" cheat-sheet + starter-template seeding ──
+  #
+  # Prints where every customization surface lives under ~/.osa/ and, with the
+  # `seed` argument, copies the starter templates into place using the existing
+  # `Onboarding.seed_workspace/0` "only-if-not-exists" guard (never overwrites).
+
+  @customize_rows [
+    {"IDENTITY.md", "who OSA is — name, role, personality"},
+    {"SOUL.md", "voice & values — how OSA speaks and decides"},
+    {"USER.md", "your profile — who OSA is working for"},
+    {"HEARTBEAT.md", "proactive work OSA does on its own when idle"},
+    {"CRONS.json", "scheduled tasks that run on a recurring timer"},
+    {"TRIGGERS.json", "event-driven tasks fired when something happens"},
+    {"config.json", "provider/model, budgets, machines, channels"},
+    {"skills/<name>/SKILL.md", "reusable skills OSA can load on demand"},
+    {"workflows/<id>.json", "multi-step workflow templates"}
+  ]
+
+  def cmd_customize(args, session_id) do
+    IO.puts("")
+
+    case String.trim(args) do
+      "seed" ->
+        seed_customize_templates()
+
+      _ ->
+        print_customize_cheatsheet()
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp print_customize_cheatsheet do
+    osa_dir = Path.expand("~/.osa")
+
+    IO.puts("  #{@bold}Make OSA yours#{@reset}")
+
+    IO.puts(
+      "  #{@dim}OSA works out of the box — everything below is optional and lives in #{osa_dir}/#{@reset}"
+    )
+
+    IO.puts("")
+
+    Enum.each(@customize_rows, fn {path, purpose} ->
+      exists? = File.exists?(Path.join(osa_dir, hd(String.split(path, "/"))))
+      marker = if exists?, do: "#{@green}●#{@reset}", else: "#{@dim}○#{@reset}"
+      padded = String.pad_trailing("~/.osa/#{path}", 26)
+      IO.puts("  #{marker} #{@cyan}#{padded}#{@reset} #{@dim}#{purpose}#{@reset}")
+    end)
+
+    IO.puts("")
+    IO.puts("  #{@dim}See examples/ (or examples/README.md) for ready-to-copy templates.#{@reset}")
+
+    IO.puts(
+      "  #{@dim}Run #{@reset}#{@cyan}/customize seed#{@reset}#{@dim} to copy starter templates into ~/.osa/ (never overwrites).#{@reset}"
+    )
+  end
+
+  defp seed_customize_templates do
+    osa_dir = Path.expand("~/.osa")
+
+    before = MapSet.new(list_osa_files(osa_dir))
+    OptimalSystemAgent.Onboarding.seed_workspace()
+    seeded = list_osa_files(osa_dir) |> Enum.reject(&MapSet.member?(before, &1)) |> Enum.sort()
+
+    cond do
+      seeded != [] ->
+        IO.puts("  #{@green}✓#{@reset} Seeded starter templates into #{osa_dir}/:")
+
+        Enum.each(seeded, fn f ->
+          IO.puts("    #{@cyan}#{f}#{@reset}")
+        end)
+
+      true ->
+        IO.puts("  #{@dim}All starter templates already present in #{osa_dir}/ — nothing to copy.#{@reset}")
+    end
+
+    IO.puts(
+      "  #{@dim}Existing files were left untouched. Edit them, then restart OSA to apply.#{@reset}"
+    )
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: could not seed templates: #{Exception.message(e)}#{@reset}")
+  end
+
+  defp list_osa_files(osa_dir) do
+    case File.ls(osa_dir) do
+      {:ok, files} -> files
+      _ -> []
+    end
   end
 
   def cmd_channels(_args, session_id) do
