@@ -37,6 +37,10 @@ Drop a `SKILL.md` file into `~/.osa/skills/<skill-name>/` and it is available im
 ---
 name: skill-name
 description: One line description of what this skill does
+triggers:
+  - keyword or phrase that should activate this skill
+  - another activation phrase
+priority: medium
 tools:
   - file_read
   - file_write
@@ -67,6 +71,8 @@ This helps the agent understand the skill's scope.
 |-------|----------|-------------|
 | `name` | Yes | Unique skill identifier. Lowercase, hyphens allowed. Must match the folder name. |
 | `description` | Yes | One-line description. Shown in skill listings and used by the LLM to decide when to invoke the skill. |
+| `triggers` | No | List of keywords or phrases that activate the skill. If omitted, defaults to an empty list. |
+| `priority` | No | Ordering hint when multiple skills match. Accepts `critical`, `high`, `medium`, `low`, or an integer (lower runs first). Defaults to `medium` (5). |
 | `tools` | No | List of built-in tools this skill can use. Available tools: `file_read`, `file_write`, `web_search`, `memory_save`, `shell_execute`. If omitted, no tool restrictions are applied. |
 
 ### Built-in Tools Reference
@@ -340,10 +346,13 @@ If you make breaking changes to a skill, consider creating a new skill and depre
 
 See `examples/skills/` for complete, production-ready example skills:
 
-- `email-assistant/` — Email triage and management
-- `daily-briefing/` — Morning business briefing
-- `sales-pipeline/` — Sales pipeline monitoring
+- `code-review/` — Code review assistant
 - `content-writer/` — Content drafting assistant
+- `customer-support/` — Customer support triage
+- `daily-briefing/` — Morning business briefing
+- `email-assistant/` — Email triage and management
 - `meeting-prep/` — Meeting preparation
+- `research-assistant/` — Research and summarization
+- `sales-pipeline/` — Sales pipeline monitoring
 
 Copy any of these to `~/.osa/skills/` and they work immediately.

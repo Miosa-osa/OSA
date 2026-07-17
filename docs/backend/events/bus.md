@@ -41,6 +41,7 @@ All valid event types are declared in `@event_types`:
 | `:llm_response` | Providers -> Agent.Loop — LLM response received |
 | `:tool_call` | Agent.Loop -> Tools — tool execution start/end |
 | `:tool_result` | Tools -> Agent.Loop — tool output |
+| `:tool_render` | Agent.Loop -> UI — structured tool render payload |
 | `:agent_response` | Agent.Loop -> Channels/Bridge — final response |
 | `:system_event` | Scheduler/internals -> Loop/Memory — control events |
 | `:channel_connected` | Manager — channel came online |
@@ -49,6 +50,10 @@ All valid event types are declared in `@event_types`:
 | `:ask_user_question` | Agent tool — prompts user for input |
 | `:survey_answered` | Agent tool — user answered a survey |
 | `:algedonic_alert` | System health — urgent bypass signal (Beer VSM) |
+| `:signal_classified` | Signal classifier — event enriched with Signal Theory dimensions |
+| `:doom_loop_halt` | Agent.Loop — repetition/stall detected, loop halted |
+| `:auto_mode_blocked` | Safety Guardian — an auto-mode action was blocked |
+| `:auto_mode_paused` | Safety Guardian — auto mode paused after repeated blocks |
 
 Attempting to emit an unknown type raises an `ArgumentError` at the `when event_type in @event_types` guard.
 

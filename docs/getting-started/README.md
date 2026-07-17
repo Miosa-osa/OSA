@@ -11,22 +11,20 @@
 
 ```bash
 # Clone and build
-git clone https://github.com/your-org/optimal-system-agent.git
-cd optimal-system-agent
-mix deps.get && mix compile
+git clone https://github.com/Miosa-osa/OSA.git
+cd OSA
+mix setup
 
 # Configure (at minimum, one provider key)
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.osa/.env
 
-# Run
-mix run --no-halt
-# or
-./osagent
+# Run the HTTP API server
+mix osa.serve
 ```
 
 ## Prerequisites
 
-- **Elixir** >= 1.16
+- **Elixir** >= 1.17
 - **Erlang/OTP** >= 26
 - **SQLite3** (for message persistence)
 - At least one LLM provider key OR Ollama installed locally

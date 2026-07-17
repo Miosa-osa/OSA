@@ -79,7 +79,7 @@ COPY --from=build /app/_build/prod/rel/optimal_system_agent ./
 RUN mkdir -p /data/osa
 ENV OSA_CONFIG_DIR=/data/osa
 
-EXPOSE 8089
+EXPOSE 9089
 VOLUME ["/data/osa"]
 
 CMD ["bin/optimal_system_agent", "start"]
@@ -94,12 +94,12 @@ services:
   osa:
     build: .
     ports:
-      - "8089:8089"
+      - "9089:9089"
     volumes:
       - osa-data:/data/osa
       - ./.env:/app/.env:ro
     environment:
-      - OSA_HTTP_PORT=8089
+      - OSA_HTTP_PORT=9089
       - OSA_REQUIRE_AUTH=true
       - OSA_SHARED_SECRET=${OSA_SHARED_SECRET}
     restart: unless-stopped
@@ -119,7 +119,7 @@ docker compose logs -f osa
 
 ```nginx
 upstream osa {
-    server 127.0.0.1:8089;
+    server 127.0.0.1:9089;
 }
 
 server {
@@ -275,7 +275,7 @@ launchctl load ~/Library/LaunchAgents/com.miosa.osa.plist
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| Port 8089 in use | Another process | `OSA_HTTP_PORT=8090` or find/kill the process |
+| Port 9089 in use | Another process | `OSA_HTTP_PORT=9090` or find/kill the process |
 | Provider timeout | API rate limit or network | Check budget, try fallback provider |
 | SQLite locked | Multiple processes | Ensure only one OSA instance per database |
 | Sidecar not starting | Missing binary | Check `OSA_GO_TOKENIZER_ENABLED` and binary path |

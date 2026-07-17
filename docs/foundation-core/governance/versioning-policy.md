@@ -13,7 +13,7 @@ release tooling, and runtime introspection.
 The canonical version is `/VERSION`:
 
 ```
-0.2.6
+1.0.002
 ```
 
 No trailing newline. No `v` prefix. This file is read by `mix.exs`:
@@ -26,7 +26,7 @@ And available at runtime:
 
 ```elixir
 Application.spec(:optimal_system_agent, :vsn) |> to_string()
-# => "0.2.6"
+# => "1.0.002"
 ```
 
 To bump the version, edit only the `VERSION` file. Do not edit `mix.exs`
@@ -35,11 +35,12 @@ of truth.
 
 ---
 
-## Current Version: 0.2.6 (Pre-1.0)
+## Current Version: 1.0.002
 
-OSA is pre-1.0. The public API surface — environment variables, HTTP endpoints,
-hook signatures, tool behaviour callbacks, channel protocols — is not yet
-frozen. Users should expect breaking changes in minor version bumps.
+OSA has shipped 1.0. The public API surface — environment variables, HTTP
+endpoints, hook signatures, tool behaviour callbacks, channel protocols — is now
+covered by the semantic-versioning guarantees below: breaking changes are
+confined to major version bumps.
 
 ---
 
@@ -106,7 +107,7 @@ Before tagging a new version:
 - [ ] For breaking changes: ADR written and merged
 - [ ] All tests pass: `mix test`
 - [ ] Release build succeeds: `MIX_ENV=prod mix release osagent`
-- [ ] Git tag created: `git tag v0.2.6`
+- [ ] Git tag created: `git tag v1.0.002`
 
 ---
 

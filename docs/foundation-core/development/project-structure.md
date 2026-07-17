@@ -99,7 +99,7 @@ optimal_system_agent/
 ├── channels/               Channel adapters
 │   ├── behaviour.ex        Behaviour contract for all adapters
 │   ├── noise_filter.ex     Two-tier signal filter (deterministic + weight-based)
-│   ├── http.ex             HTTP/SSE API (Plug + Bandit, port 8089)
+│   ├── http.ex             HTTP/SSE API (Plug + Bandit, port 9089)
 │   ├── cli.ex              Interactive terminal chat
 │   ├── telegram.ex         Telegram Bot API adapter
 │   ├── discord.ex          Discord adapter

@@ -78,7 +78,7 @@ precedence over `OSA_MODEL` for their specific provider.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OSA_HTTP_PORT` | `8089` | Port for the Bandit HTTP server |
+| `OSA_HTTP_PORT` | `9089` | Port for the Bandit HTTP server |
 | `OSA_REQUIRE_AUTH` | `false` | Require `Authorization: Bearer <secret>` on all HTTP endpoints |
 | `OSA_SHARED_SECRET` | — | Bearer token value. Required when `OSA_REQUIRE_AUTH=true` |
 

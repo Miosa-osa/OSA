@@ -1,7 +1,7 @@
 # OSA Known Issues
 
 > Last updated: 2026-03-18
-> Version: 0.3.1
+> Version: 1.0.002
 
 This document catalogs all known bugs, missing features, and UX issues
 identified through codebase analysis and user testing.

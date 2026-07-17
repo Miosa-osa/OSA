@@ -32,7 +32,7 @@ mix chat
 ```
 
 Both start the full OTP application, open the CLI chat interface, and listen on
-port 8089 for HTTP API requests.
+port 9089 for HTTP API requests.
 
 ### IEx mode (for debugging and exploration)
 
@@ -63,7 +63,7 @@ bin/osa --dev
 ```
 
 In dev mode:
-- HTTP server listens on port 19001 (avoids collisions with production port 8089)
+- HTTP server listens on port 19001 (avoids collisions with production port 9089)
 - Debug logging is enabled by default
 - Budget limits are raised to avoid blocking experimental tool chains
 
@@ -117,7 +117,7 @@ OptimalSystemAgent.Tools.Registry.reload_skills()
 ## Desktop App (Tauri)
 
 The desktop app is a Tauri application with a Svelte frontend.
-It connects to the OSA HTTP API on port 8089.
+It connects to the OSA HTTP API on port 9089.
 
 ### Prerequisites
 
@@ -199,7 +199,7 @@ For local development, create a `.env` file in the project root:
 ANTHROPIC_API_KEY=sk-ant-...
 OSA_DEFAULT_PROVIDER=anthropic
 OSA_MODEL=claude-haiku-4-5
-OSA_HTTP_PORT=8089
+OSA_HTTP_PORT=9089
 OSA_DAILY_BUDGET_USD=10.0
 ```
 

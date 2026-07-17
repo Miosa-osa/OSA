@@ -55,7 +55,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 │   └── OptimalSystemAgent.Webhooks.Dispatcher
 ├── OptimalSystemAgent.Supervisors.Extensions  (one_for_one, conditionally populated)
 ├── OptimalSystemAgent.Channels.Starter
-└── Bandit  (HTTP, port 8089, started last)
+└── Bandit  (HTTP, port 9089, started last)
 ```
 
 ## Per-Session Agent Processes

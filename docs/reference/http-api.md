@@ -1,8 +1,8 @@
 # HTTP API Reference
 
-OSA exposes a REST API on port 8089 (configurable) for SDK clients, integrations, and external applications.
+OSA exposes a REST API on port 9089 (configurable) for SDK clients, integrations, and external applications.
 
-Base URL: `http://localhost:8089`
+Base URL: `http://localhost:9089`
 
 ---
 
@@ -90,7 +90,7 @@ Health check. Always available, no authentication required.
 **Request:**
 
 ```bash
-curl http://localhost:8089/health
+curl http://localhost:9089/health
 ```
 
 **Response (200):**
@@ -118,7 +118,7 @@ Run the full agent loop. This is the primary endpoint — send a message and get
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/orchestrate \
+curl -X POST http://localhost:9089/api/v1/orchestrate \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{
@@ -206,7 +206,7 @@ Classify a message using the Signal Theory 5-tuple without running the agent loo
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/classify \
+curl -X POST http://localhost:9089/api/v1/classify \
   -H "Content-Type: application/json" \
   -d '{
     "message": "What is our Q3 revenue trend compared to last year?",
@@ -244,7 +244,7 @@ List all registered executable tools (built-in Elixir modules the LLM can call).
 **Request:**
 
 ```bash
-curl http://localhost:8089/api/v1/tools
+curl http://localhost:9089/api/v1/tools
 ```
 
 **Response (200):**
@@ -302,7 +302,7 @@ Execute a tool directly, bypassing the agent loop. Useful for SDK integrations.
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/tools/web_search/execute \
+curl -X POST http://localhost:9089/api/v1/tools/web_search/execute \
   -H "Content-Type: application/json" \
   -d '{
     "arguments": {
@@ -343,7 +343,7 @@ List SKILL.md prompt template definitions (not executable tools).
 **Request:**
 
 ```bash
-curl http://localhost:8089/api/v1/skills
+curl http://localhost:9089/api/v1/skills
 ```
 
 **Response (200):**
@@ -372,7 +372,7 @@ Save an entry to long-term memory (MEMORY.md).
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/memory \
+curl -X POST http://localhost:9089/api/v1/memory \
   -H "Content-Type: application/json" \
   -d '{
     "content": "User prefers concise responses. Location: San Francisco.",
@@ -403,7 +403,7 @@ Read all long-term memory (MEMORY.md contents).
 **Request:**
 
 ```bash
-curl http://localhost:8089/api/v1/memory/recall
+curl http://localhost:9089/api/v1/memory/recall
 ```
 
 **Response (200):**
@@ -423,7 +423,7 @@ List active machines and their count.
 **Request:**
 
 ```bash
-curl http://localhost:8089/api/v1/machines
+curl http://localhost:9089/api/v1/machines
 ```
 
 **Response (200):**
@@ -444,7 +444,7 @@ Launch a multi-agent swarm. Returns immediately with the swarm ID.
 **Request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/swarm/launch \
+curl -X POST http://localhost:9089/api/v1/swarm/launch \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{
@@ -492,7 +492,7 @@ curl -X POST http://localhost:8089/api/v1/swarm/launch \
 Get the status and result of a specific swarm.
 
 ```bash
-curl http://localhost:8089/api/v1/swarm/swarm_abc123
+curl http://localhost:9089/api/v1/swarm/swarm_abc123
 ```
 
 ### DELETE /api/v1/swarm/:id
@@ -500,7 +500,7 @@ curl http://localhost:8089/api/v1/swarm/swarm_abc123
 Cancel a running swarm.
 
 ```bash
-curl -X DELETE http://localhost:8089/api/v1/swarm/swarm_abc123
+curl -X DELETE http://localhost:9089/api/v1/swarm/swarm_abc123
 ```
 
 ---
@@ -512,7 +512,7 @@ Server-Sent Events (SSE) stream for a specific session. Connect to this endpoint
 **Request:**
 
 ```bash
-curl -N http://localhost:8089/api/v1/stream/my-session
+curl -N http://localhost:9089/api/v1/stream/my-session
 ```
 
 **SSE Protocol:**
@@ -589,7 +589,7 @@ limit_req_zone $binary_remote_addr zone=osa:10m rate=10r/s;
 
 location /api/ {
     limit_req zone=osa burst=20 nodelay;
-    proxy_pass http://localhost:8089;
+    proxy_pass http://localhost:9089;
 }
 ```
 
@@ -606,7 +606,7 @@ location /api/ {
     add_header Access-Control-Allow-Origin "https://your-app.com";
     add_header Access-Control-Allow-Methods "GET, POST, OPTIONS";
     add_header Access-Control-Allow-Headers "Authorization, Content-Type";
-    proxy_pass http://localhost:8089;
+    proxy_pass http://localhost:9089;
 }
 ```
 
@@ -630,10 +630,10 @@ TOKEN=$(mix osa.token --user-id sdk-client-1 2>/dev/null)
 
 # 2. Start listening for events (background)
 curl -N -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8089/api/v1/stream/sdk-session &
+  http://localhost:9089/api/v1/stream/sdk-session &
 
 # 3. Send a message
-curl -X POST http://localhost:8089/api/v1/orchestrate \
+curl -X POST http://localhost:9089/api/v1/orchestrate \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

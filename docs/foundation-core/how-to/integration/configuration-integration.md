@@ -47,7 +47,7 @@ Application.get_env(:optimal_system_agent, :noise_filter_thresholds, %{})
 |-----|------|---------|-------------|
 | `:default_provider` | `atom()` | auto-detected | Active LLM provider |
 | `:default_model` | `String.t()` or `nil` | provider default | Active LLM model |
-| `:http_port` | `integer()` | `8089` | HTTP server port |
+| `:http_port` | `integer()` | `9089` | HTTP server port |
 | `:max_iterations` | `integer()` | `30` | Max ReAct loop iterations |
 | `:max_context_tokens` | `integer()` | `128_000` | Context window size |
 | `:max_response_tokens` | `integer()` | `8_192` | Max tokens per LLM response |
@@ -94,7 +94,7 @@ OSA_PER_CALL_LIMIT_USD=2.0
 ### HTTP and auth
 
 ```sh
-OSA_HTTP_PORT=8089
+OSA_HTTP_PORT=9089
 OSA_REQUIRE_AUTH=true
 OSA_SHARED_SECRET=a-very-long-random-secret
 ```

@@ -1,6 +1,6 @@
 # OSA Documentation
 
-> **OSA v0.2.6** — Optimal System Agent
+> **OSA v1.0.002** — Optimal System Agent
 > Elixir/OTP + Rust TUI + Tauri/SvelteKit. Signal Theory-based AI agent orchestration.
 > 154,000 lines · 287 modules · 18 LLM providers · 12 chat channels · Apache 2.0
 
@@ -19,8 +19,8 @@ osagent version
 miosa version
 
 # Or from source
-git clone https://github.com/miosa-osa/osa.git
-cd osa && mix setup && mix osa.serve
+git clone https://github.com/Miosa-osa/OSA.git
+cd OSA && mix setup && mix osa.serve
 ```
 
 See [Getting Started](getting-started/) for installation, configuration, and first run.
@@ -183,9 +183,9 @@ analysis, code references, and suggested fixes. See the [issue index](known-issu
 Historical documentation preserved for reference:
 
 - `architecture-legacy/` — Original architecture docs
-- `research-legacy/` — Competitor analysis, prompt engineering, roadmap
+- `research/` — Competitor analysis, prompt engineering
+- `roadmap/` — Historical roadmap docs
 - `agent-dispatch/` — Multi-agent dispatch framework research
-- `competitors/` — 14 competitor analyses
 - `flows/` — Message flow analysis across architectures
 
 ---

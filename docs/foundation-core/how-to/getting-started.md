@@ -174,7 +174,7 @@ Once OSA is running you should see the startup banner followed by the chat
 prompt. Run a quick health check from a second terminal:
 
 ```sh
-curl http://localhost:8089/health
+curl http://localhost:9089/health
 ```
 
 Expected response:

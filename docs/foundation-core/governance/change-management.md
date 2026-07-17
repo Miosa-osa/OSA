@@ -24,7 +24,7 @@ manifests, and API responses that expose the version must read from the
 `VERSION` file or from `Application.spec(:optimal_system_agent, :vsn)` at
 runtime.
 
-Current version: **0.2.6** (pre-1.0)
+Current version: **1.0.002**
 
 ### Pre-1.0 Policy
 

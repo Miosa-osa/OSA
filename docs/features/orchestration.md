@@ -77,14 +77,14 @@ Complexity detected: 7/10 → spawning 5 agents across 3 waves
 
 ### HTTP API
 ```bash
-curl -X POST http://localhost:8089/orchestrate \
+curl -X POST http://localhost:9089/api/v1/orchestrate \
   -H "Content-Type: application/json" \
   -d '{"task": "Refactor the user module with full test coverage"}'
 ```
 
 Check progress:
 ```bash
-curl http://localhost:8089/orchestrate/<task_id>/progress
+curl http://localhost:9089/api/v1/orchestrate/<task_id>/progress
 ```
 
 ## Wave Execution Detail
@@ -164,7 +164,7 @@ The Budget module tracks spend per provider, per agent, per call. If an agent ex
 
 HTTP API:
 ```bash
-curl -X POST http://localhost:8089/api/v1/swarm/launch \
+curl -X POST http://localhost:9089/api/v1/swarm/launch \
   -H "Content-Type: application/json" \
   -d '{"preset": "security-audit", "target": "./lib"}'
 ```

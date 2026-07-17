@@ -90,7 +90,7 @@ These keys live under `:optimal_system_agent` application config. Set them in `c
 
 | Env Var / Config Key | Default | Description |
 |----------------------|---------|-------------|
-| `OSA_HTTP_PORT` / `http_port` | `8089` | Port the Bandit HTTP server listens on. |
+| `OSA_HTTP_PORT` / `http_port` | `9089` | Port the Bandit HTTP server listens on. |
 | `OSA_REQUIRE_AUTH` / `require_auth` | `false` | When `true`, all `/api/v1/*` requests must include a Bearer token matching `OSA_SHARED_SECRET`. |
 | `OSA_SHARED_SECRET` / `shared_secret` | `nil` | Shared secret for Bearer token auth. Required when `OSA_REQUIRE_AUTH=true`. Raises at startup if missing. |
 

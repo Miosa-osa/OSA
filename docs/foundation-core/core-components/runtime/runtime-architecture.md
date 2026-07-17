@@ -84,7 +84,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 ├── Supervisors.AgentServices  (memory, hooks, learning, scheduler — one_for_one)
 ├── Supervisors.Extensions     (opt-in subsystems — one_for_one)
 ├── Channels.Starter           (deferred channel startup in handle_continue)
-└── Bandit                     (HTTP on OSA_HTTP_PORT, default 8089)
+└── Bandit                     (HTTP on OSA_HTTP_PORT, default 9089)
 ```
 
 ### 3. Soul and Prompt Loading
@@ -197,7 +197,7 @@ connections:
 ```
 
 Port resolution order: `OSA_HTTP_PORT` env var → application config →
-default `8089`.
+default `9089`.
 
 ## Release Build Steps
 

@@ -20,8 +20,8 @@ There is no continuous integration workflow that runs on pull requests or pushes
 Any push to a tag matching `v*`:
 
 ```bash
-git tag v0.2.7
-git push origin v0.2.7
+git tag v1.0.002
+git push origin v1.0.002
 ```
 
 ### Environment Versions
@@ -59,14 +59,14 @@ Each build job runs these steps:
 5. Install Elixir production deps: `mix deps.get --only prod`.
 6. Compile: `mix compile`.
 7. Assemble release: `mix release osagent`.
-8. Package tarball: `tar -czf osagent-{version}-{os}-{arch}.tar.gz .` from `_build/prod/rel/osagent/`.
+8. Package tarball: `tar -czf osa-{platform}.tar.gz .` from `_build/prod/rel/osagent/`.
 9. Upload tarball to the GitHub release via `gh release upload`.
 
-Tarball naming convention: `osagent-{version}-{os}-{arch}.tar.gz`
+Tarball naming convention: `osa-{platform}.tar.gz` (Windows ships `osa-windows-x64.zip`). Each asset has a `.sha256` sidecar. The version is not part of the filename — it lives in the release tag path.
 
 Examples:
-- `osagent-0.2.7-darwin-arm64.tar.gz`
-- `osagent-0.2.7-linux-amd64.tar.gz`
+- `osa-macos-arm64.tar.gz`
+- `osa-linux-x64.tar.gz`
 
 ### Artifact Storage
 
@@ -100,16 +100,16 @@ Each formula installs the release tarball into `libexec/` and symlinks `osa`, `o
 
 1. Update the `VERSION` file:
    ```bash
-   echo "0.2.7" > VERSION
+   echo "1.0.002" > VERSION
    git add VERSION
-   git commit -m "[chore] Bump version to 0.2.7"
+   git commit -m "[chore] Bump version to 1.0.002"
    ```
 2. Push the commit to `main`.
 3. Tag and push:
    ```bash
-   git tag v0.2.7
+   git tag v1.0.002
    git push origin main
-   git push origin v0.2.7
+   git push origin v1.0.002
    ```
 4. Watch the `Release` workflow at `github.com/Miosa-osa/OSA/actions`.
 5. After the release is marked published, the Homebrew tap workflow runs automatically.
@@ -136,5 +136,5 @@ MIX_ENV=prod mix release osagent
 
 # Test the binary
 ./_build/prod/rel/osagent/bin/osagent version
-# Expected: osagent v0.2.7
+# Expected: osagent v1.0.002
 ```

@@ -172,14 +172,14 @@ Role:    HTTP client for all outbound LLM provider API calls and webhook deliver
 Used in: All provider adapters in lib/optimal_system_agent/providers/ and
          lib/miosa/providers/
 Rule:    Not used for inter-process communication within OSA. Do not use
-         req to call localhost:8089 from within the Elixir process — use
+         req to call localhost:9089 from within the Elixir process — use
          direct GenServer calls instead.
 ```
 
 ### bandit + plug
 
 ```
-Role:    HTTP server for the REST API (port 8089) and webhook reception
+Role:    HTTP server for the REST API (port 9089) and webhook reception
 Used in: OptimalSystemAgent.Channels.HTTP and associated router/plugs
 Rule:    Not used as an application web framework. No Phoenix, no LiveView,
          no Ecto changesets in HTTP request handlers — raw Plug only.

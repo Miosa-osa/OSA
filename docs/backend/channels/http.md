@@ -1,6 +1,6 @@
 # Channels: HTTP
 
-The HTTP channel is a Plug.Router application served by Bandit on port 8089. It is the primary API surface consumed by MIOSA SDK clients, the web UI, and external integrations.
+The HTTP channel is a Plug.Router application served by Bandit on port 9089. It is the primary API surface consumed by MIOSA SDK clients, the web UI, and external integrations.
 
 ---
 
@@ -8,7 +8,7 @@ The HTTP channel is a Plug.Router application served by Bandit on port 8089. It 
 
 ```elixir
 config :optimal_system_agent,
-  http_port: 8089,                  # default
+  http_port: 9089,                  # default
   require_auth: false,              # set true in production
   jwt_secret: System.get_env("JWT_SECRET"),
   shared_secret: System.get_env("OSA_SHARED_SECRET"),

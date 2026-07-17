@@ -21,7 +21,7 @@ Channels are GenServers implementing `OptimalSystemAgent.Channels.Behaviour`. Th
 | Channel | Guide | Configuration |
 |---------|-------|---------------|
 | CLI | [cli.md](cli.md) | None required |
-| HTTP API | [http.md](http.md) | `OSA_HTTP_PORT` (default 8089) |
+| HTTP API | [http.md](http.md) | `OSA_HTTP_PORT` (default 9089) |
 
 ## Western Platforms
 

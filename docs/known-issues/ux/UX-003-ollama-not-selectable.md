@@ -76,7 +76,7 @@ model's `provider` field.
 
 Use the CLI command `/model ollama llama3.2:latest` or make a direct API call:
 ```bash
-curl -X POST http://localhost:8089/api/v1/models/switch \
+curl -X POST http://localhost:9089/api/v1/models/switch \
   -H "Content-Type: application/json" \
   -d '{"provider": "ollama", "model": "llama3.2:latest"}'
 ```

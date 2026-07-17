@@ -106,7 +106,7 @@ sequenceDiagram
         App->>Channels: start Channels.Starter [GenServer]
         Note over Channels: handle_continue starts configured\nchannel adapters (CLI, Telegram, etc.)
 
-        App->>HTTP: start Bandit plug: Channels.HTTP, port: 8089
+        App->>HTTP: start Bandit plug: Channels.HTTP, port: 9089
         HTTP-->>App: {:ok, pid} — HTTP now accepting connections
     end
 
@@ -159,6 +159,6 @@ contribute to the blocking time.
 | Soul.load() | File not found | Warning logged; default identity used |
 | Infrastructure supervisor | Child init failure | Supervisor crashes; BEAM halts (permanent process) |
 | Store.Repo | SQLite file locked | Repo crashes; Infrastructure crashes; BEAM halts |
-| Bandit HTTP | Port 8089 in use | `{:error, :eaddrinuse}` — BEAM halts |
+| Bandit HTTP | Port 9089 in use | `{:error, :eaddrinuse}` — BEAM halts |
 | Ollama auto-detect | Ollama not running | Warning logged; Ollama marked unavailable |
 | MCP server startup | Server binary missing | Warning logged; server skipped |

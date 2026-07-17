@@ -63,7 +63,7 @@ Per-provider model overrides: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GROQ_MODEL`, `
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OSA_HTTP_PORT` | `8089` | HTTP server port |
+| `OSA_HTTP_PORT` | `9089` | HTTP server port |
 | `OSA_REQUIRE_AUTH` | `false` | Require JWT on all API routes when `true` |
 | `OSA_SHARED_SECRET` | none | JWT signing secret; required when `OSA_REQUIRE_AUTH=true` |
 
@@ -128,7 +128,7 @@ Place `.env` at the project root or at `~/.osa/.env`. Project root takes priorit
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 OSA_DEFAULT_PROVIDER=anthropic
-OSA_HTTP_PORT=8089
+OSA_HTTP_PORT=9089
 OSA_WORKING_DIR=~/Desktop/MyProject
 ```
 

@@ -78,7 +78,7 @@ OSA (Elixir/OTP)
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          SDK TRANSPORT LAYER                        │
 │                                                                     │
-│  Local Mode: HTTP → localhost:8089   Cloud Mode: HTTPS → api.miosa  │
+│  Local Mode: HTTP → localhost:9089   Cloud Mode: HTTPS → api.miosa  │
 │  Premium:    CARRIER (AMQP, Go↔Elixir)                             │
 └─────────────────────────────────────────────────────────────────────┘
                               ↓
@@ -108,7 +108,7 @@ OSA (Elixir/OTP)
 OSA needs to expose an HTTP API. Bandit is already a compiled dependency in the OSA `_build`. Phoenix is already used for PubSub only.
 
 **Decision:**
-Add a `Plug.Router`-based HTTP channel adapter served by Bandit on port 8089. Do not introduce Phoenix Router/LiveView. Use Phoenix.PubSub (already running) to bridge agent events to SSE connections.
+Add a `Plug.Router`-based HTTP channel adapter served by Bandit on port 9089. Do not introduce Phoenix Router/LiveView. Use Phoenix.PubSub (already running) to bridge agent events to SSE connections.
 
 **Consequences:**
 - Positive: Minimal surface area. Bandit already present. Zero framework overhead.
@@ -261,7 +261,7 @@ type Client interface {
 }
 
 // NewLocalClient creates a client connected to a local OSA instance.
-// Uses HTTP on localhost:8089 with shared-secret JWT.
+// Uses HTTP on localhost:9089 with shared-secret JWT.
 // This replaces the current internal/integrations/osa/ package.
 func NewLocalClient(cfg LocalConfig) (Client, error)
 
@@ -324,7 +324,7 @@ type Execution struct {
 // LocalConfig for connecting to a local OSA instance.
 // All fields that exist in internal/integrations/osa/Config are preserved.
 type LocalConfig struct {
-    BaseURL      string        // default: "http://localhost:8089"
+    BaseURL      string        // default: "http://localhost:9089"
     SharedSecret string        // JWT shared secret (same as today)
     Timeout      time.Duration // default: 30s
     Resilience   ResilienceConfig
@@ -390,7 +390,7 @@ export interface AgentStore {
 export interface ClientConfig {
   // Local mode: connect to localhost OSA instance
   mode: 'local';
-  baseUrl?: string;         // default: 'http://localhost:8089'
+  baseUrl?: string;         // default: 'http://localhost:9089'
   sharedSecret: string;     // JWT shared secret
 
   // OR cloud mode (proprietary)
@@ -468,7 +468,7 @@ defmodule MiosaSDK do
 
   Usage in another Elixir application or OSA instance:
 
-      {:ok, client} = MiosaSDK.connect(base_url: "http://localhost:8089",
+      {:ok, client} = MiosaSDK.connect(base_url: "http://localhost:9089",
                                         shared_secret: "secret")
 
       {:ok, response} = MiosaSDK.orchestrate(client, %{
@@ -516,7 +516,7 @@ end
 
 ```
 ClientConfig.mode
-├── "local"  → HTTP/SSE to localhost:8089
+├── "local"  → HTTP/SSE to localhost:9089
 │              JWT HS256, shared secret
 │              All open-source features
 │
@@ -560,7 +560,7 @@ OS Template (Go/JS)                OSA (Elixir/Bandit)
 ### 5.3 Cloud Mode (HTTPS — Premium)
 
 Identical API surface as local mode. The SDK automatically:
-- Replaces `http://localhost:8089` with `https://api.miosa.ai`
+- Replaces `http://localhost:9089` with `https://api.miosa.ai`
 - Replaces HS256 JWT with API key header (`X-MIOSA-Key`)
 - Adds `X-Tenant-ID` for multi-tenant isolation
 - Handles TLS certificate validation
@@ -741,7 +741,7 @@ All features marked here are available to anyone running OSA locally.
 | Local SSE streaming | Real-time agent events over HTTP SSE |
 | L1 autonomy | Reactive: responds to explicit requests only |
 | L2 autonomy | Suggests next actions, no autonomous execution |
-| HTTP API (new) | All SDK endpoints on localhost:8089 |
+| HTTP API (new) | All SDK endpoints on localhost:9089 |
 | JWT local auth | HS256 shared secret, 15min TTL |
 
 **Autonomy Level Definitions:**
@@ -886,7 +886,7 @@ resp, _ := client.Orchestrate(ctx, req)
 // After (SDK migration)
 import osa "github.com/miosa/sdk-go"
 client, _ := osa.NewLocalClient(osa.LocalConfig{
-    BaseURL:      "http://localhost:8089",
+    BaseURL:      "http://localhost:9089",
     SharedSecret: os.Getenv("OSA_SHARED_SECRET"),
     Resilience:   osa.DefaultResilienceConfig(),
 })
@@ -908,7 +908,7 @@ This is the complete REST API that OSA must implement via the new `channels/http
 ### 9.1 Base URL and Versioning
 
 ```
-Local:  http://localhost:8089/api/v1
+Local:  http://localhost:9089/api/v1
 Cloud:  https://api.miosa.ai/v1
 
 All endpoints require:
@@ -1292,7 +1292,7 @@ Cloud mode (enforced):
 
 **What to build:**
 1. `lib/optimal_system_agent/channels/http.ex` — Plug.Router implementing all `/api/v1/*` endpoints
-2. Wire Bandit to serve on port 8089 in `application.ex`
+2. Wire Bandit to serve on port 9089 in `application.ex`
 3. JWT validation middleware reading from `~/.osa/config.json`
 4. SSE endpoint bridging `Bridge.PubSub.subscribe_session/1` to HTTP stream
 
@@ -1393,7 +1393,7 @@ client, _ := osa.NewCloudClient(osa.CloudConfig{
                     ┌──────────────────┼──────────────────┐
                     ↓                  ↓                   ↓
             Local HTTP           Cloud HTTPS          CARRIER AMQP
-          localhost:8089        api.miosa.ai        RabbitMQ [PREMIUM]
+          localhost:9089        api.miosa.ai        RabbitMQ [PREMIUM]
                     │                  │
                     └──────────────────┘
                                        │
@@ -1444,11 +1444,11 @@ info:
   version: 0.1.0
   description: |
     The OSA API is consumed by MIOSA SDK clients.
-    Open-source edition: localhost:8089
+    Open-source edition: localhost:9089
     Premium edition: api.miosa.ai
 
 servers:
-  - url: http://localhost:8089/api/v1
+  - url: http://localhost:9089/api/v1
     description: Local OSA instance (open-source)
   - url: https://api.miosa.ai/v1
     description: MIOSA Cloud (premium)

@@ -56,7 +56,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 ├── Supervisors.Extensions      — optional subsystems (fleet, swarm, sidecars)
 │
 ├── Channels.Starter            — deferred channel startup
-└── Bandit (HTTP)               — HTTP API on port 8089, started last
+└── Bandit (HTTP)               — HTTP API on port 9089, started last
 ```
 
 The HTTP server is started last deliberately. All agent processes must be ready

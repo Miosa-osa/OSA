@@ -38,7 +38,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 ├── Supervisors.AgentServices   (one_for_one)
 ├── Supervisors.Extensions      (one_for_one)
 ├── Channels.Starter            (GenServer, deferred channel startup)
-└── Bandit                      (HTTP server, port 8089)
+└── Bandit                      (HTTP server, port 9089)
 ```
 
 `Platform.Repo` (PostgreSQL, optional) is placed before `Infrastructure` so the platform database
@@ -182,7 +182,7 @@ graph TD
   APP --> AGSVC["Supervisors.AgentServices\none_for_one"]
   APP --> EXT["Supervisors.Extensions\none_for_one"]
   APP --> STARTER["Channels.Starter"]
-  APP --> BANDIT["Bandit\nport 8089"]
+  APP --> BANDIT["Bandit\nport 9089"]
 
   INFRA --> SR["SessionRegistry"]
   INFRA --> ETS["Events.TaskSupervisor"]
@@ -277,7 +277,7 @@ See [data-flow.md](./data-flow.md) for the event routing details.
 
 | Environment Variable | Default | Effect |
 |---|---|---|
-| `OSA_HTTP_PORT` | `8089` | Bandit HTTP listener port |
+| `OSA_HTTP_PORT` | `9089` | Bandit HTTP listener port |
 | `DATABASE_URL` | unset | Enables Platform.Repo (PostgreSQL) |
 | `OSA_TREASURY_ENABLED` | `false` | Starts MiosaBudget.Treasury |
 | `OSA_FLEET_ENABLED` | `false` | Starts Fleet.Supervisor |

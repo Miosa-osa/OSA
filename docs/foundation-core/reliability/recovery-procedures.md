@@ -286,7 +286,7 @@ export GROQ_API_KEY=your_key_here
 
 Or via the HTTP API:
 ```bash
-curl -X POST http://localhost:8089/sessions/{id}/provider \
+curl -X POST http://localhost:9089/sessions/{id}/provider \
   -H "Content-Type: application/json" \
   -d '{"provider": "groq", "model": "llama-3.3-70b-versatile"}'
 ```
@@ -326,10 +326,10 @@ mix run --no-halt
 Verify recovery:
 ```bash
 # Check HTTP API is responding:
-curl http://localhost:8089/health
+curl http://localhost:9089/health
 
 # Check provider availability:
-curl http://localhost:8089/providers
+curl http://localhost:9089/providers
 
 # Run the doctor command:
 mix run -e "OptimalSystemAgent.CLI.doctor()"

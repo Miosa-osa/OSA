@@ -25,7 +25,7 @@ OptimalSystemAgent.Supervisor  [rest_for_one]
 ├── Supervisors.AgentServices  [one_for_one]
 ├── Supervisors.Extensions     [one_for_one]
 ├── Channels.Starter
-└── Bandit (HTTP, port 8089)
+└── Bandit (HTTP, port 9089)
 ```
 
 ---

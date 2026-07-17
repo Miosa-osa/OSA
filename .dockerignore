@@ -1,8 +1,15 @@
 .git
+.github
 _build
 deps
 .elixir_ls
 .superset
 node_modules
+burrito_out
+dist
 *.log
-priv/rust/tui/target
+.env
+# The Elixir image never compiles the Rust TUI (rustler was removed; the TUI
+# ships as a separate prebuilt binary), so exclude all of it — source + target.
+# priv/go (the tokenizer binary consumed by the release) is intentionally kept.
+priv/rust

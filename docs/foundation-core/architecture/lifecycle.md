@@ -180,11 +180,11 @@ that lack required configuration (no API token, no webhook URL) skip silently an
 ### Phase 8 — HTTP Server
 
 ```
-{Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: 8089}
+{Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: 9089}
 ```
 
 Bandit (the HTTP server) starts last. By the time it accepts its first request, the entire agent
-stack is initialized and ready. The port defaults to 8089, configurable via `OSA_HTTP_PORT`.
+stack is initialized and ready. The port defaults to 9089, configurable via `OSA_HTTP_PORT`.
 
 `Channels.HTTP` is a Plug router that handles:
 - `POST /sessions` — create a new agent session
@@ -245,7 +245,7 @@ sequenceDiagram
     participant AGSVC as AgentServices
     participant EXT as Extensions
     participant CHAN as Channels.Starter
-    participant HTTP as Bandit (port 8089)
+    participant HTTP as Bandit (port 9089)
     participant MCP as MCP.Client (async)
 
     APP->>ETS: Create 7 named ETS tables
@@ -259,7 +259,7 @@ sequenceDiagram
     APP->>EXT: start_link (one_for_one)
     Note over EXT: Intelligence + Swarm always; others conditional
     APP->>CHAN: start_link → handle_continue (deferred adapter startup)
-    APP->>HTTP: start_link (port 8089)
+    APP->>HTTP: start_link (port 9089)
     APP->>APP: Ollama auto_detect_model (synchronous)
     APP-->>MCP: Task.start (async): start_servers → list_tools → register_mcp_tools
 ```

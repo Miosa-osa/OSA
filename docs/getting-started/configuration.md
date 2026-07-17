@@ -111,7 +111,7 @@ Default models:
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `OSA_HTTP_PORT` | `8089` | HTTP API server port |
+| `OSA_HTTP_PORT` | `9089` | HTTP API server port |
 | `OSA_REQUIRE_AUTH` | `false` | Require authentication |
 | `OSA_SHARED_SECRET` | Auto-generated | HMAC secret for request signing |
 

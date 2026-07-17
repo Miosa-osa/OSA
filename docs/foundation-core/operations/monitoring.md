@@ -71,7 +71,7 @@ The stream stays open until the client disconnects or the session terminates.
 
 ```sh
 curl -N -H "Accept: text/event-stream" \
-  http://localhost:8089/api/v1/stream/cli:my_session_id
+  http://localhost:9089/api/v1/stream/cli:my_session_id
 ```
 
 ---
@@ -206,7 +206,7 @@ JSON snapshot to `~/.osa/metrics.json` every 5 minutes.
 Read current metrics:
 
 ```sh
-curl http://localhost:8089/api/v1/analytics
+curl http://localhost:9089/api/v1/analytics
 ```
 
 Tracked metrics include: sessions per day, total messages, token usage,

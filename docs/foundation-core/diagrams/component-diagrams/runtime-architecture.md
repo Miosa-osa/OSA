@@ -21,7 +21,7 @@ graph TD
     Root --> AgentSvc["Supervisors.AgentServices [S]\nstrategy: one_for_one"]
     Root --> Extensions["Supervisors.Extensions [S]\nstrategy: one_for_one"]
     Root --> ChannelStarter["Channels.Starter [GS]\ndeferred channel init"]
-    Root --> Bandit["Bandit HTTP [GS]\nport 8089 / Plug"]
+    Root --> Bandit["Bandit HTTP [GS]\nport 9089 / Plug"]
 
     subgraph InfraChildren["Infrastructure Children (rest_for_one)"]
         I1["SessionRegistry [R]\nunique keys"]

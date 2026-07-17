@@ -72,7 +72,7 @@ protocols to the agent loop. Each channel adapter is a supervised GenServer.
 
 **Key modules**:
 - `Channels.Supervisor` — DynamicSupervisor for adapters
-- `Channels.HTTP` — Plug-based HTTP/SSE adapter (Bandit, port 8089)
+- `Channels.HTTP` — Plug-based HTTP/SSE adapter (Bandit, port 9089)
 - `Channels.CLI` — interactive terminal adapter
 - `Channels.Telegram`, `Channels.Discord`, `Channels.Slack`, etc.
 - `Channels.NoiseFilter` — signal-to-noise filtering for incoming messages

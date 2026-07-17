@@ -38,10 +38,8 @@ The desktop app and backend run on the same machine. The backend is either:
 
 ## Port Configuration
 
-The backend listens on port **9089** when running as a desktop sidecar.
-
-This is different from the default development port (8089). The distinction exists so
-the desktop app and a development server can run simultaneously without conflict.
+The backend listens on port **9089** — its default HTTP port — both in local
+development and when running as a desktop sidecar.
 
 The Tauri security policy in `tauri.conf.json` allows connections only to:
 
@@ -253,7 +251,7 @@ curl -N http://localhost:9089/api/v1/stream/test-session-id
 
 **CORS errors in the console:**
 
-Ensure the backend is running on port 9089, not 8089. The Tauri CSP only allows
+Ensure the backend is running on port 9089. The Tauri CSP only allows
 port 9089.
 
 **Window stays blank:**

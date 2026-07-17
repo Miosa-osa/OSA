@@ -8,7 +8,7 @@ Operators setting up load balancers, monitoring systems, and liveness probes for
 
 OSA exposes a single health check endpoint at `GET /health`. It requires no authentication and bypasses the JWT auth plug and HMAC integrity plug.
 
-**URL:** `GET http://localhost:8089/health`
+**URL:** `GET http://localhost:9089/health`
 
 **Response:** HTTP 200 with JSON body. This endpoint always returns 200 as long as the HTTP server is running — it is a liveness check, not a full readiness check.
 
@@ -17,7 +17,7 @@ OSA exposes a single health check endpoint at `GET /health`. It requires no auth
 ```json
 {
   "status": "ok",
-  "version": "0.2.5",
+  "version": "1.0.002",
   "uptime_seconds": 3600,
   "provider": "anthropic",
   "model": "claude-sonnet-4-6",
@@ -105,7 +105,7 @@ Call the analytics endpoint to verify end-to-end application state:
 
 ```bash
 # Requires auth if OSA_REQUIRE_AUTH=true
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8089/api/v1/analytics
+curl -H "Authorization: Bearer $TOKEN" http://localhost:9089/api/v1/analytics
 ```
 
 Or check the Providers.HealthChecker state from inside the application:
@@ -122,14 +122,14 @@ OptimalSystemAgent.Providers.HealthChecker.state()
 ### curl health check
 
 ```bash
-curl -f http://localhost:8089/health && echo "OK" || echo "UNHEALTHY"
+curl -f http://localhost:9089/health && echo "OK" || echo "UNHEALTHY"
 ```
 
 ### Docker HEALTHCHECK
 
 ```dockerfile
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8089/health || exit 1
+  CMD curl -f http://localhost:9089/health || exit 1
 ```
 
 ### Kubernetes liveness probe
@@ -138,7 +138,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 livenessProbe:
   httpGet:
     path: /health
-    port: 8089
+    port: 9089
   initialDelaySeconds: 10
   periodSeconds: 30
   timeoutSeconds: 5
@@ -149,7 +149,7 @@ livenessProbe:
 
 ```yaml
 healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:8089/health"]
+  test: ["CMD", "curl", "-f", "http://localhost:9089/health"]
   interval: 30s
   timeout: 5s
   retries: 3
@@ -160,7 +160,7 @@ healthcheck:
 
 ## Port Configuration
 
-The HTTP server runs on port 8089 by default. Override with:
+The HTTP server runs on port 9089 by default. Override with:
 
 ```bash
 OSA_HTTP_PORT=9000

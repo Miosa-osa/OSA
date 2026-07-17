@@ -402,7 +402,7 @@ defmodule OptimalSystemAgent.HTTPEndpointTest do
   use ExUnit.Case, async: false
   @moduletag :integration
 
-  @base_url "http://localhost:8089"
+  @base_url "http://localhost:9089"
 
   test "GET /health returns 200" do
     assert {:ok, %{status: 200, body: body}} =

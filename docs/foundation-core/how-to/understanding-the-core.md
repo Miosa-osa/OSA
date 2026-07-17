@@ -24,7 +24,7 @@ OptimalSystemAgent.Supervisor  (rest_for_one)
 ├── Supervisors.AgentServices  (one_for_one — memory, hooks, scheduler…)
 ├── Supervisors.Extensions     (one_for_one — opt-in subsystems)
 ├── Channels.Starter           (deferred channel boot)
-└── Bandit HTTP server         (port 8089)
+└── Bandit HTTP server         (port 9089)
 ```
 
 Infrastructure failing tears down everything above it because everything

@@ -42,43 +42,50 @@ Structured scheduled jobs at `~/.osa/CRONS.json`. Checked every 60 seconds (1-mi
 
 ### File format
 
+The top-level object has a `"jobs"` array (a bare array is rejected as
+"unexpected format"):
+
 ```json
-[
-  {
-    "id": "daily-summary",
-    "name": "Daily Summary",
-    "schedule": "0 9 * * *",
-    "type": "agent",
-    "task": "Summarize today's key events and send to Telegram",
-    "enabled": true
-  },
-  {
-    "id": "backup",
-    "name": "Hourly Backup",
-    "schedule": "0 * * * *",
-    "type": "command",
-    "command": "rsync -av ~/Documents /mnt/backup/",
-    "enabled": true
-  },
-  {
-    "id": "health-check",
-    "name": "API Health Check",
-    "schedule": "*/5 * * * *",
-    "type": "webhook",
-    "url": "https://api.example.com/health",
-    "method": "GET",
-    "on_failure": "Alert: API health check failed"
-  }
-]
+{
+  "jobs": [
+    {
+      "id": "daily-summary",
+      "name": "Daily Summary",
+      "schedule": "0 9 * * *",
+      "type": "agent",
+      "job": "Summarize today's key events and send to Telegram",
+      "enabled": true
+    },
+    {
+      "id": "backup",
+      "name": "Hourly Backup",
+      "schedule": "0 * * * *",
+      "type": "command",
+      "command": "rsync -av ~/Documents /mnt/backup/",
+      "enabled": true
+    },
+    {
+      "id": "health-check",
+      "name": "API Health Check",
+      "schedule": "*/5 * * * *",
+      "type": "webhook",
+      "url": "https://api.example.com/health",
+      "method": "GET",
+      "headers": {},
+      "on_failure": "agent",
+      "failure_job": "Alert: API health check failed"
+    }
+  ]
+}
 ```
 
 ### Job types
 
-| Type | Execution |
-|------|-----------|
-| `"agent"` | `Agent.Loop.process_message(scheduler_session, task)` |
-| `"command"` | Shell execution (same security checks as `shell_execute` tool) |
-| `"webhook"` | Outbound HTTP request; `on_failure` triggers an agent job on non-2xx |
+| Type | Required field | Execution |
+|------|----------------|-----------|
+| `"agent"` | `job` | `Agent.Loop.process_message(scheduler_session, job)` |
+| `"command"` | `command` | Shell execution (same security checks as `shell_execute` tool) |
+| `"webhook"` | `url` | Outbound HTTP request (`method`, `headers`). When `on_failure` is `"agent"` and a `failure_job` is set, that task runs via the agent loop on non-2xx |
 
 ### Cron expression syntax
 
@@ -101,25 +108,30 @@ Event-driven automation at `~/.osa/TRIGGERS.json`. Triggers fire when matching e
 
 ### File format
 
+The top-level object has a `"triggers"` array. Each trigger is flat — the
+task lives in a top-level `job` (for `type: "agent"`) or `command` (for
+`type: "command"`) field, not a nested `action` object:
+
 ```json
-[
-  {
-    "id": "on-tool-error",
-    "name": "Alert on Tool Error",
-    "event": "tool_result",
-    "action": {
+{
+  "triggers": [
+    {
+      "id": "on-tool-error",
+      "name": "Alert on Tool Error",
+      "event": "tool_result",
       "type": "agent",
-      "task": "A tool error occurred at {{timestamp}}: {{payload}}"
-    },
-    "enabled": true
-  }
-]
+      "job": "A tool error occurred at {{timestamp}}: {{payload}}",
+      "enabled": true
+    }
+  ]
+}
 ```
 
 ### Template interpolation
 
-Action strings support two placeholders:
+The `job` / `command` string supports three placeholders:
 - `{{payload}}` — JSON-encoded event payload map.
+- `{{payload.key}}` — a specific top-level key from the payload map.
 - `{{timestamp}}` — ISO 8601 UTC timestamp.
 
 ### Bus registration
@@ -173,8 +185,8 @@ Failure counts appear in `list_jobs/0` and `list_triggers/0` output:
 `CRONS.json` and `TRIGGERS.json` are read from disk at startup and on `reload_crons/0`. Writes use atomic replace: write to a temp file, then `File.rename/2` to the final path. This prevents partial writes on crash.
 
 Validation is run before any write:
-- Jobs require `"id"`, `"name"`, `"schedule"`, `"type"`, and a type-specific required field (`"task"`, `"command"`, or `"url"`).
-- Triggers require `"id"`, `"name"`, and `"action"`.
+- Jobs require a non-empty `"name"`, a `"schedule"` (valid cron expression), a `"type"` of `agent`/`command`/`webhook`, and the type-specific field (`"job"`, `"command"`, or `"url"`). `"id"` and `"enabled"` are optional.
+- Triggers require a non-empty `"name"`, an `"event"`, a `"type"` of `agent`/`command`, and the type-specific field (`"job"` or `"command"`).
 
 ---
 

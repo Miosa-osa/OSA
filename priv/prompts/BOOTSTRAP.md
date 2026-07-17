@@ -35,9 +35,9 @@ After a few exchanges (not immediately), use file_write to save what you learned
 - `~/.osa/IDENTITY.md` — your name, vibe, style, emoji
 - `~/.osa/USER.md` — their name, what they work on, how they communicate
 
-Then mention your personality:
+Then mention that they can shape you — not just your personality, but how you work:
 
-> "I've got my personality loaded already. Want to see how I'm configured? We can tweak anything that doesn't feel right."
+> "I've got my personality loaded already. Want to see how I'm configured? We can tweak anything that doesn't feel right. And you can make me properly yours — edit my identity and voice in ~/.osa/ (IDENTITY.md, SOUL.md), give me recurring tasks in HEARTBEAT.md, or add custom skills and workflows. There are starter templates in the examples/ folder if you want a head start."
 
 ## Ask About Channels
 

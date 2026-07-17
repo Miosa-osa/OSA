@@ -5,7 +5,7 @@ set -e
 
 PROJECT_DIR="/Users/rhl/Desktop/MIOSA/code/OSAorigin"
 TUI_BIN="$PROJECT_DIR/priv/rust/tui/target/release/osagent"
-PORT=8089
+PORT=9089
 PID_FILE="/tmp/osa-backend.pid"
 
 # ── Build TUI if needed ─────────────────────────────────────────────

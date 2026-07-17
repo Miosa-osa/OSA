@@ -6,7 +6,7 @@
 
 > Your AI agent, running locally on your machine.
 
-OSA Desktop is the native GUI for [OSA](https://github.com/Miosa-osa/OptimalSystemAgent) — an Elixir/OTP AI agent platform. It runs on your machine, connects to a local OSA backend, and gives you full control over multi-agent orchestration, 18 LLM providers, memory, scheduling, and knowledge graphs. No cloud required.
+OSA Desktop is the native GUI for [OSA](https://github.com/Miosa-osa/OSA) — an Elixir/OTP AI agent platform. It runs on your machine, connects to a local OSA backend, and gives you full control over multi-agent orchestration, 18 LLM providers, memory, scheduling, and knowledge graphs. No cloud required.
 
 **Built with:** Tauri v2 + SvelteKit 2 + Svelte 5 | Dark glassmorphic UI | <10MB shell
 

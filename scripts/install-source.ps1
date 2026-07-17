@@ -7,7 +7,7 @@
     Auto-installs: Visual Studio Build Tools, Rust, Erlang/OTP, Elixir, Git.
     Builds the Rust TUI, fetches Elixir deps, and installs `osa`/`osagent` commands.
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/install.ps1 | iex
+    irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 #>
@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 # Constants
 # --------------------------------------------------------------------------- #
 $AppName        = 'OSA Agent'
-$RepoUrl        = 'https://github.com/Miosa-osa/OptimalSystemAgent.git'
+$RepoUrl        = 'https://github.com/Miosa-osa/OSA.git'
 $OsaDir         = "$env:USERPROFILE\.osa"
 $AgentDir       = "$OsaDir\agent"
 $InstallDir     = "$env:USERPROFILE\.local\bin"
@@ -396,14 +396,14 @@ if %attempts% geq 90 (
     echo Check logs: %LOG_DIR%\backend.log
     exit /b 1
 )
-curl -sf http://localhost:8089/health >nul 2>&1
+curl -sf http://localhost:9089/health >nul 2>&1
 if %errorlevel%==0 goto healthy
 set /a attempts+=1
 timeout /t 1 /nobreak >nul
 goto healthloop
 
 :healthy
-set "OSA_URL=http://localhost:8089"
+set "OSA_URL=http://localhost:9089"
 "%TUI_BIN%" %*
 "@
 
@@ -431,7 +431,7 @@ if (-not (Test-Path $envFile)) {
 
 # Default: Ollama (local, no API key needed)
 # OSA_DEFAULT_PROVIDER=ollama
-# OSA_PORT=8089
+# OSA_HTTP_PORT=9089
 "@
     Set-Content -Path $envFile -Value $envContent
     Write-OK "Created config template: $envFile"

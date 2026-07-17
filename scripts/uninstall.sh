@@ -2,7 +2,7 @@
 # scripts/uninstall.sh — Remove OSA Agent installation.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OptimalSystemAgent/main/scripts/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/uninstall.sh | bash
 
 set -euo pipefail
 

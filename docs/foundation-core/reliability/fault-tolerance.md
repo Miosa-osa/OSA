@@ -20,7 +20,7 @@ OptimalSystemAgent.Supervisor  [strategy: :rest_for_one]
 ├── Supervisors.AgentServices        [strategy: :one_for_one]
 ├── Supervisors.Extensions           [strategy: :one_for_one]
 ├── Channels.Starter                 Deferred channel boot (handle_continue)
-└── Bandit HTTP                      Port 8089 — started last
+└── Bandit HTTP                      Port 9089 — started last
 ```
 
 Under `:rest_for_one`, if child N crashes, OTP restarts N and also restarts every child

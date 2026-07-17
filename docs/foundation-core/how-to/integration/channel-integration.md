@@ -57,7 +57,7 @@ The CLI session ID format is `"cli_"` followed by 16 random hex characters.
 
 ## HTTP Channel
 
-The HTTP API is always available on port 8089 (configurable via `OSA_HTTP_PORT`).
+The HTTP API is always available on port 9089 (configurable via `OSA_HTTP_PORT`).
 
 ```bash
 # Start OSA:
@@ -85,7 +85,7 @@ docker-compose up
 **Example request:**
 
 ```bash
-curl -X POST http://localhost:8089/api/v1/orchestrate \
+curl -X POST http://localhost:9089/api/v1/orchestrate \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $JWT_TOKEN" \
   -d '{"message": "List files in /tmp", "session_id": "my-session"}'
@@ -154,7 +154,7 @@ OptimalSystemAgent.Channels.Telegram.get_me()
 Use [ngrok](https://ngrok.com) to expose a local port:
 
 ```bash
-ngrok http 8089
+ngrok http 9089
 # Copy the HTTPS URL: https://abc123.ngrok.io
 ```
 

@@ -1,6 +1,6 @@
 # Supervision Tree
 
-Full OTP supervision tree for OSA v0.2.6. Every named supervisor, every child,
+Full OTP supervision tree for OSA v1.0.002. Every named supervisor, every child,
 and the restart strategy at each level.
 
 Source of truth: `lib/optimal_system_agent/application.ex` and
@@ -21,7 +21,7 @@ graph TD
     ROOT --> AgentSvc["Supervisors.AgentServices<br/><b>strategy: one_for_one</b>"]
     ROOT --> Ext["Supervisors.Extensions<br/><b>strategy: one_for_one</b>"]
     ROOT --> Starter["Channels.Starter<br/><i>deferred channel boot</i>"]
-    ROOT --> HTTP["Bandit HTTP<br/>port 8089"]
+    ROOT --> HTTP["Bandit HTTP<br/>port 9089"]
 
     %% Infrastructure children (rest_for_one ordering matters)
     Infra --> SessReg["Registry<br/>name: SessionRegistry<br/>keys: :unique"]

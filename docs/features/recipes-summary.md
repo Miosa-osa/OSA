@@ -139,4 +139,4 @@ When a user runs `/recipe <slug>`, the system:
 
 - Works with `--no-start` (no server needed for list/load)
 - `Recipe.run()` requires full app (agent loop, tools registry)
-- TUI recipe flow requires backend on `localhost:8089` + SSE connection
+- TUI recipe flow requires backend on `localhost:9089` + SSE connection

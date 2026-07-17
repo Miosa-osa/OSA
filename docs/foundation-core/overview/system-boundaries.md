@@ -35,7 +35,7 @@ Concretely, OSA owns:
 Understanding what OSA does not do is as important as understanding what it does.
 
 **OSA is not a web framework.** Bandit and Plug are present for a narrow purpose:
-exposing the HTTP API on port 8089 and receiving inbound webhooks from messaging
+exposing the HTTP API on port 9089 and receiving inbound webhooks from messaging
 platforms. There is no routing DSL, no middleware stack for end-user web
 applications, no template rendering, no cookie management for user sessions in
 the web sense. Do not build a web application on top of Bandit/OSA directly —
@@ -65,7 +65,7 @@ That is the job of the operator's infrastructure (Kubernetes, Nomad, ECS, etc.).
 
 ## Component Boundaries
 
-### Elixir Backend (Port 8089)
+### Elixir Backend (Port 9089)
 
 The backend is the core of the system. It owns all reasoning, memory, and
 orchestration logic.
@@ -87,7 +87,7 @@ Responsibilities:
   - MCP server management
 
 Exposes:
-  - REST API on port 8089
+  - REST API on port 9089
   - SSE stream at /api/v1/stream/:session_id
   - Health endpoint at /health
 ```
@@ -133,7 +133,7 @@ Responsibilities:
   - Settings and profile management
 
 Connects to:
-  - Elixir backend on port 8089 (HTTP + SSE)
+  - Elixir backend on port 9089 (HTTP + SSE)
 
 Does NOT own:
   - Any backend logic
@@ -256,7 +256,7 @@ These are not Elixir NIFs. They are external processes managed by
 │                                                                     │
 │  ┌─────────────────────────────┐   ┌──────────────────────────────┐│
 │  │  OSA Elixir Backend         │   │  Tauri Desktop App           ││
-│  │  Port 8089                  │   │  Port 9089 (dev sidecar)     ││
+│  │  Port 9089                  │   │  Port 9089 (dev sidecar)     ││
 │  │                             │   │                              ││
 │  │  SQLite (local)             │◄──│  SvelteKit UI                ││
 │  │  ETS / persistent_term      │   │  xterm.js terminal           ││

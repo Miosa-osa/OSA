@@ -289,5 +289,5 @@ mix deps.compile
 If issues persist, check:
 1. `~/.osa/` directory exists and is writable
 2. `.env` file has correct API keys
-3. No port conflicts on 8089
+3. No port conflicts on 9089
 4. Ollama is running (if using local models)

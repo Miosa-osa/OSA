@@ -41,7 +41,7 @@ Dependencies are declared in `mix.exs` `deps/0`. All resolved versions are pinne
 | `ex_json_schema` | `~> 0.11` | JSON Schema validation. Validates tool call arguments against each skill's `parameters/0` schema before `execute/1` is called. |
 | `phoenix_pubsub` | `~> 2.1` | Standalone PubSub for internal event fan-out. OSA does not use the Phoenix framework — this is the PubSub library in isolation. |
 | `yaml_elixir` | `~> 2.9` | YAML parsing for SKILL.md frontmatter and YAML-formatted config files. |
-| `bandit` | `~> 1.6` | HTTP server. Powers the SDK API on port 8089. Chosen over Cowboy for its pure-Elixir implementation and lower resource usage. |
+| `bandit` | `~> 1.6` | HTTP server. Powers the SDK API on port 9089. Chosen over Cowboy for its pure-Elixir implementation and lower resource usage. |
 | `plug` | `~> 1.16` | Request routing and middleware. Used with Bandit for the HTTP channel. |
 | `ecto_sql` | `~> 3.12` | SQL query builder and migration runner. |
 | `ecto_sqlite3` | `~> 0.17` | Ecto adapter for SQLite3. Provides the `Store.Repo` that persists messages, budget records, tasks, and treasury ledger. |
@@ -113,7 +113,7 @@ To create a tarball for distribution (matches the CI release job):
 
 ```bash
 cd _build/prod/rel/osagent
-tar -czf ../../../../osagent-$(cat ../../../../VERSION)-linux-amd64.tar.gz .
+tar -czf ../../../../osa-linux-x64.tar.gz .
 ```
 
 ## Docker Build
@@ -133,14 +133,14 @@ The `Dockerfile` uses a two-stage build:
 - Installs `libstdc++ openssl ncurses-libs` (ERTS runtime requirements)
 - Creates a non-root `osa` user
 - Copies the release from the builder stage
-- Exposes port 8089
+- Exposes port 9089
 - Sets `CMD ["bin/osagent", "serve"]`
 
 Build and run:
 
 ```bash
 docker build -t osa:local .
-docker run -p 8089:8089 \
+docker run -p 9089:9089 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v osa_data:/root/.osa \
   osa:local

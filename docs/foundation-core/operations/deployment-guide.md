@@ -32,13 +32,13 @@ Download the tarball for your platform from the GitHub releases page:
 https://github.com/Miosa-osa/OSA/releases/latest
 ```
 
-Available targets: `linux-amd64`, `linux-arm64`, `darwin-arm64`, `darwin-amd64`.
+Available targets: `linux-x64`, `macos-arm64`, `windows-x64`.
 
 ```bash
-VERSION=0.2.6
-PLATFORM=linux-amd64   # adjust as needed
+VERSION=1.0.002
+PLATFORM=linux-x64   # or macos-arm64
 
-curl -fsSL "https://github.com/Miosa-osa/OSA/releases/download/v${VERSION}/osagent-${VERSION}-${PLATFORM}.tar.gz" \
+curl -fsSL "https://github.com/Miosa-osa/OSA/releases/download/v${VERSION}/osa-${PLATFORM}.tar.gz" \
   | tar -xz -C /opt/osagent
 
 # Add to PATH
@@ -71,16 +71,16 @@ Run in serve (headless API) mode:
 ```bash
 docker run -d \
   --name osa \
-  -p 8089:8089 \
+  -p 9089:9089 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e OSA_DEFAULT_PROVIDER=anthropic \
   -v osa_data:/root/.osa \
   osa:latest
 ```
 
-The container exposes port 8089. The `/root/.osa` directory holds the SQLite database, session files, vault memory, and the `.env` config. Mount it as a named volume to persist data across container restarts.
+The container exposes port 9089. The `/root/.osa` directory holds the SQLite database, session files, vault memory, and the `.env` config. Mount it as a named volume to persist data across container restarts.
 
-Health check: `GET http://localhost:8089/health` returns `{"status":"ok"}`. The Dockerfile configures this check with a 30-second interval, 5-second timeout, 10-second start period, and 3 retries.
+Health check: `GET http://localhost:9089/health` returns `{"status":"ok"}`. The Dockerfile configures this check with a 30-second interval, 5-second timeout, 10-second start period, and 3 retries.
 
 ## Docker Compose (with Ollama)
 
@@ -144,7 +144,7 @@ OSA_DEFAULT_PROVIDER=anthropic        # explicit provider selection
 ```bash
 OSA_REQUIRE_AUTH=true
 OSA_SHARED_SECRET=change-this-to-a-long-random-string
-OSA_HTTP_PORT=8089
+OSA_HTTP_PORT=9089
 OSA_DAILY_BUDGET_USD=50.0
 OSA_MONTHLY_BUDGET_USD=500.0
 ```
@@ -178,7 +178,7 @@ WorkingDirectory=/opt/osagent
 ExecStart=/opt/osagent/bin/osagent serve
 Restart=on-failure
 RestartSec=5
-Environment=OSA_HTTP_PORT=8089
+Environment=OSA_HTTP_PORT=9089
 Environment=OSA_REQUIRE_AUTH=true
 Environment=OSA_SHARED_SECRET=your-secret
 EnvironmentFile=/etc/osa/env
@@ -197,14 +197,14 @@ sudo systemctl status osagent
 
 ```bash
 # Health check
-curl http://localhost:8089/health
+curl http://localhost:9089/health
 # Expected: {"status":"ok"}
 
 # Version
-curl http://localhost:8089/api/v1/version   # or: osagent version
+curl http://localhost:9089/api/v1/version   # or: osagent version
 
 # Send a test message (unauthenticated if OSA_REQUIRE_AUTH=false)
-curl -X POST http://localhost:8089/api/v1/sessions \
+curl -X POST http://localhost:9089/api/v1/sessions \
   -H "Content-Type: application/json" \
   -d '{"message": "hello"}'
 ```

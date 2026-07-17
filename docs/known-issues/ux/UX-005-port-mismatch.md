@@ -1,13 +1,24 @@
-# UX-005: Desktop Client Uses Port 9089 but Server Defaults to 8089
+# UX-005: Desktop Client / Backend Port Mismatch
 
 > **Severity:** UX
-> **Status:** Open
+> **Status:** Resolved — the backend default is now `9089`, matching the desktop client
 > **Component:** `desktop/src/lib/api/client.ts`, `lib/mix/tasks/osa.serve.ex`
 > **Reported:** 2026-03-14
 
 ---
 
-## Summary
+## Resolution
+
+Both sides now default to port `9089`, so the mismatch no longer exists:
+
+- `config/config.exs` — `http_port: 9089`
+- `lib/mix/tasks/osa.serve.ex` — `Application.get_env(:optimal_system_agent, :http_port, 9089)`
+- `desktop/src/lib/api/client.ts` — `BASE_URL = "http://127.0.0.1:9089"`
+
+The historical analysis below is preserved for reference; it described an
+earlier state where the backend defaulted to `8089`.
+
+## Summary (historical)
 
 The desktop Tauri application hard-codes the backend URL as
 `http://127.0.0.1:9089` in `client.ts` line 24:
@@ -16,16 +27,9 @@ The desktop Tauri application hard-codes the backend URL as
 export const BASE_URL = "http://127.0.0.1:9089";
 ```
 
-The backend default port, set in `mix osa.serve` (line 27 of `osa.serve.ex`)
-and `config.exs`, is `8089`:
-
-```elixir
-port = Application.get_env(:optimal_system_agent, :http_port, 8089)
-```
-
-The desktop app and the backend are therefore out-of-sync by default. A fresh
-install that starts both with default configuration will have the desktop unable
-to connect to the backend.
+At the time this was reported, the backend default port set in `mix osa.serve`
+and `config.exs` was `8089`, so the two were out of sync on a fresh install.
+The backend default has since been changed to `9089`.
 
 ## Symptom
 
@@ -58,11 +62,8 @@ time.
 
 ## Suggested Fix
 
-**Option A (recommended):** Standardise on port `8089` in both places:
-```typescript
-// client.ts
-export const BASE_URL = "http://127.0.0.1:8089";
-```
+**Option A (applied):** Standardise on port `9089` in both places. This is the
+current state — `config.exs`, `osa.serve.ex`, and `client.ts` all use `9089`.
 
 **Option B:** Make `BASE_URL` dynamic by reading from the Tauri store or an
 environment variable baked in at build time:
@@ -76,9 +77,9 @@ allowing users to configure a non-default port in the Settings page.
 
 ## Workaround
 
-Start the backend on port 9089 explicitly:
+No workaround needed on current versions — both sides default to `9089`. To run
+the backend on a non-default port, set `OSA_HTTP_PORT` and point the desktop
+client at the same value:
 ```bash
-OSA_HTTP_PORT=9089 mix osa.serve
+OSA_HTTP_PORT=9090 mix osa.serve
 ```
-Or change `BASE_URL` in `client.ts` to `http://127.0.0.1:8089` and rebuild
-the desktop app.

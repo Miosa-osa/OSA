@@ -124,7 +124,7 @@ Reviews check:
 
 ## CI Requirements
 
-There is no automatic CI on pull requests at present. The CI pipeline (`release.yml`) runs on version tags only and produces release binaries for macOS (arm64, amd64) and Linux (amd64, arm64).
+There is no automatic CI on pull requests at present. The CI pipeline (`release.yml`) runs on version tags only and produces release binaries for Linux (x64), macOS (arm64), and Windows (x64).
 
 Contributors must verify locally before opening a PR:
 

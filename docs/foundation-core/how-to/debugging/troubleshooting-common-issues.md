@@ -158,18 +158,18 @@ in-memory; they do not survive application restarts.
 ## "Port already in use"
 
 **Symptom:** OSA fails to start with `{:error, :eaddrinuse}` or
-`Address already in use` on port 8089.
+`Address already in use` on port 9089.
 
 **Resolution:**
 
-1. Find the process using port 8089:
+1. Find the process using port 9089:
 
    ```sh
    # macOS / Linux
-   lsof -i :8089
+   lsof -i :9089
 
    # Or
-   ss -tlnp | grep 8089
+   ss -tlnp | grep 9089
    ```
 
 2. Kill the conflicting process:

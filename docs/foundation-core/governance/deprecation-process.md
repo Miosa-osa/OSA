@@ -144,7 +144,7 @@ the callback for one MINOR release with a `@deprecated` annotation, then remove 
 
 ## Currently Deprecated Items
 
-As of v0.2.6, no public API features are in the deprecated-but-not-removed state.
+As of v1.0.002, no public API features are in the deprecated-but-not-removed state.
 
 Items in the shim layer (`lib/miosa/shims.ex`) that delegate to the real
 implementations are not deprecated — they are the designed access path for
