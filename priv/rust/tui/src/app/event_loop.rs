@@ -153,6 +153,7 @@ impl App {
                         tool_count,
                         provider.as_deref(),
                         model.as_deref(),
+                        Some(self.working_dir.as_str()),
                     );
                     let h = lines.len() as u16;
                     if h > 0 {

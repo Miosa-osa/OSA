@@ -112,8 +112,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> put_resp_content_type("application/json")
       |> send_resp(200, body)
     else
-      case SessionManager.create_session(user_id: user_id, channel: :http) do
+      case SessionManager.create_session(
+             user_id: user_id,
+             channel: :http,
+             working_dir: working_dir
+           ) do
         {:ok, %{session_id: session_id}} ->
+          # Bind the freshly created session's loop to the folder it advertises
+          # in the 201 response, so a POST /sessions is directory-scoped from
+          # turn one (not just on directory-scoped resume).
+          if is_binary(working_dir) and working_dir != "" do
+            SessionManager.ensure_loop(session_id,
+              user_id: user_id,
+              channel: :http,
+              working_dir: working_dir
+            )
+          end
+
           body = Jason.encode!(%{id: session_id, status: "created", working_dir: working_dir})
 
           conn

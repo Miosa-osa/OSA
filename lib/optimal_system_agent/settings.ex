@@ -203,7 +203,7 @@ defmodule OptimalSystemAgent.Settings do
   # Fails CLOSED (false — project hooks stay inert) on any Trust error so a
   # crash can never widen the executable-config surface.
   defp project_trusted? do
-    OptimalSystemAgent.Workspace.Trust.trusted?(File.cwd!())
+    OptimalSystemAgent.Workspace.Trust.trusted?(OptimalSystemAgent.Workspace.Cwd.get())
   rescue
     _ -> false
   catch
@@ -245,13 +245,13 @@ defmodule OptimalSystemAgent.Settings do
   end
 
   defp project_settings_path do
-    Path.join(File.cwd!(), ".osa/settings.json")
+    Path.join(OptimalSystemAgent.Workspace.Cwd.get(), ".osa/settings.json")
   rescue
     _ -> ".osa/settings.json"
   end
 
   defp local_settings_path do
-    Path.join(File.cwd!(), ".osa/settings.local.json")
+    Path.join(OptimalSystemAgent.Workspace.Cwd.get(), ".osa/settings.local.json")
   rescue
     _ -> ".osa/settings.local.json"
   end

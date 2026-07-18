@@ -290,7 +290,7 @@ defmodule OptimalSystemAgent.Orchestrator do
         do: worktree_info.path,
         else:
           Map.get(config, :working_dir) ||
-            Application.get_env(:optimal_system_agent, :working_dir)
+            OptimalSystemAgent.Workspace.Cwd.get()
 
     # Spawn the subagent Loop
     subagent_opts = [

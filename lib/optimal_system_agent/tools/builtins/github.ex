@@ -337,7 +337,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   defp gh_api(args) do
     task =
       Task.async(fn ->
-        System.cmd("gh", args, stderr_to_stdout: true, cd: File.cwd!())
+        System.cmd("gh", args, stderr_to_stdout: true, cd: OptimalSystemAgent.Workspace.Cwd.get())
       end)
 
     case Task.yield(task, @gh_timeout) || Task.shutdown(task) do
@@ -367,7 +367,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
   defp gh(args) do
     task =
       Task.async(fn ->
-        System.cmd("gh", args, stderr_to_stdout: true, cd: File.cwd!())
+        System.cmd("gh", args, stderr_to_stdout: true, cd: OptimalSystemAgent.Workspace.Cwd.get())
       end)
 
     case Task.yield(task, @gh_timeout) || Task.shutdown(task) do

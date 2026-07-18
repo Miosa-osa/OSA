@@ -23,7 +23,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
   # ── GET / ─────────────────────────────────────────────────────────────────
 
   get "/" do
-    cwd = File.cwd!()
+    cwd = workspace_cwd(conn)
 
     {git_status, git_log} = fetch_git_info(cwd)
 
@@ -62,7 +62,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   get "/ls" do
     conn = Plug.Conn.fetch_query_params(conn)
-    cwd = File.cwd!()
+    cwd = workspace_cwd(conn)
     req_path = conn.query_params["path"] || "."
 
     # Resolve and validate path is within cwd (prevent directory traversal)
@@ -119,7 +119,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   get "/read" do
     conn = Plug.Conn.fetch_query_params(conn)
-    cwd = File.cwd!()
+    cwd = workspace_cwd(conn)
     req_path = conn.query_params["path"] || ""
 
     resolved = Path.expand(req_path, cwd)
@@ -166,7 +166,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   get "/trust" do
     conn = Plug.Conn.fetch_query_params(conn)
-    path = conn.query_params["path"] || File.cwd!()
+    path = conn.query_params["path"] || OptimalSystemAgent.Workspace.Cwd.get()
     status = OptimalSystemAgent.Workspace.Trust.status(path)
 
     conn
@@ -178,7 +178,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
     path =
       case conn.body_params do
         %{"path" => p} when is_binary(p) and p != "" -> p
-        _ -> File.cwd!()
+        _ -> OptimalSystemAgent.Workspace.Cwd.get()
       end
 
     :ok = OptimalSystemAgent.Workspace.Trust.accept(path)
@@ -188,11 +188,36 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
     |> send_resp(200, Jason.encode!(OptimalSystemAgent.Workspace.Trust.status(path)))
   end
 
+  # ── GET /identity ─────────────────────────────────────────────────────────
+  # Git-root-aware workspace identity for the TUI status bar / terminal title /
+  # welcome banner, so the label reflects the directory the agent actually
+  # operates in (not a raw path basename). Optional ?working_dir= scopes it.
+  get "/identity" do
+    cwd = workspace_cwd(conn)
+    identity = OptimalSystemAgent.Workspace.Cwd.identity(cwd)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(identity))
+  end
+
   match _ do
     json_error(conn, 404, "not_found", "Workspace endpoint not found")
   end
 
   # ── Private ───────────────────────────────────────────────────────────────
+
+  # Resolve the workspace root for a request: an explicit ?working_dir= wins
+  # (session-scoped), else the single cwd source of truth (the user's launch
+  # dir), never a raw File.cwd!() that points at the OSA source tree.
+  defp workspace_cwd(conn) do
+    conn = Plug.Conn.fetch_query_params(conn)
+
+    case conn.query_params["working_dir"] do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> OptimalSystemAgent.Workspace.Cwd.get()
+    end
+  end
 
   # Run git commands in the given directory. Returns {status_lines, log_lines}.
   # Both lists are empty when git is not available or the directory is not a git repo.

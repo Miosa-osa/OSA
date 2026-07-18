@@ -264,6 +264,8 @@ pub enum BackendEvent {
     ContextLoaded(Result<crate::client::types::ContextStats, String>),
     /// `/trust` fetch result → opens the workspace-trust dialog.
     TrustLoaded(Result<crate::client::types::TrustStatus, String>),
+    /// `/workspace/identity` fetch result → reconciles status-bar/title/welcome name.
+    WorkspaceIdentityLoaded(Result<crate::client::types::WorkspaceIdentity, String>),
     /// Management-surface fetch results → open their overlays.
     PermissionRulesLoaded(Result<crate::client::types::PermissionRulesResponse, String>),
     HooksLoaded(Result<crate::client::types::HooksResponse, String>),

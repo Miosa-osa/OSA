@@ -1007,6 +1007,21 @@ impl App {
         });
     }
 
+    /// Fetch the backend's git-root-aware workspace identity so the status bar,
+    /// terminal title, and welcome banner reflect the dir the agent actually
+    /// operates in (not an independent launch-dir basename).
+    pub(super) fn load_workspace_identity(&self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let event = match client.get_workspace_identity().await {
+                Ok(identity) => BackendEvent::WorkspaceIdentityLoaded(Ok(identity)),
+                Err(e) => BackendEvent::WorkspaceIdentityLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(Event::Backend(event));
+        });
+    }
+
     fn try_spawn_backend(&self) {
         let candidates: Vec<Option<std::path::PathBuf>> = vec![
             // From binary location: target/release/osagent → ../../.. = priv/rust/tui → ../../../ = root
@@ -1029,6 +1044,10 @@ impl App {
                 info!("Auto-starting backend from: {}", candidate.display());
                 let project_dir = candidate;
                 let log_dir = osa_home_dir().join(".osa/logs/backend.log");
+                // The backend spawns from the mix.exs dir (the OSA source tree),
+                // but its cwd source of truth must be the user's launch dir.
+                // Export it so Cwd.set_original_cwd() captures the project.
+                let original_cwd = self.working_dir.clone();
                 std::thread::spawn(move || {
                     let log_file = std::fs::OpenOptions::new()
                         .create(true)
@@ -1057,6 +1076,7 @@ impl App {
                     };
                     let _ = command
                         .current_dir(&project_dir)
+                        .env("OSA_ORIGINAL_CWD", &original_cwd)
                         .stdout(stdout)
                         .stderr(stderr)
                         .spawn();

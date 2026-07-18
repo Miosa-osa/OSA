@@ -55,6 +55,8 @@ impl App {
                 // Load commands and tools after SSE connection
                 self.load_commands();
                 self.load_tools();
+                // Reconcile the workspace name/title with the backend's real cwd.
+                self.load_workspace_identity();
             }
             BackendEvent::SseDisconnected { error } => {
                 match error.as_deref() {
@@ -433,6 +435,18 @@ impl App {
                         );
                     }
                     warn!("Failed to load tools: {}", e);
+                }
+            },
+            BackendEvent::WorkspaceIdentityLoaded(result) => match result {
+                Ok(identity) => {
+                    // Prefer the backend's git-root-aware name over the launch-dir
+                    // basename so a home-dir launch reads as '~'/repo name, and the
+                    // displayed dir is the one tools actually operate in.
+                    self.workspace_name = Some(identity.name.clone());
+                    self.status.set_workspace_name(Some(identity.name.clone()));
+                }
+                Err(e) => {
+                    debug!("Failed to load workspace identity: {}", e);
                 }
             },
             BackendEvent::ContextLoaded(result) => match result {

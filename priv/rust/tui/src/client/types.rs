@@ -236,6 +236,19 @@ pub struct TrustStatus {
     pub session_only: bool,
 }
 
+/// Git-root-aware workspace identity, as returned by GET /workspace/identity.
+/// Drives the status-bar name, terminal title, and welcome banner so the label
+/// reflects the directory the agent actually operates in (not a raw basename).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceIdentity {
+    pub cwd: String,
+    #[serde(default)]
+    pub project_root: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_git: bool,
+}
+
 // === Auth ===
 
 #[derive(Debug, Clone, Serialize)]

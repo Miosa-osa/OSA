@@ -70,8 +70,10 @@ defmodule OptimalSystemAgent.MCP.Config do
   """
   @spec scope_path(:local | :project | :user) :: String.t()
   def scope_path(:user), do: config_path()
-  def scope_path(:project), do: Path.join(File.cwd!(), ".mcp.json")
-  def scope_path(:local), do: Path.join([File.cwd!(), ".osa", "mcp.local.json"])
+  def scope_path(:project), do: Path.join(OptimalSystemAgent.Workspace.Cwd.get(), ".mcp.json")
+
+  def scope_path(:local),
+    do: Path.join([OptimalSystemAgent.Workspace.Cwd.get(), ".osa", "mcp.local.json"])
 
   @doc "Load one scope's servers, tagging each with its scope. Never raises."
   @spec load_scope(:local | :project | :user) :: [Server.t()]

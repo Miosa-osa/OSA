@@ -256,9 +256,16 @@ impl App {
                 {
                     return;
                 }
-                let capped: String = text.chars().take(super::MAX_MESSAGE_SIZE).collect();
+                // Route Ctrl+V through the SAME normalization + large-paste pill
+                // collapse as bracketed paste (update.rs). The old path inserted
+                // the raw clipboard text verbatim, so a Ctrl+V of copied terminal
+                // output injected ANSI escape bytes and carriage returns straight
+                // into the composer, and a huge clipboard never collapsed into a
+                // "[Pasted text #N]" pill the way a terminal-drag paste did.
+                let normalized = crate::components::input::normalize_paste(&text);
+                let capped = crate::util::truncate_str(&normalized, super::MAX_MESSAGE_SIZE);
                 let lines = capped.lines().count();
-                self.input.insert_str(&capped);
+                self.input.insert_paste(capped);
                 if lines >= 5 {
                     self.toasts
                         .push(format!("Pasted {} lines", lines), ToastLevel::Info);

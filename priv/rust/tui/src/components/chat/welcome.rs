@@ -19,8 +19,9 @@ pub fn draw_welcome_with_tools(
     tool_count: usize,
     provider: Option<&str>,
     model: Option<&str>,
+    workspace_dir: Option<&str>,
 ) {
-    let lines = welcome_lines(area.width, tool_count, provider, model);
+    let lines = welcome_lines(area.width, tool_count, provider, model, workspace_dir);
     let content_height = lines.len() as u16;
     let content_area = Rect::new(area.x, area.y, area.width, content_height.min(area.height));
     frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
@@ -34,13 +35,19 @@ pub fn welcome_lines(
     tool_count: usize,
     provider: Option<&str>,
     model: Option<&str>,
+    workspace_dir: Option<&str>,
 ) -> Vec<Line<'static>> {
     let theme = style::theme();
 
-    let cwd = std::env::current_dir()
-        .map(|p| {
+    // Prefer the explicit workspace dir (the launch dir the agent operates in,
+    // == backend OSA_ORIGINAL_CWD) over an independent current_dir() read, so
+    // the banner shows the absolute project path, never the backend's dir.
+    let cwd = workspace_dir
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .map(|s| {
             let home = std::env::var("HOME").unwrap_or_default();
-            let s = p.display().to_string();
             if !home.is_empty() && s.starts_with(&home) {
                 format!("~{}", &s[home.len()..])
             } else if s.len() > 50 {
@@ -228,8 +235,8 @@ mod welcome_tests {
     #[test]
     fn welcome_lines_various_widths_never_panic() {
         for w in [1u16, 8, 20, 40, 52, 80, 200] {
-            let _ = welcome_lines(w, 12, Some("openai"), Some("gpt-4o"));
-            let _ = welcome_lines(w, 0, None, None);
+            let _ = welcome_lines(w, 12, Some("openai"), Some("gpt-4o"), None);
+            let _ = welcome_lines(w, 0, None, None, None);
         }
     }
 
@@ -238,7 +245,7 @@ mod welcome_tests {
         // The first screen must stay calm: the full banner (logo box + model/cwd
         // + a single short hint line) fits comfortably. A regression that brings
         // back the multi-line cheatsheet / wall of tips would push this over.
-        let wide = welcome_lines(92, 12, Some("openclaw"), Some("glm-5.2:cloud"));
+        let wide = welcome_lines(92, 12, Some("openclaw"), Some("glm-5.2:cloud"), None);
         assert!(
             wide.len() <= 20,
             "welcome banner should be compact, got {} lines",
@@ -256,7 +263,7 @@ mod welcome_tests {
         );
 
         // Narrow panes stay compact too (shorter hint, no cheatsheet).
-        let narrow = welcome_lines(38, 12, None, None);
+        let narrow = welcome_lines(38, 12, None, None, None);
         assert!(narrow.len() <= 20, "narrow welcome too tall: {}", narrow.len());
         let narrow_tail = narrow
             .iter()
@@ -272,7 +279,7 @@ mod welcome_tests {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             term.draw(|f| {
                 let area = f.area();
-                draw_welcome_with_tools(f, area, 12, Some("openai"), Some("gpt-4o"));
+                draw_welcome_with_tools(f, area, 12, Some("openai"), Some("gpt-4o"), None);
             })
             .unwrap();
         }

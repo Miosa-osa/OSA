@@ -87,7 +87,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
   """
   @spec load() :: :ok
   def load do
-    dirs = discover_agent_dirs(File.cwd!())
+    dirs = discover_agent_dirs(OptimalSystemAgent.Workspace.Cwd.get())
     merged = load_from_paths(dirs)
 
     :persistent_term.put(@persistent_key, merged)
@@ -123,7 +123,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
   cwd so nearer files override broader files.
   """
   @spec discover_agent_dirs(String.t()) :: [{atom(), String.t()}]
-  def discover_agent_dirs(cwd \\ File.cwd!()) do
+  def discover_agent_dirs(cwd \\ OptimalSystemAgent.Workspace.Cwd.get()) do
     project_dirs =
       cwd
       |> ancestor_dirs()

@@ -208,6 +208,16 @@ impl StatusBar {
         }
     }
 
+    /// Override the workspace label with the backend's git-root-aware project
+    /// name (from /workspace/identity), so the status bar shows the dir the
+    /// agent actually operates in — not a raw launch-dir basename. A blank name
+    /// leaves the existing label untouched.
+    pub fn set_workspace_name(&mut self, name: Option<String>) {
+        if let Some(n) = name.filter(|s| !s.trim().is_empty()) {
+            self.cwd_basename = n;
+        }
+    }
+
     /// Set (or clear with None) the reasoning-effort chip.
     pub fn set_effort(&mut self, effort: Option<String>) {
         // Normalize away blanks so an empty string never renders "effort:".

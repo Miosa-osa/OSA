@@ -176,6 +176,10 @@ pub struct App {
     // Session
     pub session_id: String,
     pub working_dir: String,
+    /// Backend's git-root-aware workspace name (from /workspace/identity). None
+    /// until it arrives; the status bar/title fall back to the launch-dir
+    /// basename in the meantime.
+    pub workspace_name: Option<String>,
 
     // Dimensions
     pub width: u16,
@@ -468,6 +472,7 @@ impl App {
             startup_continue: cli.continue_last,
             startup_resume: cli.resume.clone(),
 
+            workspace_name: None,
             state: AppState::Connecting,
             return_stack: Vec::new(),
             focus: FocusStack::new(),
@@ -654,10 +659,16 @@ impl App {
     ///    `useNotifyAfterTimeout`). Resets when the dialog closes; honours the
     ///    OSA_NO_NOTIFY opt-out via `notify_on_complete`.
     pub(crate) fn sync_chrome(&mut self) {
-        let basename = std::path::Path::new(&self.working_dir)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "~".to_string());
+        let basename = self
+            .workspace_name
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                std::path::Path::new(&self.working_dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "~".to_string())
+            });
         let busy = self.state == AppState::Processing;
         let title = crate::components::title::compose(busy, &basename);
         self.chrome_title.update(&title);

@@ -330,6 +330,13 @@ impl ApiClient {
         Ok(self.get("/api/v1/channels").await?.json().await?)
     }
 
+    /// GET /api/v1/workspace/identity — git-root-aware workspace name for chrome.
+    pub async fn get_workspace_identity(
+        &self,
+    ) -> Result<crate::client::types::WorkspaceIdentity> {
+        Ok(self.get("/api/v1/workspace/identity").await?.json().await?)
+    }
+
     /// GET /api/v1/workspace/trust?path=<dir> — current trust status + risks.
     pub async fn get_trust(&self, path: &str) -> Result<crate::client::types::TrustStatus> {
         let enc: String = path

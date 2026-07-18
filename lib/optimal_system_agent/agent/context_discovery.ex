@@ -39,7 +39,7 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
 
   @spec discover(String.t() | nil) :: String.t() | nil
   def discover(working_dir) do
-    dir = working_dir || File.cwd!()
+    dir = working_dir || OptimalSystemAgent.Workspace.Cwd.get()
     ensure_cache_table()
     now = System.monotonic_time(:millisecond)
 

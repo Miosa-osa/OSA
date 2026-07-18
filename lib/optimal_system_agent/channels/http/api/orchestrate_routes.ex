@@ -76,11 +76,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
         Jason.encode!(%{error: "invalid_request", details: "Missing required field: input"})
       )
     else
-      # Set working directory if provided
-      if working_dir && working_dir != "" do
-        Application.put_env(:optimal_system_agent, :working_dir, working_dir)
-      end
-
       # Ensure a Loop GenServer is running for this session. Pass working_dir so
       # the session persists a real directory (directory-scoped resume) rather
       # than relying on the global mutable :working_dir app-env.
@@ -107,7 +102,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
           # Process the message asynchronously through the agent loop
           Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
             try do
-              result = SessionManager.process_message(session_id, input, images: images)
+              result =
+                SessionManager.process_message(session_id, input,
+                  images: images,
+                  working_dir: working_dir
+                )
 
               case result do
                 {:ok, response} when is_binary(response) ->

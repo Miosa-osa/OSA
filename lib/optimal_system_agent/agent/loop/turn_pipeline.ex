@@ -131,10 +131,18 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   end
 
   defp apply_overrides(state, opts) do
+    state =
+      state
+      |> maybe_override(:provider, Keyword.get(opts, :provider))
+      |> maybe_override(:model, Keyword.get(opts, :model))
+      |> maybe_override(:working_dir, Keyword.get(opts, :working_dir))
+
+    # Publish the resolved working_dir into the process dictionary so every
+    # cwd lookup within this turn (running in the Loop process) resolves via
+    # Cwd.get() to the session's dir — mechanism for "live Loop state" in the
+    # Cwd resolution order — never the backend's boot dir.
+    OptimalSystemAgent.Workspace.Cwd.put_process_override(Map.get(state, :working_dir))
     state
-    |> maybe_override(:provider, Keyword.get(opts, :provider))
-    |> maybe_override(:model, Keyword.get(opts, :model))
-    |> maybe_override(:working_dir, Keyword.get(opts, :working_dir))
   end
 
   defp maybe_override(state, _key, nil), do: state

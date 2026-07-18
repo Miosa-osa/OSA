@@ -122,7 +122,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = build_system_message(static_base, dynamic_context)
+    system_msg = build_system_message(static_base, dynamic_context, provider)
     %{messages: [system_msg | conversation]}
   end
 
@@ -173,9 +173,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   # System message construction
   # ---------------------------------------------------------------------------
 
-  defp build_system_message(static_base, dynamic_context) do
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-
+  defp build_system_message(static_base, dynamic_context, provider) do
     if provider == :anthropic and dynamic_context != "" do
       # Anthropic cache hint: split into 2 content blocks.
       # The static base gets cache_control for ~90% input token savings after first call.
@@ -271,6 +269,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       {tool_process_block(state), 1, "tool_process"},
       {runtime_block(state), 1, "runtime"},
       {environment_block(state), 1, "environment"},
+      {commands_block(state), 2, "commands"},
       {project_context_block(state), 1, "project_context"},
       {plan_mode_block(state), 1, "plan_mode"},
       {memory_block_relevant(state), 1, "memory"},
@@ -283,6 +282,32 @@ defmodule OptimalSystemAgent.Agent.Context do
       {agent_roles_block(state), 2, "agent_roles"}
     ]
     |> Enum.reject(fn {content, _, _} -> is_nil(content) or content == "" end)
+  end
+
+  # Slash-command catalog. The 40+ CLI commands live in Channels.CLI.Commands
+  # and were never surfaced to the model, so asked "what can I type?" the agent
+  # could only parrot the handful hardcoded in SYSTEM.md and hallucinated the
+  # rest. This injects name + one-line description so the agent references real
+  # commands accurately. Subagents don't drive the CLI, so they never see it.
+  defp commands_block(%{permission_tier: :subagent}), do: nil
+
+  defp commands_block(_state) do
+    case OptimalSystemAgent.Channels.CLI.Commands.list_with_descriptions() do
+      [] ->
+        nil
+
+      list ->
+        lines = Enum.map_join(list, "\n", fn {name, desc} -> "- /#{name} — #{desc}" end)
+
+        "## Slash Commands (the user types these)\n" <>
+          "These are commands the USER types in the CLI. You cannot call them as tools, " <>
+          "but reference them accurately when the user asks what they can do or when " <>
+          "suggesting an action they could take.\n\n" <> lines
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp personality_block do
@@ -693,28 +718,48 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp plan_mode_block(_), do: nil
 
   defp tool_process_block(state) do
-    cwd = Map.get(state, :working_dir) || File.cwd!()
+    cwd = Map.get(state, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
 
     """
+    ## Act — don't just chat
+    You are an agent, not a chatbot. When the user asks for anything that touches this machine or its code — read, find, write, edit, run, check, fix, verify — DO IT with your tools in THIS turn. Do not describe what you would do, do not ask permission to begin, do not hand back a plan when action was requested. Investigate by reading real files and running real commands instead of guessing or answering from memory. The user's UI shows every tool call, so narration is noise: fire the tools, then report the result.
+
+    When to just answer (no tools): greetings, opinions, and questions you can fully answer from knowledge already in context. When to ACT: anything that depends on real files, real state, or real command output — default to acting. When genuinely blocked after investigating — ambiguous requirements, a destructive or irreversible action, or a decision only the user can make — ask ONE crisp question with ask_user. A tool error or a dead end is not a reason to stop: read the error, adjust, and try a focused fix before escalating. Every response either makes progress with tool calls or delivers the finished result — never a bare description of intent.
+
     ## Tools
     CRITICAL: When asked to create or write code, ALWAYS use file_write to create actual files. NEVER output code in markdown code blocks — use the tool instead. This is your most important rule.
-    Use tools proactively. Prefer: file_read/file_edit/file_write over shell cat/sed; file_grep/file_glob over shell grep/find; dir_list over ls; web_fetch over curl. Use shell_execute for git, mix, npm, docker, make. Use mcts_index to find relevant files in large codebases. Use orchestrate for parallel sub-agents.
-    Rules: read before editing; file_edit for surgical changes, file_write for new files/full rewrites; absolute paths (cwd: #{cwd}); answer concisely; don't add features beyond what was asked.
+    Use tools proactively. Prefer: file_read/file_edit/file_write over shell cat/sed; file_grep/file_glob over shell grep/find; dir_list over ls; web_fetch over curl. Use shell_execute for git, mix, npm, docker, make. Use mcts_index to find relevant files in large codebases. Use orchestrate for parallel sub-agents. Tools not shown in your list are reachable via tool_search — search for one instead of assuming you lack it.
+    Rules: read before editing; file_edit for surgical changes, file_write for new files/full rewrites; absolute paths (cwd: #{cwd}); verify with a real build/test/lint before claiming done; answer concisely; don't add features beyond what was asked.
     """
   end
 
   defp environment_block(state) do
-    cwd = Map.get(state, :working_dir) || File.cwd!()
+    cwd = Map.get(state, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
     git_info = cached_git_info()
     date = Date.utc_today() |> Date.to_iso8601()
-    provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-    model = get_active_model(provider)
+
+    # Session-accurate provider/model — NOT the global default. On a
+    # provider-switched session (via /model or state.provider) the global
+    # config default is wrong, which would tell the agent it is running on a
+    # model it is not. Prefer the session's own provider/model, falling back
+    # to the config default only when the session has not pinned them.
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :unknown)
+
+    model = Map.get(state, :model) || get_active_model(provider)
+
+    {os_family, os_name} = :os.type()
+    platform = "#{os_family}/#{os_name}"
 
     """
     ## Environment
+    Useful information about the environment you are running in:
     - Working directory: #{cwd}
-    - Date: #{date}
-    - Provider: #{provider} / #{model}
+    - Is directory a git repo: #{if git_info != "", do: "Yes", else: "No"}
+    - Platform: #{platform}
+    - Today's date: #{date}
+    - You are OSA, powered by the model `#{model}` running on the `#{provider}` provider.
     #{git_info}
     """
   rescue

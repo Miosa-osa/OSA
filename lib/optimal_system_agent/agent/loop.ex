@@ -502,7 +502,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       system_prompt_override: Keyword.get(opts, :system_prompt_override),
       working_dir:
         Keyword.get(opts, :working_dir) ||
-          Application.get_env(:optimal_system_agent, :working_dir),
+          OptimalSystemAgent.Workspace.Cwd.get(),
       strategy: nil,
       strategy_state: %{},
       started_at: DateTime.utc_now()
@@ -634,6 +634,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def handle_call({:swap_provider, provider, model}, _from, state) do
     :ets.insert(:osa_session_provider_overrides, {state.session_id, provider, model})
     {:reply, :ok, %{state | provider: provider, model: model}}
+  end
+
+  # Update a live session's working_dir (e.g. a later turn sent from a different
+  # folder). Publishes into the process dictionary too so any immediate cwd
+  # lookup in this process resolves to the new dir.
+  @impl true
+  def handle_call({:set_working_dir, dir}, _from, state) when is_binary(dir) and dir != "" do
+    OptimalSystemAgent.Workspace.Cwd.put_process_override(dir)
+    {:reply, :ok, %{state | working_dir: dir}}
+  end
+
+  def handle_call({:set_working_dir, _dir}, _from, state) do
+    {:reply, :ok, state}
   end
 
   @impl true

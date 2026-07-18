@@ -226,10 +226,20 @@ impl InputComponent {
         if avail == 0 {
             return 3 + queued;
         }
-        let char_count = self.content.chars().count();
-        let wrap_lines = ((char_count + avail - 1) / avail) as u16; // ceil division
-        let newline_lines = self.content.lines().count().max(1) as u16;
-        let text_lines = wrap_lines.max(newline_lines);
+        // Each logical line wraps INDEPENDENTLY under the composer's Paragraph
+        // wrap, so sum the wrapped visual rows per line. The old
+        // `ceil(total_chars / avail)` treated the whole buffer as one wrap
+        // stream and under-counted a long line sitting inside a multiline draft
+        // (e.g. a 100-col line + "\nx" reported 3 rows but occupies 4), clipping
+        // the box's last row — and hiding the caret — as the draft grew.
+        let text_lines: u16 = self
+            .content
+            .split('\n')
+            .map(|line| {
+                let n = line.chars().count();
+                (n / avail + usize::from(n % avail != 0)).max(1) as u16
+            })
+            .sum();
         (2 + text_lines).min(11) + queued // top divider + text + bottom divider, cap at 11
     }
 
@@ -1690,8 +1700,13 @@ impl Component for InputComponent {
             }
         }
 
-        // Mic button — always visible, clickable
-        if !self.processing && input_area.width > 10 {
+        // Mic button — an idle affordance, shown only on an EMPTY composer.
+        // While the user is typing it must NOT render: it drew OVER the last
+        // cells of a full-width line (obscuring the text under a yellow glyph),
+        // and because `handle_mouse` tests the mic rect BEFORE the caret, a
+        // click near the right edge meant to place the caret at end-of-line
+        // toggled voice recording instead.
+        if !self.processing && self.content.is_empty() && input_area.width > 10 {
             let btn = " \u{25C9} ";
             let btn_width = 4u16;
             let mic_rect = Rect::new(
@@ -1806,8 +1821,26 @@ impl InputComponent {
         if row == area.y {
             let rel = col
                 .saturating_sub(area.x)
-                .saturating_sub(prompt_len);
-            self.set_cursor_col(rel);
+                .saturating_sub(prompt_len) as usize;
+            // A long single line is horizontally scrolled at draw time to keep
+            // the caret in view, so the leftmost VISIBLE char is `scroll_start`
+            // chars into the content (same formula the draw path uses). Without
+            // adding it back, a click lands `scroll_start` chars too early —
+            // typically snapping the caret to the very start of the line.
+            let avail = (area.width as usize).saturating_sub(prompt_len as usize + 1);
+            let scroll_start = if !self.multiline
+                && !self.content.contains('\n')
+                && avail > 0
+            {
+                let cur = self.content[..self.cursor.min(self.content.len())]
+                    .chars()
+                    .count();
+                if cur >= avail { cur - avail + 1 } else { 0 }
+            } else {
+                0
+            };
+            let target = (scroll_start + rel).min(u16::MAX as usize) as u16;
+            self.set_cursor_col(target);
         }
         true
     }

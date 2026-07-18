@@ -430,7 +430,8 @@ defmodule OptimalSystemAgent.Permissions do
     expanded = Path.expand(path)
 
     roots =
-      [File.cwd!(), System.tmp_dir()] ++ Enum.map(additional_directories(), &Path.expand/1)
+      [OptimalSystemAgent.Workspace.Cwd.get(), System.tmp_dir()] ++
+        Enum.map(additional_directories(), &Path.expand/1)
 
     Enum.any?(roots, fn root ->
       is_binary(root) and (expanded == root or String.starts_with?(expanded, root <> "/"))

@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
         session_id: session_id,
         user_id: user_id,
         channel: channel,
+        working_dir: Keyword.get(opts, :working_dir),
         created_at: DateTime.to_iso8601(created_at)
       }
 
@@ -110,6 +111,9 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   def ensure_loop(session_id, opts) when is_binary(session_id) do
     if live_session?(session_id) do
+      # An already-live loop must still pick up a changed working_dir (e.g. a new
+      # turn from a different folder) instead of staying frozen at first-turn cwd.
+      maybe_update_working_dir(session_id, Keyword.get(opts, :working_dir))
       :ok
     else
       case start_loop(session_id, opts) do
@@ -136,6 +140,26 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     do: Keyword.put(opts, :parent_session_id, parent)
 
   defp maybe_put_parent(opts, _), do: opts
+
+  # Push a changed working_dir into a live loop. Best-effort: a loop mid-turn (or
+  # gone) must never make ensure_loop fail.
+  defp maybe_update_working_dir(session_id, wd) when is_binary(wd) and wd != "" do
+    case lookup_loop(session_id) do
+      {:ok, pid, _owner} ->
+        try do
+          GenServer.call(pid, {:set_working_dir, wd})
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp maybe_update_working_dir(_session_id, _wd), do: :ok
 
   @doc "Compatibility arity for existing channel adapters."
   @spec ensure_loop(session_id(), String.t(), channel()) :: :ok | {:error, term()}

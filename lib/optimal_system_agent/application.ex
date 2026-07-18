@@ -26,6 +26,12 @@ defmodule OptimalSystemAgent.Application do
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
+    # Capture the user's launch directory as the single cwd source of truth
+    # (mirrors CC setOriginalCwd). Prefers OSA_ORIGINAL_CWD (exported by the TUI
+    # from its launch dir) over File.cwd!(), which under `mix osa.serve` is the
+    # OSA source tree, not the user's project.
+    OptimalSystemAgent.Workspace.Cwd.set_original_cwd()
+
     # ── Phase 0: Environment & Configuration ──────────────────────────
     # Load .env file FIRST (before anything reads env vars)
     load_dotenv()
