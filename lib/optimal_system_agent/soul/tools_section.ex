@@ -80,8 +80,13 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   # We need *modules* (not the map-based tool specs) because PromptAssembler
   # calls `mod.prompt/1`, `mod.name/0`, etc. directly.
   defp fetch_builtin_modules do
+    hidden = Registry.model_hidden()
+
     :persistent_term.get({Registry, :builtin_tools}, %{})
-    |> Map.values()
+    # Harness/UI/redundant tools stay registered + searchable but are kept out
+    # of the model's system-prompt toolbox (a lean, CC-style default set).
+    |> Enum.reject(fn {name, _mod} -> MapSet.member?(hidden, name) end)
+    |> Enum.map(fn {_name, mod} -> mod end)
   catch
     :exit, _ -> []
   end

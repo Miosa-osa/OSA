@@ -42,9 +42,28 @@ defmodule OptimalSystemAgent.Tools.Registry do
     GenServer.call(__MODULE__, {:register_module, skill_module})
   end
 
-  @doc "List all available tools (for LLM function calling)."
+  # Tools that stay REGISTERED and callable (internal orchestration uses them,
+  # and `tool_search` can still surface them mid-turn) but are hidden from the
+  # model's DEFAULT toolbox — they are harness/orchestration infrastructure,
+  # UI/user actions, or redundant with a kept tool, NOT things the agent should
+  # reach for on its own. Keeping the default set lean (CC-style) makes the model
+  # sharper, not weaker. See list_active/0 + the :list_tools handler.
+  @model_hidden MapSet.new(~w(
+    team_create team_delete team_tasks
+    peer_review peer_claim_region peer_negotiate_task cross_team_query
+    list_agents create_agent message_agent spawn_conversation
+    enter_worktree exit_worktree monitor verify_loop remote_trigger
+    config session_search subscribe_pr send_user_file brief progress_note budget_status
+    orchestrate knowledge create_skill list_skills save_skill find_skill
+  ))
+
+  @doc "Names hidden from the model's default toolbox (still callable internally)."
+  def model_hidden, do: @model_hidden
+
+  @doc "List all available tools (for LLM function calling), minus model-hidden."
   def list_tools do
     GenServer.call(__MODULE__, :list_tools)
+    |> Enum.reject(&MapSet.member?(@model_hidden, &1.name))
   end
 
   @doc "List only non-deferred tools (for system prompt injection). Reduces prompt size."
@@ -55,6 +74,11 @@ defmodule OptimalSystemAgent.Tools.Registry do
     list_tools_direct()
     |> Enum.reject(fn tool ->
       cond do
+        # Harness/UI/redundant tools: registered + searchable, but never in the
+        # model's default toolbox.
+        MapSet.member?(@model_hidden, tool.name) ->
+          true
+
         # Built-in tool declaring itself deferred.
         (mod = Map.get(builtin_tools, tool.name)) != nil ->
           function_exported?(mod, :deferred?, 0) and mod.deferred?()
