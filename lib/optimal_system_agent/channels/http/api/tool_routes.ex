@@ -396,7 +396,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # blocked executing process via PermissionBroker's ETS response table.
   post "/respond" do
     request_id = conn.body_params["request_id"]
-    decision = conn.body_params["decision"] || conn.body_params["response"]
+
+    # Canonical `decision` string preferred; legacy TUI `{allowed: bool}`
+    # payloads (optionally with `allow_always`) are mapped for compatibility so
+    # older clients never wedge a parked tool call into the 300s timeout.
+    decision =
+      conn.body_params["decision"] || conn.body_params["response"] ||
+        legacy_decision(conn.body_params)
 
     note =
       conn.body_params["note"] || conn.body_params["clarify"] || conn.body_params["arg"]
@@ -426,6 +432,23 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   end
 
   # ── Private handlers ────────────────────────────────────────────────
+
+  # Compat: older TUI builds POST `{allowed: bool}` (plus `allow_always: true`
+  # from the Always button) instead of the canonical decision string. Map onto
+  # the canonical vocabulary PermissionBroker.canonical/1 understands. A
+  # non-boolean `allowed` falls through to nil → 400 upstream.
+  defp legacy_decision(%{"allowed" => allowed} = params) when is_boolean(allowed) do
+    always = params["allow_always"] == true or params["always"] == true
+
+    case {allowed, always} do
+      {true, true} -> "always"
+      {true, false} -> "allow"
+      {false, true} -> "deny_always"
+      {false, false} -> "deny"
+    end
+  end
+
+  defp legacy_decision(_), do: nil
 
   defp handle_list_tools(conn) do
     tools = Tools.list_tools()

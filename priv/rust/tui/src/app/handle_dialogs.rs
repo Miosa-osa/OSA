@@ -333,7 +333,8 @@ impl App {
                             let client = self.client.clone();
                             let request_id = d.request_id().to_string();
                             tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, true).await;
+                                let _ =
+                                    client.permission_respond(&request_id, "allow_once", None).await;
                             });
                         }
                         self.permissions = None;
@@ -348,7 +349,9 @@ impl App {
                             let client = self.client.clone();
                             let request_id = d.request_id().to_string();
                             tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, true).await;
+                                let _ = client
+                                    .permission_respond(&request_id, "allow_session", None)
+                                    .await;
                             });
                         }
                         self.permissions = None;
@@ -366,25 +369,32 @@ impl App {
                             // always-allow flag asks the backend to persist a rule.
                             tokio::spawn(async move {
                                 let _ = client
-                                    .permission_response_always(&request_id, true)
+                                    .permission_respond(&request_id, "allow_always", None)
                                     .await;
                             });
                         }
                         self.permissions = None;
                     }
                     DialogAction::PermissionClarify(text) => {
-                        // Release the pending gate, then steer the clarification
-                        // back to the agent as an ordinary message.
+                        // Reject-with-steer: decision "clarify" makes the backend
+                        // block THIS tool call and feed `note` back into the SAME
+                        // turn (tool_executor.ex apply_permission_decision :clarify
+                        // → {:steer, note}), so do NOT also submit it as a new
+                        // prompt — that would double-send the clarification.
                         if let Some(ref d) = self.permissions {
                             let client = self.client.clone();
                             let request_id = d.request_id().to_string();
+                            let note = text.clone();
                             tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, false).await;
+                                let _ = client
+                                    .permission_respond(&request_id, "clarify", Some(&note))
+                                    .await;
                             });
                         }
                         self.discard_overlay_return();
                         self.permissions = None;
-                        self.submit_prompt(&text);
+                        // Echo locally so the steer text shows in the transcript.
+                        self.chat.add_user_message(&text);
                     }
                     DialogAction::PermissionDeny => {
                         self.exit_overlay();
@@ -396,7 +406,7 @@ impl App {
                             let client = self.client.clone();
                             let request_id = d.request_id().to_string();
                             tokio::spawn(async move {
-                                let _ = client.permission_response(&request_id, false).await;
+                                let _ = client.permission_respond(&request_id, "deny", None).await;
                             });
                         }
                         self.permissions = None;

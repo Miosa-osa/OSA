@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     GET    /sessions/:id/stream   — SSE event stream for the session
     POST   /sessions/:id/message
     POST   /sessions/:id/cancel
+    POST   /sessions/:id/clear    — end conversation, hand back a fresh session (lineage kept)
     POST   /sessions/:id/survey/answer
     POST   /sessions/:id/survey/skip
     DELETE /sessions/:id
@@ -437,6 +438,83 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
       {:error, :not_running} ->
         json_error(conn, 404, "not_running", "No active agent loop for session #{session_id}")
+    end
+  end
+
+  # ── POST /sessions/:id/clear ───────────────────────────────────────
+  #
+  # Claude-Code-style /clear (CC ref: commands/clear/conversation.ts): end the
+  # current conversation and hand back a FRESH session so the model cannot
+  # remember anything said before the clear.
+  #
+  #   1. Save the old transcript to disk while the loop is alive (resumable).
+  #   2. Stop the old loop — Loop.terminate/2 runs session_end hooks
+  #      synchronously and clears the checkpoint + durable step log.
+  #   3. Create a brand-new session id and start its Loop with
+  #      parent_session_id lineage; Loop.init fires session_start hooks.
+  #
+  # A fresh id guarantees no memory carryover: no checkpoint restore, empty
+  # message buffer, empty transcript. Response: 201 { id, status: "cleared",
+  # parent_session, working_dir }.
+
+  post "/:id/clear" do
+    old_id = conn.params["id"]
+    user_id = conn.assigns[:user_id] || "anonymous"
+
+    if SessionManager.session_exists?(old_id) do
+      # A mid-turn loop is blocked in handle_call, so any :sys.get_state-based
+      # read (auto_save / get_metadata) exits with a timeout. Clearing while
+      # busy is legitimate — cancel the in-flight turn, then treat the save as
+      # best-effort: losing the partial turn is fine (the user is discarding
+      # this context), but the clear itself must never 500.
+      _ = OptimalSystemAgent.Agent.Loop.cancel(old_id)
+
+      # Persist the pre-clear conversation while the loop can still be read.
+      try do
+        OptimalSystemAgent.Agent.SessionPersistence.auto_save(old_id)
+      catch
+        :exit, reason ->
+          Logger.warning("[clear] best-effort pre-clear save skipped: #{inspect(reason)}")
+      end
+
+      # Carry working_dir into the fresh session so directory-scoped features
+      # (resume-by-folder, project settings) keep working after the clear.
+      working_dir =
+        try do
+          case OptimalSystemAgent.Agent.SessionPersistence.get_metadata(old_id) do
+            %{working_dir: wd} when is_binary(wd) and wd != "" -> wd
+            _ -> nil
+          end
+        catch
+          :exit, _ -> nil
+        end
+
+      # session_end hooks fire inside Loop.terminate/2 (synchronous — ordered
+      # strictly before the new loop's session_start). A tracked-but-not-live
+      # session has no loop to stop; {:error, :not_found} is fine.
+      SessionManager.stop_session(old_id)
+
+      with {:ok, %{session_id: new_id}} <-
+             SessionManager.create_session(user_id: user_id, channel: :http),
+           :ok <-
+             SessionManager.ensure_loop(new_id,
+               user_id: user_id,
+               channel: :http,
+               working_dir: working_dir,
+               parent_session_id: old_id
+             ) do
+        json(conn, 201, %{
+          id: new_id,
+          status: "cleared",
+          parent_session: old_id,
+          working_dir: working_dir
+        })
+      else
+        _ ->
+          json_error(conn, 500, "clear_failed", "Failed to start a fresh session after clear")
+      end
+    else
+      json_error(conn, 404, "session_not_found", "Session #{old_id} not found")
     end
   end
 

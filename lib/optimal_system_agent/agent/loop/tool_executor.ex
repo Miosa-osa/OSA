@@ -220,6 +220,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   #      protected branches, …). Evaluated ONCE, before everything else, so it
   #      applies in EVERY permission mode — including :overdrive — and cannot be
   #      bypassed.
+  #   1b. saved DENY rules — evaluated before every permission-mode
+  #      short-circuit (CC permissions.ts step-1 ordering), so an explicit deny
+  #      rule holds even in :overdrive/:bypass and :accept_edits.
   #   2. permission_mode gate (higher-level selector, this commit):
   #        :overdrive    → allow all (full auto), circuit-breaker aside
   #        :plan         → deny mutating tools (read-only planning)
@@ -246,6 +249,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         {:blocked,
          "Blocked: #{reason} (hard safety limit — not overridable in any permission mode)"}
 
+      # Step 1b (CC permissions.ts step-1 ordering): an explicit saved DENY rule
+      # beats every mode short-circuit — overdrive/bypass and accept_edits
+      # included. Same message as the maybe_ask/2 deny branch.
+      saved_rule_denies?(tool_call) ->
+        {:blocked, "Blocked: #{tool_call.name} is denied by a saved permission rule"}
+
       # Overdrive / bypass (full auto): everything past the circuit-breaker runs.
       mode in [:overdrive, :bypass] ->
         :allow
@@ -265,6 +274,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       true ->
         approve_by_tier(tool_call, state)
     end
+  end
+
+  # Saved DENY rules are consulted before any permission-mode short-circuit
+  # (step 1b in approve_tool_call/2). :allow/:ask results fall through — allow
+  # short-circuits stay mode-governed; only an explicit deny is absolute.
+  defp saved_rule_denies?(tool_call) do
+    args = Map.get(tool_call, :arguments) || %{}
+    Permissions.check(tool_call.name, args) == :deny
   end
 
   # Existing tier + subagent + auto-Guardian gate. Returns `:allow` |
@@ -322,8 +339,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   #   - saved "allow"/"deny" rule short-circuits (no prompt)
   #   - "allow for this session" grant short-circuits
   #   - otherwise, when interactive permissions are enabled, PARK and ask; when
-  #     disabled (e.g. the test suite, or unattended non-TUI channels) the tier
-  #     decision stands and the call is allowed — preserving prior behavior.
+  #     disabled (headless non-TUI channels: Slack/Discord/HTTP) FAIL CLOSED —
+  #     auto-reject with a clear message. The explicit
+  #     `:non_interactive_permission_bypass` config restores the old auto-allow
+  #     (set in config/test.exs for the suite, and for deliberate unattended runs).
   defp maybe_ask(tool_call, state) do
     cond do
       permission_tier_allows?(:read_only, tool_call.name) ->
@@ -341,9 +360,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
           :ask ->
             cond do
-              not interactive_permissions?() -> :allow
-              PermissionBroker.session_allowed?(state.session_id, tool_call.name) -> :allow
-              true -> {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call)}
+              not interactive_permissions?() ->
+                non_interactive_decision(tool_call)
+
+              PermissionBroker.session_allowed?(state.session_id, tool_call.name) ->
+                :allow
+
+              true ->
+                {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call)}
             end
         end
     end
@@ -351,6 +375,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp interactive_permissions? do
     Application.get_env(:optimal_system_agent, :interactive_permissions, true)
+  end
+
+  # FAIL CLOSED (WS1): a mutating tool that would prompt, on a channel that
+  # cannot prompt, is auto-rejected instead of silently allowed. The explicit
+  # `:non_interactive_permission_bypass` opt-out restores the old auto-allow —
+  # set only in config/test.exs and for deliberately unattended deployments.
+  defp non_interactive_decision(tool_call) do
+    if Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false) do
+      :allow
+    else
+      {:blocked,
+       "Blocked: #{tool_call.name} requires interactive approval, but this channel " <>
+         "cannot prompt — auto-rejected (permissions fail closed). Save an allow rule " <>
+         "for this tool, or run it from an interactive session."}
+    end
   end
 
   defp permission_summary(tool_call) do
@@ -496,15 +535,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
         execute_tool(tool_call.name, enriched_args)
 
-      {:inject_message, content} ->
-        # Hook wants to inject a system message instead of executing the tool.
-        # Store it for the next LLM call via process dict.
-        existing = Process.get(:osa_injected_messages, [])
-        Process.put(:osa_injected_messages, existing ++ [content])
-        # Still execute the tool
-        enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
-        execute_tool(tool_call.name, enriched_args)
-
       _ ->
         # Inject session_id so tools like ask_user can register pending state
         enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
@@ -541,7 +571,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         tool_call.id
       )
 
-    # Run post_tool_use hooks async (cost tracker, telemetry, learning)
+    # Run post_tool_use hooks SYNC and CONSUME their results (WS1/CC parity):
+    # a :rewrite_output replaces the tool result the model sees, injected
+    # context is appended to it, and a hook block surfaces its reason as
+    # feedback. The tool already ran, so hooks-unavailable is non-fatal here.
     post_payload = %{
       tool_name: tool_call.name,
       result: result_str,
@@ -549,7 +582,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       session_id: state.session_id
     }
 
-    run_hooks_async(:post_tool_use, post_payload)
+    result_str = consume_post_hooks(result_str, post_payload)
 
     # Fire distinct failure hook if tool errored
     tool_failed =
@@ -673,6 +706,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       end
 
     {tool_msg, result_str}
+  end
+
+  # PostToolUse hook consumption (CC parity). The tool has already run, so a
+  # hook cannot un-run it — but its verdict shapes what the model sees:
+  #   {:blocked, reason}              → append the reason as hook feedback
+  #   {:ok, %{result: rewritten}}     → a :rewrite_output replaced the result
+  #   {:ok, %{injected_context: cs}}  → append injected context lines
+  #   {:error, :hooks_unavailable}    → keep the original result (non-critical)
+  defp consume_post_hooks(result_str, post_payload) do
+    case run_hooks(:post_tool_use, post_payload) do
+      {:blocked, reason} ->
+        result_str <> "\n\n[post_tool_use hook blocked this result: #{reason}]"
+
+      {:ok, final} when is_map(final) ->
+        rewritten =
+          case Map.get(final, :result) do
+            r when is_binary(r) -> r
+            _ -> result_str
+          end
+
+        case Map.get(final, :injected_context, []) do
+          ctx when is_list(ctx) and ctx != [] ->
+            notes = ctx |> Enum.filter(&is_binary/1) |> Enum.join("\n")
+            if notes == "", do: rewritten, else: rewritten <> "\n\n[hook context]\n" <> notes
+
+          _ ->
+            rewritten
+        end
+
+      _ ->
+        result_str
+    end
   end
 
   # For file_edit: send full JSON args so TUI can render the diff with

@@ -598,6 +598,53 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        // Provider retry: broadcast directly on the session topic by
+        // llm_client.ex as {type: :provider_retry, attempt, max_attempts,
+        // delay_ms, reason} — fields are flat in both wire shapes.
+        "provider_retry" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                attempt: u32,
+                #[serde(default)]
+                max_attempts: u32,
+                #[serde(default)]
+                delay_ms: u64,
+                #[serde(default)]
+                reason: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("provider_retry", e)),
+            };
+            Some(BackendEvent::ProviderRetry {
+                attempt: ev.attempt,
+                max_attempts: ev.max_attempts,
+                delay_ms: ev.delay_ms,
+                reason: ev.reason,
+            })
+        }
+
+        // Turn-fatal backend error (react_loop llm_error / context_overflow),
+        // unwrapped from a system_event frame by the SSE loop / TuiForwarder.
+        "error" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                kind: String,
+                #[serde(default)]
+                reason: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("error", e)),
+            };
+            Some(BackendEvent::TurnError {
+                kind: ev.kind,
+                reason: ev.reason,
+            })
+        }
+
         "" => None,
 
         other => Some(BackendEvent::ParseWarning {
@@ -1235,7 +1282,9 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
         // (with an `event` field). Delegate to the top-level parser, which builds
         // them from the same frame data.
         "agent_finished" | "agent_message" | "background_command_completed"
-        | "turn_recap" => parse_sse_event(base.event.as_str(), data),
+        | "turn_recap" | "provider_retry" | "error" => {
+            parse_sse_event(base.event.as_str(), data)
+        }
 
         other if !other.is_empty() => Some(BackendEvent::ParseWarning {
             message: format!("[sse] unknown system_event: {}", other),
@@ -1248,5 +1297,38 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
 fn parse_warning(event_type: &str, err: serde_json::Error) -> BackendEvent {
     BackendEvent::ParseWarning {
         message: format!("[sse] parse {}: {}", event_type, err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_provider_retry() {
+        let data = br#"{"type":"provider_retry","session_id":"s1","attempt":2,"max_attempts":3,"delay_ms":4000,"reason":"timeout"}"#;
+        match parse_sse_event("provider_retry", data) {
+            Some(BackendEvent::ProviderRetry {
+                attempt: 2,
+                max_attempts: 3,
+                delay_ms: 4000,
+                reason,
+            }) => assert_eq!(reason, "timeout"),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_error_direct_and_wrapped() {
+        let data = br#"{"type":"system_event","event":"error","kind":"llm_error","reason":"boom"}"#;
+        for frame in ["error", "system_event"] {
+            match parse_sse_event(frame, data) {
+                Some(BackendEvent::TurnError { kind, reason }) => {
+                    assert_eq!(kind, "llm_error");
+                    assert_eq!(reason, "boom");
+                }
+                other => panic!("unexpected for {}: {:?}", frame, other),
+            }
+        }
     }
 }

@@ -193,6 +193,14 @@ impl App {
                 }
             }
 
+            // 2b. Hard repaint (Ctrl+L / return from a Ctrl+Z suspend): drop
+            // the terminal's diff state so the next draw repaints every cell,
+            // recovering the live region from any stray output corruption.
+            if self.force_redraw {
+                self.force_redraw = false;
+                let _ = terminal.clear();
+            }
+
             // 3. Draw the live region (inline) or the modal / fullscreen view (full).
             terminal.draw(|frame| self.draw(frame))?;
 

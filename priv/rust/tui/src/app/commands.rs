@@ -116,8 +116,29 @@ impl App {
                 self.execute_backend_command("skill", arg);
             }
             "/clear" => {
+                // Local transcript reset...
                 self.chat.clear();
                 self.tasks.clear();
+                self.transcript_log.clear();
+                self.attachments.clear();
+                // ...AND a backend context reset (POST /sessions/:id/clear).
+                // Without it the model still carries the "cleared" context —
+                // CC commands/clear/conversation.ts parity. Failure surfaces
+                // as a CommandResult error toast so the user knows the model
+                // may still remember.
+                let client = self.client.clone();
+                let tx = self.event_tx.clone();
+                let sid = self.session_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.clear_session(&sid).await {
+                        let _ = tx.send(Event::Backend(BackendEvent::CommandResult(Err(
+                            format!(
+                                "/clear: backend reset failed ({}) \u{2014} the model may still remember earlier context",
+                                e
+                            ),
+                        ))));
+                    }
+                });
                 self.toasts.push(
                     "Chat cleared".into(),
                     crate::components::toast::ToastLevel::Info,

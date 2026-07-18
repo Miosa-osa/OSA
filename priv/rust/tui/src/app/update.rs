@@ -355,6 +355,55 @@ impl App {
         });
     }
 
+    /// Ctrl+Z — suspend the TUI to the shell (SIGTSTP). Terminal modes are
+    /// restored to cooked first; when the user runs `fg` (SIGCONT) execution
+    /// resumes on the next line, raw mode + protocols are re-enabled and a
+    /// full repaint is forced. Mirrors the mode save/restore already proven in
+    /// `InputComponent::open_in_editor`.
+    #[cfg(unix)]
+    pub(crate) fn suspend_to_shell(&mut self) {
+        use crossterm::event::{
+            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+            EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+            PushKeyboardEnhancementFlags,
+        };
+        use crossterm::execute;
+        use crossterm::terminal::{
+            disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
+        };
+        let mut out = std::io::stdout();
+        let _ = execute!(
+            out,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
+        let _ = disable_raw_mode();
+        // Stop this process; the parent shell shows its job-control prompt.
+        // Execution continues below after `fg` delivers SIGCONT.
+        let _ = unsafe { libc::raise(libc::SIGTSTP) };
+        let _ = enable_raw_mode();
+        let _ = execute!(out, EnableBracketedPaste, EnableMouseCapture);
+        if matches!(supports_keyboard_enhancement(), Ok(true)) {
+            let _ = execute!(
+                out,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                )
+            );
+        }
+        self.force_redraw = true;
+    }
+
+    /// Non-unix fallback: no job control — say so instead of dying silently.
+    #[cfg(not(unix))]
+    pub(crate) fn suspend_to_shell(&mut self) {
+        self.toasts.push(
+            "Suspend (Ctrl+Z) is not supported on this platform".into(),
+            crate::components::toast::ToastLevel::Info,
+        );
+    }
+
     fn handle_idle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         // Any non-Esc key breaks a pending double-Esc pair so a stale first Esc
         // can never combine with a much later one.
@@ -372,13 +421,13 @@ impl App {
         let input_empty = self.input.is_empty();
 
         match (key.code, key.modifiers) {
-            // Esc — context-appropriate cancel, with a time-gated double-press
-            // chord. Single Esc: clear the composer when it holds text (Claude
-            // Code semantics); no-op when empty. Double Esc (two within the
-            // window, no key between): open the rewind / jump-to-previous-message
-            // picker — OSA's equivalent of Claude Code's "press esc twice to go
-            // up a few messages". The @-file dropdown, when open, gets the Esc
-            // first (dismiss) and never starts a chord.
+            // Esc — time-gated double-press chord (800ms). A single Esc never
+            // destroys a draft: it only hints. Double Esc with text clears the
+            // composer (with a toast) and pushes the cleared draft into input
+            // history so ↑ restores it; double Esc on an empty composer opens
+            // the rewind / jump-to-previous-message picker (Claude Code's
+            // "press esc twice to go up a few messages"). The @-file dropdown,
+            // when open, gets the Esc first (dismiss) and never starts a chord.
             (KeyCode::Esc, _) => {
                 if self.input.file_search_active() {
                     self.input
@@ -388,13 +437,23 @@ impl App {
                 }
                 let now = std::time::Instant::now();
                 if self.esc_tracker.press(now) {
-                    // Completed a double-Esc → open the rewind picker.
-                    self.load_rewind_checkpoints();
+                    if input_empty {
+                        // Double-Esc on an empty composer → rewind picker.
+                        self.load_rewind_checkpoints();
+                    } else {
+                        // Double-Esc with a draft → clear it, pushing it into
+                        // input history first so ↑ (or Ctrl+R) restores it.
+                        self.input.clear_to_history();
+                        self.prune_orphaned_attachments();
+                        self.recompute_layout();
+                        self.toasts.push(
+                            "Input cleared \u{2014} press \u{2191} to restore it".into(),
+                            crate::components::toast::ToastLevel::Info,
+                        );
+                    }
                 } else if !input_empty {
-                    self.input.reset();
-                    self.recompute_layout();
                     self.toasts.push(
-                        "Input cleared \u{2014} press Esc again to edit a previous message".into(),
+                        "Press Esc again to clear".into(),
                         crate::components::toast::ToastLevel::Info,
                     );
                 } else {
@@ -441,6 +500,12 @@ impl App {
                 self.create_session();
                 false
             }
+            // Ctrl+Z — suspend the TUI to the shell (SIGTSTP); `fg` resumes.
+            // Composer undo moved to Ctrl+_ (see components/input/mod.rs).
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                self.suspend_to_shell();
+                false
+            }
             // Ctrl+V — paste from the system clipboard directly (via arboard).
             // Complements the terminal's bracketed paste, which mouse-capture and
             // some paste methods (middle-click, right-click) don't deliver.
@@ -484,10 +549,20 @@ impl App {
                 }
                 false
             }
-            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+            // Ctrl+Shift+L — toggle the sidebar. Needs the kitty keyboard
+            // protocol to be distinguishable from Ctrl+L (legacy terminals
+            // collapse both to 0x0C, which lands on the redraw arm below).
+            (KeyCode::Char('l') | KeyCode::Char('L'), m)
+                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+            {
                 self.config.sidebar_enabled = !self.config.sidebar_enabled;
                 let _ = self.config.save();
                 self.recompute_layout();
+                false
+            }
+            // Ctrl+L — redraw the screen (readline/terminal convention).
+            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+                self.force_redraw = true;
                 false
             }
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
@@ -523,13 +598,9 @@ impl App {
                 self.copy_last_message();
                 false
             }
-            // Ctrl+R on an empty composer expands the last tool result inline
-            // (parity with Claude Code's verbose-expand). With text present it
-            // falls through to the composer's reverse-i-search, so both survive.
-            (KeyCode::Char('r'), KeyModifiers::CONTROL) if input_empty => {
-                self.chat.toggle_last_tool_expand(self.width);
-                false
-            }
+            // Ctrl+R always reaches the composer's reverse-i-search — even from
+            // an empty composer. (The old empty-composer steal expanded the last
+            // tool result; that affordance stays on Ctrl+O.)
             // ↓ on an empty composer opens the agent/background dashboard —
             // Claude Code's "↓ to manage". Only intercepted when there are tracked
             // agents to manage and no @-file dropdown is open, so it never steals
@@ -558,7 +629,13 @@ impl App {
                         self.submit_input(&text);
                         false
                     }
-                    _ => false,
+                    _ => {
+                        // Content-changed hook: an edit may have deleted an
+                        // [Image #N]/[File #N] chip — drop its attachment so it
+                        // is never silently sent (CC PromptInput.tsx:1189).
+                        self.prune_orphaned_attachments();
+                        false
+                    }
                 }
             }
         }
@@ -610,10 +687,24 @@ impl App {
                 self.chat.toggle_last_tool_expand(self.width);
                 false
             }
-            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+            // Ctrl+Z — suspend to the shell even mid-turn (the backend keeps
+            // running; SSE events queue in the channel while stopped).
+            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                self.suspend_to_shell();
+                false
+            }
+            // Ctrl+Shift+L — toggle the sidebar (kitty-protocol terminals).
+            (KeyCode::Char('l') | KeyCode::Char('L'), m)
+                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+            {
                 self.config.sidebar_enabled = !self.config.sidebar_enabled;
                 let _ = self.config.save();
                 self.recompute_layout();
+                false
+            }
+            // Ctrl+L — redraw the screen (readline/terminal convention).
+            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
+                self.force_redraw = true;
                 false
             }
             // Chat scrolling is delegated to the host terminal's native scrollback.
@@ -630,7 +721,12 @@ impl App {
                         self.submit_input(&text);
                         false
                     }
-                    _ => false,
+                    _ => {
+                        // Content-changed hook: deleted chip → drop attachment
+                        // (CC PromptInput.tsx:1189 orphan prune).
+                        self.prune_orphaned_attachments();
+                        false
+                    }
                 }
             }
         }

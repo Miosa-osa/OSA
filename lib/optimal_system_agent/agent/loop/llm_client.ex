@@ -122,6 +122,27 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           session_id: session_id
         })
 
+      {:provider_retry, info} ->
+        # Bridge provider retries to the session PubSub topic so the SSE loop
+        # forwards them and the TUI can render "Retrying in Ns…". The registry
+        # forwards this via notify_stream_retry/2 but its own Bus emission has
+        # no session_id, so this is the only session-routed path (WS1 item 8).
+        :atomics.add(heartbeat, 1, 1)
+
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{session_id}",
+          {:osa_event,
+           %{
+             type: :provider_retry,
+             session_id: session_id,
+             attempt: Map.get(info, :attempt, 0),
+             max_attempts: Map.get(info, :max_attempts, 0),
+             delay_ms: Map.get(info, :delay_ms, 0),
+             reason: Map.get(info, :reason, "")
+           }}
+        )
+
       _other ->
         :atomics.add(heartbeat, 1, 1)
         :ok

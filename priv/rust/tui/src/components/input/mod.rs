@@ -252,6 +252,19 @@ impl InputComponent {
         self.completions.hide();
     }
 
+    /// Double-Esc clear: push the current draft into input history (so ↑ /
+    /// Ctrl+R can restore it) and clear the composer. Also snapshots for
+    /// Ctrl+_ undo. Returns true when a non-blank draft was cleared.
+    pub fn clear_to_history(&mut self) -> bool {
+        if self.content.trim().is_empty() {
+            return false;
+        }
+        self.snapshot();
+        self.history.push(self.content.clone());
+        self.reset();
+        true
+    }
+
     pub fn set_content(&mut self, text: &str) {
         self.content = text.to_string();
         self.cursor = self.content.len();
@@ -1125,8 +1138,15 @@ impl Component for InputComponent {
                         self.move_word_right();
                         return ComponentAction::Consumed;
                     }
-                    // Ctrl+Z: undo
-                    (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                    // Ctrl+_ : undo (Ctrl+Z is now app-level suspend). Encodings:
+                    // legacy terminals send 0x1F, which crossterm decodes as
+                    // Ctrl+'7' (parse.rs maps 0x1C..=0x1F to '4'..='7');
+                    // kitty-protocol terminals report '_' (often with SHIFT,
+                    // since '_' is shifted '-'); Ctrl+'-' is accepted for CC
+                    // parity. `contains` tolerates stray protocol bits.
+                    (KeyCode::Char('_') | KeyCode::Char('7') | KeyCode::Char('-'), m)
+                        if m.contains(KeyModifiers::CONTROL) =>
+                    {
                         self.undo();
                         return ComponentAction::Consumed;
                     }
@@ -1801,5 +1821,42 @@ mod input_edit_tests {
         assert_eq!(input.value(), "line one\nline two");
         // Caret moved onto the first line.
         assert!(cursor_on_first_line(input.value(), input.cursor()));
+    }
+
+    // ── Double-Esc clear-to-history + Ctrl+_ undo rebind ────────────────────
+
+    #[test]
+    fn clear_to_history_pushes_draft_and_up_restores_it() {
+        let mut input = at("draft in progress", 5);
+        input.history = history::History::new(10); // in-memory: no disk writes
+        assert!(input.clear_to_history());
+        assert_eq!(input.value(), "");
+        // ↑ recalls the cleared draft.
+        input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(input.value(), "draft in progress");
+        // Blank drafts are not pushed.
+        let mut empty = at("   ", 0);
+        empty.history = history::History::new(10);
+        assert!(!empty.clear_to_history());
+        assert!(empty.history.entries().is_empty());
+    }
+
+    #[test]
+    fn undo_rebound_to_ctrl_underscore_encodings() {
+        // All three terminal encodings of Ctrl+_ / Ctrl+- undo the last edit.
+        for code in [KeyCode::Char('_'), KeyCode::Char('7'), KeyCode::Char('-')] {
+            let mut input = at("", 0);
+            input.handle_event(&key(KeyCode::Char('x'), KeyModifiers::NONE));
+            assert_eq!(input.value(), "x");
+            input.handle_event(&key(code, KeyModifiers::CONTROL));
+            assert_eq!(input.value(), "", "undo via {code:?}");
+        }
+        // Ctrl+Z no longer reaches undo (it suspends at the app level); the
+        // composer ignores it and keeps the buffer intact.
+        let mut input = at("", 0);
+        input.handle_event(&key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let act = input.handle_event(&key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert!(matches!(act, ComponentAction::Ignored));
+        assert_eq!(input.value(), "x");
     }
 }

@@ -290,6 +290,19 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// POST /api/v1/sessions/:id/clear — reset the backend session context
+    /// (session_end hooks → save → fresh loop with parent lineage →
+    /// session_start hooks; workstream M). The body is ignored: a 2xx means
+    /// the model's context is actually gone, not just the TUI's view of it.
+    pub async fn clear_session(&self, id: &str) -> Result<()> {
+        self.post(
+            &format!("/api/v1/sessions/{}/clear", id),
+            &serde_json::json!({}),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// GET /api/v1/sessions/:id/recap — short LLM summary of the session so far.
     pub async fn recap_session(&self, id: &str) -> Result<RecapResponse> {
         let resp = self.get(&format!("/api/v1/sessions/{}/recap", id)).await?;
@@ -641,17 +654,26 @@ impl ApiClient {
     // -- Permissions --
 
     /// POST /api/v1/permissions/respond — resume the parked tool call with the
-    /// user's Allow/Deny decision. `request_id` is the opaque id carried on the
+    /// user's decision. `decision` must be one of the backend's canonical
+    /// strings (tool_routes.ex → PermissionBroker.canonical/1): `allow_once`,
+    /// `allow_session`, `allow_always`, `deny`, `deny_always`, `clarify`;
+    /// `note` carries clarify/steer text. `request_id` is the opaque id carried on the
     /// `permission_required` SSE event; the backend uses it to release the exact
     /// call the agent loop is blocked on.
     ///
     /// A missing/unreachable endpoint is tolerated (the decision is best-effort)
     /// so an older backend never wedges the UI, but transport-level failures are
     /// still logged by the caller when it cares about the result.
-    pub async fn permission_response(&self, request_id: &str, allowed: bool) -> Result<()> {
+    pub async fn permission_respond(
+        &self,
+        request_id: &str,
+        decision: &str,
+        note: Option<&str>,
+    ) -> Result<()> {
         let body = serde_json::json!({
             "request_id": request_id,
-            "allowed": allowed,
+            "decision": decision,
+            "note": note,
         });
         match self.post("/api/v1/permissions/respond", &body).await {
             Ok(_) => Ok(()),
@@ -662,28 +684,6 @@ impl ApiClient {
         }
     }
 
-    /// POST /api/v1/permissions/respond — allow and persist an always-allow rule
-    /// for this tool/command. Reuses the permission-response mechanism, adding
-    /// the `allow_always` flag the backend consumes to call `Permissions.save_rule/2`
-    /// so future invocations short-circuit without prompting.
-    pub async fn permission_response_always(
-        &self,
-        request_id: &str,
-        allowed: bool,
-    ) -> Result<()> {
-        let body = serde_json::json!({
-            "request_id": request_id,
-            "allowed": allowed,
-            "allow_always": true,
-        });
-        match self.post("/api/v1/permissions/respond", &body).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                tracing::warn!("permission respond (always) failed (best-effort): {}", e);
-                Ok(())
-            }
-        }
-    }
 
     // =========================================================================
     // Local config store (~/.osa/.env)

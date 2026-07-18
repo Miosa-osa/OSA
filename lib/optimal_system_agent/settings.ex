@@ -16,13 +16,22 @@ defmodule OptimalSystemAgent.Settings do
 
   @user_settings Path.expand("~/.osa/settings.json")
 
-  @doc "Get a setting by key, resolved through the cascade."
+  @doc """
+  Get a setting by key, resolved through the cascade.
+
+  Resolution is presence-based (`Map.fetch` per layer), so an explicit `false`
+  or `null` in a higher-priority layer is honored instead of falling through
+  to a lower layer or the default (CC `updateSettingsForSource` semantics).
+  """
   def get(key, default \\ nil) do
-    get_session(key) ||
-      get_local(key) ||
-      get_project(key) ||
-      get_user(key) ||
+    with :error <- fetch_session(key),
+         :error <- Map.fetch(load_json(local_settings_path()), to_string(key)),
+         :error <- Map.fetch(load_json(project_settings_path()), to_string(key)),
+         :error <- Map.fetch(load_json(@user_settings), to_string(key)) do
       default
+    else
+      {:ok, value} -> value
+    end
   end
 
   @doc "Set a session-level setting (in-memory only, not persisted)."
@@ -34,19 +43,29 @@ defmodule OptimalSystemAgent.Settings do
     end
   end
 
-  @doc "Set a user-level setting (persisted to ~/.osa/settings.json)."
-  def set_user(key, value) do
-    settings = load_json(@user_settings)
-    updated = Map.put(settings, to_string(key), value)
-    write_json(@user_settings, updated)
-  end
+  @doc """
+  Set a user-level setting (persisted to ~/.osa/settings.json).
 
-  @doc "Set a project-level setting (persisted to .osa/settings.json)."
-  def set_project(key, value) do
-    path = project_settings_path()
-    settings = load_json(path)
-    updated = Map.put(settings, to_string(key), value)
-    write_json(path, updated)
+  Refuses to overwrite an existing-but-unparseable settings file — returns
+  `{:error, :corrupt_settings_file}` so a corrupt file is never clobbered.
+  """
+  def set_user(key, value), do: set_in_file(@user_settings, key, value)
+
+  @doc "Set a project-level setting (persisted to .osa/settings.json). Refuses to overwrite a corrupt file."
+  def set_project(key, value), do: set_in_file(project_settings_path(), key, value)
+
+  defp set_in_file(path, key, value) do
+    case load_json_for_write(path) do
+      {:ok, settings} ->
+        write_json(path, Map.put(settings, to_string(key), value))
+
+      {:error, :corrupt} ->
+        Logger.warning(
+          "[settings] Refusing to overwrite corrupt settings file #{path} — fix or delete it first"
+        )
+
+        {:error, :corrupt_settings_file}
+    end
   end
 
   @doc "Get all settings merged (for /settings API endpoint)."
@@ -68,16 +87,33 @@ defmodule OptimalSystemAgent.Settings do
   def layer(:local), do: load_json(local_settings_path())
   def layer(:session), do: get_all_session()
 
+  @doc """
+  Merge `"hooks"` config across ALL settings layers by CONCATENATION.
+
+  Unlike `get(:hooks)` (which returns only the highest-priority layer's map,
+  shadowing every other source), this concatenates each event's hook list
+  across user → project → local → session so hooks configured in multiple
+  files all fire. Duplicate hook entries are removed.
+  """
+  def get_merged_hooks do
+    [layer(:user), layer(:project), layer(:local), layer(:session)]
+    |> Enum.map(&layer_hooks/1)
+    |> Enum.reduce(%{}, fn hooks, acc ->
+      Map.merge(acc, hooks, fn _event, a, b -> a ++ b end)
+    end)
+    |> Map.new(fn {event, list} -> {event, Enum.uniq(list)} end)
+  end
+
   # ── Private ──────────────────────────────────────────────────────────
 
-  defp get_session(key) do
+  defp fetch_session(key) do
     try do
       case :ets.lookup(:osa_settings, {:session, key}) do
-        [{{:session, ^key}, value}] -> value
-        _ -> nil
+        [{{:session, ^key}, value}] -> {:ok, value}
+        _ -> :error
       end
     rescue
-      _ -> nil
+      _ -> :error
     end
   end
 
@@ -92,9 +128,39 @@ defmodule OptimalSystemAgent.Settings do
     end
   end
 
-  defp get_local(key), do: Map.get(load_json(local_settings_path()), to_string(key))
-  defp get_project(key), do: Map.get(load_json(project_settings_path()), to_string(key))
-  defp get_user(key), do: Map.get(load_json(@user_settings), to_string(key))
+  defp layer_hooks(layer) when is_map(layer) do
+    case Map.get(layer, "hooks") do
+      hooks when is_map(hooks) ->
+        Map.new(hooks, fn {event, list} -> {to_string(event), List.wrap(list)} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp layer_hooks(_), do: %{}
+
+  # Presence-aware read for WRITE paths: distinguishes a missing/empty file
+  # (fresh start → {:ok, %{}}) from an existing-but-unparseable one (refuse
+  # to clobber → {:error, :corrupt}). Non-map top-level JSON is also corrupt.
+  defp load_json_for_write(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, map} when is_map(map) ->
+            {:ok, map}
+
+          _ ->
+            if String.trim(content) == "", do: {:ok, %{}}, else: {:error, :corrupt}
+        end
+
+      {:error, :enoent} ->
+        {:ok, %{}}
+
+      {:error, _} ->
+        {:error, :corrupt}
+    end
+  end
 
   defp project_settings_path do
     Path.join(File.cwd!(), ".osa/settings.json")

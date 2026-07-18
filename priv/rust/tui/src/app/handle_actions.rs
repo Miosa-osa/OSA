@@ -489,6 +489,11 @@ impl App {
         } else {
             Some(self.working_dir.clone())
         };
+        // Orphan prune (CC PromptInput.tsx:1189-1200): a chip the user deleted
+        // from the composer must not send its attachment — keep only
+        // attachments whose [Image #N]/[File #N] token appears in the outgoing
+        // text. Final gate covering every submit path (keys, voice, queue).
+        self.prune_orphaned_attachments_in(text);
         // Collect pasted/dropped attachments for this turn, then clear them so the
         // next prompt starts fresh (the chips already left the input on submit).
         let images = if self.attachments.is_empty() {

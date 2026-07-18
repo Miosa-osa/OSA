@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     monitor_fired
     push_notification
     subscribe_pr_registered
+    error
   )a
 
   def start_link(_opts \\ []) do

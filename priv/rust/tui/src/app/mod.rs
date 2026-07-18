@@ -250,9 +250,15 @@ pub struct App {
     // Claude Code / Hermes "keep typing while busy".
     pub message_queue: Vec<String>,
 
-    // Esc-vs-Esc-Esc detector. A single Esc performs the context cancel; two
-    // Escs within the window open the rewind picker (Claude Code double-Esc).
+    // Esc-vs-Esc-Esc detector. A single Esc never destroys state; double-Esc
+    // clears the draft (pushed to input history) or, on an empty composer,
+    // opens the rewind picker (Claude Code double-Esc).
     pub esc_tracker: EscTracker,
+
+    // One-shot hard-repaint request (Ctrl+L, or resume after a Ctrl+Z
+    // suspend). The event loop clears the terminal's diff state before the
+    // next draw so every cell repaints.
+    pub force_redraw: bool,
 }
 
 impl App {
@@ -426,6 +432,7 @@ impl App {
             agents_dashboard_selected: 0,
             message_queue: Vec::new(),
             esc_tracker: EscTracker::default(),
+            force_redraw: false,
         })
     }
 

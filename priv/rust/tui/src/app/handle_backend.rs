@@ -943,6 +943,30 @@ impl App {
                     crate::components::toast::ToastLevel::Error,
                 );
             }
+            BackendEvent::ProviderRetry { attempt, max_attempts, delay_ms, reason } => {
+                // Surface "Retrying in Ns…" so a mid-turn network drop is
+                // visible instead of a silent stall (WS1 item 8).
+                let secs = ((delay_ms + 999) / 1000).max(1);
+                let note = if reason.is_empty() {
+                    format!("Retrying in {}s\u{2026} (attempt {}/{})", secs, attempt, max_attempts)
+                } else {
+                    format!(
+                        "Retrying in {}s\u{2026} (attempt {}/{}) \u{2014} {}",
+                        secs, attempt, max_attempts, reason
+                    )
+                };
+                self.chat.add_system_message(&note, "warning");
+            }
+            BackendEvent::TurnError { kind, reason } => {
+                // Red error line for turn-fatal failures (llm_error /
+                // context_overflow) — SystemError renders in the error style.
+                let note = if reason.is_empty() {
+                    format!("Error: {}", kind)
+                } else {
+                    format!("Error ({}): {}", kind, reason)
+                };
+                self.chat.add_system_message(&note, "error");
+            }
             BackendEvent::OnboardingStatus(result) => match result {
                 Ok(resp) => {
                     if resp.needs_onboarding {

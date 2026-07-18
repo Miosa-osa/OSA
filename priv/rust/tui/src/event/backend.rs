@@ -223,6 +223,17 @@ pub enum BackendEvent {
     BudgetWarning { utilization: f64, message: String },
     BudgetExceeded { message: String },
 
+    // === Retry / Error visibility (WS1 item 8) ===
+    /// Provider call failed and the backend is retrying after `delay_ms`.
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        reason: String,
+    },
+    /// Turn-fatal backend error (`llm_error` / `context_overflow`).
+    TurnError { kind: String, reason: String },
+
     // === Parse Warnings ===
     ParseWarning { message: String },
 

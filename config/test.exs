@@ -69,8 +69,13 @@ config :optimal_system_agent, open_computers_enabled: false
 # Interactive permission prompts (default 'ask' mode round-trip) are OFF in the
 # test suite: no TUI is attached to respond, so a mutating tool must not park.
 # The permission round-trip is exercised by its own tests, which flip this on
-# explicitly. With it off, the tier decision stands (prior behavior preserved).
+# explicitly.
 config :optimal_system_agent, interactive_permissions: false
+
+# WS1 fail-closed: non-interactive 'ask' decisions now auto-REJECT unless this
+# explicit bypass is set. The suite opts out so mutating-tool tests keep running
+# without a TUI; the fail-closed path is exercised by its own regression tests.
+config :optimal_system_agent, non_interactive_permission_bypass: true
 
 # Isolate the saved permission-rule store so save_rule/2 tests never touch the
 # real ~/.osa/permissions.json.

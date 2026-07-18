@@ -157,4 +157,83 @@ impl App {
         self.push_attachment(AttachmentSource::Bytes(png), true);
         true
     }
+
+    /// Orphan prune against explicit text (CC PromptInput.tsx:1189-1200):
+    /// deleting an "[Image #N]" / "[File #N]" chip from the composer must
+    /// delete the attachment too, or a removed image would still be silently
+    /// sent with the next prompt. Used as the final before-submit gate, diffed
+    /// against the outgoing text.
+    pub(crate) fn prune_orphaned_attachments_in(&mut self, content: &str) {
+        retain_referenced(&mut self.attachments, content);
+    }
+
+    /// Content-changed hook: prune against the live composer buffer. Called
+    /// from the key fall-through paths after every composer edit.
+    pub(crate) fn prune_orphaned_attachments(&mut self) {
+        if self.attachments.is_empty() {
+            return;
+        }
+        let content = self.input.value().to_string();
+        retain_referenced(&mut self.attachments, &content);
+    }
+}
+
+/// Pure core of the orphan prune: retain only attachments whose exact chip
+/// token ("[Image #N]" / "[File #N]", closing bracket included so #1 can never
+/// be kept alive by #12) still appears in `content`. Split out for unit
+/// testing without an `App`.
+fn retain_referenced(attachments: &mut Vec<Attachment>, content: &str) {
+    if attachments.is_empty() {
+        return;
+    }
+    attachments.retain(|a| content.contains(&a.chip_label()));
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    fn att(index: usize, is_image: bool) -> Attachment {
+        Attachment {
+            index,
+            is_image,
+            source: AttachmentSource::Path(format!("/tmp/f{index}")),
+        }
+    }
+
+    #[test]
+    fn deleting_a_chip_drops_its_attachment() {
+        let mut atts = vec![att(1, true), att(2, false)];
+        // The "[File #2]" chip was deleted from the composer.
+        retain_referenced(&mut atts, "look at [Image #1] please");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].index, 1);
+    }
+
+    #[test]
+    fn chip_index_match_is_exact_not_prefix() {
+        // "[Image #1]" must NOT be kept alive by "[Image #12]".
+        let mut atts = vec![att(1, true), att(12, true)];
+        retain_referenced(&mut atts, "see [Image #12]");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].index, 12);
+    }
+
+    #[test]
+    fn kind_mismatch_is_not_a_reference() {
+        // A [File #1] token does not keep an Image #1 attachment alive.
+        let mut atts = vec![att(1, true)];
+        retain_referenced(&mut atts, "[File #1]");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn empty_content_drops_everything_and_surviving_chips_stay() {
+        let mut atts = vec![att(1, true)];
+        retain_referenced(&mut atts, "");
+        assert!(atts.is_empty());
+        let mut atts = vec![att(1, true)];
+        retain_referenced(&mut atts, "[Image #1] and text");
+        assert_eq!(atts.len(), 1);
+    }
 }

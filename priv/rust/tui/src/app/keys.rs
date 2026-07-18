@@ -5,14 +5,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 
 /// Default window in which a second Esc counts as a "double-Esc" chord.
-pub const ESC_DOUBLE_WINDOW: Duration = Duration::from_millis(500);
+/// 800ms — Claude Code's double-press window (useDoublePress).
+pub const ESC_DOUBLE_WINDOW: Duration = Duration::from_millis(800);
 
 /// Time-gated detector for the Esc-vs-Esc-Esc distinction.
 ///
-/// A single Esc performs the context-appropriate cancel; two Escs pressed
-/// within `window` (with no intervening key) are a distinct chord — OSA maps it
-/// to the rewind / jump-to-previous-message picker, matching Claude Code's
-/// "press esc twice to go up a few messages".
+/// A single Esc performs the context-appropriate cancel and never destroys a
+/// draft; two Escs pressed within `window` (with no intervening key) are a
+/// distinct chord — OSA maps it to clear-the-draft (pushed into input history
+/// so ↑ restores it) when the composer holds text, or to the rewind /
+/// jump-to-previous-message picker when empty, matching Claude Code.
 ///
 /// The type is deliberately pure (no wall-clock reads inside) so the decision
 /// logic is unit-testable: callers pass `Instant::now()` in, and any non-Esc
@@ -166,7 +168,7 @@ impl Default for KeyMap {
             ),
             toggle_sidebar: KeyBinding::new(
                 KeyCode::Char('l'),
-                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
                 "toggle sidebar",
             ),
             tab: KeyBinding::new(KeyCode::Tab, KeyModifiers::NONE, "autocomplete"),

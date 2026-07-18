@@ -132,6 +132,11 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   defp maybe_put_working_dir(opts, _), do: opts
 
+  defp maybe_put_parent(opts, parent) when is_binary(parent) and parent != "",
+    do: Keyword.put(opts, :parent_session_id, parent)
+
+  defp maybe_put_parent(opts, _), do: opts
+
   @doc "Compatibility arity for existing channel adapters."
   @spec ensure_loop(session_id(), String.t(), channel()) :: :ok | {:error, term()}
   def ensure_loop(session_id, user_id, channel) do
@@ -251,6 +256,7 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     loop_opts =
       [session_id: session_id, user_id: user_id, channel: channel]
       |> maybe_put_working_dir(Keyword.get(opts, :working_dir))
+      |> maybe_put_parent(Keyword.get(opts, :parent_session_id))
 
     case DynamicSupervisor.start_child(
            OptimalSystemAgent.SessionSupervisor,

@@ -67,7 +67,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
 
   @doc "Register shell hooks from settings configuration."
   def register_from_settings do
-    hooks_config = OptimalSystemAgent.Settings.get(:hooks) || %{}
+    hooks_config = OptimalSystemAgent.Settings.get_merged_hooks()
 
     Enum.each(hooks_config, fn {event_name, hook_list} ->
       event = String.to_existing_atom(event_name)
