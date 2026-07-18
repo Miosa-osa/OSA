@@ -40,6 +40,10 @@ pub struct Chat {
     /// finalized messages are pushed to native scrollback and no longer retained.
     last_agent_text: Option<String>,
     last_user_text: Option<String>,
+    /// True once any block has been queued for scrollback — used to emit a
+    /// single blank spacer line between blocks (Claude Code's `addMargin`),
+    /// never before the first one.
+    scrollback_started: bool,
 }
 
 impl Chat {
@@ -56,6 +60,7 @@ impl Chat {
             welcome_tool_count: 0,
             last_agent_text: None,
             last_user_text: None,
+            scrollback_started: false,
         }
     }
 
@@ -67,33 +72,49 @@ impl Chat {
 
     // ── Enqueue helpers (all route to native scrollback) ──────────────
 
+    /// Queue a finalized block for native scrollback with CC-style spacing:
+    /// exactly one blank line before every block except the very first
+    /// (Claude Code's `addMargin` / `marginTop={1}`).
+    fn push_scrollback_block(&mut self, msg: Message) {
+        if self.scrollback_started {
+            self.scrollback.push(Message::new_tool_call(ToolCallData {
+                name: String::new(),
+                args: String::new(),
+                result: String::new(),
+                duration_ms: 0,
+                success: true,
+                expanded: false,
+                lines: vec![Line::from("")],
+            }));
+        }
+        self.scrollback_started = true;
+        self.scrollback.push(msg);
+        self.has_messages = true;
+    }
+
     pub fn add_user_message(&mut self, content: &str) {
         self.last_user_text = Some(content.to_string());
-        self.scrollback
-            .push(Message::new(MessageType::User, content.to_string(), None));
-        self.has_messages = true;
+        self.push_scrollback_block(Message::new(MessageType::User, content.to_string(), None));
     }
 
     pub fn add_agent_message(&mut self, content: &str, signal: Option<&Signal>) {
         self.last_agent_text = Some(content.to_string());
-        self.scrollback.push(Message::new(
+        self.push_scrollback_block(Message::new(
             MessageType::Agent,
-            content.to_string(),
+            content.trim_end().to_string(),
             signal.cloned(),
         ));
-        self.has_messages = true;
     }
 
     /// Add a continuation chunk — same left-border style as an agent message but
     /// rendered without the "◈ OSA" header.
     pub fn add_agent_continuation(&mut self, content: &str) {
         self.last_agent_text = Some(content.to_string());
-        self.scrollback.push(Message::new(
+        self.push_scrollback_block(Message::new(
             MessageType::AgentContinuation,
-            content.to_string(),
+            content.trim_end().to_string(),
             None,
         ));
-        self.has_messages = true;
     }
 
     pub fn add_system_message(&mut self, content: &str, severity: &str) {
@@ -102,23 +123,17 @@ impl Chat {
             "warning" => MessageType::SystemWarning,
             _ => MessageType::SystemInfo,
         };
-        self.scrollback
-            .push(Message::new(msg_type, content.to_string(), None));
-        self.has_messages = true;
+        self.push_scrollback_block(Message::new(msg_type, content.to_string(), None));
     }
 
     /// Add a styled help message (rendering is hardcoded).
     pub fn add_help_message(&mut self) {
-        self.scrollback
-            .push(Message::new(MessageType::Help, String::new(), None));
-        self.has_messages = true;
+        self.push_scrollback_block(Message::new(MessageType::Help, String::new(), None));
     }
 
     /// Add an inline tool-call summary to the chat (compact one-liner, legacy).
     pub fn add_tool_message(&mut self, content: &str) {
-        self.scrollback
-            .push(Message::new(MessageType::ToolCall, content.to_string(), None));
-        self.has_messages = true;
+        self.push_scrollback_block(Message::new(MessageType::ToolCall, content.to_string(), None));
     }
 
     /// Add a rich tool-call message. Held in the live tail (`messages`) until its
@@ -132,7 +147,7 @@ impl Chat {
     /// straight into native scrollback. Reuses the ToolCall message carrier so
     /// the styled line renders verbatim via `draw_tool_call`.
     pub fn add_collapsed_tool_summary(&mut self, line: ratatui::text::Line<'static>) {
-        self.scrollback.push(Message::new_tool_call(ToolCallData {
+        self.push_scrollback_block(Message::new_tool_call(ToolCallData {
             name: String::new(),
             args: String::new(),
             result: String::new(),
@@ -141,12 +156,11 @@ impl Chat {
             expanded: false,
             lines: vec![line],
         }));
-        self.has_messages = true;
     }
 
     /// Add a survey Q&A summary to the chat.
     pub fn add_survey_summary(&mut self, survey_id: String, pairs: Vec<(String, String)>) {
-        self.scrollback.push(Message {
+        self.push_scrollback_block(Message {
             msg_type: MessageType::SurveyQA,
             content: String::new(),
             signal: None,
@@ -155,7 +169,6 @@ impl Chat {
             cached_height: None,
             timestamp: None,
         });
-        self.has_messages = true;
     }
 
     /// Attach result data to the last matching in-progress tool call and
@@ -223,15 +236,16 @@ impl Chat {
             .position(|m| m.tool_data.as_ref().map_or(false, |t| t.name == name))
         {
             let msg = self.messages.remove(idx);
-            self.scrollback.push(msg);
+            self.push_scrollback_block(msg);
         }
     }
 
     /// Move every in-progress tool call into scrollback (turn-end safety net so a
     /// tool that never emitted a result is still shown).
     pub fn flush_pending_tools(&mut self) {
-        for msg in self.messages.drain(..) {
-            self.scrollback.push(msg);
+        let pending: Vec<Message> = self.messages.drain(..).collect();
+        for msg in pending {
+            self.push_scrollback_block(msg);
         }
     }
 
@@ -277,6 +291,7 @@ impl Chat {
         self.streaming_content = None;
         self.last_agent_text = None;
         self.last_user_text = None;
+        self.scrollback_started = false;
     }
 
     pub fn last_agent_message(&self) -> Option<String> {
@@ -339,5 +354,38 @@ impl Component for Chat {
         // The chat no longer owns a scroll viewport; the live region is drawn via
         // `draw_live`. This trait impl remains for the Component contract.
         self.draw_live(frame, area);
+    }
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_get_single_blank_spacer_between_them() {
+        let mut chat = Chat::new();
+        chat.add_user_message("hi");
+        chat.add_agent_message("hello", None);
+        let msgs = chat.drain_scrollback();
+        assert_eq!(msgs.len(), 3, "user, spacer, agent");
+        assert!(matches!(msgs[0].msg_type, MessageType::User));
+        assert_eq!(msgs[1].height(80), 1, "spacer is exactly one blank row");
+        assert!(matches!(msgs[2].msg_type, MessageType::Agent));
+    }
+
+    #[test]
+    fn first_block_has_no_leading_spacer() {
+        let mut chat = Chat::new();
+        chat.add_agent_message("hello", None);
+        assert_eq!(chat.drain_scrollback().len(), 1);
+    }
+
+    #[test]
+    fn clear_resets_spacing_state() {
+        let mut chat = Chat::new();
+        chat.add_user_message("hi");
+        chat.clear();
+        chat.add_user_message("again");
+        assert_eq!(chat.drain_scrollback().len(), 1, "no spacer after clear");
     }
 }

@@ -16,31 +16,18 @@ impl ToolRenderer for FileViewRenderer {
         let path = parse_json_arg(args, &["path", "file_path", "filename", "target_file"])
             .unwrap_or_else(|| "…".to_string());
 
-        // Collapsed header with path in cyan+underline
-        let (icon, icon_style) = super::status_icon(opts.status, opts.spinner_frame);
-        let header = Line::from(vec![
-            Span::styled(icon, icon_style),
-            Span::raw(" "),
-            Span::styled("Read".to_string(), theme.tool_name()),
-            Span::raw("  "),
-            Span::styled(
-                path.clone(),
-                Style::default()
-                    .fg(theme.colors.secondary)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-            {
-                let dur = super::format_duration(opts.duration_ms);
-                if dur.is_empty() {
-                    Span::raw("")
-                } else {
-                    Span::styled(format!("  {}", dur), theme.tool_duration())
-                }
-            },
-        ]);
+        // CC-style header: ● Read(path) — bold name, plain parenthesized path.
+        let header = super::make_header(
+            opts.status,
+            opts.spinner_frame,
+            "Read",
+            &path,
+            opts.duration_ms,
+        );
 
         if !opts.expanded {
-            // Collapsed: show header + summary line when result is available
+            // CC parity: a Read collapses to a single connector line —
+            // `⎿  Read N lines (ctrl+o to expand)` — no content preview.
             let line_count = if result.is_empty() {
                 0usize
             } else {
@@ -48,34 +35,20 @@ impl ToolRenderer for FileViewRenderer {
             };
             if line_count > 0 {
                 let summary = Line::from(vec![
-                    Span::styled("└ ".to_string(), Style::default().fg(theme.colors.muted)),
                     Span::styled(
-                        format!("Read · {} lines", line_count),
-                        Style::default().fg(theme.colors.success),
+                        format!(
+                            "Read {} line{}",
+                            line_count,
+                            if line_count == 1 { "" } else { "s" }
+                        ),
+                        Style::default().fg(theme.colors.muted),
+                    ),
+                    Span::styled(
+                        " (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
                     ),
                 ]);
-                let mut out = vec![header, summary];
-                // Preview: first 5 lines with dimmed line numbers
-                const PREVIEW_LINES: usize = 5;
-                for (idx, line_content) in result.lines().take(PREVIEW_LINES).enumerate() {
-                    let lineno = idx + 1;
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {:>4}  ", lineno),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                        Span::styled(line_content.to_string(), Style::default().fg(theme.colors.muted)),
-                    ]));
-                }
-                if line_count > PREVIEW_LINES {
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            "         (ctrl+o to expand)".to_string(),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                    ]));
-                }
-                return out;
+                return render_tool_box(header, vec![summary]);
             }
             return vec![header];
         }
@@ -142,7 +115,7 @@ impl ToolRenderer for FileWriteRenderer {
         };
 
         if !opts.expanded {
-            // Collapsed: show header + summary line when content is available
+            // CC parity: `⎿  Wrote N lines to <path> (ctrl+o to expand)`.
             // Parse real line count from "N lines written" header if present,
             // otherwise fall back to counting preview lines.
             let line_count = {
@@ -156,38 +129,21 @@ impl ToolRenderer for FileWriteRenderer {
             };
             if line_count > 0 {
                 let summary = Line::from(vec![
-                    Span::styled("└ ".to_string(), Style::default().fg(theme.colors.muted)),
                     Span::styled(
                         format!(
-                            "Written · {} line{}",
+                            "Wrote {} line{} to {}",
                             line_count,
-                            if line_count == 1 { "" } else { "s" }
+                            if line_count == 1 { "" } else { "s" },
+                            path
                         ),
-                        Style::default().fg(theme.colors.success),
+                        Style::default().fg(theme.colors.muted),
+                    ),
+                    Span::styled(
+                        " (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
                     ),
                 ]);
-                let mut out = vec![header, summary];
-                // Preview: first 5 lines with dimmed line numbers
-                const PREVIEW_LINES: usize = 5;
-                for (idx, line) in content.lines().take(PREVIEW_LINES).enumerate() {
-                    let lineno = idx + 1;
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {:>4}  ", lineno),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                        Span::styled(line.to_string(), Style::default().fg(theme.colors.muted)),
-                    ]));
-                }
-                if line_count > PREVIEW_LINES {
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            "         (ctrl+o to expand)".to_string(),
-                            Style::default().fg(theme.colors.dim),
-                        ),
-                    ]));
-                }
-                return out;
+                return render_tool_box(header, vec![summary]);
             }
             return vec![header];
         }
@@ -235,38 +191,27 @@ impl ToolRenderer for FileEditRenderer {
             _ => "Update",
         };
 
-        let (icon, icon_style) = super::status_icon(opts.status, opts.spinner_frame);
-        let header = Line::from(vec![
-            Span::styled(icon, icon_style),
-            Span::raw(" "),
-            Span::styled(display_name.to_string(), theme.tool_name()),
-            Span::raw("  "),
-            Span::styled(
-                path,
-                Style::default()
-                    .fg(theme.colors.secondary)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-            {
-                let dur = super::format_duration(opts.duration_ms);
-                if dur.is_empty() {
-                    Span::raw("")
-                } else {
-                    Span::styled(format!("  {}", dur), theme.tool_duration())
-                }
-            },
-        ]);
+        // CC-style header: ● Update(path)
+        let header = super::make_header(
+            opts.status,
+            opts.spinner_frame,
+            display_name,
+            &path,
+            opts.duration_ms,
+        );
 
         // Parse old/new up front — needed for both collapsed and expanded paths.
         let old = parse_json_arg(args, &["old_string", "old", "original", "before"]);
         let new = parse_json_arg(args, &["new_string", "new", "replacement", "after"]);
 
         if !opts.expanded {
-            // Collapsed: show diff summary + up to 5 changed lines when old/new are available.
+            // CC parity (FileEditToolUpdatedMessage): `⎿  Added N lines,
+            // removed M lines` (bold counts) followed by the full hunk diff
+            // (context lines + word-level highlights), capped with a ctrl+o hint.
             if let (Some(ref old_text), Some(ref new_text)) = (&old, &new) {
-                let mut lines = vec![header];
-                lines.extend(render_collapsed_diff_preview(old_text, new_text, &theme));
-                return lines;
+                let mut body = render_collapsed_diff_preview(old_text, new_text, opts.width, &theme);
+                body = truncate_lines(body, 20);
+                return render_tool_box(header, body);
             }
             return vec![header];
         }
@@ -294,110 +239,57 @@ impl ToolRenderer for FileEditRenderer {
     }
 }
 
-/// Collapsed diff summary: `└ Added N, removed M lines` followed by up to 5 changed lines.
-/// Removed lines get a subtle red-tinted background; added lines get a subtle green-tinted background.
+/// Collapsed diff body, CC style (FileEditToolUpdatedMessage): an
+/// `Added N lines, removed M lines` summary with bold counts, followed by the
+/// full hunk diff — context lines, word-level highlights, `…` hunk separators.
 fn render_collapsed_diff_preview(
     old: &str,
     new: &str,
+    width: u16,
     theme: &crate::style::Theme,
 ) -> Vec<Line<'static>> {
     use similar::{ChangeTag, TextDiff};
 
     let diff = TextDiff::from_lines(old, new);
-
-    // Count totals and collect changed lines (not Equal context).
     let mut added: usize = 0;
     let mut removed: usize = 0;
-
-    // Collect (tag, old_lineno, new_lineno, content) for changed lines only.
-    struct DiffLine {
-        tag: ChangeTag,
-        lineno: usize,
-        content: String,
-    }
-    let mut changed_lines: Vec<DiffLine> = Vec::new();
-
     for change in diff.iter_all_changes() {
         match change.tag() {
-            ChangeTag::Insert => {
-                added += 1;
-                let lineno = change.new_index().map(|i| i + 1).unwrap_or(0);
-                changed_lines.push(DiffLine {
-                    tag: ChangeTag::Insert,
-                    lineno,
-                    content: change.value().trim_end_matches('\n').to_string(),
-                });
-            }
-            ChangeTag::Delete => {
-                removed += 1;
-                let lineno = change.old_index().map(|i| i + 1).unwrap_or(0);
-                changed_lines.push(DiffLine {
-                    tag: ChangeTag::Delete,
-                    lineno,
-                    content: change.value().trim_end_matches('\n').to_string(),
-                });
-            }
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
             ChangeTag::Equal => {}
         }
     }
 
     let mut out: Vec<Line<'static>> = Vec::new();
 
-    // Summary line: └ Added N, removed M lines
-    let summary_text = match (added, removed) {
-        (0, 0) => "No changes".to_string(),
-        (a, 0) => format!("Added {} line{}", a, if a == 1 { "" } else { "s" }),
-        (0, r) => format!("Removed {} line{}", r, if r == 1 { "" } else { "s" }),
-        (a, r) => format!(
-            "Added {}, removed {} line{}",
-            a,
-            r,
-            if r == 1 { "" } else { "s" }
-        ),
-    };
-    out.push(Line::from(vec![
-        Span::styled("└ ".to_string(), Style::default().fg(theme.colors.muted)),
-        Span::styled(summary_text, Style::default().fg(theme.colors.success)),
-    ]));
-
-    // Subtle background tints — fixed Rgb values that work across themes.
-    // Dark red tint for removed; dark green/teal tint for added.
-    let del_bg = theme.colors.diff_del_bg;
-    let add_bg = theme.colors.diff_add_bg;
-
-    // Show up to 5 changed lines.
-    let preview: Vec<&DiffLine> = changed_lines.iter().take(5).collect();
-    for dl in preview {
-        let (prefix, fg, bg) = match dl.tag {
-            ChangeTag::Delete => ("-", theme.colors.error, del_bg),
-            ChangeTag::Insert => ("+", theme.colors.success, add_bg),
-            ChangeTag::Equal => unreachable!(),
-        };
-        let lineno_str = if dl.lineno > 0 {
-            format!("{:>4} ", dl.lineno)
-        } else {
-            "     ".to_string()
-        };
-        out.push(Line::from(vec![
-            Span::styled(
-                "  ".to_string(),
-                Style::default().bg(bg),
-            ),
-            Span::styled(
-                lineno_str,
-                Style::default().fg(theme.colors.dim).bg(bg),
-            ),
-            Span::styled(
-                format!("{} ", prefix),
-                Style::default().fg(fg).bg(bg),
-            ),
-            Span::styled(
-                dl.content.clone(),
-                Style::default().fg(fg).bg(bg),
-            ),
-        ]));
+    // Summary line: Added N lines, removed M lines — CC bolds the counts.
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    match (added, removed) {
+        (0, 0) => spans.push(Span::raw("No changes".to_string())),
+        (a, r) => {
+            if a > 0 {
+                spans.push(Span::raw("Added ".to_string()));
+                spans.push(Span::styled(a.to_string(), bold));
+                spans.push(Span::raw(format!(" line{}", if a == 1 { "" } else { "s" })));
+            }
+            if a > 0 && r > 0 {
+                spans.push(Span::raw(", ".to_string()));
+            }
+            if r > 0 {
+                spans.push(Span::raw(
+                    if a == 0 { "Removed " } else { "removed " }.to_string(),
+                ));
+                spans.push(Span::styled(r.to_string(), bold));
+                spans.push(Span::raw(format!(" line{}", if r == 1 { "" } else { "s" })));
+            }
+        }
     }
+    out.push(Line::from(spans));
 
+    // Full hunk diff with context + word-level highlights (StructuredDiffList).
+    out.extend(render_inline_diff(old, new, width, theme));
     out
 }
 

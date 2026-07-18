@@ -43,7 +43,7 @@ impl ToolKind {
 }
 
 /// Classify a finished tool call by name (+ args) into a collapse kind.
-pub fn classify(name: &str, _args: &str) -> ToolKind {
+pub fn classify(name: &str, args: &str) -> ToolKind {
     let lower = name.to_lowercase();
 
     // MCP tools: mcp__server__tool → group by server.
@@ -53,8 +53,10 @@ pub fn classify(name: &str, _args: &str) -> ToolKind {
     }
 
     match lower.as_str() {
-        // Shell — inline viewport treats shell as always collapsible.
-        "bash" | "run_bash_command" | "shell" => ToolKind::Shell,
+        // Shell — CC parity (BashTool.isSearchOrReadCommand): only pure
+        // search/read/list command pipelines collapse; any other command
+        // renders in full with its `● Bash(cmd)` header + `⎿` output block.
+        "bash" | "run_bash_command" | "shell" => classify_shell_command(args),
         // Read-family.
         "read" | "read_file" | "file_read" | "cat" | "head" | "tail" => ToolKind::Read,
         // Directory listing.
@@ -63,6 +65,73 @@ pub fn classify(name: &str, _args: &str) -> ToolKind {
         "grep" | "file_grep" | "glob" | "file_glob" | "rg" | "search" => ToolKind::Search,
         // Everything else (edit/write/web/task/…) renders in full.
         _ => ToolKind::NonCollapsible,
+    }
+}
+
+/// CC's BASH_* command sets (BashTool.tsx): a compound command collapses only
+/// when every non-neutral segment is a search/read/list command. Anything else
+/// (build, git, test, …) is NonCollapsible and renders in full.
+fn classify_shell_command(args: &str) -> ToolKind {
+    const SEARCH: &[&str] = &["find", "grep", "rg", "ag", "ack", "locate", "which", "whereis"];
+    const READ: &[&str] = &[
+        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk",
+        "cut", "sort", "uniq", "tr",
+    ];
+    const LIST: &[&str] = &["ls", "tree", "du"];
+    const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
+
+    let command = match super::parse_json_arg(args, &["command", "cmd", "input"]) {
+        Some(c) => c,
+        None => return ToolKind::NonCollapsible,
+    };
+
+    let (mut has_search, mut has_read, mut has_list, mut any) = (false, false, false, false);
+    // Approximation of CC's splitCommandWithOperators: split on ; \n && || |.
+    for segment in command
+        .split(|c| c == ';' || c == '\n')
+        .flat_map(|s| s.split("&&"))
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split('|'))
+    {
+        let mut words = segment.split_whitespace();
+        // Skip leading VAR=val assignments.
+        let base = loop {
+            match words.next() {
+                Some(w) if w.contains('=') && !w.starts_with('=') => continue,
+                other => break other,
+            }
+        };
+        let base = match base {
+            Some(b) => b,
+            None => continue,
+        };
+        // Strip a path prefix: /usr/bin/grep → grep.
+        let base = base.rsplit('/').next().unwrap_or(base);
+        if NEUTRAL.contains(&base) {
+            continue;
+        }
+        any = true;
+        if SEARCH.contains(&base) {
+            has_search = true;
+        } else if READ.contains(&base) {
+            has_read = true;
+        } else if LIST.contains(&base) {
+            has_list = true;
+        } else {
+            return ToolKind::NonCollapsible;
+        }
+    }
+    if !any {
+        return ToolKind::NonCollapsible;
+    }
+    if has_search {
+        ToolKind::Search
+    } else if has_read {
+        ToolKind::Read
+    } else if has_list {
+        ToolKind::List
+    } else {
+        ToolKind::NonCollapsible
     }
 }
 
@@ -178,5 +247,42 @@ impl Accumulator {
             ),
             Span::styled(text, Style::default().fg(theme.colors.muted)),
         ]))
+    }
+}
+
+#[cfg(test)]
+mod shell_classify_tests {
+    use super::*;
+
+    #[test]
+    fn plain_bash_commands_render_in_full() {
+        assert_eq!(
+            classify("bash", r#"{"command":"cargo build"}"#),
+            ToolKind::NonCollapsible
+        );
+    }
+
+    #[test]
+    fn search_read_list_pipelines_still_collapse() {
+        assert_eq!(
+            classify("bash", r#"{"command":"grep -rn foo src"}"#),
+            ToolKind::Search
+        );
+        assert_eq!(
+            classify("bash", r#"{"command":"cat a.txt | head -5"}"#),
+            ToolKind::Read
+        );
+        assert_eq!(
+            classify("bash", r#"{"command":"ls -la && echo done"}"#),
+            ToolKind::List
+        );
+    }
+
+    #[test]
+    fn mixed_pipeline_with_mutation_is_not_collapsible() {
+        assert_eq!(
+            classify("bash", r#"{"command":"grep foo src && cargo test"}"#),
+            ToolKind::NonCollapsible
+        );
     }
 }

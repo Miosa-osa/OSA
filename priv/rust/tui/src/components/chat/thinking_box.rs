@@ -1,13 +1,14 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 // ─── ThinkingBox ──────────────────────────────────────────────────────────────
 
 /// Collapsible panel that shows extended-thinking / reasoning content.
 ///
-/// Collapsed (default):  ∴ Thinking… (ctrl+t to expand)
-/// Expanded:             Dashed-border block with dim-italic wrapped content,
-///                       capped at 10 visible lines with overflow indicator.
+/// Collapsed (default):  ∴ Thinking… (alt+t to expand)
+/// Expanded:             Borderless CC-style block — dim-italic "∴ Thinking…"
+///                       label + 2-col-indented dim-italic content, capped at
+///                       10 visible lines with an overflow indicator.
 pub struct ThinkingBox {
     content: String,
     expanded: bool,
@@ -34,7 +35,7 @@ impl ThinkingBox {
         self.content.clear();
     }
 
-    // Phase 3: thinking panel expand/collapse via Ctrl+T keybind
+    // Thinking panel expand/collapse (alt+t — chat:thinkingToggle)
     #[allow(dead_code)]
     pub fn toggle(&mut self) {
         self.expanded = !self.expanded;
@@ -49,20 +50,20 @@ impl ThinkingBox {
     /// Compute required height for the given render width.
     ///
     /// - Collapsed: always 1 line.
-    /// - Expanded:  2 (border) + content lines (max 10) + optional overflow line.
+    /// - Expanded:  1 label line + content lines (max 10) + optional overflow line.
     pub fn height(&self, width: u16) -> u16 {
         if !self.expanded || self.content.is_empty() {
             return 1;
         }
 
-        // Inner width subtracts border (2) and one padding char each side (2).
-        let inner_w = (width as usize).saturating_sub(4).max(1);
+        // Content is indented 2 columns under the label (CC paddingLeft=2).
+        let inner_w = (width as usize).saturating_sub(2).max(1);
         let content_lines = self.wrap_lines(inner_w);
         let visible = content_lines.len().min(10);
         let overflow_line = if content_lines.len() > 10 { 1 } else { 0 };
 
-        // 2 border lines + visible content + optional overflow indicator
-        2 + visible as u16 + overflow_line as u16
+        // 1 label line + visible content + optional overflow indicator
+        1 + visible as u16 + overflow_line as u16
     }
 
     // ─── Draw ──────────────────────────────────────────────────────────────
@@ -79,7 +80,7 @@ impl ThinkingBox {
             let indicator = if self.content.is_empty() {
                 "\u{2234} Thinking\u{2026}".to_string()
             } else {
-                "\u{2234} Thinking\u{2026} (ctrl+t to expand)".to_string()
+                "\u{2234} Thinking\u{2026} (alt+t to expand)".to_string()
             };
             let line = Line::from(Span::styled(
                 indicator,
@@ -89,40 +90,38 @@ impl ThinkingBox {
             return;
         }
 
-        // Expanded: bordered block with content.
-        let inner_w = (area.width as usize).saturating_sub(4).max(1);
+        // Expanded — CC parity (AssistantThinkingMessage): no border. A
+        // dim-italic "∴ Thinking…" label with the content indented two columns
+        // beneath it, all dim italic.
+        let inner_w = (area.width as usize).saturating_sub(2).max(1);
         let all_lines = self.wrap_lines(inner_w);
         let total = all_lines.len();
         let visible_count = total.min(10);
         let has_overflow = total > 10;
 
-        // Build Text from visible lines.
-        let mut text_lines: Vec<Line<'_>> = all_lines[..visible_count]
-            .iter()
-            .map(|l| {
-                Line::from(Span::styled(
-                    l.as_str(),
+        let mut text_lines: Vec<Line<'_>> = Vec::with_capacity(visible_count + 2);
+        text_lines.push(Line::from(Span::styled(
+            format!("{}\u{2026}", self.title),
+            theme.faint().add_modifier(Modifier::ITALIC),
+        )));
+        for l in &all_lines[..visible_count] {
+            text_lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    l.clone(),
                     theme.thinking_content().add_modifier(Modifier::ITALIC),
-                ))
-            })
-            .collect();
+                ),
+            ]));
+        }
 
         if has_overflow {
             text_lines.push(Line::from(Span::styled(
-                format!("... ({} more lines)", total - 10),
+                format!("  … +{} lines", total - 10),
                 theme.faint().add_modifier(Modifier::ITALIC),
             )));
         }
 
-        let block = Block::default()
-            .title(Span::styled(&self.title, theme.thinking_header()))
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Plain)
-            .border_style(theme.faint());
-
-        let paragraph = Paragraph::new(Text::from(text_lines))
-            .block(block)
-            .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(Text::from(text_lines));
 
         frame.render_widget(paragraph, area);
     }

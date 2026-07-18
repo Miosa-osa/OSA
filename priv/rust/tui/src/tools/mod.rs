@@ -228,7 +228,7 @@ pub(crate) fn format_duration(ms: u64) -> String {
     format!("{}m {}s", minutes, remaining)
 }
 
-/// Truncate `lines` to `max`, appending a dim "... (N more lines)" hint.
+/// Truncate `lines` to `max`, appending CC's dim "… +N lines (ctrl+o to expand)" hint.
 pub(crate) fn truncate_lines(mut lines: Vec<Line<'static>>, max: usize) -> Vec<Line<'static>> {
     if lines.len() <= max {
         return lines;
@@ -237,27 +237,33 @@ pub(crate) fn truncate_lines(mut lines: Vec<Line<'static>>, max: usize) -> Vec<L
     lines.truncate(max);
     let theme = crate::style::theme();
     lines.push(Line::from(Span::styled(
-        format!("  … ({} more lines)", total - max),
+        format!("… +{} lines (ctrl+o to expand)", total - max),
         Style::default().fg(theme.colors.dim),
     )));
     lines
 }
 
-/// Wrap each body line with a `│ ` left-border prefix.
-/// Returns `[header_line, │ body_line, …]`.
+/// Claude Code's result connector (MessageResponse.tsx): the first body line
+/// hangs off the header with a dim `  ⎿  `; continuation lines get a matching
+/// 5-column indent so the block stays aligned under the connector.
+pub(crate) fn result_connector(first: bool) -> Span<'static> {
+    let theme = crate::style::theme();
+    let glyph = if first { "  \u{23bf}  " } else { "     " };
+    Span::styled(glyph.to_string(), Style::default().fg(theme.colors.muted))
+}
+
+/// Indent a result body under its header, CC style:
+/// `[header, "  ⎿  line1", "     line2", …]`.
 pub(crate) fn render_tool_box(
     header: Line<'static>,
     body: Vec<Line<'static>>,
 ) -> Vec<Line<'static>> {
-    let theme = crate::style::theme();
-    let border_style = Style::default().fg(theme.colors.border);
-
     let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len() + 1);
     out.push(header);
 
-    for line in body {
+    for (i, line) in body.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
-        spans.push(Span::styled("│ ".to_string(), border_style));
+        spans.push(result_connector(i == 0));
         spans.extend(line.spans);
         out.push(Line::from(spans));
     }
@@ -300,18 +306,19 @@ pub(crate) fn make_header(
         _ => detail.to_string(),
     };
 
-    // Format: ● tool_name(args)
-    let display = if !detail.is_empty() {
-        format!("{}({})", tool_display, detail)
-    } else {
-        tool_display.to_string()
-    };
-
+    // Format: ● ToolName(args) — CC parity: bold tool name, plain args
+    // (AssistantToolUseMessage renders <Text bold>{name}</Text><Text>({args})</Text>).
     let mut spans = vec![
         Span::styled(icon, icon_style),
         Span::raw(" "),
-        Span::styled(display, theme.tool_name()),
+        Span::styled(
+            tool_display.to_string(),
+            theme.tool_name().add_modifier(Modifier::BOLD),
+        ),
     ];
+    if !detail.is_empty() {
+        spans.push(Span::styled(format!("({})", detail), Style::default()));
+    }
 
     // Duration on the same line for compact mode
     let dur = format_duration(duration_ms);
