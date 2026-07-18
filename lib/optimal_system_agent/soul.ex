@@ -77,6 +77,9 @@ defmodule OptimalSystemAgent.Soul do
     # Invalidate cached static base (rebuilt lazily on next static_base/0 call)
     :persistent_term.put({__MODULE__, :static_base}, nil)
     :persistent_term.put({__MODULE__, :static_token_count}, 0)
+    # Also invalidate the LITE variant (rebuilt lazily on next static_base(:lite) call)
+    :persistent_term.put({__MODULE__, :static_base_lite}, nil)
+    :persistent_term.put({__MODULE__, :static_token_count_lite}, 0)
 
     loaded_count = Enum.count([identity, soul, user], &(&1 != nil))
     agent_count = map_size(agent_souls)
@@ -112,6 +115,31 @@ defmodule OptimalSystemAgent.Soul do
     # Ensure static base is built
     _ = static_base()
     :persistent_term.get({__MODULE__, :static_token_count}, 0)
+  end
+
+  @doc """
+  Returns the cached LITE static base — the same SYSTEM.md template but with only
+  the core-tool allowlist inlined (non-core tools advertised by name via the
+  `<system-reminder>` and loadable through tool_search). Used for local providers
+  and small context windows so the static base stays ~4-6k instead of ~24k.
+
+  The full and lite bases are cached in SEPARATE persistent_term slots because the
+  static base is process-wide cached and cannot vary per-request from a single slot.
+  """
+  @spec static_base(:lite) :: String.t()
+  def static_base(:lite) do
+    case :persistent_term.get({__MODULE__, :static_base_lite}, nil) do
+      nil -> interpolate_and_cache(:lite)
+      cached -> cached
+    end
+  end
+
+  @doc "Returns the token count of the cached LITE static base."
+  @spec static_token_count(:lite) :: non_neg_integer()
+  def static_token_count(:lite) do
+    # Ensure lite static base is built
+    _ = static_base(:lite)
+    :persistent_term.get({__MODULE__, :static_token_count_lite}, 0)
   end
 
   @doc "Get the user profile content (USER.md)."
@@ -158,24 +186,39 @@ defmodule OptimalSystemAgent.Soul do
   # ── Static Base Assembly ───────────────────────────────────────────
 
   defp interpolate_and_cache do
-    template = load_system_template()
+    base = build_base(tools_content())
 
-    # Interpolate boot-time variables
-    base =
-      template
-      |> interpolate("{{TOOL_DEFINITIONS}}", tools_content())
-      |> interpolate("{{RULES}}", rules_content())
-      |> interpolate("{{USER_PROFILE}}", user_content())
-      |> interpolate("{{SOUL_CONTENT}}", soul_content())
-      |> interpolate("{{IDENTITY_PROFILE}}", identity_content())
-
-    # Cache result + token count
     token_count = estimate_tokens(base)
     :persistent_term.put({__MODULE__, :static_base}, base)
     :persistent_term.put({__MODULE__, :static_token_count}, token_count)
 
     Logger.info("[Soul] Static base cached: #{token_count} tokens")
     base
+  end
+
+  # LITE variant — same template, but only the core-tool allowlist is inlined
+  # (ToolsSection.build(:lite)). Cached in its own persistent_term slot.
+  defp interpolate_and_cache(:lite) do
+    base = build_base(tools_content(:lite))
+
+    token_count = estimate_tokens(base)
+    :persistent_term.put({__MODULE__, :static_base_lite}, base)
+    :persistent_term.put({__MODULE__, :static_token_count_lite}, token_count)
+
+    Logger.info("[Soul] Static base (lite) cached: #{token_count} tokens")
+    base
+  end
+
+  # Interpolate SYSTEM.md with the given pre-rendered tool-definitions block plus
+  # the boot-time rules/user/soul/identity content. Shared by the full and lite
+  # variants so the only difference between the two bases is the tools section.
+  defp build_base(tools_section) do
+    load_system_template()
+    |> interpolate("{{TOOL_DEFINITIONS}}", tools_section)
+    |> interpolate("{{RULES}}", rules_content())
+    |> interpolate("{{USER_PROFILE}}", user_content())
+    |> interpolate("{{SOUL_CONTENT}}", soul_content())
+    |> interpolate("{{IDENTITY_PROFILE}}", identity_content())
   end
 
   defp load_system_template do
@@ -212,6 +255,11 @@ defmodule OptimalSystemAgent.Soul do
   # any deferred tools.  Flat-layout tools fall back to `description/0`.
   defp tools_content do
     ToolsSection.build()
+  end
+
+  # LITE tools section: only the core allowlist inlined, everything else deferred.
+  defp tools_content(:lite) do
+    ToolsSection.build(:lite)
   end
 
   defp rules_content do

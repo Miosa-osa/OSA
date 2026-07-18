@@ -23,7 +23,14 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: String, profile_dir: PathBuf) -> Result<Self> {
-        let http = HttpClient::builder().timeout(DEFAULT_TIMEOUT).build()?;
+        let http = HttpClient::builder()
+            .timeout(DEFAULT_TIMEOUT)
+            // Evict idle pooled sockets well before Bandit/Thousand_Island's
+            // ~60s server-side idle close, so reqwest never writes a request
+            // onto a keep-alive socket the backend has already closed.
+            .pool_idle_timeout(Duration::from_secs(15))
+            .tcp_keepalive(Duration::from_secs(30))
+            .build()?;
 
         // Try to load saved tokens
         let auth_state = match auth::load_tokens(&profile_dir) {
@@ -759,6 +766,50 @@ impl ApiClient {
     // HTTP helpers
     // =========================================================================
 
+    /// Send an idempotent request, retrying on transport-level failures that
+    /// indicate a stale pooled socket — Claude Code's `isStaleConnectionError`
+    /// -> disableKeepAlive -> fresh-client pattern (withRetry.ts / proxy.ts),
+    /// and the same class fetchTelemetry.ts classifies as retryable
+    /// (ECONNRESET / "connection closed before message completed").
+    ///
+    /// reqwest evicts the dead socket on the failed send, so every retry opens a
+    /// FRESH TCP connection. We retry only `is_connect()` / `is_request()`
+    /// errors and explicitly EXCLUDE `is_timeout()` — a timeout means the real
+    /// 300s budget was exhausted and must not be silently multiplied. HTTP
+    /// status errors are never seen here (a completed send returns `Ok(resp)`);
+    /// the caller handles status. Only for idempotent, bodyless GETs, so a
+    /// retry can never double-submit a mutation and `try_clone()` always
+    /// succeeds. Max 3 attempts with a short 120ms/240ms backoff so the UI
+    /// never hangs.
+    async fn send_retry(
+        &self,
+        req_builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let mut attempt: u32 = 0;
+        loop {
+            let rb = req_builder
+                .try_clone()
+                .expect("idempotent GET has a cloneable (bodyless) request");
+            match rb.send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e)
+                    if attempt < 2
+                        && !e.is_timeout()
+                        && (e.is_connect() || e.is_request()) =>
+                {
+                    attempt += 1;
+                    debug!(
+                        "transport error (stale socket?), retry {}/2: {}",
+                        attempt, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(120 * attempt as u64)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     /// GET with auth header (auto-retries on 401 after token refresh).
     async fn get(&self, path: &str) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
@@ -766,7 +817,7 @@ impl ApiClient {
         if let Ok(token) = self.auth.read().await.require_token() {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
-        let resp = req.send().await?;
+        let resp = self.send_retry(req).await?;
 
         // Auto-refresh on 401: try refresh_token, then retry unauthenticated
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -847,7 +898,7 @@ impl ApiClient {
     /// GET without auth header (for unauthenticated endpoints like /health).
     async fn get_no_auth(&self, path: &str) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.get(&url).send().await?;
+        let resp = self.send_retry(self.http.get(&url)).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();

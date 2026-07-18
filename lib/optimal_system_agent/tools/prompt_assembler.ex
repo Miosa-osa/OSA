@@ -34,7 +34,8 @@ defmodule OptimalSystemAgent.Tools.PromptAssembler do
           {String.t(), [String.t()]}
   def assemble(tool_modules, %UseContext{} = ctx, opts \\ []) do
     available = Enum.filter(tool_modules, &available?/1)
-    {loaded, deferred} = partition(available)
+    only = Keyword.get(opts, :only)
+    {loaded, deferred} = partition(available, only)
 
     loaded_section =
       loaded
@@ -56,9 +57,28 @@ defmodule OptimalSystemAgent.Tools.PromptAssembler do
   `LegacyAdapter.always_load?/1` is false. `always_load?` always wins.
   """
   @spec partition([module()]) :: {[module()], [module()]}
-  def partition(tools) do
+  def partition(tools), do: partition(tools, nil)
+
+  @doc """
+  Partition with an optional `only` allowlist predicate (`fn tool_name -> boolean`).
+
+  Base rule (unchanged): a tool is loaded iff NOT `deferred?`, OR `always_load?`
+  overrides. When `only` is a 1-arity function, that result is further
+  INTERSECTED with the allowlist — any tool whose name fails `only` is forced to
+  the deferred side regardless of `always_load?`, so it still appears in the
+  `<system-reminder>` and stays reachable via tool_search. Passing `nil`
+  reproduces the original `partition/1` behavior exactly.
+  """
+  @spec partition([module()], (String.t() -> boolean()) | nil) :: {[module()], [module()]}
+  def partition(tools, only) do
     Enum.split_with(tools, fn mod ->
-      not LegacyAdapter.deferred?(mod) or LegacyAdapter.always_load?(mod)
+      base_loaded = not LegacyAdapter.deferred?(mod) or LegacyAdapter.always_load?(mod)
+
+      if is_function(only, 1) do
+        base_loaded and only.(mod.name())
+      else
+        base_loaded
+      end
     end)
   end
 

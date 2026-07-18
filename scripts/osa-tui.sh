@@ -61,6 +61,10 @@ if ! curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
 fi
 
 # ── Launch Rust TUI (takes over terminal) ───────────────────────────
+# Point the TUI at the backend this script just started (mirror bin/osa),
+# so the launch path and any direct-binary run never fall back to a wrong
+# default port and fail every request with "Failed to load providers".
+export OSA_URL="http://localhost:$PORT"
 "$TUI_BIN" "$@"
 EXIT_CODE=$?
 

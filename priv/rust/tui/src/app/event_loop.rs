@@ -403,8 +403,13 @@ impl App {
         // background-terminals summary) so it isn't clipped by the fixed chrome.
         let agents_h = self.agents.height().min(AGENTS_INLINE_CAP);
         let hi0 = term_rows.saturating_sub(1).max(1);
+        // Reserve rows for an open slash-completions popup so the upward-growing
+        // menu always has room above the input (same mechanism as the agents
+        // panel). Zero when the popup is closed, so idle height is unchanged.
+        let popup_h = self.input.completions_popup_height();
         let base = live_region_height(input_needed, term_rows)
             .saturating_add(agents_h)
+            .saturating_add(popup_h)
             .min(hi0);
 
         // Rows the streaming reply currently renders to (0 when idle).
@@ -433,7 +438,8 @@ impl App {
         let want = OVERHEAD
             .saturating_add(input_needed)
             .saturating_add(stream_preview)
-            .saturating_add(agents_h);
+            .saturating_add(agents_h)
+            .saturating_add(popup_h);
         let hi = term_rows.saturating_sub(1).max(1);
         want.clamp(base, hi)
     }
@@ -990,6 +996,58 @@ mod render_tests {
             let top = rows.saturating_sub(view_h);
             render_inline(top, w, view_h, &input, &status);
         }
+    }
+
+    #[test]
+    fn inline_slash_popup_renders_real_commands() {
+        // Regression for "/ shows no commands": with the popup open the inline
+        // viewport must be grown by `completions_popup_height()` so the
+        // upward-growing popup has room above the input and renders actual
+        // command names, not just a \u{25bc} scroll arrow.
+        let w = 92u16;
+        let input = input_with_slash_popup(w);
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        status.set_context(0.0, 0, 200_000);
+
+        // The popup wants rows now that it is open (all sample commands match "").
+        let popup_h = input.completions_popup_height();
+        assert!(popup_h >= 3, "open popup should want >= 3 rows, got {popup_h}");
+
+        // Viewport height the event loop would build: live region + popup rows.
+        let view_h = super::live_region_height(input.needed_height(), 40)
+            .saturating_add(popup_h);
+        let total_h = view_h + 4;
+
+        let mut backend = TestBackend::new(w, total_h);
+        backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(view_h),
+            },
+        )
+        .unwrap();
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+
+        // The rendered buffer must contain at least one real command name from
+        // the sample list — proof the popup shows commands, not an empty box or
+        // a lone \u{25bc} arrow (the reported bug).
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            sample_commands()
+                .iter()
+                .any(|(name, _)| text.contains(name.as_str())),
+            "slash popup must render a real command name; buffer had none"
+        );
     }
 
     #[test]

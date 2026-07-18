@@ -723,6 +723,32 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def context_window(_),
     do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
+  @doc """
+  The context window OSA will actually operate within for `model` on `provider`.
+
+  For cloud providers this is just the trained / catalog window (`context_window/1`).
+  For LOCAL providers (:ollama / :lmstudio / :llamacpp) it is capped to
+  `:ollama_num_ctx` — the num_ctx ceiling OSA is willing to allocate (KV-cache
+  memory scales with it). This is the single source of truth so that budgeting
+  (Agent.Context) and the num_ctx we send to Ollama (Providers.Ollama.build_options)
+  always agree, instead of Context believing it has a 32k-128k window while the
+  Ollama server honors only 4096.
+
+  A nil/non-binary `model` resolves through `context_window/1`'s catch-all to the
+  config default (128k), preserving prior behavior for cloud providers.
+  """
+  @spec effective_context_window(String.t() | nil, atom()) :: pos_integer()
+  def effective_context_window(model, provider) do
+    trained = context_window(model)
+
+    if provider in [:ollama, :lmstudio, :llamacpp] do
+      ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+      min(trained, ceiling)
+    else
+      trained
+    end
+  end
+
   # Model ids for a provider from the Catalog, or nil when the Catalog has no
   # entry for it (so the caller falls back to the per-module list). Never raises.
   defp catalog_models_for(provider) do

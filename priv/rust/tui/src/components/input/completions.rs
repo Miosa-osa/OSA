@@ -62,6 +62,19 @@ impl Completions {
         self.visible
     }
 
+    /// Rows the popup wants to occupy when open: one bordered row per visible
+    /// item (capped at `max_visible`) plus the top and bottom border. Zero when
+    /// hidden or empty so callers reserve nothing at idle. The event loop adds
+    /// this to the inline viewport height so the upward-growing popup always has
+    /// room above the input — the same mechanism used for the agents panel.
+    pub fn desired_height(&self) -> u16 {
+        if !self.visible || self.filtered.is_empty() {
+            0
+        } else {
+            (self.filtered.len().min(self.max_visible) as u16) + 2
+        }
+    }
+
     pub fn update_filter(&mut self, filter: &str) {
         self.filter = filter.to_string();
         self.apply_filter();
@@ -210,14 +223,31 @@ impl Completions {
             return;
         }
 
-        // Only as many rows as physically fit inside the (possibly shrunken)
-        // inner area — never index a row past the popup's clipped height.
-        let rows_fit = inner.height.min(visible_count);
-        let show_scroll_up = self.scroll_offset > 0;
-        let show_scroll_down = self.scroll_offset + self.max_visible < self.filtered.len();
+        // Rows that physically fit inside the (possibly shrunken) inner area.
+        // The `popup_height < 3` guard above guarantees inner.height >= 1, so
+        // `rows_fit >= 1`: the popup ALWAYS shows at least one real command,
+        // never an arrow-only box (the "/ shows no commands" bug).
+        let rows_fit = inner.height.min(visible_count).max(1);
+        let total = self.filtered.len();
+        let win = rows_fit as usize;
+        // Center the scroll window on the selection so the highlighted item is
+        // always on screen even when the popup is shorter than `max_visible`
+        // (Claude Code's centered-window rule), clamped so we never read past
+        // the ends of `filtered`. Because the selection sits near the middle of
+        // the window, it can never land on the first or last row when
+        // rows_fit >= 3, so a scroll arrow never hides the selected command.
+        let offset = self
+            .selected
+            .saturating_sub(win / 2)
+            .min(total.saturating_sub(win));
+        let show_scroll_up = offset > 0;
+        let show_scroll_down = offset + win < total;
+        // Only spend a whole row on a \u{25b2}/\u{25bc} arrow when there are at
+        // least 3 rows; a 1-2 row popup shows real commands instead.
+        let arrows = rows_fit >= 3;
 
         for row in 0..rows_fit {
-            let list_idx = self.scroll_offset + row as usize;
+            let list_idx = offset + row as usize;
             let item_idx = match self.filtered.get(list_idx) {
                 Some(&i) => i,
                 None => break,
@@ -242,15 +272,16 @@ impl Completions {
                 continue;
             }
 
-            // Scroll indicator rows
-            if is_first && show_scroll_up {
+            // Scroll indicator rows — only when we can spare a row for them, so
+            // the arrow never consumes the only (or the selected) content row.
+            if arrows && is_first && show_scroll_up {
                 frame.render_widget(
                     Paragraph::new("  \u{25b2}").style(theme.completion_normal()),
                     row_rect,
                 );
                 continue;
             }
-            if is_last && show_scroll_down {
+            if arrows && is_last && show_scroll_down {
                 frame.render_widget(
                     Paragraph::new("  \u{25bc}").style(theme.completion_normal()),
                     row_rect,

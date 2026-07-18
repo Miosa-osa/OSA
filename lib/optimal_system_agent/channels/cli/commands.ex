@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   alias OptimalSystemAgent.Memory
   alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Sandbox.Router, as: SandboxRouter
+  alias OptimalSystemAgent.Tools.Builtins.{SkillManager, UseSkill}
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
 
   @reset IO.ANSI.reset()
@@ -38,7 +39,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "context" => {"Show context window usage", :cmd_context},
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
-    "skills" => {"List available skills", :cmd_skills},
+    "skills" => {"List, run, enable, disable, or create a skill", :cmd_skill},
+    "skill" => {"List, run, enable, disable, or create a skill", :cmd_skill},
     "agents" => {"Runtime agent dashboard — live subagent runs and roles", :cmd_agents},
     "bg" => {"List background work — subagent runs and background commands", :cmd_bg},
     "steer" => {"Inject a directive into the running turn (mid-turn steer)", :cmd_steer},
@@ -438,6 +440,101 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     session_id
   end
 
+  # ── /skill — list / run / enable / disable / delete / reload ─────────
+  #
+  # Verb dispatcher reachable from the TUI (POST /commands/execute command="skill"
+  # arg="<verb> <rest>") and the CLI REPL. Reuses the existing SkillManager and
+  # UseSkill tools so there is exactly ONE implementation of each operation.
+  def cmd_skill(args, session_id) do
+    {verb, rest} = parse_command(args)
+    rest = String.trim(rest)
+
+    case verb do
+      v when v in ["", "list", "ls"] ->
+        cmd_skills(args, session_id)
+
+      "enable" when rest != "" ->
+        print_skill_result(SkillManager.execute(%{"action" => "enable", "name" => rest}))
+        session_id
+
+      "disable" when rest != "" ->
+        print_skill_result(SkillManager.execute(%{"action" => "disable", "name" => rest}))
+        session_id
+
+      "delete" when rest != "" ->
+        print_skill_result(SkillManager.execute(%{"action" => "delete", "name" => rest}))
+        session_id
+
+      "reload" ->
+        print_skill_result(SkillManager.execute(%{"action" => "reload"}))
+        session_id
+
+      v when v in ["run", "use"] ->
+        {name, task} = parse_command(rest)
+        name = String.trim(name)
+        task = String.trim(task)
+
+        cond do
+          name == "" ->
+            IO.puts("  #{@yellow}Usage: /skill run <name> <task>#{@reset}")
+
+          task == "" ->
+            IO.puts(
+              "  #{@yellow}Usage: /skill run #{name} <task> — a task/prompt is required#{@reset}"
+            )
+
+          true ->
+            IO.puts("  #{@dim}Running skill '#{name}'...#{@reset}")
+
+            print_skill_result(
+              UseSkill.execute(%{
+                "skill_name" => name,
+                "task" => task,
+                "__session_id__" => session_id
+              })
+            )
+        end
+
+        session_id
+
+      v when v in ["enable", "disable", "delete"] ->
+        IO.puts("  #{@yellow}Usage: /skill #{v} <name>#{@reset}")
+        session_id
+
+      _ ->
+        IO.puts(
+          "  #{@yellow}Usage: /skill [list|enable <name>|disable <name>|run <name> <task>|reload|delete <name>]#{@reset}"
+        )
+
+        session_id
+    end
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: skill command failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  # Render a SkillManager/UseSkill `{:ok, msg}` / `{:error, msg}` result, indented
+  # and (for :ok) line-by-line so multi-line skill output stays readable.
+  defp print_skill_result({:ok, msg}) do
+    IO.puts("")
+
+    msg
+    |> to_string()
+    |> String.split("\n")
+    |> Enum.each(fn line -> IO.puts("  #{line}") end)
+
+    IO.puts("")
+  end
+
+  defp print_skill_result({:error, msg}) do
+    IO.puts("\n  #{@yellow}#{msg}#{@reset}\n")
+  end
+
+  defp print_skill_result(other) do
+    IO.puts("\n  #{@yellow}Unexpected skill result: #{inspect(other)}#{@reset}\n")
+  end
+
   def cmd_skills(_args, session_id) do
     IO.puts("")
     IO.puts("  #{@bold}Available Skills#{@reset}")
@@ -445,19 +542,43 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     skills = ToolsRegistry.list_skills()
 
+    skills_dir =
+      Path.expand(Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills"))
+
+    disabled? = fn name ->
+      File.exists?(Path.join([skills_dir, to_string(name), ".disabled"]))
+    end
+
     if length(skills) > 0 do
       Enum.each(skills, fn skill ->
         name = skill[:name] || "?"
         desc = skill[:description] || ""
-        truncated = String.slice(desc, 0, 55)
+        truncated = String.slice(desc, 0, 48)
         padded = String.pad_trailing(name, 22)
-        IO.puts("  #{@cyan}#{padded}#{@reset} #{@dim}#{truncated}#{@reset}")
+
+        {status, color} =
+          if disabled?.(name), do: {"disabled", @yellow}, else: {"active", @green}
+
+        IO.puts(
+          "  #{@cyan}#{padded}#{@reset} #{color}[#{status}]#{@reset} #{@dim}#{truncated}#{@reset}"
+        )
       end)
 
+      disabled_count = Enum.count(skills, fn s -> disabled?.(s[:name] || "?") end)
+      active_count = length(skills) - disabled_count
+
       IO.puts("")
-      IO.puts("  #{@dim}#{length(skills)} skills available#{@reset}")
+
+      IO.puts(
+        "  #{@dim}#{length(skills)} skills (#{active_count} active, #{disabled_count} disabled)#{@reset}"
+      )
+
+      IO.puts(
+        "  #{@dim}/skill enable <name> · /skill disable <name> · /skill run <name> <task>#{@reset}"
+      )
     else
       IO.puts("  #{@dim}No skills loaded#{@reset}")
+      IO.puts("  #{@dim}Add one at ~/.osa/skills/<name>/SKILL.md, then /skill reload#{@reset}")
     end
 
     IO.puts("")

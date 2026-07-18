@@ -157,6 +157,13 @@ impl InputComponent {
         self.completions.set_items(items);
     }
 
+    /// Rows the open slash-completions popup wants above the input, or 0 when it
+    /// is closed. `desired_inline_height` reserves this so the upward-growing
+    /// popup always has room to render real commands (not just a scroll arrow).
+    pub fn completions_popup_height(&self) -> u16 {
+        self.completions.desired_height()
+    }
+
     /// Set commands with descriptions AND an optional category for the inline
     /// completions popup. The category (e.g. "custom" for user-defined
     /// `~/.osa/commands/*.md` commands) lets the popup tag entries so a

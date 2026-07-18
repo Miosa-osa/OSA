@@ -27,6 +27,12 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
 
   alias OptimalSystemAgent.Tools.{PromptAssembler, Registry, UseContext}
 
+  # Core tools inlined into the LITE static base. Mirrors ToolFilter's runtime
+  # allowlist (@priority_tools + the always-on file/task/memory/tool_search set)
+  # so the prompt's tool-defs match the tools a local model can actually call.
+  @core_tools ~w(file_read file_write file_edit file_grep file_glob dir_list
+    shell_execute task_write ask_user memory_recall memory_save tool_search)
+
   @doc """
   Returns the full tool-definitions block for the system prompt, or `nil`
   when no tools are available.
@@ -34,7 +40,19 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
   Catches all errors so a registry crash never prevents boot.
   """
   @spec build() :: String.t() | nil
-  def build do
+  def build, do: do_build([])
+
+  @doc """
+  LITE variant of `build/0`: only the core-tool allowlist (`@core_tools`) is
+  inlined; EVERY other tool is forced to the deferred side — advertised by name
+  in the `<system-reminder>` block and loadable via tool_search — REGARDLESS of
+  its `always_load?/0`. This is what drops the static base from ~24k to ~4-6k for
+  local providers / small windows.
+  """
+  @spec build(:lite) :: String.t() | nil
+  def build(:lite), do: do_build(only: &(&1 in @core_tools))
+
+  defp do_build(opts) do
     tool_modules = fetch_builtin_modules()
 
     case tool_modules do
@@ -45,13 +63,13 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
         ctx = build_use_context(mods)
 
         {loaded_section, deferred_names} =
-          PromptAssembler.assemble(mods, ctx)
+          PromptAssembler.assemble(mods, ctx, opts)
 
         render(loaded_section, deferred_names)
     end
   rescue
     err ->
-      Logger.warning("[Soul.ToolsSection] build/0 failed: #{Exception.message(err)}")
+      Logger.warning("[Soul.ToolsSection] build failed: #{Exception.message(err)}")
       nil
   end
 

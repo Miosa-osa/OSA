@@ -45,7 +45,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   @response_reserve 8_192
 
   defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-  defp max_tokens(model), do: OptimalSystemAgent.Providers.Registry.context_window(model)
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -64,27 +63,46 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    # Single source of truth for the window OSA actually operates within. For
+    # local providers this is capped to :ollama_num_ctx (the same num_ctx we send
+    # to Ollama), so the assembled prompt is budgeted against the REAL window
+    # rather than the model's trained maximum. nil/"" model resolves to the config
+    # default, preserving prior cloud behavior.
     max_tok =
-      case Map.get(state, :model) do
-        nil -> max_tokens()
-        "" -> max_tokens()
-        model -> max_tokens(model)
-      end
+      OptimalSystemAgent.Providers.Registry.effective_context_window(
+        Map.get(state, :model),
+        provider
+      )
+
+    # Local providers (or any small effective window) get the LITE static base:
+    # only the core-tool allowlist is inlined; every other tool is advertised by
+    # name in a <system-reminder> and pulled on demand via tool_search. This keeps
+    # the static base ~4-6k instead of ~24k so the assembled prompt fits a real
+    # <=32k window (and so num_ctx isn't forced up to 32k+).
+    lite? = provider in [:ollama, :lmstudio, :llamacpp] or max_tok < 40_000
 
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
     # This gives each agent role its own focused prompt from AGENT.md.
     static_base =
       case Map.get(state, :system_prompt_override) do
-        nil -> Soul.static_base()
-        "" -> Soul.static_base()
-        override -> override
+        override when override in [nil, ""] ->
+          if lite?, do: Soul.static_base(:lite), else: Soul.static_base()
+
+        override ->
+          override
       end
 
     static_tokens =
       case Map.get(state, :system_prompt_override) do
-        nil -> Soul.static_token_count()
-        "" -> Soul.static_token_count()
-        override -> estimate_tokens(override)
+        override when override in [nil, ""] ->
+          if lite?, do: Soul.static_token_count(:lite), else: Soul.static_token_count()
+
+        override ->
+          estimate_tokens(override)
       end
 
     # Tier 2: Dynamic context

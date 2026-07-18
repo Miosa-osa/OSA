@@ -193,7 +193,7 @@ fn default_profile_dir() -> PathBuf {
 }
 
 fn default_base_url() -> String {
-    std::env::var("OSA_URL").unwrap_or_else(|_| "http://localhost:8089".to_string())
+    std::env::var("OSA_URL").unwrap_or_else(|_| "http://localhost:9089".to_string())
 }
 
 impl Config {
@@ -223,7 +223,7 @@ impl Config {
             );
         } else {
             config.base_url =
-                std::env::var("OSA_URL").unwrap_or_else(|_| "http://localhost:8089".to_string());
+                std::env::var("OSA_URL").unwrap_or_else(|_| "http://localhost:9089".to_string());
         }
 
         debug!(

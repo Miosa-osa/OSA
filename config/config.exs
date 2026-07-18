@@ -12,6 +12,14 @@ config :optimal_system_agent,
   ollama_model: "qwen3-next:80b",
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
 
+  # num_ctx ceiling OSA is willing to allocate for LOCAL providers
+  # (:ollama / :lmstudio / :llamacpp). This is a CEILING, not the model's
+  # trained maximum: KV-cache memory scales with num_ctx, so operators with
+  # small VRAM lower it. It is the single knob that keeps budgeting
+  # (Agent.Context) and the num_ctx we actually send to Ollama in agreement.
+  # See Providers.Registry.effective_context_window/2.
+  ollama_num_ctx: 32_768,
+
   # Anthropic settings (set ANTHROPIC_API_KEY env var)
   anthropic_model: "claude-sonnet-4-6",
 

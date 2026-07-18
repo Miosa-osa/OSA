@@ -125,7 +125,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
           handle_custom_command(conn, custom, conn.body_params["arg"] || "")
 
         true ->
-          execute_cli_command(conn, command)
+          # Reconstruct the full command line from the SEPARATE `command` and
+          # `arg` JSON fields the TUI sends (execute_backend_command splits verb
+          # and args into two fields). Without this, arg-taking slash commands
+          # like `/skill enable <name>` lose their verb+args before reaching
+          # CLI.Commands.dispatch/2. Benefits every arg-taking CLI command.
+          full_command =
+            case conn.body_params["arg"] do
+              a when is_binary(a) and a != "" -> command <> " " <> a
+              _ -> command
+            end
+
+          execute_cli_command(conn, full_command)
       end
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: command")

@@ -20,7 +20,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("continue", "Resume this folder's last session"),
     ("session", "Show or switch session"),
     ("new", "Start a fresh session"),
-    ("skill", "List, run, or create a skill"),
+    ("skill", "List, run, enable, or disable a skill"),
     ("steer", "Redirect the agent mid-turn (queues if idle)"),
     ("bg", "List background turns (Ctrl+B backgrounds one)"),
     ("fg", "Bring a backgrounded turn to the foreground"),

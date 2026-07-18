@@ -151,7 +151,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         messages: format_messages(messages),
         stream: false,
         keep_alive: "30m",
-        options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
+        options: build_options(opts, messages, model)
       }
       |> maybe_add_tools(model, opts)
       |> maybe_add_think(model, opts)
@@ -210,7 +210,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: true,
-        options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
+        options: build_options(opts, messages, model)
       }
 
       body_map =
@@ -379,7 +379,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: true,
-        options: %{temperature: Keyword.get(opts, :temperature, 0.7)}
+        options: build_options(opts, messages, model)
       }
       |> maybe_add_tools(model, opts)
       |> maybe_add_think(model, opts)
@@ -476,6 +476,56 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       not String.contains?(name, ":1.") and
       not String.contains?(name, ":3b")
   end
+
+  # Build the Ollama `options` map with a right-sized context window.
+  #
+  # The bug this fixes: without an explicit num_ctx Ollama defaults it to 4096
+  # (2048 on older builds) and silently LEFT-TRUNCATES any prompt larger than
+  # that — discarding the system prompt and leaving the model an incoherent
+  # tail, which is why local turns returned empty / "...".
+  #
+  # We size num_ctx to actually hold the prompt + the requested output, rounded
+  # up to a sane bucket and capped at the window OSA is willing to allocate
+  # (Registry.effective_context_window/2 — the SAME ceiling Agent.Context
+  # budgets against, so budget and reality agree). `max_tokens` maps to Ollama's
+  # `num_predict` (output cap); Ollama ignores `:max_tokens` entirely.
+  defp build_options(opts, messages, model) do
+    temperature = Keyword.get(opts, :temperature, 0.7)
+    max_ctx = OptimalSystemAgent.Providers.Registry.effective_context_window(model, :ollama)
+
+    # Requested output cap (react_loop passes max_response_tokens, default 32768).
+    # Floor at 256 so a bogus tiny/zero value can't starve generation.
+    num_predict =
+      opts
+      |> Keyword.get(:max_tokens, 4096)
+      |> max(256)
+
+    prompt_tokens = OptimalSystemAgent.Agent.Context.estimate_tokens_messages(messages)
+
+    # num_ctx must be >= prompt_tokens or Ollama truncates the prompt. Size it to
+    # prompt + output + margin, bucket it, then cap at the real window. Because
+    # Agent.Context already budgets the assembled prompt against this same
+    # effective window, prompt_tokens stays under max_ctx and is never truncated;
+    # any leftover room becomes generation headroom.
+    num_ctx =
+      (prompt_tokens + num_predict + 512)
+      |> round_up_ctx()
+      |> min(max_ctx)
+
+    # Never advertise a generation cap larger than the window itself.
+    num_predict = min(num_predict, num_ctx)
+
+    %{temperature: temperature, num_ctx: num_ctx, num_predict: num_predict}
+  end
+
+  # Round a raw token requirement up to a standard KV-cache bucket. Floors at
+  # 4096 (Ollama's own default) so we never REDUCE the window below the default.
+  defp round_up_ctx(n) when n <= 4096, do: 4096
+  defp round_up_ctx(n) when n <= 8192, do: 8192
+  defp round_up_ctx(n) when n <= 16384, do: 16384
+  defp round_up_ctx(n) when n <= 32768, do: 32768
+  defp round_up_ctx(n) when n <= 65536, do: 65536
+  defp round_up_ctx(_), do: 131072
 
   defp format_messages(messages) do
     Enum.map(messages, fn
