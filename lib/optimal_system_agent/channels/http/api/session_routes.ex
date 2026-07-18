@@ -967,6 +967,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── POST /sessions/:id/undo ────────────────────────────────────
+  #
+  # Drop the last exchange (the most recent user turn and everything after it)
+  # from the live session's context buffer — the backend half of /undo.
+  post "/:id/undo" do
+    session_id = conn.params["id"]
+
+    case OptimalSystemAgent.Agent.Loop.undo(session_id) do
+      {:ok, stats} ->
+        json(conn, 200, Map.merge(%{status: "undone", session_id: session_id}, stats))
+
+      {:error, :no_session} ->
+        json_error(conn, 404, "not_running", "No active agent loop for session #{session_id}")
+    end
+  end
+
   match _ do
     json_error(conn, 404, "not_found", "Session endpoint not found")
   end

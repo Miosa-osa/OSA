@@ -160,6 +160,57 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   end
 
   @doc """
+  Delete saved session files older than the `cleanupPeriodDays` retention window
+  (CC-parity; default 30). Called once at startup. A value of `0` purges EVERY
+  saved session (retention disabled). Non-positive/invalid values fall back to
+  the 30-day default. Best-effort: never raises. Returns `{:ok, removed_count}`.
+  """
+  @spec purge_expired() :: {:ok, non_neg_integer()} | {:error, term()}
+  def purge_expired do
+    days = retention_days()
+    cutoff = System.system_time(:second) - days * 86_400
+
+    case File.ls(@sessions_dir) do
+      {:ok, files} ->
+        removed =
+          files
+          |> Enum.filter(&String.ends_with?(&1, ".json"))
+          |> Enum.count(fn file ->
+            path = Path.join(@sessions_dir, file)
+
+            case File.stat(path, time: :posix) do
+              {:ok, %{mtime: mtime}} when days == 0 or mtime < cutoff ->
+                File.rm(path) == :ok
+
+              _ ->
+                false
+            end
+          end)
+
+        if removed > 0 do
+          Logger.info("[session_persist] Purged #{removed} session(s) older than #{days}d")
+        end
+
+        {:ok, removed}
+
+      {:error, :enoent} ->
+        {:ok, 0}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp retention_days do
+    case OptimalSystemAgent.Settings.get("cleanupPeriodDays", 30) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> 30
+    end
+  end
+
+  @doc """
   Merge friendly metadata (e.g. `%{title: ..., tags: [...]}`) into a saved
   session record. Creates the record if none exists yet so `/rename` and `/tag`
   work before the first message is saved. Returns `:ok` or `{:error, reason}`.

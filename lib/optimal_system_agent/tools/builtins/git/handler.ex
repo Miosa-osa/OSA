@@ -76,7 +76,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Handler do
       # so the user sees the advisory even if permissions passed.
       case warn_check(command, args_list) do
         {:warn, message} -> {:ok, message}
-        :ok -> run_git([command | args_list], effective_cwd)
+        :ok -> run_git([command | maybe_coauthor_args(command, args_list)], effective_cwd)
       end
     end
   end
@@ -156,6 +156,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Handler do
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────
+
+  # includeCoAuthoredBy (CC-parity, OSA default FALSE — never-attribute rule):
+  # only when an operator EXPLICITLY opts in (setting == true) does a commit gain
+  # a Co-Authored-By trailer. Default/unset -> no trailer, so OSA never
+  # self-attributes a commit. Attribution is to OSA, never to Claude.
+  defp maybe_coauthor_args("commit", args_list) do
+    if OptimalSystemAgent.Settings.get("includeCoAuthoredBy", false) == true do
+      args_list ++ ["--trailer", "Co-Authored-By: OSA <noreply@osa.dev>"]
+    else
+      args_list
+    end
+  end
+
+  defp maybe_coauthor_args(_command, args_list), do: args_list
 
   defp has_message_flag?([]), do: false
 

@@ -296,6 +296,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
+  Drop the last exchange from the live session's context buffer — the backend
+  half of `/undo`. Removes the most recent `user` turn AND every message after
+  it from `state.messages` (what the model sees next turn). Returns
+  `{:ok, %{messages_before, messages_after, dropped}}` or `{:error, :no_session}`.
+  """
+  @spec undo(String.t()) :: {:ok, map()} | {:error, :no_session | term()}
+  def undo(session_id) do
+    GenServer.call(via(session_id), :undo)
+  catch
+    :exit, _ -> {:error, :no_session}
+  end
+
+  @doc """
   Toggle plan mode for the session.
 
   Returns `{:ok, enabled?}` or `{:error, :no_session}`.
@@ -480,7 +493,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
-      permission_mode: Keyword.get(opts, :permission_mode, :ask),
+      permission_mode: Keyword.get(opts, :permission_mode, default_permission_mode()),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       delegation_policy: Keyword.get(opts, :delegation_policy),
       parent_session_id: Keyword.get(opts, :parent_session_id),
@@ -583,6 +596,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:get_messages, _from, state) do
     {:reply, state.messages, state}
+  end
+
+  def handle_call(:undo, _from, state) do
+    messages = state.messages || []
+    {kept, dropped} = drop_last_exchange(messages)
+
+    stats = %{
+      messages_before: length(messages),
+      messages_after: length(kept),
+      dropped: dropped
+    }
+
+    {:reply, {:ok, stats}, %{state | messages: kept}}
   end
 
   def handle_call(:get_state, _from, state) do
@@ -1067,6 +1093,36 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # --- Helpers ---
 
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
+
+  # permission_mode (CC-parity): the session's starting mode when none is passed
+  # explicitly. Maps Settings.get("permission_mode") (string enum) to the loop's
+  # atom; unknown/unset -> :ask (the safe default).
+  defp default_permission_mode do
+    case OptimalSystemAgent.Settings.get("permission_mode") do
+      "auto-edit" -> :accept_edits
+      "plan" -> :plan
+      "overdrive" -> :overdrive
+      "ask" -> :ask
+      _ -> :ask
+    end
+  end
+
+  # /undo backend: split off the most recent user turn and everything after it.
+  # Returns {kept_messages, dropped_count}. No user turn -> unchanged, 0 dropped.
+  defp drop_last_exchange(messages) do
+    last_user_idx =
+      messages
+      |> Enum.with_index()
+      |> Enum.filter(fn {m, _i} ->
+        to_string(Map.get(m, :role) || Map.get(m, "role") || "") == "user"
+      end)
+      |> List.last()
+
+    case last_user_idx do
+      {_m, idx} -> {Enum.take(messages, idx), length(messages) - idx}
+      nil -> {messages, 0}
+    end
+  end
 
   defp should_plan?(state), do: state.plan_mode_enabled and not state.plan_mode
 

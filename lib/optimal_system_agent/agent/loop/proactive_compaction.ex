@@ -450,7 +450,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   defp safe_to_string(v), do: inspect(v)
 
   defp enabled?,
-    do: Application.get_env(:optimal_system_agent, :proactive_compaction_enabled, true)
+    do:
+      Application.get_env(:optimal_system_agent, :proactive_compaction_enabled, true) and
+        OptimalSystemAgent.Settings.get("autoCompactEnabled", true) == true
 
   defp llm_enabled?,
     do: Application.get_env(:optimal_system_agent, :compactor_llm_enabled, true)

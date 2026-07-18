@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Prompt do
   @moduledoc """
   Dynamic prompt for `file_read`.
 
- The prompt body is a function
+  The prompt body is a function
   (not a static string) so it can reference *current* tool names — when
   `file_edit` is renamed, this prompt updates automatically through the
   `safe_ref/3` helper.

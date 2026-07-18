@@ -21,13 +21,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   Otherwise return the result unchanged.
   """
   def apply_budget(result_str, tool_name, tool_call_id) when is_binary(result_str) do
-    threshold =
-      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, @default_threshold)
-
-    if byte_size(result_str) > threshold do
-      persist_and_reference(result_str, tool_name, tool_call_id, threshold)
-    else
+    # verbose (CC-parity): when set, show full tool output — bypass the byte
+    # budget entirely so nothing is truncated or off-loaded to disk.
+    if OptimalSystemAgent.Settings.get("verbose", false) == true do
       result_str
+    else
+      threshold =
+        Application.get_env(:optimal_system_agent, :max_tool_output_bytes, @default_threshold)
+
+      if byte_size(result_str) > threshold do
+        persist_and_reference(result_str, tool_name, tool_call_id, threshold)
+      else
+        result_str
+      end
     end
   end
 

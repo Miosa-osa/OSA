@@ -16,6 +16,10 @@ defmodule OptimalSystemAgent.Supervisors.Sessions do
 
   @impl true
   def init(_init_arg) do
+    # cleanupPeriodDays (CC-parity): purge saved session transcripts older than
+    # the retention window once at boot. Best-effort — never blocks startup.
+    OptimalSystemAgent.Agent.SessionPersistence.purge_expired()
+
     children = [
       # Channel adapters (CLI, HTTP, Telegram, Discord, Slack, etc.)
       {DynamicSupervisor,
