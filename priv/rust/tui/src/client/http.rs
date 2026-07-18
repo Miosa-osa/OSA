@@ -279,6 +279,32 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/permission-rules — standing permission rules with provenance.
+    pub async fn get_permission_rules(
+        &self,
+    ) -> Result<crate::client::types::PermissionRulesResponse> {
+        let resp = self.get("/api/v1/permission-rules").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /api/v1/hooks — registered hooks per event + metrics.
+    pub async fn get_hooks(&self) -> Result<crate::client::types::HooksResponse> {
+        let resp = self.get("/api/v1/hooks").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /api/v1/mcp — configured MCP servers + status.
+    pub async fn get_mcp_servers(&self) -> Result<crate::client::types::McpServersResponse> {
+        let resp = self.get("/api/v1/mcp").await?;
+        Ok(resp.json().await?)
+    }
+
+    /// GET /api/v1/cost — spend + token accounting.
+    pub async fn get_cost(&self) -> Result<crate::client::types::CostResponse> {
+        let resp = self.get("/api/v1/cost").await?;
+        Ok(resp.json().await?)
+    }
+
     /// GET /api/v1/workspace/trust?path=<dir> — current trust status + risks.
     pub async fn get_trust(&self, path: &str) -> Result<crate::client::types::TrustStatus> {
         let enc: String = path

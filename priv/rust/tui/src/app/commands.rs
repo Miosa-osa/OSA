@@ -115,10 +115,13 @@ impl App {
                 self.open_command_palette();
             }
             "/skill" | "/skills" => {
-                // Skills are backend-managed (list / run / create). Route the
-                // verb + args straight to the backend skill command; empty args
-                // list available skills.
-                self.execute_backend_command("skill", arg);
+                // Bare command opens the branded skills browser; a verb
+                // (run/enable/disable/create…) routes to the backend as before.
+                if arg.is_empty() && !self.activity.a11y() {
+                    self.open_skills_browser();
+                } else {
+                    self.execute_backend_command("skill", arg);
+                }
             }
             "/clear" => {
                 // Local transcript reset...
@@ -531,9 +534,31 @@ impl App {
                 self.execute_backend_command("doctor", "");
             }
             "/cost" => {
-                // Cost & token accounting (Budget.get_status) — rendered into chat
-                // via CommandResult, matching the CLI breakdown.
-                self.execute_backend_command("cost", "");
+                // Branded cost dashboard (spend + tokens + sessions); a11y keeps
+                // the flat CLI breakdown in chat.
+                if self.activity.a11y() {
+                    self.execute_backend_command("cost", "");
+                } else {
+                    self.open_cost_dashboard();
+                }
+            }
+            "/permissions" => {
+                if self.activity.a11y() {
+                    self.execute_backend_command("permissions", arg);
+                } else {
+                    self.open_permissions_manager();
+                }
+            }
+            "/hooks" => {
+                if self.activity.a11y() {
+                    self.execute_backend_command("hooks", arg);
+                } else {
+                    self.open_hooks_viewer();
+                }
+            }
+            "/mcp" => {
+                // Previously had NO handler (fell through to unknown-command).
+                self.open_mcp_servers();
             }
             "/config" => {
                 // Open the unified full-screen settings editor.

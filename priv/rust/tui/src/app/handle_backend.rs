@@ -475,6 +475,133 @@ impl App {
                     );
                 }
             },
+            BackendEvent::PermissionRulesLoaded(result) => match result {
+                Ok(resp) => {
+                    let rules = resp
+                        .rules
+                        .into_iter()
+                        .map(|r| crate::dialogs::permissions_manager::Rule {
+                            behavior: r.behavior,
+                            rule: r.rule,
+                            source: r.source,
+                        })
+                        .collect();
+                    self.permissions_manager =
+                        Some(crate::dialogs::permissions_manager::PermissionsManager::new(rules));
+                    if self.state.can_transition_to(AppState::PermissionsManager) {
+                        self.enter_overlay(AppState::PermissionsManager);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load permission rules: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::HooksLoaded(result) => match result {
+                Ok(resp) => {
+                    let mut events: Vec<crate::dialogs::hooks_viewer::EventHooks> = resp
+                        .hooks
+                        .into_iter()
+                        .map(|(event, hooks)| {
+                            let m = resp.metrics.get(&event);
+                            crate::dialogs::hooks_viewer::EventHooks {
+                                hooks: hooks
+                                    .into_iter()
+                                    .map(|h| crate::dialogs::hooks_viewer::HookEntry {
+                                        name: h.name,
+                                        priority: h.priority,
+                                    })
+                                    .collect(),
+                                calls: m.map(|x| x.calls).unwrap_or(0),
+                                avg_us: m.map(|x| x.avg_us).unwrap_or(0),
+                                event,
+                            }
+                        })
+                        .collect();
+                    events.sort_by(|a, b| a.event.cmp(&b.event));
+                    self.hooks_viewer =
+                        Some(crate::dialogs::hooks_viewer::HooksViewer::new(events));
+                    if self.state.can_transition_to(AppState::Hooks) {
+                        self.enter_overlay(AppState::Hooks);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load hooks: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::McpServersLoaded(result) => match result {
+                Ok(resp) => {
+                    let servers = resp
+                        .servers
+                        .into_iter()
+                        .map(|s| crate::dialogs::mcp_servers::McpServer {
+                            name: s.name,
+                            transport: s.transport,
+                            enabled: s.enabled,
+                            status: s.status,
+                            tool_count: s.tool_count,
+                        })
+                        .collect();
+                    self.mcp_servers =
+                        Some(crate::dialogs::mcp_servers::McpServers::new(servers));
+                    if self.state.can_transition_to(AppState::Mcp) {
+                        self.enter_overlay(AppState::Mcp);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load MCP servers: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::CostLoaded(result) => match result {
+                Ok(r) => {
+                    let view = crate::dialogs::cost_dashboard::CostView {
+                        total_cost_usd: r.total_cost_usd,
+                        total_tokens: r.total_tokens,
+                        input_tokens: r.input_tokens,
+                        output_tokens: r.output_tokens,
+                        sessions: r.sessions,
+                        since: r.since,
+                        monthly_limit_usd: None,
+                        monthly_spent_usd: None,
+                        daily_limit_usd: None,
+                        daily_spent_usd: None,
+                    };
+                    self.cost_dashboard =
+                        Some(crate::dialogs::cost_dashboard::CostDashboard::new(view));
+                    if self.state.can_transition_to(AppState::Cost) {
+                        self.enter_overlay(AppState::Cost);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load cost: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::SkillsBrowserLoaded(result) => match result {
+                Ok(skills) => {
+                    let items = skills
+                        .into_iter()
+                        .map(|s| crate::dialogs::skills_browser::SkillItem {
+                            name: s.name,
+                            description: s.description,
+                            category: s.category,
+                            triggers: s.triggers.unwrap_or_default(),
+                            priority: s.priority,
+                        })
+                        .collect();
+                    self.skills_browser =
+                        Some(crate::dialogs::skills_browser::SkillsBrowser::new(items));
+                    if self.state.can_transition_to(AppState::Skills) {
+                        self.enter_overlay(AppState::Skills);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load skills: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
             BackendEvent::OrchestrateResult(result) => match result {
                 Ok(resp) => {
                     debug!(

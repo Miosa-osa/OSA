@@ -19,6 +19,80 @@ use std::collections::HashMap;
 // Everything below is hand-written for payloads codegen does not reach yet.
 pub use super::generated::*;
 
+// === Management surfaces (GET /api/v1/permission-rules|hooks|mcp|cost) ===
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionRuleDto {
+    #[serde(default)]
+    pub behavior: String,
+    #[serde(default)]
+    pub rule: String,
+    #[serde(default)]
+    pub source: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct PermissionRulesResponse {
+    #[serde(default)]
+    pub rules: Vec<PermissionRuleDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HookEntryDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub priority: i64,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct HookMetricDto {
+    #[serde(default)]
+    pub calls: i64,
+    #[serde(default)]
+    pub avg_us: i64,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct HooksResponse {
+    #[serde(default)]
+    pub hooks: std::collections::HashMap<String, Vec<HookEntryDto>>,
+    #[serde(default)]
+    pub metrics: std::collections::HashMap<String, HookMetricDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub tool_count: i64,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServersResponse {
+    #[serde(default)]
+    pub servers: Vec<McpServerDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CostResponse {
+    #[serde(default)]
+    pub total_cost_usd: f64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub sessions: u64,
+    #[serde(default)]
+    pub since: String,
+}
+
 // === Workspace trust (GET/POST /api/v1/workspace/trust) ===
 
 /// One reason a directory is flagged risky (e.g. untracked executables).

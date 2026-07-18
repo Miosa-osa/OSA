@@ -22,6 +22,12 @@ pub enum AppState {
     Tools,
     ContextBreakdown,
     Trust,
+    PermissionsManager,
+    Hooks,
+    Mcp,
+    Cost,
+    Skills,
+    Channels,
 }
 
 impl AppState {
@@ -52,6 +58,12 @@ impl AppState {
                 | (Idle, Tools)
                 | (Idle, ContextBreakdown)
                 | (Idle, Trust)
+                | (Idle, PermissionsManager)
+                | (Idle, Hooks)
+                | (Idle, Mcp)
+                | (Idle, Cost)
+                | (Idle, Skills)
+                | (Idle, Channels)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -68,6 +80,12 @@ impl AppState {
                 | (Processing, Tools)
                 | (Processing, ContextBreakdown)
                 | (Processing, Trust)
+                | (Processing, PermissionsManager)
+                | (Processing, Hooks)
+                | (Processing, Mcp)
+                | (Processing, Cost)
+                | (Processing, Skills)
+                | (Processing, Channels)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -99,6 +117,18 @@ impl AppState {
                 | (ContextBreakdown, Processing)
                 | (Trust, Idle)
                 | (Trust, Processing)
+                | (PermissionsManager, Idle)
+                | (PermissionsManager, Processing)
+                | (Hooks, Idle)
+                | (Hooks, Processing)
+                | (Mcp, Idle)
+                | (Mcp, Processing)
+                | (Cost, Idle)
+                | (Cost, Processing)
+                | (Skills, Idle)
+                | (Skills, Processing)
+                | (Channels, Idle)
+                | (Channels, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -123,6 +153,12 @@ impl AppState {
                 | AppState::Tools
                 | AppState::ContextBreakdown
                 | AppState::Trust
+                | AppState::PermissionsManager
+                | AppState::Hooks
+                | AppState::Mcp
+                | AppState::Cost
+                | AppState::Skills
+                | AppState::Channels
         )
     }
 
@@ -163,6 +199,12 @@ impl std::fmt::Display for AppState {
             AppState::Tools => write!(f, "Tools"),
             AppState::ContextBreakdown => write!(f, "Context"),
             AppState::Trust => write!(f, "Trust"),
+            AppState::PermissionsManager => write!(f, "Permissions"),
+            AppState::Hooks => write!(f, "Hooks"),
+            AppState::Mcp => write!(f, "MCP"),
+            AppState::Cost => write!(f, "Cost"),
+            AppState::Skills => write!(f, "Skills"),
+            AppState::Channels => write!(f, "Channels"),
         }
     }
 }

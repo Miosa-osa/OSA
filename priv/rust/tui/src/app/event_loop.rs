@@ -440,6 +440,36 @@ impl App {
                                     d.draw(frame, area);
                                 }
                             }
+                            AppState::PermissionsManager => {
+                                if let Some(ref d) = self.permissions_manager {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Hooks => {
+                                if let Some(ref d) = self.hooks_viewer {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Mcp => {
+                                if let Some(ref d) = self.mcp_servers {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Cost => {
+                                if let Some(ref d) = self.cost_dashboard {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Skills => {
+                                if let Some(ref d) = self.skills_browser {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Channels => {
+                                if let Some(ref d) = self.channels_panel {
+                                    d.draw(frame, area);
+                                }
+                            }
                             _ => {}
                         }
                     }

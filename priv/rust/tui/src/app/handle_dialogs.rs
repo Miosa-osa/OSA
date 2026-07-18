@@ -499,6 +499,66 @@ impl App {
         });
     }
 
+    /// `/permissions` — fetch the standing rule set, open the manager overlay.
+    pub(crate) fn open_permissions_manager(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_permission_rules().await {
+                Ok(r) => crate::event::backend::BackendEvent::PermissionRulesLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::PermissionRulesLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
+    /// `/hooks` — fetch registered hooks + metrics, open the viewer.
+    pub(crate) fn open_hooks_viewer(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_hooks().await {
+                Ok(r) => crate::event::backend::BackendEvent::HooksLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::HooksLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
+    /// `/mcp` — fetch configured MCP servers, open the list.
+    pub(crate) fn open_mcp_servers(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_mcp_servers().await {
+                Ok(r) => crate::event::backend::BackendEvent::McpServersLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::McpServersLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
+    /// `/cost` — fetch spend/token accounting, open the dashboard.
+    pub(crate) fn open_cost_dashboard(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_cost().await {
+                Ok(r) => crate::event::backend::BackendEvent::CostLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::CostLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
+    /// `/skill` `/skills` — fetch the loaded skills, open the browser.
+    pub(crate) fn open_skills_browser(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.list_skills().await {
+                Ok(r) => crate::event::backend::BackendEvent::SkillsBrowserLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::SkillsBrowserLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
     /// `/context` — fetch the token-usage breakdown; the `ContextLoaded`
     /// handler stores the snapshot and opens the overlay.
     pub(crate) fn open_context_breakdown(&mut self) {

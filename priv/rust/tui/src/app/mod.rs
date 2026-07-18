@@ -122,6 +122,19 @@ pub struct App {
     /// `/trust` — workspace-trust dialog (AppState::Trust), populated from
     /// GET /workspace/trust and confirmed via POST /workspace/trust/accept.
     pub trust_dialog: Option<crate::dialogs::trust::TrustDialog>,
+    /// `/permissions` — rules manager (AppState::PermissionsManager), from
+    /// GET /api/v1/permission-rules.
+    pub permissions_manager: Option<crate::dialogs::permissions_manager::PermissionsManager>,
+    /// `/hooks` — registered-hooks viewer (AppState::Hooks), from GET /api/v1/hooks.
+    pub hooks_viewer: Option<crate::dialogs::hooks_viewer::HooksViewer>,
+    /// `/mcp` — MCP server list (AppState::Mcp), from GET /api/v1/mcp.
+    pub mcp_servers: Option<crate::dialogs::mcp_servers::McpServers>,
+    /// `/cost` — cost dashboard (AppState::Cost), from GET /api/v1/cost.
+    pub cost_dashboard: Option<crate::dialogs::cost_dashboard::CostDashboard>,
+    /// `/skill` `/skills` — skills browser (AppState::Skills), from GET /api/v1/skills.
+    pub skills_browser: Option<crate::dialogs::skills_browser::SkillsBrowser>,
+    /// `/channels` — channel connectivity panel (AppState::Channels).
+    pub channels_panel: Option<crate::dialogs::channels_panel::ChannelsPanel>,
     /// One-shot overdrive (full-auto) entry confirmation overlay. When Some, it
     /// takes key priority; `overdrive_prev_mode` is the mode to revert to on
     /// cancel.
@@ -422,6 +435,12 @@ impl App {
             context_stats: None,
             tools_browser_pending: false,
             trust_dialog: None,
+            permissions_manager: None,
+            hooks_viewer: None,
+            mcp_servers: None,
+            cost_dashboard: None,
+            skills_browser: None,
+            channels_panel: None,
             overdrive_confirm: None,
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,

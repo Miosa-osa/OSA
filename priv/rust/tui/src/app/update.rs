@@ -217,6 +217,72 @@ impl App {
             AppState::Tools => self.handle_tools_browser_key(key),
             AppState::ContextBreakdown => self.handle_context_breakdown_key(key),
             AppState::Trust => self.handle_trust_key(key),
+            AppState::PermissionsManager => {
+                use crate::dialogs::permissions_manager::PermissionsAction;
+                if matches!(
+                    self.permissions_manager.as_mut().map(|d| d.handle_key(key)),
+                    Some(PermissionsAction::Close)
+                ) {
+                    self.permissions_manager = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Hooks => {
+                use crate::dialogs::hooks_viewer::HooksViewerAction;
+                if matches!(
+                    self.hooks_viewer.as_mut().map(|d| d.handle_key(key)),
+                    Some(HooksViewerAction::Close)
+                ) {
+                    self.hooks_viewer = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Mcp => {
+                use crate::dialogs::mcp_servers::McpServersAction;
+                if matches!(
+                    self.mcp_servers.as_mut().map(|d| d.handle_key(key)),
+                    Some(McpServersAction::Close)
+                ) {
+                    self.mcp_servers = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Cost => {
+                use crate::dialogs::cost_dashboard::CostDashboardAction;
+                if matches!(
+                    self.cost_dashboard.as_mut().map(|d| d.handle_key(key)),
+                    Some(CostDashboardAction::Close)
+                ) {
+                    self.cost_dashboard = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Skills => {
+                use crate::dialogs::skills_browser::SkillsBrowserAction;
+                if matches!(
+                    self.skills_browser.as_mut().map(|d| d.handle_key(key)),
+                    Some(SkillsBrowserAction::Close)
+                ) {
+                    self.skills_browser = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Channels => {
+                use crate::dialogs::channels_panel::ChannelsPanelAction;
+                if matches!(
+                    self.channels_panel.as_mut().map(|d| d.handle_key(key)),
+                    Some(ChannelsPanelAction::Close)
+                ) {
+                    self.channels_panel = None;
+                    self.exit_overlay();
+                }
+                true
+            }
             _ => false,
         }
     }

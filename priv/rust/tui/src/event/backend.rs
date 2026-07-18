@@ -264,6 +264,12 @@ pub enum BackendEvent {
     ContextLoaded(Result<crate::client::types::ContextStats, String>),
     /// `/trust` fetch result → opens the workspace-trust dialog.
     TrustLoaded(Result<crate::client::types::TrustStatus, String>),
+    /// Management-surface fetch results → open their overlays.
+    PermissionRulesLoaded(Result<crate::client::types::PermissionRulesResponse, String>),
+    HooksLoaded(Result<crate::client::types::HooksResponse, String>),
+    McpServersLoaded(Result<crate::client::types::McpServersResponse, String>),
+    CostLoaded(Result<crate::client::types::CostResponse, String>),
+    SkillsBrowserLoaded(Result<Vec<crate::client::types::SkillEntry>, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
