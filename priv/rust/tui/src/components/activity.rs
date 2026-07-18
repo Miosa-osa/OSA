@@ -522,6 +522,10 @@ impl Component for Activity {
             ));
         }
 
+        // WS5 — persistent interrupt affordance (CC SpinnerAnimationRow's
+        // "(esc to interrupt)").
+        spinner_spans.push(Span::styled(" \u{00b7} esc to interrupt", theme.faint()));
+
         let spinner_line = Line::from(spinner_spans);
         frame.render_widget(
             Paragraph::new(spinner_line),

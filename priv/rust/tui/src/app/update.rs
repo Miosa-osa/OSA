@@ -447,6 +447,15 @@ impl App {
                     self.esc_tracker.reset();
                     return false;
                 }
+                // WS5 — queued messages pending at Idle (e.g. after an
+                // interrupt): Esc pops them into the composer for editing (CC
+                // CancelRequestHandler priority 2) instead of starting the
+                // clear / rewind chord.
+                if !self.message_queue.is_empty() {
+                    self.pop_queue_to_composer();
+                    self.esc_tracker.reset();
+                    return false;
+                }
                 let now = std::time::Instant::now();
                 if self.esc_tracker.press(now) {
                     if input_empty {
@@ -585,18 +594,19 @@ impl App {
                 false
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                let now = std::time::Instant::now();
-                if let Some(last) = self.last_cancel_attempt {
-                    if now.duration_since(last) < std::time::Duration::from_millis(1000) {
-                        self.cancel_processing();
-                        return false;
-                    }
-                }
-                self.last_cancel_attempt = Some(now);
-                self.toasts.push(
-                    "Press Ctrl+C again to interrupt".into(),
-                    crate::components::toast::ToastLevel::Warning,
-                );
+                // WS5 — CC parity (useCancelRequest): a SINGLE Ctrl+C interrupts
+                // the running turn, same as Esc. Double-press stays only at Idle
+                // (quit confirm).
+                self.cancel_processing();
+                false
+            }
+            // WS5 — pop queued messages into the composer for editing (CC
+            // messageQueueManager.popAllEditable): ↑ on an EMPTY composer while
+            // items are queued recalls them instead of navigating input history.
+            (KeyCode::Up, KeyModifiers::NONE)
+                if self.input.is_empty() && !self.message_queue.is_empty() =>
+            {
+                self.pop_queue_to_composer();
                 false
             }
             // Ctrl+B background and Ctrl+O expand moved to the keybinding map

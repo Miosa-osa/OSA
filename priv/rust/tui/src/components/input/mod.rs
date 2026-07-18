@@ -67,9 +67,12 @@ pub struct InputComponent {
     redo_stack: Vec<(String, usize)>,
     /// Reverse-incremental history search state (Ctrl+R)
     reverse_search: Option<ReverseSearch>,
-    /// Number of messages queued while the agent is Processing. Purely for the
-    /// small "N queued" indicator; set by the app via `set_queued_count`.
+    /// Number of messages queued while the agent is Processing — drives the
+    /// small "N queued" badge; kept in sync with `queued_items`.
     queued_count: usize,
+    /// WS5 — the queued message texts, rendered as dim recallable lines above
+    /// the composer (CC PromptInputQueuedCommands). Set via `set_queued_items`.
+    queued_items: Vec<String>,
     /// Whether the kitty keyboard-enhancement protocol (DISAMBIGUATE_ESCAPE_CODES)
     /// was enabled at startup. Drives the terminal-aware newline hint: when true
     /// the composer advertises "shift+enter newline"; when false it advertises the
@@ -112,6 +115,7 @@ impl InputComponent {
             redo_stack: Vec::new(),
             reverse_search: None,
             queued_count: 0,
+            queued_items: Vec::new(),
             // Conservative default: assume no enhancement until main.rs probes the
             // terminal, so the always-works backslash hint shows if never set. The
             // test-only InputComponent::new() call sites (event_loop.rs) rely on this.
@@ -119,10 +123,12 @@ impl InputComponent {
         }
     }
 
-    /// Set the "N queued" indicator (messages waiting for the current turn to
-    /// finish). 0 hides it.
-    pub fn set_queued_count(&mut self, n: usize) {
-        self.queued_count = n;
+    /// WS5 — set the queued messages (typed mid-turn). They render as dim
+    /// recallable lines directly above the composer (CC
+    /// PromptInputQueuedCommands) plus the "N queued" badge. Empty hides both.
+    pub fn set_queued_items(&mut self, items: Vec<String>) {
+        self.queued_count = items.len();
+        self.queued_items = items;
     }
 
     /// Record whether the keyboard-enhancement protocol is active (set once from
@@ -202,19 +208,31 @@ impl InputComponent {
     /// bottom divider (Claude-Code frames the prompt with a rule above AND below).
     /// Single-line: 3. Multiline or wrapped: 2 + extra lines (capped at 11).
     pub fn needed_height(&self) -> u16 {
+        let queued = self.queued_lines() as u16;
         if self.content.is_empty() {
-            return 3; // top divider + 1 text row + bottom divider
+            return 3 + queued; // queued rows + top divider + 1 text row + bottom divider
         }
         let prompt_len: usize = if self.processing { 4 } else { 2 };
         let avail = (self.width as usize).saturating_sub(prompt_len + 1); // usable chars
         if avail == 0 {
-            return 3;
+            return 3 + queued;
         }
         let char_count = self.content.chars().count();
         let wrap_lines = ((char_count + avail - 1) / avail) as u16; // ceil division
         let newline_lines = self.content.lines().count().max(1) as u16;
         let text_lines = wrap_lines.max(newline_lines);
-        (2 + text_lines).min(11) // top divider + text + bottom divider, cap at 11
+        (2 + text_lines).min(11) + queued // top divider + text + bottom divider, cap at 11
+    }
+
+    /// WS5 — rows used by the queued-message display above the composer: one
+    /// per item (each clipped to a single row), capped at 4 items plus a
+    /// "+N more queued" overflow row.
+    fn queued_lines(&self) -> usize {
+        match self.queued_items.len() {
+            0 => 0,
+            n if n <= 4 => n,
+            _ => 5,
+        }
     }
 
     /// Set processing indicator state (Step 4)
@@ -1205,6 +1223,41 @@ impl Component for InputComponent {
 
     fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = style::theme();
+
+        // WS5 — queued messages (typed mid-turn) render as dim one-row lines
+        // directly above the composer (CC PromptInputQueuedCommands) so the
+        // user can see and verify what they queued; ↑ / Esc pops them back
+        // into the composer for editing.
+        let mut area = area;
+        let queued_rows = self.queued_lines() as u16;
+        if queued_rows > 0 && area.height > queued_rows + 1 {
+            let max_items = 4usize;
+            let shown = self.queued_items.len().min(max_items);
+            for (i, item) in self.queued_items.iter().take(shown).enumerate() {
+                let one_line = item.replace('\n', " ");
+                let line = Line::from(vec![
+                    Span::styled("\u{29d6} ", theme.hint()),
+                    Span::styled(one_line, theme.hint()),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(line),
+                    Rect::new(area.x, area.y + i as u16, area.width, 1),
+                );
+            }
+            if self.queued_items.len() > max_items {
+                let more = format!("  +{} more queued", self.queued_items.len() - max_items);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(more, theme.hint())),
+                    Rect::new(area.x, area.y + shown as u16, area.width, 1),
+                );
+            }
+            area = Rect::new(
+                area.x,
+                area.y + queued_rows,
+                area.width,
+                area.height - queued_rows,
+            );
+        }
 
         if area.height < 2 {
             return;

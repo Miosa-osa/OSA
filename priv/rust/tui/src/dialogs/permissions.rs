@@ -1,4 +1,5 @@
-// Phase 2+: permissions set_diff() — wired when permission review shows diffs
+// Enriched permission dialog: diff viewport (set_diff, wired from the
+// permission_required event) plus warning/reason metadata lines.
 #![allow(dead_code)]
 
 use std::cell::Cell;
@@ -39,6 +40,10 @@ pub struct Permissions {
     request_id: String,
     pub diff_old: Option<String>,
     pub diff_new: Option<String>,
+    /// Destructive-command warning from the backend (informational).
+    pub warning: Option<String>,
+    /// Why the prompt fired (ask rule, safety path, out-of-scope path).
+    pub reason: Option<String>,
     /// 0 = Allow, 1 = Allow Session, 2 = Allow Always, 3 = Deny
     pub selected: usize,
     pub scroll: u16,
@@ -65,6 +70,8 @@ impl Permissions {
             request_id: String::new(),
             diff_old: None,
             diff_new: None,
+            warning: None,
+            reason: None,
             selected: 0,
             scroll: 0,
             clarify_mode: false,
@@ -80,6 +87,8 @@ impl Permissions {
         self.request_id = request_id;
         self.diff_old = None;
         self.diff_new = None;
+        self.warning = None;
+        self.reason = None;
         self.scroll = 0;
         self.selected = 0;
         self.clarify_mode = false;
@@ -96,6 +105,12 @@ impl Permissions {
         self.diff_old = Some(old);
         self.diff_new = Some(new);
         self.scroll = 0;
+    }
+
+    /// Attach the enriched metadata (destructive warning + prompt reason).
+    pub fn set_meta(&mut self, warning: Option<String>, reason: Option<String>) {
+        self.warning = warning;
+        self.reason = reason;
     }
 
     /// Handle a key event.  Returns `Some(action)` when the dialog should close.
@@ -256,6 +271,34 @@ impl Permissions {
                 Rect::new(inner.x, cursor_y, inner.width, 1),
             );
             cursor_y += 1;
+        }
+
+        // ── Warning / reason lines (enriched permission event) ───────────────
+        if let Some(warning) = &self.warning {
+            if cursor_y < inner.y + inner.height {
+                let line = Line::from(vec![
+                    Span::styled("  ⚠ ", Style::default().fg(theme.colors.warning)),
+                    Span::styled(warning.clone(), Style::default().fg(theme.colors.warning)),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(line),
+                    Rect::new(inner.x, cursor_y, inner.width, 1),
+                );
+                cursor_y += 1;
+            }
+        }
+        if let Some(reason) = &self.reason {
+            if cursor_y < inner.y + inner.height {
+                let line = Line::from(vec![
+                    Span::styled("  Why:   ", Style::default().fg(theme.colors.muted)),
+                    Span::styled(reason.clone(), Style::default().fg(theme.colors.dim)),
+                ]);
+                frame.render_widget(
+                    Paragraph::new(line),
+                    Rect::new(inner.x, cursor_y, inner.width, 1),
+                );
+                cursor_y += 1;
+            }
         }
 
         // ── Separator ────────────────────────────────────────────────────────

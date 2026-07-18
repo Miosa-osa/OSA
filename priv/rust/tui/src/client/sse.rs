@@ -1156,19 +1156,45 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             struct Ev {
                 #[serde(default)]
                 tool: String,
+                /// Flat hint string on current backends; older backends sent a
+                /// {tool, args} object — accept both.
                 #[serde(default)]
-                args: String,
+                args: serde_json::Value,
                 #[serde(default)]
                 request_id: String,
+                #[serde(default)]
+                kind: Option<String>,
+                #[serde(default)]
+                old_content: Option<String>,
+                #[serde(default)]
+                new_content: Option<String>,
+                #[serde(default)]
+                warning: Option<String>,
+                #[serde(default)]
+                reason: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("permission_required", e)),
             };
+            let args = match ev.args {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Object(map) => map
+                    .get("args")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => String::new(),
+            };
             Some(BackendEvent::PermissionRequired {
                 tool: ev.tool,
-                args: ev.args,
+                args,
                 request_id: ev.request_id,
+                kind: ev.kind.unwrap_or_default(),
+                old_content: ev.old_content,
+                new_content: ev.new_content,
+                warning: ev.warning,
+                reason: ev.reason,
             })
         }
 

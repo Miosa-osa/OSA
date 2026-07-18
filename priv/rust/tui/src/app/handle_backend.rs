@@ -1353,12 +1353,25 @@ impl App {
                     }
                 }
             }
-            BackendEvent::PermissionRequired { tool, args, request_id } => {
+            BackendEvent::PermissionRequired {
+                tool,
+                args,
+                request_id,
+                kind: _,
+                old_content,
+                new_content,
+                warning,
+                reason,
+            } => {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
                 // Carry the backend-assigned request_id so the user's decision can
                 // resume the exact parked tool call via POST /permissions/respond.
                 let mut dialog = crate::dialogs::permissions::Permissions::new();
                 dialog.set_tool(tool, args, request_id);
+                if let (Some(old), Some(new)) = (old_content, new_content) {
+                    dialog.set_diff(old, new);
+                }
+                dialog.set_meta(warning, reason);
                 self.permissions = Some(dialog);
                 if self.state.can_transition_to(AppState::Permissions) {
                     self.enter_overlay(AppState::Permissions);

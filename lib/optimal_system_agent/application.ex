@@ -103,6 +103,11 @@ defmodule OptimalSystemAgent.Application do
     # (same concurrency rationale as :osa_cancel_flags). See Loop.Steer.
     :ets.new(:osa_steer_queue, [:named_table, :public, :ordered_set])
 
+    # WS5 — per-session buffer of in-flight streamed text: {session_id, [delta | acc]}
+    # (reverse iodata). Written by LLMClient's text_delta callback, read on a hard
+    # interrupt so the partial assistant text survives the stream abort.
+    :ets.new(:osa_stream_partial, [:named_table, :public, :set])
+
     # ETS table for ask_user_question survey answers — the HTTP endpoint writes
     # answers here, Loop.ask_user_question/4 polls and consumes them.
     :ets.new(:osa_survey_answers, [:set, :public, :named_table])

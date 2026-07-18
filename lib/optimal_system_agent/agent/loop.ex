@@ -871,9 +871,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
       tools_used: Enum.uniq(turn_tool_names)
     }
 
+    # WS5 — an interrupted turn already ends with the USER-role interrupt
+    # marker appended by ReactLoop.finalize_interrupt; appending the marker
+    # again here as an ASSISTANT message would flip its role for the model.
+    new_messages =
+      if response in ReactLoop.interrupt_markers() do
+        state.messages
+      else
+        state.messages ++ [%{role: "assistant", content: response}]
+      end
+
     state = %{
       state
-      | messages: state.messages ++ [%{role: "assistant", content: response}],
+      | messages: new_messages,
         status: :idle,
         last_meta: meta
     }

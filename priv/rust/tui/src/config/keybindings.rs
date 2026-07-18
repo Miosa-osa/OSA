@@ -176,6 +176,10 @@ pub enum Action {
     ThinkingToggle,
     TodosToggle,
     CopyLast,
+    /// WS5 — interrupt the running turn (chat:interrupt). Esc / Ctrl+C are
+    /// hardwired to the same path in update.rs (non-rebindable); this action
+    /// lets users bind ADDITIONAL keys to interrupt.
+    Interrupt,
     Command(String),
 }
 
@@ -200,6 +204,7 @@ impl Action {
             "chat:thinkingToggle" => Action::ThinkingToggle,
             "chat:todosToggle" => Action::TodosToggle,
             "chat:copyLast" => Action::CopyLast,
+            "chat:interrupt" => Action::Interrupt,
             s if s.starts_with('/') => Action::Command(s.to_string()),
             _ => return None,
         })
@@ -226,6 +231,7 @@ impl Action {
             Action::ThinkingToggle => "chat:thinkingToggle".into(),
             Action::TodosToggle => "chat:todosToggle".into(),
             Action::CopyLast => "chat:copyLast".into(),
+            Action::Interrupt => "chat:interrupt".into(),
             Action::Command(c) => c.clone(),
         }
     }

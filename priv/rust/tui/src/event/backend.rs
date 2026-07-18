@@ -287,6 +287,15 @@ pub enum BackendEvent {
         tool: String,
         args: String,
         request_id: String,
+        /// Request kind: "bash" | "file_edit" | "file_write" | "file_delete" | "fetch" | "mcp" | "other".
+        kind: String,
+        /// Old/new content when the request is an edit/write (diff rendering).
+        old_content: Option<String>,
+        new_content: Option<String>,
+        /// Destructive-command warning (informational).
+        warning: Option<String>,
+        /// Why the prompt fired (ask rule, out-of-scope path, safety path).
+        reason: Option<String>,
     },
     /// Backend proposing a plan for the user to review before execution.
     PlanProposed {

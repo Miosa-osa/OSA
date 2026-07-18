@@ -177,6 +177,16 @@ impl App {
                 self.copy_last_message();
                 Some(false)
             }
+            Action::Interrupt => {
+                // WS5 — interrupt through the action layer. Declines at Idle so
+                // a bound key falls through to the composer.
+                if self.state.is_processing() {
+                    self.cancel_processing();
+                    Some(false)
+                } else {
+                    None
+                }
+            }
             Action::Command(cmd) => {
                 self.handle_command(cmd);
                 Some(false)

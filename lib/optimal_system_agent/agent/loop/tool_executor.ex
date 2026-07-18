@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
+  alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
   alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
@@ -238,6 +239,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
     mode = Map.get(state, :permission_mode, :ask)
 
+    # Bypass-immune safety paths (.git internals, OSA settings/permission
+    # files, shell rc). Computed once, consumed by step 1c below.
+    safety_ask =
+      Permissions.bypass_immune_ask(tool_call.name, Map.get(tool_call, :arguments) || %{})
+
     cond do
       match?({:blocked, _}, circuit_breaker) ->
         {:blocked, reason} = circuit_breaker
@@ -254,6 +260,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       # included. Same message as the maybe_ask/2 deny branch.
       saved_rule_denies?(tool_call) ->
         {:blocked, "Blocked: #{tool_call.name} is denied by a saved permission rule"}
+
+      # Step 1c — bypass-immune safety ask: mutating writes to .git/ internals,
+      # OSA settings/permission files, and shell startup files ALWAYS prompt —
+      # overdrive/accept_edits included — and saved allow rules or session
+      # grants cannot skip it (CC parity: rule-based checks still run under
+      # bypassPermissions). Plan mode and tier denials still win: a tool the
+      # tier forbids stays blocked rather than becoming promptable.
+      is_binary(safety_ask) and mode != :plan and
+          permission_tier_allows?(state.permission_tier, tool_call.name) ->
+        safety_prompt(tool_call, safety_ask)
 
       # Overdrive / bypass (full auto): everything past the circuit-breaker runs.
       mode in [:overdrive, :bypass] ->
@@ -332,46 +348,93 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     end
   end
 
-  # The tier permitted the call. Enforce saved allow/deny rules, then decide
-  # whether an interactive prompt is required.
+  # The tier permitted the call. Enforce saved allow/deny/ask rules (with
+  # provenance) and path-scope checks, then decide whether to prompt.
   #
   # Read-only tools never prompt (no side effects). For mutating tools:
-  #   - saved "allow"/"deny" rule short-circuits (no prompt)
-  #   - "allow for this session" grant short-circuits
-  #   - otherwise, when interactive permissions are enabled, PARK and ask; when
-  #     disabled (headless non-TUI channels: Slack/Discord/HTTP) FAIL CLOSED —
-  #     auto-reject with a clear message. The explicit
-  #     `:non_interactive_permission_bypass` config restores the old auto-allow
-  #     (set in config/test.exs for the suite, and for deliberate unattended runs).
+  #   - a deny rule blocks (message carries rule + source provenance)
+  #   - an allow rule short-circuits — unless the write is out of workspace
+  #     scope and the rule is only tool-level (a content rule that names the
+  #     path is honored; a blanket tool allow does not cover foreign paths)
+  #   - an explicit ask rule or an out-of-scope path always prompts (the
+  #     session-scoped grant cannot skip it)
+  #   - otherwise the session grant short-circuits, else PARK and ask; when
+  #     interactive prompts are disabled (headless channels) FAIL CLOSED —
+  #     the explicit `:non_interactive_permission_bypass` config restores the
+  #     old auto-allow (config/test.exs and deliberate unattended runs).
   defp maybe_ask(tool_call, state) do
-    cond do
-      permission_tier_allows?(:read_only, tool_call.name) ->
-        :allow
+    if permission_tier_allows?(:read_only, tool_call.name) do
+      :allow
+    else
+      args = Map.get(tool_call, :arguments) || %{}
+      {decision, meta} = Permissions.check_detailed(tool_call.name, args)
+      oos_path = Permissions.out_of_scope_write(tool_call.name, args)
 
-      true ->
-        args = Map.get(tool_call, :arguments) || %{}
+      cond do
+        decision == :deny ->
+          {:blocked,
+           "Blocked: #{tool_call.name} is denied by a saved permission rule" <>
+             provenance_suffix(meta)}
 
-        case Permissions.check(tool_call.name, args) do
-          :allow ->
-            :allow
+        decision == :allow and (oos_path == nil or content_rule?(meta)) ->
+          :allow
 
-          :deny ->
-            {:blocked, "Blocked: #{tool_call.name} is denied by a saved permission rule"}
+        true ->
+          reason = ask_reason(decision, meta, oos_path)
+          explicit_ask_rule? = decision == :ask and is_binary(meta.rule)
 
-          :ask ->
-            cond do
-              not interactive_permissions?() ->
-                non_interactive_decision(tool_call)
+          cond do
+            not interactive_permissions?() ->
+              non_interactive_decision(tool_call)
 
-              PermissionBroker.session_allowed?(state.session_id, tool_call.name) ->
-                :allow
+            explicit_ask_rule? or oos_path != nil ->
+              {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
 
-              true ->
-                {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call)}
-            end
-        end
+            PermissionBroker.session_allowed?(state.session_id, tool_call.name) ->
+              :allow
+
+            true ->
+              {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
+          end
+      end
     end
   end
+
+  defp content_rule?(%{rule: rule}) when is_binary(rule),
+    do: Permissions.parse_rule(rule).content != nil
+
+  defp content_rule?(_), do: false
+
+  defp provenance_suffix(%{rule: rule, source: source}) when is_binary(rule),
+    do: " (#{rule}, #{source} settings)"
+
+  defp provenance_suffix(_), do: ""
+
+  defp ask_reason(:allow, _meta, oos) when is_binary(oos),
+    do: "path is outside the workspace and allowed directories: #{oos}"
+
+  defp ask_reason(:ask, %{rule: rule, source: source}, _oos) when is_binary(rule),
+    do: "an ask rule requires confirmation: #{rule} (#{source} settings)"
+
+  defp ask_reason(_decision, _meta, oos) when is_binary(oos),
+    do: "path is outside the workspace and allowed directories: #{oos}"
+
+  defp ask_reason(_, _, _), do: nil
+
+  # Bypass-immune safety paths prompt even in overdrive; on channels that
+  # cannot prompt this fails closed (the explicit test/unattended bypass
+  # config in non_interactive_decision/1 is honored).
+  defp safety_prompt(tool_call, reason) do
+    if interactive_permissions?() do
+      {:ask, PermissionBroker.new_request_id(),
+       permission_summary(tool_call, "Safety check (not bypassable): #{reason}")}
+    else
+      non_interactive_decision(tool_call)
+    end
+  end
+
+  defp saved_rule_for(tool_call),
+    do: Permissions.suggested_rule(tool_call.name, Map.get(tool_call, :arguments) || %{})
 
   defp interactive_permissions? do
     Application.get_env(:optimal_system_agent, :interactive_permissions, true)
@@ -392,11 +455,86 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     end
   end
 
-  defp permission_summary(tool_call) do
+  # Enriched permission_required payload (CC parity): kind, old/new content
+  # for diff rendering, destructive-command warning, prompt reason, and
+  # structured rule/directory suggestions.
+  defp permission_summary(tool_call, reason) do
+    args = Map.get(tool_call, :arguments) || %{}
+    kind = permission_kind(tool_call.name)
+    {old_content, new_content} = permission_diff(tool_call.name, args)
+
+    warning =
+      if kind == "bash",
+        do: DestructiveWarning.warning_for(Map.get(args, "command") || Map.get(args, "code")),
+        else: nil
+
     %{
       tool: tool_call.name,
-      args: tool_call_hint(Map.get(tool_call, :arguments) || %{})
+      args: tool_call_hint(args),
+      kind: kind,
+      old_content: old_content,
+      new_content: new_content,
+      warning: warning,
+      reason: reason,
+      suggestions: permission_suggestions(tool_call.name, args)
     }
+  end
+
+  defp permission_kind(name) do
+    cond do
+      name in OptimalSystemAgent.Agent.Safety.DangerousCommands.shell_tools() -> "bash"
+      name in ["file_edit", "multi_file_edit"] -> "file_edit"
+      name in ["file_write", "file_create"] -> "file_write"
+      name in ["file_delete", "file_move"] -> "file_delete"
+      name in ["web_fetch", "web_search"] -> "fetch"
+      String.starts_with?(name, "mcp__") -> "mcp"
+      true -> "other"
+    end
+  end
+
+  # Old/new content for the dialog's diff viewport. Edits carry their own
+  # old/new strings; whole-file writes diff against the current disk content.
+  @permission_diff_limit 20_000
+  defp permission_diff(name, %{"old_string" => old, "new_string" => new})
+       when name in ["file_edit", "multi_file_edit"] and is_binary(old) and is_binary(new) do
+    {truncate_content(old), truncate_content(new)}
+  end
+
+  defp permission_diff(name, %{"path" => path, "content" => content})
+       when name in ["file_write", "file_create"] and is_binary(path) and is_binary(content) do
+    old =
+      case File.read(path) do
+        {:ok, existing} -> existing
+        _ -> ""
+      end
+
+    {truncate_content(old), truncate_content(content)}
+  end
+
+  defp permission_diff(_name, _args), do: {nil, nil}
+
+  defp truncate_content(bin) when byte_size(bin) > @permission_diff_limit,
+    do: binary_part(bin, 0, @permission_diff_limit) <> "\n… (truncated)"
+
+  defp truncate_content(bin), do: bin
+
+  defp permission_suggestions(name, args) do
+    rule_suggestion = [
+      %{
+        type: "addRules",
+        behavior: "allow",
+        rule: Permissions.suggested_rule(name, args),
+        destination: "localSettings"
+      }
+    ]
+
+    dir_suggestion =
+      case Permissions.out_of_scope_write(name, args) do
+        nil -> []
+        path -> [%{type: "addDirectories", directories: [Path.dirname(path)]}]
+      end
+
+    rule_suggestion ++ dir_suggestion
   end
 
   # Emit `permission_required` (mirrors the plan_proposed emit path) then block
@@ -438,14 +576,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         :allow
 
       :allow_always ->
-        Permissions.save_rule(tool_call.name, :allow_always)
+        # Persist a SCOPED rule, not a whole-tool allow: shell calls save a
+        # command-prefix rule (e.g. shell_execute(npm test:*)); other tools
+        # keep the tool-level rule.
+        tool_call |> saved_rule_for() |> Permissions.save_rule(:allow_always)
         :allow
 
       :deny ->
         {:blocked, "Blocked: you declined to run #{tool_call.name}"}
 
       :deny_always ->
-        Permissions.save_rule(tool_call.name, :deny_always)
+        tool_call |> saved_rule_for() |> Permissions.save_rule(:deny_always)
         {:blocked, "Blocked: #{tool_call.name} denied and saved as a standing rule"}
 
       :clarify ->
@@ -457,13 +598,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   end
 
   defp emit_permission_required(state, request_id, tool_call, summary) do
+    # `args` is the flat human hint STRING (the TUI deserializes it as a
+    # string — the previous nested summary map failed serde parsing and the
+    # dialog never opened via this path); enriched fields ride at top level.
     payload = %{
       type: :system_event,
       event: :permission_required,
       session_id: state.session_id,
       request_id: request_id,
       tool: tool_call.name,
-      args: summary
+      args: Map.get(summary, :args, ""),
+      kind: Map.get(summary, :kind, "other"),
+      old_content: Map.get(summary, :old_content),
+      new_content: Map.get(summary, :new_content),
+      warning: Map.get(summary, :warning),
+      reason: Map.get(summary, :reason),
+      suggestions: Map.get(summary, :suggestions, [])
     }
 
     Phoenix.PubSub.broadcast(
@@ -474,13 +624,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
     Bus.emit(
       :system_event,
-      %{
-        event: :permission_required,
-        session_id: state.session_id,
-        request_id: request_id,
-        tool: tool_call.name,
-        args: summary
-      },
+      Map.delete(payload, :type),
       Observability.annotate(state, source: "agent.tool_executor")
     )
 

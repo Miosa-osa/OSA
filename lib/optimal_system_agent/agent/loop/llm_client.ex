@@ -50,11 +50,34 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     heartbeat = :atomics.new(1, signed: false)
     :atomics.put(heartbeat, 1, 1)
 
+    # WS5 — reset this session's partial-text buffer for the new stream so an
+    # interrupt persists only THIS stream's text.
+    try do
+      :ets.insert(:osa_stream_partial, {session_id, []})
+    rescue
+      ArgumentError -> :ok
+    end
+
     caller = self()
 
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+
+        # WS5 — accumulate the partial text (reverse-prepended iodata; single
+        # writer = this stream task) so a hard abort can persist what the model
+        # had already produced.
+        try do
+          case :ets.lookup(:osa_stream_partial, session_id) do
+            [{^session_id, acc}] when is_list(acc) ->
+              :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+
+            _ ->
+              :ets.insert(:osa_stream_partial, {session_id, [text]})
+          end
+        rescue
+          ArgumentError -> :ok
+        end
 
         Bus.emit(:system_event, %{
           event: :streaming_token,
@@ -202,6 +225,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     watchdog =
       spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)
 
+    # WS5 — hard-abort watcher: polls the shared cancel flag every 150ms and
+    # pings this caller to kill the in-flight stream the moment the user
+    # interrupts — instead of the stream running to the next ReAct iteration
+    # boundary. Self-terminates once the stream task is dead.
+    _canceller = spawn_link(fn -> cancel_watch_loop(session_id, stream_task, caller) end)
+
     # Wait for stream completion or idle timeout
     result =
       receive do
@@ -214,6 +243,20 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           # on timeout which crashes the agent loop.
           Task.shutdown(stream_task, 5_000)
           {:ok, stream_result}
+
+        {:llm_stream_cancelled} ->
+          # WS5 hard abort: the user interrupted — kill the in-flight provider
+          # stream NOW and hand back whatever text already streamed so
+          # ReactLoop can persist it under an interrupt marker.
+          Logger.info(
+            "[stream] User interrupt — killing in-flight stream for session:#{session_id}"
+          )
+
+          Process.unlink(watchdog)
+          Process.exit(watchdog, :normal)
+          Task.shutdown(stream_task, :brutal_kill)
+          flush_stream_messages()
+          {:cancelled, %{content: partial_text(session_id)}}
 
         {:llm_idle_timeout, elapsed_ms} ->
           # Watchdog detected idle connection — kill the stream
@@ -262,6 +305,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           {:error, "LLM stream exceeded 1 hour absolute limit"}
       end
 
+    # WS5 — drain a stale watcher ping that raced the stream's own termination
+    # so it can never leak into the Loop process mailbox as an unexpected info.
+    receive do
+      {:llm_stream_cancelled} -> :ok
+    after
+      0 -> :ok
+    end
+
     # Record provider telemetry
     stream_duration =
       System.monotonic_time(:millisecond) -
@@ -288,6 +339,50 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     e ->
       Logger.error("[stream] Exception in llm_chat_stream: #{inspect(e)}")
       {:error, "Stream error: #{inspect(e)}"}
+  end
+
+  # WS5 — cancel watcher: poll the shared cancel-flag table; ping the stream
+  # owner the moment the flag appears while the stream is still running.
+  defp cancel_watch_loop(session_id, stream_task, owner) do
+    Process.sleep(150)
+
+    cancelled? =
+      try do
+        match?([{^session_id, true}], :ets.lookup(:osa_cancel_flags, session_id))
+      rescue
+        ArgumentError -> false
+      end
+
+    cond do
+      not Process.alive?(stream_task.pid) -> :ok
+      cancelled? -> send(owner, {:llm_stream_cancelled})
+      true -> cancel_watch_loop(session_id, stream_task, owner)
+    end
+  end
+
+  # Partial streamed text accumulated by the text_delta callback (reverse
+  # iodata rows in :osa_stream_partial), joined for interrupt persistence.
+  defp partial_text(session_id) do
+    case :ets.lookup(:osa_stream_partial, session_id) do
+      [{^session_id, acc}] when is_list(acc) ->
+        acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+      _ ->
+        ""
+    end
+  rescue
+    ArgumentError -> ""
+  end
+
+  # After a hard abort, drop any {:done}/task-result messages the dying stream
+  # already enqueued, so they never reach the Loop mailbox as stale infos.
+  defp flush_stream_messages do
+    receive do
+      {:llm_stream_done, _} -> flush_stream_messages()
+      {:llm_stream_task_result, _} -> flush_stream_messages()
+    after
+      0 -> :ok
+    end
   end
 
   # Watchdog process: polls heartbeat counter every 10s.

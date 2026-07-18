@@ -39,6 +39,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   @default_max_concurrency 10
   @default_timeout_ms 60_000
+  # WS5 — shared cancel-flag table (same as ReactLoop) + await poll cadence.
+  @cancel_table :osa_cancel_flags
+  @poll_interval_ms 200
 
   @type tool_call :: %{
           required(:id) => String.t(),
@@ -133,39 +136,103 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   defp run_parallel([], _state, _opts), do: []
 
+  # WS5 — explicit per-tool tasks (instead of async_stream_nolink) so a user
+  # interrupt can brutal-kill every in-flight tool the moment the cancel flag
+  # is set, rather than waiting for the batch to finish. Chunked by
+  # max_concurrency to preserve the previous parallelism bound.
   defp run_parallel(tool_calls, state, opts) do
     supervisor = Keyword.get(opts, :supervisor, OptimalSystemAgent.TaskSupervisor)
     executor = Keyword.get(opts, :executor, ToolExecutor)
     max_conc = Keyword.get(opts, :max_concurrency, @default_max_concurrency)
     timeout = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    sid = Map.get(state, :session_id)
 
-    supervisor
-    |> Task.Supervisor.async_stream_nolink(
-      tool_calls,
-      fn tc -> executor.execute_tool_call(tc, state) end,
-      max_concurrency: max_conc,
-      timeout: timeout,
-      on_timeout: :kill_task
-    )
-    |> Enum.zip(tool_calls)
-    |> Enum.map(&parallel_result/1)
-  end
+    tool_calls
+    |> Enum.chunk_every(max_conc)
+    |> Enum.flat_map(fn chunk ->
+      if cancelled?(sid) do
+        Enum.map(chunk, fn tc -> {tc, interrupted_result(tc)} end)
+      else
+        tasks =
+          Enum.map(chunk, fn tc ->
+            {tc,
+             Task.Supervisor.async_nolink(supervisor, fn ->
+               executor.execute_tool_call(tc, state)
+             end)}
+          end)
 
-  defp run_serial(tool_calls, state, opts) do
-    executor = Keyword.get(opts, :executor, ToolExecutor)
-
-    Enum.map(tool_calls, fn tc ->
-      {tc, executor.execute_tool_call(tc, state)}
+        deadline = System.monotonic_time(:millisecond) + timeout
+        collect_tasks(tasks, [], sid, deadline)
+      end
     end)
   end
 
-  defp parallel_result({{:ok, result}, tc}), do: {tc, result}
+  # Serial barriers now also run inside a supervised task (one at a time) so an
+  # interrupt can kill a long-running barrier tool too. execute_tool_call has
+  # always been task-safe: the parallel path and StreamingToolExecutor already
+  # ran it under Task.Supervisor.
+  defp run_serial(tool_calls, state, opts) do
+    run_parallel(tool_calls, state, Keyword.put(opts, :max_concurrency, 1))
+  end
 
-  defp parallel_result({{:exit, _reason}, tc}),
-    do: {tc, error_result(tc, "Tool execution timed out")}
+  # Poll-await a batch: finishes normally, hard-kills every still-running task
+  # the moment the session's cancel flag appears (WS5 interrupt), or kills on
+  # deadline (parity with the old async_stream on_timeout: :kill_task).
+  defp collect_tasks([], done, _sid, _deadline), do: Enum.reverse(done)
 
-  defp parallel_result({_, tc}),
-    do: {tc, error_result(tc, "Tool execution failed")}
+  defp collect_tasks(pending, done, sid, deadline) do
+    cond do
+      cancelled?(sid) ->
+        killed =
+          Enum.map(pending, fn {tc, task} ->
+            case Task.shutdown(task, :brutal_kill) do
+              {:ok, result} -> {tc, result}
+              _ -> {tc, interrupted_result(tc)}
+            end
+          end)
+
+        Enum.reverse(done) ++ killed
+
+      System.monotonic_time(:millisecond) > deadline ->
+        timed_out =
+          Enum.map(pending, fn {tc, task} ->
+            case Task.shutdown(task, :brutal_kill) do
+              {:ok, result} -> {tc, result}
+              _ -> {tc, error_result(tc, "Tool execution timed out")}
+            end
+          end)
+
+        Enum.reverse(done) ++ timed_out
+
+      true ->
+        yielded = Task.yield_many(Enum.map(pending, &elem(&1, 1)), @poll_interval_ms)
+        results = Map.new(yielded, fn {task, res} -> {task.ref, res} end)
+
+        {still_pending, newly_done} =
+          Enum.reduce(pending, {[], done}, fn {tc, task}, {p, d} ->
+            case Map.get(results, task.ref) do
+              nil -> {[{tc, task} | p], d}
+              {:ok, result} -> {p, [{tc, result} | d]}
+              {:exit, _} -> {p, [{tc, error_result(tc, "Tool execution failed")} | d]}
+            end
+          end)
+
+        collect_tasks(Enum.reverse(still_pending), newly_done, sid, deadline)
+    end
+  end
+
+  defp cancelled?(sid) when is_binary(sid) do
+    match?([{^sid, true}], :ets.lookup(@cancel_table, sid))
+  rescue
+    ArgumentError -> false
+  end
+
+  defp cancelled?(_), do: false
+
+  defp interrupted_result(tc) do
+    {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: "Error: Interrupted by user"},
+     "Error: Interrupted by user"}
+  end
 
   defp error_result(tc, msg) do
     {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: "Error: #{msg}"},

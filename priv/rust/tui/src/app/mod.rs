@@ -159,7 +159,10 @@ pub struct App {
     /// never the server's later-starting clock (which can appear to jump
     /// backwards). `.take()`n on use; None falls back to server elapsed_ms.
     pub last_turn_client_elapsed_secs: Option<u64>,
-    pub last_cancel_attempt: Option<Instant>,
+    /// WS5 — the last prompt submitted to the backend; restored into the
+    /// composer when an interrupt lands before the turn produced any output
+    /// (CC auto-restore on user-cancel).
+    pub last_submitted_prompt: Option<String>,
     pub cancelled: bool,
     pub sse_reconnecting: bool,
 
@@ -415,7 +418,7 @@ impl App {
             thinking_buf: String::new(),
             processing_start: None,
             last_turn_client_elapsed_secs: None,
-            last_cancel_attempt: None,
+            last_submitted_prompt: None,
             cancelled: false,
             sse_reconnecting: false,
 
@@ -503,7 +506,6 @@ impl App {
             self.input.set_processing(true);
         } else if self.state == AppState::Processing && target != AppState::Processing {
             self.input.set_processing(false);
-            self.last_cancel_attempt = None;
         }
         // Dismiss the file picker on any state transition — prevents the invisible
         // overlay from silently intercepting keystrokes when the app changes context.
@@ -558,7 +560,6 @@ impl App {
             self.input.set_processing(true);
         } else if from == AppState::Processing && to != AppState::Processing {
             self.input.set_processing(false);
-            self.last_cancel_attempt = None;
         }
     }
 }

@@ -94,7 +94,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           iteration: iter
         })
 
-        {"Cancelled by user.", state}
+        finalize_interrupt(state, nil)
 
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
@@ -725,6 +725,35 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
+  # WS5 — hard interrupt: LLMClient killed the in-flight stream. Kill any tool
+  # tasks the streaming executor had started (their tool_use blocks were never
+  # persisted, so discarding keeps history valid), persist the partial text and
+  # the interrupt marker, and end the turn.
+  defp handle_result({:cancelled, %{content: partial}}, state, _context) do
+    Logger.info("[loop] Hard interrupt at iteration #{state.iteration} — aborting turn")
+
+    case Process.get(:osa_streaming_tool_ctx) do
+      nil -> :ok
+      ctx -> StreamingToolExecutor.discard(ctx)
+    end
+
+    Process.delete(:osa_streaming_tool_ctx)
+
+    try do
+      :ets.delete(@cancel_table, state.session_id)
+    rescue
+      ArgumentError -> :ok
+    end
+
+    Bus.emit(:system_event, %{
+      event: :agent_cancelled,
+      session_id: state.session_id,
+      iteration: state.iteration
+    })
+
+    finalize_interrupt(state, partial)
+  end
+
   # LLM error — compact and retry or surface error
   defp handle_result({:error, reason}, state, _context) do
     alias OptimalSystemAgent.Agent.Loop.ContextCollapse
@@ -789,6 +818,67 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         {OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason), state}
       end
+    end
+  end
+
+  @interrupt_marker "[Request interrupted by user]"
+  @interrupt_marker_tool_use "[Request interrupted by user for tool use]"
+
+  @doc false
+  # The synthetic user-marker strings an interrupted turn ends with. Public so
+  # Loop.run_and_reply can skip the assistant append for interrupted turns and
+  # the TUI contract (is_interrupt_marker in handle_actions.rs) stays in sync.
+  def interrupt_markers, do: [@interrupt_marker, @interrupt_marker_tool_use]
+
+  # Port of CC's onCancel ordering (REPL.tsx / messages.ts): [partial assistant
+  # text] → [is_error tool_results for orphaned tool_use] → [user interrupt
+  # marker]. Returns {marker, state} so the marker doubles as the turn's
+  # response string (the TUI renders it as a styled "Interrupted" line).
+  defp finalize_interrupt(state, partial) do
+    messages = state.messages
+
+    messages =
+      if is_binary(partial) and String.trim(partial) != "" do
+        messages ++ [%{role: "assistant", content: partial}]
+      else
+        messages
+      end
+
+    {messages, tool_use?} = fill_orphaned_tool_results(messages)
+
+    marker = if tool_use?, do: @interrupt_marker_tool_use, else: @interrupt_marker
+    state = %{state | messages: messages ++ [%{role: "user", content: marker}]}
+    {marker, state}
+  end
+
+  # CC yieldMissingToolResultBlocks: every tool_use in a trailing assistant
+  # message that never received a tool result gets an "Interrupted by user"
+  # result so the API history stays valid on the next turn.
+  defp fill_orphaned_tool_results(messages) do
+    case List.last(messages) do
+      %{role: "assistant", tool_calls: tcs} when is_list(tcs) and tcs != [] ->
+        results =
+          Enum.map(tcs, fn tc ->
+            %{role: "tool", tool_call_id: tc.id, content: "Interrupted by user"}
+          end)
+
+        {messages ++ results, true}
+
+      _ ->
+        {messages, trailing_interrupted_tool?(messages)}
+    end
+  end
+
+  # True when the tool batch itself was killed (ToolOrchestrator appended
+  # "Error: Interrupted by user" results) — the marker should then say
+  # "for tool use".
+  defp trailing_interrupted_tool?(messages) do
+    case List.last(messages) do
+      %{role: "tool", content: content} when is_binary(content) ->
+        String.contains?(content, "Interrupted by user")
+
+      _ ->
+        false
     end
   end
 

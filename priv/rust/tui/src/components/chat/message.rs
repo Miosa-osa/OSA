@@ -576,7 +576,7 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  Ctrl+R", "Reverse history search"),
         ("  Esc", "Clear input / interrupt turn"),
         ("  Esc Esc", "Edit a previous message (rewind)"),
-        ("  Ctrl+C x2", "Force interrupt / quit"),
+        ("  Ctrl+C", "Interrupt turn (x2 at idle quits)"),
         ("  Ctrl+D", "Exit (empty input)"),
         ("  Shift+Enter", "Newline (Ctrl+J also works)"),
         ("  Ctrl+A/E", "Line start / end"),

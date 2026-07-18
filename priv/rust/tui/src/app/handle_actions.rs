@@ -181,7 +181,32 @@ impl App {
         // final answer text.
         self.flush_collapse();
 
-        if self.agent_header_sent {
+        // WS5 — interrupt marker (CC parity): an interrupted turn ends with a
+        // synthetic user-marker string (ReactLoop.finalize_interrupt). Render
+        // it as a styled dim line instead of raw agent text — and when the
+        // turn produced NO output at all, restore the interrupted prompt into
+        // the composer for editing (CC auto-restore on user-cancel).
+        if is_interrupt_marker(&display_response) {
+            let remaining = std::mem::take(&mut self.stream_buf);
+            let had_output = self.agent_header_sent || !remaining.trim().is_empty();
+            if !remaining.trim().is_empty() {
+                if self.agent_header_sent {
+                    self.chat.add_agent_continuation(&remaining);
+                } else {
+                    self.chat.add_agent_message(&remaining, signal.as_ref());
+                    self.agent_header_sent = true;
+                }
+            }
+            self.chat.add_system_message(
+                "Interrupted \u{00b7} What should OSA do instead?",
+                "warning",
+            );
+            if !had_output && self.input.is_empty() && self.message_queue.is_empty() {
+                if let Some(prev) = self.last_submitted_prompt.take() {
+                    self.input.insert_str(&prev);
+                }
+            }
+        } else if self.agent_header_sent {
             // The header was already emitted earlier this turn (either by a
             // ToolCallStart flush or by marking the first tool call). Flush
             // any remaining buffered streaming text as a header-less
@@ -339,11 +364,18 @@ impl App {
             }
         }
 
-        // Message-queue parity (Claude Code / Hermes "keep typing while busy"):
-        // while the agent is working, Enter ENQUEUES the message (FIFO) instead
-        // of interrupting. It auto-submits when the current turn completes.
+        // WS5 — keep typing while it works (CC parity): while the agent is
+        // Processing, a PLAIN message becomes an automatic mid-turn STEER (no
+        // /steer needed) — the backend folds it into the RUNNING turn at its
+        // next step boundary. Slash commands and !shell stay FIFO-queued to
+        // run when the turn ends (CC defers those to turn end too).
         if self.state == AppState::Processing {
-            self.enqueue_message(text);
+            if text.starts_with('/') || text.starts_with('!') {
+                self.enqueue_message(text);
+            } else {
+                self.chat.add_user_message(text);
+                self.steer_message(text);
+            }
             return;
         }
 
@@ -361,12 +393,11 @@ impl App {
     /// indicator on the input.
     fn enqueue_message(&mut self, text: &str) {
         self.message_queue.push(text.to_string());
-        let n = self.message_queue.len();
-        self.input.set_queued_count(n);
-        self.toasts.push(
-            format!("queued ({})", n),
-            crate::components::toast::ToastLevel::Info,
-        );
+        // WS5 — the queued text renders as dim lines directly above the
+        // composer (CC PromptInputQueuedCommands), so no toast: the user can
+        // see and verify exactly what they queued, and recall it with ↑/Esc.
+        self.input.set_queued_items(self.message_queue.clone());
+        self.recompute_layout();
     }
 
     /// /steer — inject a directive. Idle: submit immediately as a new turn.
@@ -420,10 +451,31 @@ impl App {
             return;
         }
         let next = self.message_queue.remove(0);
-        self.input.set_queued_count(self.message_queue.len());
+        self.input.set_queued_items(self.message_queue.clone());
+        self.recompute_layout();
         // Re-enter the normal submit path so queued commands / shell / prompts
         // all behave exactly as if freshly typed at an Idle prompt.
         self.submit_input(&next);
+    }
+
+    /// WS5 — CC messageQueueManager.popAllEditable: move every queued message
+    /// back into the composer (oldest first, joined by newlines, any current
+    /// draft appended last) so a mistyped queued message can be edited before
+    /// it fires. Cursor lands at the end.
+    pub(crate) fn pop_queue_to_composer(&mut self) {
+        if self.message_queue.is_empty() {
+            return;
+        }
+        let items = std::mem::take(&mut self.message_queue);
+        let joined = join_queued_for_composer(&items, self.input.value());
+        self.input.reset();
+        self.input.insert_str(&joined);
+        self.input.set_queued_items(Vec::new());
+        self.toasts.push(
+            "Queued messages moved to composer".into(),
+            crate::components::toast::ToastLevel::Info,
+        );
+        self.recompute_layout();
     }
 
     fn execute_shell(&mut self, cmd: &str) {
@@ -465,6 +517,9 @@ impl App {
         // Safety net: commit any leftover collapsed tool run before the new turn.
         self.flush_collapse();
         self.chat.add_user_message(text);
+        // WS5 — remember the outgoing prompt so an interrupt that lands before
+        // any output can restore it into the composer (CC auto-restore).
+        self.last_submitted_prompt = Some(text.to_string());
         if self.state != AppState::Processing {
             self.transition(AppState::Processing);
         }
@@ -534,12 +589,9 @@ impl App {
             self.clear_goal(true);
         }
 
-        // ...and drops any queued messages: the user is taking back control, so
-        // we don't auto-fire the backlog after the stop.
-        if !self.message_queue.is_empty() {
-            self.message_queue.clear();
-            self.input.set_queued_count(0);
-        }
+        // WS5 — the queue SURVIVES an interrupt (CC parity: clearCommandQueue
+        // only runs in the kill-agents chord). Queued items either fire when
+        // the cancel completes or can be popped into the composer with Esc/↑.
 
         // Immediately clear the agents panel so the UI reflects the interrupt
         self.agents.task_completed();
@@ -1494,6 +1546,61 @@ pub fn read_user_name_sync() -> Option<String> {
         }
     }
     None
+}
+
+/// WS5 — the backend ends an interrupted turn with one of these synthetic
+/// user-marker strings. Kept in sync with
+/// `OptimalSystemAgent.Agent.Loop.ReactLoop.interrupt_markers/0`.
+pub(crate) fn is_interrupt_marker(s: &str) -> bool {
+    matches!(
+        s,
+        "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+    )
+}
+
+/// WS5 — composer content after pop-all-editable: queued items oldest-first,
+/// then the current draft (if any), joined by newlines (CC popAllEditable).
+pub(crate) fn join_queued_for_composer(items: &[String], current: &str) -> String {
+    let mut parts: Vec<String> = items.to_vec();
+    if !current.trim().is_empty() {
+        parts.push(current.to_string());
+    }
+    parts.join("\n")
+}
+
+#[cfg(test)]
+mod interrupt_steer_tests {
+    use super::{is_interrupt_marker, join_queued_for_composer};
+
+    #[test]
+    fn recognizes_both_interrupt_markers() {
+        assert!(is_interrupt_marker("[Request interrupted by user]"));
+        assert!(is_interrupt_marker("[Request interrupted by user for tool use]"));
+    }
+
+    #[test]
+    fn ordinary_text_is_not_a_marker() {
+        assert!(!is_interrupt_marker("Cancelled by user."));
+        assert!(!is_interrupt_marker("[Request interrupted by user] extra"));
+    }
+
+    #[test]
+    fn pop_joins_queued_items_with_newlines() {
+        let items = vec!["first".to_string(), "second".to_string()];
+        assert_eq!(join_queued_for_composer(&items, ""), "first\nsecond");
+    }
+
+    #[test]
+    fn pop_appends_current_draft_last() {
+        let items = vec!["queued".to_string()];
+        assert_eq!(join_queued_for_composer(&items, "draft"), "queued\ndraft");
+    }
+
+    #[test]
+    fn pop_drops_blank_draft() {
+        let items = vec!["queued".to_string()];
+        assert_eq!(join_queued_for_composer(&items, "   "), "queued");
+    }
 }
 
 #[cfg(test)]
