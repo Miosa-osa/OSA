@@ -165,6 +165,18 @@ impl App {
                 }
                 self.agent_header_sent = true;
 
+                // The reasoning box REPLACES the activity row in draw_inline
+                // (event_loop draws thinking_box INSTEAD of the activity feed
+                // whenever it is non-empty — see event_loop.rs:642 and
+                // think_row_height). If the model went thinking → straight to a
+                // tool call with no interleaved streaming text, the box would
+                // stay up and hide the live tool feed for the rest of the turn.
+                // Clear it here (StreamingToken already does the same) so each
+                // running tool is visible with its name + status + spinner.
+                if !self.thinking_box.is_empty() {
+                    self.thinking_box.clear();
+                }
+
                 if !self.activity.is_active() {
                     self.activity.start();
                 }

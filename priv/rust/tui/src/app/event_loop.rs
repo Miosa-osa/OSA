@@ -532,9 +532,17 @@ impl App {
         // menu always has room above the input (same mechanism as the agents
         // panel). Zero when the popup is closed, so idle height is unchanged.
         let popup_h = self.input.completions_popup_height();
+        // Extra rows the live tool-use feed needs beyond the single activity
+        // row already baked into `live_region_height`'s fixed chrome. Without
+        // this the base (non-streaming) viewport reserves only 1 row for the
+        // activity component, so the per-tool feed drawn by draw_inline would
+        // be clipped off the bottom of the inline viewport. `think_row_height`
+        // is the shared source of truth, so viewport and layout grow together.
+        let activity_feed_extra = self.think_row_height().saturating_sub(1);
         let base = live_region_height(input_needed, term_rows)
             .saturating_add(agents_h)
             .saturating_add(popup_h)
+            .saturating_add(activity_feed_extra)
             .min(hi0);
 
         // Rows the streaming reply currently renders to (0 when idle).
@@ -582,7 +590,15 @@ impl App {
             // Collapsed → 1 row; expanded (ctrl+t) → the box's measured height.
             self.thinking_box.height(self.width)
         } else {
-            self.activity.height().min(1)
+            // Full activity height so the LIVE tool-use feed (spinner row +
+            // one row per running/finished tool) actually gets vertical space.
+            // Previously clamped to `.min(1)`, which left the inline layout a
+            // single row for the whole activity component: `Activity::draw`
+            // returns early when `area.height < 2` (see activity.rs), so ONLY
+            // the "✦ Working…" spinner drew and every per-tool feed row was
+            // dropped — that is why the user never saw tools as they ran.
+            // Capped so a long feed can never swallow the compact live region.
+            self.activity.height().min(6)
         }
     }
 

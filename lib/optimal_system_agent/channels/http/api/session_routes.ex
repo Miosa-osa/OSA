@@ -964,6 +964,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           )
         end)
 
+        # Also seed the DURABLE resume store (not just the FTS transcript above):
+        # the forked session's Loop.init restores agent context from
+        # SessionPersistence, so without this the fork shows history in the UI but
+        # resumes amnesiac. Keep non-empty text turns and carry the source folder
+        # so the fork stays directory-scoped (/continue can find it later).
+        forked_working_dir =
+          case OptimalSystemAgent.Agent.SessionPersistence.get_metadata(source_session_id) do
+            %{working_dir: wd} when is_binary(wd) and wd != "" -> wd
+            _ -> nil
+          end
+
+        seeded_messages =
+          seeded
+          |> Enum.filter(fn t -> is_binary(t.content) and t.content != "" end)
+          |> Enum.map(fn t -> %{role: t.role, content: t.content} end)
+
+        _ =
+          OptimalSystemAgent.Agent.SessionPersistence.save(
+            new_id,
+            seeded_messages,
+            forked_working_dir
+          )
+
         body_json =
           Jason.encode!(%{
             id: new_id,

@@ -1034,7 +1034,7 @@ impl App {
                     self.submit_input(trimmed);
                     self.input.reset();
                 } else {
-                    self.input.insert_str(&text);
+                    self.input.insert_str(trimmed);
                     self.toasts.push(
                         "Voice transcribed \u{2014} review and press Enter".into(),
                         crate::components::toast::ToastLevel::Info,

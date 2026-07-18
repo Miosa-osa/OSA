@@ -321,7 +321,14 @@ impl InputComponent {
         let mut byte_pos = 0;
         let mut char_col = 0;
         for ch in self.content.chars() {
-            if char_col >= target {
+            // Stop at the target column OR at the first newline. `set_cursor_col`
+            // is only used to place the caret from a first-visual-row mouse
+            // click, so counting must never run past the end of line 0. Without
+            // the '\n' guard a click in the blank space to the right of a SHORT
+            // first line kept counting characters into line 2+, dropping the
+            // caret onto a later line instead of clamping it to the first line's
+            // end.
+            if char_col >= target || ch == '\n' {
                 break;
             }
             byte_pos += ch.len_utf8();
@@ -363,6 +370,12 @@ impl InputComponent {
         self.tab_matches.clear();
         self.file_search_active = false;
         self.file_matches.clear();
+        // Bulk insertion (paste / voice transcription) makes any open slash
+        // completions popup stale — its filter no longer reflects the buffer.
+        // insert_char/delete_char re-evaluate the popup on every edit; do the
+        // same here so a Ctrl+V into a "/"-draft doesn't leave a ghost menu
+        // (which also over-reserved viewport rows via completions_popup_height).
+        self.completions.hide();
     }
 
     /// WS9 — insert normalized pasted text. Large pastes (>[`PASTE_THRESHOLD`]
@@ -1706,7 +1719,15 @@ impl Component for InputComponent {
         // and because `handle_mouse` tests the mic rect BEFORE the caret, a
         // click near the right edge meant to place the caret at end-of-line
         // toggled voice recording instead.
-        if !self.processing && self.content.is_empty() && input_area.width > 10 {
+        // Also suppress the mic when a stash-restore hint is showing: both
+        // draw at the composer's right edge on an empty composer and the mic
+        // (drawn last) clobbered the tail of "[Ctrl+S to restore stash]". The
+        // stash affordance wins while a stash exists.
+        if !self.processing
+            && self.content.is_empty()
+            && self.stash.is_none()
+            && input_area.width > 10
+        {
             let btn = " \u{25C9} ";
             let btn_width = 4u16;
             let mic_rect = Rect::new(

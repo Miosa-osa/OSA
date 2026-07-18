@@ -465,7 +465,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     restored = Checkpoint.restore_checkpoint(session_id)
 
-    messages = Keyword.get(opts, :messages) || Map.get(restored, :messages, [])
+    # Resume history precedence: an explicit :messages opt (CLI --continue) wins,
+    # then the crash-recovery checkpoint. The checkpoint is CLEARED at every
+    # successful turn boundary, so an HTTP/TUI session resumed AFTER a completed
+    # turn (/continue, /resume, /session <id>, directory-scoped POST /sessions)
+    # has an EMPTY checkpoint. Fall back to the durable SessionPersistence store
+    # (rewritten every turn by the auto_save_session :post_response hook) so the
+    # resumed agent actually remembers the prior conversation instead of starting
+    # amnesiac — matching the CLI resume path in channels/cli.ex. Note: an
+    # explicit `messages: []` (fresh session) is truthy in Elixir and correctly
+    # short-circuits the fallback, so new sessions stay empty.
+    messages =
+      Keyword.get(opts, :messages) ||
+        case Map.get(restored, :messages, []) do
+          [] -> load_persisted_messages(session_id)
+          checkpoint_msgs -> checkpoint_msgs
+        end
+
+    resumed? = restored != %{} or messages != []
+
     iteration = Map.get(restored, :iteration, 0)
     plan_mode = Map.get(restored, :plan_mode, false)
     turn_count = Map.get(restored, :turn_count, 0)
@@ -533,7 +551,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       session_id: session_id,
       user_id: state.user_id,
       channel: state.channel,
-      resumed: restored != %{},
+      resumed: resumed?,
       resumed_steps: durable_steps
     })
 
@@ -1178,6 +1196,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   defdelegate restore_checkpoint(session_id), to: Checkpoint
+
+  # Durable resume fallback: load the persisted conversation for a session from
+  # the SessionPersistence store (JSON under ~/.osa/sessions, rewritten every
+  # turn by the auto_save_session :post_response hook). Used by init/1 when the
+  # crash-recovery checkpoint is empty — i.e. a session resumed after a completed
+  # turn — so HTTP/TUI /continue and /resume restore real agent context, not just
+  # the on-screen transcript. Returns [] on any miss/error.
+  defp load_persisted_messages(session_id) do
+    case OptimalSystemAgent.Agent.SessionPersistence.load(session_id) do
+      {:ok, msgs} when is_list(msgs) -> msgs
+      _ -> []
+    end
+  end
 
   @doc false
   defdelegate clear_checkpoint(session_id), to: Checkpoint
