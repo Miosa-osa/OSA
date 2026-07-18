@@ -575,7 +575,10 @@ defmodule OptimalSystemAgent.Orchestrator do
   """
   @spec resume_subagent(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def resume_subagent(agent_id, message) when is_binary(agent_id) and is_binary(message) do
-    run = RunStore.get(agent_id)
+    # Fall back to the on-disk ETF snapshot when the ETS index has no row (e.g.
+    # after a node restart before rehydrate, or a pruned terminal row) so resume
+    # still works as long as <id>.md.messages.etf exists.
+    run = RunStore.get(agent_id) || rehydrate_run(agent_id)
 
     cond do
       is_nil(run) ->
@@ -637,6 +640,33 @@ defmodule OptimalSystemAgent.Orchestrator do
           |> Map.new()
 
         run_background(run.parent_session_id, config)
+    end
+  end
+
+  # Reconstruct a minimal run row from the persisted ETF snapshot when the ETS
+  # index has no live row for this agent (restart / pruned). Enough for
+  # resume_subagent to proceed; full stats aren't needed to replay context.
+  defp rehydrate_run(agent_id) do
+    case RunStore.load_messages(agent_id) do
+      {:ok, _messages, meta} when is_map(meta) ->
+        %{
+          agent_id: agent_id,
+          parent_session_id: Map.get(meta, :parent_session_id) || "unknown",
+          role: Map.get(meta, :role) || "agent",
+          task: Map.get(meta, :task) || "",
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now(),
+          duration_ms: nil,
+          tool_count: 0,
+          tokens_used: 0,
+          recent_actions: [],
+          result: nil,
+          transcript_path: RunStore.transcript_path_for(agent_id)
+        }
+
+      _ ->
+        nil
     end
   end
 
@@ -733,6 +763,9 @@ defmodule OptimalSystemAgent.Orchestrator do
     # the Loop is terminated, so resume_subagent/2 can restore complete context
     # (CC recordSidechainTranscript/writeAgentMetadata parity).
     RunStore.save_messages(subagent_id, child_messages, %{
+      agent_id: subagent_id,
+      parent_session_id: parent_id,
+      task: task,
       role: role,
       worktree_path: worktree_info && worktree_info.path
     })
@@ -890,22 +923,33 @@ defmodule OptimalSystemAgent.Orchestrator do
     meta = Loop.get_metadata(subagent_id)
     tool_count = length(List.wrap(Map.get(meta, :tools_used, [])))
 
-    # Get actual token count from Loop state snapshot
+    # Get actual token count from Loop state snapshot. When the child Loop is
+    # already gone (common — stats are read right after it terminates), fall back
+    # to the last token count persisted in RunStore rather than fabricating
+    # tool_count * 500, which silently corrupted usage totals.
     actual_tokens =
       try do
         case Loop.get_state(subagent_id) do
           {:ok, %{tokens_used: t}} when is_integer(t) and t > 0 -> t
-          _ -> tool_count * 500
+          _ -> last_known_tokens(subagent_id)
         end
       rescue
-        _ -> tool_count * 500
+        _ -> last_known_tokens(subagent_id)
       catch
-        :exit, _ -> tool_count * 500
+        :exit, _ -> last_known_tokens(subagent_id)
       end
 
     {tool_count, actual_tokens}
   rescue
     _ -> {0, 0}
+  end
+
+  # Last token count persisted for this subagent; 0 when unknown (never fabricate).
+  defp last_known_tokens(subagent_id) do
+    case RunStore.get(subagent_id) do
+      %{tokens_used: t} when is_integer(t) and t > 0 -> t
+      _ -> 0
+    end
   end
 
   defp structured_result(attrs) do

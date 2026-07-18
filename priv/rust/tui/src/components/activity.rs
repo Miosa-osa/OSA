@@ -130,6 +130,8 @@ pub struct Activity {
     thinking_chars: usize,
     model_name: String,
     llm_iteration: u32,
+    /// Per-turn iteration ceiling from the backend (item 6). None on older backends.
+    llm_max_iterations: Option<u32>,
     expanded: bool,
     phrase_tick: u32,
     /// Starting index into SPINNER_VERBS for this request, so each one opens on a
@@ -212,6 +214,7 @@ impl Activity {
             thinking_chars: 0,
             model_name: String::new(),
             llm_iteration: 0,
+            llm_max_iterations: None,
             expanded: false,
             phrase_tick: 0,
             verb_offset: 0,
@@ -260,6 +263,7 @@ impl Activity {
         self.stream_chars = 0;
         self.thinking_chars = 0;
         self.llm_iteration = 0;
+        self.llm_max_iterations = None;
         self.phrase_tick = 0;
         self.verb_offset =
             VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -352,6 +356,10 @@ impl Activity {
 
     pub fn set_iteration(&mut self, iteration: u32) {
         self.llm_iteration = iteration;
+    }
+
+    pub fn set_max_iterations(&mut self, max_iterations: Option<u32>) {
+        self.llm_max_iterations = max_iterations;
     }
 
     /// Record a tool call start
@@ -553,12 +561,24 @@ impl Component for Activity {
             );
         }
 
-        // Iteration indicator (only shown for multi-iteration requests)
+        // Iteration indicator (only shown for multi-iteration requests). When the
+        // backend supplies the per-turn ceiling, show "iter N/max" and switch to a
+        // warning color as the loop approaches the cap so the user sees it coming.
         if self.llm_iteration > 1 {
-            spinner_spans.push(Span::styled(
-                format!(" \u{00b7} iter {}", self.llm_iteration),
-                theme.faint(),
-            ));
+            let (label, style) = match self.llm_max_iterations {
+                Some(max) if max > 0 => {
+                    // within the last 20% of the ceiling → warn
+                    let near_cap = self.llm_iteration.saturating_mul(5) >= max.saturating_mul(4);
+                    let style = if near_cap {
+                        Style::default().fg(theme.colors.warning)
+                    } else {
+                        theme.faint()
+                    };
+                    (format!(" \u{00b7} iter {}/{}", self.llm_iteration, max), style)
+                }
+                _ => (format!(" \u{00b7} iter {}", self.llm_iteration), theme.faint()),
+            };
+            spinner_spans.push(Span::styled(label, style));
         }
 
         // Token counts from LlmResponse events

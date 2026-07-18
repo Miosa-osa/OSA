@@ -164,6 +164,17 @@ defmodule OptimalSystemAgent.Application do
     # arguments before returning a terminal error, bounding malformed-args loops.
     :ets.new(:osa_reask_counts, [:named_table, :public, :set])
 
+    # ETS table for cooperative agent pause flags. Rows: {session_id, true}.
+    # Checked by ReactLoop each iteration; set/cleared by POST /agents/:id/pause
+    # and /resume. Replaces the unsafe :sys.suspend pause that hung status reads.
+    :ets.new(:osa_agent_pause_flags, [:named_table, :public, :set])
+
+    # Rehydrate the subagent RunStore index from ~/.osa/agent-runs so /runs and
+    # task_resume survive a node restart (CC sidechain rehydrate parity). The ETS
+    # table is created here (owned by the long-lived app master process) so it is
+    # not lost when the transient task that first touched it exits.
+    OptimalSystemAgent.Agent.RunStore.init_store()
+
     # Sandbox config (reads ~/.osa/sandbox.json if present)
     OptimalSystemAgent.Sandbox.Router.load_config()
 

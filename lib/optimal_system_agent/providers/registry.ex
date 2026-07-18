@@ -252,6 +252,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     Enum.reduce_while(available_chain, {:error, "No providers in chain"}, fn provider, _acc ->
       case chat(messages, Keyword.put(opts, :provider, provider)) do
         {:ok, _} = result ->
+          emit_serving_provider(provider, opts)
           {:halt, result}
 
         {:error, {:rate_limited, retry_after}} ->
@@ -476,6 +477,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
           fb_module ->
             case try_stream_provider(fb_module, messages, callback, opts) do
               :ok ->
+                emit_serving_provider(fb_provider, opts)
                 {:halt, :ok}
 
               {:error, r} ->
@@ -539,6 +541,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
       max_attempts: info.max_attempts,
       delay_ms: info.delay_ms,
       reason: Resilience.reason_to_string(info.reason)
+    })
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # Announce which provider/model actually served a turn after a fallback so the
+  # TUI statusline can reflect the real serving provider instead of the one that
+  # failed. Best-effort, mirroring emit_retry_event/2.
+  defp emit_serving_provider(provider, opts) do
+    model =
+      Keyword.get(opts, :model) ||
+        Application.get_env(:optimal_system_agent, :"#{provider}_model")
+
+    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+      event: :provider_fallback,
+      provider: provider,
+      model: model
     })
   rescue
     _ -> :ok
@@ -695,6 +716,12 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
+    model
+    |> resolve_context_window()
+    |> maybe_cap_1m_context(model)
+  end
+
+  defp resolve_context_window(model) do
     case catalog_context_window(model) || Map.get(@fallback_context_windows, model) do
       nil ->
         # Try prefix match for Ollama models and variants
@@ -717,6 +744,23 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
       size ->
         size
+    end
+  end
+
+  # Keep the advertised window in lockstep with the actually-sent request beta:
+  # OSA only advertises Claude's 1M window when the context-1m beta will be sent
+  # (Providers.Anthropic.supports_1m?/1). When the beta is disabled
+  # (DISABLE_1M_CONTEXT / :disable_1m_context), a 1M-capable Claude model is
+  # capped back to 200K so Agent.Context never budgets past what the API accepts
+  # without the beta (the old bug: budget 1M, API 400 'prompt is too long').
+  defp maybe_cap_1m_context(size, model) do
+    m = String.downcase(to_string(model))
+
+    if (String.contains?(m, "sonnet-4-6") or String.contains?(m, "opus-4-6")) and
+         not Providers.Anthropic.supports_1m?(model) do
+      min(size, 200_000)
+    else
+      size
     end
   end
 
@@ -743,10 +787,144 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
     if provider in [:ollama, :lmstudio, :llamacpp] do
       ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
-      min(trained, ceiling)
+
+      # Floor against the model's REAL trained window too, not just the config
+      # ceiling. A static/catalog entry (or a family prefix match) can advertise
+      # a larger window than the specific local tag actually supports (e.g. an
+      # 8k-context local model whose family lists 128k). For :ollama we consult
+      # the live /api/show num_ctx (negative-cached) so num_ctx never exceeds the
+      # weights' real context_length. Result: min(config ceiling, trained window).
+      trained
+      |> min(local_trained_window(provider, model, trained))
+      |> min(ceiling)
     else
       trained
     end
+  end
+
+  # Real trained window for a LOCAL model. For :ollama we probe /api/show
+  # (cached, incl. a negative cache) and fall back to `default` when the server
+  # is unreachable or does not report a context length. Non-:ollama local
+  # providers (lmstudio/llamacpp) have no Ollama /api/show endpoint, so they keep
+  # the resolved `default`.
+  defp local_trained_window(:ollama, model, default) when is_binary(model) do
+    case get_ollama_context(model) do
+      {:ok, ctx} when is_integer(ctx) and ctx > 0 -> ctx
+      _ -> default
+    end
+  end
+
+  defp local_trained_window(_provider, _model, default), do: default
+
+  @doc """
+  Resolve the provider atom that OWNS `model`.
+
+  Uses the Catalog (models.dev provider_id) first, then a name heuristic, and
+  finally nil when the model can't be attributed. Only ever returns a provider
+  that is actually registered here. Powers the cross-provider CLI `/model` switch
+  so `/model claude-sonnet-4-6` routes to :anthropic even when the default
+  provider is :ollama.
+  """
+  @spec provider_for_model(String.t()) :: atom() | nil
+  def provider_for_model(model) when is_binary(model) do
+    catalog_provider_for(model) || heuristic_provider_for(model)
+  end
+
+  def provider_for_model(_), do: nil
+
+  defp catalog_provider_for(model) do
+    with %{provider_id: pid} when is_binary(pid) <- safe_catalog_find(model),
+         atom when is_atom(atom) <- provider_id_to_atom(pid),
+         true <- Map.has_key?(@providers, atom) do
+      atom
+    else
+      _ -> nil
+    end
+  end
+
+  defp safe_catalog_find(model) do
+    OptimalSystemAgent.Providers.Catalog.find(model)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  # models.dev provider ids mostly match OSA atoms; map the few that differ.
+  defp provider_id_to_atom(pid) do
+    case pid do
+      "x-ai" -> :xai
+      "google-vertex" -> :google
+      "azure" -> :openai
+      _ ->
+        try do
+          String.to_existing_atom(pid)
+        rescue
+          ArgumentError -> nil
+        end
+    end
+  end
+
+  defp heuristic_provider_for(model) do
+    m = String.downcase(model)
+
+    cond do
+      String.contains?(m, ":cloud") -> :ollama_cloud
+      String.starts_with?(m, "claude") -> :anthropic
+      String.starts_with?(m, "gpt") -> :openai
+      String.starts_with?(m, "o1") or String.starts_with?(m, "o3") or
+          String.starts_with?(m, "o4") -> :openai
+      String.starts_with?(m, "gemini") -> :google
+      String.starts_with?(m, "deepseek") -> :deepseek
+      String.starts_with?(m, "grok") -> :xai
+      String.starts_with?(m, "command") -> :cohere
+      String.starts_with?(m, "mistral") or String.starts_with?(m, "mixtral") -> :mistral
+      String.starts_with?(m, "glm") -> :zhipu
+      String.starts_with?(m, "qwen") -> :qwen
+      String.starts_with?(m, "moonshot") or String.starts_with?(m, "kimi") -> :moonshot
+      String.starts_with?(m, "llama") -> :groq
+      true -> nil
+    end
+  end
+
+  @doc """
+  True when `model` is a plausible model for `provider`.
+
+  Local providers accept any tag (models are pulled dynamically). For cloud
+  providers, a model is accepted when the Catalog knows it (for the provider or
+  anywhere), OR when the Catalog has NO data for that provider at all (offline /
+  not-yet-loaded — be permissive rather than block a valid switch). Only when the
+  Catalog positively knows the provider AND the model is absent do we reject.
+  """
+  @spec known_model?(atom(), String.t()) :: boolean()
+  def known_model?(provider, model) when is_atom(provider) and is_binary(model) do
+    cond do
+      provider in [:ollama, :ollama_cloud, :lmstudio, :llamacpp] -> true
+      catalog_model_known?(provider, model) -> true
+      true -> not catalog_has_provider?(provider)
+    end
+  end
+
+  def known_model?(_provider, _model), do: false
+
+  defp catalog_model_known?(provider, model) do
+    (safe_catalog_model(provider, model) || safe_catalog_find(model)) != nil
+  end
+
+  defp safe_catalog_model(provider, model) do
+    OptimalSystemAgent.Providers.Catalog.model(to_string(provider), model)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  defp catalog_has_provider?(provider) do
+    OptimalSystemAgent.Providers.Catalog.models(to_string(provider)) != []
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   # Model ids for a provider from the Catalog, or nil when the Catalog has no

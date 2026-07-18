@@ -18,6 +18,12 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   @default_url "https://api.anthropic.com/v1"
   @api_version "2023-06-01"
 
+  # Anthropic 1M-token context beta (CC parity: src/utils/betas.ts +
+  # src/utils/context.ts). Sent ONLY for the Claude models that support it and
+  # only when not disabled, so the advertised context window (Providers.Registry)
+  # and the request headers stay in lockstep.
+  @context_1m_beta "context-1m-2025-08-07"
+
   @impl true
   def name, do: :anthropic
 
@@ -77,7 +83,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
 
-    headers = build_headers(auth, thinking)
+    headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing output
     timeout = if thinking, do: 600_000, else: 120_000
 
@@ -148,7 +154,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
 
-    headers = build_headers(auth, thinking)
+    headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing the first token
     timeout = if thinking, do: 600_000, else: 120_000
 
@@ -340,8 +346,20 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           acc
         end
 
+      %{"type" => "signature_delta", "signature" => sig} ->
+        # Capture the thinking block's cryptographic signature. It is NOT needed
+        # for display, but interleaved thinking REQUIRES it be echoed back
+        # verbatim on the next tool round-trip (else Anthropic 400s and the
+        # thinking-block prompt cache is broken). Store it on the in-flight
+        # thinking block so finalize_current_thinking/1 can attach it.
+        if acc.current_thinking do
+          %{acc | current_thinking: Map.put(acc.current_thinking, :signature, sig)}
+        else
+          acc
+        end
+
       %{"type" => "signature_delta"} ->
-        # Signature deltas are not needed for display — skip
+        # signature_delta without a signature payload — nothing to capture.
         acc
 
       %{"type" => "input_json_delta", "partial_json" => json_chunk} ->
@@ -436,7 +454,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   defp finalize_current_thinking(%{current_thinking: nil} = acc), do: acc
 
   defp finalize_current_thinking(%{current_thinking: thinking} = acc) do
-    block = %{type: "thinking", thinking: thinking.text, signature: nil}
+    # Preserve the signature captured from signature_delta events so the block
+    # can be re-serialized verbatim on the next interleaved-thinking round-trip.
+    block = %{type: "thinking", thinking: thinking.text, signature: Map.get(thinking, :signature)}
     %{acc | thinking: [block | acc.thinking], current_thinking: nil}
   end
 
@@ -488,12 +508,21 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       %{role: role, content: content, thinking_blocks: blocks} = msg
       when is_list(blocks) and blocks != [] ->
         thinking_content =
-          Enum.map(blocks, fn block ->
-            base = %{"type" => "thinking", "thinking" => block[:thinking] || block["thinking"]}
-
-            if block[:signature] || block["signature"],
-              do: Map.put(base, "signature", block[:signature] || block["signature"]),
-              else: base
+          blocks
+          # Anthropic REJECTS unsigned thinking blocks on input (400). Only signed
+          # blocks may be echoed back on a subsequent interleaved-thinking turn,
+          # so drop any block whose signature was never captured rather than send
+          # an invalid block. With the streaming signature-capture fix above,
+          # real blocks are always signed; this only guards degenerate/legacy state.
+          |> Enum.filter(fn block ->
+            (block[:signature] || block["signature"]) not in [nil, ""]
+          end)
+          |> Enum.map(fn block ->
+            %{
+              "type" => "thinking",
+              "thinking" => block[:thinking] || block["thinking"],
+              "signature" => block[:signature] || block["signature"]
+            }
           end)
 
         text_blocks =
@@ -684,9 +713,38 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   def maybe_add_thinking(body, _), do: body
 
   @doc """
-  Build request headers, adding interleaved-thinking beta when thinking is enabled.
+  True for Claude models that support the 1M-token context window beta, unless
+  disabled via the `DISABLE_1M_CONTEXT` env var or `:disable_1m_context` config.
+
+  Single source of truth: `Providers.Registry` consults this to decide the
+  advertised context window, and `build_headers/3` consults it to decide whether
+  to send the `context-1m` beta header — so the two can never disagree (a >200K
+  prompt on sonnet-4-6/opus-4-6 either gets the beta or is budgeted at 200K).
   """
-  def build_headers(auth, thinking) do
+  @spec supports_1m?(String.t() | atom()) :: boolean()
+  def supports_1m?(model) do
+    m = String.downcase(to_string(model))
+
+    (String.contains?(m, "sonnet-4-6") or String.contains?(m, "opus-4-6")) and
+      not one_m_disabled?()
+  end
+
+  defp one_m_disabled? do
+    case System.get_env("DISABLE_1M_CONTEXT") do
+      v when v in [nil, "", "0", "false", "no"] ->
+        Application.get_env(:optimal_system_agent, :disable_1m_context, false) == true
+
+      _ ->
+        true
+    end
+  end
+
+  @doc """
+  Build request headers, adding interleaved-thinking beta when thinking is
+  enabled and the context-1m beta for 1M-capable Claude models. `model` defaults
+  to nil (no 1M beta) so pre-existing `build_headers/2` callers are unaffected.
+  """
+  def build_headers(auth, thinking, model \\ nil) do
     auth_header =
       case auth do
         {:oauth, token} ->
@@ -710,6 +768,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     betas = []
     betas = if thinking, do: ["interleaved-thinking-2025-05-14" | betas], else: betas
     betas = if prompt_caching_enabled?(), do: ["prompt-caching-2024-07-31" | betas], else: betas
+    betas = if model && supports_1m?(model), do: [@context_1m_beta | betas], else: betas
 
     case betas do
       [] -> base

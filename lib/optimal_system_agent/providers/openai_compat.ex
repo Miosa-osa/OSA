@@ -719,12 +719,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         body
 
       n when is_integer(n) and n > 0 ->
+        capped = cap_max_output(model, n)
+
         if openai_reasoning_model?(model),
-          do: Map.put(body, :max_completion_tokens, n),
-          else: Map.put(body, :max_tokens, n)
+          do: Map.put(body, :max_completion_tokens, capped),
+          else: Map.put(body, :max_tokens, capped)
 
       _ ->
         body
+    end
+  end
+
+  # Clamp the requested output cap to the model's real output ceiling (Catalog /
+  # static table) so num-output never exceeds a model's limit and 400s or
+  # truncates. No-op when the ceiling is unknown.
+  defp cap_max_output(model, n) do
+    case OptimalSystemAgent.Providers.ModelLimits.max_output(model) do
+      cap when is_integer(cap) and cap > 0 -> min(n, cap)
+      _ -> n
     end
   end
 

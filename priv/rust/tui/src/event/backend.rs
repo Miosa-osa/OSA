@@ -47,7 +47,7 @@ pub enum BackendEvent {
     },
 
     // === LLM ===
-    LlmRequest { iteration: u32 },
+    LlmRequest { iteration: u32, max_iterations: Option<u32> },
     LlmResponse {
         duration_ms: u64,
         input_tokens: u64,

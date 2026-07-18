@@ -122,7 +122,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
         %{
           role: "assistant",
           content: "The answer is 42.",
-          thinking_blocks: [%{thinking: "Calculating...", signature: nil}]
+          thinking_blocks: [%{thinking: "Calculating...", signature: "sig_test_1"}]
         }
       ]
 
@@ -139,7 +139,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
         %{
           role: "assistant",
           content: "",
-          thinking_blocks: [%{thinking: "hmm", signature: nil}]
+          thinking_blocks: [%{thinking: "hmm", signature: "sig_test_2"}]
         }
       ]
 

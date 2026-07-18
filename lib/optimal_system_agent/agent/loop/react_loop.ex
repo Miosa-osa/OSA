@@ -64,6 +64,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       Effort.max_response_tokens()
   end
 
+  # Cooperative pause flag (WS pause parity) — set by POST /agents/:id/pause,
+  # cleared by /resume. Checked once per iteration; when set the loop soft-stops
+  # and returns instead of hanging on :sys.suspend.
+  defp paused?(sid) when is_binary(sid) do
+    match?([{^sid, true}], :ets.lookup(:osa_agent_pause_flags, sid))
+  rescue
+    ArgumentError -> false
+  end
+
+  defp paused?(_), do: false
+
   @doc """
   Run the agent loop for the given state.
 
@@ -96,6 +107,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         finalize_interrupt(state, nil)
 
+      paused?(sid) ->
+        Logger.info("[loop] Paused at iteration #{iter} — soft-stopping until resumed")
+
+        Bus.emit(:system_event, %{
+          event: :agent_paused,
+          session_id: sid,
+          iteration: iter
+        })
+
+        {"Paused at iteration #{iter}. The agent stopped cooperatively; resume it or send a new message to continue.",
+         state}
+
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
       # `max_budget_usd`; default nil = OFF, so long runs are never killed.
@@ -117,6 +140,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iter >= max_iter ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
         tools_used = Telemetry.extract_tools_used(state.messages) |> Enum.join(", ")
+
+        # Typed terminal event (item 9) so consumers render the iteration-cap stop
+        # distinctly rather than as a plain agent_response. Parallels the
+        # :budget_limit_reached / :tool_call_cap_exceeded stop events.
+        Bus.emit(:system_event, %{
+          event: :max_iterations_reached,
+          session_id: sid,
+          iteration: iter,
+          max_iterations: max_iter
+        })
 
         {"I've used all #{max_iter} iterations on this task.\n\n**Tools used:** #{tools_used}\n\nIf the task isn't complete, try breaking it into smaller steps or giving more specific instructions.",
          state}
@@ -234,6 +267,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       %{
         session_id: state.session_id,
         iteration: state.iteration,
+        # Per-turn iteration ceiling so the TUI can render "iter N/max" and warn
+        # as the loop approaches the cap (item 6). max_iter computed just above.
+        max_iterations: max_iter,
         model: state.model,
         agent: state.session_id
       },
@@ -329,6 +365,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
     )
 
+    # Typed observability event (item 7) so the truncate-and-continue path is
+    # visible instead of a silent re-call.
+    Bus.emit(:system_event, %{
+      event: :response_truncated,
+      session_id: state.session_id,
+      reason: :max_tokens_bump,
+      old_max_tokens: current_max,
+      new_max_tokens: bumped,
+      iteration: state.iteration
+    })
+
     # Inject the partial response so the model can continue from where it left off
     state = %{
       state
@@ -375,6 +422,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] Truncated response (stop_reason=#{stop_reason}) carried #{length(tool_calls)} " <>
         "tool call(s) — failing all to avoid executing partial arguments; requesting re-emit"
     )
+
+    # Typed observability event (item 7) so the truncated-tool-call re-emit path
+    # is visible to the TUI/analytics instead of a silent re-call.
+    Bus.emit(:system_event, %{
+      event: :response_truncated,
+      session_id: state.session_id,
+      reason: :tool_call_reemit,
+      stop_reason: stop_reason,
+      iteration: state.iteration
+    })
 
     content = Map.get(resp, :content) || ""
     assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
@@ -690,7 +747,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         |> Enum.map(fn {_tc, {_msg, result_str}} -> result_str end)
         |> Enum.join("\n")
 
-      {summary, state}
+      # Even on this fast-return path (no synthesis round-trip), run doom-loop
+      # detection so a pathological computer_use-only loop is still caught by the
+      # identical-call / absolute call-cap safety net, and so these calls count
+      # toward total_tool_calls (DoomLoop.check increments it). Respect a halt.
+      case DoomLoop.check(results, tool_calls, state) do
+        {:halt, doom_message, state} -> {doom_message, state}
+        {:ok, state} -> {summary, state}
+      end
     else
       Checkpoint.checkpoint_state(state)
 
@@ -1152,7 +1216,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     max_iter = max_iterations()
     remaining = max_iter - state.iteration
 
-    if state.iteration > 0 and remaining <= max_iter do
+    # Only nag when GENUINELY near the ceiling — not every iteration. The old
+    # guard `remaining <= max_iter` was a tautology (remaining is always < max_iter
+    # once iteration > 0), so a budget message was appended on EVERY iteration,
+    # inflating context and pushing the model to "wrap up" thousands of turns early.
+    budget_warn_threshold = 10
+
+    if state.iteration > 0 and remaining <= budget_warn_threshold do
       budget_msg = %{
         role: "system",
         content:

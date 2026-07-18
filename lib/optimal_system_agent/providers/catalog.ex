@@ -146,6 +146,36 @@ defmodule OptimalSystemAgent.Providers.Catalog do
 
   def cost(_), do: nil
 
+  @doc """
+  Max output tokens for a model looked up across all providers (first match
+  wins), or nil when unknown. Sourced from models.dev `limit.output`.
+  """
+  @spec max_output(String.t()) :: pos_integer() | nil
+  def max_output(model_id) when is_binary(model_id) do
+    data()
+    |> Enum.find_value(fn {_pid, models} ->
+      case Map.get(models, model_id) do
+        %Model{max_output: n} when is_integer(n) and n > 0 -> n
+        _ -> nil
+      end
+    end)
+  end
+
+  def max_output(_), do: nil
+
+  @doc """
+  First `%Model{}` matching `model_id` across all providers, or nil. Used by
+  callers that need the full capability record (tool_call / reasoning / limits)
+  without knowing the owning provider up front.
+  """
+  @spec find(String.t()) :: Model.t() | nil
+  def find(model_id) when is_binary(model_id) do
+    data()
+    |> Enum.find_value(fn {_pid, models} -> Map.get(models, model_id) end)
+  end
+
+  def find(_), do: nil
+
   @doc "Trigger a foreground network refresh (respects the disable flag)."
   @spec refresh() :: :ok | {:ok, :disabled} | {:error, term()}
   def refresh do

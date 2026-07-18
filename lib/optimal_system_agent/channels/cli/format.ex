@@ -17,6 +17,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Format do
   def format_tokens_arrow(n) when n < 1_000, do: "↓ #{n}"
   def format_tokens_arrow(n), do: "↓ #{Float.round(n / 1_000, 1)}k"
 
+  @doc "Format a context window size: 200000 → \"200K\", 1000000 → \"1M\", 131072 → \"131K\"."
+  def format_context_window(n) when is_integer(n) and n >= 1_000_000 do
+    m = n / 1_000_000
+    if m == Float.round(m, 0), do: "#{trunc(m)}M", else: "#{Float.round(m, 1)}M"
+  end
+
+  def format_context_window(n) when is_integer(n) and n >= 1_000,
+    do: "#{trunc(Float.round(n / 1_000, 0))}K"
+
+  def format_context_window(n) when is_integer(n), do: "#{n}"
+  def format_context_window(_), do: "?"
+
   @doc "Format milliseconds as human-readable elapsed time."
   def format_elapsed(ms) when ms < 1_000, do: "<1s"
   def format_elapsed(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"

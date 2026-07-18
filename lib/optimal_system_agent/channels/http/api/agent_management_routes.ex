@@ -129,9 +129,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
 
     try do
       case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
-        [{pid, _}] ->
-          # Suspend the process to pause execution
-          :sys.suspend(pid)
+        [{_pid, _}] ->
+          # Cooperative pause: set an ETS flag the ReactLoop checks each iteration
+          # and soft-stops on (replaces the unsafe :sys.suspend which blocked
+          # every GenServer.call to the loop and never auto-resumed).
+          set_pause_flag(agent_id, true)
           Logger.info("[AgentMgmt] paused agent=#{agent_id}")
           json(conn, 200, %{status: "paused", agent: agent_id})
 
@@ -150,8 +152,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
 
     try do
       case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
-        [{pid, _}] ->
-          :sys.resume(pid)
+        [{_pid, _}] ->
+          set_pause_flag(agent_id, false)
           Logger.info("[AgentMgmt] resumed agent=#{agent_id}")
           json(conn, 200, %{status: "resumed", agent: agent_id})
 
@@ -229,12 +231,44 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentManagementRoutes do
     _ -> :error
   end
 
-  # Count how many active session IDs contain the agent name as a substring.
-  # Session IDs are typically structured as "<agent>_<uuid>" or similar.
+  # Count active sessions that belong to this agent. Matches an exact session id
+  # or the trailing name segment of a structured subagent id
+  # ("agent:<parent>:<name>") — avoids the old String.contains? false positives
+  # (agent "go" matching "goose-123").
   defp count_active_sessions(agent_name, session_ids) do
     Enum.count(session_ids, fn sid ->
-      is_binary(sid) && String.contains?(sid, agent_name)
+      is_binary(sid) and session_matches_agent?(sid, agent_name)
     end)
+  end
+
+  defp session_matches_agent?(sid, agent_name) do
+    cond do
+      sid == agent_name ->
+        true
+
+      String.starts_with?(sid, "agent:") ->
+        case String.split(sid, ":") do
+          parts when length(parts) >= 3 -> List.last(parts) == agent_name
+          _ -> false
+        end
+
+      true ->
+        false
+    end
+  end
+
+  # Set/clear the cooperative pause flag for an agent/session. The ReactLoop
+  # reads :osa_agent_pause_flags each iteration and soft-stops when set.
+  defp set_pause_flag(agent_id, true) do
+    :ets.insert(:osa_agent_pause_flags, {agent_id, true})
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp set_pause_flag(agent_id, false) do
+    :ets.delete(:osa_agent_pause_flags, agent_id)
+  rescue
+    ArgumentError -> :ok
   end
 
   # Build a hierarchy node map, recursively expanding children.

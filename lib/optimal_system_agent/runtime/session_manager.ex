@@ -254,7 +254,7 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   @doc "Hot-swap the provider/model for a live loop."
   @spec swap_provider(session_id(), String.t(), String.t() | nil) ::
-          :ok | {:error, :not_found} | {:error, term()}
+          {:ok, map()} | {:error, :not_found} | {:error, term()}
   def swap_provider(session_id, provider, model) do
     case lookup_loop(session_id) do
       {:ok, pid, _owner} -> GenServer.call(pid, {:swap_provider, provider, model})

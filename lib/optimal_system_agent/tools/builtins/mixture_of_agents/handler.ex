@@ -39,23 +39,50 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"query" => query} = args, _ctx) do
-    requested = Map.get(args, "providers")
+    case resolve_providers(Map.get(args, "providers")) do
+      {:error, msg} ->
+        # Bad provider name(s): return a clean tool result instead of crashing on
+        # String.to_existing_atom/1 (which raised ArgumentError before).
+        {:ok, msg}
 
-    providers =
-      if is_list(requested) and length(requested) > 0 do
-        Enum.map(requested, &String.to_existing_atom/1)
-      else
-        available_providers()
-      end
-
-    if length(providers) < 2 do
-      {:ok,
-       "Mixture-of-Agents requires at least 2 providers. Only #{length(providers)} available. " <>
-         "Configure additional providers or use the default model instead."}
-    else
-      fan_out_and_synthesize(query, providers)
+      {:ok, providers} ->
+        if length(providers) < 2 do
+          {:ok,
+           "Mixture-of-Agents requires at least 2 providers. Only #{length(providers)} available. " <>
+             "Configure additional providers or use the default model instead."}
+        else
+          fan_out_and_synthesize(query, providers)
+        end
     end
   end
+
+  # Map requested provider name strings to known provider atoms WITHOUT
+  # String.to_existing_atom/1 (which crashes on an unseen name). Unknown names
+  # yield a clean error message the caller surfaces as an {:ok, msg} tool result.
+  defp resolve_providers(requested) when is_list(requested) and requested != [] do
+    known = Constants.candidate_providers()
+    by_name = Map.new(known, fn atom -> {Atom.to_string(atom), atom} end)
+
+    {mapped, unknown} =
+      Enum.reduce(requested, {[], []}, fn name, {ok, bad} ->
+        key = name |> to_string() |> String.trim() |> String.downcase()
+
+        case Map.get(by_name, key) do
+          nil -> {ok, [to_string(name) | bad]}
+          atom -> {[atom | ok], bad}
+        end
+      end)
+
+    if unknown == [] do
+      {:ok, mapped |> Enum.reverse() |> Enum.uniq()}
+    else
+      {:error,
+       "Unknown provider(s): #{unknown |> Enum.reverse() |> Enum.join(", ")}. " <>
+         "Known providers: #{by_name |> Map.keys() |> Enum.sort() |> Enum.join(", ")}."}
+    end
+  end
+
+  defp resolve_providers(_), do: {:ok, available_providers()}
 
   # ── Private ───────────────────────────────────────────────────────────
 

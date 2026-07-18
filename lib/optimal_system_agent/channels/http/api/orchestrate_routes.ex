@@ -288,7 +288,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
               try do
                 case SessionManager.ensure_loop(session_id, user_id, :http) do
                   :ok ->
-                    SessionManager.process_message(session_id, task)
+                    # Honor the validated pattern: dispatch through the swarm
+                    # engine instead of running a single plain agent loop.
+                    _ = OptimalSystemAgent.Swarm.Patterns.dispatch(pattern, session_id, task)
 
                     ensure_swarm_table()
 

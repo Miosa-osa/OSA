@@ -18,31 +18,97 @@ const SCROLL_WHEEL_LINES: isize = 3;
 /// a slower wheel-up restarts the count instead of accumulating stale ticks.
 const SCROLL_GESTURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
 
+/// Max whitespace-separated tokens `paste_is_file_paths` will stat before
+/// giving up and treating the paste as ordinary text. Bounds UI-thread disk I/O
+/// on a large paste and stops a long prose line from being probed word by word.
+const MAX_PATH_TOKENS: usize = 8;
+
+/// Strip one matching pair of surrounding quotes (mirrors attachment.rs so the
+/// path gate and attachment ingestion agree on what a path token is).
+fn unquote_path(s: &str) -> &str {
+    let s = s.trim();
+    for q in ['\'', '"'] {
+        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Undo the shell-style escaping a terminal applies to dropped paths
+/// ("my\\ file" -> "my file"), mirroring attachment.rs.
+fn unescape_path(s: &str) -> String {
+    s.replace("\\ ", " ").replace("\\\\", "\\")
+}
+
+/// A token is worth stat'ing only when it *looks* like a filesystem path:
+/// absolute (`/…`), explicitly relative (`./`, `../`), home (`~`), a Windows
+/// drive path (`C:\…` / `C:/…`), or a UNC path (`\\…`). A bare word like
+/// `Cargo.toml` or `src` never qualifies, so ordinary prose whose words happen
+/// to name files on disk is inserted as text instead of being hijacked into
+/// attachment chips — and, crucially, does NO filesystem I/O at all.
+fn looks_like_path(tok: &str) -> bool {
+    let t = tok.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('/')
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with('~')
+        || t.starts_with("\\\\")
+    {
+        return true;
+    }
+    // Windows drive-letter path: `C:\` or `C:/`.
+    let b = t.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Normalize a token the way attachment ingestion does (strip surrounding
+/// quotes, undo `\\ ` escaping) and return it ONLY when it looks like a path.
+/// Bare words return None so they never trigger a stat.
+fn path_candidate(tok: &str) -> Option<String> {
+    let unq = unquote_path(tok);
+    if !looks_like_path(unq) {
+        return None;
+    }
+    Some(unescape_path(unq))
+}
+
 /// True only when a pasted string is entirely one-or-more existing filesystem
 /// paths (drag-drop of files or a copied path), as opposed to ordinary text.
 /// Ordinary prose — even prose that happens to contain a word matching a
 /// filename — returns false so it is inserted as text rather than hijacked into
-/// an attachment chip.
+/// an attachment chip. De-risked: a token must LOOK like a path (see
+/// `looks_like_path`) before any `exists()` stat, and at most `MAX_PATH_TOKENS`
+/// tokens are probed, so a large prose paste can never stall the UI thread on
+/// disk I/O nor be silently turned into attachments.
 pub(crate) fn paste_is_file_paths(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return false;
     }
-    // Whole paste is a single existing path (handles paths containing spaces).
-    if std::path::Path::new(trimmed).exists() {
-        return true;
-    }
-    // Otherwise accept only when EVERY whitespace/newline-separated token is an
-    // existing path (multi-file drag-drop). A single non-path token means text.
-    let mut tokens = trimmed.split_whitespace();
-    let mut any = false;
-    for tok in &mut tokens {
-        any = true;
-        if !std::path::Path::new(tok).exists() {
-            return false;
+    // Whole paste is a single (optionally quoted) path — handles paths that
+    // contain spaces. Only stat it when it looks like a path.
+    if let Some(p) = path_candidate(trimmed) {
+        if std::path::Path::new(&p).exists() {
+            return true;
         }
     }
-    any
+    // Otherwise every whitespace-separated token must look like a path AND
+    // exist (multi-file drag-drop), bounded to MAX_PATH_TOKENS stats.
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > MAX_PATH_TOKENS {
+        return false;
+    }
+    for tok in tokens {
+        match path_candidate(tok) {
+            Some(p) if std::path::Path::new(&p).exists() => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// True only for the two keys that dismiss a read-only overlay: Esc, or an
@@ -94,31 +160,10 @@ impl App {
                         picker.handle_paste(&text);
                     }
                 } else if self.state.allows_input() {
-                    // Drag-drop / a pasted file path becomes an attachment chip
-                    // instead of raw text — but ONLY when the paste is entirely
-                    // existing file path(s). Ordinary text (even text that happens
-                    // to contain a word matching a filename) is inserted as-is.
-                    if paste_is_file_paths(&text) && self.ingest_paste_as_attachments(&text) {
-                        return false;
-                    }
-                    // WS9 — CC PromptInput onTextPaste parity: strip ANSI
-                    // escapes and normalize \r -> \n, tabs -> 4 spaces BEFORE
-                    // any size decision, so control bytes never enter the
-                    // composer buffer.
-                    let normalized = crate::components::input::normalize_paste(&text);
-                    // Char-boundary-safe cap: truncate_str floors to a UTF-8
-                    // boundary and returns the whole string when under the limit,
-                    // so a large multi-byte paste can never slice mid-char.
-                    let capped =
-                        crate::util::truncate_str(&normalized, super::MAX_MESSAGE_SIZE);
-
-                    // Large pastes (>PASTE_THRESHOLD=800 chars or >2 newlines,
-                    // CC verbatim) collapse into a "[Pasted text #N +M lines]"
-                    // pill token; the full text is spliced back in at submit.
-                    // The pill itself is the feedback — the old "Large paste"
-                    // toast is gone with it. Small pastes insert inline.
-                    self.input.insert_paste(capped);
-                    self.recompute_layout();
+                    // Route through the single shared paste path so terminal
+                    // bracketed paste and Ctrl+V clipboard paste behave
+                    // identically (WS9 parity).
+                    self.insert_paste_text(&text);
                 }
                 false
             }
@@ -137,6 +182,21 @@ impl App {
                 false
             }
         }
+    }
+
+    /// The single shared paste path (WS9 parity): terminal bracketed paste and
+    /// Ctrl+V clipboard paste both route here so they behave identically. A
+    /// paste that is entirely existing file path(s) becomes attachment chips;
+    /// otherwise the text is ANSI-stripped/CRLF-normalized, char-boundary
+    /// capped, and inserted (large pastes collapse into a pill via insert_paste).
+    pub(crate) fn insert_paste_text(&mut self, text: &str) {
+        if paste_is_file_paths(text) && self.ingest_paste_as_attachments(text) {
+            return;
+        }
+        let normalized = crate::components::input::normalize_paste(text);
+        let capped = crate::util::truncate_str(&normalized, super::MAX_MESSAGE_SIZE);
+        self.input.insert_paste(capped);
+        self.recompute_layout();
     }
 
     /// Handle a mouse event. Behaviour is deliberately conservative so a normal
@@ -1208,5 +1268,61 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod paste_path_tests {
+    use super::{looks_like_path, paste_is_file_paths, MAX_PATH_TOKENS};
+
+    #[test]
+    fn bare_words_are_never_paths() {
+        assert!(!looks_like_path("Cargo.toml"));
+        assert!(!looks_like_path("src"));
+        assert!(!looks_like_path("README.md"));
+    }
+
+    #[test]
+    fn path_prefixes_are_recognized() {
+        assert!(looks_like_path("/etc/hosts"));
+        assert!(looks_like_path("./foo"));
+        assert!(looks_like_path("../bar"));
+        assert!(looks_like_path("~/baz"));
+        assert!(looks_like_path("C:\\Users\\x"));
+        assert!(looks_like_path("C:/Users/x"));
+        assert!(looks_like_path("\\\\host\\share"));
+    }
+
+    #[test]
+    fn prose_of_real_filenames_is_not_hijacked() {
+        // Even if these words name files in the CWD, without a path prefix they
+        // are treated as text (the pre-fix hijack bug) and do zero disk I/O.
+        assert!(!paste_is_file_paths("src Cargo.toml README.md"));
+        assert!(!paste_is_file_paths("look at the readme file please"));
+    }
+
+    #[test]
+    fn missing_prefixed_paths_are_text() {
+        assert!(!paste_is_file_paths("/no/such/file/osa_xyz123"));
+        assert!(!paste_is_file_paths("./nope-abc /also/missing-def"));
+    }
+
+    #[test]
+    fn too_many_tokens_short_circuit() {
+        let many = (0..(MAX_PATH_TOKENS + 1))
+            .map(|i| format!("/p/{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!paste_is_file_paths(&many));
+    }
+
+    #[test]
+    fn real_file_is_detected() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("osa_paste_test_{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let s = path.to_string_lossy().to_string();
+        assert!(paste_is_file_paths(&s));
+        let _ = std::fs::remove_file(&path);
     }
 }

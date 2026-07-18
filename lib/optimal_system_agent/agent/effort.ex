@@ -12,7 +12,9 @@ defmodule OptimalSystemAgent.Agent.Effort do
   @levels %{
     low: %{
       thinking_budget: 0,
-      max_iterations: 30,
+      # Raised from 30. CC has no fixed per-turn iteration ceiling by default; the
+      # cap is a backstop, not a routine limit. Explicit :max_iterations wins.
+      max_iterations: 50,
       max_response_tokens: 32_768,
       tool_budget: 18,
       temperature: 0.2,
@@ -21,7 +23,11 @@ defmodule OptimalSystemAgent.Agent.Effort do
     },
     medium: %{
       thinking_budget: 5_000,
-      max_iterations: 30,
+      # Raised 30 → 100 (default effort). A 30-round cap killed legitimate
+      # multi-file tasks mid-work; CC keeps going until the model stops emitting
+      # tool_use, bounded by context + budget. This keeps the canned stop as a
+      # genuine backstop rather than a routine cap.
+      max_iterations: 100,
       max_response_tokens: 32_768,
       tool_budget: 24,
       temperature: 0.7,
@@ -30,7 +36,8 @@ defmodule OptimalSystemAgent.Agent.Effort do
     },
     high: %{
       thinking_budget: 10_000,
-      max_iterations: 50,
+      # Raised 50 → 150 to match the higher default ceilings; still a backstop.
+      max_iterations: 150,
       max_response_tokens: 32_768,
       tool_budget: 32,
       temperature: 0.7,

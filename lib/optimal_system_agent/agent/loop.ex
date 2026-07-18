@@ -22,6 +22,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
   - `Loop.LLMClient`      — provider-agnostic LLM call with streaming
   - `Loop.Checkpoint`     — crash-recovery state snapshots
   - `Loop.GenreRouter`    — signal genre routing
+
+  ## Turn / iteration / budget stop taxonomy
+
+  A single turn can end for four INDEPENDENT reasons. Checked per iteration in
+  `ReactLoop.run/1` (and around it), each broadcasts a TYPED `:system_event` so
+  consumers (TUI, analytics) render it distinctly rather than as a plain
+  `agent_response`:
+
+    1. `max_iterations`      — per-turn tool round-trip ceiling. Config
+       `:max_iterations` wins; else the effort ceiling (`Effort.max_iterations/0`).
+       A genuine backstop, NOT a routine cap. Event: `:max_iterations_reached`.
+    2. `max_budget_usd`      — per-session USD spend cap (`Loop.Limits`).
+       Default nil = OFF. Event: `:budget_limit_reached`.
+    3. `doom_loop_max_calls` — absolute session tool-call cap plus repeated
+       failure / identical-call detection (`Loop.DoomLoop`).
+       Event: `:tool_call_cap_exceeded` (and `:doom_loop_halt`).
+    4. `max_turns`           — cross-turn conversation cap (`Loop.Limits`, turn
+       pipeline), enforced before the LLM is invoked.
   """
   use GenServer
   require Logger
@@ -50,6 +68,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :channel,
     :provider,
     :model,
+    :effective_context_window,
     :working_dir,
     messages: [],
     iteration: 0,
@@ -642,6 +661,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       uptime_seconds: uptime,
       provider: state.provider,
       model: state.model,
+      effective_context_window: state.effective_context_window,
       spend: OptimalSystemAgent.Agent.Loop.Accounting.snapshot(state)
     }
 
@@ -650,9 +670,42 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @impl true
   def handle_call({:swap_provider, provider, model}, _from, state) do
-    :ets.insert(:osa_session_provider_overrides, {state.session_id, provider, model})
-    {:reply, :ok, %{state | provider: provider, model: model}}
+    provider_atom = normalize_provider(provider)
+
+    cond do
+      is_nil(provider_atom) ->
+        {:reply, {:error, "unknown provider: #{inspect(provider)}"}, state}
+
+      not is_binary(model) or model == "" ->
+        {:reply, {:error, "model is required"}, state}
+
+      not OptimalSystemAgent.Providers.Registry.known_model?(provider_atom, model) ->
+        {:reply, {:error, "unknown model \"#{model}\" for provider #{provider_atom}"}, state}
+
+      true ->
+        ecw =
+          OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider_atom)
+
+        :ets.insert(:osa_session_provider_overrides, {state.session_id, provider_atom, model})
+
+        {:reply, {:ok, %{provider: provider_atom, model: model, context_window: ecw}},
+         %{state | provider: provider_atom, model: model, effective_context_window: ecw}}
+    end
   end
+
+  # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and
+  # only return a provider that is actually registered.
+  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
+    if provider in OptimalSystemAgent.Providers.Registry.list_providers(), do: provider, else: nil
+  end
+
+  defp normalize_provider(provider) when is_binary(provider) do
+    Enum.find(OptimalSystemAgent.Providers.Registry.list_providers(), fn a ->
+      Atom.to_string(a) == provider
+    end)
+  end
+
+  defp normalize_provider(_), do: nil
 
   # Update a live session's working_dir (e.g. a later turn sent from a different
   # folder). Publishes into the process dictionary too so any immediate cwd

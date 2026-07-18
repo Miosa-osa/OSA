@@ -49,6 +49,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   @default_min_older_tokens 400
   @max_consecutive_failures 3
   @summary_retries 2
+  @default_restore_max_tokens 4_000
+  @min_summary_length 200
+
+  # Section headers the folded summary MUST retain (subset of the CC 9-section
+  # contract). A summary missing these — or below @min_summary_length — has lost
+  # signal; reject and retry with a stricter prompt before spending a
+  # circuit-breaker failure.
+  @required_summary_sections ["Primary Request", "Pending Tasks", "Current Work"]
+
+  @stricter_instructions "STRICT: your previous summary was REJECTED as incomplete. You MUST include ALL 9 numbered sections with their exact headers (1. Primary Request and Intent, 2. Key Technical Concepts, 3. Files and Code Sections, 4. Errors and fixes, 5. Problem Solving, 6. All user messages, 7. Pending Tasks, 8. Current Work, 9. Optional Next Step). Do NOT omit Pending Tasks or Current Work. Preserve every open todo, unresolved error, file path, and function signature."
 
   # Ported from Claude Code `services/compact/prompt.ts` (BASE_COMPACT_PROMPT).
   # The <analysis> block is a drafting scratchpad that strip_analysis/1 removes
@@ -181,7 +191,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             restore =
               case CompactRestore.build_restore_message(session_id) do
                 nil -> []
-                msg -> [msg]
+                msg -> [clamp_restore_message(msg, restore_max_tokens())]
               end
 
             compacted = [summary_msg | restore] ++ recent
@@ -275,6 +285,112 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   defp append_user_instructions(prompt, _), do: prompt
 
   # ---------------------------------------------------------------------------
+  # Summary quality verification (build-plan step 9)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  True when a folded summary retains the required sections and clears the
+  minimum-length floor. Used to reject low-quality summaries and retry with a
+  stricter prompt before counting a circuit-breaker failure.
+  """
+  @spec valid_summary?(term()) :: boolean()
+  def valid_summary?(summary) when is_binary(summary) do
+    body = strip_analysis(summary)
+
+    String.length(String.trim(body)) >= @min_summary_length and
+      Enum.all?(@required_summary_sections, &String.contains?(body, &1))
+  end
+
+  def valid_summary?(_), do: false
+
+  defp summary_quality_reason(summary) when is_binary(summary) do
+    body = strip_analysis(summary)
+    missing = Enum.reject(@required_summary_sections, &String.contains?(body, &1))
+
+    cond do
+      String.length(String.trim(body)) < @min_summary_length -> :too_short
+      missing != [] -> {:missing_sections, missing}
+      true -> :low_quality
+    end
+  end
+
+  defp summary_quality_reason(_), do: :not_a_string
+
+  defp stricter_instructions(nil), do: @stricter_instructions
+
+  defp stricter_instructions(existing) when is_binary(existing),
+    do: existing <> "\n\n" <> @stricter_instructions
+
+  defp stricter_instructions(_), do: @stricter_instructions
+
+  # ---------------------------------------------------------------------------
+  # Dedicated summarizer model (build-plan step 6)
+  # ---------------------------------------------------------------------------
+
+  # Prefer a dedicated cheap/fast summarizer (:compaction_summarizer_model) so an
+  # expensive main model doesn't do compaction. Cache-safe: it runs as a one-shot
+  # user turn that never touches the main conversation's cached prefix. Config
+  # accepts a bare model string or a {provider, model} tuple; unset → default
+  # provider/model with the same temperature/max_tokens as before.
+  defp summarizer_opts do
+    base = [temperature: 0.2, max_tokens: summary_max_tokens()]
+
+    case Application.get_env(:optimal_system_agent, :compaction_summarizer_model) do
+      nil ->
+        base
+
+      "" ->
+        base
+
+      {provider, model} when is_atom(provider) and is_binary(model) ->
+        [{:provider, provider}, {:model, model} | base]
+
+      model when is_binary(model) ->
+        [{:model, model} | base]
+
+      _ ->
+        base
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Post-compact restore budgeting (build-plan step 7)
+  # ---------------------------------------------------------------------------
+
+  defp restore_max_tokens do
+    case Application.get_env(
+           :optimal_system_agent,
+           :compaction_restore_max_tokens,
+           @default_restore_max_tokens
+         ) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_restore_max_tokens
+    end
+  end
+
+  # Clamp the post-compaction restore block so re-injected file contents/tasks
+  # can never re-inflate the freshly-shrunk window past compact_at. Measured with
+  # the same estimator the loop uses; trimmed on a ~4 chars/token ceiling.
+  @doc false
+  def clamp_restore_message(%{content: content} = msg, max_tokens)
+      when is_binary(content) and is_integer(max_tokens) and max_tokens > 0 do
+    if Compactor.estimate_tokens([msg]) <= max_tokens do
+      msg
+    else
+      approx_chars = max_tokens * 4
+
+      truncated =
+        content
+        |> String.slice(0, approx_chars)
+        |> Kernel.<>("\n\n[Restore context truncated to fit the compacted window.]")
+
+      %{msg | content: truncated}
+    end
+  end
+
+  def clamp_restore_message(msg, _max_tokens), do: msg
+
+  # ---------------------------------------------------------------------------
   # Turn splitting
   # ---------------------------------------------------------------------------
 
@@ -318,8 +434,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # (CC compact does 2 streaming retries before giving up).
   defp summarize_with_retries(messages, retries_left, instructions \\ nil) do
     case summarize(messages, instructions) do
-      {:ok, _} = ok ->
-        ok
+      {:ok, summary} ->
+        # Skip quality gating in offline/stub mode (no real LLM to retry with).
+        if not llm_enabled?() or valid_summary?(summary) do
+          {:ok, summary}
+        else
+          if retries_left > 0 do
+            summarize_with_retries(
+              messages,
+              retries_left - 1,
+              stricter_instructions(instructions)
+            )
+          else
+            {:error, {:low_quality_summary, summary_quality_reason(summary)}}
+          end
+        end
 
       {:error, _reason} when retries_left > 0 ->
         summarize_with_retries(messages, retries_left - 1, instructions)
@@ -343,10 +472,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         |> append_user_instructions(instructions)
 
       try do
-        case Providers.chat([%{role: "user", content: prompt}],
-               temperature: 0.2,
-               max_tokens: summary_max_tokens()
-             ) do
+        case Providers.chat([%{role: "user", content: prompt}], summarizer_opts()) do
           {:ok, %{content: content}} when is_binary(content) and content != "" ->
             {:ok, content}
 

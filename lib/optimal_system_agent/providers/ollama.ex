@@ -472,6 +472,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec model_supports_tools?(String.t()) :: boolean()
   def model_supports_tools?(model_name) do
+    case OptimalSystemAgent.Providers.ModelLimits.tool_call(:ollama, model_name) do
+      true -> true
+      false -> false
+      _ -> heuristic_supports_tools?(model_name)
+    end
+  end
+
+  # Name+size heuristic used only when the Catalog has no authoritative
+  # tool_call flag for the model.
+  defp heuristic_supports_tools?(model_name) do
     name = String.downcase(model_name)
 
     Enum.any?(@tool_capable_prefixes, &String.starts_with?(name, &1)) and
@@ -501,6 +511,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       opts
       |> Keyword.get(:max_tokens, 4096)
       |> max(256)
+      |> cap_num_predict(model)
 
     prompt_tokens = OptimalSystemAgent.Agent.Context.estimate_tokens_messages(messages)
 
@@ -518,6 +529,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     num_predict = min(num_predict, num_ctx)
 
     %{temperature: temperature, num_ctx: num_ctx, num_predict: num_predict}
+  end
+
+  # Cap num_predict (output tokens) at the model's real output ceiling when the
+  # Catalog / static table knows it, so a large flat max_tokens (react_loop's
+  # 32768 default) can't exceed a small-output model's limit and 400/truncate.
+  defp cap_num_predict(n, model) do
+    case OptimalSystemAgent.Providers.ModelLimits.max_output(model) do
+      cap when is_integer(cap) and cap > 0 -> min(n, cap)
+      _ -> n
+    end
   end
 
   # Round a raw token requirement up to a standard KV-cache bucket. Floors at
@@ -627,8 +648,24 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Returns true for models known to enter unbounded thinking phases by default.
   @doc false
   def thinking_model?(model_name) do
+    case OptimalSystemAgent.Providers.ModelLimits.reasoning(:ollama, model_name) do
+      true -> true
+      false -> false
+      _ -> heuristic_thinking_model?(model_name)
+    end
+  end
+
+  # Reasoning-model name heuristic used when the Catalog has no reasoning flag.
+  # Broadened past kimi/'thinking' to the common local reasoning tags whose names
+  # don't literally contain 'thinking' (deepseek-r1, qwq, qwen '-r1' variants).
+  defp heuristic_thinking_model?(model_name) do
     name = String.downcase(model_name)
-    String.contains?(name, "thinking") or String.starts_with?(name, "kimi")
+
+    String.contains?(name, "thinking") or
+      String.starts_with?(name, "kimi") or
+      String.contains?(name, "deepseek-r1") or
+      String.contains?(name, "qwq") or
+      String.contains?(name, "-r1")
   end
 
   defp format_tools(tools) do

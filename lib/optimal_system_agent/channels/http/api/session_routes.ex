@@ -799,23 +799,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> halt()
     else
       case SessionManager.swap_provider(session_id, provider, model) do
+        {:ok, info} ->
+          resp =
+            Jason.encode!(%{
+              status: "ok",
+              session_id: session_id,
+              provider: to_string(info.provider),
+              model: info.model,
+              context_window: info.context_window
+            })
+
+          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+
         :ok ->
+          # Backward-compatible path (older loop returning bare :ok): compute the
+          # window here so the TUI context bar can still resize on switch.
+          provider_atom =
+            Enum.find(
+              OptimalSystemAgent.Providers.Registry.list_providers(),
+              &(Atom.to_string(&1) == provider)
+            )
+
+          ctx =
+            provider_atom &&
+              OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider_atom)
+
           resp =
             Jason.encode!(%{
               status: "ok",
               session_id: session_id,
               provider: provider,
-              model: model
+              model: model,
+              context_window: ctx
             })
 
           conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
+        {:error, :not_found} ->
+          json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+
+        {:error, reason} when is_binary(reason) ->
+          json_error(conn, 400, "invalid_model", reason)
+
         {:error, reason} ->
-          if reason == :not_found do
-            json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
-          else
-            json_error(conn, 500, "swap_failed", inspect(reason))
-          end
+          json_error(conn, 500, "swap_failed", inspect(reason))
       end
     end
   end

@@ -146,6 +146,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       task: child_task,
       parent_session_id: parent_id,
       role: role || "agent",
+      # Non-fatal signal: caller named a specific role/subagent_type but no such
+      # agent definition exists — surfaced in the result so the model learns its
+      # chosen specialist wasn't found (it ran a generic agent instead).
+      requested_role_missing: role && is_nil(agent_def) && role != "agent" && role,
       # Stable UI handle → @name id + "Teammate @name finished" line. Per-task
       # name (fan-out) wins over a top-level "name" arg.
       name: name || Map.get(args, "name"),
@@ -333,9 +337,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   end
 
   defp dispatch_foreground(config) do
+    note = role_missing_note(config)
+
     case Orchestrator.run_subagent(config) do
-      {:ok, result} -> {:ok, result}
+      {:ok, result} -> {:ok, note <> result}
       {:error, reason} -> {:ok, "Delegation failed: #{inspect(reason)}"}
+    end
+  end
+
+  # Prefix a non-fatal note when the requested role/subagent_type had no matching
+  # agent definition (typed-registry-miss signal for the model).
+  defp role_missing_note(config) do
+    case Map.get(config, :requested_role_missing) do
+      role when is_binary(role) ->
+        "[note: requested agent '#{role}' was not found in the registry — ran a generic agent instead]\n\n"
+
+      _ ->
+        ""
     end
   end
 

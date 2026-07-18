@@ -712,7 +712,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       OptimalSystemAgent.Agent.Loop.ToolResultStorage.apply_budget(
         result_str,
         tool_call.name,
-        tool_call.id
+        tool_call.id,
+        state.session_id
       )
 
     # Run post_tool_use hooks SYNC and CONSUME their results (WS1/CC parity):

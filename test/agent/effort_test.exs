@@ -26,7 +26,7 @@ defmodule OptimalSystemAgent.Agent.EffortTest do
 
     assert Effort.fast_mode?()
     assert Effort.thinking_budget() == 0
-    assert Effort.max_iterations() == 30
+    assert Effort.max_iterations() == 50
     assert Effort.max_response_tokens() == 32_768
     assert Effort.tool_budget() == 18
   end

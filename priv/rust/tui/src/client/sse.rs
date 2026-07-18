@@ -346,6 +346,8 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             #[derive(serde::Deserialize)]
             struct Ev {
                 iteration: u32,
+                #[serde(default)]
+                max_iterations: Option<u32>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -353,6 +355,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             };
             Some(BackendEvent::LlmRequest {
                 iteration: ev.iteration,
+                max_iterations: ev.max_iterations,
             })
         }
 

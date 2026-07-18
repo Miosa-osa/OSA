@@ -287,8 +287,9 @@ impl App {
                 self.chat.finalize_tool(&name);
                 debug!("Tool result: {} (success={})", name, success);
             }
-            BackendEvent::LlmRequest { iteration } => {
+            BackendEvent::LlmRequest { iteration, max_iterations } => {
                 self.activity.set_iteration(iteration as u32);
+                self.activity.set_max_iterations(max_iterations);
                 self.status.set_iteration(iteration as u32);
                 debug!("LLM request iteration {}", iteration);
             }

@@ -233,6 +233,145 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   end
 
   # ---------------------------------------------------------------------------
+  # Dispatch facade
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Single entry point that turns a caller's plain task string + a pattern name
+  into a real multi-agent run and returns ONE synthesized string.
+
+  Pattern names accepted (string or atom): "parallel", "pipeline", "debate",
+  "review"/"review_loop", "pact", "auto". Unknown names fall back to :auto.
+  This wires the swarm patterns into the `orchestrate` tool and the
+  POST /swarm/launch route so the advertised `strategy`/`pattern` actually
+  changes behavior instead of silently running a single agent.
+  """
+  @spec dispatch(String.t() | atom(), String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def dispatch(pattern, parent_id, task, opts \\ []) when is_binary(task) do
+    result =
+      case normalize_pattern(pattern) do
+        :parallel -> parallel(parent_id, build_configs(:parallel, task, opts), opts)
+        :pipeline -> pipeline(parent_id, build_configs(:pipeline, task, opts), opts)
+        :debate -> debate(parent_id, build_configs(:debate, task, opts), opts)
+        :review_loop -> review_loop(parent_id, build_configs(:review_loop, task, opts), opts)
+        :pact -> pipeline(parent_id, build_configs(:pact, task, opts), opts)
+        :auto -> auto_dispatch(parent_id, task, opts)
+      end
+
+    case result do
+      {:ok, results} -> {:ok, flatten_results(results)}
+      {:error, _} = err -> err
+      other -> {:ok, flatten_results(other)}
+    end
+  end
+
+  @doc "Normalize a pattern name (string/atom) to a known pattern atom; :auto fallback."
+  @spec normalize_pattern(String.t() | atom()) :: atom()
+  def normalize_pattern(pattern) do
+    pattern
+    |> to_string()
+    |> String.downcase()
+    |> String.trim()
+    |> case do
+      "parallel" -> :parallel
+      "pipeline" -> :pipeline
+      "debate" -> :debate
+      "review" -> :review_loop
+      "review_loop" -> :review_loop
+      "pact" -> :pact
+      "auto" -> :auto
+      _ -> :auto
+    end
+  end
+
+  # Decompose a single task string into role-specialized sub-agent configs.
+  # A caller may fully override the config list via opts[:configs].
+  defp build_configs(pattern, task, opts) do
+    case Keyword.get(opts, :configs) do
+      [_ | _] = configs -> configs
+      _ -> default_configs(pattern, task)
+    end
+  end
+
+  defp default_configs(:pact, task) do
+    [
+      %{task: "Plan the approach for the following goal. Produce a concrete, ordered plan.\n\nGoal: #{task}", role: "planner", tier: :specialist},
+      %{task: "Execute the plan for the following goal, implementing the required changes.\n\nGoal: #{task}", role: "implementer", tier: :specialist},
+      %{task: "Coordinate and integrate the work done so far for the following goal, resolving conflicts.\n\nGoal: #{task}", role: "coordinator", tier: :specialist},
+      %{task: "Test and verify the result for the following goal. Report pass/fail and any gaps.\n\nGoal: #{task}", role: "tester", tier: :specialist}
+    ]
+  end
+
+  defp default_configs(:pipeline, task) do
+    [
+      %{task: "Research and outline an approach for: #{task}", role: "researcher", tier: :specialist},
+      %{task: "Implement the following, using the prior research: #{task}", role: "implementer", tier: :specialist},
+      %{task: "Review and finalize the following, fixing any issues: #{task}", role: "reviewer", tier: :specialist}
+    ]
+  end
+
+  defp default_configs(:debate, task) do
+    [
+      %{task: "Propose a solution for: #{task}", role: "proposer-a", tier: :specialist},
+      %{task: "Propose a DIFFERENT, alternative solution for: #{task}", role: "proposer-b", tier: :specialist},
+      %{task: "Evaluate the proposals and produce the best synthesized answer for: #{task}", role: "critic", tier: :specialist}
+    ]
+  end
+
+  defp default_configs(:review_loop, task) do
+    [
+      %{task: task, role: "worker", tier: :specialist},
+      %{task: "Review the worker's output for correctness and completeness for: #{task}", role: "reviewer", tier: :specialist}
+    ]
+  end
+
+  defp default_configs(_parallel_or_auto, task) do
+    [
+      %{task: task, role: "agent-1", tier: :specialist},
+      %{task: task, role: "agent-2", tier: :specialist}
+    ]
+  end
+
+  # :auto — a genuine (LLM-free) heuristic decision: multi-step / long tasks get
+  # a pipeline decomposition, simple ones run as a single agent.
+  defp auto_dispatch(parent_id, task, opts) do
+    if complex_task?(task) do
+      pipeline(parent_id, build_configs(:pipeline, task, opts), opts)
+    else
+      result =
+        Orchestrator.run_subagent(%{
+          task: task,
+          parent_session_id: parent_id,
+          role: "agent",
+          tier: :specialist
+        })
+
+      {:ok, [result]}
+    end
+  end
+
+  defp complex_task?(task) do
+    String.length(task) > 240 or
+      Regex.match?(~r/\b(and then|after that|multiple|several|steps?|phases?|pipeline)\b/i, task)
+  end
+
+  defp flatten_results(results) when is_list(results) do
+    results
+    |> Enum.with_index(1)
+    |> Enum.map_join("\n\n---\n\n", fn {res, idx} ->
+      case res do
+        {:ok, text} when is_binary(text) -> "### Agent #{idx}\n#{text}"
+        {:error, reason} -> "### Agent #{idx} (failed)\n#{inspect(reason)}"
+        text when is_binary(text) -> "### Agent #{idx}\n#{text}"
+        other -> "### Agent #{idx}\n#{inspect(other)}"
+      end
+    end)
+  end
+
+  defp flatten_results(other), do: inspect(other)
+
+  # ---------------------------------------------------------------------------
   # Named Presets
   # ---------------------------------------------------------------------------
 
@@ -250,12 +389,17 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     end
   end
 
-  @doc "List all available named patterns."
+  @doc """
+  List all known swarm pattern names. Single source of truth is
+  `OptimalSystemAgent.Agent.Orchestrator.Patterns` (also surfaced by the command
+  center) so the tool schema, /swarm/launch, and any UI stay in agreement.
+  """
   def list_patterns do
-    case load_presets() do
-      {:ok, presets} -> {:ok, Map.keys(presets)}
-      err -> err
-    end
+    names =
+      OptimalSystemAgent.Agent.Orchestrator.Patterns.list_patterns()
+      |> Enum.map(fn {name, _desc} -> name end)
+
+    {:ok, names}
   end
 
   defp load_presets do

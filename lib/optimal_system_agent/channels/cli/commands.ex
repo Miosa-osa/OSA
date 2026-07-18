@@ -19,6 +19,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   alias OptimalSystemAgent.Sandbox.Router, as: SandboxRouter
   alias OptimalSystemAgent.Tools.Builtins.{SkillManager, UseSkill}
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
+  alias OptimalSystemAgent.Providers.Registry, as: ProviderRegistry
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -220,21 +221,45 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       "" ->
         provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
         model = get_model_name(provider)
-        max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+        ctx = ProviderRegistry.effective_context_window(model, provider)
 
         IO.puts("  #{@bold}Current Model#{@reset}")
         IO.puts("  #{@dim}Provider:#{@reset}  #{provider}")
         IO.puts("  #{@dim}Model:#{@reset}     #{model}")
-        IO.puts("  #{@dim}Context:#{@reset}   #{format_tokens(max_tokens)} tokens")
+        IO.puts("  #{@dim}Context:#{@reset}   #{format_context_window(ctx)} tokens")
 
-      model_name ->
+      model_arg ->
         IO.puts("  #{@dim}Switching model...#{@reset}")
 
         case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
           [{pid, _}] ->
-            provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-            GenServer.call(pid, {:swap_provider, provider, model_name})
-            IO.puts("  #{@green}#{@reset} Switched to #{model_name}")
+            {provider, model_name} =
+              case parse_model_arg(model_arg) do
+                {:explicit, prov, m} ->
+                  {prov, m}
+
+                {:model_only, m} ->
+                  provider =
+                    ProviderRegistry.provider_for_model(m) ||
+                      Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+                  {provider, m}
+              end
+
+            case GenServer.call(pid, {:swap_provider, provider, model_name}) do
+              {:ok, info} ->
+                ctx = ProviderRegistry.effective_context_window(info.model, info.provider)
+
+                IO.puts(
+                  "  #{@green}#{@reset} Switched to #{info.model} #{@dim}(#{info.provider}, #{format_context_window(ctx)} ctx)#{@reset}"
+                )
+
+              {:error, reason} ->
+                IO.puts("  #{@yellow}error: #{reason}#{@reset}")
+
+              :ok ->
+                IO.puts("  #{@green}#{@reset} Switched to #{model_name}")
+            end
 
           _ ->
             IO.puts("  #{@yellow}error: session not found#{@reset}")
@@ -268,13 +293,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       {:ok, state} ->
         iter = state[:iteration] || state[:iteration_count] || 0
         tokens = state[:tokens_used] || state[:estimated_tokens] || 0
-        max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+        max_tokens = ProviderRegistry.effective_context_window(get_model_name(provider), provider)
         pct = if max_tokens > 0, do: round(tokens / max_tokens * 100), else: 0
 
         IO.puts("  #{@dim}Iteration:#{@reset} #{iter}")
 
         IO.puts(
-          "  #{@dim}Context:#{@reset}   #{pct}% (#{format_tokens(tokens)} / #{format_tokens(max_tokens)})"
+          "  #{@dim}Context:#{@reset}   #{pct}% (#{format_tokens(tokens)} / #{format_context_window(max_tokens)})"
         )
 
       _ ->
@@ -1578,6 +1603,43 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp format_tokens(n), do: Format.format_tokens(n)
   defp pad_num(n), do: String.pad_leading(format_tokens(n), 8)
   defp get_model_name(provider), do: Format.get_model_name(provider)
+
+  defp format_context_window(n), do: Format.format_context_window(n)
+
+  # Parse a `/model` argument into an explicit provider+model or a bare model.
+  # Supports "provider/model", "provider model", and "model" (provider resolved
+  # from the Catalog / heuristic by the caller). A leading token is only treated
+  # as a provider when it names a REGISTERED provider — otherwise the whole arg
+  # is a model id (many ids legitimately contain "/", e.g. "meta-llama/…").
+  defp parse_model_arg(arg) do
+    cond do
+      String.contains?(arg, "/") ->
+        [head, rest] = String.split(arg, "/", parts: 2)
+
+        case atomize_provider(head) do
+          nil -> {:model_only, arg}
+          provider when rest != "" -> {:explicit, provider, rest}
+          _ -> {:model_only, arg}
+        end
+
+      true ->
+        case String.split(arg, ~r/\s+/, parts: 2, trim: true) do
+          [head, rest] ->
+            case atomize_provider(head) do
+              nil -> {:model_only, arg}
+              provider -> {:explicit, provider, rest}
+            end
+
+          _ ->
+            {:model_only, arg}
+        end
+    end
+  end
+
+  # Resolve a provider token to a registered provider atom, or nil.
+  defp atomize_provider(token) do
+    Enum.find(ProviderRegistry.list_providers(), fn a -> Atom.to_string(a) == token end)
+  end
 
   # ── Permission Management ────────────────────────────────────────────
 

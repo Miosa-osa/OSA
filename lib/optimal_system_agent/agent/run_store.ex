@@ -298,4 +298,141 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   rescue
     ArgumentError -> :ok
   end
+
+  @doc """
+  Create the ETS index and rehydrate known runs from disk. Call from the app
+  supervisor's boot so the table is owned by the long-lived app master process
+  (not a transient task that would take the table down with it). Idempotent.
+  """
+  @spec init_store() :: :ok
+  def init_store do
+    ensure_table()
+    rehydrate()
+    :ok
+  end
+
+  @doc """
+  Rebuild the ETS run index from `~/.osa/agent-runs/*.md` (+ `.messages.etf`) so
+  `/runs` and `task_resume` survive a node restart (CC sidechain rehydrate
+  parity). Newest @max_terminal_runs runs only. Best-effort; never raises.
+  """
+  @spec rehydrate() :: :ok
+  def rehydrate do
+    ensure_table()
+    dir = runs_dir()
+
+    case File.ls(dir) do
+      {:ok, entries} ->
+        entries
+        |> Enum.filter(&String.ends_with?(&1, ".md"))
+        |> Enum.map(fn name -> {name, file_mtime(Path.join(dir, name))} end)
+        |> Enum.sort_by(fn {_n, dt} -> DateTime.to_unix(dt) end, :desc)
+        |> Enum.take(@max_terminal_runs)
+        |> Enum.each(fn {name, mtime} ->
+          try do
+            rehydrate_file(dir, name, mtime)
+          rescue
+            _ -> :ok
+          end
+        end)
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp rehydrate_file(dir, md_name, mtime) do
+    md_path = Path.join(dir, md_name)
+    safe_id = String.replace_suffix(md_name, ".md", "")
+    etf_path = md_path <> ".messages.etf"
+
+    meta =
+      case File.read(etf_path) do
+        {:ok, bin} ->
+          case safe_term(bin) do
+            %{meta: m} when is_map(m) -> m
+            _ -> %{}
+          end
+
+        _ ->
+          %{}
+      end
+
+    # Prefer the original (unsanitized) agent_id persisted in meta; the filename
+    # is sanitized and would not match RunStore.get(original_id) on resume.
+    agent_id = Map.get(meta, :agent_id) || safe_id
+
+    # Never clobber a live/in-memory row.
+    case :ets.lookup(@table, agent_id) do
+      [{^agent_id, _}] ->
+        :ok
+
+      _ ->
+        content =
+          case File.read(md_path) do
+            {:ok, c} -> c
+            _ -> ""
+          end
+
+        run = %{
+          agent_id: agent_id,
+          parent_session_id: Map.get(meta, :parent_session_id) || "unknown",
+          role: Map.get(meta, :role) || "agent",
+          task: Map.get(meta, :task) || extract_task(content),
+          status: infer_status(content),
+          started_at: mtime,
+          completed_at: mtime,
+          duration_ms: nil,
+          tool_count: 0,
+          tokens_used: 0,
+          recent_actions: [],
+          result: nil,
+          transcript_path: md_path
+        }
+
+        :ets.insert(@table, {agent_id, run})
+        :ok
+    end
+  end
+
+  defp safe_term(bin) do
+    :erlang.binary_to_term(bin, [:safe])
+  rescue
+    _ -> nil
+  end
+
+  defp infer_status(content) do
+    case Regex.scan(~r/STOP status=(\w+)/, content) do
+      [] ->
+        :failed
+
+      matches ->
+        [_, token] = List.last(matches)
+
+        case token do
+          "completed" -> :completed
+          "failed" -> :failed
+          "cancelled" -> :cancelled
+          _ -> :completed
+        end
+    end
+  end
+
+  defp extract_task(content) do
+    case Regex.run(~r/START role=[^\n]*\n\n(.+?)(?:\n\n## |\z)/s, content) do
+      [_, task] -> task |> String.trim() |> String.slice(0, 500)
+      _ -> ""
+    end
+  end
+
+  defp file_mtime(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: secs}} when is_integer(secs) -> DateTime.from_unix!(secs)
+      _ -> DateTime.utc_now()
+    end
+  end
 end
