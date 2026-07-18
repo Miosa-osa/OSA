@@ -134,6 +134,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   # ── Workspace introspection ───────────────────────────────────────────
   forward("/workspace", to: API.WorkspaceRoutes)
 
+  # ── Management introspection (read-only) for /permissions, /hooks, /mcp ─
+  forward("/permission-rules", to: API.PermissionRulesRoutes)
+  forward("/hooks", to: API.HooksRoutes)
+  forward("/mcp", to: API.MCPRoutes)
+
   # ── Canopy workspaces (CRUD + .canopy/ init + agent/skill discovery) ─
   forward("/workspaces", to: API.CanopyRoutes)
 
