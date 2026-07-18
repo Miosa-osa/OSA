@@ -371,12 +371,31 @@ defmodule OptimalSystemAgent.Permissions do
     "plan" => :plan
   }
 
+  # Legacy top-level `permission_mode` key vocabulary — the loop's original
+  # startup source (`auto-edit/plan/overdrive/ask`). Kept as a fallback so
+  # existing settings that used this key keep working after `default_mode/0`
+  # became the single source of truth. Unknown -> :ask (safe interactive default).
+  @legacy_mode_map %{
+    "auto-edit" => :accept_edits,
+    "plan" => :plan,
+    "overdrive" => :overdrive,
+    "ask" => :ask
+  }
+
   @doc """
-  Startup permission mode from settings `permissions.defaultMode` (CC parity).
-  Maps the CC mode string to an OSA mode atom
-  (`:ask | :accept_edits | :plan | :overdrive`), defaulting to `:ask` when the
-  key is absent or unrecognized. Seed `Loop` initial state with this so the
-  settings `defaultMode` is honored on session start.
+  Startup permission mode from settings (CC parity + legacy fallback).
+
+  Precedence:
+    1. CC key `permissions.defaultMode`
+       (`default/acceptEdits/bypassPermissions/plan`) when present.
+    2. Legacy top-level `permission_mode`
+       (`auto-edit/plan/overdrive/ask`) when the CC key is absent.
+
+  Maps to an OSA mode atom (`:ask | :accept_edits | :plan | :overdrive`),
+  defaulting to `:ask` when neither key is present or the value is
+  unrecognized. `Loop` seeds its initial state with this so the settings
+  `defaultMode` is honored on session start (previously this was dead code —
+  `Loop.init` read only the legacy key).
   """
   def default_mode do
     case Settings.get("permissions") do
@@ -384,10 +403,18 @@ defmodule OptimalSystemAgent.Permissions do
         Map.get(@default_mode_map, mode, :ask)
 
       _ ->
-        :ask
+        legacy_default_mode()
     end
   rescue
     _ -> :ask
+  end
+
+  # Fallback to the pre-parity top-level `permission_mode` string enum.
+  defp legacy_default_mode do
+    case Settings.get("permission_mode") do
+      mode when is_binary(mode) -> Map.get(@legacy_mode_map, mode, :ask)
+      _ -> :ask
+    end
   end
 
   # ── additionalDirectories + path scope ───────────────────────────────

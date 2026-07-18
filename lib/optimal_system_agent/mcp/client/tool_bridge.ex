@@ -4,10 +4,11 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
 
   Two responsibilities:
 
-    * `build_tools/2` — turn a server's raw MCP tool schemas into the OSA
+    * `build_tools/3` — turn a server's raw MCP tool schemas into the OSA
       `mcp_tools` map, keyed by the `mcp__<server>__<tool>` convention, with
       `should_defer?: true` so MCP tools stay out of the base system prompt and
-      are surfaced on demand via `tool_search`.
+      are surfaced on demand via `tool_search`. A server's `tool_filter`
+      allowlist is enforced here so unlisted tools are never exposed.
 
     * `call/2` — given a prefixed tool name and arguments, parse out the server
       and original tool name, invoke the `ServerSession`, and normalize the
@@ -24,12 +25,23 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
   @prefix "mcp__"
   @sep "__"
 
-  @doc "Build the OSA `mcp_tools` map fragment for one server's tool schemas."
-  @spec build_tools(String.t(), [map()]) :: %{String.t() => map()}
-  def build_tools(server_name, schemas) when is_list(schemas) do
+  @doc """
+  Build the OSA `mcp_tools` map fragment for one server's tool schemas.
+
+  `tool_filter` is the server's configured allowlist (config `tools` /
+  `tool_filter`). When set, only tools whose original name appears in the
+  allowlist are exposed to the agent; a `nil` filter exposes every discovered
+  tool. An explicit empty allowlist (`[]`) exposes none — the filter is
+  fail-closed so a mis-scoped allowlist never leaks unlisted tools.
+  """
+  @spec build_tools(String.t(), [map()], [String.t()] | nil) :: %{String.t() => map()}
+  def build_tools(server_name, schemas, tool_filter \\ nil) when is_list(schemas) do
+    allowed? = filter_predicate(tool_filter)
+
     schemas
     |> Enum.map(fn schema -> build_entry(server_name, schema) end)
     |> Enum.reject(&is_nil/1)
+    |> Enum.filter(fn {_key, entry} -> allowed?.(entry.original_name) end)
     |> Map.new()
   end
 
@@ -117,6 +129,16 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
     else
       nil
     end
+  end
+
+  # Turn a `tool_filter` allowlist into a membership predicate over original
+  # tool names. `nil` means "no filter configured" → expose everything; any
+  # list (including `[]`) is an explicit allowlist → expose only listed names.
+  defp filter_predicate(nil), do: fn _name -> true end
+
+  defp filter_predicate(list) when is_list(list) do
+    allowed = MapSet.new(list)
+    fn name -> MapSet.member?(allowed, name) end
   end
 
   # Drop OSA-injected internal args (e.g. __session_id__) before forwarding

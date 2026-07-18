@@ -888,6 +888,13 @@ impl App {
                 let bypass = matches!(mode, PermissionMode::BypassPermissions);
                 self.config.skip_permissions = bypass;
                 self.sidebar.set_yolo_mode(bypass);
+                // Notify the backend so the ACTIVE session's gate tracks the
+                // displayed mode (mirrors `cycle_permission_mode` /
+                // `enter_overdrive`). Without these, the status bar showed the
+                // new mode but `state.permission_mode` on the server was
+                // unchanged, so mutating tools still ran under the old mode.
+                self.spawn_backend_command("dangerous_mode", if bypass { "on" } else { "off" });
+                self.spawn_backend_command("permission_mode", mode.backend_token());
                 let _ = self.client.set_env_var("OSA_PERMISSION_MODE", value);
                 self.toasts.push(
                     format!("Permission mode: {}", mode.title()),

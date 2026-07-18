@@ -9,7 +9,7 @@
 #      (MiosaKnowledge, pure behaviour/struct types, etc.).
 #
 # Planned modules (guarded with Code.ensure_loaded?/1):
-#   - MiosaMemory.Injector  → OptimalSystemAgent.Agent.Memory.Injector  (not yet implemented)
+#   - MiosaMemory.Injector  → OptimalSystemAgent.Agent.Memory.Injector  (implemented; ONE-WAY alias)
 #   - MiosaMemory.Taxonomy  → OptimalSystemAgent.Agent.Memory.Taxonomy  (not yet implemented)
 #   - MiosaMemory.Learning  → OptimalSystemAgent.Agent.Learning          (not yet implemented)
 #
@@ -456,26 +456,21 @@ end
 
 defmodule MiosaMemory.Injector do
   @moduledoc """
-  Shim for OptimalSystemAgent.Agent.Memory.Injector.
+  One-way alias to `OptimalSystemAgent.Agent.Memory.Injector`, which holds the
+  real implementation.
 
-  The target module is planned but not yet implemented. All functions degrade
-  gracefully so callers can proceed without injection support.
+  IMPORTANT: this shim must NEVER conditionally delegate *back* to the target
+  based on `Code.ensure_loaded?/1`. The target module used to alias here too,
+  which produced an A->B->A infinite mutual-delegation loop (stack overflow).
+  Delegation flows strictly MiosaMemory.Injector -> Agent.Memory.Injector.
+  `defdelegate` resolves the callee at runtime, so no compile-order guard is
+  needed.
   """
 
-  @type injection_context :: map()
+  @type injection_context :: OptimalSystemAgent.Agent.Memory.Injector.injection_context()
 
-  if Code.ensure_loaded?(OptimalSystemAgent.Agent.Memory.Injector) do
-    defdelegate inject_relevant(entries, context),
-      to: OptimalSystemAgent.Agent.Memory.Injector
-
-    defdelegate format_for_prompt(entries), to: OptimalSystemAgent.Agent.Memory.Injector
-  else
-    @doc "Returns entries unchanged when the Injector module is unavailable."
-    def inject_relevant(entries, _context), do: entries
-
-    @doc "Returns an empty string when the Injector module is unavailable."
-    def format_for_prompt(_entries), do: ""
-  end
+  defdelegate inject_relevant(entries, context), to: OptimalSystemAgent.Agent.Memory.Injector
+  defdelegate format_for_prompt(entries), to: OptimalSystemAgent.Agent.Memory.Injector
 end
 
 defmodule MiosaMemory.Taxonomy do

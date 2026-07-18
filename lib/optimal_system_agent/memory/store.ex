@@ -17,10 +17,19 @@ defmodule OptimalSystemAgent.Memory.Store do
   Before inserting a new entry, the Store checks for similar existing entries
   using keyword overlap scoring. Four outcomes are possible:
 
-    - ADD    — no similar entry found; insert as new
-    - UPDATE — a similar entry exists; merge content and update
-    - NOOP   — content is effectively identical; skip the write
+    - ADD    — no sufficiently-similar entry (overlap < @merge_threshold);
+               insert as new, recording A-MEM links to keyword-adjacent entries
+    - UPDATE — a highly-similar entry exists (overlap >= @merge_threshold and
+               < @duplicate_threshold); merge content (growth-capped) and update
+    - NOOP   — content is effectively identical (overlap >= @duplicate_threshold);
+               skip the write
     - DELETE — (future) contradictory memory; remove the old one
+
+  Note: the *candidate* threshold (`@similarity_threshold`, used for A-MEM
+  linking) is intentionally LOWER than the *merge* threshold (`@merge_threshold`).
+  Entries that merely share ~40% of keywords are linked, NOT merged — merging two
+  distinct facts collapses them into a single garbled row and loses the new
+  fact's id/category, which silently corrupts memory quality.
 
   ## Relevance scoring
 
@@ -47,8 +56,29 @@ defmodule OptimalSystemAgent.Memory.Store do
   # Decay timer fires every hour
   @decay_interval_ms 60 * 60 * 1_000
 
-  # Minimum keyword overlap score to consider two entries "similar"
+  # Minimum keyword overlap score to consider two entries "similar" — used ONLY
+  # to gather candidates for A-MEM linking (do_save records links to these).
   @similarity_threshold 0.40
+
+  # Overlap required to MERGE the new content into an existing entry. Deliberately
+  # much higher than @similarity_threshold: below this the entries are merely
+  # keyword-adjacent (distinct facts) and must be stored separately, not merged.
+  @merge_threshold 0.75
+
+  # Overlap at/above which the new content is treated as a duplicate (NOOP write).
+  @duplicate_threshold 0.95
+
+  # Growth cap: an entry whose content already exceeds this size is never appended
+  # to again — a near-duplicate is stored as its own linked entry instead, so a
+  # single row can't accumulate content forever.
+  @max_merge_content_chars 4_000
+
+  # When merging, keep only the base content plus the most recent N "Updated:"
+  # refinement segments.
+  @max_updated_segments 5
+
+  # Delimiter separating the base content from appended refinement segments.
+  @updated_delim "\n\nUpdated: "
 
   # Stop words excluded from keyword extraction
   @stop_words ~w(a an the and or but in on at to for of is are was were be been
@@ -829,30 +859,75 @@ defmodule OptimalSystemAgent.Memory.Store do
     {:add, new_entry}
   end
 
-  defp consolidate(_new_entry, [{score, _existing} | _]) when score >= 0.95 do
-    # Very high overlap — treat as duplicate
+  defp consolidate(_new_entry, [{score, _existing} | _]) when score >= @duplicate_threshold do
+    # Near-identical content — treat as a duplicate and skip the write.
     :noop
   end
 
-  defp consolidate(new_entry, [{_score, existing} | _]) do
-    # Moderate overlap — merge by appending new content to existing
-    merged_content = "#{existing[:content]}\n\nUpdated: #{new_entry.content}"
+  defp consolidate(new_entry, [{score, existing} | _]) when score >= @merge_threshold do
+    # High overlap (but not a duplicate) — the new fact refines the existing one,
+    # so merge. Growth is capped: if the target row is already large, or the merge
+    # would exceed the size ceiling, we DON'T garble it — we fall back to storing
+    # the new fact as its own (linked) entry.
+    case merge_entry(existing, new_entry) do
+      {:ok, merged} -> {:update, existing[:id], merged}
+      :too_large -> {:add, new_entry}
+    end
+  end
 
-    merged_keywords =
-      (parse_keywords(existing[:keywords] || "") ++ parse_keywords(new_entry.keywords))
+  defp consolidate(new_entry, _similar) do
+    # Candidate-but-not-merge band (@similarity_threshold <= score < @merge_threshold):
+    # the entries merely share keywords, they are NOT the same fact. Store the new
+    # entry separately. do_save/2 still records A-MEM links to these candidates, so
+    # the association is preserved without collapsing two memories into one.
+    {:add, new_entry}
+  end
+
+  # Merge the new entry's content into an existing entry, bounding growth so a
+  # single row can't accumulate content forever. Returns {:ok, merged} or
+  # :too_large when the merge should be declined in favour of a separate insert.
+  defp merge_entry(existing, new_entry) do
+    existing_content = existing[:content] || ""
+
+    if String.length(existing_content) > @max_merge_content_chars do
+      :too_large
+    else
+      merged_content = build_merged_content(existing_content, new_entry.content)
+
+      if String.length(merged_content) > @max_merge_content_chars do
+        :too_large
+      else
+        merged_keywords =
+          (parse_keywords(existing[:keywords] || "") ++ parse_keywords(new_entry.keywords))
+          |> Enum.uniq()
+          |> Enum.join(",")
+
+        merged =
+          existing
+          |> Map.merge(%{
+            content: merged_content,
+            keywords: merged_keywords,
+            signal_weight: max(existing[:signal_weight] || 0.5, new_entry.signal_weight),
+            relevance: 1.0
+          })
+
+        {:ok, merged}
+      end
+    end
+  end
+
+  # Append the new content as an "Updated:" segment, keeping only the base content
+  # plus the most recent @max_updated_segments refinements. Duplicate segments are
+  # dropped so re-saving the same near-duplicate is idempotent.
+  defp build_merged_content(existing_content, new_content) do
+    [base | prior] = String.split(existing_content, @updated_delim)
+
+    segments =
+      (prior ++ [new_content])
       |> Enum.uniq()
-      |> Enum.join(",")
+      |> Enum.take(-@max_updated_segments)
 
-    merged =
-      existing
-      |> Map.merge(%{
-        content: merged_content,
-        keywords: merged_keywords,
-        signal_weight: max(existing[:signal_weight] || 0.5, new_entry.signal_weight),
-        relevance: 1.0
-      })
-
-    {:update, existing[:id], merged}
+    Enum.join([base | segments], @updated_delim)
   end
 
   defp keyword_overlap_score([], _), do: 0.0

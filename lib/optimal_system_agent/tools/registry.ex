@@ -767,18 +767,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "code_sandbox" => OptimalSystemAgent.Tools.Builtins.CodeSandbox,
       "knowledge" => OptimalSystemAgent.Tools.Builtins.Knowledge,
       "orchestrate" => OptimalSystemAgent.Tools.Builtins.Orchestrate,
-      "mcts_index" => OptimalSystemAgent.Tools.Builtins.MCTSIndex,
       "diff" => OptimalSystemAgent.Tools.Builtins.Diff,
-      "wallet_ops" => OptimalSystemAgent.Tools.Builtins.WalletOps,
-      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,
+      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus
 
-      # ── Memory-vault tools ─────────────────────────────────────────────
-      "vault_checkpoint" => OptimalSystemAgent.Tools.Builtins.VaultCheckpoint,
-      "vault_context" => OptimalSystemAgent.Tools.Builtins.VaultContext,
-      "vault_inject" => OptimalSystemAgent.Tools.Builtins.VaultInject,
-      "vault_remember" => OptimalSystemAgent.Tools.Builtins.VaultRemember,
-      "vault_sleep" => OptimalSystemAgent.Tools.Builtins.VaultSleep,
-      "vault_wake" => OptimalSystemAgent.Tools.Builtins.VaultWake
+      # NOT registered on purpose: mcts_index, wallet_ops, and the vault_*
+      # tools have no backend (MCTS.Indexer / Integrations.Wallet / Vault do
+      # not exist), so exposing them to the model would only produce runtime
+      # errors. A tool earns registration only when it actually works.
     }
   end
 

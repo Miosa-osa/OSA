@@ -1108,16 +1108,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
 
   # permission_mode (CC-parity): the session's starting mode when none is passed
-  # explicitly. Maps Settings.get("permission_mode") (string enum) to the loop's
-  # atom; unknown/unset -> :ask (the safe default).
+  # explicitly. Delegates to Permissions.default_mode/0 — the single source of
+  # truth — which honors the CC key `permissions.defaultMode` first and falls
+  # back to the legacy top-level `permission_mode` string enum. Unknown/unset
+  # -> :ask (the safe default).
   defp default_permission_mode do
-    case OptimalSystemAgent.Settings.get("permission_mode") do
-      "auto-edit" -> :accept_edits
-      "plan" -> :plan
-      "overdrive" -> :overdrive
-      "ask" -> :ask
-      _ -> :ask
-    end
+    OptimalSystemAgent.Permissions.default_mode()
   end
 
   # /undo backend: split off the most recent user turn and everything after it.

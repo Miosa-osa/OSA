@@ -19,7 +19,7 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.MCP.Config
+  alias OptimalSystemAgent.MCP.{Config, ProjectApproval}
   alias OptimalSystemAgent.MCP.Client.{ServerSession, ToolBridge}
 
   @supervisor OptimalSystemAgent.MCP.Supervisor
@@ -126,11 +126,20 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   end
 
   def handle_call({:enable_server, name}, _from, state) do
-    case Map.get(state.servers, name) do
-      nil ->
+    # Resolve from live state first; fall back to on-disk config so a
+    # project-scope server that boot deliberately withheld (unapproved) is
+    # still visible here and can be explicitly REFUSED rather than silently
+    # "not found" — closing the approval-bypass path.
+    server = Map.get(state.servers, name) || find_config_server(name)
+
+    cond do
+      is_nil(server) ->
         {:reply, {:error, :not_found}, state}
 
-      server ->
+      not enable_authorized?(server) ->
+        {:reply, {:error, :requires_approval}, state}
+
+      true ->
         server = %{server | enabled: true}
         _ = start_session(server)
         {:reply, :ok, %{state | servers: Map.put(state.servers, name, server)}}
@@ -189,6 +198,23 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
     new_state
   end
 
+  # Whether a server may be started via the enable path. Project-scope servers
+  # (repo-committed `.mcp.json`) require operator approval, mirroring the
+  # boot-time gate in `Config.load_startup/0`; user/local scopes are trusted.
+  # Public + @doc false so the gate decision is unit-testable in isolation.
+  @doc false
+  @spec enable_authorized?(Config.Server.t() | map()) :: boolean()
+  def enable_authorized?(%{scope: :project} = server),
+    do: ProjectApproval.approved?(server.name)
+
+  def enable_authorized?(_server), do: true
+
+  # Find a configured server by (sanitized) name across all scopes, including
+  # project servers that boot filtered out for lack of approval.
+  defp find_config_server(name) do
+    Config.load_all() |> Enum.find(fn s -> s.name == name end)
+  end
+
   defp start_session(server) do
     case DynamicSupervisor.start_child(@supervisor, ServerSession.child_spec(server)) do
       {:ok, pid} ->
@@ -211,15 +237,22 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   end
 
   # Rebuild the aggregate mcp_tools map and publish to :persistent_term.
+  # Each server's configured `tool_filter` allowlist is enforced here, so a
+  # server that discovers more tools than it is permitted to expose is trimmed
+  # to its allowlist before any tool reaches the agent.
   defp republish(state) do
     aggregate =
       Enum.reduce(state.tools_by_server, %{}, fn {name, schemas}, acc ->
-        Map.merge(acc, ToolBridge.build_tools(name, schemas))
+        tool_filter = state.servers |> Map.get(name) |> server_tool_filter()
+        Map.merge(acc, ToolBridge.build_tools(name, schemas, tool_filter))
       end)
 
     :persistent_term.put(@pt_key, aggregate)
     :ok
   end
+
+  defp server_tool_filter(%{tool_filter: tool_filter}), do: tool_filter
+  defp server_tool_filter(_), do: nil
 
   defp server_status(%{enabled: false}), do: :disabled
 
