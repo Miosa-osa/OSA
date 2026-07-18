@@ -164,17 +164,14 @@ impl App {
                 // Otherwise focus the composer / position the caret.
                 self.input.handle_click(me.column, me.row);
             }
-            // Wheel up opens the transcript reader (history is in native
-            // scrollback we can't scroll programmatically once mouse-captured;
-            // the reader is the in-app way to page back through it).
-            MouseEventKind::ScrollUp => {
-                if self.transcript_can_open() {
-                    self.transcript =
-                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
-                            &self.transcript_log,
-                        ));
-                }
-            }
+            // Mouse wheel is intentionally a NO-OP for now. Opening the
+            // full-screen transcript reader on a single wheel tick was jarring
+            // (a normal scroll gesture yanked the user into an overlay, and with
+            // inline rendering it stacked duplicate composer lines into the
+            // terminal). Until the proper inline wheel-scroll UX lands, swallow
+            // wheel events so scrolling can't corrupt the screen. History is
+            // still reachable via the transcript reader on its key binding.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {}
             _ => {}
         }
     }
