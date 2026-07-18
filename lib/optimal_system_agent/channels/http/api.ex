@@ -139,6 +139,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
   forward("/hooks", to: API.HooksRoutes)
   forward("/mcp", to: API.MCPRoutes)
 
+  # ── Command-surface data (read-only) for /memory /tasks /metrics /persona /sandbox ─
+  forward("/memories", to: API.MemoryRoutes)
+  forward("/tasks-list", to: API.TasksRoutes)
+  forward("/metrics", to: API.MetricsRoutes)
+  forward("/personas", to: API.PersonaRoutes)
+  forward("/sandboxes", to: API.SandboxRoutes)
+
   # ── Canopy workspaces (CRUD + .canopy/ init + agent/skill discovery) ─
   forward("/workspaces", to: API.CanopyRoutes)
 
