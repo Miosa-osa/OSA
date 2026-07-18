@@ -15,6 +15,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants do
     wait list_windows focus_window launch cursor snapshot right_click triple_click
     set_value clipboard_get clipboard_set clipboard_clear list_apps list_surfaces
     resize_window move_window scroll_to
+    left_click mouse_move middle_click left_mouse_down left_mouse_up hold_key
+    left_click_drag cursor_position
   )a
   def valid_actions, do: @valid_actions
 

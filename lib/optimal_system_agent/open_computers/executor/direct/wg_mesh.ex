@@ -571,8 +571,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh do
 
   defp find_wg_quick do
     System.find_executable("wg-quick") ||
-      "/usr/local/bin/wg-quick" ||
-      "/opt/homebrew/bin/wg-quick"
+      Enum.find(
+        ["/opt/homebrew/bin/wg-quick", "/usr/local/bin/wg-quick", "/usr/bin/wg-quick"],
+        &File.exists?/1
+      ) ||
+      "wg-quick"
   end
 
   defp sudo_help_message do

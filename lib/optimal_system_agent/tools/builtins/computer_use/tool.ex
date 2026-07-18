@@ -84,6 +84,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
           "type" => "number",
           "description" => "Seconds to wait for wait action"
         },
+        "amount" => %{
+          "type" => "integer",
+          "description" => "Scroll amount (number of wheel steps, default 3)"
+        },
+        "duration" => %{
+          "type" => "number",
+          "description" => "Seconds to hold a key for hold_key (0-30)"
+        },
         "width" => %{
           "type" => "integer",
           "description" => "Window width for resize_window"

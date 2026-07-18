@@ -59,10 +59,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   def execute(%{"action" => action} = params, ctx) do
     maybe_focus_window(params["window"])
     session_id = params["__session_id__"] || ctx.session_id || "default"
-    server = ensure_server(session_id)
-    result = Server.execute(server, action, params)
+    result = call_server(session_id, action, params, 1)
     record_keyframe(session_id, action, result)
     result
+  end
+
+  # Fix (P1): the idle timer can stop the Server in the window between the
+  # Process.alive?/1 check in ensure_server and the GenServer.call, producing an
+  # :exit/:noproc crash of the whole tool call. Catch it, drop the stale ETS row,
+  # and retry once against a fresh server.
+  defp call_server(session_id, action, params, retries) do
+    server = ensure_server(session_id)
+
+    try do
+      Server.execute(server, action, params)
+    catch
+      :exit, reason ->
+        if retries > 0 do
+          drop_stale_server(session_id)
+          call_server(session_id, action, params, retries - 1)
+        else
+          {:error, "computer_use server unavailable: #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp drop_stale_server(session_id) do
+    :ets.delete(Constants.server_table(), session_id)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ── Private: action-level parameter validation ─────────────────────────
@@ -106,6 +132,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp validate_action_params("resize_window", params), do: validate_window_size(params)
   defp validate_action_params("move_window", params), do: validate_window_position(params)
   defp validate_action_params("scroll_to", params), do: validate_target_or_coords(params)
+  defp validate_action_params("left_click", params), do: validate_action_params("click", params)
+  defp validate_action_params("mouse_move", params), do: validate_required_coords(params)
+  defp validate_action_params("middle_click", params), do: validate_required_coords(params)
+  defp validate_action_params("left_mouse_down", params), do: validate_required_coords(params)
+  defp validate_action_params("left_mouse_up", params), do: validate_required_coords(params)
+  defp validate_action_params("hold_key", params), do: validate_hold_key(params)
+  defp validate_action_params("left_click_drag", params), do: validate_required_coords(params)
+  defp validate_action_params("cursor_position", _params), do: :ok
 
   defp validate_region(%{"x" => x, "y" => y, "width" => w, "height" => h})
        when is_integer(x) and is_integer(y) and is_integer(w) and is_integer(h) and
@@ -181,9 +215,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp validate_key_combo(%{"text" => _}), do: {:error, "Key combo must be a string"}
   defp validate_key_combo(_), do: {:error, "Missing required parameter: text"}
 
-  defp validate_scroll(%{"direction" => dir})
-       when dir in ["up", "down", "left", "right"],
-       do: :ok
+  defp validate_scroll(%{"direction" => dir} = params)
+       when dir in ["up", "down", "left", "right"] do
+    case Map.get(params, "amount") do
+      nil -> :ok
+      a when is_integer(a) and a > 0 and a <= 100 -> :ok
+      _ -> {:error, "amount must be an integer between 1 and 100"}
+    end
+  end
 
   defp validate_scroll(%{"direction" => dir}) when is_binary(dir),
     do: {:error, "Invalid direction: #{dir}"}
@@ -198,6 +237,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
       :ok
     else
       {:error, "seconds must be a number between 0 and 30"}
+    end
+  end
+
+  defp validate_hold_key(params) do
+    with :ok <- validate_key_combo(params) do
+      case Map.get(params, "duration") do
+        nil -> :ok
+        d when is_number(d) and d >= 0 and d <= 30 -> :ok
+        _ -> {:error, "duration must be a number between 0 and 30"}
+      end
     end
   end
 
@@ -275,6 +324,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
 
         :ets.insert(table, {session_id, pid})
         Keyframe.init_journal(session_id)
+        maybe_housekeeping()
         pid
 
       {:error, reason} ->
@@ -287,6 +337,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
       :ets.new(table, [:set, :public, :named_table])
     rescue
       ArgumentError -> table
+    end
+  end
+
+  # ── Private: disk hygiene ──────────────────────────────────────────────
+
+  defp maybe_housekeeping do
+    try do
+      base = Path.expand("~/.osa/trajectories")
+      if File.dir?(base), do: Keyframe.cleanup_old_journals(base)
+      prune_old_files(Path.expand("~/.osa/screenshots"), 86_400)
+    rescue
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp prune_old_files(dir, max_age_seconds) do
+    now = System.system_time(:second)
+
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.each(entries, fn entry ->
+          path = Path.join(dir, entry)
+
+          with true <- File.regular?(path),
+               {:ok, %{mtime: mtime}} <- File.stat(path, time: :posix),
+               true <- now - mtime > max_age_seconds do
+            File.rm(path)
+          else
+            _ -> :ok
+          end
+        end)
+
+      _ ->
+        :ok
     end
   end
 

@@ -10,6 +10,8 @@ pub mod message;
 pub mod thinking_box;
 pub mod welcome;
 
+use std::cell::RefCell;
+
 use ratatui::prelude::*;
 
 use crate::client::types::Signal;
@@ -17,6 +19,21 @@ use crate::event::Event;
 
 use super::{Component, ComponentAction};
 use message::{Message, MessageType, SurveyQAData, ToolCallData};
+
+/// Cached parse of the in-flight streaming reply. See `Chat::stream_cache`.
+struct StreamCache {
+    /// Byte length of `streaming_content` this cache was parsed from. The
+    /// streaming buffer only ever grows within a turn, so a length change is a
+    /// reliable "content changed" signal and a valid cache key.
+    content_len: usize,
+    /// Viewport width the body was wrapped at.
+    width: u16,
+    /// Parsed markdown body (includes the trailing block cursor). Cloned once
+    /// per frame in `draw_live`; never re-parsed until content or width changes.
+    body: Text<'static>,
+    /// Total rendered height: body rows + 1 for the "◈ OSA" label row.
+    height: u16,
+}
 
 /// Chat state for the native-scrollback TUI.
 pub struct Chat {
@@ -44,6 +61,13 @@ pub struct Chat {
     /// single blank spacer line between blocks (Claude Code's `addMargin`),
     /// never before the first one.
     scrollback_started: bool,
+    /// Lazy render cache for the live streaming reply so the full-buffer markdown
+    /// parse runs at most once per frame — not 2–3× per frame (old
+    /// `streaming_height` + `draw_live` each re-parsed the whole buffer) and not
+    /// once per token. Keyed by (content byte length, width). Interior
+    /// mutability lets the `&self` render paths populate it lazily, which also
+    /// coalesces multiple tokens arriving between two frames into a single parse.
+    stream_cache: RefCell<Option<StreamCache>>,
 }
 
 impl Chat {
@@ -61,6 +85,7 @@ impl Chat {
             last_agent_text: None,
             last_user_text: None,
             scrollback_started: false,
+            stream_cache: RefCell::new(None),
         }
     }
 
@@ -168,6 +193,7 @@ impl Chat {
             survey_data: Some(SurveyQAData { survey_id, pairs }),
             cached_height: None,
             timestamp: None,
+            prerendered_body: None,
         });
     }
 
@@ -262,26 +288,70 @@ impl Chat {
     // ── Streaming preview ─────────────────────────────────────────────
 
     pub fn update_streaming(&mut self, content: &str) {
-        self.streaming_content = Some(content.to_string());
+        // Reuse the existing allocation instead of reallocating a fresh String
+        // each token. No markdown parse happens here — the cache is rebuilt
+        // lazily on the next render, so multiple tokens arriving between two
+        // frames coalesce into a single parse.
+        match self.streaming_content {
+            Some(ref mut s) => {
+                s.clear();
+                s.push_str(content);
+            }
+            None => self.streaming_content = Some(content.to_string()),
+        }
         self.has_messages = true;
     }
 
     pub fn clear_streaming(&mut self) {
         self.streaming_content = None;
+        *self.stream_cache.borrow_mut() = None;
+    }
+
+    /// Parse the live streaming markdown at most once per (content length, width),
+    /// caching the parsed body + height. Returns the total rendered height (body
+    /// rows + label row), or `None` when nothing is streaming. This is the single
+    /// choke point that kills the old O(n²) hot path: `draw_live` and
+    /// `streaming_height` (called 2–3× per frame) now share one parse, and
+    /// successive tokens within a frame don't each re-parse the whole reply.
+    fn ensure_stream_cache(&self, width: u16) -> Option<u16> {
+        let content = self.streaming_content.as_ref()?;
+        if content.is_empty() {
+            return None;
+        }
+        let content_len = content.len();
+
+        {
+            let cache = self.stream_cache.borrow();
+            if let Some(c) = cache.as_ref() {
+                if c.content_len == content_len && c.width == width {
+                    return Some(c.height);
+                }
+            }
+        }
+
+        // Cache miss: re-parse once. Match `draw_agent`'s body width (width − 2)
+        // and append the block cursor exactly as the old direct path did.
+        let with_cursor = format!("{}\u{2588}", content);
+        let body =
+            crate::render::markdown::render_markdown(&with_cursor, width.saturating_sub(2));
+        let height = (body.lines.len() as u16).max(1) + 1; // +1 for the "◈ OSA" label
+
+        *self.stream_cache.borrow_mut() = Some(StreamCache {
+            content_len,
+            width,
+            body,
+            height,
+        });
+        Some(height)
     }
 
     /// Rendered height, in terminal rows, that the in-progress streaming reply
-    /// occupies at `width` — 0 when nothing is streaming. Computed through the
-    /// exact same `Message` render path `draw_live` uses (markdown + label +
-    /// cursor row), so the inline live region can grow to fit the reply as it
-    /// streams in place instead of churning it through a cramped 1-row preview.
+    /// occupies at `width` — 0 when nothing is streaming. Backed by the shared
+    /// `ensure_stream_cache` parse (label + markdown body + cursor row), so the
+    /// inline live region grows to fit the reply as it streams in place without
+    /// re-parsing the whole buffer for the measurement pass.
     pub fn streaming_height(&self, width: u16) -> u16 {
-        match self.streaming_content {
-            Some(ref s) if !s.is_empty() => {
-                Message::new(MessageType::Agent, format!("{}\u{2588}", s), None).height(width)
-            }
-            _ => 0,
-        }
+        self.ensure_stream_cache(width).unwrap_or(0)
     }
 
     pub fn clear(&mut self) {
@@ -289,6 +359,7 @@ impl Chat {
         self.scrollback.clear();
         self.has_messages = false;
         self.streaming_content = None;
+        *self.stream_cache.borrow_mut() = None;
         self.last_agent_text = None;
         self.last_user_text = None;
         self.scrollback_started = false;
@@ -322,6 +393,9 @@ impl Chat {
         for msg in &mut self.scrollback {
             msg.invalidate_cache();
         }
+        // A width change (only caller: `set_size`) invalidates the stream cache
+        // too; the width key would force a rebuild anyway, but clear it eagerly.
+        *self.stream_cache.borrow_mut() = None;
     }
 
     /// Render the live streaming preview, bottom-anchored so the newest lines
@@ -331,9 +405,15 @@ impl Chat {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        if let Some(ref s) = self.streaming_content {
-            let msg = Message::new(MessageType::Agent, format!("{}\u{2588}", s), None);
-            let full_h = msg.height(area.width);
+        if self.ensure_stream_cache(area.width).is_some() {
+            // One clone of the cached body per frame (O(lines), not a re-parse);
+            // height comes straight from the cache so it can't drift from draw.
+            let (body, full_h) = {
+                let cache = self.stream_cache.borrow();
+                let c = cache.as_ref().expect("cache populated by ensure_stream_cache");
+                (c.body.clone(), c.height)
+            };
+            let msg = Message::new_agent_prerendered(body);
             let h = full_h.min(area.height);
             let y = area.y + area.height.saturating_sub(h);
             msg.draw_scrolled(
@@ -387,5 +467,87 @@ mod spacing_tests {
         chat.clear();
         chat.add_user_message("again");
         assert_eq!(chat.drain_scrollback().len(), 1, "no spacer after clear");
+    }
+}
+
+#[cfg(test)]
+mod stream_cache_tests {
+    use super::*;
+
+    #[test]
+    fn empty_stream_has_zero_height() {
+        let chat = Chat::new();
+        assert_eq!(chat.streaming_height(80), 0);
+        assert!(chat.stream_cache.borrow().is_none());
+    }
+
+    #[test]
+    fn streaming_height_is_stable_and_cached() {
+        let mut chat = Chat::new();
+        chat.update_streaming("hello world");
+        let h1 = chat.streaming_height(80);
+        let h2 = chat.streaming_height(80);
+        assert_eq!(h1, h2);
+        assert!(h1 >= 2, "label row + at least one body row");
+        let cache = chat.stream_cache.borrow();
+        let cached = cache.as_ref().expect("cache populated after render");
+        assert_eq!(cached.content_len, "hello world".len());
+        assert_eq!(cached.width, 80);
+        assert_eq!(cached.height, h1);
+    }
+
+    #[test]
+    fn cache_rebuilds_when_content_grows() {
+        let mut chat = Chat::new();
+        chat.update_streaming("a");
+        let _ = chat.streaming_height(80);
+        let grown = "a much longer streamed reply that will wrap across several rows";
+        chat.update_streaming(grown);
+        let _ = chat.streaming_height(80);
+        assert_eq!(
+            chat.stream_cache.borrow().as_ref().unwrap().content_len,
+            grown.len(),
+            "cache re-parses when the streaming buffer grows"
+        );
+    }
+
+    #[test]
+    fn cache_rebuilds_on_width_change() {
+        let mut chat = Chat::new();
+        chat.update_streaming("some streamed text that wraps differently at narrow widths");
+        let _ = chat.streaming_height(80);
+        let _ = chat.streaming_height(20);
+        assert_eq!(chat.stream_cache.borrow().as_ref().unwrap().width, 20);
+    }
+
+    #[test]
+    fn clear_streaming_drops_cache() {
+        let mut chat = Chat::new();
+        chat.update_streaming("hi");
+        let _ = chat.streaming_height(80);
+        assert!(chat.stream_cache.borrow().is_some());
+        chat.clear_streaming();
+        assert_eq!(chat.streaming_height(80), 0);
+        assert!(chat.stream_cache.borrow().is_none());
+    }
+
+    #[test]
+    fn update_streaming_reuses_allocation() {
+        let mut chat = Chat::new();
+        chat.update_streaming("a");
+        let cap_before = chat
+            .streaming_content
+            .as_ref()
+            .map(|s| s.capacity())
+            .unwrap_or(0);
+        // Same-length replacement must not allocate a new String.
+        chat.update_streaming("b");
+        let cap_after = chat
+            .streaming_content
+            .as_ref()
+            .map(|s| s.capacity())
+            .unwrap_or(0);
+        assert!(cap_after >= cap_before);
+        assert_eq!(chat.streaming_content.as_deref(), Some("b"));
     }
 }

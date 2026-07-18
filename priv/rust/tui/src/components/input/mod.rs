@@ -86,6 +86,9 @@ pub struct InputComponent {
     paste_store: std::collections::HashMap<usize, String>,
     /// Next pill id — auto-incrementing, session-scoped (CC nextPasteIdRef).
     next_paste_id: usize,
+    /// Whether voice input is currently usable (local engine present/
+    /// provisionable, or a cloud API key configured). Greys the mic when false.
+    voice_available: bool,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -129,6 +132,7 @@ impl InputComponent {
             kbd_enhanced: false,
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
+            voice_available: true,
         }
     }
 
@@ -262,6 +266,11 @@ impl InputComponent {
     /// Set voice recording state — changes placeholder text
     pub fn set_recording(&mut self, active: bool) {
         self.recording = active;
+    }
+
+    /// Set whether voice input is available; greys the mic button when false.
+    pub fn set_voice_available(&mut self, available: bool) {
+        self.voice_available = available;
     }
 
     pub fn submit(&mut self) -> String {
@@ -1737,8 +1746,11 @@ impl Component for InputComponent {
                 1,
             );
             self.mic_area.set(Some(mic_rect));
+            // Grey the mic when voice input is unavailable (no local engine and no
+            // cloud key) so the affordance honestly reflects capability.
+            let mic_color = if self.voice_available { Color::Yellow } else { Color::DarkGray };
             frame.render_widget(
-                Paragraph::new(Span::styled(btn, Style::default().fg(Color::Yellow))),
+                Paragraph::new(Span::styled(btn, Style::default().fg(mic_color))),
                 mic_rect,
             );
         } else {

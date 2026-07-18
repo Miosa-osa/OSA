@@ -10,17 +10,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
   require Logger
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse
-  alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{Planner, Keyframe}
+  alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{Planner, Keyframe, AppAllowlist}
 
   @max_steps 15
 
   # Fix 1 (P0 SECURITY): Strict allowlist for launch_app — never pass LLM-generated
-  # strings directly to System.cmd. Only these known-safe binaries are permitted.
-  @allowed_apps ~w(firefox chromium chromium-browser google-chrome google-chrome-stable
-    nautilus thunar nemo pcmanfm gnome-terminal xterm konsole alacritty kitty
-    gnome-text-editor gedit kate mousepad nano vim code subl
-    libreoffice evince eog gimp inkscape vlc mpv totem rhythmbox
-    gnome-calculator gnome-system-monitor htop)
+  # strings directly to System.cmd. The canonical list now lives in the shared
+  # AppAllowlist module so the CLI dispatch path enforces the exact same set.
 
   @cu_tool %{
     type: "function",
@@ -228,7 +224,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   # Fix 1 (P0 SECURITY): Validate app name against allowlist before exec.
   defp execute_action(%{"_tool" => "launch_app", "app" => app} = params) do
-    if app in @allowed_apps do
+    if AppAllowlist.allowed?(app) do
       args = params["args"] || ""
       cmd_args = if args != "", do: String.split(args), else: []
 
@@ -354,7 +350,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
 
   # Fix 3 (P1): Route to the configured provider instead of always hitting Ollama.
 
-  defp cu_api_url do
+  def cu_api_url do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
 
     case to_string(provider) do
@@ -377,7 +373,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
     end
   end
 
-  defp cu_api_key do
+  def cu_api_key do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
 
     case to_string(provider) do
@@ -396,7 +392,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Executor do
     end
   end
 
-  defp cu_model do
+  def cu_model do
     provider = Application.get_env(:optimal_system_agent, :default_provider, "ollama")
 
     case to_string(provider) do

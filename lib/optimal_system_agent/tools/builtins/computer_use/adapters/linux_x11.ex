@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
 
   require Logger
 
+  alias OptimalSystemAgent.Tools.Builtins.ComputerUse.AppAllowlist
+
   @scroll_buttons %{"up" => "4", "down" => "5", "left" => "6", "right" => "7"}
 
   # ── Behaviour Callbacks ──────────────────────────────────────────────
@@ -116,6 +118,143 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.LinuxX11 do
       _ ->
         Path.join([File.cwd!(), "priv", "scripts", "atspi_tree.py"])
     end
+  end
+
+  # ── Extended action callbacks (standard-contract parity) ─────────────
+  # These are not part of the base Adapter behaviour; the Server guards each
+  # with function_exported?/3 before calling, so implementing them here simply
+  # lights the action up on X11.
+
+  @doc "Right-click at coordinates."
+  def right_click(%{"x" => x, "y" => y}) when is_integer(x) and is_integer(y) do
+    run_cmd("xdotool", ["mousemove", "--sync", "#{x}", "#{y}", "click", "3"], "Right click")
+  end
+
+  def right_click(_), do: {:error, "right_click on X11 requires x,y coordinates"}
+
+  @doc "Triple-click at coordinates."
+  def triple_click(%{"x" => x, "y" => y}) when is_integer(x) and is_integer(y) do
+    run_cmd(
+      "xdotool",
+      ["mousemove", "--sync", "#{x}", "#{y}", "click", "--repeat", "3", "1"],
+      "Triple click"
+    )
+  end
+
+  def triple_click(_), do: {:error, "triple_click on X11 requires x,y coordinates"}
+
+  @doc "Middle-click at coordinates."
+  def middle_click(x, y) do
+    run_cmd("xdotool", ["mousemove", "--sync", "#{x}", "#{y}", "click", "2"], "Middle click")
+  end
+
+  @doc "Press the left button down at coordinates without releasing."
+  def left_mouse_down(x, y) do
+    run_cmd("xdotool", ["mousemove", "--sync", "#{x}", "#{y}", "mousedown", "1"], "Mouse down")
+  end
+
+  @doc "Release the left button at coordinates."
+  def left_mouse_up(x, y) do
+    run_cmd("xdotool", ["mousemove", "--sync", "#{x}", "#{y}", "mouseup", "1"], "Mouse up")
+  end
+
+  @doc "Hold a key combo down for `duration` seconds, then release it."
+  def hold_key(combo, duration) do
+    key = translate_key_combo(combo)
+
+    with :ok <- run_cmd("xdotool", ["keydown", key], "Key down") do
+      Process.sleep(trunc(max(0, min(duration || 1, 30)) * 1000))
+      run_cmd("xdotool", ["keyup", key], "Key up")
+    end
+  end
+
+  @doc "Pause for `seconds` (clamped 0-30)."
+  def wait(seconds) do
+    Process.sleep(trunc(max(0, min(seconds || 1, 30)) * 1000))
+    :ok
+  end
+
+  @doc "Return the current pointer coordinates."
+  def cursor do
+    case System.cmd("xdotool", ["getmouselocation", "--shell"], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, parse_mouse_location(out)}
+      {output, code} -> {:error, "cursor failed (exit #{code}): #{String.trim(output)}"}
+    end
+  rescue
+    e in ErlangError -> {:error, "cursor failed: #{inspect(e)}"}
+  end
+
+  @doc "List open windows via wmctrl."
+  def list_windows do
+    case System.cmd("wmctrl", ["-l"], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, out}
+      {output, code} -> {:error, "list_windows failed (exit #{code}): #{String.trim(output)}"}
+    end
+  rescue
+    e in ErlangError -> {:error, "list_windows unavailable (install wmctrl): #{inspect(e)}"}
+  end
+
+  @doc "Activate a window by its X11 window id."
+  def focus_window(window_id) when is_binary(window_id) do
+    run_cmd("xdotool", ["windowactivate", "--sync", window_id], "Focus window")
+  end
+
+  @doc "Launch an allowlisted application."
+  def launch(app) when is_binary(app) do
+    if AppAllowlist.allowed?(app) do
+      _ = spawn(fn -> System.cmd("nohup", [app], stderr_to_stdout: true) end)
+      Process.sleep(1500)
+      :ok
+    else
+      {:error, "'#{app}' is not in the allowed application list"}
+    end
+  end
+
+  @doc "Read the clipboard via xclip."
+  def clipboard_get do
+    case System.cmd("xclip", ["-selection", "clipboard", "-o"], stderr_to_stdout: false) do
+      {out, 0} -> {:ok, out}
+      {output, code} -> {:error, "clipboard_get failed (exit #{code}): #{String.trim(output)}"}
+    end
+  rescue
+    e in ErlangError -> {:error, "clipboard_get unavailable (install xclip): #{inspect(e)}"}
+  end
+
+  @doc "Write text to the clipboard via xclip."
+  def clipboard_set(text) when is_binary(text), do: clipboard_write(text)
+
+  @doc "Clear the clipboard."
+  def clipboard_clear, do: clipboard_write("")
+
+  defp parse_mouse_location(shell_output) do
+    vals =
+      shell_output
+      |> String.split("\n", trim: true)
+      |> Map.new(fn line ->
+        case String.split(line, "=", parts: 2) do
+          [k, v] -> {k, v}
+          _ -> {line, ""}
+        end
+      end)
+
+    "Cursor at (#{Map.get(vals, "X", "0")}, #{Map.get(vals, "Y", "0")})"
+  end
+
+  defp clipboard_write(text) do
+    tmp = Path.join(System.tmp_dir!(), "osa_clip_#{System.unique_integer([:positive])}")
+
+    try do
+      File.write!(tmp, text)
+
+      case System.cmd("sh", ["-c", "xclip -selection clipboard < #{tmp}"], stderr_to_stdout: true) do
+        {_, 0} -> :ok
+        {output, code} -> {:error, "clipboard write failed (exit #{code}): #{String.trim(output)}"}
+      end
+    after
+      File.rm(tmp)
+    end
+  rescue
+    e -> {:error, "clipboard write unavailable (install xclip): #{inspect(e)}"}
   end
 
   # ── Public Command Generators (tested directly) ──────────────────────

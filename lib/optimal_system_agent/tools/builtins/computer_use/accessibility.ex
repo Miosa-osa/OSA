@@ -38,7 +38,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
 
   @doc """
   Assign sequential refs (e0, e1, ...) to interactive elements.
-  Returns {formatted_text, ref_map} where ref_map is %{"e0" => %{x, y, role, name}, ...}.
+  Returns {formatted_text, ref_map} where ref_map is %{"e0" => %{x, y, width, height, role, name}, ...}.
   """
   def assign_refs(parsed_elements) do
     {lines, refs, _counter} =
@@ -46,7 +46,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
         if interactive?(elem.role) do
           ref = "e#{counter}"
           line = "[#{ref}] #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"
-          ref_data = %{x: elem.x, y: elem.y, role: elem.role, name: elem.name}
+          ref_data = %{
+            x: elem.x,
+            y: elem.y,
+            width: elem.width,
+            height: elem.height,
+            role: elem.role,
+            name: elem.name
+          }
           {[line | lines], Map.put(refs, ref, ref_data), counter + 1}
         else
           line = "  #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"

@@ -3,7 +3,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
   macOS adapter helpers: AppleScript sanitization, key combo parsing,
   and screenshot command generation.
 
-  Full adapter implementation (all 10 callbacks) comes in Phase 7.
+  Interaction is driven by `osascript`/System Events (keyboard) and `cliclick`
+  (mouse); screenshots use `screencapture`. `get_tree` (accessibility) is not yet
+  implemented.
   """
 
   @behaviour OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter
@@ -71,7 +73,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
       {:error, "Screenshot failed: #{inspect(e)}"}
   end
 
-  # ── Stub callbacks (Phase 7) ─────────────────────────────────────────
+  # ── Behaviour Callbacks ──────────────────────────────────────────────
 
   def available? do
     case :os.type() do
@@ -80,17 +82,105 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
     end
   end
 
-  def click(_x, _y), do: {:error, "macOS click not yet implemented (Phase 7)"}
-  def double_click(_x, _y), do: {:error, "macOS double_click not yet implemented (Phase 7)"}
-  def type_text(_text), do: {:error, "macOS type_text not yet implemented (Phase 7)"}
-  def key_press(_combo), do: {:error, "macOS key_press not yet implemented (Phase 7)"}
-  def scroll(_direction, _amount), do: {:error, "macOS scroll not yet implemented (Phase 7)"}
-  def move_mouse(_x, _y), do: {:error, "macOS move_mouse not yet implemented (Phase 7)"}
+  def click(x, y), do: cliclick(["c:#{x},#{y}"], "Click")
+  def double_click(x, y), do: cliclick(["dc:#{x},#{y}"], "Double click")
+  def move_mouse(x, y), do: cliclick(["m:#{x},#{y}"], "Move mouse")
 
-  def drag(_from_x, _from_y, _to_x, _to_y),
-    do: {:error, "macOS drag not yet implemented (Phase 7)"}
+  def drag(from_x, from_y, to_x, to_y),
+    do: cliclick(["dd:#{from_x},#{from_y}", "du:#{to_x},#{to_y}"], "Drag")
 
-  def get_tree, do: {:error, "macOS accessibility tree not yet implemented (Phase 7)"}
+  def type_text(text) do
+    osascript(
+      ~s(tell application "System Events" to keystroke "#{sanitize_for_applescript(text)}"),
+      "Type"
+    )
+  end
+
+  def key_press(combo) do
+    {mods, key} = parse_key_combo(combo)
+    osascript(key_press_script(mods, key), "Key press")
+  end
+
+  def scroll(direction, amount \\ 3) do
+    case scroll_key_code(direction) do
+      nil ->
+        {:error, "Unknown scroll direction: #{direction}"}
+
+      code ->
+        # cliclick has no scroll verb; approximate a wheel scroll with repeated
+        # arrow-key presses via System Events.
+        lines = for _ <- 1..max(amount, 1), do: "key code #{code}"
+        script = "tell application \"System Events\"\n" <> Enum.join(lines, "\n") <> "\nend tell"
+        osascript(script, "Scroll")
+    end
+  end
+
+  def get_tree, do: {:error, "macOS accessibility tree not yet implemented"}
+
+  # ── Private helpers ──────────────────────────────────────────────────
+
+  # Build AppleScript for a key combo. Modifiers use the "using {… down}" form;
+  # named keys map to virtual key codes, otherwise a literal keystroke is sent.
+  defp key_press_script(mods, key) do
+    using = mods |> Enum.map(&applescript_modifier/1) |> Enum.reject(&is_nil/1)
+
+    keystroke =
+      case special_key_code(key) do
+        nil -> ~s(keystroke "#{sanitize_for_applescript(key)}")
+        code -> "key code #{code}"
+      end
+
+    inner =
+      case using do
+        [] -> keystroke
+        list -> "#{keystroke} using {#{Enum.join(list, ", ")}}"
+      end
+
+    ~s(tell application "System Events" to #{inner})
+  end
+
+  defp applescript_modifier(m) when m in ["cmd", "command"], do: "command down"
+  defp applescript_modifier(m) when m in ["ctrl", "control"], do: "control down"
+  defp applescript_modifier(m) when m in ["alt", "opt", "option"], do: "option down"
+  defp applescript_modifier("shift"), do: "shift down"
+  defp applescript_modifier(_), do: nil
+
+  defp special_key_code(k) when k in ["return", "enter"], do: 36
+  defp special_key_code("tab"), do: 48
+  defp special_key_code("space"), do: 49
+  defp special_key_code(k) when k in ["delete", "backspace"], do: 51
+  defp special_key_code(k) when k in ["escape", "esc"], do: 53
+  defp special_key_code("left"), do: 123
+  defp special_key_code("right"), do: 124
+  defp special_key_code("down"), do: 125
+  defp special_key_code("up"), do: 126
+  defp special_key_code(_), do: nil
+
+  defp scroll_key_code("up"), do: 126
+  defp scroll_key_code("down"), do: 125
+  defp scroll_key_code("left"), do: 123
+  defp scroll_key_code("right"), do: 124
+  defp scroll_key_code(_), do: nil
+
+  defp cliclick(args, label) do
+    if System.find_executable("cliclick") do
+      run_cmd("cliclick", args, label)
+    else
+      {:error, "#{label} requires `cliclick` on macOS (install: brew install cliclick)"}
+    end
+  end
+
+  defp osascript(script, label), do: run_cmd("osascript", ["-e", script], label)
+
+  defp run_cmd(cmd, args, label) do
+    case System.cmd(cmd, args, stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {output, code} -> {:error, "#{label} failed (exit #{code}): #{String.trim(output)}"}
+    end
+  rescue
+    e in ErlangError ->
+      {:error, "#{label} failed: #{inspect(e)}"}
+  end
 
   defp screenshots_dir do
     Path.expand("~/.osa/screenshots")

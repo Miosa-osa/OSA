@@ -7,6 +7,8 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   Ollama). Falls back to the full agent loop when the intent doesn't match.
   """
 
+  alias OptimalSystemAgent.Tools.Builtins.ComputerUse.{AppAllowlist, Executor}
+
   @reset IO.ANSI.reset()
   @dim IO.ANSI.faint()
 
@@ -175,11 +177,17 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   end
 
   defp execute_multi_tool("launch_app", %{"app" => app} = params) do
-    args = params["args"] || ""
-    cmd_args = if args != "", do: String.split(args), else: []
-    spawn(fn -> System.cmd("nohup", [app | cmd_args], stderr_to_stdout: true) end)
-    Process.sleep(2000)
-    "Launched #{app} #{args}"
+    # Fix (P0 SECURITY): the app name comes straight from LLM tool output — never
+    # exec it without checking the shared allowlist, exactly as Executor does.
+    if AppAllowlist.allowed?(app) do
+      args = params["args"] || ""
+      cmd_args = if args != "", do: String.split(args), else: []
+      spawn(fn -> System.cmd("nohup", [app | cmd_args], stderr_to_stdout: true) end)
+      Process.sleep(2000)
+      "Launched #{app} #{args}"
+    else
+      "Error: '#{app}' is not in the allowed application list"
+    end
   rescue
     e -> "Error: #{Exception.message(e)}"
   end
@@ -208,18 +216,11 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   defp format_cu_params(%{"action" => "get_tree"}), do: " (accessibility)"
   defp format_cu_params(_), do: ""
 
-  defp cu_api_url do
-    url = Application.get_env(:optimal_system_agent, :ollama_url) || "https://ollama.com"
-    "#{url}/v1/chat/completions"
-  end
-
-  defp cu_api_key do
-    Application.get_env(:optimal_system_agent, :ollama_api_key) || ""
-  end
-
-  defp cu_model do
-    Application.get_env(:optimal_system_agent, :ollama_model) || "nemotron-3-super:cloud"
-  end
+  # Fix (P3): reuse the provider-aware resolution from the PPEV Executor instead
+  # of hardcoding ollama.com — keeps the CLI fast-path on the configured provider.
+  defp cu_api_url, do: Executor.cu_api_url()
+  defp cu_api_key, do: Executor.cu_api_key()
+  defp cu_model, do: Executor.cu_model()
 
   defp clear_line do
     width =

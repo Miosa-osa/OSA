@@ -76,6 +76,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     {:stop, :normal, state}
   end
 
+  @impl true
+  def terminate(_reason, state) do
+    # Fix (P1): delete our own ETS registry row on shutdown so a stale dead-pid
+    # entry never lingers to be handed to a caller. Guard against a newer server
+    # having already claimed the same session id.
+    try do
+      table = OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants.server_table()
+
+      case :ets.lookup(table, state.session_id) do
+        [{_id, pid}] when pid == self() -> :ets.delete(table, state.session_id)
+        _ -> :ok
+      end
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
   # ── Dispatch ────────────────────────────────────────────────────────
 
   defp dispatch("screenshot", params, state) do
@@ -259,6 +280,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
 
   defp dispatch("scroll_to", params, state) do
     adapter_ok(state, :scroll_to, [params], "Scrolled to target")
+  end
+
+  # ── Standard Anthropic contract aliases + new primitives ────────────
+
+  defp dispatch("left_click", params, state), do: dispatch("click", params, state)
+  defp dispatch("mouse_move", params, state), do: dispatch("move_mouse", params, state)
+  defp dispatch("left_click_drag", params, state), do: dispatch("drag", params, state)
+  defp dispatch("cursor_position", params, state), do: dispatch("cursor", params, state)
+
+  defp dispatch("middle_click", %{"x" => x, "y" => y}, state) do
+    adapter_ok(state, :middle_click, [x, y], "Middle click at (#{x}, #{y})")
+  end
+
+  defp dispatch("left_mouse_down", %{"x" => x, "y" => y}, state) do
+    adapter_ok(state, :left_mouse_down, [x, y], "Mouse down at (#{x}, #{y})")
+  end
+
+  defp dispatch("left_mouse_up", %{"x" => x, "y" => y}, state) do
+    adapter_ok(state, :left_mouse_up, [x, y], "Mouse up at (#{x}, #{y})")
+  end
+
+  defp dispatch("hold_key", %{"text" => combo} = params, state) do
+    duration = Map.get(params, "duration", 1)
+    adapter_ok(state, :hold_key, [combo, duration], "Held key #{combo}")
   end
 
   defp dispatch(action, _params, state) do

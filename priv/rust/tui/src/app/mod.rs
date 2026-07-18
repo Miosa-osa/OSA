@@ -575,6 +575,7 @@ impl App {
         self.chat
             .set_size(self.layout.chat_width, self.layout.chat_height);
         self.input.set_width(self.layout.chat_width);
+        self.input.set_voice_available(self.voice.available);
         self.status.set_width(self.width);
     }
 

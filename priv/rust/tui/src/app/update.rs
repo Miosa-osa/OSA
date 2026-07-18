@@ -1059,16 +1059,16 @@ impl App {
             VoiceEvent::TranscriptionError(err) => {
                 self.status.clear_download_progress();
                 self.status.set_transcribing(false);
-                if err.contains("whisper-cli not found") || err.contains("whisper not found") {
-                    let install_hint = if cfg!(target_os = "macos") {
-                        "brew install whisper-cpp"
-                    } else if cfg!(target_os = "windows") {
-                        "auto-downloads on Windows; retry, or set VOICE_PROVIDER=cloud"
+                if err.contains("whisper-cli") || err.contains("whisper not found") {
+                    let install_hint = if cfg!(target_os = "windows") {
+                        "whisper-cli auto-downloads on Windows \u{2014} retry, or set VOICE_PROVIDER=cloud"
+                    } else if cfg!(target_os = "macos") {
+                        "install whisper.cpp (brew install whisper-cpp) or set OSA_WHISPER_URL; or use VOICE_PROVIDER=cloud"
                     } else {
-                        "build whisper.cpp from source: https://github.com/ggerganov/whisper.cpp"
+                        "install whisper.cpp or set OSA_WHISPER_URL to a prebuilt zip; or use VOICE_PROVIDER=cloud"
                     };
                     self.toasts.push(
-                        format!("Install whisper-cli: {} (or set VOICE_PROVIDER=cloud)", install_hint),
+                        format!("Voice unavailable: {}", install_hint),
                         crate::components::toast::ToastLevel::Error,
                     );
                 } else {

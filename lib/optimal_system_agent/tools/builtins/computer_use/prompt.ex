@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
 
     **scroll** — Scroll the view.
       - `direction` (required): one of `up`, `down`, `left`, `right`.
+      - `amount` (optional): integer number of wheel steps (default 3).
 
     **move_mouse** — Move the pointer without clicking.
       - `x`, `y` required.
@@ -76,6 +77,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
 
     **scroll_to** — Scroll an element or coordinate into view.
 
+    **left_click** / **mouse_move** — Aliases for `click` / `move_mouse` matching the standard
+    computer-use contract.
+
+    **middle_click** — Middle-click at `x`, `y`.
+
+    **left_mouse_down** / **left_mouse_up** — Press or release the left button at `x`, `y`
+    (compose your own drag/hold gestures).
+
+    **hold_key** — Hold a key combo (`text`) down for `duration` seconds (default 1).
+
+    **left_click_drag** — Press at `x`, `y` and release at `target_x`, `target_y` (or `region`).
+
+    **cursor_position** — Alias for `cursor`; return the current pointer coordinates.
+
+    > Coverage varies by platform. Linux X11 supports the full set above; Linux Wayland and
+    > Windows cover screenshot + click/type/key/scroll/drag + clipboard; the MIOSA REST adapter
+    > implements every action. Actions unsupported by the active backend return a clear
+    > "not supported" error rather than failing silently.
+
     ## Parameters
 
     - `window` (optional): Window name/title to focus before executing the action.
@@ -85,7 +105,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
 
     The platform adapter is selected automatically:
       - macOS: AppleScript/Quartz event injection
-      - Linux X11: xdotool + scrot
+      - Linux X11: xdotool + maim/scrot
+      - Linux Wayland: grim + wtype/ydotool + wl-clipboard
+      - Windows: PowerShell (screen capture + user32 input)
       - Docker/headless: virtual framebuffer (Xvfb)
       - Remote SSH: tunnelled X11 or platform VM adapter
       - Platform VM: OSA compute layer integration

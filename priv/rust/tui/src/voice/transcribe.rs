@@ -56,6 +56,9 @@ impl std::fmt::Debug for VoiceProvider {
 pub struct LocalTranscriber {
     osa_dir: std::path::PathBuf,
     model_name: String,
+    /// Transcription language passed to whisper-cli's `-l` flag. `auto` lets
+    /// whisper.cpp auto-detect. Set from `WHISPER_LANG`.
+    lang: String,
 }
 
 impl LocalTranscriber {
@@ -71,7 +74,9 @@ impl LocalTranscriber {
         let model_name = std::env::var("WHISPER_MODEL")
             .unwrap_or_else(|_| "tiny".to_string());
 
-        Self { osa_dir, model_name }
+        let lang = whisper_lang();
+
+        Self { osa_dir, model_name, lang }
     }
 
     fn bin_dir(&self) -> std::path::PathBuf {
@@ -91,8 +96,8 @@ impl LocalTranscriber {
         self.models_dir().join(format!("ggml-{}.bin", self.model_name))
     }
 
-    /// Download the pre-built whisper-cli binary for this platform
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    /// Ensure a whisper-cli binary is available: use the one in `~/.osa/bin`, one
+    /// already on PATH, or auto-provision a pre-built binary for this platform.
     async fn ensure_binary(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
         let bin = self.whisper_bin();
         if bin.exists() {
@@ -116,44 +121,24 @@ impl LocalTranscriber {
             }
         }
 
-        // On Windows, download pre-built binary from whisper.cpp releases
-        #[cfg(target_os = "windows")]
-        {
-            return self.download_whisper_binary(progress_tx).await;
-        }
-
-        // macOS/Linux: no pre-built CLI binaries available from upstream
-        #[cfg(not(target_os = "windows"))]
-        {
-            let install_hint = if cfg!(target_os = "macos") {
-                "brew install whisper-cpp"
-            } else {
-                // No reliable distro package for whisper.cpp; build from source.
-                "build whisper.cpp from source: https://github.com/ggerganov/whisper.cpp (produces the `whisper-cli` binary; put it on PATH)"
-            };
-            anyhow::bail!(
-                "whisper-cli not found. Install it and try again:\n  {}\n\nOr use cloud transcription: export VOICE_PROVIDER=cloud",
-                install_hint
-            );
-        }
+        // Auto-provision a pre-built binary. Cross-platform: on Windows this pulls
+        // the upstream whisper.cpp release; on macOS/Linux it succeeds when
+        // `OSA_WHISPER_URL` points at a compatible archive, otherwise it returns an
+        // actionable error (install whisper.cpp locally or use cloud).
+        self.download_whisper_binary(progress_tx).await
     }
 
-    /// Download and extract the pre-built Windows whisper-cli binary
-    #[cfg(target_os = "windows")]
+    /// Download and extract a pre-built whisper-cli binary for this platform.
+    /// Cross-platform: on Windows this pulls the upstream whisper.cpp release
+    /// zip; on macOS/Linux it succeeds only when `OSA_WHISPER_URL` points at a
+    /// compatible archive (upstream publishes no macOS/Linux CLI binaries).
     async fn download_whisper_binary(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
         let bin = self.whisper_bin();
 
         std::fs::create_dir_all(self.bin_dir())
-            .context("Failed to create ~/.osa/bin")?;
+            .context("Failed to create the OSA bin directory")?;
 
-        let platform = platform_archive_name();
-        let tag = "v1.8.3";
-        let archive_name = format!("whisper-bin-{}.zip", platform);
-        let url = format!(
-            "https://github.com/ggerganov/whisper.cpp/releases/download/{}/{}",
-            tag, archive_name
-        );
-
+        let url = resolve_binary_download_url()?;
         info!("Downloading whisper-cli: {}", url);
 
         let response = reqwest::Client::new()
@@ -164,7 +149,10 @@ impl LocalTranscriber {
 
         if !response.status().is_success() {
             anyhow::bail!(
-                "Failed to download whisper-cli: HTTP {} ({})",
+                "Failed to download whisper-cli: HTTP {} ({}). The pinned asset may \
+                 have been renamed or removed \u{2014} override the release tag with \
+                 OSA_WHISPER_TAG, point OSA_WHISPER_URL at a working archive, or use \
+                 cloud transcription (export VOICE_PROVIDER=cloud).",
                 response.status(), url
             );
         }
@@ -191,32 +179,77 @@ impl LocalTranscriber {
         }
         info!("Downloaded {:.1}MB, extracting...", body.len() as f64 / 1_048_576.0);
 
-        // Extract whisper-cli + required DLLs from the zip
-        let cursor = std::io::Cursor::new(&body);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .context("Failed to open whisper zip archive")?;
-
-        let needed: &[&str] = &["whisper-cli.exe", "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"];
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let name = file.name().to_string();
-            let basename = name.rsplit('/').next().unwrap_or(&name);
-            if needed.iter().any(|n| *n == basename) {
-                let dest = self.bin_dir().join(basename);
-                let mut out = std::fs::File::create(&dest)
-                    .with_context(|| format!("Failed to create {}", dest.display()))?;
-                std::io::copy(&mut file, &mut out)?;
-                info!("Extracted: {}", basename);
-            }
-        }
+        self.extract_whisper_archive(&body)?;
 
         if !bin.exists() {
-            anyhow::bail!("whisper-cli not found in archive");
+            anyhow::bail!("whisper-cli binary not found in the downloaded archive ({})", url);
         }
 
         info!("whisper-cli installed to {:?}", bin);
         Ok(bin)
+    }
+
+    /// Extract the whisper-cli binary (and its runtime deps) from a downloaded
+    /// zip archive into the OSA bin dir. OS-aware: Windows keeps the CLI plus its
+    /// DLLs; unix keeps the CLI (published as `whisper-cli` or `main`) plus any
+    /// shared objects, and marks them executable.
+    fn extract_whisper_archive(&self, body: &[u8]) -> Result<()> {
+        let cursor = std::io::Cursor::new(body);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .context("Failed to open whisper zip archive")?;
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let name = file.name().to_string();
+            let basename = name
+                .rsplit(|c| c == '/' || c == '\\')
+                .next()
+                .unwrap_or(&name)
+                .to_string();
+            if basename.is_empty() || !wanted_archive_member(&basename) {
+                continue;
+            }
+            // Unix upstream/mirror builds may name the CLI `main`; normalise so
+            // `whisper_bin()` resolves it.
+            let dest_name = if !cfg!(windows) && basename == "main" {
+                "whisper-cli".to_string()
+            } else {
+                basename.clone()
+            };
+            let dest = self.bin_dir().join(&dest_name);
+            {
+                let mut out = std::fs::File::create(&dest)
+                    .with_context(|| format!("Failed to create {}", dest.display()))?;
+                std::io::copy(&mut file, &mut out)?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&dest) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(perms.mode() | 0o755);
+                    let _ = std::fs::set_permissions(&dest, perms);
+                }
+            }
+            info!("Extracted: {}", dest_name);
+        }
+        Ok(())
+    }
+
+    /// Best-effort synchronous check for whether local transcription can run:
+    /// the binary exists, is on PATH, this platform auto-provisions it (Windows),
+    /// or a download URL is configured. Used to grey the mic at startup.
+    pub fn engine_available(&self) -> bool {
+        if self.whisper_bin().exists() {
+            return true;
+        }
+        if which_whisper_on_path() {
+            return true;
+        }
+        cfg!(target_os = "windows")
+            || std::env::var("OSA_WHISPER_URL")
+                .map(|u| !u.trim().is_empty())
+                .unwrap_or(false)
     }
 
     /// Download the ggml model if not present
@@ -286,10 +319,19 @@ impl LocalTranscriber {
         let bin = self.ensure_binary(progress_tx).await?;
         let model = self.ensure_model(progress_tx).await?;
 
-        // Write WAV to temp file
+        // Write WAV to a per-process/per-call unique temp file under the OSA data
+        // dir (never the shared system temp) so concurrent recordings or multiple
+        // OSA instances never race on a fixed filename (truncation, cross-
+        // contamination, or EACCES on a stale root-owned file in a shared /tmp).
         let wav_bytes = buffer.to_wav_bytes()?;
-        let tmp_dir = std::env::temp_dir();
-        let wav_path = tmp_dir.join("osa_voice_input.wav");
+        let tmp_dir = self.osa_dir.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)
+            .context("Failed to create the OSA tmp directory")?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let wav_path = tmp_dir.join(format!("osa_voice_{}_{}.wav", std::process::id(), nonce));
         std::fs::write(&wav_path, &wav_bytes)
             .context("Failed to write temp WAV file")?;
 
@@ -299,7 +341,7 @@ impl LocalTranscriber {
         let output = tokio::process::Command::new(&bin)
             .arg("-m").arg(&model)
             .arg("-f").arg(&wav_path)
-            .arg("-l").arg("en")
+            .arg("-l").arg(&self.lang)
             .arg("--no-timestamps")
             .arg("-nt")  // no timestamps in output
             .output()
@@ -323,16 +365,114 @@ impl LocalTranscriber {
     }
 }
 
-/// Get platform archive name for whisper.cpp release downloads
-#[allow(dead_code)]
+/// Default whisper.cpp release tag used to build the upstream download URL when
+/// neither `OSA_WHISPER_URL` nor `OSA_WHISPER_TAG` is set. Overridable at runtime
+/// so a renamed/removed asset can be repinned without rebuilding.
+const DEFAULT_WHISPER_TAG: &str = "v1.8.3";
+
+/// Resolve the whisper.cpp release tag: `OSA_WHISPER_TAG` env override, else the
+/// pinned default.
+fn whisper_tag() -> String {
+    std::env::var("OSA_WHISPER_TAG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_WHISPER_TAG.to_string())
+}
+
+/// Platform token used to build the upstream whisper.cpp release asset name
+/// (`whisper-bin-<token>.zip`). Upstream publishes only Windows assets today, so
+/// the non-Windows tokens matter only for a self-hosted mirror set via
+/// `OSA_WHISPER_URL`.
 fn platform_archive_name() -> &'static str {
     if cfg!(target_os = "windows") {
-        if cfg!(target_arch = "x86_64") { "x64" }
-        else { "Win32" }
+        if cfg!(target_arch = "x86_64") { "x64" } else { "Win32" }
     } else if cfg!(target_os = "macos") {
-        "apple-darwin"  // not distributed via GitHub, but placeholder
+        if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x64" }
+    } else if cfg!(target_arch = "aarch64") {
+        "linux-arm64"
     } else {
-        "x64"  // Linux x64
+        "linux-x64"
+    }
+}
+
+/// Resolve the whisper-cli download URL for this platform. `OSA_WHISPER_URL` (a
+/// direct link to a zip containing a `whisper-cli`/`main` binary) wins on every
+/// OS — the way macOS/Linux users point OSA at a self-hosted or CI-built
+/// binary. Otherwise we fall back to the upstream whisper.cpp release zip, which
+/// only exists for Windows; on other platforms this returns an actionable error.
+fn resolve_binary_download_url() -> Result<String> {
+    if let Ok(url) = std::env::var("OSA_WHISPER_URL") {
+        if !url.trim().is_empty() {
+            return Ok(url);
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        let archive = format!("whisper-bin-{}.zip", platform_archive_name());
+        Ok(format!(
+            "https://github.com/ggerganov/whisper.cpp/releases/download/{}/{}",
+            whisper_tag(), archive
+        ))
+    } else {
+        anyhow::bail!(
+            "no prebuilt whisper-cli is published for this platform ({}/{}). \
+             Set OSA_WHISPER_URL to a .zip containing a `whisper-cli` binary, \
+             install whisper.cpp yourself (e.g. `brew install whisper-cpp` on macOS), \
+             or use cloud transcription (export VOICE_PROVIDER=cloud).",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    }
+}
+
+/// Whether an archive member (by basename) is one we need to extract. OS-aware:
+/// Windows keeps the CLI plus its DLLs; unix keeps the CLI (`whisper-cli`/`main`)
+/// plus any shared objects (`.so`/`.dylib`).
+fn wanted_archive_member(basename: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        const NEEDED: &[&str] = &[
+            "whisper-cli.exe", "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll",
+        ];
+        NEEDED.contains(&basename)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        basename == "whisper-cli"
+            || basename == "main"
+            || basename.ends_with(".so")
+            || basename.contains(".so.")
+            || basename.ends_with(".dylib")
+    }
+}
+
+/// True when a `whisper-cli` binary is resolvable on the system PATH.
+fn which_whisper_on_path() -> bool {
+    std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+        .arg("whisper-cli")
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Resolve the transcription language from `WHISPER_LANG`. Defaults to `auto`
+/// (whisper.cpp auto-detects; cloud/groq omit the field to auto-detect).
+fn whisper_lang() -> String {
+    std::env::var("WHISPER_LANG")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "auto".to_string())
+}
+
+/// Map the configured language to an OpenAI/Groq API `language` value. `auto`
+/// (or empty) means "let the service auto-detect", so the field is omitted.
+fn api_language(lang: &str) -> Option<String> {
+    let l = lang.trim();
+    if l.is_empty() || l.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(l.to_string())
     }
 }
 
@@ -340,11 +480,12 @@ fn platform_archive_name() -> &'static str {
 
 pub struct CloudTranscriber {
     api_key: String,
+    lang: String,
 }
 
 impl CloudTranscriber {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self { api_key, lang: whisper_lang() }
     }
 
     pub fn api_key(&self) -> &str {
@@ -365,11 +506,13 @@ impl CloudTranscriber {
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
 
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .text("model", "whisper-1")
-            .text("language", "en")
-            .text("response_format", "text")
-            .part("file", part);
+            .text("response_format", "text");
+        if let Some(lang) = api_language(&self.lang) {
+            form = form.text("language", lang);
+        }
+        let form = form.part("file", part);
 
         let response = client
             .post("https://api.openai.com/v1/audio/transcriptions")
@@ -395,11 +538,12 @@ impl CloudTranscriber {
 
 pub struct GroqTranscriber {
     api_key: String,
+    lang: String,
 }
 
 impl GroqTranscriber {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self { api_key, lang: whisper_lang() }
     }
 
     pub fn api_key(&self) -> &str {
@@ -420,11 +564,13 @@ impl GroqTranscriber {
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
 
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .text("model", "whisper-large-v3-turbo")
-            .text("language", "en")
-            .text("response_format", "text")
-            .part("file", part);
+            .text("response_format", "text");
+        if let Some(lang) = api_language(&self.lang) {
+            form = form.text("language", lang);
+        }
+        let form = form.part("file", part);
 
         let response = client
             .post("https://api.groq.com/openai/v1/audio/transcriptions")

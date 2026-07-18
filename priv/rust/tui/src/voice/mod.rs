@@ -20,6 +20,9 @@ pub struct VoiceState {
     pub hands_free: bool,
     /// When silence started (for VAD stop detection)
     pub silence_start: Option<Instant>,
+    /// Whether voice input can run right now (local engine present/provisionable
+    /// or a cloud API key configured). Drives the greyed mic affordance.
+    pub available: bool,
 }
 
 impl VoiceState {
@@ -44,6 +47,8 @@ impl VoiceState {
             _ => VoiceProvider::local_or_unavailable(),
         };
 
+        let available = provider_available(&provider);
+
         Self {
             recording: false,
             started_at: None,
@@ -51,6 +56,23 @@ impl VoiceState {
             provider,
             hands_free: false,
             silence_start: None,
+            available,
+        }
+    }
+
+    /// One-line startup warning when voice cannot run out of the box, else None.
+    /// Suitable for a startup toast alongside the greyed mic.
+    #[allow(dead_code)]
+    pub fn preflight_warning(&self) -> Option<String> {
+        if self.available {
+            None
+        } else {
+            Some(
+                "Voice input unavailable \u{2014} no local whisper engine and no \
+                 OPENAI_API_KEY/GROQ_API_KEY. Install whisper.cpp, set \
+                 OSA_WHISPER_URL, or run with VOICE_PROVIDER=cloud."
+                    .to_string(),
+            )
         }
     }
 
@@ -59,5 +81,14 @@ impl VoiceState {
         self.started_at
             .map(|s| s.elapsed().as_secs())
             .unwrap_or(0)
+    }
+}
+
+/// Whether the selected provider can transcribe right now (drives the mic state).
+fn provider_available(provider: &VoiceProvider) -> bool {
+    match provider {
+        VoiceProvider::Cloud(c) => !c.api_key().is_empty(),
+        VoiceProvider::Groq(g) => !g.api_key().is_empty(),
+        VoiceProvider::Local(l) => l.engine_available(),
     }
 }

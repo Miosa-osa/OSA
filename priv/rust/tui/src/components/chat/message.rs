@@ -60,6 +60,11 @@ pub struct Message {
     pub survey_data: Option<SurveyQAData>,
     /// Cached height for given width
     pub cached_height: Option<(u16, u16)>,
+    /// Pre-parsed markdown body for the live streaming preview. When set (only
+    /// via `new_agent_prerendered`), `height` and `draw_agent` reuse this parsed
+    /// `Text` instead of re-running `render_markdown` over the whole reply — this
+    /// is what removes the per-frame / per-token full-buffer re-parse.
+    pub prerendered_body: Option<Text<'static>>,
     /// Wall-clock time when this message was created (used for timestamp display).
     /// None for tool calls and survey messages where timestamps are not shown.
     pub timestamp: Option<SystemTime>,
@@ -75,6 +80,7 @@ impl Message {
             survey_data: None,
             cached_height: None,
             timestamp: Some(SystemTime::now()),
+            prerendered_body: None,
         }
     }
 
@@ -88,6 +94,24 @@ impl Message {
             signal: None,
             cached_height: None,
             timestamp: None,
+            prerendered_body: None,
+        }
+    }
+
+    /// Create an Agent message whose markdown body is already parsed. Used only
+    /// by the live streaming region (`Chat::draw_live`) so the same `Text`
+    /// powers both `height` and `draw` without re-parsing the whole reply every
+    /// frame or every token.
+    pub fn new_agent_prerendered(body: Text<'static>) -> Self {
+        Self {
+            msg_type: MessageType::Agent,
+            content: String::new(),
+            signal: None,
+            tool_data: None,
+            survey_data: None,
+            cached_height: None,
+            timestamp: None,
+            prerendered_body: Some(body),
         }
     }
 
@@ -124,6 +148,18 @@ impl Message {
 
         // For agent messages, use the markdown renderer for accurate line count.
         if matches!(self.msg_type, MessageType::Agent | MessageType::AgentContinuation) {
+            // Live streaming preview supplies a pre-parsed body (see
+            // `Chat::ensure_stream_cache`) so height and draw share ONE markdown
+            // parse and can never disagree on line count.
+            if let Some(ref body) = self.prerendered_body {
+                let rendered_lines = (body.lines.len() as u16).max(1);
+                let h = if matches!(self.msg_type, MessageType::AgentContinuation) {
+                    rendered_lines
+                } else {
+                    rendered_lines + 1 // +1 for label
+                };
+                return h.max(1);
+            }
             let rendered = crate::render::markdown::render_markdown(&self.content, content_width);
             let rendered_lines = rendered.lines.len() as u16;
             // AgentContinuation has no header label line.
@@ -284,7 +320,13 @@ impl Message {
                 .border_type(BorderType::Thick)
                 .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-            let styled_text = crate::render::markdown::render_markdown(&self.content, content_area.width.saturating_sub(2));
+            let styled_text = match self.prerendered_body {
+                Some(ref body) => body.clone(),
+                None => crate::render::markdown::render_markdown(
+                    &self.content,
+                    content_area.width.saturating_sub(2),
+                ),
+            };
             let body_scroll = scroll_top.saturating_sub(1); // header was line 0
             let paragraph = Paragraph::new(styled_text)
                 .block(block)
@@ -304,10 +346,13 @@ impl Message {
             .border_type(BorderType::Thick)
             .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-        let styled_text = crate::render::markdown::render_markdown(
-            &self.content,
-            area.width.saturating_sub(2),
-        );
+        let styled_text = match self.prerendered_body {
+            Some(ref body) => body.clone(),
+            None => crate::render::markdown::render_markdown(
+                &self.content,
+                area.width.saturating_sub(2),
+            ),
+        };
         // No header on a continuation, so scroll_top applies straight to the body.
         let paragraph = Paragraph::new(styled_text)
             .block(block)
