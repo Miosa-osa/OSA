@@ -251,6 +251,10 @@ impl App {
             }
             "/logout" => {
                 self.do_logout();
+                self.toasts.push(
+                    "Signed out".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
             }
             "/bg" => {
                 // List backgrounded turns with live/done status. Backgrounding
@@ -417,8 +421,20 @@ impl App {
                     // Open the reasoning level selector dialog
                     self.open_reasoning_selector();
                 } else {
-                    // Accept direct level: /reasoning off|low|medium|high
-                    self.execute_reasoning_command(arg);
+                    // Accept direct level: /reasoning off|low|medium|high|max.
+                    // Validate BEFORE dispatch — execute_reasoning_command
+                    // optimistically stamps the status line with the level, so
+                    // an unvalidated typo would display a bogus effort while
+                    // the backend rejects it.
+                    let lvl = arg.to_ascii_lowercase();
+                    if matches!(lvl.as_str(), "off" | "low" | "medium" | "high" | "max") {
+                        self.execute_reasoning_command(&lvl);
+                    } else {
+                        self.chat.add_system_message(
+                            "Usage: /reasoning off|low|medium|high|max",
+                            "warning",
+                        );
+                    }
                 }
             }
             "/voice" => {
@@ -504,12 +520,11 @@ impl App {
                 self.open_config_editor();
             }
             "/desktop" | "/gui" => {
-                // Send to backend — it handles finding and launching the Tauri app
+                // Send to backend — it finds and launches the desktop app and
+                // reports the REAL outcome via CommandResult. No eager toast:
+                // it used to claim "Launching..." even when the backend had no
+                // desktop handler at all and the app was not installed.
                 self.execute_backend_command("desktop", arg);
-                self.toasts.push(
-                    "Launching OSA Desktop...".to_string(),
-                    crate::components::toast::ToastLevel::Info,
-                );
             }
             "/context" => {
                 // Fetch token-usage breakdown and render a compact summary in chat.

@@ -136,6 +136,14 @@ pub struct Activity {
     /// different verb instead of always "Accomplishing".
     verb_offset: usize,
     start_time: Option<std::time::Instant>,
+    /// When the current thinking stretch began (phase == Thinking). Drives the
+    /// CC-style "thinking" status segment; on leaving Thinking the duration is
+    /// captured into `thought_for` so "thought for Ns" lingers briefly.
+    thinking_since: Option<std::time::Instant>,
+    /// (seconds, captured_at) of the last completed thinking stretch. Rendered
+    /// as "thought for Ns" for 2s after capture (CC's minimum-display window),
+    /// then expires by age check in `draw` — no mutation needed.
+    thought_for: Option<(u64, std::time::Instant)>,
     /// When set, overrides the rotating spinner verb with the active task's
     /// present-continuous form (Claude Code's `activeForm`), so the spinner shows
     /// the concrete current step (e.g. "Wiring the checklist…") instead of a
@@ -208,6 +216,8 @@ impl Activity {
             phrase_tick: 0,
             verb_offset: 0,
             start_time: None,
+            thinking_since: None,
+            thought_for: None,
             active_verb: None,
             verbosity: Verbosity::All,
             a11y: false,
@@ -254,6 +264,8 @@ impl Activity {
         self.verb_offset =
             VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.start_time = Some(std::time::Instant::now());
+        self.thinking_since = None;
+        self.thought_for = None;
     }
 
     pub fn stop(&mut self) {
@@ -261,6 +273,8 @@ impl Activity {
         self.phase = ProcessingPhase::Waiting;
         self.start_time = None;
         self.active_verb = None;
+        self.thinking_since = None;
+        self.thought_for = None;
     }
 
     /// Seconds since the spinner clock started (`start()`), if running. This is
@@ -288,8 +302,19 @@ impl Activity {
         }
     }
 
-    /// Set processing phase (auto-activates if inactive)
+    /// Set processing phase (auto-activates if inactive). Tracks thinking
+    /// stretches for the CC-style "thinking" / "thought for Ns" status segment:
+    /// entering Thinking stamps the start, leaving it captures the duration
+    /// (clamped to 1s minimum, CC's Math.max(1, round) parity).
     pub fn set_phase(&mut self, phase: ProcessingPhase) {
+        if phase == ProcessingPhase::Thinking {
+            if self.thinking_since.is_none() {
+                self.thinking_since = Some(std::time::Instant::now());
+            }
+        } else if let Some(since) = self.thinking_since.take() {
+            let secs = since.elapsed().as_secs().max(1);
+            self.thought_for = Some((secs, std::time::Instant::now()));
+        }
         self.phase = phase;
         if !self.active {
             self.active = true;
@@ -297,14 +322,11 @@ impl Activity {
         }
     }
 
-    /// Legacy compat: enable thinking indicator via phase
+    /// Legacy compat: enable thinking indicator via phase. Routed through
+    /// `set_phase` so thinking-stretch tracking sees this path too.
     pub fn set_thinking(&mut self, thinking: bool) {
         if thinking {
-            self.phase = ProcessingPhase::Thinking;
-            if !self.active {
-                self.active = true;
-                self.start_time = Some(std::time::Instant::now());
-            }
+            self.set_phase(ProcessingPhase::Thinking);
         }
     }
 
@@ -488,21 +510,39 @@ impl Component for Activity {
         // Claude-Code line: "✻ Zesting… (28s · ↓ 1.5k tokens)". Sub-phase detail
         // (which tool is running) shows separately as the ✓ tool-result lines.
         let elapsed_str = crate::util::fmt_elapsed(elapsed);
+
+        // CC SpinnerAnimationRow status parts, in its exact order: suffix slot
+        // (our persistent "esc to interrupt" affordance), elapsed timer, token
+        // count with a direction glyph (↑ while waiting on the API, ↓ once
+        // output streams — CC's SpinnerModeGlyph), then the thinking status —
+        // all joined with " · " inside one dim paren group:
+        //   ✳ Pondering… (esc to interrupt · 12s · ↓ 1.2k tokens · thinking)
+        let mut parts: Vec<String> = vec!["esc to interrupt".to_string(), elapsed_str];
+        // Token gate (CC SHOW_TOKENS_AFTER_MS): only once tokens actually flow
+        // AND the turn has run 30s — short turns never flash a count. Verbose
+        // display surfaces it immediately (CC `verbose || …`).
+        if tokens > 0 && (elapsed >= 30 || self.verbosity == Verbosity::Verbose) {
+            let arrow = if self.phase == ProcessingPhase::Waiting {
+                "\u{2191}"
+            } else {
+                "\u{2193}"
+            };
+            parts.push(format!("{} {} tokens", arrow, format_count(tokens)));
+        }
+        // "thinking" while reasoning deltas stream; "thought for Ns" lingers
+        // 2s after the stretch ends (CC's minimum-display window), expiring by
+        // age — draw never mutates.
+        if self.phase == ProcessingPhase::Thinking {
+            parts.push("thinking".to_string());
+        } else if let Some((secs, at)) = self.thought_for {
+            if at.elapsed() < std::time::Duration::from_secs(2) {
+                parts.push(format!("thought for {}s", secs));
+            }
+        }
         let mut spinner_spans: Vec<Span<'_>> = vec![
             Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
             Span::styled(format!("{}\u{2026}", word), theme.spinner_verb()),
-            Span::styled(
-                // Only surface the "↓ N tokens" segment once tokens are actually
-                // flowing AND the turn has run 30s (CC's token gate — short turns
-                // never flash a count; during the initial thinking phase it reads
-                // 0, which looks broken). Just the elapsed timer until then.
-                if tokens > 0 && elapsed >= 30 {
-                    format!(" ({} \u{00b7} \u{2193} {} tokens)", elapsed_str, format_count(tokens))
-                } else {
-                    format!(" ({})", elapsed_str)
-                },
-                theme.faint(),
-            ),
+            Span::styled(format!(" ({})", parts.join(" \u{00b7} ")), theme.faint()),
         ];
 
         // Model name prefix (e.g. "qwen3-coder:480b ∙ ")
@@ -532,9 +572,6 @@ impl Component for Activity {
             ));
         }
 
-        // WS5 — persistent interrupt affordance (CC SpinnerAnimationRow's
-        // "(esc to interrupt)").
-        spinner_spans.push(Span::styled(" \u{00b7} esc to interrupt", theme.faint()));
 
         let spinner_line = Line::from(spinner_spans);
         frame.render_widget(
@@ -621,6 +658,25 @@ mod activity_tests {
         act.tool_start("Read", "short ascii");
         act.tool_start("Web", &"\u{1f600}".repeat(30)); // 4-byte emoji run
         assert!(!act.tool_feed.is_empty());
+    }
+
+    #[test]
+    fn thinking_stretch_is_tracked_across_phases() {
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Thinking);
+        assert!(act.thinking_since.is_some());
+        assert!(act.thought_for.is_none());
+        act.set_phase(ProcessingPhase::Streaming);
+        assert!(act.thinking_since.is_none());
+        let (secs, _) = act.thought_for.expect("thought_for captured on leave");
+        assert!(secs >= 1, "sub-second stretches clamp to 1s (CC parity)");
+        // Legacy set_thinking path routes through set_phase tracking too.
+        act.set_thinking(true);
+        assert!(act.thinking_since.is_some());
+        // A new turn clears both.
+        act.start();
+        assert!(act.thinking_since.is_none() && act.thought_for.is_none());
     }
 
     #[test]

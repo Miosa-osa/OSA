@@ -413,7 +413,63 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  def cmd_memory(_args, session_id) do
+  # `/memory` — no arg: stats + recent overview. Verbs: `save <text>` persists
+  # a note, `search <q>` / `recall <q>` query the store. The TUI advertises
+  # "Save or recall a memory", so the verbs must actually work — previously
+  # `_args` was ignored and every invocation printed the same listing.
+  def cmd_memory(args, session_id) do
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      ["save", content] ->
+        IO.puts("")
+
+        try do
+          case Memory.save(content, source: :user) do
+            {:ok, _entry} -> IO.puts("  #{@green}✓#{@reset} Saved to memory")
+            {:error, reason} -> IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+          end
+        rescue
+          _ -> IO.puts("  #{@dim}Memory not available#{@reset}")
+        end
+
+        IO.puts("")
+        session_id
+
+      [verb, query] when verb in ["search", "recall"] ->
+        IO.puts("")
+
+        try do
+          case Memory.recall(query, limit: 10) do
+            {:ok, entries} when is_list(entries) and entries != [] ->
+              Enum.each(entries, fn entry ->
+                content = entry[:content] || entry[:key] || "?"
+                IO.puts("  #{@dim}•#{@reset} #{String.slice(to_string(content), 0, 100)}")
+              end)
+
+            _ ->
+              IO.puts("  #{@dim}No memories matched \"#{query}\"#{@reset}")
+          end
+        rescue
+          _ -> IO.puts("  #{@dim}Memory not available#{@reset}")
+        end
+
+        IO.puts("")
+        session_id
+
+      ["save"] ->
+        IO.puts("\n  #{@dim}Usage: /memory save <text>#{@reset}\n")
+        session_id
+
+      [verb] when verb in ["search", "recall"] ->
+        IO.puts("\n  #{@dim}Usage: /memory #{verb} <query>#{@reset}\n")
+        session_id
+
+      _ ->
+        memory_overview(session_id)
+    end
+  end
+
+  # `/memory` with no verb: the original stats + recent-entries overview.
+  defp memory_overview(session_id) do
     IO.puts("")
     IO.puts("  #{@bold}Memory#{@reset}")
 

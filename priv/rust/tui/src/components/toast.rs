@@ -156,20 +156,31 @@ impl Component for Toasts {
             }
             let row = Rect::new(area.x, area.y + i as u16, area.width, 1);
 
-            // Coherent per-level styling: info reads neutral, success green,
-            // warning amber, error red — icon AND colour agree on severity.
-            let style = match toast.level {
+            // CC task-notification styling (UserAgentNotificationMessage): the
+            // status glyph carries the severity colour, the message body stays
+            // neutral text — "● summary" where only the bullet is coloured by
+            // completed/failed/killed status. The per-level glyphs are kept so
+            // severity still reads without colour.
+            let icon_style = match toast.level {
                 ToastLevel::Info => theme.status_signal(),
                 ToastLevel::Success => theme.task_done(),
                 ToastLevel::Warning => theme.prefix_thinking(),
                 ToastLevel::Error => theme.error_text(),
             };
 
-            let raw = format!("{} {}", toast.level.icon(), toast.message);
-            // Fit to the toast width so a long message can't spill/clip (the row
-            // is right-aligned, so overflow would otherwise drop the start).
-            let text = fit_to_width(&raw, area.width as usize);
-            let line = Line::from(Span::styled(text, style));
+            // Fit to the toast width (minus the icon cell) so a long message
+            // can't spill/clip (the row is right-aligned, so overflow would
+            // otherwise drop the start).
+            let icon = toast.level.icon();
+            let icon_cols = icon.chars().count() + 1;
+            let text = fit_to_width(
+                &toast.message,
+                (area.width as usize).saturating_sub(icon_cols),
+            );
+            let line = Line::from(vec![
+                Span::styled(format!("{} ", icon), icon_style),
+                Span::raw(text),
+            ]);
             let p = Paragraph::new(line).alignment(Alignment::Right);
             frame.render_widget(p, row);
         }

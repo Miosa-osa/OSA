@@ -181,18 +181,41 @@ impl Agents {
                     if entry.tool_uses == 1 { "" } else { "s" },
                     fmt_tokens(entry.tokens_used)
                 );
-                let prefix_len = connector.len() + 2 + 1; // connector + icon + space
+                // CC TeammateSpinnerLine: "@name: subject" — the @-handle in the
+                // agent color, the subject dim after a faint ": " separator.
+                // When the backend sent no distinct subject the handle alone
+                // stands in.
+                let name_prefix = format!("@{}", entry.name);
+                let show_handle = !entry.subject.is_empty() && entry.subject != entry.name;
+                let name_cols = if show_handle {
+                    name_prefix.chars().count() + 2 // "@name" + ": "
+                } else {
+                    0
+                };
+                // Char-count width: the connector is multi-byte box drawing, so
+                // byte .len() would treble-count its 3 columns.
+                let prefix_len = connector.chars().count() + 2 + name_cols;
                 let tags_len = role_str.len() + model_str.len();
                 let max_subject = (area.width as usize)
                     .saturating_sub(prefix_len + tags_len + stats_str.len())
                     .max(8);
-                let subject_display = truncate_str(&subject, max_subject);
+                let subject_display = if show_handle {
+                    truncate_str(&subject, max_subject)
+                } else {
+                    truncate_str(&name_prefix, max_subject)
+                };
 
                 let mut row1_spans = vec![
                     Span::styled(connector, theme.faint()),
                     Span::styled(format!("{} ", icon), icon_style),
-                    Span::styled(subject_display, theme.agent_name()),
                 ];
+                if show_handle {
+                    row1_spans.push(Span::styled(name_prefix.clone(), theme.agent_name()));
+                    row1_spans.push(Span::styled(": ", theme.faint()));
+                    row1_spans.push(Span::styled(subject_display, theme.faint()));
+                } else {
+                    row1_spans.push(Span::styled(subject_display, theme.agent_name()));
+                }
                 if !role_str.is_empty() {
                     row1_spans.push(Span::styled(role_str, theme.role_tag()));
                 }
@@ -527,7 +550,7 @@ impl Agents {
     fn agent_icon(&self, entry: &AgentEntry) -> (char, Style) {
         let theme = crate::style::theme();
         match entry.status {
-            AgentStatus::Spawning => ('○', Style::default().fg(Color::DarkGray)),
+            AgentStatus::Spawning => ('⚡', theme.task_pending()),
             AgentStatus::Running => {
                 let frame = SPINNER[self.tick as usize % SPINNER.len()];
                 (frame, theme.spinner())

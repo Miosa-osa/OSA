@@ -105,9 +105,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     with %{"command" => command} when is_binary(command) <- conn.body_params do
       cmd_name = command |> String.split() |> List.first() |> String.downcase()
 
+      # Reconstruct the full command line from the SEPARATE `command` and `arg`
+      # JSON fields the TUI sends, BEFORE any routing decision. The auto/
+      # permission-mode handlers classify on tokens, and the on/off argument
+      # lives in `arg` — matching on `command` alone made `/auto off` re-enable
+      # the auto tier because the "off" token never arrived.
+      full_command =
+        case conn.body_params["arg"] do
+          a when is_binary(a) and a != "" -> command <> " " <> a
+          _ -> command
+        end
+
       cond do
-        auto_mode_command?(command) ->
-          handle_auto_mode_command(conn, command)
+        auto_mode_command?(full_command) ->
+          handle_auto_mode_command(conn, full_command)
 
         cmd_name in ~w(plan_approve plan_reject plan_edit) ->
           handle_plan_command(conn, cmd_name)
@@ -124,18 +135,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         custom = custom_command(cmd_name) ->
           handle_custom_command(conn, custom, conn.body_params["arg"] || "")
 
-        true ->
-          # Reconstruct the full command line from the SEPARATE `command` and
-          # `arg` JSON fields the TUI sends (execute_backend_command splits verb
-          # and args into two fields). Without this, arg-taking slash commands
-          # like `/skill enable <name>` lose their verb+args before reaching
-          # CLI.Commands.dispatch/2. Benefits every arg-taking CLI command.
-          full_command =
-            case conn.body_params["arg"] do
-              a when is_binary(a) and a != "" -> command <> " " <> a
-              _ -> command
-            end
+        cmd_name in ~w(reasoning mem-save mem-search mem-recall reload debug desktop) ->
+          handle_api_only_command(conn, cmd_name, conn.body_params["arg"] || "")
 
+        true ->
           execute_cli_command(conn, full_command)
       end
     else
@@ -175,12 +178,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
   end
 
-  # Matches `auto_mode`, `auto_mode on/off`, and `set_permission_mode auto|full`.
+  # Matches `auto_mode`, `auto_mode on/off`, `set_permission_mode auto|full`,
+  # and the TUI mode-sync verbs: `permission_mode <mode>` (sent on every
+  # Shift+Tab cycle) and `dangerous_mode on|off` (sent by /overdrive). The
+  # latter two previously fell through to CLI dispatch as unknown commands, so
+  # permission-mode changes made in the TUI never reached the backend gate.
   defp auto_mode_command?(command) do
     normalized = command |> String.trim() |> String.downcase()
 
     String.starts_with?(normalized, "auto_mode") or
-      String.starts_with?(normalized, "set_permission_mode")
+      String.starts_with?(normalized, "set_permission_mode") or
+      String.starts_with?(normalized, "permission_mode") or
+      String.starts_with?(normalized, "dangerous_mode")
   end
 
   defp handle_auto_mode_command(conn, command) do
@@ -203,6 +212,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # fall through to the tier path (unchanged behavior).
   defp classify_permission_mode(tokens) do
     cond do
+      # `dangerous_mode on|off` (the /overdrive toggle): ON is overdrive, OFF
+      # returns to ask. Checked before the generic scan — the command token
+      # itself is "dangerous_mode", which must not match the "dangerous" alias.
+      "dangerous_mode" in tokens ->
+        if Enum.any?(tokens, &(&1 in ~w(off false 0 no))),
+          do: {:mode, :ask},
+          else: {:mode, :overdrive}
+
       Enum.any?(tokens, &(&1 in ~w(overdrive bypass yolo dangerous))) -> {:mode, :overdrive}
       Enum.any?(tokens, &(&1 in ~w(accept-edits accept_edits auto-edit auto_edit edits))) ->
         {:mode, :accept_edits}
@@ -449,6 +466,118 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   end
 
   defp legacy_decision(_), do: nil
+
+  # ── API-only slash commands ─────────────────────────────────────────
+  # Commands advertised in GET /commands (api_only entries) or emitted by the
+  # TUI (`/reasoning` selector, `/desktop`) that have no CLI @commands handler.
+  # Without these branches they fell through to CLI.Commands.dispatch and the
+  # user saw an "Unknown command" suggestion instead of the command running.
+
+  defp handle_api_only_command(conn, "reasoning", arg) do
+    # The TUI reasoning selector sends off|low|medium|high; the backend's
+    # canonical implementation is /effort (low|medium|high|max). "off" maps to
+    # the lowest effort tier.
+    level =
+      case arg |> String.trim() |> String.downcase() do
+        "off" -> "low"
+        other -> other
+      end
+
+    line = if level == "", do: "effort", else: "effort " <> level
+    execute_cli_command(conn, line)
+  end
+
+  defp handle_api_only_command(conn, "mem-save", arg) do
+    output =
+      case String.trim(arg) do
+        "" ->
+          "Usage: /mem-save <text to remember>"
+
+        content ->
+          case OptimalSystemAgent.Memory.save(content, source: :user) do
+            {:ok, _entry} -> "Saved to memory."
+            {:error, reason} -> "Memory save failed: #{inspect(reason)}"
+          end
+      end
+
+    respond_output(conn, "mem-save", output)
+  rescue
+    _ -> respond_output(conn, "mem-save", "Memory not available.")
+  end
+
+  defp handle_api_only_command(conn, cmd, arg) when cmd in ["mem-search", "mem-recall"] do
+    query = String.trim(arg)
+
+    output =
+      cond do
+        cmd == "mem-search" and query == "" ->
+          "Usage: /mem-search <query>"
+
+        query == "" ->
+          case OptimalSystemAgent.Memory.recent(10) do
+            {:ok, entries} when entries != [] -> format_memory_entries(entries)
+            _ -> "No memory entries yet."
+          end
+
+        true ->
+          case OptimalSystemAgent.Memory.recall(query, limit: 10) do
+            {:ok, entries} when entries != [] -> format_memory_entries(entries)
+            _ -> "No memories matched \"#{query}\"."
+          end
+      end
+
+    respond_output(conn, cmd, output)
+  rescue
+    _ -> respond_output(conn, cmd, "Memory not available.")
+  end
+
+  defp handle_api_only_command(conn, "reload", _arg) do
+    output =
+      try do
+        OptimalSystemAgent.Tools.Registry.reload_skills()
+        skills = OptimalSystemAgent.Tools.Registry.load_skill_definitions()
+        "Reloaded skills from disk — #{length(skills)} loaded."
+      rescue
+        _ -> "Skill reload failed."
+      catch
+        :exit, _ -> "Skill reload failed."
+      end
+
+    respond_output(conn, "reload", output)
+  end
+
+  defp handle_api_only_command(conn, "debug", _arg) do
+    Logger.configure(level: :debug)
+    respond_output(conn, "debug", "Debug logging enabled for this backend (level: debug).")
+  end
+
+  defp handle_api_only_command(conn, "desktop", _arg) do
+    output =
+      case System.find_executable("osa-desktop") do
+        nil ->
+          "OSA Desktop app not found on PATH. Build it from desktop/ (see desktop/README.md) or install the osa-desktop package."
+
+        path ->
+          spawn(fn -> System.cmd(path, [], stderr_to_stdout: true) end)
+          "Launching OSA Desktop..."
+      end
+
+    respond_output(conn, "desktop", output)
+  end
+
+  defp respond_output(conn, command, output) do
+    body = Jason.encode!(%{output: output, command: command})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  defp format_memory_entries(entries) do
+    entries
+    |> Enum.map(fn entry ->
+      content = entry[:content] || entry["content"] || entry[:key] || inspect(entry)
+      "• " <> String.slice(to_string(content), 0, 120)
+    end)
+    |> Enum.join("\n")
+  end
 
   defp handle_list_tools(conn) do
     tools = Tools.list_tools()
