@@ -226,7 +226,7 @@ impl App {
                     self.permissions_manager = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Hooks => {
                 use crate::dialogs::hooks_viewer::HooksViewerAction;
@@ -237,7 +237,7 @@ impl App {
                     self.hooks_viewer = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Mcp => {
                 use crate::dialogs::mcp_servers::McpServersAction;
@@ -248,7 +248,7 @@ impl App {
                     self.mcp_servers = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Cost => {
                 use crate::dialogs::cost_dashboard::CostDashboardAction;
@@ -259,7 +259,7 @@ impl App {
                     self.cost_dashboard = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Skills => {
                 use crate::dialogs::skills_browser::SkillsBrowserAction;
@@ -270,7 +270,7 @@ impl App {
                     self.skills_browser = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Channels => {
                 use crate::dialogs::channels_panel::ChannelsPanelAction;
@@ -281,7 +281,7 @@ impl App {
                     self.channels_panel = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Memory => {
                 use crate::dialogs::memory_browser::MemoryBrowserAction;
@@ -292,7 +292,7 @@ impl App {
                     self.memory_browser = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Metrics => {
                 use crate::dialogs::metrics_dashboard::MetricsAction;
@@ -303,7 +303,7 @@ impl App {
                     self.metrics_dashboard = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Tasks => {
                 use crate::dialogs::tasks_panel::TasksPanelAction;
@@ -314,7 +314,7 @@ impl App {
                     self.tasks_panel = None;
                     self.exit_overlay();
                 }
-                true
+                false
             }
             AppState::Persona => {
                 use crate::dialogs::persona_picker::PersonaPickerAction;
@@ -330,7 +330,7 @@ impl App {
                     }
                     _ => {}
                 }
-                true
+                false
             }
             AppState::Sandbox => {
                 use crate::dialogs::sandbox_picker::SandboxAction;
@@ -346,7 +346,7 @@ impl App {
                     }
                     _ => {}
                 }
-                true
+                false
             }
             _ => false,
         }
@@ -375,14 +375,14 @@ impl App {
                 );
                 self.trust_dialog = None;
                 self.exit_overlay();
-                true
+                false
             }
             Some(TrustAction::Exit) => {
                 self.trust_dialog = None;
                 self.exit_overlay();
-                true
+                false
             }
-            None => true,
+            None => false,
         }
     }
 
@@ -404,14 +404,14 @@ impl App {
                 }
                 self.theme_picker = None;
                 self.exit_overlay();
-                true
+                false
             }
             Some(ThemeAction::Close) => {
                 self.theme_picker = None;
                 self.exit_overlay();
-                true
+                false
             }
-            None => true,
+            None => false,
         }
     }
 
@@ -427,7 +427,7 @@ impl App {
             self.keybindings_viewer = None;
             self.exit_overlay();
         }
-        true
+        false
     }
 
     /// `/tools` browser: type-to-filter + navigation handled inside; the
@@ -443,7 +443,7 @@ impl App {
             self.tools_browser = None;
             self.exit_overlay();
         }
-        true
+        false
     }
 
     /// `/context` breakdown: read-only. Only Esc or an unmodified 'q' dismiss it
@@ -455,7 +455,7 @@ impl App {
             self.context_stats = None;
             self.exit_overlay();
         }
-        true
+        false
     }
 
     /// Key handling for the `/status` dashboard. Read-only, no navigation: only
@@ -465,7 +465,7 @@ impl App {
         if is_overlay_dismiss(key) {
             self.exit_overlay();
         }
-        true
+        false
     }
 
     /// Key handling for the full-screen management dashboard.
