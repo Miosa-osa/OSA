@@ -279,6 +279,35 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/workspace/trust?path=<dir> — current trust status + risks.
+    pub async fn get_trust(&self, path: &str) -> Result<crate::client::types::TrustStatus> {
+        let enc: String = path
+            .chars()
+            .map(|ch| match ch {
+                ' ' => "%20".to_string(),
+                '#' => "%23".to_string(),
+                '?' => "%3F".to_string(),
+                '&' => "%26".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+        let resp = self
+            .get(&format!("/api/v1/workspace/trust?path={}", enc))
+            .await?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /api/v1/workspace/trust/accept — persist trust for <dir>.
+    pub async fn accept_trust(&self, path: &str) -> Result<crate::client::types::TrustStatus> {
+        let resp = self
+            .post(
+                "/api/v1/workspace/trust/accept",
+                &serde_json::json!({ "path": path }),
+            )
+            .await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST /api/v1/sessions/:id/compact — trigger proactive compaction now.
     /// A non-empty `instructions` string is sent as custom summarization
     /// guidance (CC `/compact <instructions>` parity).

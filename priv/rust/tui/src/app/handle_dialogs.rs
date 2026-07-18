@@ -482,6 +482,23 @@ impl App {
         self.load_tools();
     }
 
+    /// `/trust` — fetch the workspace trust status for the current directory;
+    /// the `TrustLoaded` handler builds and opens the dialog.
+    pub(crate) fn open_trust_dialog(&mut self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let path = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        tokio::spawn(async move {
+            let event = match client.get_trust(&path).await {
+                Ok(s) => crate::event::backend::BackendEvent::TrustLoaded(Ok(s)),
+                Err(e) => crate::event::backend::BackendEvent::TrustLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(event));
+        });
+    }
+
     /// `/context` — fetch the token-usage breakdown; the `ContextLoaded`
     /// handler stores the snapshot and opens the overlay.
     pub(crate) fn open_context_breakdown(&mut self) {

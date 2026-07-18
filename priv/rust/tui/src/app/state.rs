@@ -21,6 +21,7 @@ pub enum AppState {
     Keybindings,
     Tools,
     ContextBreakdown,
+    Trust,
 }
 
 impl AppState {
@@ -50,6 +51,7 @@ impl AppState {
                 | (Idle, Keybindings)
                 | (Idle, Tools)
                 | (Idle, ContextBreakdown)
+                | (Idle, Trust)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -65,6 +67,7 @@ impl AppState {
                 | (Processing, Keybindings)
                 | (Processing, Tools)
                 | (Processing, ContextBreakdown)
+                | (Processing, Trust)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -94,6 +97,8 @@ impl AppState {
                 | (Tools, Processing)
                 | (ContextBreakdown, Idle)
                 | (ContextBreakdown, Processing)
+                | (Trust, Idle)
+                | (Trust, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -117,6 +122,7 @@ impl AppState {
                 | AppState::Keybindings
                 | AppState::Tools
                 | AppState::ContextBreakdown
+                | AppState::Trust
         )
     }
 
@@ -156,6 +162,7 @@ impl std::fmt::Display for AppState {
             AppState::Keybindings => write!(f, "Keybindings"),
             AppState::Tools => write!(f, "Tools"),
             AppState::ContextBreakdown => write!(f, "Context"),
+            AppState::Trust => write!(f, "Trust"),
         }
     }
 }

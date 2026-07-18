@@ -456,6 +456,25 @@ impl App {
                     );
                 }
             },
+            BackendEvent::TrustLoaded(result) => match result {
+                Ok(status) => {
+                    let risks: Vec<String> =
+                        status.risks.iter().map(|r| r.label.clone()).collect();
+                    self.trust_dialog = Some(crate::dialogs::trust::TrustDialog::new(
+                        status.path.clone(),
+                        risks,
+                    ));
+                    if self.state.can_transition_to(AppState::Trust) {
+                        self.enter_overlay(AppState::Trust);
+                    }
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("Could not load trust status: {e}"),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                }
+            },
             BackendEvent::OrchestrateResult(result) => match result {
                 Ok(resp) => {
                     debug!(

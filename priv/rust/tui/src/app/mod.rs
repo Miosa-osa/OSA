@@ -119,6 +119,9 @@ pub struct App {
     /// shared tool-list fetch knows to open the browser (vs. the startup load
     /// that only updates the tool count / welcome).
     pub tools_browser_pending: bool,
+    /// `/trust` — workspace-trust dialog (AppState::Trust), populated from
+    /// GET /workspace/trust and confirmed via POST /workspace/trust/accept.
+    pub trust_dialog: Option<crate::dialogs::trust::TrustDialog>,
     /// One-shot overdrive (full-auto) entry confirmation overlay. When Some, it
     /// takes key priority; `overdrive_prev_mode` is the mode to revert to on
     /// cancel.
@@ -418,6 +421,7 @@ impl App {
             tools_browser: None,
             context_stats: None,
             tools_browser_pending: false,
+            trust_dialog: None,
             overdrive_confirm: None,
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,

@@ -205,7 +205,42 @@ impl App {
             AppState::Keybindings => self.handle_keybindings_key(key),
             AppState::Tools => self.handle_tools_browser_key(key),
             AppState::ContextBreakdown => self.handle_context_breakdown_key(key),
+            AppState::Trust => self.handle_trust_key(key),
             _ => false,
+        }
+    }
+
+    /// `/trust` dialog: Accept persists trust for the workspace via the backend
+    /// (POST /workspace/trust/accept) and closes; decline just closes (the
+    /// on-demand command never force-quits the app, unlike a startup gate).
+    fn handle_trust_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::dialogs::trust::TrustAction;
+        let action = self.trust_dialog.as_mut().and_then(|d| d.handle_key(key));
+        match action {
+            Some(TrustAction::Accept) => {
+                let path = self
+                    .trust_dialog
+                    .as_ref()
+                    .map(|d| d.cwd.clone())
+                    .unwrap_or_default();
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    let _ = client.accept_trust(&path).await;
+                });
+                self.toasts.push(
+                    "Workspace trusted".into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.trust_dialog = None;
+                self.exit_overlay();
+                true
+            }
+            Some(TrustAction::Exit) => {
+                self.trust_dialog = None;
+                self.exit_overlay();
+                true
+            }
+            None => true,
         }
     }
 

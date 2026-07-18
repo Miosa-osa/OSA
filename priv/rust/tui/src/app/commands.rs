@@ -514,6 +514,15 @@ impl App {
             "/channels" | "/ch" => {
                 self.execute_backend_command("channels", "status");
             }
+            "/trust" => {
+                // Open the workspace-trust dialog (fetches GET /workspace/trust
+                // then opens on TrustLoaded). a11y keeps the flat backend text.
+                if self.activity.a11y() {
+                    self.execute_backend_command("trust", arg);
+                } else {
+                    self.open_trust_dialog();
+                }
+            }
             "/memory" | "/mem" => {
                 self.execute_backend_command("memory", arg);
             }

@@ -435,6 +435,11 @@ impl App {
                                     crate::dialogs::context_breakdown::draw(frame, area, s);
                                 }
                             }
+                            AppState::Trust => {
+                                if let Some(ref d) = self.trust_dialog {
+                                    d.draw(frame, area);
+                                }
+                            }
                             _ => {}
                         }
                     }

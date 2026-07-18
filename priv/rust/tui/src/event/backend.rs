@@ -262,6 +262,8 @@ pub enum BackendEvent {
     ToolsLoaded(Result<Vec<ToolEntry>, String>),
     /// `/context` fetch result → opens the breakdown overlay.
     ContextLoaded(Result<crate::client::types::ContextStats, String>),
+    /// `/trust` fetch result → opens the workspace-trust dialog.
+    TrustLoaded(Result<crate::client::types::TrustStatus, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),

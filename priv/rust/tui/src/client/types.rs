@@ -19,6 +19,30 @@ use std::collections::HashMap;
 // Everything below is hand-written for payloads codegen does not reach yet.
 pub use super::generated::*;
 
+// === Workspace trust (GET/POST /api/v1/workspace/trust) ===
+
+/// One reason a directory is flagged risky (e.g. untracked executables).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrustRisk {
+    /// Machine tag for the risk category (backend atom → string).
+    #[serde(default)]
+    pub kind: String,
+    /// Human-readable one-line description shown in the dialog.
+    pub label: String,
+}
+
+/// Trust status for a workspace path, as returned by GET /workspace/trust and
+/// POST /workspace/trust/accept.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrustStatus {
+    pub path: String,
+    pub trusted: bool,
+    #[serde(default)]
+    pub risks: Vec<TrustRisk>,
+    #[serde(default)]
+    pub session_only: bool,
+}
+
 // === Auth ===
 
 #[derive(Debug, Clone, Serialize)]
