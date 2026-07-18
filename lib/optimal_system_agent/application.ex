@@ -45,6 +45,27 @@ defmodule OptimalSystemAgent.Application do
     # Map provider-specific env vars to application config
     load_provider_env(provider)
 
+    # Reconcile the active model from every source into BOTH :default_model and
+    # the provider-scoped key (e.g. :ollama_model). Without this, an .env /
+    # config.json model lands only on :ollama_model while :default_model stays
+    # nil, so Ollama.auto_detect_model probes and silently overwrites a
+    # configured model (including :cloud models) with a local one.
+    # Precedence: OLLAMA_MODEL env > ~/.osa/config.json "model" > already-loaded.
+    # config.json is the user's PERSISTED selection — onboarding and the in-TUI
+    # /switch both write it — so it wins over a possibly-stale OLLAMA_MODEL env
+    # var (e.g. a leftover project-root .env that config/runtime.exs loads first).
+    # Order: config.json > OLLAMA_MODEL env > already-loaded provider/default key.
+    resolved_model =
+      config_json_model() ||
+        System.get_env("OLLAMA_MODEL") ||
+        Application.get_env(:optimal_system_agent, :"#{provider}_model") ||
+        Application.get_env(:optimal_system_agent, :default_model)
+
+    if is_binary(resolved_model) and resolved_model != "" do
+      Application.put_env(:optimal_system_agent, :default_model, resolved_model)
+      Application.put_env(:optimal_system_agent, :"#{provider}_model", resolved_model)
+    end
+
     # ── Phase 1: Soul & Prompts (before anything needs the system prompt) ──
     OptimalSystemAgent.Soul.load()
     OptimalSystemAgent.PromptLoader.load()
@@ -218,6 +239,24 @@ defmodule OptimalSystemAgent.Application do
   end
 
   # Load ~/.osa/.env file if it exists (key=value pairs)
+  # Read the "model" field from ~/.osa/config.json (written by onboarding), if any.
+  # Respects :bootstrap_dir so tests/isolated runs don't read the real home config.
+  defp config_json_model do
+    base =
+      Application.get_env(:optimal_system_agent, :bootstrap_dir) ||
+        Path.join(System.user_home!() || ".", ".osa")
+
+    path = Path.join(base, "config.json")
+
+    with true <- File.exists?(path),
+         {:ok, body} <- File.read(path),
+         {:ok, %{"model" => m}} when is_binary(m) and m != "" <- Jason.decode(body) do
+      m
+    else
+      _ -> nil
+    end
+  end
+
   defp load_dotenv do
     env_file = Path.expand("~/.osa/.env")
 

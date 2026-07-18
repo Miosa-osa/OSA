@@ -51,7 +51,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec auto_detect_model() :: :ok
   def auto_detect_model do
-    explicit = Application.get_env(:optimal_system_agent, :default_model)
+    # Consider BOTH keys: a configured model may live on :default_model (reconciled
+    # at boot) or :ollama_model (from OLLAMA_MODEL). Probing/clobbering must only
+    # happen when NO model was configured from any source. Accepts :cloud models.
+    explicit =
+      Application.get_env(:optimal_system_agent, :default_model) ||
+        Application.get_env(:optimal_system_agent, :ollama_model)
 
     if explicit && explicit != "" do
       Logger.info("[Ollama] Using explicitly configured model: #{explicit}")

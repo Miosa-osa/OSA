@@ -156,9 +156,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       Application.put_env(:optimal_system_agent, :default_provider, provider)
       Application.put_env(:optimal_system_agent, :default_model, model_name)
 
-      if provider == :ollama do
-        Application.put_env(:optimal_system_agent, :ollama_model, model_name)
-      end
+      # Providers read the scoped key :"#{provider}_model" (e.g. :openai_model,
+      # :anthropic_model, :ollama_model), NOT :default_model — so set the scoped
+      # key or the switch is a silent no-op for every non-ollama provider.
+      Application.put_env(:optimal_system_agent, :"#{provider}_model", model_name)
 
       # Persist selection to ~/.osa/config.json so it survives restarts.
       persist_model_selection(prov_str, model_name)
@@ -240,9 +241,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       Application.put_env(:optimal_system_agent, :default_provider, provider)
       Application.put_env(:optimal_system_agent, :default_model, model_name)
 
-      if provider == :ollama do
-        Application.put_env(:optimal_system_agent, :ollama_model, model_name)
-      end
+      # Providers read the scoped key :"#{provider}_model" (e.g. :openai_model,
+      # :anthropic_model, :ollama_model), NOT :default_model — so set the scoped
+      # key or the switch is a silent no-op for every non-ollama provider.
+      Application.put_env(:optimal_system_agent, :"#{provider}_model", model_name)
 
       persist_model_selection(prov_str, model_name)
 
