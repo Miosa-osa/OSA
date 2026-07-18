@@ -11,7 +11,7 @@ impl App {
         if let Some(action) = self.quit_dialog.handle_key(key) {
             match action {
                 DialogAction::QuitConfirmed => return true,
-                DialogAction::Dismissed => self.transition(AppState::Idle),
+                DialogAction::Dismissed => self.exit_overlay(),
                 _ => {}
             }
         }
@@ -22,11 +22,11 @@ impl App {
         if let Some(action) = self.palette.handle_key(key) {
             match action {
                 DialogAction::PaletteExecute(name) => {
-                    self.transition(AppState::Idle);
+                    self.exit_overlay();
                     self.handle_command(&format!("/{}", name));
                 }
                 DialogAction::Dismissed => {
-                    self.transition(AppState::Idle);
+                    self.exit_overlay();
                 }
                 _ => {}
             }
@@ -51,7 +51,7 @@ impl App {
                     model,
                     base_url,
                 } => {
-                    self.transition(AppState::Idle);
+                    self.exit_overlay();
                     self.model_picker = None;
                     // Persist selection into .env (merge, set active) and switch
                     // live. For a re-select of the current default this is a no-op
@@ -65,7 +65,7 @@ impl App {
                     );
                 }
                 ModelPickerAction::Cancel => {
-                    self.transition(AppState::Idle);
+                    self.exit_overlay();
                     self.model_picker = None;
                 }
                 ModelPickerAction::SaveKeyAndSwitch {
@@ -75,7 +75,7 @@ impl App {
                     model,
                     base_url,
                 } => {
-                    self.transition(AppState::Idle);
+                    self.exit_overlay();
                     self.model_picker = None;
                     self.save_provider_key_and_switch(
                         provider,
@@ -112,7 +112,7 @@ impl App {
             if let Some(action) = browser.handle_key(key) {
                 match action {
                     crate::dialogs::sessions::SessionAction::Switch(id) => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.session_id = id;
                         self.chat.clear();
                         self.tasks.clear();
@@ -125,11 +125,11 @@ impl App {
                         );
                     }
                     crate::dialogs::sessions::SessionAction::Create => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.create_session();
                     }
                     crate::dialogs::sessions::SessionAction::Cancel => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                     }
                     crate::dialogs::sessions::SessionAction::Rename(id, new_title) => {
                         let client = self.client.clone();
@@ -173,6 +173,7 @@ impl App {
             if let Some(action) = wizard.handle_key(key) {
                 match action {
                     crate::dialogs::onboarding::OnboardingAction::Complete(result) => {
+                        self.discard_overlay_return();
                         self.transition(AppState::Idle);
                         self.toasts.push(
                             "Setup complete!".into(),
@@ -205,6 +206,7 @@ impl App {
                         self.onboarding = None;
                     }
                     crate::dialogs::onboarding::OnboardingAction::Cancel => {
+                        self.discard_overlay_return();
                         self.transition(AppState::Idle);
                         self.onboarding = None;
                     }
@@ -247,6 +249,7 @@ impl App {
                 // Approve → resume execution. Drive the processing indicator so the
                 // spinner comes back immediately; SSE events resume the turn.
                 self.plan_review = None;
+                self.discard_overlay_return();
                 self.transition(AppState::Processing);
                 self.activity.start();
                 self.status.set_active(true);
@@ -259,6 +262,7 @@ impl App {
             }
             DialogAction::PlanReject => {
                 self.plan_review = None;
+                self.discard_overlay_return();
                 self.transition(AppState::Idle);
                 self.toasts.push(
                     "Plan rejected".into(),
@@ -276,6 +280,7 @@ impl App {
                     .map(|r| r.plan_text().to_string())
                     .unwrap_or_default();
                 self.plan_review = None;
+                self.discard_overlay_return();
                 self.transition(AppState::Idle);
                 if !plan_text.is_empty() {
                     self.input.reset();
@@ -319,7 +324,7 @@ impl App {
             if let Some(action) = dialog.handle_key(key) {
                 match action {
                     DialogAction::PermissionAllow => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.toasts.push(
                             "Permission granted".into(),
                             crate::components::toast::ToastLevel::Info,
@@ -334,7 +339,7 @@ impl App {
                         self.permissions = None;
                     }
                     DialogAction::PermissionAllowSession => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.toasts.push(
                             "Permission granted for session".into(),
                             crate::components::toast::ToastLevel::Info,
@@ -349,7 +354,7 @@ impl App {
                         self.permissions = None;
                     }
                     DialogAction::PermissionAllowAlways => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.toasts.push(
                             "Permission granted (always)".into(),
                             crate::components::toast::ToastLevel::Info,
@@ -377,11 +382,12 @@ impl App {
                                 let _ = client.permission_response(&request_id, false).await;
                             });
                         }
+                        self.discard_overlay_return();
                         self.permissions = None;
                         self.submit_prompt(&text);
                     }
                     DialogAction::PermissionDeny => {
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                         self.toasts.push(
                             "Permission denied".into(),
                             crate::components::toast::ToastLevel::Warning,
@@ -462,7 +468,7 @@ impl App {
                     crate::dialogs::rewind::RewindAction::Restore(id, scope) => {
                         use crate::client::types::RewindScope;
                         self.rewind_dialog = None;
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
 
                         // If the conversation is being restored, reset the visible
                         // scrollback — the live loop's context is swapped server-side.
@@ -495,7 +501,7 @@ impl App {
                     }
                     crate::dialogs::rewind::RewindAction::Cancel => {
                         self.rewind_dialog = None;
-                        self.transition(AppState::Idle);
+                        self.exit_overlay();
                     }
                 }
             }
@@ -745,8 +751,7 @@ impl App {
                             let _ = client.submit_survey_answer(&session_id, request).await;
                         });
                         self.survey = None;
-                        let target = self.prev_state.unwrap_or(AppState::Idle);
-                        self.transition(target);
+                        self.exit_overlay();
                     }
                     SurveyAction::Skip => {
                         let session_id = self.session_id.clone();
@@ -756,8 +761,7 @@ impl App {
                             let _ = client.skip_survey(&session_id, &survey_id).await;
                         });
                         self.survey = None;
-                        let target = self.prev_state.unwrap_or(AppState::Idle);
-                        self.transition(target);
+                        self.exit_overlay();
                     }
                 }
             }
@@ -809,7 +813,7 @@ impl App {
             self.agents_dashboard_selected = count.saturating_sub(1);
         }
         if self.state.can_transition_to(AppState::AgentsDashboard) {
-            self.transition(AppState::AgentsDashboard);
+            self.enter_overlay(AppState::AgentsDashboard);
         } else {
             self.toasts.push(
                 "Cannot open the agent dashboard right now".into(),
@@ -820,11 +824,7 @@ impl App {
 
     /// Close the dashboard, returning to whichever state opened it.
     pub(super) fn close_agents_dashboard(&mut self) {
-        let target = match self.prev_state {
-            Some(AppState::Processing) => AppState::Processing,
-            _ => AppState::Idle,
-        };
-        self.transition(target);
+        self.exit_overlay();
     }
 
     /// Cancel the currently-selected running agent via the backend and reflect it
@@ -895,7 +895,7 @@ impl App {
         }
         // A foreground turn is running underneath the dashboard — can't attach a
         // second live turn to the same session.
-        if self.prev_state == Some(AppState::Processing) {
+        if self.return_stack.last() == Some(&AppState::Processing) {
             self.toasts.push(
                 "A turn is already in the foreground".into(),
                 crate::components::toast::ToastLevel::Warning,
@@ -936,7 +936,7 @@ impl App {
             );
             return;
         }
-        if self.prev_state == Some(AppState::Processing) {
+        if self.return_stack.last() == Some(&AppState::Processing) {
             self.toasts.push(
                 "A foreground turn is active — foreground this terminal first, then stop it".into(),
                 crate::components::toast::ToastLevel::Warning,
@@ -1007,6 +1007,6 @@ impl App {
         }
 
         self.palette.open(items);
-        self.transition(AppState::Palette);
+        self.enter_overlay(AppState::Palette);
     }
 }

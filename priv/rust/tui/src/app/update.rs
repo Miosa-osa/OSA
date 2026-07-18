@@ -417,7 +417,7 @@ impl App {
                 false
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) if input_empty => {
-                self.transition(AppState::Quit);
+                self.enter_overlay(AppState::Quit);
                 false
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {

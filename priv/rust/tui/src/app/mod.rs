@@ -118,7 +118,13 @@ pub struct App {
 
     // State
     pub state: AppState,
-    pub prev_state: Option<AppState>,
+    /// Overlay caller stack. Each `enter_overlay` pushes the state that was
+    /// active when the overlay opened, so closing it (`exit_overlay`) returns to
+    /// the exact caller — including a live `Processing` turn — instead of a
+    /// hardcoded `Idle`. Base-lifecycle transitions never touch this. Replaces
+    /// the old single-slot `prev_state`, which could not survive nesting and
+    /// dumped every overlay close into `Idle`, tearing down live turns.
+    pub return_stack: Vec<AppState>,
     pub focus: FocusStack,
     pub keys: KeyMap,
     pub layout: Layout,
@@ -353,7 +359,7 @@ impl App {
             startup_resume: cli.resume.clone(),
 
             state: AppState::Connecting,
-            prev_state: None,
+            return_stack: Vec::new(),
             focus: FocusStack::new(),
             keys: KeyMap::default(),
             layout: Layout::compute(init_w, init_h, config.sidebar_enabled, 0, 0),
@@ -465,11 +471,55 @@ impl App {
         if self.file_picker.is_some() {
             self.file_picker = None;
         }
-        self.prev_state = Some(self.state);
         self.state = target;
         // Reset quit dialog focus to Cancel (safe default) each time the dialog opens.
         if target == AppState::Quit {
             self.quit_dialog.reset();
+        }
+    }
+
+    /// Enter an overlay, remembering the caller on the return stack so closing
+    /// the overlay lands back where it opened (including a live `Processing`
+    /// turn). Entry reuses `transition()`, so its legality assert and side
+    /// effects (spinner bookkeeping, stray file-picker dismissal, quit reset)
+    /// are preserved unchanged.
+    pub fn enter_overlay(&mut self, target: AppState) {
+        self.return_stack.push(self.state);
+        self.transition(target);
+    }
+
+    /// Close the current overlay, returning to whatever opened it (default
+    /// `Idle` if the stack is somehow empty). Deliberately bypasses
+    /// `can_transition_to`: returning to the caller — even `Processing` — is
+    /// legal by construction, and several overlay→Processing edges are absent
+    /// from the legacy transition table.
+    pub fn exit_overlay(&mut self) {
+        let from = self.state;
+        let target = self.return_stack.pop().unwrap_or(AppState::Idle);
+        self.sync_overlay_processing_indicator(from, target);
+        if self.file_picker.is_some() {
+            self.file_picker = None;
+        }
+        self.state = target;
+    }
+
+    /// Pop the caller recorded for the current overlay WITHOUT restoring it —
+    /// for the few close paths that intentionally land somewhere other than the
+    /// caller (plan approve → `Processing`, plan reject/edit and onboarding
+    /// completion → `Idle`). Keeps the return stack balanced: exactly one pop
+    /// per overlay open.
+    pub fn discard_overlay_return(&mut self) {
+        self.return_stack.pop();
+    }
+
+    /// Mirror of `transition()`'s processing-indicator bookkeeping for the
+    /// assert-free `exit_overlay` path.
+    fn sync_overlay_processing_indicator(&mut self, from: AppState, to: AppState) {
+        if to == AppState::Processing && from != AppState::Processing {
+            self.input.set_processing(true);
+        } else if from == AppState::Processing && to != AppState::Processing {
+            self.input.set_processing(false);
+            self.last_cancel_attempt = None;
         }
     }
 }

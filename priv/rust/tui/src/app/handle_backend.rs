@@ -510,7 +510,7 @@ impl App {
                             current_model,
                         );
                     self.model_picker = Some(picker);
-                    self.transition(AppState::ModelPicker);
+                    self.enter_overlay(AppState::ModelPicker);
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -570,7 +570,7 @@ impl App {
                         self.session_id.clone(),
                     );
                     self.session_browser = Some(browser);
-                    self.transition(AppState::Sessions);
+                    self.enter_overlay(AppState::Sessions);
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -590,7 +590,7 @@ impl App {
                     } else {
                         self.rewind_dialog =
                             Some(crate::dialogs::rewind::RewindDialog::new(checkpoints));
-                        self.transition(AppState::Rewind);
+                        self.enter_overlay(AppState::Rewind);
                     }
                 }
                 Err(e) => {
@@ -928,7 +928,7 @@ impl App {
                             crate::dialogs::onboarding::OnboardingWizard::new(data),
                         );
                         if self.state.can_transition_to(AppState::Onboarding) {
-                            self.transition(AppState::Onboarding);
+                            self.enter_overlay(AppState::Onboarding);
                         }
                     } else {
                         // Onboarded. Two things, both Claude-Code-style:
@@ -1270,6 +1270,7 @@ impl App {
                     self.sidebar.set_provider_info(prov, mdl);
                     self.onboarding = None;
                     if self.state == AppState::Onboarding {
+                        self.discard_overlay_return();
                         self.transition(AppState::Idle);
                     }
 
@@ -1309,7 +1310,7 @@ impl App {
                 dialog.set_tool(tool, args, request_id);
                 self.permissions = Some(dialog);
                 if self.state.can_transition_to(AppState::Permissions) {
-                    self.transition(AppState::Permissions);
+                    self.enter_overlay(AppState::Permissions);
                 }
             }
             BackendEvent::PlanProposed { plan, request_id: _ } => {
@@ -1318,7 +1319,7 @@ impl App {
                 review.set_plan(plan);
                 self.plan_review = Some(review);
                 if self.state.can_transition_to(AppState::PlanReview) {
-                    self.transition(AppState::PlanReview);
+                    self.enter_overlay(AppState::PlanReview);
                 }
             }
             BackendEvent::CancelTimeout => {
@@ -1363,7 +1364,7 @@ impl App {
                 }).collect();
                 self.survey = Some(SurveyDialog::new(survey_id, qs, skippable));
                 if self.state.can_transition_to(AppState::Survey) {
-                    self.transition(AppState::Survey);
+                    self.enter_overlay(AppState::Survey);
                 }
             }
             BackendEvent::SurveyAnswered { survey_id, summary } => {

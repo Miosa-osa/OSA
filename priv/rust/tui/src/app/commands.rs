@@ -100,7 +100,7 @@ impl App {
                 if let Some(cancel) = self.sse_cancel.take() {
                     cancel.cancel();
                 }
-                self.transition(AppState::Quit);
+                self.enter_overlay(AppState::Quit);
             }
             "/help" => {
                 // Open the interactive, filterable command menu (the Ctrl+K
