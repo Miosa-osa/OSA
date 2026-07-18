@@ -283,6 +283,71 @@ impl App {
                 }
                 true
             }
+            AppState::Memory => {
+                use crate::dialogs::memory_browser::MemoryBrowserAction;
+                if matches!(
+                    self.memory_browser.as_mut().map(|d| d.handle_key(key)),
+                    Some(MemoryBrowserAction::Close)
+                ) {
+                    self.memory_browser = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Metrics => {
+                use crate::dialogs::metrics_dashboard::MetricsAction;
+                if matches!(
+                    self.metrics_dashboard.as_mut().map(|d| d.handle_key(key)),
+                    Some(MetricsAction::Close)
+                ) {
+                    self.metrics_dashboard = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Tasks => {
+                use crate::dialogs::tasks_panel::TasksPanelAction;
+                if matches!(
+                    self.tasks_panel.as_mut().map(|d| d.handle_key(key)),
+                    Some(TasksPanelAction::Close)
+                ) {
+                    self.tasks_panel = None;
+                    self.exit_overlay();
+                }
+                true
+            }
+            AppState::Persona => {
+                use crate::dialogs::persona_picker::PersonaPickerAction;
+                match self.persona_picker.as_mut().map(|d| d.handle_key(key)) {
+                    Some(PersonaPickerAction::Apply(name)) => {
+                        self.persona_picker = None;
+                        self.exit_overlay();
+                        self.execute_backend_command("persona", &name);
+                    }
+                    Some(PersonaPickerAction::Close) => {
+                        self.persona_picker = None;
+                        self.exit_overlay();
+                    }
+                    _ => {}
+                }
+                true
+            }
+            AppState::Sandbox => {
+                use crate::dialogs::sandbox_picker::SandboxAction;
+                match self.sandbox_picker.as_mut().and_then(|d| d.handle_key(key)) {
+                    Some(SandboxAction::Apply(name)) => {
+                        self.sandbox_picker = None;
+                        self.exit_overlay();
+                        self.execute_backend_command("sandbox", &name);
+                    }
+                    Some(SandboxAction::Close) => {
+                        self.sandbox_picker = None;
+                        self.exit_overlay();
+                    }
+                    _ => {}
+                }
+                true
+            }
             _ => false,
         }
     }

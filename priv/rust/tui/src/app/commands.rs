@@ -515,7 +515,11 @@ impl App {
                 );
             }
             "/channels" | "/ch" => {
-                self.execute_backend_command("channels", "status");
+                if self.activity.a11y() {
+                    self.execute_backend_command("channels", "status");
+                } else {
+                    self.open_channels_panel();
+                }
             }
             "/trust" => {
                 // Open the workspace-trust dialog (fetches GET /workspace/trust
@@ -527,7 +531,42 @@ impl App {
                 }
             }
             "/memory" | "/mem" => {
-                self.execute_backend_command("memory", arg);
+                // Bare command opens the browser; a subcommand (save/search/
+                // recall <x>) routes to the backend.
+                if arg.is_empty() && !self.activity.a11y() {
+                    self.open_memory_browser();
+                } else {
+                    self.execute_backend_command("memory", arg);
+                }
+            }
+            "/tasks" => {
+                if self.activity.a11y() {
+                    self.execute_backend_command("tasks", arg);
+                } else {
+                    self.open_tasks_panel();
+                }
+            }
+            "/metrics" => {
+                if self.activity.a11y() {
+                    self.execute_backend_command("metrics", arg);
+                } else {
+                    self.open_metrics_dashboard();
+                }
+            }
+            "/persona" => {
+                // Bare opens the picker; `/persona <name>` switches directly.
+                if arg.is_empty() && !self.activity.a11y() {
+                    self.open_persona_picker();
+                } else {
+                    self.execute_backend_command("persona", arg);
+                }
+            }
+            "/sandbox" => {
+                if arg.is_empty() && !self.activity.a11y() {
+                    self.open_sandbox_picker();
+                } else {
+                    self.execute_backend_command("sandbox", arg);
+                }
             }
             "/doctor" => {
                 // Backend diagnostics — rendered into chat via CommandResult.

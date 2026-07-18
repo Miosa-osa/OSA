@@ -28,6 +28,11 @@ pub enum AppState {
     Cost,
     Skills,
     Channels,
+    Memory,
+    Persona,
+    Sandbox,
+    Metrics,
+    Tasks,
 }
 
 impl AppState {
@@ -64,6 +69,11 @@ impl AppState {
                 | (Idle, Cost)
                 | (Idle, Skills)
                 | (Idle, Channels)
+                | (Idle, Memory)
+                | (Idle, Persona)
+                | (Idle, Sandbox)
+                | (Idle, Metrics)
+                | (Idle, Tasks)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -86,6 +96,11 @@ impl AppState {
                 | (Processing, Cost)
                 | (Processing, Skills)
                 | (Processing, Channels)
+                | (Processing, Memory)
+                | (Processing, Persona)
+                | (Processing, Sandbox)
+                | (Processing, Metrics)
+                | (Processing, Tasks)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -129,6 +144,16 @@ impl AppState {
                 | (Skills, Processing)
                 | (Channels, Idle)
                 | (Channels, Processing)
+                | (Memory, Idle)
+                | (Memory, Processing)
+                | (Persona, Idle)
+                | (Persona, Processing)
+                | (Sandbox, Idle)
+                | (Sandbox, Processing)
+                | (Metrics, Idle)
+                | (Metrics, Processing)
+                | (Tasks, Idle)
+                | (Tasks, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -159,6 +184,11 @@ impl AppState {
                 | AppState::Cost
                 | AppState::Skills
                 | AppState::Channels
+                | AppState::Memory
+                | AppState::Persona
+                | AppState::Sandbox
+                | AppState::Metrics
+                | AppState::Tasks
         )
     }
 
@@ -205,6 +235,11 @@ impl std::fmt::Display for AppState {
             AppState::Cost => write!(f, "Cost"),
             AppState::Skills => write!(f, "Skills"),
             AppState::Channels => write!(f, "Channels"),
+            AppState::Memory => write!(f, "Memory"),
+            AppState::Persona => write!(f, "Persona"),
+            AppState::Sandbox => write!(f, "Sandbox"),
+            AppState::Metrics => write!(f, "Metrics"),
+            AppState::Tasks => write!(f, "Tasks"),
         }
     }
 }

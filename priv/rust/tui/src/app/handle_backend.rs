@@ -602,6 +602,165 @@ impl App {
                     crate::components::toast::ToastLevel::Error,
                 ),
             },
+            BackendEvent::MemoriesLoaded(result) => match result {
+                Ok(resp) => {
+                    let entries = resp
+                        .entries
+                        .into_iter()
+                        .map(|e| crate::dialogs::memory_browser::MemoryEntry {
+                            content: e.content,
+                            category: e.category,
+                            scope: e.scope,
+                            created_at: e.created_at,
+                        })
+                        .collect();
+                    self.memory_browser =
+                        Some(crate::dialogs::memory_browser::MemoryBrowser::new(entries));
+                    if self.state.can_transition_to(AppState::Memory) {
+                        self.enter_overlay(AppState::Memory);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load memory: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::TasksListLoaded(result) => match result {
+                Ok(resp) => {
+                    let tasks = resp
+                        .tasks
+                        .into_iter()
+                        .map(|t| crate::dialogs::tasks_panel::TaskEntry {
+                            id: t.id,
+                            description: t.description,
+                            status: t.status,
+                            priority: t.priority,
+                        })
+                        .collect();
+                    self.tasks_panel =
+                        Some(crate::dialogs::tasks_panel::TasksPanel::new(tasks));
+                    if self.state.can_transition_to(AppState::Tasks) {
+                        self.enter_overlay(AppState::Tasks);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load tasks: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::MetricsLoaded(result) => match result {
+                Ok(resp) => {
+                    let data = crate::dialogs::metrics_dashboard::MetricsData {
+                        cards: resp
+                            .cards
+                            .into_iter()
+                            .map(|c| crate::dialogs::metrics_dashboard::MetricCard {
+                                label: c.label,
+                                value: c.value,
+                                note: c.note,
+                                tone: c.tone,
+                            })
+                            .collect(),
+                        rows: resp
+                            .rows
+                            .into_iter()
+                            .map(|r| crate::dialogs::metrics_dashboard::LatencyRow {
+                                name: r.name,
+                                kind: r.kind,
+                                count: r.count,
+                                avg_ms: r.avg_ms,
+                                p99_ms: r.p99_ms,
+                            })
+                            .collect(),
+                    };
+                    self.metrics_dashboard =
+                        Some(crate::dialogs::metrics_dashboard::MetricsDashboard::new(data));
+                    if self.state.can_transition_to(AppState::Metrics) {
+                        self.enter_overlay(AppState::Metrics);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load metrics: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::PersonasLoaded(result) => match result {
+                Ok(resp) => {
+                    let current = resp.current.clone();
+                    let personas = resp
+                        .personas
+                        .into_iter()
+                        .map(|p| crate::dialogs::persona_picker::PersonaEntry {
+                            current: p.name == current,
+                            name: p.name,
+                            display: p.display,
+                            description: p.description,
+                        })
+                        .collect();
+                    self.persona_picker =
+                        Some(crate::dialogs::persona_picker::PersonaPicker::new(personas));
+                    if self.state.can_transition_to(AppState::Persona) {
+                        self.enter_overlay(AppState::Persona);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load personas: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::SandboxesLoaded(result) => match result {
+                Ok(resp) => {
+                    let mode = resp.mode.clone();
+                    let backends = resp
+                        .backends
+                        .into_iter()
+                        .map(|b| crate::dialogs::sandbox_picker::SandboxBackend {
+                            name: b.name,
+                            display_name: b.display_name,
+                            available: b.available,
+                            current: b.current,
+                        })
+                        .collect();
+                    self.sandbox_picker =
+                        Some(crate::dialogs::sandbox_picker::SandboxPicker::new(backends, mode));
+                    if self.state.can_transition_to(AppState::Sandbox) {
+                        self.enter_overlay(AppState::Sandbox);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load sandboxes: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
+            BackendEvent::ChannelsListLoaded(result) => match result {
+                Ok(resp) => {
+                    let channels = resp
+                        .channels
+                        .into_iter()
+                        .map(|ch| {
+                            let connected = ch.connected;
+                            crate::dialogs::channels_panel::ChannelEntry {
+                                name: ch.name,
+                                connected,
+                                status: if connected { "connected".into() } else { "not connected".into() },
+                                kind: ch
+                                    .module
+                                    .and_then(|m| m.rsplit('.').next().map(|s| s.to_lowercase()))
+                                    .unwrap_or_else(|| "messaging".into()),
+                            }
+                        })
+                        .collect();
+                    self.channels_panel =
+                        Some(crate::dialogs::channels_panel::ChannelsPanel::new(channels));
+                    if self.state.can_transition_to(AppState::Channels) {
+                        self.enter_overlay(AppState::Channels);
+                    }
+                }
+                Err(e) => self.toasts.push(
+                    format!("Could not load channels: {e}"),
+                    crate::components::toast::ToastLevel::Error,
+                ),
+            },
             BackendEvent::OrchestrateResult(result) => match result {
                 Ok(resp) => {
                     debug!(

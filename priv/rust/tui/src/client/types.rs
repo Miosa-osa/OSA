@@ -93,6 +93,125 @@ pub struct CostResponse {
     pub since: String,
 }
 
+// === Command-surface data (memories/tasks/metrics/personas/sandboxes/channels) ===
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryEntryDto {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MemoriesResponse {
+    #[serde(default)]
+    pub entries: Vec<MemoryEntryDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub priority: String,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TasksResponse {
+    #[serde(default)]
+    pub tasks: Vec<TaskDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricCardDto {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub tone: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct LatencyRowDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub count: u64,
+    #[serde(default)]
+    pub avg_ms: f64,
+    #[serde(default)]
+    pub p99_ms: u64,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MetricsResponse {
+    #[serde(default)]
+    pub cards: Vec<MetricCardDto>,
+    #[serde(default)]
+    pub rows: Vec<LatencyRowDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PersonaDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub description: String,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PersonasResponse {
+    #[serde(default)]
+    pub current: String,
+    #[serde(default)]
+    pub personas: Vec<PersonaDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SandboxDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub current: bool,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SandboxesResponse {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub backends: Vec<SandboxDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelDto {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub module: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ChannelsListResponse {
+    #[serde(default)]
+    pub channels: Vec<ChannelDto>,
+}
+
 // === Workspace trust (GET/POST /api/v1/workspace/trust) ===
 
 /// One reason a directory is flagged risky (e.g. untracked executables).

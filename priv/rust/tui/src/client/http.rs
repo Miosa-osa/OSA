@@ -305,6 +305,31 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/memories — persistent memory entries.
+    pub async fn get_memories(&self) -> Result<crate::client::types::MemoriesResponse> {
+        Ok(self.get("/api/v1/memories").await?.json().await?)
+    }
+    /// GET /api/v1/tasks-list — task queue.
+    pub async fn get_tasks_list(&self) -> Result<crate::client::types::TasksResponse> {
+        Ok(self.get("/api/v1/tasks-list").await?.json().await?)
+    }
+    /// GET /api/v1/metrics — telemetry summary (cards + latency rows).
+    pub async fn get_metrics(&self) -> Result<crate::client::types::MetricsResponse> {
+        Ok(self.get("/api/v1/metrics").await?.json().await?)
+    }
+    /// GET /api/v1/personas — persona presets + current.
+    pub async fn get_personas(&self) -> Result<crate::client::types::PersonasResponse> {
+        Ok(self.get("/api/v1/personas").await?.json().await?)
+    }
+    /// GET /api/v1/sandboxes — sandbox backends + current.
+    pub async fn get_sandboxes(&self) -> Result<crate::client::types::SandboxesResponse> {
+        Ok(self.get("/api/v1/sandboxes").await?.json().await?)
+    }
+    /// GET /api/v1/channels — connected channel adapters.
+    pub async fn get_channels(&self) -> Result<crate::client::types::ChannelsListResponse> {
+        Ok(self.get("/api/v1/channels").await?.json().await?)
+    }
+
     /// GET /api/v1/workspace/trust?path=<dir> — current trust status + risks.
     pub async fn get_trust(&self, path: &str) -> Result<crate::client::types::TrustStatus> {
         let enc: String = path

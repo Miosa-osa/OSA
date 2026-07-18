@@ -135,6 +135,16 @@ pub struct App {
     pub skills_browser: Option<crate::dialogs::skills_browser::SkillsBrowser>,
     /// `/channels` — channel connectivity panel (AppState::Channels).
     pub channels_panel: Option<crate::dialogs::channels_panel::ChannelsPanel>,
+    /// `/memory` — memory browser (AppState::Memory).
+    pub memory_browser: Option<crate::dialogs::memory_browser::MemoryBrowser>,
+    /// `/persona` — persona picker (AppState::Persona).
+    pub persona_picker: Option<crate::dialogs::persona_picker::PersonaPicker>,
+    /// `/sandbox` — sandbox-backend picker (AppState::Sandbox).
+    pub sandbox_picker: Option<crate::dialogs::sandbox_picker::SandboxPicker>,
+    /// `/metrics` — telemetry dashboard (AppState::Metrics).
+    pub metrics_dashboard: Option<crate::dialogs::metrics_dashboard::MetricsDashboard>,
+    /// `/tasks` — task panel (AppState::Tasks).
+    pub tasks_panel: Option<crate::dialogs::tasks_panel::TasksPanel>,
     /// One-shot overdrive (full-auto) entry confirmation overlay. When Some, it
     /// takes key priority; `overdrive_prev_mode` is the mode to revert to on
     /// cancel.
@@ -441,6 +451,11 @@ impl App {
             cost_dashboard: None,
             skills_browser: None,
             channels_panel: None,
+            memory_browser: None,
+            persona_picker: None,
+            sandbox_picker: None,
+            metrics_dashboard: None,
+            tasks_panel: None,
             overdrive_confirm: None,
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,

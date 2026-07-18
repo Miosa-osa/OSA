@@ -470,6 +470,31 @@ impl App {
                                     d.draw(frame, area);
                                 }
                             }
+                            AppState::Memory => {
+                                if let Some(ref d) = self.memory_browser {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Persona => {
+                                if let Some(ref d) = self.persona_picker {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Sandbox => {
+                                if let Some(ref d) = self.sandbox_picker {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Metrics => {
+                                if let Some(ref d) = self.metrics_dashboard {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Tasks => {
+                                if let Some(ref d) = self.tasks_panel {
+                                    d.draw(frame, area);
+                                }
+                            }
                             _ => {}
                         }
                     }

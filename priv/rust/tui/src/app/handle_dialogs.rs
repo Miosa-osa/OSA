@@ -559,6 +559,73 @@ impl App {
         });
     }
 
+    /// `/memory` — fetch stored memories, open the browser.
+    pub(crate) fn open_memory_browser(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_memories().await {
+                Ok(r) => crate::event::backend::BackendEvent::MemoriesLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::MemoriesLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+    /// `/tasks` — fetch the task queue, open the panel.
+    pub(crate) fn open_tasks_panel(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_tasks_list().await {
+                Ok(r) => crate::event::backend::BackendEvent::TasksListLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::TasksListLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+    /// `/metrics` — fetch telemetry, open the dashboard.
+    pub(crate) fn open_metrics_dashboard(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_metrics().await {
+                Ok(r) => crate::event::backend::BackendEvent::MetricsLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::MetricsLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+    /// `/persona` — fetch presets, open the picker.
+    pub(crate) fn open_persona_picker(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_personas().await {
+                Ok(r) => crate::event::backend::BackendEvent::PersonasLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::PersonasLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+    /// `/sandbox` — fetch backends, open the picker.
+    pub(crate) fn open_sandbox_picker(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_sandboxes().await {
+                Ok(r) => crate::event::backend::BackendEvent::SandboxesLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::SandboxesLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+    /// `/channels` — fetch adapters, open the panel.
+    pub(crate) fn open_channels_panel(&mut self) {
+        let (client, tx) = (self.client.clone(), self.event_tx.clone());
+        tokio::spawn(async move {
+            let ev = match client.get_channels().await {
+                Ok(r) => crate::event::backend::BackendEvent::ChannelsListLoaded(Ok(r)),
+                Err(e) => crate::event::backend::BackendEvent::ChannelsListLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(ev));
+        });
+    }
+
     /// `/context` — fetch the token-usage breakdown; the `ContextLoaded`
     /// handler stores the snapshot and opens the overlay.
     pub(crate) fn open_context_breakdown(&mut self) {
