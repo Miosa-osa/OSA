@@ -113,10 +113,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   This function is safe — it never raises. On any unexpected error it returns
   the original messages unchanged.
   """
-  @spec maybe_compact([map()], non_neg_integer() | nil) :: [map()]
-  def maybe_compact(messages, known_tokens \\ nil) do
+  @spec maybe_compact([map()], non_neg_integer() | nil, String.t() | nil) :: [map()]
+  def maybe_compact(messages, known_tokens \\ nil, session_id \\ nil) do
     try do
-      do_maybe_compact(messages, known_tokens)
+      do_maybe_compact(messages, known_tokens, session_id)
     rescue
       e ->
         Logger.error("Compactor.maybe_compact crashed: #{Exception.message(e)}")
@@ -237,7 +237,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp do_maybe_compact(messages, known_tokens) do
+  defp do_maybe_compact(messages, known_tokens, session_id) do
     # Message-only heuristic estimate — used for the pipeline's savings math so
     # before/after token counts stay in the same unit.
     estimated = estimate_tokens(messages)
@@ -260,15 +260,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
           "Compactor: usage at #{pct(usage_ratio)} — running full pipeline (emergency)"
         )
 
-        run_pipeline(messages, estimated, :emergency, max_tok)
+        run_pipeline(messages, estimated, :emergency, max_tok, session_id)
 
       usage_ratio > tier2_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running aggressive pipeline")
-        run_pipeline(messages, estimated, :aggressive, max_tok)
+        run_pipeline(messages, estimated, :aggressive, max_tok, session_id)
 
       usage_ratio > tier1_threshold() ->
         Logger.info("Compactor: usage at #{pct(usage_ratio)} — running background pipeline")
-        run_pipeline(messages, estimated, :background, max_tok)
+        run_pipeline(messages, estimated, :background, max_tok, session_id)
 
       true ->
         messages
@@ -280,7 +280,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp run_pipeline(messages, tokens_before, severity, max_tok) do
+  defp run_pipeline(messages, tokens_before, severity, max_tok, session_id) do
     # PreCompact hook — fire-and-forget; observers can record/telemetry the compaction.
     try do
       OptimalSystemAgent.Agent.Hooks.run_async(:pre_compact, %{
@@ -321,7 +321,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
     # Post-compact restore: re-inject working context (files, tasks, workspace)
     final_messages =
-      case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(nil) do
+      case OptimalSystemAgent.Agent.CompactRestore.build_restore_message(session_id) do
         nil -> final_messages
         restore_msg -> final_messages ++ [restore_msg]
       end

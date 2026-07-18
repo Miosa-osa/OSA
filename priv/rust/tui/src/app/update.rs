@@ -14,7 +14,7 @@ use crate::event::Event;
 /// Ordinary prose — even prose that happens to contain a word matching a
 /// filename — returns false so it is inserted as text rather than hijacked into
 /// an attachment chip.
-fn paste_is_file_paths(text: &str) -> bool {
+pub(crate) fn paste_is_file_paths(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return false;
@@ -247,7 +247,7 @@ impl App {
     /// pattern); once acknowledged it enters directly. Overdrive keeps
     /// `config.skip_permissions`, the sidebar indicator, and the backend
     /// `dangerous_mode` toggle in lockstep so it converges with `/yolo`.
-    fn cycle_permission_mode(&mut self) {
+    pub(crate) fn cycle_permission_mode(&mut self) {
         let prev = self.status.permission_mode();
         let next = prev.next();
 
@@ -420,6 +420,18 @@ impl App {
 
         let input_empty = self.input.is_empty();
 
+        // WS10 — consult the user-configurable keybinding map first. Esc never
+        // enters the resolver: its double-press semantics are context-sensitive
+        // and non-rebindable. A match consumes the key; a decline falls through
+        // to the remaining hardcoded arms and the composer.
+        if key.code != KeyCode::Esc {
+            if let Some(quit) =
+                self.resolve_keymap(crate::config::keybindings::Context::Idle, key)
+            {
+                return quit;
+            }
+        }
+
         match (key.code, key.modifiers) {
             // Esc — time-gated double-press chord (800ms). A single Esc never
             // destroys a draft: it only hints. Double Esc with text clears the
@@ -484,113 +496,22 @@ impl App {
                 false
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) if input_empty => true,
-            (KeyCode::F(1), _) => {
-                self.show_help();
-                false
-            }
-            (KeyCode::Char('v'), KeyModifiers::ALT) => {
-                self.start_recording();
-                false
-            }
-            (KeyCode::F(9), _) => {
-                self.toggle_hands_free();
-                false
-            }
-            (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                self.create_session();
-                false
-            }
-            // Ctrl+Z — suspend the TUI to the shell (SIGTSTP); `fg` resumes.
-            // Composer undo moved to Ctrl+_ (see components/input/mod.rs).
-            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
-                self.suspend_to_shell();
-                false
-            }
-            // Ctrl+V — paste from the system clipboard directly (via arboard).
-            // Complements the terminal's bracketed paste, which mouse-capture and
-            // some paste methods (middle-click, right-click) don't deliver.
-            (KeyCode::Char('v'), KeyModifiers::CONTROL) if self.state.allows_input() => {
-                // An image on the clipboard becomes an [Image #N] attachment chip.
-                if self.ingest_clipboard_image() {
-                    return false;
-                }
-                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                    Ok(text) if !text.is_empty() => {
-                        // A copied file path attaches instead of inserting text —
-                        // but only when the whole paste is existing file path(s).
-                        if paste_is_file_paths(&text) && self.ingest_paste_as_attachments(&text) {
-                            return false;
-                        }
-                        let capped: String =
-                            text.chars().take(super::MAX_MESSAGE_SIZE).collect();
-                        let lines = capped.lines().count();
-                        self.input.insert_str(&capped);
-                        if lines >= 5 {
-                            self.toasts.push(
-                                format!("Pasted {} lines", lines),
-                                crate::components::toast::ToastLevel::Info,
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        self.toasts.push(
-                            "Clipboard is empty".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                    }
-                    Err(e) => {
-                        // Surface the failure instead of silently doing nothing, so
-                        // clipboard access problems are diagnosable.
-                        self.toasts.push(
-                            format!("Paste failed: {} (try Ctrl+Shift+V)", e),
-                            crate::components::toast::ToastLevel::Warning,
-                        );
-                    }
-                }
-                false
-            }
-            // Ctrl+Shift+L — toggle the sidebar. Needs the kitty keyboard
-            // protocol to be distinguishable from Ctrl+L (legacy terminals
-            // collapse both to 0x0C, which lands on the redraw arm below).
-            (KeyCode::Char('l') | KeyCode::Char('L'), m)
-                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-            {
-                self.config.sidebar_enabled = !self.config.sidebar_enabled;
-                let _ = self.config.save();
-                self.recompute_layout();
-                false
-            }
-            // Ctrl+L — redraw the screen (readline/terminal convention).
-            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-                self.force_redraw = true;
-                false
-            }
-            (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                // Empty input: open the command palette. Otherwise let the composer
-                // handle Ctrl+K (kill-to-end-of-line) so both bindings coexist.
-                if input_empty {
-                    self.open_command_palette();
-                } else {
-                    self.input
-                        .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
-                }
-                false
-            }
+            // F1 help, Alt+V voice, F9 hands-free, Ctrl+N new-session and
+            // Ctrl+Z suspend moved to the keybinding map (resolve_keymap
+            // above) so they are user-rebindable via ~/.osa/keybindings.json.
+            // Ctrl+V clipboard paste, Ctrl+Shift+L sidebar, Ctrl+L redraw and
+            // Ctrl+K palette moved to the keybinding map (resolve_keymap
+            // above). Ctrl+K with a non-empty composer falls through to the
+            // composer's kill-to-end-of-line; paste lives in
+            // App::paste_from_clipboard (keymap_dispatch.rs).
             // / on empty input — type '/' into input to trigger inline completions
             (KeyCode::Char('/'), KeyModifiers::NONE) if input_empty => {
                 self.input
                     .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
                 false
             }
-            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
-                if self.agents.is_active() {
-                    self.agents.toggle_collapse();
-                    self.recompute_layout();
-                } else {
-                    self.chat.toggle_last_tool_expand(self.width);
-                }
-                false
-            }
+            // Ctrl+O expand/collapse moved to the keybinding map
+            // (chat:expandTools via resolve_keymap above).
             // Chat scrolling is delegated to the host terminal's native
             // scrollback (mouse wheel / terminal keybindings). `j`/`k`/`u`/`d`,
             // Page/Home/End fall through to the input editor.
@@ -648,6 +569,16 @@ impl App {
             return false;
         }
 
+        // WS10 — user-configurable keybindings (Esc stays hardcoded: cancel is
+        // non-rebindable). Decline falls through to the arms below.
+        if key.code != KeyCode::Esc {
+            if let Some(quit) =
+                self.resolve_keymap(crate::config::keybindings::Context::Processing, key)
+            {
+                return quit;
+            }
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => {
                 self.cancel_processing();
@@ -668,45 +599,16 @@ impl App {
                 );
                 false
             }
-            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-                self.background_or_detach();
-                false
-            }
-            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
-                if self.agents.is_active() {
-                    self.agents.toggle_collapse();
-                    self.recompute_layout();
-                } else {
-                    self.chat.toggle_last_tool_expand(self.width);
-                }
-                false
-            }
+            // Ctrl+B background and Ctrl+O expand moved to the keybinding map
+            // (chat:background / chat:expandTools via resolve_keymap above).
             // Ctrl+R on an empty composer expands the last tool result (parity
             // with Ctrl+O / CC verbose-expand); with text it reaches reverse-search.
             (KeyCode::Char('r'), KeyModifiers::CONTROL) if self.input.is_empty() => {
                 self.chat.toggle_last_tool_expand(self.width);
                 false
             }
-            // Ctrl+Z — suspend to the shell even mid-turn (the backend keeps
-            // running; SSE events queue in the channel while stopped).
-            (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
-                self.suspend_to_shell();
-                false
-            }
-            // Ctrl+Shift+L — toggle the sidebar (kitty-protocol terminals).
-            (KeyCode::Char('l') | KeyCode::Char('L'), m)
-                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-            {
-                self.config.sidebar_enabled = !self.config.sidebar_enabled;
-                let _ = self.config.save();
-                self.recompute_layout();
-                false
-            }
-            // Ctrl+L — redraw the screen (readline/terminal convention).
-            (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
-                self.force_redraw = true;
-                false
-            }
+            // Ctrl+Z suspend, Ctrl+Shift+L sidebar and Ctrl+L redraw moved to
+            // the keybinding map (Global context, resolve_keymap above).
             // Chat scrolling is delegated to the host terminal's native scrollback.
             _ => {
                 let action =

@@ -6,6 +6,7 @@ mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
 pub mod key_normalize;
+mod keymap_dispatch;
 pub mod keys;
 pub mod layout;
 pub mod state;
@@ -259,6 +260,17 @@ pub struct App {
     // suspend). The event loop clears the terminal's diff state before the
     // next draw so every cell repaints.
     pub force_redraw: bool,
+
+    // WS10 — user-configurable keybindings: compiled defaults overlaid by
+    // ~/.osa/keybindings.json, consulted by update.rs before hardcoded arms.
+    pub keymap: crate::config::keybindings::Keybindings,
+    // Pending multi-step chord prefix (e.g. ctrl+x awaiting ctrl+k) plus when
+    // it was pressed; expires after 3s (keymap_dispatch::CHORD_TIMEOUT).
+    pub chord_pending: Option<(Vec<crossterm::event::KeyEvent>, Instant)>,
+    // Armed timestamp for the ctrl+x ctrl+k kill-all-agents press-twice confirm.
+    pub kill_agents_armed: Option<Instant>,
+    // Ctrl+T (chat:todosToggle) — hide/show the floating task checklist.
+    pub task_checklist_hidden: bool,
 }
 
 impl App {
@@ -339,6 +351,15 @@ impl App {
         // once in main.rs) so the composer's newline hint matches the terminal's
         // real capabilities: "shift+enter" when enhanced, backslash+enter otherwise.
         input.set_kbd_enhanced(kbd_enhanced);
+
+        // WS10: user keybindings (~/.osa/keybindings.json) over compiled
+        // defaults. Load problems are warnings, never fatal.
+        let keymap = crate::config::keybindings::Keybindings::load(
+            &config.profile_dir.join("keybindings.json"),
+        );
+        for w in keymap.load_warnings() {
+            tracing::warn!("keybindings: {}", w);
+        }
 
         Ok(Self {
             header: Header::new(),
@@ -433,6 +454,10 @@ impl App {
             message_queue: Vec::new(),
             esc_tracker: EscTracker::default(),
             force_redraw: false,
+            keymap,
+            chord_pending: None,
+            kill_agents_armed: None,
+            task_checklist_hidden: false,
         })
     }
 

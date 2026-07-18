@@ -26,13 +26,23 @@ fn syntect_color_to_ratatui(c: syntect::highlighting::Color) -> Color {
 /// Returns `Vec<Line<'static>>`. Falls back to plain dim rendering when the
 /// language is unknown or syntect cannot tokenize the input.
 pub fn highlight(code: &str, language: &str) -> Vec<Line<'static>> {
+    // Kill switch mirroring CC's CLAUDE_CODE_SYNTAX_HIGHLIGHT env toggle.
+    if highlighting_disabled() {
+        return plain_fallback(code);
+    }
     let ss = syntax_set();
     let ts = theme_set();
 
-    // Resolve syntect theme — prefer base16-eighties.dark, fall back to the
-    // first available theme so we never panic on a stripped theme set.
-    let syntect_theme_name = if ts.themes.contains_key("base16-eighties.dark") {
+    // Resolve syntect theme — follow the app theme (light OSA themes get a
+    // light syntect theme), falling back to the first available theme so we
+    // never panic on a stripped theme set.
+    let preferred = if crate::style::theme().name.contains("light") {
+        "InspiredGitHub"
+    } else {
         "base16-eighties.dark"
+    };
+    let syntect_theme_name = if ts.themes.contains_key(preferred) {
+        preferred
     } else {
         ts.themes.keys().next().map(|s| s.as_str()).unwrap_or("base16-ocean.dark")
     };
@@ -98,4 +108,16 @@ fn plain_fallback(code: &str) -> Vec<Line<'static>> {
     code.lines()
         .map(|l| Line::from(Span::styled(l.to_owned(), style)))
         .collect()
+}
+
+/// True when highlighting is disabled via `OSA_SYNTAX_HIGHLIGHT`
+/// (`0`, `false`, `off`, `disabled` — case-insensitive).
+fn highlighting_disabled() -> bool {
+    match std::env::var("OSA_SYNTAX_HIGHLIGHT") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "disabled"
+        ),
+        Err(_) => false,
+    }
 }

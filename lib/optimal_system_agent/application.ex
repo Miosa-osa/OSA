@@ -30,8 +30,16 @@ defmodule OptimalSystemAgent.Application do
     # Load .env file FIRST (before anything reads env vars)
     load_dotenv()
 
-    # Load settings cascade (user → project → local)
+    # Load settings cascade (user → project → local → flag)
     load_settings_into_app_env()
+
+    # Apply the merged settings "env" key to the OS environment BEFORE the
+    # provider env mapping below so settings-provided vars are visible to it.
+    # Re-applied live by Settings.Watcher when a settings file changes on disk.
+    OptimalSystemAgent.Settings.apply_env_settings()
+
+    # Surface settings schema/parse issues (with fix tips) once at boot.
+    OptimalSystemAgent.Settings.Schema.validate_and_log()
 
     # Read provider from environment — OSA_DEFAULT_PROVIDER takes effect at startup
     provider =
@@ -78,6 +86,15 @@ defmodule OptimalSystemAgent.Application do
     # ETS table for read-before-write tracking — tracks which files have been read
     # per session so the pre_tool_use hook can nudge when writing unread files.
     :ets.new(:osa_files_read, [:named_table, :public, :set])
+
+    # ETS table for session-layer settings (Settings.set_session). This table
+    # was previously never created anywhere, so session-level settings
+    # silently no-opped in production (set_session's rescue swallowed it).
+    :ets.new(:osa_settings, [:named_table, :public, :set])
+
+    # ETS cache of parsed settings files — rows {path, {mtime, size}, map}.
+    # Settings.reset_cache/0 is the single reset (watcher + internal writes).
+    :ets.new(:osa_settings_cache, [:named_table, :public, :set])
 
     # ETS table for the mid-turn steer queue (primitive #32). Rows:
     # {{session_id, seq}, text} in an ordered_set so steers drain FIFO. public so

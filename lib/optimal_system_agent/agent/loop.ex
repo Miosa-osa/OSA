@@ -605,13 +605,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def handle_call(:compact, _from, state) do
-    compacted = OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+    compacted =
+      OptimalSystemAgent.Agent.Compactor.maybe_compact(
+        state.messages,
+        Map.get(state, :last_input_tokens, 0),
+        state.session_id
+      )
+
     {:reply, :ok, %{state | messages: compacted}}
   end
 
   def handle_call(:proactive_compact, _from, state) do
     messages = state.messages || []
-    compacted = OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(messages)
+    compacted =
+      OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(messages, state.session_id)
 
     stats = %{
       messages_before: length(messages),

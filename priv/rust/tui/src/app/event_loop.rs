@@ -462,7 +462,8 @@ impl App {
     /// `desired_inline_height`).
     fn think_row_height(&self) -> u16 {
         if !self.thinking_box.is_empty() {
-            1
+            // Collapsed → 1 row; expanded (ctrl+t) → the box's measured height.
+            self.thinking_box.height(self.width)
         } else {
             self.activity.height().min(1)
         }
@@ -534,7 +535,10 @@ impl App {
         // Live task checklist floats bottom-right of the streaming/chat region
         // (Claude Code's todo panel). It self-positions and no-ops when empty.
         // It additionally clamps its own panel to the frame internally.
-        self.task_checklist.draw(frame, a_stream);
+        // Ctrl+T (chat:todosToggle) hides it.
+        if !self.task_checklist_hidden {
+            self.task_checklist.draw(frame, a_stream);
+        }
         if self.toasts.has_toasts() {
             self.toasts.draw(frame, toast_rect(area).intersection(bounds));
         }

@@ -810,7 +810,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         end
 
       nil ->
-        60
+        unified_reset_seconds(headers) || 60
     end
   end
 
@@ -821,11 +821,44 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     case headers["retry-after"] || headers["Retry-After"] do
       [v | _] -> parse_seconds(v)
       v when is_binary(v) -> parse_seconds(v)
-      _ -> 60
+      _ -> unified_reset_seconds(headers) || 60
     end
   end
 
   defp parse_retry_after(_), do: 60
+
+  # Rate-limit surfacing (CC claudeAiLimits parity): when no Retry-After
+  # header is present, `anthropic-ratelimit-unified-reset` (unix seconds)
+  # says when the quota window resets. Convert it to an effective retry-after
+  # so both the backoff and the user-facing rate-limit message reflect the
+  # real reset time instead of a blind 60s guess.
+  defp unified_reset_seconds(headers) do
+    raw =
+      case headers do
+        h when is_list(h) ->
+          case List.keyfind(h, "anthropic-ratelimit-unified-reset", 0) do
+            {_, v} -> v
+            nil -> nil
+          end
+
+        h when is_map(h) ->
+          case h["anthropic-ratelimit-unified-reset"] do
+            [v | _] -> v
+            v when is_binary(v) -> v
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    with v when is_binary(v) <- raw,
+         {reset_unix, _} <- Integer.parse(v) do
+      max(reset_unix - System.os_time(:second), 1)
+    else
+      _ -> nil
+    end
+  end
 
   defp parse_seconds(v) when is_binary(v) do
     case Integer.parse(v) do

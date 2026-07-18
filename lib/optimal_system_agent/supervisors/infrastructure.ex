@@ -46,6 +46,12 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # SSE event stream for frontend — must start after PubSub
       OptimalSystemAgent.EventStream,
 
+      # Settings file watcher — polls the cascade files, resets the settings
+      # cache on external edits, re-applies "env" live, and emits a
+      # settings_changed event. Its init returns :ignore when
+      # :settings_watcher_enabled is false (test suite).
+      OptimalSystemAgent.Settings.Watcher,
+
       # Provider health / circuit breaker — must start before Registry
       OptimalSystemAgent.Providers.HealthChecker,
 

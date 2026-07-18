@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 /// Collapsible panel that shows extended-thinking / reasoning content.
 ///
-/// Collapsed (default):  ▶ Thinking... (N chars)
+/// Collapsed (default):  ∴ Thinking… (ctrl+t to expand)
 /// Expanded:             Dashed-border block with dim-italic wrapped content,
 ///                       capped at 10 visible lines with overflow indicator.
 pub struct ThinkingBox {
@@ -18,8 +18,9 @@ impl ThinkingBox {
     pub fn new() -> Self {
         Self {
             content: String::new(),
-            expanded: true,
-            title: "Thinking".to_string(),
+            // CC parity: thinking is collapsed to a one-liner by default.
+            expanded: false,
+            title: "∴ Thinking".to_string(),
         }
     }
 
@@ -74,16 +75,15 @@ impl ThinkingBox {
         let theme = crate::style::theme();
 
         if !self.expanded || self.content.is_empty() {
-            // Collapsed: single indicator line.
-            let char_count = self.content.chars().count();
+            // Collapsed: CC-style dim italic one-liner with the expand hint.
             let indicator = if self.content.is_empty() {
-                "\u{25b6} Thinking...".to_string()
+                "\u{2234} Thinking\u{2026}".to_string()
             } else {
-                format!("\u{25b6} Thinking... ({} chars)", char_count)
+                "\u{2234} Thinking\u{2026} (ctrl+t to expand)".to_string()
             };
             let line = Line::from(Span::styled(
                 indicator,
-                theme.thinking_header().add_modifier(Modifier::ITALIC),
+                theme.faint().add_modifier(Modifier::ITALIC),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -147,5 +147,19 @@ impl ThinkingBox {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThinkingBox;
+
+    #[test]
+    fn collapsed_by_default_toggle_expands() {
+        let mut tb = ThinkingBox::new();
+        tb.update("line one\nline two");
+        assert_eq!(tb.height(80), 1, "collapsed by default");
+        tb.toggle();
+        assert!(tb.height(80) > 1, "expanded shows the bordered box");
     }
 }

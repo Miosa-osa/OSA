@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -401,8 +401,16 @@ fn render_collapsed_diff_preview(
     out
 }
 
-/// Inline unified diff renderer with WORD-LEVEL highlighting.
-/// Changed words within lines are highlighted in a brighter color.
+/// Inline unified diff renderer with hunk grouping and WORD-LEVEL highlighting.
+///
+/// CC parity (`StructuredDiff*` / `Fallback.tsx`):
+///   - hunks come from `grouped_ops(3)` (3 context lines) with a dim `…`
+///     separator line between hunks;
+///   - within a change run, the i-th removed line pairs with the i-th added
+///     line for word-level highlights (runs of N deletes + N inserts pair,
+///     not just 1:1);
+///   - word highlights apply only when the pair is similar enough
+///     (`CHANGE_THRESHOLD = 0.4` — more than 40% changed renders plain).
 fn render_inline_diff(
     old: &str,
     new: &str,
@@ -414,106 +422,184 @@ fn render_inline_diff(
     let line_diff = TextDiff::from_lines(old, new);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Collect changes for word-level diffing on adjacent delete+insert pairs
-    let changes: Vec<_> = line_diff.iter_all_changes().collect();
-    let mut i = 0;
-
-    while i < changes.len() {
-        let change = &changes[i];
-        match change.tag() {
-            ChangeTag::Equal => {
+    let groups = line_diff.grouped_ops(3);
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            // Dim ellipsis separator between hunks (StructuredDiffList parity).
+            lines.push(Line::from(Span::styled(
+                "  …".to_string(),
+                Style::default().fg(theme.colors.dim),
+            )));
+        }
+        for op in group {
+            let mut dels: Vec<String> = Vec::new();
+            let mut inss: Vec<String> = Vec::new();
+            for change in line_diff.iter_changes(op) {
                 let content = change.value().trim_end_matches('\n').to_string();
-                lines.push(Line::from(vec![
-                    Span::styled("  ".to_string(), Style::default().fg(theme.colors.muted)),
-                    Span::styled(content, Style::default().fg(theme.colors.muted)),
-                ]));
-                i += 1;
-            }
-            ChangeTag::Delete => {
-                // Check if next change is an Insert (paired delete+insert = modification)
-                let has_insert = i + 1 < changes.len() && changes[i + 1].tag() == ChangeTag::Insert;
-
-                if has_insert {
-                    // Word-level diff between the old and new line
-                    let old_line = change.value().trim_end_matches('\n');
-                    let new_line = changes[i + 1].value().trim_end_matches('\n');
-
-                    let del_bg = Color::Rgb(60, 10, 10);
-                    let add_bg = Color::Rgb(10, 45, 20);
-                    let del_highlight = theme.colors.diff_del_highlight_fg;
-                    let add_highlight = theme.colors.diff_add_highlight_fg;
-
-                    // Render delete line with word highlights
-                    let word_diff = TextDiff::from_words(old_line, new_line);
-                    let mut del_spans: Vec<Span<'static>> = vec![
-                        Span::styled("- ".to_string(), Style::default().fg(theme.colors.error).bg(del_bg)),
-                    ];
-                    for wc in word_diff.iter_all_changes() {
-                        match wc.tag() {
-                            ChangeTag::Equal => {
-                                del_spans.push(Span::styled(
-                                    wc.value().to_string(),
-                                    Style::default().fg(theme.colors.error).bg(del_bg),
-                                ));
-                            }
-                            ChangeTag::Delete => {
-                                del_spans.push(Span::styled(
-                                    wc.value().to_string(),
-                                    Style::default().fg(del_highlight).bg(theme.colors.diff_del_highlight_bg)
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            }
-                            ChangeTag::Insert => {} // shown in the add line
-                        }
+                match change.tag() {
+                    ChangeTag::Equal => {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ".to_string(), Style::default().fg(theme.colors.muted)),
+                            Span::styled(content, Style::default().fg(theme.colors.muted)),
+                        ]));
                     }
-                    lines.push(Line::from(del_spans));
-
-                    // Render insert line with word highlights
-                    let mut add_spans: Vec<Span<'static>> = vec![
-                        Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success).bg(add_bg)),
-                    ];
-                    for wc in word_diff.iter_all_changes() {
-                        match wc.tag() {
-                            ChangeTag::Equal => {
-                                add_spans.push(Span::styled(
-                                    wc.value().to_string(),
-                                    Style::default().fg(theme.colors.success).bg(add_bg),
-                                ));
-                            }
-                            ChangeTag::Insert => {
-                                add_spans.push(Span::styled(
-                                    wc.value().to_string(),
-                                    Style::default().fg(add_highlight).bg(theme.colors.diff_add_highlight_bg)
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            }
-                            ChangeTag::Delete => {} // shown in the del line
-                        }
-                    }
-                    lines.push(Line::from(add_spans));
-
-                    i += 2; // skip both delete and insert
-                } else {
-                    // Standalone delete (no matching insert)
-                    let content = change.value().trim_end_matches('\n').to_string();
-                    lines.push(Line::from(vec![
-                        Span::styled("- ".to_string(), Style::default().fg(theme.colors.error)),
-                        Span::styled(content, Style::default().fg(theme.colors.error)),
-                    ]));
-                    i += 1;
+                    ChangeTag::Delete => dels.push(content),
+                    ChangeTag::Insert => inss.push(content),
                 }
             }
-            ChangeTag::Insert => {
-                // Standalone insert (no preceding delete)
-                let content = change.value().trim_end_matches('\n').to_string();
-                lines.push(Line::from(vec![
-                    Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success)),
-                    Span::styled(content, Style::default().fg(theme.colors.success)),
-                ]));
-                i += 1;
-            }
+            render_change_run(&dels, &inss, theme, &mut lines);
         }
     }
 
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no changes)".to_string(),
+            Style::default().fg(theme.colors.muted),
+        )));
+    }
+
     lines
+}
+
+/// Proportion of a paired line that may change before word-level highlighting
+/// is skipped in favor of plain +/- lines (CC `Fallback.tsx` CHANGE_THRESHOLD).
+const WORD_DIFF_CHANGE_THRESHOLD: f32 = 0.4;
+
+fn word_diff_pairs_well(old_line: &str, new_line: &str) -> bool {
+    if old_line.trim().is_empty() || new_line.trim().is_empty() {
+        return false;
+    }
+    let ratio = similar::TextDiff::from_words(old_line, new_line).ratio();
+    (1.0 - ratio) <= WORD_DIFF_CHANGE_THRESHOLD
+}
+
+/// Render a run of removed lines followed by added lines, pairing the i-th
+/// delete with the i-th insert for word-level highlights when similar enough.
+fn render_change_run(
+    dels: &[String],
+    inss: &[String],
+    theme: &crate::style::Theme,
+    out: &mut Vec<Line<'static>>,
+) {
+    use similar::{ChangeTag, TextDiff};
+
+    let paired = dels.len().min(inss.len());
+
+    for (i, old_line) in dels.iter().enumerate() {
+        if i < paired && word_diff_pairs_well(old_line, &inss[i]) {
+            let word_diff = TextDiff::from_words(old_line.as_str(), inss[i].as_str());
+            let del_bg = theme.colors.diff_del_bg;
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                "- ".to_string(),
+                Style::default().fg(theme.colors.error).bg(del_bg),
+            )];
+            for wc in word_diff.iter_all_changes() {
+                match wc.tag() {
+                    ChangeTag::Equal => spans.push(Span::styled(
+                        wc.value().to_string(),
+                        Style::default().fg(theme.colors.error).bg(del_bg),
+                    )),
+                    ChangeTag::Delete => spans.push(Span::styled(
+                        wc.value().to_string(),
+                        Style::default()
+                            .fg(theme.colors.diff_del_highlight_fg)
+                            .bg(theme.colors.diff_del_highlight_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    ChangeTag::Insert => {} // shown in the add line
+                }
+            }
+            out.push(Line::from(spans));
+        } else {
+            out.push(Line::from(vec![
+                Span::styled("- ".to_string(), Style::default().fg(theme.colors.error)),
+                Span::styled(old_line.clone(), Style::default().fg(theme.colors.error)),
+            ]));
+        }
+    }
+
+    for (i, new_line) in inss.iter().enumerate() {
+        if i < paired && word_diff_pairs_well(&dels[i], new_line) {
+            let word_diff = TextDiff::from_words(dels[i].as_str(), new_line.as_str());
+            let add_bg = theme.colors.diff_add_bg;
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                "+ ".to_string(),
+                Style::default().fg(theme.colors.success).bg(add_bg),
+            )];
+            for wc in word_diff.iter_all_changes() {
+                match wc.tag() {
+                    ChangeTag::Equal => spans.push(Span::styled(
+                        wc.value().to_string(),
+                        Style::default().fg(theme.colors.success).bg(add_bg),
+                    )),
+                    ChangeTag::Insert => spans.push(Span::styled(
+                        wc.value().to_string(),
+                        Style::default()
+                            .fg(theme.colors.diff_add_highlight_fg)
+                            .bg(theme.colors.diff_add_highlight_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    ChangeTag::Delete => {} // shown in the del line
+                }
+            }
+            out.push(Line::from(spans));
+        } else {
+            out.push(Line::from(vec![
+                Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success)),
+                Span::styled(new_line.clone(), Style::default().fg(theme.colors.success)),
+            ]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod diff_render_tests {
+    use super::*;
+
+    fn text(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn distant_changes_get_hunk_ellipsis_separator() {
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
+        let theme = crate::style::theme();
+        let rendered = text(&render_inline_diff(old, new, 80, &theme));
+        assert!(rendered.iter().any(|l| l == "  …"), "{:?}", rendered);
+    }
+
+    #[test]
+    fn heavily_rewritten_pair_skips_word_highlights() {
+        let theme = crate::style::theme();
+        let lines = render_inline_diff("alpha beta\n", "zq xw yv\n", 80, &theme);
+        let has_bold = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!has_bold);
+    }
+
+    #[test]
+    fn small_change_gets_word_highlights() {
+        let theme = crate::style::theme();
+        let lines = render_inline_diff("let count = 1;\n", "let count = 2;\n", 80, &theme);
+        let has_bold = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
+        assert!(has_bold);
+    }
+
+    #[test]
+    fn unbalanced_runs_render_all_lines() {
+        let theme = crate::style::theme();
+        let lines = render_inline_diff("one\ntwo\nthree\n", "uno\n", 80, &theme);
+        let rendered = text(&lines);
+        assert_eq!(rendered.iter().filter(|l| l.starts_with("- ")).count(), 3);
+        assert_eq!(rendered.iter().filter(|l| l.starts_with("+ ")).count(), 1);
+    }
 }

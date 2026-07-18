@@ -98,14 +98,14 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       assert Resilience.backoff_ms(1, 9999) == 60_000
     end
 
-    test "uses exponential backoff when no retry-after" do
-      assert Resilience.backoff_ms(1) == 1_000
-      assert Resilience.backoff_ms(2) == 2_000
-      assert Resilience.backoff_ms(3) == 4_000
+    test "uses exponential backoff (500ms base) with 0-25% jitter" do
+      assert Resilience.backoff_ms(1) in 500..625
+      assert Resilience.backoff_ms(2) in 1_000..1_250
+      assert Resilience.backoff_ms(3) in 2_000..2_500
     end
 
-    test "caps exponential backoff at 60s" do
-      assert Resilience.backoff_ms(50) == 60_000
+    test "caps the exponential portion at 32s (plus jitter)" do
+      assert Resilience.backoff_ms(50) in 32_000..40_000
     end
   end
 
@@ -127,13 +127,14 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
         Resilience.with_retry(
           fn ->
             Agent.update(counter, &(&1 + 1))
-            {:error, {:http_error, 503, "overloaded"}}
+            {:error, {:http_error, 503, "server busy"}}
           end,
-          sleep: no_sleep()
+          sleep: no_sleep(),
+          max_attempts: 3
         )
 
-      assert result == {:error, {:http_error, 503, "overloaded"}}
-      # 1 initial + 2 retries = 3 total attempts.
+      assert result == {:error, {:http_error, 503, "server busy"}}
+      # 1 initial + 2 retries = 3 total attempts (explicit max_attempts).
       assert Agent.get(counter, & &1) == 3
     end
 
@@ -194,6 +195,7 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       Resilience.with_retry(
         fn -> {:error, {:rate_limited, 2}} end,
         sleep: no_sleep(),
+        max_attempts: 3,
         on_retry: on_retry
       )
 
@@ -229,6 +231,42 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       assert Resilience.reason_to_string({:stream_error, "overloaded"}) =~ "mid-stream"
       assert Resilience.reason_to_string({:stream_error, "overloaded", "partial"}) =~ "mid-stream"
       assert Resilience.reason_to_string("plain") == "plain"
+    end
+  end
+
+  describe "CC parity — defaults and 529 fallback" do
+    test "default attempts = 1 + 10 retries, overridable via OSA_API_MAX_RETRIES" do
+      System.delete_env("OSA_API_MAX_RETRIES")
+      assert Resilience.max_attempts() == 11
+
+      System.put_env("OSA_API_MAX_RETRIES", "2")
+      on_exit(fn -> System.delete_env("OSA_API_MAX_RETRIES") end)
+      assert Resilience.max_attempts() == 3
+    end
+
+    test "stops retrying after 3 consecutive overloaded (529) errors" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      result =
+        Resilience.with_retry(
+          fn ->
+            Agent.update(counter, &(&1 + 1))
+            {:error, {:http_error, 529, "overloaded_error"}}
+          end,
+          sleep: no_sleep(),
+          max_attempts: 10
+        )
+
+      assert result == {:error, {:http_error, 529, "overloaded_error"}}
+      assert Agent.get(counter, & &1) == 3
+    end
+
+    test "overloaded?/1 recognizes 529 tuples, overloaded_error bodies, and strings" do
+      assert Resilience.overloaded?({:http_error, 529, "x"})
+      assert Resilience.overloaded?({:http_error, 503, ~s({"type":"overloaded_error"})})
+      assert Resilience.overloaded?("Anthropic returned 529: Overloaded")
+      refute Resilience.overloaded?({:http_error, 503, "server busy"})
+      refute Resilience.overloaded?({:rate_limited, 5})
     end
   end
 end

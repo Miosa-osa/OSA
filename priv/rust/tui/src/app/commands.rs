@@ -38,6 +38,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("reasoning", "Set the reasoning effort level"),
     ("verbose", "Cycle tool output detail"),
     ("theme", "Switch the color theme"),
+    ("keybindings", "Show the keybinding map + config file"),
     ("config", "Open the settings editor"),
     ("goal", "Set an auto-continue goal loop"),
     ("auto", "Toggle the safety-guardian auto mode"),
@@ -169,6 +170,18 @@ impl App {
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
+            }
+            "/keybindings" => {
+                let path = self.config.profile_dir.join("keybindings.json");
+                let mut msg = format!(
+                    "Keybindings file: {}\nFormat: [{{\"context\": \"global|idle|processing\", \"bindings\": {{\"ctrl+n\": \"app:newSession\"}}}}]\nUse \"none\" to unbind; values starting with / run that slash command.\nCurrent bindings:\n{}",
+                    path.display(),
+                    self.keymap.describe(),
+                );
+                for w in self.keymap.load_warnings() {
+                    msg.push_str(&format!("\nwarning: {}", w));
+                }
+                self.chat.add_system_message(&msg, "info");
             }
             "/models" => {
                 self.load_models();

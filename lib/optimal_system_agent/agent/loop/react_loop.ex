@@ -144,24 +144,39 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # calling the model so the window stays under threshold. Complementary to
     # the reactive ContextCollapse fallback in handle_result/3 (413 retry).
     state =
-      with cw when is_integer(cw) and cw > 0 <-
-             OptimalSystemAgent.Providers.Registry.context_window(state.model),
-           true <- ProactiveCompaction.should_compact?(state, cw) do
-        before_count = length(state.messages)
-        compacted = ProactiveCompaction.compact(state.messages)
+      case OptimalSystemAgent.Providers.Registry.context_window(state.model) do
+        cw when is_integer(cw) and cw > 0 ->
+          cond do
+            ProactiveCompaction.should_compact?(state, cw) ->
+              before_count = length(state.messages)
+              compacted = ProactiveCompaction.compact(state.messages, state.session_id)
 
-        if length(compacted) != before_count do
-          Observability.compaction(state, %{
-            strategy: :proactive,
-            messages_before: before_count,
-            messages_after: length(compacted),
-            iteration: state.iteration
-          })
-        end
+              if length(compacted) != before_count do
+                Observability.compaction(state, %{
+                  strategy: :proactive,
+                  messages_before: before_count,
+                  messages_after: length(compacted),
+                  iteration: state.iteration
+                })
+              end
 
-        %{state | messages: compacted}
-      else
-        _ -> state
+              %{state | messages: compacted}
+
+            ProactiveCompaction.should_microcompact?(state, cw) ->
+              # Warning band: cheap standalone microcompact pass (truncate
+              # stale tool results, no LLM call) to delay full compaction.
+              # CC parity: apiMicrocompact pre-request pass.
+              %{
+                state
+                | messages: OptimalSystemAgent.Agent.Compactor.micro_compact(state.messages)
+              }
+
+            true ->
+              state
+          end
+
+        _ ->
+          state
       end
 
     # Start async prefetches while we build context. In fast mode this also
@@ -732,7 +747,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           {:error, _} ->
             # Collapse failed — fall back to full compaction
             Logger.info("[loop] Context collapse insufficient, running full compaction")
-            OptimalSystemAgent.Agent.Compactor.maybe_compact(state.messages)
+
+            OptimalSystemAgent.Agent.Compactor.maybe_compact(
+              state.messages,
+              Map.get(state, :last_input_tokens, 0),
+              state.session_id
+            )
         end
 
       state = %{state | messages: collapsed_messages, overflow_retries: retry_num}
@@ -752,14 +772,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       else
         Logger.error("LLM call failed: #{reason_str}")
 
+        category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
+
         Observability.emit(
           :system_event,
-          %{event: :error, kind: :llm_error, reason: reason_str, iteration: state.iteration},
+          %{
+            event: :error,
+            kind: :llm_error,
+            category: category,
+            reason: reason_str,
+            iteration: state.iteration
+          },
           state,
           source: "agent.react_loop"
         )
 
-        {"I encountered an error processing your request. Please try again.", state}
+        {OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason), state}
       end
     end
   end

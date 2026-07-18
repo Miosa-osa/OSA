@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod cli;
+pub mod keybindings;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

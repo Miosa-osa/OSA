@@ -183,8 +183,11 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # the compaction decision instead of the char-heuristic estimate; falls back
     # to the estimate on the first turn when no real count exists yet.
     compacted =
-      Compactor.maybe_compact(state.messages, Map.get(state, :last_input_tokens, 0)) ||
-        state.messages
+      Compactor.maybe_compact(
+        state.messages,
+        Map.get(state, :last_input_tokens, 0),
+        state.session_id
+      ) || state.messages
 
     state = %{state | messages: compacted}
 

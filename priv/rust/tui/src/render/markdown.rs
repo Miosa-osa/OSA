@@ -11,11 +11,12 @@ use unicode_width::UnicodeWidthStr;
 ///   - Inline code `` `expr` `` — dim style
 ///   - **Bold**  `**text**`
 ///   - *Italic*  `*text*`
-///   - ~~Strikethrough~~ `~~text~~`
+///   - `~~text~~` — passes through literally (strikethrough deliberately
+///     disabled, CC parity: models write `~~100ms~~` meaning "approximately")
 ///   - Task checkboxes  `- [ ] todo` / `- [x] done` — green checkmark or muted circle
 ///   - Unordered lists  `- item` / `* item` / `+ item` — nested with indent-aware bullets
-///   - Ordered lists    `1. item` — nested with indentation
-///   - Links  `[text](url)` — text in cyan+underline, URL dropped
+///   - Ordered lists    `1. item` — depth-styled markers (1. / a. / i.)
+///   - Links  `[text](url)` — text in cyan+underline followed by the URL in dim parens
 ///   - Blockquotes  `> text` — muted italic with `│ ` prefix
 ///   - Horizontal rules  `---` / `***` — full-width `─`
 ///   - GFM pipe tables  `| H1 | H2 |` — styled with box-drawing borders
@@ -214,7 +215,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
 
-        // ── Ordered lists (indent-aware) ─────────────────────────────────────
+        // ── Ordered lists (indent-aware, depth-styled markers) ───────────────
         if let Some(pos) = trimmed.find(". ") {
             let num_part = &trimmed[..pos];
             if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
@@ -222,8 +223,12 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 let indent = raw_line.len() - raw_line.trim_start().len();
                 let indent_level = indent / 2;
                 let indent_str = "  ".repeat(indent_level);
+                let marker = match num_part.parse::<usize>() {
+                    Ok(n) => format_list_number(n, indent_level),
+                    Err(_) => format!("{}.", num_part),
+                };
                 let mut spans = vec![
-                    Span::styled(format!("{}{}. ", indent_str, num_part), Style::default().fg(theme.colors.muted)),
+                    Span::styled(format!("{}{} ", indent_str, marker), Style::default().fg(theme.colors.muted)),
                 ];
                 spans.extend(parse_inline(text, &theme));
                 lines.push(Line::from(spans));
@@ -271,6 +276,26 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 
     let mut result = Vec::new();
 
+    // Column alignments from the separator row: `:---` left, `:---:` center,
+    // `---:` right (GFM).
+    let alignments: Vec<ColAlign> = rows
+        .iter()
+        .find(|r| r.contains("---"))
+        .map(|r| {
+            r.trim_matches('|')
+                .split('|')
+                .map(|cell| {
+                    let c = cell.trim();
+                    match (c.starts_with(':'), c.ends_with(':')) {
+                        (true, true) => ColAlign::Center,
+                        (false, true) => ColAlign::Right,
+                        _ => ColAlign::Left,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Parse cells from each row, skipping separator rows (contain ---)
     let parsed: Vec<Vec<String>> = rows
         .iter()
@@ -289,12 +314,12 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 
     let num_cols = parsed[0].len();
 
-    // Calculate column widths (max content per column)
-    let mut col_widths: Vec<usize> = vec![0; num_cols];
+    // Calculate column widths (max DISPLAY width per column, min 3 — CC parity)
+    let mut col_widths: Vec<usize> = vec![3; num_cols];
     for row in &parsed {
         for (i, cell) in row.iter().enumerate() {
             if i < num_cols {
-                col_widths[i] = col_widths[i].max(cell.len());
+                col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
             }
         }
     }
@@ -304,7 +329,7 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     if total > width as usize && width > 10 {
         let max_per_col = (width as usize).saturating_sub(num_cols + 1) / num_cols.max(1);
         for w in col_widths.iter_mut() {
-            *w = (*w).min(max_per_col);
+            *w = (*w).min(max_per_col).max(3);
         }
     }
 
@@ -316,7 +341,8 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         spans.push(Span::styled("│ ".to_string(), muted));
         for (i, cell) in header.iter().enumerate() {
             let w = col_widths.get(i).copied().unwrap_or(10);
-            let padded = format!("{:<width$}", cell, width = w);
+            let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
+            let padded = fit_cell(cell, w, align);
             spans.push(Span::styled(
                 padded,
                 Style::default()
@@ -350,7 +376,8 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         spans.push(Span::styled("│ ".to_string(), muted));
         for (i, cell) in row.iter().enumerate() {
             let w = col_widths.get(i).copied().unwrap_or(10);
-            let padded = format!("{:<width$}", cell, width = w);
+            let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
+            let padded = fit_cell(cell, w, align);
             spans.push(Span::styled(padded, Style::default()));
             if i < row.len() - 1 {
                 spans.push(Span::styled(" │ ".to_string(), muted));
@@ -361,6 +388,87 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     }
 
     result
+}
+
+/// GFM column alignment parsed from the table separator row.
+#[derive(Clone, Copy, PartialEq)]
+enum ColAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Pad (or grapheme-truncate with `…`) `cell` to exactly `w` display columns,
+/// honoring the column alignment. Display-width aware (CJK/emoji safe).
+fn fit_cell(cell: &str, w: usize, align: ColAlign) -> String {
+    let cw = UnicodeWidthStr::width(cell);
+    if cw > w {
+        let mut out = String::new();
+        let mut used = 0;
+        for g in UnicodeSegmentation::graphemes(cell, true) {
+            let gw = UnicodeWidthStr::width(g);
+            if used + gw > w.saturating_sub(1) {
+                break;
+            }
+            out.push_str(g);
+            used += gw;
+        }
+        out.push('…');
+        let final_w = UnicodeWidthStr::width(out.as_str());
+        out.push_str(&" ".repeat(w.saturating_sub(final_w)));
+        return out;
+    }
+    let pad = w - cw;
+    match align {
+        ColAlign::Left => format!("{}{}", cell, " ".repeat(pad)),
+        ColAlign::Right => format!("{}{}", " ".repeat(pad), cell),
+        ColAlign::Center => {
+            let left = pad / 2;
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(pad - left))
+        }
+    }
+}
+
+/// Depth-styled ordered-list markers (CC `getListNumber` parity):
+/// depth 0-1 → `1.`, depth 2 → `a.`, depth 3+ → `i.` (lowercase roman).
+fn format_list_number(n: usize, depth: usize) -> String {
+    match depth {
+        0 | 1 => format!("{}.", n),
+        2 => format!("{}.", number_to_letter(n)),
+        _ => format!("{}.", number_to_roman(n)),
+    }
+}
+
+fn number_to_letter(n: usize) -> String {
+    // 1→a … 26→z, 27→aa (spreadsheet-style)
+    let mut n = n.max(1);
+    let mut s = String::new();
+    while n > 0 {
+        let rem = ((n - 1) % 26) as u8;
+        s.insert(0, (b'a' + rem) as char);
+        n = (n - 1) / 26;
+    }
+    s
+}
+
+fn number_to_roman(n: usize) -> String {
+    if n == 0 || n > 3999 {
+        return n.to_string();
+    }
+    const VALS: [(usize, &str); 13] = [
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"),
+        (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"),
+        (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut n = n;
+    let mut s = String::new();
+    for (v, sym) in VALS {
+        while n >= v {
+            s.push_str(sym);
+            n -= v;
+        }
+    }
+    s
 }
 
 // ─── Task checkbox detector ──────────────────────────────────────────────────
@@ -547,39 +655,13 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 }
             }
 
-            // ── Strikethrough: ~~text~~ ───────────────────────────────────
+            // ── `~` is always literal ─────────────────────────────────────
+            // Strikethrough is deliberately disabled (CC parity, marked's
+            // del() override): models write `~~100ms~~` meaning
+            // "approximately", so CROSSED_OUT rendering corrupts the reply.
             '~' => {
-                chars.next(); // consume first `~`
-                if chars.peek() == Some(&'~') {
-                    chars.next(); // consume second `~`
-                    let mut content = String::new();
-                    let mut closed = false;
-                    while let Some(&nc) = chars.peek() {
-                        if nc == '~' {
-                            chars.next(); // consume this `~`
-                            if chars.peek() == Some(&'~') {
-                                chars.next(); // consume second closing `~`
-                                closed = true;
-                                break;
-                            }
-                            content.push('~');
-                        } else {
-                            chars.next();
-                            content.push(nc);
-                        }
-                    }
-                    if closed && !content.is_empty() {
-                        flush_plain!();
-                        let style = Style::default().add_modifier(Modifier::CROSSED_OUT);
-                        spans.push(Span::styled(content, style));
-                    } else {
-                        plain.push_str("~~");
-                        plain.push_str(&content);
-                    }
-                } else {
-                    // Single `~` — treat as literal.
-                    plain.push('~');
-                }
+                chars.next();
+                plain.push('~');
             }
 
             // ── Links: [text](url) ────────────────────────────────────────
@@ -597,20 +679,39 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 // Check for `(url)` following the `]`.
                 if found_bracket && chars.peek() == Some(&'(') {
                     chars.next(); // consume `(`
-                    let mut _url = String::new();
+                    let mut url = String::new();
                     for c in chars.by_ref() {
                         if c == ')' {
                             break;
                         }
-                        _url.push(c);
+                        url.push(c);
                     }
-                    // Emit the link text in cyan+underline; drop the URL.
+                    // Emit the link text in cyan+underline, then the target in
+                    // dim parens so the user can see (and copy) it.
+                    // `mailto:` is stripped to the bare address (CC parity).
+                    let display_url = url.strip_prefix("mailto:").unwrap_or(&url);
+                    let link_style = Style::default()
+                        .fg(theme.colors.secondary)
+                        .add_modifier(Modifier::UNDERLINED);
                     if !link_text.is_empty() {
                         flush_plain!();
-                        let style = Style::default()
-                            .fg(theme.colors.secondary)
-                            .add_modifier(Modifier::UNDERLINED);
-                        spans.push(Span::styled(link_text, style));
+                        let show_url = !display_url.is_empty() && display_url != link_text;
+                        let url_suffix = if show_url {
+                            Some(Span::styled(
+                                format!(" ({})", display_url),
+                                Style::default().fg(theme.colors.dim),
+                            ))
+                        } else {
+                            None
+                        };
+                        spans.push(Span::styled(link_text, link_style));
+                        if let Some(s) = url_suffix {
+                            spans.push(s);
+                        }
+                    } else if !display_url.is_empty() {
+                        // `[](url)` — show the URL itself as the link text.
+                        flush_plain!();
+                        spans.push(Span::styled(display_url.to_string(), link_style));
                     }
                 } else {
                     // Not a valid link — emit literally.
@@ -636,7 +737,11 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_text;
+    use super::{format_list_number, parse_inline, wrap_text};
+
+    fn flat(spans: &[ratatui::text::Span<'_>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
 
     #[test]
     fn wraps_streaming_cursor_without_splitting_utf8() {
@@ -645,5 +750,51 @@ mod tests {
         let wrapped = wrap_text(input, 71);
 
         assert_eq!(wrapped, vec![input]);
+    }
+
+    #[test]
+    fn strikethrough_is_disabled_and_renders_literally() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("~~100ms~~", &theme);
+        assert_eq!(flat(&spans), "~~100ms~~");
+        assert!(spans.iter().all(|s| !s
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::CROSSED_OUT)));
+    }
+
+    #[test]
+    fn link_url_is_visible() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("[docs](https://osa.dev)", &theme);
+        assert_eq!(flat(&spans), "docs (https://osa.dev)");
+    }
+
+    #[test]
+    fn mailto_is_stripped_and_deduped() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("[a@b.co](mailto:a@b.co)", &theme);
+        assert_eq!(flat(&spans), "a@b.co");
+    }
+
+    #[test]
+    fn ordered_list_depth_markers() {
+        assert_eq!(format_list_number(2, 0), "2.");
+        assert_eq!(format_list_number(2, 2), "b.");
+        assert_eq!(format_list_number(4, 3), "iv.");
+        assert_eq!(format_list_number(27, 2), "aa.");
+    }
+
+    #[test]
+    fn table_right_alignment_pads_left() {
+        let theme = crate::style::theme();
+        let rows = vec![
+            "| h |".to_string(),
+            "| ---: |".to_string(),
+            "| x |".to_string(),
+        ];
+        let lines = super::render_table(&rows, 80, &theme);
+        let data_row: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(data_row.contains("  x"), "{:?}", data_row);
     }
 }

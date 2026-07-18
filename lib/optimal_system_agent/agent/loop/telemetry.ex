@@ -25,6 +25,14 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         else: OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
 
     utilization = if max_tok > 0, do: Float.round(estimated / max_tok * 100, 1), else: 0.0
+
+    warning =
+      if is_integer(max_tok) and max_tok > 0 do
+        OptimalSystemAgent.Agent.Loop.CompactionThresholds.warning_state(estimated, max_tok)
+      else
+        %{percent_left: 100, above_warning: false, above_compact: false, at_blocking_limit: false}
+      end
+
     Logger.info("[ctx] estimated=#{estimated} max=#{max_tok} util=#{utilization}%")
 
     Bus.emit(:system_event, %{
@@ -32,7 +40,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       session_id: state.session_id,
       estimated_tokens: estimated,
       max_tokens: max_tok,
-      utilization: utilization
+      utilization: utilization,
+      percent_left: warning.percent_left,
+      context_low: warning.above_warning,
+      above_compact: warning.above_compact,
+      at_blocking_limit: warning.at_blocking_limit
     })
 
     Phoenix.PubSub.broadcast(
@@ -50,7 +62,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          session_id: state.session_id,
          estimated_tokens: estimated,
          max_tokens: max_tok,
-         utilization: utilization
+         utilization: utilization,
+         percent_left: warning.percent_left,
+         context_low: warning.above_warning,
+         above_compact: warning.above_compact,
+         at_blocking_limit: warning.at_blocking_limit
        }}
     )
 

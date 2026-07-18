@@ -25,6 +25,7 @@
 #   --resume [id]                      Resume a session
 #   --permission-mode <mode>           ask | auto-edit | plan | overdrive
 #   --dev                              Dev profile (port 19001)
+#   --settings <file>                  Extra settings file (highest-priority file layer)
 
 set -euo pipefail
 
@@ -138,6 +139,35 @@ for _a in "$@"; do
   [ "$_a" = "--dev" ] && PORT="${OSA_PORT:-19001}"
 done
 HEALTH_URL="http://localhost:${PORT}/health"
+
+# ── --settings <file>: extra highest-priority settings file layer ─
+# Consumed here (NOT forwarded to the TUI) and exported as OSA_SETTINGS so the
+# backend reads it as the flag layer of the cascade. Note: only a FRESHLY
+# started daemon inherits it — an already-warm daemon keeps its environment.
+_OSA_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --settings)
+      shift
+      if [ -n "${1:-}" ]; then
+        OSA_SETTINGS="$(cd "$(dirname "$1")" 2>/dev/null && pwd)/$(basename "$1")" || OSA_SETTINGS="$1"
+        export OSA_SETTINGS
+        shift
+      fi
+      ;;
+    --settings=*)
+      _osa_sfile="${1#--settings=}"
+      OSA_SETTINGS="$(cd "$(dirname "$_osa_sfile")" 2>/dev/null && pwd)/$(basename "$_osa_sfile")" || OSA_SETTINGS="$_osa_sfile"
+      export OSA_SETTINGS
+      shift
+      ;;
+    *)
+      _OSA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- ${_OSA_ARGS[@]+"${_OSA_ARGS[@]}"}
 
 # ── Daemon helpers ────────────────────────────────────────────────
 backend_healthy() { _http_ok "$HEALTH_URL"; }
@@ -265,6 +295,7 @@ print_help() {
   echo -e "    ${CYAN}--resume${RESET} ${DIM}[id]${RESET}                 Resume a session"
   echo -e "    ${CYAN}--permission-mode${RESET} ${DIM}<mode>${RESET}      ask · auto-edit · plan · overdrive"
   echo -e "    ${CYAN}--dev${RESET}                           Dev profile ${DIM}(port 19001)${RESET}"
+  echo -e "    ${CYAN}--settings${RESET} ${DIM}<file>${RESET}               Extra settings file ${DIM}(highest-priority file layer)${RESET}"
   echo ""
   echo -e "  ${DIM}The backend keeps running in the background so the next ${RESET}${CYAN}osa${RESET}${DIM} is instant."
   echo -e "  ${DIM}Stop it any time with ${RESET}${CYAN}osa stop${RESET}${DIM}; it also idles down when unused.${RESET}"

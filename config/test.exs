@@ -28,6 +28,12 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
+
+# Disable the settings file watcher in tests — the suite changes cwd per test,
+# so the watcher would see every project-path change as an external edit and
+# fire spurious settings_changed events / cache resets. The watcher's own test
+# re-enables it explicitly around a supervised instance.
+config :optimal_system_agent, settings_watcher_enabled: false
 # Isolate the ~/.osa bootstrap dir so tests NEVER touch the operator's real
 # config. Without this, HTTP route tests that exercise POST /switch call
 # persist_model_selection, which writes ~/.osa/config.json — silently clobbering
