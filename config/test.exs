@@ -28,6 +28,13 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # Disable all LLM calls in tests so deterministic paths are always
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
+# Isolate the ~/.osa bootstrap dir so tests NEVER touch the operator's real
+# config. Without this, HTTP route tests that exercise POST /switch call
+# persist_model_selection, which writes ~/.osa/config.json — silently clobbering
+# the user's real model selection every time the suite runs.
+config :optimal_system_agent,
+  bootstrap_dir: Path.join(System.tmp_dir!(), "osa-test-bootstrap")
+
 # Model catalog: no network fetch in tests — deterministic, bundled-only.
 # Point the on-disk cache at a path that never exists so the catalog's tier-1
 # cache lookup (`fresh_cache/0`) always misses and it falls through to the

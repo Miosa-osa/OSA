@@ -8,12 +8,14 @@ defmodule OptimalSystemAgent.ContextRefs.Hook do
     unless OptimalSystemAgent.Settings.get("context_refs_enabled", true) do
       {:ok, payload}
     else
-      case Parser.parse(message) do
+      working_dir = Map.get(payload, :working_dir)
+
+      case Parser.parse(message, working_dir: working_dir) do
         {_cleaned, []} ->
           :skip
 
         {cleaned, refs} ->
-          blocks = Resolver.resolve(refs)
+          blocks = Resolver.resolve(refs, working_dir: working_dir)
           expanded = cleaned <> Resolver.format_blocks(blocks)
           {:ok, %{payload | message: expanded}}
       end

@@ -89,6 +89,17 @@ impl App {
             }
             BackendEvent::StreamingToken { text, .. } => {
                 if self.state.is_processing() {
+                    // Reasoning is over once real tokens stream: collapse the
+                    // thinking box so the elapsed-timer spinner row returns for
+                    // the rest of the turn. Without this the box (which REPLACES
+                    // the activity row in draw_inline) froze at "▶ Thinking…"
+                    // until agent_response, hiding the timer the recap must
+                    // agree with. A later ThinkingDelta (multi-iteration turn)
+                    // repopulates it; thinking_buf is kept — it is the
+                    // transcript accumulator, not the live box.
+                    if !self.thinking_box.is_empty() {
+                        self.thinking_box.clear();
+                    }
                     self.stream_buf.push_str(&text);
                     self.chat.update_streaming(&self.stream_buf);
                     self.activity.add_stream_chars(text.len());
@@ -825,21 +836,37 @@ impl App {
                 }
                 self.recompute_layout();
             }
-            BackendEvent::TurnRecap { elapsed_ms, tools_used } => {
+            BackendEvent::TurnRecap { elapsed_ms, tool_calls, tools_used } => {
                 // Only surface the recap when the turn did substantive, user-visible
                 // work — a real tool ran (shell/file/web/dir/git/…) OR the turn took
-                // a noticeable amount of wall-clock time. Internal bookkeeping tools
-                // (memory_save / memory_recall) auto-fire every turn, so counting
-                // them would slap a "Worked for 3s · 1 tool" line under trivial chat
-                // like "Yeah?". They are filtered out here.
-                let elapsed_secs = elapsed_ms / 1000;
-                let tool_count = crate::util::substantive_tool_count(&tools_used);
-                if tool_count > 0 || elapsed_secs > 10 {
+                // a noticeable amount of wall-clock time. `tool_calls` is the
+                // server's PER-TURN substantive tool-USE count (internal
+                // bookkeeping like memory_save / memory_recall / session_search
+                // is filtered server-side, and calls are counted per use, not
+                // per distinct tool name). The name-list fallback covers legacy
+                // servers that don't send tool_calls; substantive_tool_count
+                // re-filters it as defense-in-depth.
+                let tool_count = if tool_calls > 0 {
+                    tool_calls as usize
+                } else {
+                    crate::util::substantive_tool_count(&tools_used)
+                };
+                // Elapsed: prefer the CLIENT clock the live spinner rendered
+                // from (snapshotted at the agent_response turn-end edge), so
+                // the recap equals the last spinner value and can never jump
+                // backwards — the server clock starts later, after the request
+                // round-trip. Server elapsed_ms is only the fallback (e.g. a
+                // recap arriving after an SSE reconnect with no live timer).
+                let elapsed_secs = self
+                    .last_turn_client_elapsed_secs
+                    .take()
+                    .unwrap_or(elapsed_ms / 1000);
+                if tool_count > 0 || elapsed_secs >= crate::util::RECAP_ELAPSED_THRESHOLD_SECS {
                     let mut text =
                         format!("\u{273b} Worked for {}", crate::util::fmt_elapsed(elapsed_secs));
                     if tool_count > 0 {
                         text.push_str(&format!(
-                            " \u{00b7} {} tool{}",
+                            " \u{00b7} {} tool use{}",
                             tool_count,
                             if tool_count == 1 { "" } else { "s" }
                         ));

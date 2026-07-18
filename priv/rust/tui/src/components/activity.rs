@@ -32,28 +32,6 @@ fn format_count(n: usize) -> String {
     }
 }
 
-/// Format elapsed seconds into human-readable duration: 45s → 2m 15s → 1h 3m
-fn format_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        let m = secs / 60;
-        let s = secs % 60;
-        if s == 0 {
-            format!("{}m", m)
-        } else {
-            format!("{}m {}s", m, s)
-        }
-    } else {
-        let h = secs / 3600;
-        let m = (secs % 3600) / 60;
-        if m == 0 {
-            format!("{}h", h)
-        } else {
-            format!("{}h {}m", h, m)
-        }
-    }
-}
 
 /// Tool symbol + verb mapping for activity feed
 fn tool_display(name: &str) -> (&'static str, &'static str) {
@@ -285,6 +263,13 @@ impl Activity {
         self.active_verb = None;
     }
 
+    /// Seconds since the spinner clock started (`start()`), if running. This is
+    /// the exact clock `draw` renders (floored the same way), exposed so the
+    /// turn recap can print the same number the live spinner last showed.
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        self.start_time.map(|t| t.elapsed().as_secs())
+    }
+
     /// Override the spinner verb with the currently-active task's present-
     /// continuous form (Claude Code's `activeForm`). Pass `None` to fall back to
     /// the rotating flavor verbs (no task in progress).
@@ -456,7 +441,7 @@ impl Component for Activity {
             } else {
                 (self.stream_chars + self.thinking_chars) / 4
             };
-            let mut text = format!("OSA: {} ({}", self.a11y_status(), format_elapsed(elapsed));
+            let mut text = format!("OSA: {} ({}", self.a11y_status(), crate::util::fmt_elapsed(elapsed));
             if tokens > 0 {
                 text.push_str(&format!(", {} tokens", format_count(tokens)));
             }
@@ -493,7 +478,7 @@ impl Component for Activity {
 
         // Claude-Code line: "✻ Zesting… (28s · ↓ 1.5k tokens)". Sub-phase detail
         // (which tool is running) shows separately as the ✓ tool-result lines.
-        let elapsed_str = format_elapsed(elapsed);
+        let elapsed_str = crate::util::fmt_elapsed(elapsed);
         let mut spinner_spans: Vec<Span<'_>> = vec![
             Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
             Span::styled(format!("{}\u{2026}", word), theme.spinner_verb()),

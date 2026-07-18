@@ -17,29 +17,51 @@ pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Format an elapsed duration (in seconds) compactly and identically across the
-/// agents panel, dashboard, teammate-finished chat lines, background completions,
-/// and the turn recap: `45s → 2m15s → 1h03m`. Shared so every surface renders
-/// h/m/s the same way (a 2h33m run must never print as `9180s`).
+/// live spinner, agents panel, dashboard, teammate-finished chat lines,
+/// background completions, and the turn recap: `45s → 2m 15s → 1h 3m` (spaced,
+/// non-zero-padded, trailing zero units dropped — `2m`, `1h`; Claude Code's
+/// formatDuration style). This is the ONLY duration formatter — every surface
+/// must call it so the spinner→recap transition never renders the same
+/// duration two different ways (`2m 15s` vs `2m15s`).
 pub fn fmt_elapsed(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
     } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
+        let (m, s) = (secs / 60, secs % 60);
+        if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m {}s", m, s)
+        }
     } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+        let (h, m) = (secs / 3600, (secs % 3600) / 60);
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h {}m", h, m)
+        }
     }
 }
 
-/// True for internal bookkeeping tools that fire automatically every turn
-/// (memory persistence / recall) and therefore must NOT, on their own, trigger
-/// the end-of-turn "✻ Worked for …" recap. Without this gate a trivial reply
-/// like "Yeah?" still prints "Worked for 3s · 1 tool" because a memory tool
-/// auto-fired. Everything else — shell_execute, file_read/write/edit,
-/// web_search/fetch, dir_list, git, … — is substantive, user-visible work and
-/// counts toward the recap.
+/// Wall-clock threshold (seconds) above which a turn with zero substantive
+/// tool calls still earns a "✻ Worked for …" recap line. Compared with `>=`
+/// against whole (floored) seconds, so the first qualifying display is exactly
+/// "Worked for 10s" — the same number the user just watched the spinner show.
+pub const RECAP_ELAPSED_THRESHOLD_SECS: u64 = 10;
+
+/// True for internal bookkeeping tools that fire automatically (memory
+/// persistence / recall, session history search) and therefore must NOT, on
+/// their own, trigger the end-of-turn "✻ Worked for …" recap. Without this
+/// gate a trivial reply like "Yeah?" still prints "Worked for 3s · 1 tool use"
+/// because a memory tool auto-fired. Everything else — shell_execute,
+/// file_read/write/edit, web_search/fetch, dir_list, git, … — is substantive,
+/// user-visible work and counts toward the recap. The server applies the same
+/// filter (Telemetry.internal_tool?/1) before counting; this client copy is
+/// defense-in-depth for legacy payloads that only carry the name list.
 pub fn is_internal_tool(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
     n.starts_with("memory")
+        || matches!(n.as_str(), "session_search" | "session_recall" | "recall")
 }
 
 /// Count the substantive (user-visible) tools in a turn's tool list, excluding
@@ -94,6 +116,31 @@ mod tests {
             let out = truncate_str_start(s, limit);
             assert!(s.ends_with(out));
         }
+    }
+
+    #[test]
+    fn fmt_elapsed_matches_spinner_style() {
+        assert_eq!(fmt_elapsed(0), "0s");
+        assert_eq!(fmt_elapsed(45), "45s");
+        assert_eq!(fmt_elapsed(60), "1m");
+        assert_eq!(fmt_elapsed(135), "2m 15s");
+        assert_eq!(fmt_elapsed(3600), "1h");
+        assert_eq!(fmt_elapsed(3780), "1h 3m");
+        assert_eq!(fmt_elapsed(9180), "2h 33m");
+    }
+
+    #[test]
+    fn internal_tools_do_not_count_as_substantive() {
+        assert!(is_internal_tool("memory_save"));
+        assert!(is_internal_tool("memory_recall"));
+        assert!(is_internal_tool("session_search"));
+        assert!(is_internal_tool(" Session_Search "));
+        assert!(!is_internal_tool("shell_execute"));
+        assert!(!is_internal_tool("file_read"));
+        assert_eq!(
+            substantive_tool_count(&["memory_save", "session_search", "shell_execute"]),
+            1
+        );
     }
 
     #[test]

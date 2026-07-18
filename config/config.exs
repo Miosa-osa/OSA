@@ -247,7 +247,26 @@ config :optimal_system_agent,
   vault_checkpoint_interval: 10,
   vault_observation_min_score: 0.4,
   vault_observation_flush_interval: 60_000,
-  vault_context_max_chars: 3000
+  vault_context_max_chars: 3000,
+
+  # ---------------------------------------------------------------------------
+  # Memory recall + dynamic-context budgeting (Agent.Context / Memory.Store)
+  # ---------------------------------------------------------------------------
+  # Bounded, query-scored, threshold-gated recall (mirrors Grok's
+  # MemorySearchConfig). Below-threshold entries are DROPPED, not truncated.
+  memory_recall_max_results: 6,
+  memory_recall_min_score: 0.35,
+  # Hard token cap for the rendered "## Long-term Memory" block (and per-block
+  # cap for any single RECALL-group block).
+  memory_context_token_cap: 1_200,
+  # Char cap for injected project context files (CLAUDE.md/AGENTS.md/...).
+  project_context_char_cap: 8_000,
+  # The RECALL block group (memory, episodic, project_context, skills,
+  # learned_skills, agent_roles) is capped to this fraction of the REAL
+  # effective context window — never the full leftover slack.
+  dynamic_recall_budget_frac: 0.20,
+  # Floor so a genuinely relevant memory still fits on small (8k) windows.
+  dynamic_recall_budget_floor: 512
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,

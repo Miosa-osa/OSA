@@ -212,13 +212,29 @@ defmodule OptimalSystemAgent.Soul do
   # Interpolate SYSTEM.md with the given pre-rendered tool-definitions block plus
   # the boot-time rules/user/soul/identity content. Shared by the full and lite
   # variants so the only difference between the two bases is the tools section.
+  # Grok-style memory pointer: a tiny STATIC section advertising the on-demand
+  # memory tools instead of force-injecting recalled memories every turn.
+  # Compile-time constant appended to the cached base — stable across turns,
+  # so it is safe inside the Anthropic ephemeral-cached content block.
+  @memory_pointer """
+  <memory>
+  Long-term memory and learned skills are NOT auto-injected on trivial turns. \
+  When the user references past work, preferences, decisions, or prior \
+  sessions, call `memory_recall` with a focused query. Call `find_skill` to \
+  load a learned skill's full steps.
+  </memory>
+  """
+
   defp build_base(tools_section) do
-    load_system_template()
-    |> interpolate("{{TOOL_DEFINITIONS}}", tools_section)
-    |> interpolate("{{RULES}}", rules_content())
-    |> interpolate("{{USER_PROFILE}}", user_content())
-    |> interpolate("{{SOUL_CONTENT}}", soul_content())
-    |> interpolate("{{IDENTITY_PROFILE}}", identity_content())
+    base =
+      load_system_template()
+      |> interpolate("{{TOOL_DEFINITIONS}}", tools_section)
+      |> interpolate("{{RULES}}", rules_content())
+      |> interpolate("{{USER_PROFILE}}", user_content())
+      |> interpolate("{{SOUL_CONTENT}}", soul_content())
+      |> interpolate("{{IDENTITY_PROFILE}}", identity_content())
+
+    base <> "\n\n" <> String.trim(@memory_pointer)
   end
 
   defp load_system_template do

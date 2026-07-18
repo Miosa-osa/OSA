@@ -507,22 +507,18 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
   # ── post_response ──────────────────────────────────────────────────
 
-  # Save transcript — persist user input and assistant response.
-  def save_transcript(%{session_id: sid, input: input, response: response} = payload)
+  # Save transcript — persist the ASSISTANT turn only. The user turn is
+  # persisted at ingestion by TurnPipeline.persist_user_turn/2 (store-at-
+  # source, Claude Code pattern): saving it here again would double-write
+  # every prompt, and the old code effectively saved the assistant's text
+  # under role "user" because :input was mis-derived from the merged
+  # message list. Memory auto-extraction moved to ingestion with it.
+  # `response` is the fully accumulated streamed final text from ReactLoop.
+  def save_transcript(%{session_id: sid, response: response} = payload)
       when is_binary(sid) do
     alias OptimalSystemAgent.Store.SessionTranscript
 
     try do
-      if is_binary(input) and input != "" do
-        SessionTranscript.save_turn(sid, "user", input)
-
-        extractions = OptimalSystemAgent.Memory.AutoExtract.extract(input)
-
-        if extractions != [] do
-          OptimalSystemAgent.Memory.AutoExtract.save_extracted(extractions, sid)
-        end
-      end
-
       if is_binary(response) and response != "" do
         SessionTranscript.save_turn(sid, "assistant", response)
       end

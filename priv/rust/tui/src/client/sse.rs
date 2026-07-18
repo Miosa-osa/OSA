@@ -579,6 +579,11 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             struct Ev {
                 #[serde(default)]
                 elapsed_ms: u64,
+                /// Substantive tool USES this turn (server-filtered). Defaults
+                /// to 0 for legacy servers, in which case the handler falls
+                /// back to counting the `tools_used` name list.
+                #[serde(default)]
+                tool_calls: u32,
                 #[serde(default)]
                 tools_used: Vec<String>,
             }
@@ -588,6 +593,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             };
             Some(BackendEvent::TurnRecap {
                 elapsed_ms: ev.elapsed_ms,
+                tool_calls: ev.tool_calls,
                 tools_used: ev.tools_used,
             })
         }

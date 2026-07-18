@@ -73,10 +73,51 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   end
 
   @doc """
-  Extract unique tool names used in the message history.
+  Extract unique tool names used in the message history (whole-session scope).
   """
   @spec extract_tools_used(list(map())) :: list(String.t())
   def extract_tools_used(messages) do
+    messages
+    |> extract_tool_call_names()
+    |> Enum.uniq()
+  end
+
+  @doc """
+  Tool names called in messages appended after index `since` — per-TURN scope.
+
+  NOT deduplicated: one entry per call, so the turn recap counts tool USES
+  (Claude Code's `toolUseCount` semantics — "5 reads + 3 bash" is 8, not 2),
+  never distinct tool types, and never tools from earlier turns (the message
+  list accumulates across the whole session).
+  """
+  @spec tools_used_since(list(map()), non_neg_integer()) :: list(String.t())
+  def tools_used_since(messages, since) when is_integer(since) and since >= 0 do
+    messages
+    |> Enum.drop(since)
+    |> extract_tool_call_names()
+  end
+
+  # Internal bookkeeping tools that auto-fire (memory persistence/recall,
+  # session history search). They must not, on their own, make a trivial turn
+  # print a "✻ Worked for Ns · 1 tool use" recap. The TUI keeps a mirror filter
+  # (util.rs is_internal_tool) as defense-in-depth for legacy payloads.
+  @internal_tools ~w(session_search session_recall recall)
+  @internal_tool_prefixes ~w(memory)
+
+  @doc "True for internal bookkeeping tools excluded from the turn recap."
+  @spec internal_tool?(term()) :: boolean()
+  def internal_tool?(name) when is_binary(name) do
+    n = name |> String.trim() |> String.downcase()
+    n in @internal_tools or Enum.any?(@internal_tool_prefixes, &String.starts_with?(n, &1))
+  end
+
+  def internal_tool?(_), do: false
+
+  @doc "Drop internal bookkeeping tools, keeping substantive user-visible work."
+  @spec substantive_tools(list(String.t())) :: list(String.t())
+  def substantive_tools(names), do: Enum.reject(names, &internal_tool?/1)
+
+  defp extract_tool_call_names(messages) do
     messages
     |> Enum.filter(fn
       %{role: "assistant", tool_calls: tcs} when is_list(tcs) and tcs != [] -> true
@@ -84,6 +125,5 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     end)
     |> Enum.flat_map(& &1.tool_calls)
     |> Enum.map(& &1.name)
-    |> Enum.uniq()
   end
 end

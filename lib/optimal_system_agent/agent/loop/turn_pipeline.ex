@@ -30,6 +30,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   alias OptimalSystemAgent.Agent.Loop.GenreRouter
   alias OptimalSystemAgent.Agent.Loop.MessageHandler
   alias OptimalSystemAgent.Agent.Loop.Limits
+  alias OptimalSystemAgent.Store.SessionTranscript
 
   @cancel_table :osa_cancel_flags
 
@@ -146,7 +147,8 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       case Hooks.run(:user_prompt_submit, %{
              message: message,
              session_id: state.session_id,
-             turn_count: state.turn_count
+             turn_count: state.turn_count,
+             working_dir: Map.get(state, :working_dir)
            }) do
         {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
         {:blocked, _reason} -> {nil, %{state | status: :idle}}
@@ -161,6 +163,14 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
 
   # signal weight, compaction, decorated message build, and per-turn state reset
   defp prepare_turn(message, opts, state) do
+    # Persist the USER turn at ingestion (store-at-source, the Claude Code /
+    # OpenCode pattern): the raw prompt is committed under its own role
+    # before nudge/directive decoration and before the plan/genre branches,
+    # so cancelled turns, ReactLoop crashes, and plan-mode turns still
+    # record what the user asked. The post_response hook persists only the
+    # assistant side (see Hooks.Handlers.save_transcript/1).
+    persist_user_turn(state.session_id, message)
+
     signal_weight = Keyword.get(opts, :signal_weight, nil)
 
     # Mint a per-turn correlation id (prompt.id-style) and emit turn_start so the
@@ -187,6 +197,11 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     %{
       state
       | messages: state.messages ++ messages_to_append,
+        # Raw user input for this turn — read by Loop.run_and_reply when it
+        # builds the :post_response payload, replacing the old (wrong)
+        # derivation from List.last(state.messages) which returned the
+        # just-appended assistant reply instead of the user's prompt.
+        current_input: message,
         iteration: 0,
         overflow_retries: 0,
         auto_continues: 0,
@@ -201,6 +216,38 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     }
   end
 
+  @doc """
+  Persist the raw user prompt to the transcript store at ingestion time.
+
+  Best-effort: transcript loss must never fail the turn (`save_turn/4`
+  already rescues internally; this wrapper adds belt-and-braces). Also runs
+  memory auto-extraction on the REAL user text — previously the
+  post_response handler mined the assistant's reply by mistake because its
+  :input field was mis-derived.
+  """
+  @spec persist_user_turn(String.t(), term()) :: :ok
+  def persist_user_turn(session_id, message) when is_binary(message) and message != "" do
+    SessionTranscript.save_turn(session_id, "user", message)
+
+    Task.start(fn ->
+      try do
+        extractions = OptimalSystemAgent.Memory.AutoExtract.extract(message)
+
+        if extractions != [] do
+          OptimalSystemAgent.Memory.AutoExtract.save_extracted(extractions, session_id)
+        end
+      rescue
+        _ -> :ok
+      end
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def persist_user_turn(_session_id, _message), do: :ok
+
   defp route_genre(message, opts, state, skip_plan) do
     # Genre routing
     signal_genre = Keyword.get(opts, :signal_genre, :direct)
@@ -209,6 +256,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     case genre_route do
       {:respond, genre_response} ->
         state = %{state | status: :idle}
+
+        # Genre turns bypass run_and_reply/:post_response — persist the
+        # canned reply so the ingestion-time user turn doesn't sit
+        # unanswered in the transcript used by /sessions resume and recap.
+        SessionTranscript.save_turn(state.session_id, "assistant", genre_response,
+          tool_name: "genre"
+        )
 
         Bus.emit(:agent_response, %{
           session_id: state.session_id,

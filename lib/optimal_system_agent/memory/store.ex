@@ -305,29 +305,44 @@ defmodule OptimalSystemAgent.Memory.Store do
     limit = Keyword.get(opts, :limit, 10)
     category = opts |> Keyword.get(:category) |> normalize_filter()
     scope = opts |> Keyword.get(:scope) |> normalize_filter()
+    min_score = Keyword.get(opts, :min_score)
 
     query_keywords = extract_keywords(query)
 
-    ets_ids = lookup_ets_index(query_keywords)
+    if Enum.empty?(query_keywords) do
+      # Empty / stop-word-only query: NEVER run the "%%" LIKE fallback — it
+      # table-scans and returns every row, which let context assembly dump the
+      # whole memory DB into the prompt. Callers that want a listing must use
+      # recent/1 explicitly.
+      {:ok, []}
+    else
+      ets_ids = lookup_ets_index(query_keywords)
 
-    entries =
-      if Enum.empty?(ets_ids) do
-        fallback_sqlite_search(query, category, scope, limit)
-      else
-        load_entries_by_ids(ets_ids, category, scope)
-      end
+      entries =
+        if Enum.empty?(ets_ids) do
+          fallback_sqlite_search(query, category, scope, limit)
+        else
+          load_entries_by_ids(ets_ids, category, scope)
+        end
 
-    scored =
-      entries
-      |> Enum.map(fn e -> {score_relevance(e, query_keywords), e} end)
-      |> Enum.sort_by(&elem(&1, 0), :desc)
-      |> Enum.take(limit)
-      |> Enum.map(&elem(&1, 1))
+      scored =
+        entries
+        |> Enum.map(fn e -> {score_relevance(e, query_keywords), e} end)
+        |> maybe_filter_min_score(min_score)
+        |> Enum.sort_by(&elem(&1, 0), :desc)
+        |> Enum.take(limit)
+        |> Enum.map(&elem(&1, 1))
 
-    bump_access_counts(scored)
+      bump_access_counts(scored)
 
-    {:ok, scored}
+      {:ok, scored}
+    end
   end
+
+  defp maybe_filter_min_score(scored, min_score) when is_number(min_score),
+    do: Enum.filter(scored, fn {score, _entry} -> score >= min_score end)
+
+  defp maybe_filter_min_score(scored, _), do: scored
 
   defp do_recent(limit) do
     entries =

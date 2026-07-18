@@ -218,6 +218,15 @@ impl App {
             self.agent_header_sent = true;
         }
 
+        // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it
+        // (and before /goal auto-continue or a queued auto-submit can restart
+        // it for the NEXT turn). The turn_recap SSE event arrives after this
+        // agent_response and consumes the snapshot, so "✻ Worked for Ns"
+        // equals the last value the spinner showed instead of a server-side
+        // clock that starts later (after the request round-trip) and can
+        // visibly jump backwards.
+        self.last_turn_client_elapsed_secs = self.activity.elapsed_secs();
+
         // Clear streaming state
         self.stream_buf.clear();
         self.thinking_buf.clear();

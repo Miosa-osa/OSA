@@ -13,9 +13,19 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
   """
   require Logger
 
-  @max_chars 20_000
   @head_ratio 0.7
   @tail_ratio 0.2
+
+  # Char cap for injected project context (configurable; default 8_000 ≈ 2k
+  # tokens — lowered from the old hardcoded 20_000 so instruction files cannot
+  # dominate the per-turn dynamic tier).
+  defp max_chars,
+    do: Application.get_env(:optimal_system_agent, :project_context_char_cap, 8_000)
+
+  # Discovery cache — instruction files are read + injection-scanned once per
+  # TTL instead of on every context build.
+  @cache_table :osa_context_discovery_cache
+  @cache_ttl 60_000
 
   @context_files [
     ".osa/context.md",
@@ -30,6 +40,32 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
   @spec discover(String.t() | nil) :: String.t() | nil
   def discover(working_dir) do
     dir = working_dir || File.cwd!()
+    ensure_cache_table()
+    now = System.monotonic_time(:millisecond)
+
+    case :ets.lookup(@cache_table, dir) do
+      [{^dir, result, ts}] when now - ts < @cache_ttl ->
+        result
+
+      _ ->
+        result = do_discover(dir)
+        :ets.insert(@cache_table, {dir, result, now})
+        result
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp ensure_cache_table do
+    case :ets.whereis(@cache_table) do
+      :undefined -> :ets.new(@cache_table, [:named_table, :public, :set])
+      _ -> @cache_table
+    end
+  rescue
+    ArgumentError -> @cache_table
+  end
+
+  defp do_discover(dir) do
     git_root = find_git_root(dir)
     search_dirs = Enum.uniq([dir | if(git_root && git_root != dir, do: [git_root], else: [])])
 
@@ -57,7 +93,7 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
       {path, content} ->
         case scan_for_injection(content) do
           :clean ->
-            truncated = truncate_smart(content, @max_chars)
+            truncated = truncate_smart(content, max_chars())
             "## Project Context (#{Path.basename(path)})\n\n#{truncated}"
 
           {:blocked, reason} ->

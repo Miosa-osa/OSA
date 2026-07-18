@@ -35,7 +35,7 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
     attrs = %{
       session_id: session_id,
       role: role,
-      content: content,
+      content: normalize_content(content),
       tool_name: Keyword.get(opts, :tool_name),
       tokens: Keyword.get(opts, :tokens, 0)
     }
@@ -128,12 +128,35 @@ defmodule OptimalSystemAgent.Store.SessionTranscript do
   def get_transcript(session_id) do
     from(t in __MODULE__,
       where: t.session_id == ^session_id,
-      order_by: [asc: t.inserted_at]
+      order_by: [asc: t.inserted_at, asc: t.id]
     )
     |> Repo.all()
   rescue
     _ -> []
   end
+
+  # The :content column is :string. Structured messages (vision turns carry
+  # a list of content blocks — see MessageHandler.build_messages/3) would
+  # fail the Ecto cast and be silently dropped; flatten block lists to text
+  # ("[image]" placeholder per image block) so every turn survives
+  # persistence. nil passes through so validate_required still catches
+  # genuine caller bugs.
+  defp normalize_content(content) when is_binary(content), do: content
+
+  defp normalize_content(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{type: "text", text: text} when is_binary(text) -> text
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      %{type: "image"} -> "[image]"
+      %{"type" => "image"} -> "[image]"
+      other -> inspect(other)
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp normalize_content(nil), do: nil
+  defp normalize_content(content), do: inspect(content)
 
   # Sanitize FTS5 query to prevent injection — escape special chars
   defp sanitize_fts_query(query) do

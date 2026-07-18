@@ -152,6 +152,12 @@ pub struct App {
     pub stream_buf: String,
     pub thinking_buf: String,
     pub processing_start: Option<Instant>,
+    /// Spinner-clock elapsed captured at the agent_response turn-end edge (just
+    /// before `activity.stop()`), consumed by the trailing turn_recap event so
+    /// "✻ Worked for Ns" prints the same number the live spinner last showed —
+    /// never the server's later-starting clock (which can appear to jump
+    /// backwards). `.take()`n on use; None falls back to server elapsed_ms.
+    pub last_turn_client_elapsed_secs: Option<u64>,
     pub last_cancel_attempt: Option<Instant>,
     pub cancelled: bool,
     pub sse_reconnecting: bool,
@@ -381,6 +387,7 @@ impl App {
             stream_buf: String::new(),
             thinking_buf: String::new(),
             processing_start: None,
+            last_turn_client_elapsed_secs: None,
             last_cancel_attempt: None,
             cancelled: false,
             sse_reconnecting: false,

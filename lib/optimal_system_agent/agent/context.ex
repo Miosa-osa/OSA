@@ -37,9 +37,11 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Context.Budget
   alias OptimalSystemAgent.Agent.Scratchpad
   alias OptimalSystemAgent.Agent.Tasks
   alias OptimalSystemAgent.Agent.Memory.Episodic
+  alias OptimalSystemAgent.Memory.Scoring
   alias OptimalSystemAgent.Soul
 
   @response_reserve 8_192
@@ -105,9 +107,11 @@ defmodule OptimalSystemAgent.Agent.Context do
           estimate_tokens(override)
       end
 
-    # Tier 2: Dynamic context
+    # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
+    # RECALL group (memory/project/skills) is additionally capped to a fraction
+    # of the REAL window so trivial turns can't balloon into the free space.
     dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
-    dynamic_context = assemble_dynamic_context(state, dynamic_budget)
+    dynamic_context = assemble_dynamic_context(state, dynamic_budget, max_tok)
 
     dynamic_tokens = estimate_tokens(dynamic_context)
     total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
@@ -146,7 +150,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       end)
 
     dynamic_budget = max(max_tok - @response_reserve - conversation_tokens - static_tokens, 1_000)
-    dynamic_context = assemble_dynamic_context(state, dynamic_budget)
+    dynamic_context = assemble_dynamic_context(state, dynamic_budget, max_tok)
     dynamic_tokens = estimate_tokens(dynamic_context)
     total_tokens = static_tokens + dynamic_tokens + conversation_tokens + @response_reserve
 
@@ -199,15 +203,61 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Dynamic context assembly
   # ---------------------------------------------------------------------------
 
-  defp assemble_dynamic_context(state, budget) do
+  # ESSENTIAL blocks are small, always-relevant operating state — fitted first
+  # from the full dynamic budget. Everything else (memory, episodic, project
+  # context, skills, learned skills, agent roles) is RECALL and competes within
+  # a bounded sub-budget capped to a fraction of the REAL window.
+  @essential_labels ~w(bootstrap personality tool_process runtime environment plan_mode task_state workflow scratchpad)
+
+  defp assemble_dynamic_context(state, budget, effective_window) do
     blocks = gather_dynamic_blocks(state)
 
-    # All blocks are tier 1 (always included) — just fit within budget
-    {parts, _used} = fit_blocks(blocks, budget)
+    {essential, recall} =
+      Enum.split_with(blocks, fn {_content, _priority, label} ->
+        label in @essential_labels
+      end)
 
-    parts
+    {essential_parts, essential_used} = fit_blocks(essential, budget)
+
+    # RECALL group: capped to ~dynamic_recall_budget_frac of the REAL window
+    # (with a small floor), never the full leftover slack.
+    leftover = budget - essential_used
+    recall_budget = Budget.recall_budget(effective_window, leftover)
+
+    # Most query-relevant recall blocks first, so they win the budget.
+    recall_ordered = order_by_query_relevance(recall, state)
+
+    {recall_parts, _recall_used} =
+      fit_blocks(recall_ordered, recall_budget, Budget.memory_context_token_cap())
+
+    (essential_parts ++ recall_parts)
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n---\n\n")
+  end
+
+  # Order the RECALL group by keyword overlap with the latest user message.
+  # Enum.sort_by is stable, so equally-relevant blocks keep their listed order.
+  defp order_by_query_relevance(blocks, state) do
+    keywords = Scoring.extract_keywords(find_latest_user_message(state.messages))
+
+    if keywords == [] do
+      blocks
+    else
+      kw_set = MapSet.new(keywords)
+
+      Enum.sort_by(
+        blocks,
+        fn {content, _priority, _label} ->
+          content
+          |> String.downcase()
+          |> String.split(~r/\s+/, trim: true)
+          |> MapSet.new()
+          |> MapSet.intersection(kw_set)
+          |> MapSet.size()
+        end,
+        :desc
+      )
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -272,13 +322,22 @@ defmodule OptimalSystemAgent.Agent.Context do
   # Fitting blocks into a budget
   # ---------------------------------------------------------------------------
 
-  defp fit_blocks(_blocks, budget) when budget <= 0, do: {[], 0}
+  # per_block_cap (when given) bounds any SINGLE block so one oversized block
+  # cannot consume the entire group budget even when slack would allow it.
+  defp fit_blocks(blocks, budget, per_block_cap \\ nil)
 
-  defp fit_blocks(blocks, budget) do
+  defp fit_blocks(_blocks, budget, _per_block_cap) when budget <= 0, do: {[], 0}
+
+  defp fit_blocks(blocks, budget, per_block_cap) do
     {parts, used} =
       Enum.reduce(blocks, {[], 0}, fn {content, _priority, _label}, {acc, tokens_used} ->
         block_tokens = estimate_tokens(content)
-        available = budget - tokens_used
+
+        available =
+          case per_block_cap do
+            nil -> budget - tokens_used
+            cap -> min(budget - tokens_used, cap)
+          end
 
         cond do
           available <= 0 ->
@@ -414,18 +473,20 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   end
 
+  # Bounded, query-scored, threshold-gated memory recall (Grok-style).
+  # Trivial turns (no meaningful keywords in the latest user message) get NO
+  # memory block at all — the static base carries a <memory> pointer so the
+  # model pulls memories on demand via memory_recall instead. Fails CLOSED:
+  # errors yield nil, never an unfiltered dump.
   defp memory_block_relevant(state) do
     latest_user_msg = find_latest_user_message(state.messages)
+    keywords = Scoring.extract_keywords(latest_user_msg)
 
     content =
-      if latest_user_msg do
-        try do
-          recall_relevant(latest_user_msg)
-        rescue
-          _ -> full_recall()
-        end
+      if keywords == [] do
+        nil
       else
-        full_recall()
+        recall_scored(latest_user_msg, keywords)
       end
 
     # Append taxonomy-classified memories via Injector (if available)
@@ -464,71 +525,45 @@ defmodule OptimalSystemAgent.Agent.Context do
     end)
   end
 
-  defp recall_relevant(query) do
-    full = full_recall()
+  # Real keyword recall against the store (never the empty string), re-scored
+  # with Memory.Scoring (category weight + Jaccard keyword overlap + recency),
+  # entries below min_score DROPPED (not truncated), count capped, then the
+  # rendered block hard-truncated to the token cap.
+  defp recall_scored(query, query_keywords) do
+    max_results = Budget.memory_recall_max_results()
+    min_score = Budget.memory_recall_min_score()
 
-    case full do
-      nil ->
-        nil
-
-      "" ->
-        nil
-
-      text ->
-        query_words =
-          query
-          |> String.downcase()
-          |> String.split(~r/\s+/, trim: true)
-          |> Enum.reject(&(String.length(&1) < 3))
-          |> MapSet.new()
-
-        if MapSet.size(query_words) == 0 do
-          text
-        else
-          sections = String.split(text, ~r/\n(?=## )/, trim: true)
-
-          relevant =
-            sections
-            |> Enum.filter(fn section ->
-              section_words =
-                section
-                |> String.downcase()
-                |> String.split(~r/\s+/, trim: true)
-                |> MapSet.new()
-
-              overlap = MapSet.intersection(query_words, section_words) |> MapSet.size()
-              overlap >= 2 or overlap >= MapSet.size(query_words) * 0.2
-            end)
-
-          case relevant do
-            [] -> nil
-            _ -> Enum.join(relevant, "\n\n")
-          end
-        end
-    end
-  end
-
-  defp full_recall do
-    try do
-      case OptimalSystemAgent.Memory.recall("", limit: 50) do
-        {:ok, []} ->
-          nil
-
-        {:ok, entries} ->
+    case OptimalSystemAgent.Memory.recall(query, limit: max_results, min_score: min_score) do
+      {:ok, entries} when is_list(entries) and entries != [] ->
+        survivors =
           entries
-          |> Enum.map(fn entry ->
-            cat = Map.get(entry, :category, "general")
-            content = Map.get(entry, :content, "")
-            "## #{cat}\n#{content}"
-          end)
-          |> Enum.join("\n\n")
+          |> Enum.map(fn entry -> {Scoring.score(entry, query_keywords), entry} end)
+          |> Enum.filter(fn {score, _entry} -> score >= min_score end)
+          |> Enum.sort_by(&elem(&1, 0), :desc)
+          |> Enum.take(max_results)
 
-        _ ->
-          nil
-      end
-    rescue
-      _ -> nil
+        case survivors do
+          [] ->
+            nil
+
+          scored ->
+            scored
+            |> Enum.map(fn {_score, entry} ->
+              cat = Map.get(entry, :category, "general")
+              content = Map.get(entry, :content, "")
+              "## #{cat}\n#{content}"
+            end)
+            |> Enum.join("\n\n")
+            |> truncate_to_tokens(Budget.memory_context_token_cap())
+        end
+
+      _ ->
+        nil
     end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp episodic_block(state) do

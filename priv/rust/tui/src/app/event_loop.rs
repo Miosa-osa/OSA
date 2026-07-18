@@ -418,9 +418,11 @@ impl App {
             return base;
         }
 
-        // Chrome below the streaming preview: thinking(1) + ctx-hint(1) +
-        // status(2). The streaming region gets `stream_preview` rows on top.
-        const OVERHEAD: u16 = 4;
+        // Chrome below the streaming preview: thinking/activity row (dynamic —
+        // shared with draw_inline via think_row_height so the two can never
+        // drift a row apart) + ctx-hint(1) + status(2). The streaming region
+        // gets `stream_preview` rows on top.
+        let overhead: u16 = self.think_row_height() + 1 + 2;
         const MAX_STREAM_PREVIEW: u16 = 18;
         const STEP: u16 = 6;
         // Quantize upward to the next STEP so a growing reply changes the
@@ -435,7 +437,7 @@ impl App {
         // logic (`desired_inline_h != cur_inline_h`) thrash and leaves a ghost
         // copy of the live-region chrome — the second Thinking box + composer the
         // user saw stacked. Counting it in both branches keeps them in lockstep.
-        let want = OVERHEAD
+        let want = overhead
             .saturating_add(input_needed)
             .saturating_add(stream_preview)
             .saturating_add(agents_h)
@@ -444,14 +446,24 @@ impl App {
         want.clamp(base, hi)
     }
 
-    /// Draw the compact inline live region: streaming preview, thinking/activity,
-    /// status, and input. Finalized conversation lives in native scrollback.
-    fn draw_inline(&self, frame: &mut Frame, area: Rect) {
-        let think_h: u16 = if !self.thinking_box.is_empty() {
+    /// Height of the thinking/activity row. The SINGLE source of truth used by
+    /// BOTH `desired_inline_height` (viewport sizing) and `draw_inline` (layout)
+    /// so the reserved overhead can never disagree with the drawn row by a line
+    /// — that 1-row disagreement is exactly the height-thrash class of bug that
+    /// stacks a ghost second Thinking box + composer (see the agents_h note in
+    /// `desired_inline_height`).
+    fn think_row_height(&self) -> u16 {
+        if !self.thinking_box.is_empty() {
             1
         } else {
             self.activity.height().min(1)
-        };
+        }
+    }
+
+    /// Draw the compact inline live region: streaming preview, thinking/activity,
+    /// status, and input. Finalized conversation lives in native scrollback.
+    fn draw_inline(&self, frame: &mut Frame, area: Rect) {
+        let think_h: u16 = self.think_row_height();
         // Inline agents panel: multi-agent tree + "N background terminals" summary.
         // Height 0 when idle (row collapses); capped so it never swallows the
         // compact live region, and bounded by what's left after the fixed chrome.

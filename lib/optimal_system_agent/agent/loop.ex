@@ -95,6 +95,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     strategy_state: %{},
     # Per-call signal weight (0.0–1.0 or nil)
     signal_weight: nil,
+    # Raw user input for the current turn, set at ingestion by
+    # TurnPipeline.prepare_turn/3. Threaded into the :post_response payload
+    # (episodic recorder, auto skill creator) so hooks see the USER's text —
+    # the old List.last(state.messages) derivation returned the assistant
+    # reply because the assistant message had just been appended.
+    current_input: nil,
     started_at: nil,
     last_input_tokens: 0,
     # Per-turn correlation id (a prompt.id-style field) minted by
@@ -775,6 +781,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
       case MessageHandler.run_plan_mode(state) do
         {:ok, plan_text, state} ->
           state = %{state | status: :idle}
+
+          # Plan-mode returns without going through run_and_reply, so no
+          # :post_response fires — persist the plan here (tool_name "plan")
+          # so it appears in /sessions resume, transcript, and recap. The
+          # user turn was already saved at ingestion by TurnPipeline.
+          OptimalSystemAgent.Store.SessionTranscript.save_turn(
+            state.session_id,
+            "assistant",
+            plan_text,
+            tool_name: "plan"
+          )
+
           Telemetry.emit_context_pressure(state)
 
           Phoenix.PubSub.broadcast(
@@ -797,6 +815,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
     turn_started_ms = System.monotonic_time(:millisecond)
+    # Per-turn baselines: `state.messages` and `state.total_tool_calls` both
+    # accumulate for the whole session, so the end-of-turn recap must diff
+    # against these snapshots — otherwise a trivial turn 5 reports every tool
+    # any earlier turn ever used.
+    msg_len_before = length(state.messages)
+    tool_calls_before = Map.get(state, :total_tool_calls, 0)
 
     {response, state} =
       try do
@@ -819,9 +843,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
     response = maybe_scrub_prompt_leak(response)
     response = maybe_strip_dead_phrases(response)
 
+    # Per-turn tool telemetry: scan ONLY the messages this turn appended.
+    # `turn_tool_names` is per-call (not uniq'd) so counts reflect tool USES.
+    turn_tool_names = Telemetry.tools_used_since(state.messages, msg_len_before)
+    substantive_names = Telemetry.substantive_tools(turn_tool_names)
+
+    # Substantive tool USES this turn (Claude Code's toolUseCount semantics,
+    # matching doom_loop's call_count). If mid-turn compaction rewrote the
+    # message list (length shrank below the snapshot), fall back to the
+    # doom-loop live counter delta so the count still reflects this turn only.
+    turn_tool_calls =
+      if length(state.messages) >= msg_len_before do
+        length(substantive_names)
+      else
+        max(Map.get(state, :total_tool_calls, 0) - tool_calls_before, 0)
+      end
+
     meta = %{
       iteration_count: state.iteration,
-      tools_used: Telemetry.extract_tools_used(state.messages)
+      tools_used: Enum.uniq(turn_tool_names)
     }
 
     state = %{
@@ -852,7 +892,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       Hooks.run_async(:post_response, %{
         session_id: state.session_id,
         response: response,
-        input: List.last(state.messages) |> Map.get(:content, ""),
+        input: state.current_input || "",
         turn_count: state.turn_count,
         iteration: state.iteration,
         tools_used: Map.get(state.last_meta, :tools_used, []),
@@ -876,9 +916,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
        }}
     )
 
-    # Persistent "✻ Worked for Xm Ys · N tools" recap line — committed to the
-    # transcript when the turn ends (what the TUI-side Activity timer otherwise
-    # drops). Shared contract: %{type: :turn_recap, elapsed_ms, tools_used}.
+    # Persistent "✻ Worked for Xm Ys · N tool uses" recap line — committed to
+    # the transcript when the turn ends (what the TUI-side Activity timer
+    # otherwise drops). Shared contract:
+    # %{type: :turn_recap, elapsed_ms, tool_calls, tools_used} where
+    # `tool_calls` = substantive tool USES made by THIS turn (per-call count,
+    # internal bookkeeping tools filtered server-side) and `tools_used` = this
+    # turn's distinct substantive tool names. `elapsed_ms` stays
+    # server-monotonic and is only the TUI's fallback — the displayed elapsed
+    # comes from the client spinner clock so it never jumps backwards.
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
       "osa:session:#{state.session_id}",
@@ -887,7 +933,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
          type: :turn_recap,
          session_id: state.session_id,
          elapsed_ms: System.monotonic_time(:millisecond) - turn_started_ms,
-         tools_used: Map.get(meta, :tools_used, [])
+         tool_calls: turn_tool_calls,
+         tools_used: Enum.uniq(substantive_names)
        }}
     )
 

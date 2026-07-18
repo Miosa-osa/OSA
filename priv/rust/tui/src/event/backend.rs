@@ -148,8 +148,12 @@ pub enum BackendEvent {
     ShellDetached(Result<String, String>),
     /// End-of-turn recap. Persisted as a permanent `✻ Worked for {elapsed}` line
     /// so the elapsed timer survives past the live activity spinner.
+    /// `tool_calls` counts substantive tool USES made by this turn (per-call,
+    /// internal bookkeeping tools filtered server-side); `tools_used` lists the
+    /// turn's distinct substantive tool names (legacy fallback for the count).
     TurnRecap {
         elapsed_ms: u64,
+        tool_calls: u32,
         tools_used: Vec<String>,
     },
 

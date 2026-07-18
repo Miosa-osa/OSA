@@ -288,10 +288,10 @@ defmodule OptimalSystemAgent.SDK do
   defmodule Memory do
     @moduledoc "SDK memory facade — delegates to OptimalSystemAgent.Memory (modern store)."
 
-    @doc "Recall all persistent memories."
+    @doc "Recall all persistent memories (explicit listing via recent/1)."
     def recall do
       try do
-        case OptimalSystemAgent.Memory.recall("", limit: 50) do
+        case OptimalSystemAgent.Memory.recent(50) do
           {:ok, entries} -> entries
           _ -> []
         end

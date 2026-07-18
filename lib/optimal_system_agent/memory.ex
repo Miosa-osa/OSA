@@ -74,9 +74,13 @@ defmodule OptimalSystemAgent.Memory do
   + 20% recency. Access counts are bumped on every successful recall.
 
   Options:
-    - `:category` — filter by category atom or string
-    - `:scope`    — filter by scope atom or string
-    - `:limit`    — maximum entries to return (default: 10)
+    - `:category`  — filter by category atom or string
+    - `:scope`     — filter by scope atom or string
+    - `:limit`     — maximum entries to return (default: 10)
+    - `:min_score` — drop entries whose relevance score is below this threshold
+
+  An empty or stop-word-only query returns `{:ok, []}` — it never table-scans.
+  Use `recent/1` for an explicit listing.
 
   Returns `{:ok, [entry, ...]}`.
   """
