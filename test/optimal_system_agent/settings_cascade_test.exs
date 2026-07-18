@@ -10,8 +10,12 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
     File.mkdir_p!(Path.join(tmp, ".osa"))
     old_cwd = File.cwd!()
     File.cd!(tmp)
+    # Settings paths resolve via Workspace.Cwd (not File.cwd!/0); point it at the
+    # temp project so the cascade reads .osa/settings*.json from `tmp`.
+    OptimalSystemAgent.Workspace.Cwd.put_process_override(tmp)
 
     on_exit(fn ->
+      OptimalSystemAgent.Workspace.Cwd.clear_process_override()
       File.cd!(old_cwd)
       File.rm_rf!(tmp)
     end)

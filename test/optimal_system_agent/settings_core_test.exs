@@ -10,10 +10,18 @@ defmodule OptimalSystemAgent.SettingsCoreTest do
     tmp = Path.join(System.tmp_dir!(), "osa_ws2_t#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(tmp, ".osa"))
     old_cwd = File.cwd!()
+    old_original = OptimalSystemAgent.Workspace.Cwd.original_cwd()
     File.cd!(tmp)
+    OptimalSystemAgent.Workspace.Cwd.put_process_override(tmp)
+    # The settings watcher runs in its OWN process, so a process-dict override
+    # won't reach it — set the global original cwd too (async: false makes this
+    # safe) so the watcher resolves the settings path under `tmp`.
+    OptimalSystemAgent.Workspace.Cwd.set_original_cwd(tmp)
     Settings.reset_cache()
 
     on_exit(fn ->
+      OptimalSystemAgent.Workspace.Cwd.clear_process_override()
+      OptimalSystemAgent.Workspace.Cwd.set_original_cwd(old_original)
       File.cd!(old_cwd)
       File.rm_rf!(tmp)
       Settings.reset_cache()

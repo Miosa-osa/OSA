@@ -47,4 +47,39 @@ defmodule OptimalSystemAgent.PermissionsDefaultModeTest do
     write("weirdmode")
     assert Permissions.default_mode() == :ask
   end
+
+  defp write_legacy(mode) do
+    File.write!(@flag, Jason.encode!(%{"permission_mode" => mode}))
+    Settings.reset_cache()
+  end
+
+  defp write_both(cc_mode, legacy_mode) do
+    File.write!(
+      @flag,
+      Jason.encode!(%{
+        "permissions" => %{"defaultMode" => cc_mode},
+        "permission_mode" => legacy_mode
+      })
+    )
+
+    Settings.reset_cache()
+  end
+
+  test "falls back to legacy permission_mode key when defaultMode absent" do
+    write_legacy("auto-edit")
+    assert Permissions.default_mode() == :accept_edits
+    write_legacy("plan")
+    assert Permissions.default_mode() == :plan
+    write_legacy("overdrive")
+    assert Permissions.default_mode() == :overdrive
+    write_legacy("ask")
+    assert Permissions.default_mode() == :ask
+    write_legacy("bogus")
+    assert Permissions.default_mode() == :ask
+  end
+
+  test "CC permissions.defaultMode wins over legacy permission_mode" do
+    write_both("plan", "overdrive")
+    assert Permissions.default_mode() == :plan
+  end
 end
