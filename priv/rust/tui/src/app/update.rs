@@ -9,6 +9,15 @@ use crate::app::state::AppState;
 use crate::components::{AppAction, Component, ComponentAction};
 use crate::event::Event;
 
+/// Consecutive wheel-up ticks (on an empty composer) required before the
+/// transcript reader opens. A single tick must never yank the user into it.
+const SCROLL_OPEN_THRESHOLD: u8 = 3;
+/// Visual lines the open reader scrolls per mouse-wheel tick.
+const SCROLL_WHEEL_LINES: isize = 3;
+/// Max gap between wheel-up ticks for them to count as one deliberate gesture;
+/// a slower wheel-up restarts the count instead of accumulating stale ticks.
+const SCROLL_GESTURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// True only when a pasted string is entirely one-or-more existing filesystem
 /// paths (drag-drop of files or a copied path), as opposed to ordinary text.
 /// Ordinary prose — even prose that happens to contain a word matching a
@@ -130,19 +139,59 @@ impl App {
         }
     }
 
-    /// Handle a mouse event. Only the plain inline live region is interactive —
-    /// full-screen dialogs/overlays keep keyboard-only control. Left-click focuses
-    /// the composer and positions the caret (or toggles the mic button); a wheel
-    /// scroll-up opens the transcript reader so history is reachable by wheel now
-    /// that mouse capture has taken wheel events from the terminal's scrollback.
+    /// Handle a mouse event. Behaviour is deliberately conservative so a normal
+    /// wheel gesture never hijacks the session:
+    ///
+    /// * When the transcript reader is open, the wheel scrolls WITHIN it; a
+    ///   wheel-down while already parked at the newest line dismisses it cleanly
+    ///   (so scrolling out the bottom — then scrolling again — can't re-pop it).
+    /// * On the plain inline surface a single wheel-up does nothing. Only a
+    ///   sustained wheel-up gesture (SCROLL_OPEN_THRESHOLD consecutive ticks
+    ///   within SCROLL_GESTURE_WINDOW) on an EMPTY composer opens the reader —
+    ///   history lives in native scrollback the app can't scroll once
+    ///   mouse-captured, so the reader is the in-app way back through it.
+    /// * Left-click focuses the composer / positions the caret (or toggles mic).
     fn handle_mouse(&mut self, me: MouseEvent) {
-        // While a full-screen view or overlay owns the screen, ignore the mouse
-        // (its geometry doesn't match the inline composer coordinates).
-        if self.wants_full_viewport() || self.transcript.is_some() {
+        // ── Reader is open: the wheel drives it, nothing else. ────────────
+        if self.transcript.is_some() {
+            // Disjoint field borrows: entry source (shared) + `transcript` (mut).
+            let entries: &[crate::dialogs::transcript_viewer::TranscriptEntry] =
+                if let Some(ref o) = self.transcript_override {
+                    o
+                } else {
+                    &self.transcript_log
+                };
+            let dismiss = match me.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(ref mut tv) = self.transcript {
+                        tv.scroll_by(-SCROLL_WHEEL_LINES, entries);
+                    }
+                    false
+                }
+                MouseEventKind::ScrollDown => match self.transcript {
+                    Some(ref mut tv) => tv.scroll_by(SCROLL_WHEEL_LINES, entries),
+                    None => false,
+                },
+                _ => false,
+            };
+            if dismiss {
+                self.transcript = None;
+                self.transcript_override = None;
+            }
             return;
         }
+
+        // Any OTHER full-screen view / overlay keeps keyboard-only control (its
+        // geometry doesn't match the inline composer coordinates).
+        if self.wants_full_viewport() {
+            return;
+        }
+
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // A click ends any pending wheel-up gesture.
+                self.scroll_up_ticks = 0;
+                self.last_scroll_up = None;
                 if !self.state.allows_input() {
                     return;
                 }
@@ -164,14 +213,43 @@ impl App {
                 // Otherwise focus the composer / position the caret.
                 self.input.handle_click(me.column, me.row);
             }
-            // Mouse wheel is intentionally a NO-OP for now. Opening the
-            // full-screen transcript reader on a single wheel tick was jarring
-            // (a normal scroll gesture yanked the user into an overlay, and with
-            // inline rendering it stacked duplicate composer lines into the
-            // terminal). Until the proper inline wheel-scroll UX lands, swallow
-            // wheel events so scrolling can't corrupt the screen. History is
-            // still reachable via the transcript reader on its key binding.
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {}
+            // Wheel-up: accumulate a deliberate gesture. A single tick is a
+            // no-op; only SCROLL_OPEN_THRESHOLD consecutive ticks within the
+            // gesture window, on an empty composer, open the reader — so an
+            // ordinary scroll (or a wheel-up the instant after closing the
+            // reader) never yanks the user into the overlay.
+            MouseEventKind::ScrollUp => {
+                if !(self.transcript_can_open() && self.input.is_empty()) {
+                    self.scroll_up_ticks = 0;
+                    self.last_scroll_up = None;
+                    return;
+                }
+                let now = std::time::Instant::now();
+                let continued = self
+                    .last_scroll_up
+                    .map(|t| now.duration_since(t) <= SCROLL_GESTURE_WINDOW)
+                    .unwrap_or(false);
+                self.scroll_up_ticks = if continued {
+                    self.scroll_up_ticks.saturating_add(1)
+                } else {
+                    1
+                };
+                self.last_scroll_up = Some(now);
+                if self.scroll_up_ticks >= SCROLL_OPEN_THRESHOLD {
+                    self.scroll_up_ticks = 0;
+                    self.last_scroll_up = None;
+                    self.transcript =
+                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
+                            &self.transcript_log,
+                        ));
+                }
+            }
+            // Wheel-down on the inline surface abandons a partial open gesture
+            // (native scrollback owns actual down-scroll of finalized history).
+            MouseEventKind::ScrollDown => {
+                self.scroll_up_ticks = 0;
+                self.last_scroll_up = None;
+            }
             _ => {}
         }
     }

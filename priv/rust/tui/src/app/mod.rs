@@ -280,6 +280,13 @@ pub struct App {
     /// `transcript_log` — used for nested subagent transcripts fetched from the
     /// backend (dashboard "view"). Cleared when the overlay closes.
     pub transcript_override: Option<Vec<crate::dialogs::transcript_viewer::TranscriptEntry>>,
+    /// Consecutive mouse wheel-up ticks accumulated on the inline surface; the
+    /// reader only opens once this crosses SCROLL_OPEN_THRESHOLD, so a single
+    /// tick can never slam it open. Reset by any wheel-down / click / timeout.
+    pub scroll_up_ticks: u8,
+    /// Timestamp of the last wheel-up tick, used to time-gate the gesture so
+    /// stray ticks spread across a session never accumulate into an open.
+    pub last_scroll_up: Option<Instant>,
 
     // Completion notification: bell / OSC 9 when a turn ends while the user is
     // likely away. `notify_on_complete` toggles it (off via OSA_NO_NOTIFY);
@@ -519,6 +526,8 @@ impl App {
             transcript_log: Vec::new(),
             transcript: None,
             transcript_override: None,
+            scroll_up_ticks: 0,
+            last_scroll_up: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
             chrome_title: crate::components::title::TitleState::new(),

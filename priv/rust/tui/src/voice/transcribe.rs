@@ -128,7 +128,8 @@ impl LocalTranscriber {
             let install_hint = if cfg!(target_os = "macos") {
                 "brew install whisper-cpp"
             } else {
-                "sudo apt install whisper-cpp   # or build from source: https://github.com/ggerganov/whisper.cpp"
+                // No reliable distro package for whisper.cpp; build from source.
+                "build whisper.cpp from source: https://github.com/ggerganov/whisper.cpp (produces the `whisper-cli` binary; put it on PATH)"
             };
             anyhow::bail!(
                 "whisper-cli not found. Install it and try again:\n  {}\n\nOr use cloud transcription: export VOICE_PROVIDER=cloud",

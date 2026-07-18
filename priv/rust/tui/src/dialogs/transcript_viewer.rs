@@ -251,6 +251,24 @@ impl TranscriptViewer {
         TranscriptAction::None
     }
 
+    /// Scroll the reader by `delta` visual lines (negative = up) in response to a
+    /// mouse-wheel tick. Returns `true` only when a downward scroll is requested
+    /// while the view is already parked at the last line — the caller reads that
+    /// as "scrolled off the bottom" and dismisses the overlay cleanly.
+    pub fn scroll_by(&mut self, delta: isize, entries: &[TranscriptEntry]) -> bool {
+        let (w, h) = viewport();
+        let flat = flatten(entries, body_width(w));
+        let total = flat.len();
+        let view_h = view_height(h);
+        let at_bottom = self.cursor + 1 >= total;
+        if delta > 0 && at_bottom {
+            return true;
+        }
+        self.move_cursor(delta, total);
+        self.ensure_visible(view_h, total);
+        false
+    }
+
     pub fn draw(&self, frame: &mut Frame, area: Rect, entries: &[TranscriptEntry]) {
         let theme = style::theme();
         frame.render_widget(Clear, area);
