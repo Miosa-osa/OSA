@@ -571,6 +571,17 @@ impl App {
         if area.height == 0 {
             return;
         }
+        // Keep a 1-column gutter on each side so right-aligned notices
+        // ("Reconnecting to backend…", "Context low…", "N% context used") never
+        // touch — and clip against — the terminal's far edge (CC parity).
+        let area = Rect {
+            x: area.x.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            ..area
+        };
+        if area.width == 0 {
+            return;
+        }
         // WS13 — surface the SSE reconnect state (previously a dead flag):
         // while the event stream is down and being re-established, this row
         // shows a reconnect notice instead of the passive context hint.
