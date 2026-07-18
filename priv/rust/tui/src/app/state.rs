@@ -16,6 +16,7 @@ pub enum AppState {
     Recording,
     AgentsDashboard,
     Rewind,
+    Status,
 }
 
 impl AppState {
@@ -40,6 +41,7 @@ impl AppState {
                 | (Idle, Recording)
                 | (Idle, AgentsDashboard)
                 | (Idle, Rewind)
+                | (Idle, Status)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -50,6 +52,7 @@ impl AppState {
                 | (Processing, Quit)
                 | (Processing, AgentsDashboard)
                 | (Processing, Rewind)
+                | (Processing, Status)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -69,6 +72,8 @@ impl AppState {
                 | (Sessions, Idle)
                 | (Rewind, Idle)
                 | (Rewind, Processing)
+                | (Status, Idle)
+                | (Status, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -87,6 +92,7 @@ impl AppState {
                 | AppState::Survey
                 | AppState::AgentsDashboard
                 | AppState::Rewind
+                | AppState::Status
         )
     }
 
@@ -121,6 +127,7 @@ impl std::fmt::Display for AppState {
             AppState::Recording => write!(f, "Recording"),
             AppState::AgentsDashboard => write!(f, "Agent Dashboard"),
             AppState::Rewind => write!(f, "Rewind"),
+            AppState::Status => write!(f, "Status"),
         }
     }
 }

@@ -400,6 +400,21 @@ impl App {
                                     s.draw(frame, area);
                                 }
                             }
+                            AppState::Status => {
+                                // Stateless: build a live snapshot each frame so the
+                                // dashboard numbers are never stale.
+                                let view = crate::dialogs::status_dashboard::StatusView {
+                                    model: self.header.model_name().to_string(),
+                                    provider: self.header.provider().to_string(),
+                                    tools: self.header.tool_count(),
+                                    context_util: self.status.context_utilization(),
+                                    context_max: self.status.context_max_label(),
+                                    mode: self.status.permission_mode(),
+                                    session: self.session_id.clone(),
+                                    version: crate::config::osa_version_display().to_string(),
+                                };
+                                crate::dialogs::status_dashboard::draw(frame, area, &view);
+                            }
                             _ => {}
                         }
                     }

@@ -15,6 +15,7 @@ pub mod quit_confirm;
 pub mod reasoning;
 pub mod rewind;
 pub mod sessions;
+pub mod status_dashboard;
 pub mod survey;
 pub mod transcript_viewer;
 pub mod trust;

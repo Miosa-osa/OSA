@@ -200,7 +200,25 @@ impl App {
             AppState::Processing => self.handle_processing_key(key),
             AppState::Recording => self.handle_recording_key(key),
             AppState::AgentsDashboard => self.handle_agents_dashboard_key(key),
+            AppState::Status => self.handle_status_dashboard_key(key),
             _ => false,
+        }
+    }
+
+    /// Key handling for the `/status` dashboard: any dismiss key closes it and
+    /// returns to whatever state opened it. It is read-only, so there is no
+    /// navigation — Esc/q/Enter/Space all close.
+    fn handle_status_dashboard_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Char('q')
+            | KeyCode::Char(' ')
+            | KeyCode::Char('\n') => {
+                self.exit_overlay();
+                true
+            }
+            _ => true, // swallow other keys while the overlay is up
         }
     }
 

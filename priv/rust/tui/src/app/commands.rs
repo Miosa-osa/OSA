@@ -457,14 +457,23 @@ impl App {
                 );
             }
             "/status" => {
-                let model = self.header.model_name();
-                let tools = self.header.tool_count();
-                let ctx = self.status.context_utilization();
-                let msg = format!(
-                    "Model: {} | Tools: {} | Context: {:.0}% | Session: {}",
-                    model, tools, ctx * 100.0, self.session_id
-                );
-                self.chat.add_system_message(&msg, "status");
+                // Open the branded status dashboard overlay (model/provider,
+                // context gauge, tools, permission mode, session, version). The
+                // a11y path still gets a flat scrollback line since a screen
+                // reader can't see the overlay.
+                if self.activity.a11y() {
+                    let msg = format!(
+                        "Model: {} | Tools: {} | Context: {:.0}% | Mode: {} | Session: {}",
+                        self.header.model_name(),
+                        self.header.tool_count(),
+                        self.status.context_utilization() * 100.0,
+                        self.status.permission_mode().title(),
+                        self.session_id
+                    );
+                    self.chat.add_system_message(&msg, "status");
+                } else if self.state.can_transition_to(AppState::Status) {
+                    self.enter_overlay(AppState::Status);
+                }
             }
             "/goal" => {
                 // Cross-turn keep-going: agent auto-continues toward a stated
