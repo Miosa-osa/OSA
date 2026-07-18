@@ -87,6 +87,54 @@ pub fn truncate_str_start(s: &str, max_bytes: usize) -> &str {
     &s[idx..]
 }
 
+/// Middle-ellipsize a path to at most `max_cols` DISPLAY columns, preserving the
+/// final path segment (the filename) — Claude Code `truncatePathMiddle` parity.
+/// `src/components/deeply/nested/MyComponent.tsx` -> `src/components/…/MyComponent.tsx`.
+/// Width-aware (unicode_width) and never splits a char. Falls back to a tail-only
+/// `…name` when the filename alone won't fit.
+pub fn ellipsize_path_middle(path: &str, max_cols: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if path.width() <= max_cols {
+        return path.to_string();
+    }
+    if max_cols <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let (dir, file) = match path.rfind('/') {
+        Some(i) => (&path[..i], &path[i..]), // keep the leading '/' with the filename
+        None => ("", path),
+    };
+    let file_w = file.width();
+    // Filename alone doesn't fit → keep the tail end, prefixed with an ellipsis.
+    if file_w + 1 >= max_cols {
+        let budget = max_cols.saturating_sub(1);
+        let mut kept = String::new();
+        let mut w = 0usize;
+        for ch in path.chars().rev() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w + cw > budget {
+                break;
+            }
+            kept.push(ch);
+            w += cw;
+        }
+        let tail: String = kept.chars().rev().collect();
+        return format!("\u{2026}{}", tail);
+    }
+    let avail_for_dir = max_cols - 1 - file_w; // -1 for the ellipsis
+    let mut kept = String::new();
+    let mut w = 0usize;
+    for ch in dir.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > avail_for_dir {
+            break;
+        }
+        kept.push(ch);
+        w += cw;
+    }
+    format!("{}\u{2026}{}", kept, file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

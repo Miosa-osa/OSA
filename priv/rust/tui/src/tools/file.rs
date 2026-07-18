@@ -17,6 +17,10 @@ impl ToolRenderer for FileViewRenderer {
             .unwrap_or_else(|| "…".to_string());
 
         // CC-style header: ● Read(path) — bold name, plain parenthesized path.
+        let path = crate::util::ellipsize_path_middle(
+            &path,
+            (opts.width as usize).saturating_sub(16).max(12),
+        );
         let header = super::make_header(
             opts.status,
             opts.spinner_frame,
@@ -94,6 +98,10 @@ impl ToolRenderer for FileWriteRenderer {
             })
             .unwrap_or_else(|| "…".to_string());
 
+        let path = crate::util::ellipsize_path_middle(
+            &path,
+            (opts.width as usize).saturating_sub(16).max(12),
+        );
         let header = super::make_header(
             opts.status,
             opts.spinner_frame,
@@ -192,6 +200,10 @@ impl ToolRenderer for FileEditRenderer {
         };
 
         // CC-style header: ● Update(path)
+        let path = crate::util::ellipsize_path_middle(
+            &path,
+            (opts.width as usize).saturating_sub(16).max(12),
+        );
         let header = super::make_header(
             opts.status,
             opts.spinner_frame,

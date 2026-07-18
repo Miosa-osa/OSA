@@ -1657,7 +1657,11 @@ impl Component for InputComponent {
                     Style::default().fg(theme.colors.muted)
                 };
                 let prefix = if is_selected { "\u{25b8} " } else { "  " };
-                let display = format!("{}{}", prefix, path);
+                let ep = crate::util::ellipsize_path_middle(
+                    path,
+                    (area.width as usize).saturating_sub(6).max(8),
+                );
+                let display = format!("{}{}", prefix, ep);
                 let line = Line::from(Span::styled(display, style));
                 let row_area =
                     Rect::new(area.x + 2, row_y, area.width.saturating_sub(4), 1).intersection(bounds);

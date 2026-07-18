@@ -419,8 +419,14 @@ impl Component for StatusBar {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(area);
-        let row0 = rows[0];
-        let row1 = rows.get(1).copied().unwrap_or(row0);
+        // Reserve a 1-column right gutter on both status rows so the right-most
+        // segment (version chip / bg counter) never clips mid-glyph against the
+        // terminal edge — parity with draw_context_hint's gutter (edd66d5).
+        let row0 = Rect { width: rows[0].width.saturating_sub(1), ..rows[0] };
+        let row1 = rows
+            .get(1)
+            .map(|r| Rect { width: r.width.saturating_sub(1), ..*r })
+            .unwrap_or(row0);
         let area = row0; // special-case single-line indicators render into row 0
 
         // Download progress indicator takes top priority
