@@ -279,6 +279,17 @@ fn completed_step_summary(step_idx: usize, wizard: &OnboardingWizard) -> (String
             };
             ("Channels".to_string(), answer)
         }
+        5 => {
+            let user = wizard.flow_user_name_input().trim();
+            let agent = wizard.flow_agent_name_input().trim();
+            let answer = match (user.is_empty(), agent.is_empty()) {
+                (true, true) => "skipped".to_string(),
+                (false, true) => user.to_string(),
+                (true, false) => format!("agent {}", agent),
+                (false, false) => format!("{} \u{00b7} agent {}", user, agent),
+            };
+            ("Identity".to_string(), answer)
+        }
         _ => ("".to_string(), "".to_string()),
     }
 }
@@ -304,7 +315,8 @@ fn push_active_step(
         2 => push_model_select(lines, wizard, theme, prompt_style, active_sym),
         3 => push_verify(lines, wizard, theme, prompt_style, active_sym),
         4 => push_channels(lines, wizard, theme, prompt_style, active_sym),
-        5 => push_confirm(lines, wizard, theme, prompt_style, active_sym),
+        5 => push_identity(lines, wizard, theme, prompt_style, active_sym),
+        6 => push_confirm(lines, wizard, theme, prompt_style, active_sym),
         _ => {}
     }
 }
@@ -727,6 +739,71 @@ fn push_channels(
     lines.push(Line::from(""));
 }
 
+fn push_identity(
+    lines: &mut Vec<Line<'static>>,
+    wizard: &OnboardingWizard,
+    theme: &crate::style::Theme,
+    prompt_style: Style,
+    active_sym: Style,
+) {
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {}  ", SYM_OPEN), active_sym),
+        Span::styled("What should I call you?", prompt_style),
+    ]));
+    lines.push(Line::from(""));
+
+    let focus = wizard.flow_identity_focus();
+    let fields = [
+        ("Your name:", wizard.flow_user_name_input()),
+        ("Name your agent (or keep OSA):", wizard.flow_agent_name_input()),
+    ];
+
+    for (i, (label, value)) in fields.iter().enumerate() {
+        let focused = focus == i;
+        let label_style = if focused {
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.colors.muted)
+        };
+        lines.push(Line::from(vec![
+            Span::raw("     "),
+            Span::styled(label.to_string(), label_style),
+        ]));
+
+        let cursor = if focused { "_" } else { "" };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                if focused { SYM_CURSOR } else { " " }.to_string(),
+                Style::default().fg(theme.colors.primary),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{}{}", value, cursor),
+                Style::default()
+                    .fg(if focused {
+                        theme.colors.primary
+                    } else {
+                        theme.colors.secondary
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw("     "),
+        Span::styled(
+            "Both optional \u{2014} press Enter to continue.",
+            Style::default().fg(theme.colors.dim),
+        ),
+    ]));
+    lines.push(Line::from(""));
+}
+
 fn push_confirm(
     lines: &mut Vec<Line<'static>>,
     wizard: &OnboardingWizard,
@@ -804,6 +881,37 @@ fn push_confirm(
         ]));
     }
 
+    lines.push(Line::from(""));
+
+    // First-run security notes (CC parity: onboarding securityStep).
+    lines.push(Line::from(vec![
+        Span::raw("     "),
+        Span::styled(
+            "1. OSA can make mistakes \u{2014} review responses, especially",
+            Style::default().fg(theme.colors.dim),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("     "),
+        Span::styled(
+            "   before running code.",
+            Style::default().fg(theme.colors.dim),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("     "),
+        Span::styled(
+            "2. Prompt-injection is real \u{2014} only use OSA with code",
+            Style::default().fg(theme.colors.dim),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("     "),
+        Span::styled(
+            "   you trust.",
+            Style::default().fg(theme.colors.dim),
+        ),
+    ]));
     lines.push(Line::from(""));
 
     // Confirm / Back buttons
@@ -919,6 +1027,18 @@ fn build_help_line<'a>(
         }
         5 => {
             spans.extend([
+                key("Tab"),
+                desc(" switch field"),
+                sep(),
+                key("Enter"),
+                desc(" next"),
+                sep(),
+                key("Esc"),
+                desc(" back"),
+            ]);
+        }
+        6 => {
+            spans.extend([
                 key("\u{2190}\u{2192}/Tab"),
                 desc(" focus"),
                 sep(),
@@ -1006,6 +1126,26 @@ mod flow_render_tests {
         }
         let _ = wizard.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
         enter(&mut wizard); // open first selected channel's token screen
+        draw_all_sizes(&wizard);
+    }
+
+    #[test]
+    fn identity_renders_at_step_5_and_confirm_at_step_6() {
+        let mut wizard = wizard_with(serde_json::json!([{
+            "id": "custom", "name": "Custom", "requires_key": false,
+            "models": [ { "id": "m1", "name": "model-one", "ctx": 1000 } ]
+        }]));
+        // provider -> details -> model -> verify
+        for _ in 0..3 {
+            enter(&mut wizard);
+        }
+        wizard.set_verify_success(5);
+        enter(&mut wizard); // -> channels
+        enter(&mut wizard); // none selected -> identity
+        assert_eq!(wizard.flow_step(), 5);
+        draw_all_sizes(&wizard);
+        enter(&mut wizard); // -> confirm
+        assert_eq!(wizard.flow_step(), 6);
         draw_all_sizes(&wizard);
     }
 }

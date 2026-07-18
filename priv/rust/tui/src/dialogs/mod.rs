@@ -16,6 +16,7 @@ pub mod rewind;
 pub mod sessions;
 pub mod survey;
 pub mod transcript_viewer;
+pub mod trust;
 
 /// Actions produced by dialog event handling that bubble up to the app layer.
 #[derive(Debug, Clone)]

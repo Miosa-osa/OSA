@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.MCP.Config do
 
   require Logger
 
+  # Scope precedence for merge (later wins): user < project < local.
+  @scopes [:local, :project, :user]
+
   defmodule Server do
     @moduledoc "A single configured MCP server."
 
@@ -30,7 +33,8 @@ defmodule OptimalSystemAgent.MCP.Config do
             headers: %{String.t() => String.t()},
             oauth: map() | nil,
             enabled: boolean(),
-            tool_filter: [String.t()] | nil
+            tool_filter: [String.t()] | nil,
+            scope: :local | :project | :user
           }
 
     defstruct name: nil,
@@ -42,7 +46,8 @@ defmodule OptimalSystemAgent.MCP.Config do
               headers: %{},
               oauth: nil,
               enabled: true,
-              tool_filter: nil
+              tool_filter: nil,
+              scope: :user
   end
 
   @doc "Absolute path to the MCP config file (`~/.osa/mcp.json`)."
@@ -50,6 +55,145 @@ defmodule OptimalSystemAgent.MCP.Config do
   def config_path do
     config_dir()
     |> Path.join("mcp.json")
+  end
+
+  @doc "All supported config scopes, most-specific first."
+  @spec scopes() :: [:local | :project | :user]
+  def scopes, do: @scopes
+
+  @doc """
+  Absolute path to the config file backing a scope.
+
+    * `:user`    — `~/.osa/mcp.json` (global, trusted)
+    * `:project` — `./.mcp.json` (repo-committed, requires approval)
+    * `:local`   — `./.osa/mcp.local.json` (per-checkout, not committed, trusted)
+  """
+  @spec scope_path(:local | :project | :user) :: String.t()
+  def scope_path(:user), do: config_path()
+  def scope_path(:project), do: Path.join(File.cwd!(), ".mcp.json")
+  def scope_path(:local), do: Path.join([File.cwd!(), ".osa", "mcp.local.json"])
+
+  @doc "Load one scope's servers, tagging each with its scope. Never raises."
+  @spec load_scope(:local | :project | :user) :: [Server.t()]
+  def load_scope(scope) do
+    case load(scope_path(scope)) do
+      {:ok, servers} -> Enum.map(servers, &%{&1 | scope: scope})
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc """
+  Load and merge all scopes into a deduped server list.
+
+  Precedence (last write wins): user < project < local, so a `local` override
+  of a server name shadows the `project` and `user` definitions.
+  """
+  @spec load_all() :: [Server.t()]
+  def load_all do
+    [:user, :project, :local]
+    |> Enum.reduce(%{}, fn scope, acc ->
+      Enum.reduce(load_scope(scope), acc, fn s, a -> Map.put(a, s.name, s) end)
+    end)
+    |> Map.values()
+    |> Enum.sort_by(& &1.name)
+  end
+
+  @doc """
+  Servers eligible to start at boot.
+
+  User and local servers are trusted and always included. Project (`.mcp.json`)
+  servers are only included once the operator has approved them via
+  `MCP.ProjectApproval`, so repo-supplied commands never auto-execute.
+  """
+  @spec load_startup() :: [Server.t()]
+  def load_startup do
+    load_all()
+    |> Enum.filter(fn
+      %Server{scope: :project} = s -> OptimalSystemAgent.MCP.ProjectApproval.approved?(s.name)
+      _ -> true
+    end)
+  rescue
+    _ -> load!()
+  end
+
+  @doc """
+  Add (or overwrite) a server entry in a scope file. `spec` is the raw
+  Claude-Desktop-style value map (`command`/`args`/`env` or `url`/`headers`).
+  Returns `{:ok, path}` on success.
+  """
+  @spec add_server(String.t(), map(), :local | :project | :user) ::
+          {:ok, String.t()} | {:error, term()}
+  def add_server(name, spec, scope) when is_binary(name) and is_map(spec) do
+    path = scope_path(scope)
+    raw = read_raw(path)
+    servers = Map.get(raw, "mcpServers", %{})
+    updated = Map.put(raw, "mcpServers", Map.put(servers, name, spec))
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path, Jason.encode!(updated, pretty: true)) do
+      {:ok, path}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc """
+  Remove a server from a scope file. Matches on the raw key first, then on the
+  sanitized name, so `/mcp remove` works whether the caller passes the raw or
+  sanitized name. Returns `{:ok, path}` or `{:error, :not_found}`.
+  """
+  @spec remove_server(String.t(), :local | :project | :user) ::
+          {:ok, String.t()} | {:error, term()}
+  def remove_server(name, scope) do
+    path = scope_path(scope)
+    raw = read_raw(path)
+    servers = Map.get(raw, "mcpServers", %{})
+
+    key =
+      cond do
+        Map.has_key?(servers, name) -> name
+        true -> Enum.find(Map.keys(servers), fn k -> sanitize_name(k) == sanitize_name(name) end)
+      end
+
+    if key do
+      updated = Map.put(raw, "mcpServers", Map.delete(servers, key))
+
+      case File.write(path, Jason.encode!(updated, pretty: true)) do
+        :ok -> {:ok, path}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :not_found}
+  end
+
+  @doc "List the scopes that define a server (by sanitized name)."
+  @spec find_scopes(String.t()) :: [:local | :project | :user]
+  def find_scopes(name) do
+    sanitized = sanitize_name(name)
+
+    Enum.filter(@scopes, fn scope ->
+      Enum.any?(load_scope(scope), fn s -> s.name == sanitized end)
+    end)
+  end
+
+  defp read_raw(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, map} when is_map(map) -> map
+          _ -> %{}
+        end
+
+      _ ->
+        %{}
+    end
   end
 
   @doc """

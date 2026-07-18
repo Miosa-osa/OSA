@@ -616,6 +616,7 @@ defmodule OptimalSystemAgent.Onboarding do
       |> merge_env(provider_env_pairs(provider, model, api_key, base_url))
       |> merge_env({channel_token_pairs(channel_tokens), []})
       |> merge_env({identity_pairs(user_name, agent_name), []})
+      |> merge_env({onboarding_meta_pairs(), []})
 
     env_content = serialize_env(merged)
 
@@ -804,7 +805,71 @@ defmodule OptimalSystemAgent.Onboarding do
         [{:error, "Missing workspace files", Enum.join(missing, ", ")} | checks]
       end
 
+    # Update-check UX: surface a pending release in doctor output.
+    checks =
+      case update_check() do
+        %{update_available: true, latest: latest} ->
+          [{:error, "Update available: v#{latest}", "Run `osa update` to upgrade"} | checks]
+
+        %{current: current} ->
+          [{:ok, "OSA up to date (v#{current})"} | checks]
+      end
+
     Enum.reverse(checks)
+  end
+
+  @doc """
+  Update-check UX (CC parity: AutoUpdater status line). Wraps
+  `ReleaseNotes.version_status/0` and never raises — a git/tag/network
+  failure reports the running version with no update flagged.
+  """
+  @spec update_check() :: %{
+          current: String.t(),
+          latest: String.t(),
+          update_available: boolean(),
+          hint: String.t() | nil
+        }
+  def update_check do
+    status = OptimalSystemAgent.ReleaseNotes.version_status()
+    hint = if status.update_available, do: "Run `osa update` to upgrade", else: nil
+    Map.put(status, :hint, hint)
+  rescue
+    _ ->
+      current = safe_current_version()
+      %{current: current, latest: current, update_available: false, hint: nil}
+  end
+
+  @doc """
+  The OSA version that last completed the onboarding wizard, or nil.
+
+  Recorded as OSA_ONBOARDING_VERSION by `write_setup/1` (CC parity:
+  lastOnboardingVersion) so future releases can re-run new wizard steps
+  after an upgrade instead of gating on the .env file alone.
+  """
+  @spec completed_onboarding_version() :: String.t() | nil
+  def completed_onboarding_version do
+    @osa_dir
+    |> Path.join(".env")
+    |> parse_env_file()
+    |> List.keyfind("OSA_ONBOARDING_VERSION", 0)
+    |> case do
+      {_, v} when is_binary(v) and v != "" -> v
+      _ -> nil
+    end
+  end
+
+  defp safe_current_version do
+    OptimalSystemAgent.ReleaseNotes.current_version()
+  rescue
+    _ -> "unknown"
+  end
+
+  defp onboarding_meta_pairs do
+    [
+      maybe_pair("OSA_ONBOARDING_VERSION", safe_current_version()),
+      maybe_pair("OSA_ONBOARDED_AT", DateTime.utc_now() |> DateTime.to_iso8601())
+    ]
+    |> Enum.reject(&is_nil/1)
   end
 
   # ── Selector (used by plan_review.ex) ────────────────────────────────

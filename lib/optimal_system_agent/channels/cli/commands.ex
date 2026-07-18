@@ -1636,7 +1636,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
   # ── MCP Servers ──────────────────────────────────────────────────────
 
-  def cmd_mcp(_args, session_id) do
+  def cmd_mcp(args, session_id) do
+    case String.split(String.trim(to_string(args)), ~r/\s+/, trim: true) do
+      [] -> mcp_status(session_id)
+      ["list" | _] -> mcp_status(session_id)
+      ["add" | opts] -> mcp_add(opts, session_id)
+      [rm | opts] when rm in ["remove", "rm"] -> mcp_remove(opts, session_id)
+      ["get", name | _] -> mcp_get(name, session_id)
+      _ -> mcp_usage(session_id)
+    end
+  end
+
+  defp mcp_status(session_id) do
     IO.puts("")
     IO.puts("  #{@bold}MCP Servers#{@reset}")
     IO.puts("")
@@ -1700,6 +1711,178 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       :down -> {"#{@red}○#{@reset}", "down"}
       other -> {"#{@dim}○#{@reset}", to_string(other || "unknown")}
     end
+  end
+
+  defp mcp_add(opts, session_id) do
+    {flags, positional} = mcp_parse_opts(opts)
+    scope = mcp_scope(flags[:scope])
+    transport = flags[:transport]
+
+    case positional do
+      [name, target | rest] ->
+        url_like = String.starts_with?(target, "http://") or String.starts_with?(target, "https://")
+
+        if is_nil(transport) and url_like do
+          IO.puts(
+            "  #{@yellow}!#{@reset} #{@dim}#{target} looks like a URL; assuming remote transport. Pass -t stdio to override.#{@reset}"
+          )
+        end
+
+        spec =
+          cond do
+            transport in ["http", "sse"] or (is_nil(transport) and url_like) ->
+              %{"url" => target}
+              |> then(fn m -> if transport, do: Map.put(m, "type", transport), else: m end)
+              |> mcp_maybe_put("headers", mcp_header_map(flags[:headers]))
+
+            true ->
+              %{"command" => target, "args" => rest}
+              |> mcp_maybe_put("env", mcp_env_map(flags[:env]))
+          end
+
+        case MCP.Config.add_server(name, spec, scope) do
+          {:ok, path} ->
+            IO.puts("  #{@green}✓#{@reset} Added MCP server #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}")
+            IO.puts("  #{@dim}File modified: #{path}#{@reset}")
+            mcp_safe_reload()
+
+          {:error, reason} ->
+            IO.puts("  #{@red}✗#{@reset} Failed to add #{name}: #{inspect(reason)}")
+        end
+
+      _ ->
+        IO.puts(
+          "  #{@dim}Usage: /mcp add <name> <command|url> [args...] [-s local|user|project] [-t stdio|sse|http] [-e K=V] [-H 'Header: value']#{@reset}"
+        )
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp mcp_remove(opts, session_id) do
+    {flags, positional} = mcp_parse_opts(opts)
+
+    case positional do
+      [name | _] ->
+        scopes =
+          if flags[:scope], do: [mcp_scope(flags[:scope])], else: MCP.Config.find_scopes(name)
+
+        case scopes do
+          [] ->
+            IO.puts("  #{@dim}No MCP server named #{name} found in any scope.#{@reset}")
+
+          [scope] ->
+            case MCP.Config.remove_server(name, scope) do
+              {:ok, path} ->
+                IO.puts("  #{@green}✓#{@reset} Removed #{@cyan}#{name}#{@reset} #{@dim}(#{scope})#{@reset}")
+                IO.puts("  #{@dim}File modified: #{path}#{@reset}")
+                mcp_safe_reload()
+
+              {:error, _} ->
+                IO.puts("  #{@dim}#{name} not found in #{scope}.#{@reset}")
+            end
+
+          many ->
+            IO.puts("  #{@yellow}!#{@reset} #{name} exists in multiple scopes. Specify one:")
+            Enum.each(many, fn s -> IO.puts("  #{@dim}/mcp remove #{name} -s #{s}#{@reset}") end)
+        end
+
+      _ ->
+        IO.puts("  #{@dim}Usage: /mcp remove <name> [-s local|user|project]#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp mcp_get(name, session_id) do
+    sanitized = MCP.Config.sanitize_name(name)
+
+    case Enum.find(MCP.Config.load_all(), fn s -> s.name == sanitized end) do
+      nil ->
+        IO.puts("  #{@dim}No MCP server named #{name}.#{@reset}")
+
+      s ->
+        IO.puts("")
+        IO.puts("  #{@bold}#{s.name}#{@reset} #{@dim}(#{s.scope})#{@reset}")
+        IO.puts("  #{@dim}transport:#{@reset} #{s.transport}")
+        if s.command, do: IO.puts("  #{@dim}command:#{@reset} #{s.command} #{Enum.join(s.args, " ")}")
+        if s.url, do: IO.puts("  #{@dim}url:#{@reset} #{s.url}")
+
+        if map_size(s.env) > 0,
+          do: IO.puts("  #{@dim}env:#{@reset} #{Enum.map_join(s.env, ", ", fn {k, _} -> k end)}")
+
+        IO.puts("  #{@dim}Remove with: /mcp remove #{s.name} -s #{s.scope}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp mcp_usage(session_id) do
+    IO.puts("")
+    IO.puts("  #{@bold}/mcp#{@reset} #{@dim}— manage MCP servers#{@reset}")
+    IO.puts("  #{@cyan}/mcp list#{@reset}                     #{@dim}Show servers and status#{@reset}")
+    IO.puts("  #{@cyan}/mcp add <name> <cmd|url> ...#{@reset}  #{@dim}Add a server (-s scope -t transport -e K=V -H hdr)#{@reset}")
+    IO.puts("  #{@cyan}/mcp remove <name> [-s scope]#{@reset}  #{@dim}Remove a server#{@reset}")
+    IO.puts("  #{@cyan}/mcp get <name>#{@reset}               #{@dim}Show a server's config#{@reset}")
+    IO.puts("")
+    session_id
+  end
+
+  # Flag parser: -s/--scope, -t/--transport, -e/--env (repeatable),
+  # -H/--header (repeatable). Remaining tokens are positional.
+  defp mcp_parse_opts(opts), do: mcp_parse_opts(opts, %{env: [], headers: []}, [])
+  defp mcp_parse_opts([], flags, pos), do: {flags, Enum.reverse(pos)}
+
+  defp mcp_parse_opts([f, v | rest], flags, pos) when f in ["-s", "--scope"],
+    do: mcp_parse_opts(rest, Map.put(flags, :scope, v), pos)
+
+  defp mcp_parse_opts([f, v | rest], flags, pos) when f in ["-t", "--transport"],
+    do: mcp_parse_opts(rest, Map.put(flags, :transport, v), pos)
+
+  defp mcp_parse_opts([f, v | rest], flags, pos) when f in ["-e", "--env"],
+    do: mcp_parse_opts(rest, Map.update(flags, :env, [v], &(&1 ++ [v])), pos)
+
+  defp mcp_parse_opts([f, v | rest], flags, pos) when f in ["-H", "--header"],
+    do: mcp_parse_opts(rest, Map.update(flags, :headers, [v], &(&1 ++ [v])), pos)
+
+  defp mcp_parse_opts([a | rest], flags, pos), do: mcp_parse_opts(rest, flags, [a | pos])
+
+  defp mcp_scope(nil), do: :local
+  defp mcp_scope("user"), do: :user
+  defp mcp_scope("global"), do: :user
+  defp mcp_scope("project"), do: :project
+  defp mcp_scope(_), do: :local
+
+  defp mcp_env_map(list) do
+    Enum.reduce(list || [], %{}, fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        [k, v] -> Map.put(acc, k, v)
+        _ -> acc
+      end
+    end)
+  end
+
+  defp mcp_header_map(list) do
+    Enum.reduce(list || [], %{}, fn pair, acc ->
+      case String.split(pair, ":", parts: 2) do
+        [k, v] -> Map.put(acc, String.trim(k), String.trim(v))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp mcp_maybe_put(map, _key, m) when map_size(m) == 0, do: map
+  defp mcp_maybe_put(map, key, m), do: Map.put(map, key, m)
+
+  defp mcp_safe_reload do
+    MCP.Client.Manager.reload()
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ── Project Init (seed AGENTS.md generation) ─────────────────────────

@@ -167,7 +167,7 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   # ── Internal ──────────────────────────────────────────────────────────
 
   defp load_and_start(state) do
-    servers = Config.load!()
+    servers = Config.load_startup()
     servers_map = Map.new(servers, fn s -> {s.name, s} end)
 
     # Stop sessions for servers that vanished from config.

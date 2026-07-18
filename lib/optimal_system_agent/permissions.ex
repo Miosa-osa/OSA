@@ -57,7 +57,7 @@ defmodule OptimalSystemAgent.Permissions do
       case Map.get(rules, tool_name) do
         "allow" -> :allow
         "deny" -> :deny
-        _ -> :ask
+        _ -> mcp_rule_match(rules, tool_name)
       end
     end
   end
@@ -134,6 +134,31 @@ defmodule OptimalSystemAgent.Permissions do
   rescue
     _ -> false
   end
+
+  # MCP server-level permission: rule "mcp__server" matches tool
+  # "mcp__server__tool"; "mcp__server__*" is an explicit wildcard for the same.
+  # Deny takes precedence over allow.
+  defp mcp_rule_match(rules, "mcp__" <> _ = tool_name) do
+    server =
+      case String.split(tool_name, "__", parts: 3) do
+        ["mcp", s, _tool] when s != "" -> s
+        _ -> nil
+      end
+
+    if server do
+      candidates = [Map.get(rules, "mcp__" <> server), Map.get(rules, "mcp__" <> server <> "__*")]
+
+      cond do
+        "deny" in candidates -> :deny
+        "allow" in candidates -> :allow
+        true -> :ask
+      end
+    else
+      :ask
+    end
+  end
+
+  defp mcp_rule_match(_rules, _tool_name), do: :ask
 
   defp load_rules do
     case File.read(permissions_file()) do

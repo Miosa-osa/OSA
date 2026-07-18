@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
   """
 
   alias OptimalSystemAgent.MCP.Client.ServerSession
+  alias OptimalSystemAgent.MCP.Client.OutputLimiter
   alias OptimalSystemAgent.MCP.Protocol.Messages
 
   @prefix "mcp__"
@@ -88,7 +89,10 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
       Application.get_env(:optimal_system_agent, :mcp_server_session, ServerSession)
 
     case session_mod.call_tool(server, tool, strip_internal(arguments)) do
-      {:ok, result} -> Messages.normalize_tool_result(result)
+      {:ok, result} ->
+        result
+        |> Messages.normalize_tool_result()
+        |> OutputLimiter.limit(server, tool)
       {:error, reason} -> {:error, mcp_error_message(reason)}
     end
   end
@@ -107,6 +111,7 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
          server: server_name,
          description: schema["description"] || "MCP tool #{original} on #{server_name}",
          input_schema: schema["inputSchema"] || %{"type" => "object", "properties" => %{}},
+         annotations: normalize_annotations(schema["annotations"]),
          should_defer?: true
        }}
     else
@@ -126,6 +131,18 @@ defmodule OptimalSystemAgent.MCP.Client.ToolBridge do
   end
 
   defp strip_internal(other), do: other
+
+  # Normalize MCP tool annotations into a stable boolean map. Missing/invalid
+  # annotations default to false (treated as write-capable / closed-world).
+  defp normalize_annotations(annotations) when is_map(annotations) do
+    %{
+      read_only: annotations["readOnlyHint"] == true,
+      destructive: annotations["destructiveHint"] == true,
+      open_world: annotations["openWorldHint"] == true
+    }
+  end
+
+  defp normalize_annotations(_), do: %{read_only: false, destructive: false, open_world: false}
 
   defp mcp_error_message({:mcp_error, %{message: message}}) when is_binary(message),
     do: "MCP error: #{message}"

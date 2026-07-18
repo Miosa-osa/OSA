@@ -446,6 +446,18 @@ impl OnboardingWizard {
         self.confirm_selected
     }
 
+    pub fn flow_user_name_input(&self) -> &str {
+        &self.user_name_input
+    }
+
+    pub fn flow_agent_name_input(&self) -> &str {
+        &self.agent_name_input
+    }
+
+    pub fn flow_identity_focus(&self) -> usize {
+        self.identity_focus
+    }
+
     pub fn flow_channel_list() -> &'static [(&'static str, &'static str, &'static str)] {
         CHANNELS
     }
@@ -1601,6 +1613,14 @@ impl OnboardingWizard {
         cy += 1;
         put(frame, 
             Paragraph::new("  Change any of this later with /setup")
+                .style(Style::default().fg(theme.colors.dim)),
+            Rect::new(area.x, cy, area.width, 1),
+        );
+        cy += 1;
+        // First-run security note (CC parity: onboarding securityStep).
+        put(
+            frame,
+            Paragraph::new("  Review what I run \u{2014} only use OSA with code you trust.")
                 .style(Style::default().fg(theme.colors.dim)),
             Rect::new(area.x, cy, area.width, 1),
         );
