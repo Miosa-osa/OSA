@@ -42,6 +42,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.TurnPipeline
   alias OptimalSystemAgent.Agent.Hooks
+  alias OptimalSystemAgent.Agent.TaskNotifications
 
   defstruct [
     :session_id,
@@ -242,6 +243,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
   def steer(session_id, text) when is_binary(session_id) and is_binary(text) do
     Steer.queue(session_id, text)
     GenServer.cast(via(session_id), {:steer, text})
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Poke an IDLE session to service its pending background task notifications
+  (WS6). If the loop is mid-turn the cast waits in the mailbox until the turn
+  ends — but the running ReactLoop drains the same queue at its next step
+  boundary first, so the late poke finds an empty queue and no-ops (drain is
+  destructive → exactly-once). If the loop is idle, the notifications become
+  a synthetic turn: the agent reacts to the completion unprompted, mirroring
+  Claude Code's background-task resume.
+
+  Always returns `:ok`; poking an unknown/dead session is a no-op.
+  """
+  @spec poke(String.t()) :: :ok
+  def poke(session_id) when is_binary(session_id) do
+    GenServer.cast(via(session_id), :poke)
     :ok
   catch
     :exit, _ -> :ok
@@ -705,6 +725,37 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # WS6 — idle poke. Serviced only when the mailbox is free (loop idle): drain
+  # pending task notifications into history and run a SYNTHETIC turn so the
+  # agent reacts to background completions unprompted. When the queue is empty
+  # (a busy turn's ReactLoop already drained it beside Steer) this no-ops.
+  # run_and_reply/1 broadcasts the response on the session topic, so the TUI
+  # renders the reaction even though no HTTP caller is waiting on a reply.
+  # iteration resets to 0 exactly like TurnPipeline does for a real turn.
+  @impl true
+  def handle_cast(:poke, %{status: :idle} = state) do
+    case TaskNotifications.drain(state.session_id) do
+      [] ->
+        {:noreply, state}
+
+      notifs ->
+        TaskNotifications.announce(state.session_id, notifs)
+
+        state = %{
+          state
+          | messages: state.messages ++ TaskNotifications.to_messages(notifs),
+            iteration: 0,
+            status: :processing,
+            current_input: "[background task notification]"
+        }
+
+        {:reply, _reply, state} = run_and_reply(state)
+        {:noreply, state}
+    end
+  end
+
+  def handle_cast(:poke, state), do: {:noreply, state}
+
   @impl true
   def handle_cast({:rewind_conversation, messages, meta}, state) do
     new_state = %{
@@ -751,6 +802,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
   defp fire_session_end(state, reason \\ :normal)
 
   defp fire_session_end(%{session_id: sid} = state, reason) when is_binary(sid) do
+    # WS6 — orphan reaping: a dying session must not leave its background
+    # shell commands running with nobody left to notify. Best-effort.
+    try do
+      OptimalSystemAgent.Shell.BackgroundManager.kill_for_session(sid)
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
     try do
       Hooks.run(:session_end, %{
         session_id: sid,

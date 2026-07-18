@@ -79,6 +79,13 @@ pub struct InputComponent {
     /// universal backslash-continuation that works on every terminal. Set once from
     /// `main.rs` via [`InputComponent::set_kbd_enhanced`].
     kbd_enhanced: bool,
+    /// WS9 — deferred content store for large-paste pills: id → full pasted
+    /// text. The composer shows a compact "[Pasted text #N +M lines]" token;
+    /// the real content is spliced back in at submit (CC pasteStore/history.ts).
+    /// Retained across submits so an ↑-recalled history pill still expands.
+    paste_store: std::collections::HashMap<usize, String>,
+    /// Next pill id — auto-incrementing, session-scoped (CC nextPasteIdRef).
+    next_paste_id: usize,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -120,6 +127,8 @@ impl InputComponent {
             // terminal, so the always-works backslash hint shows if never set. The
             // test-only InputComponent::new() call sites (event_loop.rs) rely on this.
             kbd_enhanced: false,
+            paste_store: std::collections::HashMap::new(),
+            next_paste_id: 1,
         }
     }
 
@@ -246,9 +255,13 @@ impl InputComponent {
     }
 
     pub fn submit(&mut self) -> String {
-        let text = self.content.clone();
-        if !text.trim().is_empty() {
-            self.history.push(text.clone());
+        let display = self.content.clone();
+        if !display.trim().is_empty() {
+            // History keeps the DISPLAY text — pill tokens intact (CC
+            // history.ts stores `display` + pastedContents) — so ↑-recall
+            // shows the compact pill, which still expands on the next submit
+            // via the retained paste store.
+            self.history.push(display.clone());
         }
         self.content.clear();
         self.cursor = 0;
@@ -257,7 +270,11 @@ impl InputComponent {
         self.file_search_active = false;
         self.file_matches.clear();
         self.completions.hide();
-        text
+        // WS9 — expand "[Pasted text #N ...]" pills into their full stored
+        // content so the model receives the real text (CC expandPastedTextRefs
+        // in processUserInput). Attachment chips ([Image #N]) pass through
+        // untouched — they become content blocks, not inlined text.
+        self.expand_paste_pills(&display)
     }
 
     pub fn reset(&mut self) {
@@ -338,8 +355,77 @@ impl InputComponent {
         self.file_matches.clear();
     }
 
+    /// WS9 — insert normalized pasted text. Large pastes (>[`PASTE_THRESHOLD`]
+    /// chars or >2 newlines — CC PromptInput.tsx onTextPaste, maxLines
+    /// effectively 2) collapse into a "[Pasted text #N +M lines]" pill token
+    /// whose full content goes to the deferred store and is spliced back in at
+    /// submit; small pastes insert inline. The line count intentionally mirrors
+    /// CC's getPastedTextRefNumLines quirk of counting newline CHARS, not
+    /// lines ("a\nb\nc" is "+2 lines").
+    pub fn insert_paste(&mut self, text: &str) {
+        let num_lines = text.matches('\n').count();
+        if text.len() > PASTE_THRESHOLD || num_lines > 2 {
+            let id = self.next_paste_id;
+            self.next_paste_id += 1;
+            self.paste_store.insert(id, text.to_string());
+            let token = if num_lines == 0 {
+                format!("[Pasted text #{}]", id)
+            } else {
+                format!("[Pasted text #{} +{} lines]", id, num_lines)
+            };
+            self.insert_str(&token);
+        } else {
+            self.insert_str(text);
+        }
+    }
+
+    /// Replace every "[Pasted text #N]" / "[Pasted text #N +M lines]" pill in
+    /// `text` with its stored content (CC history.ts expandPastedTextRefs).
+    /// Replacements are spliced back-to-front at the ORIGINAL match offsets so
+    /// pill-like strings inside pasted content are never re-scanned. Unknown
+    /// ids (nothing stored) leave the token as literal text.
+    fn expand_paste_pills(&self, text: &str) -> String {
+        let mut pills: Vec<(usize, usize, usize)> = Vec::new();
+        for (s, e) in chip_ranges(text) {
+            if let Some(id) = pill_id(&text[s..e]) {
+                pills.push((s, e, id));
+            }
+        }
+        let mut out = text.to_string();
+        for (s, e, id) in pills.into_iter().rev() {
+            if let Some(content) = self.paste_store.get(&id) {
+                out.replace_range(s..e, content);
+            }
+        }
+        out
+    }
+
     fn delete_char(&mut self) {
         if self.cursor > 0 {
+            // Atomic chip delete (CC Cursor.deleteTokenBefore): backspace with
+            // the caret at the END of a chip token — or inside one (mouse
+            // click) — removes the whole token in one keystroke, so a pill or
+            // [Image #N] chip can never be half-deleted into stray text. The
+            // end-of-token case requires the char after the caret to be
+            // whitespace or EOL (CC's word-boundary guard), so backspacing
+            // through ordinary text touching a ']' stays character-wise.
+            let next_is_boundary = self.content[self.cursor..]
+                .chars()
+                .next()
+                .map_or(true, |c| c.is_whitespace());
+            if let Some((s, e)) = chip_ranges(&self.content).into_iter().find(|&(s, e)| {
+                (self.cursor == e && next_is_boundary)
+                    || (self.cursor > s && self.cursor < e)
+            }) {
+                self.snapshot();
+                self.content.drain(s..e);
+                self.cursor = s;
+                if !self.content.contains('\n') {
+                    self.multiline = false;
+                }
+                self.after_edit();
+                return;
+            }
             self.snapshot();
             let prev = self.content[..self.cursor]
                 .chars()
@@ -376,6 +462,15 @@ impl InputComponent {
                 .map(|c| c.len_utf8())
                 .unwrap_or(0);
             self.cursor -= prev;
+            // Atomic chip hop (CC Cursor.snapOutOfImageRef): the caret never
+            // lands INSIDE a "[Image #N]"/"[Pasted text #N]" token — crossing
+            // its right edge snaps all the way to the token start.
+            if let Some((s, _)) = chip_ranges(&self.content)
+                .into_iter()
+                .find(|&(s, e)| self.cursor > s && self.cursor < e)
+            {
+                self.cursor = s;
+            }
         }
     }
 
@@ -387,6 +482,13 @@ impl InputComponent {
                 .map(|c| c.len_utf8())
                 .unwrap_or(0);
             self.cursor += next;
+            // Atomic chip hop: crossing into a chip jumps to its far edge.
+            if let Some((_, e)) = chip_ranges(&self.content)
+                .into_iter()
+                .find(|&(s, e)| self.cursor > s && self.cursor < e)
+            {
+                self.cursor = e;
+            }
         }
     }
 
@@ -409,44 +511,88 @@ impl InputComponent {
         }
     }
 
-    /// Multiline: move the cursor up one line, preserving the column when
-    /// possible. On the first line, jump to the start of the buffer.
+    /// Effective wrap width for cursor motion — the same formula
+    /// `needed_height` uses for its wrap estimate, so caret motion and box
+    /// growth agree on where a logical line folds. Char-count based;
+    /// display-width (CJK/emoji) precision is the separate unicode-width item.
+    fn wrap_width(&self) -> usize {
+        let prompt_len: usize = if self.processing { 4 } else { 2 };
+        (self.width as usize).saturating_sub(prompt_len + 1).max(1)
+    }
+
+    /// Multiline: move the cursor up one VISUAL line (CC MeasuredText
+    /// visual-line motion). Inside a long, wrapped logical line the caret
+    /// first climbs the wrapped rows; only from the top visual row does it hop
+    /// to the previous logical line's LAST visual row. History recall stays
+    /// gated on the true buffer top edge (`up_crosses_to_history`), so a long
+    /// wrapped draft is never clobbered by a stray Up. On the first line,
+    /// jump to the start of the buffer.
     fn move_cursor_up(&mut self) {
-        let col = self.cursor_column();
-        let cur_line_start = self.content[..self.cursor]
+        let w = self.wrap_width();
+        let cur_start = self.content[..self.cursor]
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        if cur_line_start == 0 {
+        let col = self.content[cur_start..self.cursor].chars().count();
+        let (vrow, vcol) = (col / w, col % w);
+        if vrow > 0 {
+            // Up one wrapped visual row within the same logical line.
+            let cur_end = self.content[cur_start..]
+                .find('\n')
+                .map(|p| cur_start + p)
+                .unwrap_or(self.content.len());
+            self.cursor = self.byte_at_column(cur_start, cur_end, (vrow - 1) * w + vcol);
+            return;
+        }
+        if cur_start == 0 {
             self.cursor = 0;
             return;
         }
-        // Previous line occupies [prev_start, cur_line_start - 1) (excludes its
-        // trailing '\n' at cur_line_start - 1).
-        let prev_end = cur_line_start - 1;
+        // Previous line occupies [prev_start, cur_start - 1) (excludes its
+        // trailing '\n' at cur_start - 1). Land on its LAST visual row at the
+        // same visual column, clamped to the line end.
+        let prev_end = cur_start - 1;
         let prev_start = self.content[..prev_end]
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        self.cursor = self.byte_at_column(prev_start, prev_end, col);
+        let prev_len = self.content[prev_start..prev_end].chars().count();
+        let last_row_start = if prev_len == 0 { 0 } else { ((prev_len - 1) / w) * w };
+        self.cursor = self.byte_at_column(prev_start, prev_end, last_row_start + vcol);
     }
 
-    /// Multiline: move the cursor down one line, preserving the column when
-    /// possible. On the last line, jump to the end of the buffer.
+    /// Multiline: move the cursor down one VISUAL line — through the wrapped
+    /// rows of a long logical line first, then into the next logical line at
+    /// the same visual column. On the last line, jump to the end of the buffer.
     fn move_cursor_down(&mut self) {
-        let col = self.cursor_column();
-        let next_start = match self.content[self.cursor..].find('\n') {
-            Some(rel) => self.cursor + rel + 1,
-            None => {
-                self.cursor = self.content.len();
-                return;
-            }
-        };
+        let w = self.wrap_width();
+        let cur_start = self.content[..self.cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let cur_end = self.content[cur_start..]
+            .find('\n')
+            .map(|p| cur_start + p)
+            .unwrap_or(self.content.len());
+        let col = self.content[cur_start..self.cursor].chars().count();
+        let (vrow, vcol) = (col / w, col % w);
+        let line_len = self.content[cur_start..cur_end].chars().count();
+        let last_vrow = if line_len == 0 { 0 } else { (line_len - 1) / w };
+        if vrow < last_vrow {
+            // Down one wrapped visual row within the same logical line.
+            self.cursor = self.byte_at_column(cur_start, cur_end, (vrow + 1) * w + vcol);
+            return;
+        }
+        if cur_end >= self.content.len() {
+            self.cursor = self.content.len();
+            return;
+        }
+        let next_start = cur_end + 1;
         let next_end = self.content[next_start..]
             .find('\n')
             .map(|p| next_start + p)
             .unwrap_or(self.content.len());
-        self.cursor = self.byte_at_column(next_start, next_end, col);
+        self.cursor = self.byte_at_column(next_start, next_end, vcol);
     }
 
     fn handle_tab(&mut self) -> bool {
@@ -727,6 +873,22 @@ impl InputComponent {
     /// the buffer is non-empty (empty Ctrl+D is EOF/quit), so this never fights
     /// the exit binding.
     fn delete_forward_char(&mut self) {
+        // Atomic chip delete, forward direction: Ctrl+D with the caret at a
+        // chip's start (or inside one) removes the whole token — never a lone
+        // '[' that would strand the rest as text.
+        if let Some((s, e)) = chip_ranges(&self.content)
+            .into_iter()
+            .find(|&(s, e)| self.cursor >= s && self.cursor < e)
+        {
+            self.snapshot();
+            self.content.drain(s..e);
+            self.cursor = s;
+            if !self.content.contains('\n') {
+                self.multiline = false;
+            }
+            self.after_edit();
+            return;
+        }
         if self.cursor < self.content.len() {
             self.snapshot();
             let next = self.content[self.cursor..]
@@ -1678,7 +1840,12 @@ fn down_crosses_to_history(content: &str, cursor: usize) -> bool {
     cursor >= content.len() && cursor_on_last_line(content, cursor)
 }
 
-/// True when `tok` is an attachment chip token like "[Image #3]" or "[File #12]".
+/// Chars of pasted text handled inline before collapsing into a pill token —
+/// ported verbatim from Claude Code (imagePaste.ts PASTE_THRESHOLD).
+pub const PASTE_THRESHOLD: usize = 800;
+
+/// True when `tok` is a chip token: "[Image #3]", "[File #12]",
+/// "[Pasted text #1]" or "[Pasted text #1 +10 lines]".
 fn is_chip_token(tok: &str) -> bool {
     let inner = match tok.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         Some(i) => i,
@@ -1689,7 +1856,109 @@ fn is_chip_token(tok: &str) -> bool {
             return !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit());
         }
     }
+    // WS9 — large-paste pill: "Pasted text #N" with optional " +M lines".
+    if let Some(rest) = inner.strip_prefix("Pasted text #") {
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return false;
+        }
+        let tail = &rest[digits..];
+        if tail.is_empty() {
+            return true;
+        }
+        if let Some(mid) = tail.strip_prefix(" +").and_then(|t| t.strip_suffix(" lines")) {
+            return !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit());
+        }
+        return false;
+    }
     false
+}
+
+/// Byte ranges `[start, end)` of every chip token in `content`, left to
+/// right. Shared by chip styling, atomic delete, caret hop and pill expansion
+/// so all four agree on exactly what a token is.
+fn chip_ranges(content: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    while let Some(open_rel) = content[base..].find('[') {
+        let open = base + open_rel;
+        match content[open..].find(']') {
+            Some(close_rel) => {
+                let end = open + close_rel + 1;
+                if is_chip_token(&content[open..end]) {
+                    out.push((open, end));
+                    base = end;
+                } else {
+                    base = open + 1;
+                }
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// The id N of a "[Pasted text #N ...]" pill token, or None for other chips.
+fn pill_id(tok: &str) -> Option<usize> {
+    if !is_chip_token(tok) {
+        return None;
+    }
+    let rest = tok.strip_prefix("[Pasted text #")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// WS9 — CC PromptInput.tsx onTextPaste normalization, ported verbatim:
+/// strip ANSI escape sequences, then replace every `\r` with `\n` (CC's
+/// `/\r/g` — CRLF intentionally becomes two newlines, matching CC exactly)
+/// and every tab with four spaces.
+pub fn normalize_paste(raw: &str) -> String {
+    strip_ansi(raw).replace('\r', "\n").replace('\t', "    ")
+}
+
+/// Remove ANSI escape sequences: CSI (`ESC [ … final byte`), OSC (`ESC ] …`
+/// terminated by BEL or `ESC \`), and two-char `ESC x` escapes. Pasting
+/// colored terminal output must yield plain text, not control bytes.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                // CSI: parameter/intermediate bytes end at a final byte @..~.
+                chars.next();
+                for n in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: terminated by BEL or the ST sequence ESC \.
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '\u{07}' {
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// Split `text` into spans, styling attachment chip tokens ("[Image #N]",
@@ -1911,5 +2180,175 @@ mod input_edit_tests {
         let act = input.handle_event(&key(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert!(matches!(act, ComponentAction::Ignored));
         assert_eq!(input.value(), "x");
+    }
+}
+
+#[cfg(test)]
+mod ws9_composer_tests {
+    use super::*;
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    fn fresh() -> InputComponent {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10); // in-memory: no disk writes
+        input
+    }
+
+    // ── Large-paste pill: token, store, expand-at-submit ────────────────────
+
+    #[test]
+    fn small_paste_inserts_inline() {
+        let mut input = fresh();
+        input.insert_paste("hello world");
+        assert_eq!(input.value(), "hello world");
+    }
+
+    #[test]
+    fn large_paste_collapses_to_pill_and_expands_at_submit() {
+        let mut input = fresh();
+        let big = "x".repeat(PASTE_THRESHOLD + 1);
+        input.insert_paste(&big);
+        assert_eq!(input.value(), "[Pasted text #1]");
+        assert_eq!(input.submit(), big); // model receives the full text
+        // History keeps the compact pill display, not the expanded body.
+        assert_eq!(
+            input.history.entries().last().map(|s| s.as_str()),
+            Some("[Pasted text #1]")
+        );
+    }
+
+    #[test]
+    fn multiline_paste_pill_counts_newline_chars_cc_style() {
+        let mut input = fresh();
+        let text = "a\nb\nc\nd"; // 3 newline CHARS (> 2) → pill "+3 lines"
+        input.insert_paste(text);
+        assert_eq!(input.value(), "[Pasted text #1 +3 lines]");
+        assert_eq!(input.submit(), text);
+    }
+
+    #[test]
+    fn pill_expands_in_place_with_surrounding_text() {
+        let mut input = fresh();
+        input.insert_str("before ");
+        input.insert_paste(&"y".repeat(900));
+        input.insert_str(" after");
+        assert_eq!(input.submit(), format!("before {} after", "y".repeat(900)));
+    }
+
+    #[test]
+    fn recalled_pill_from_history_still_expands() {
+        let mut input = fresh();
+        let big = "z".repeat(900);
+        input.insert_paste(&big);
+        let _ = input.submit();
+        input.handle_event(&key(KeyCode::Up)); // recall "[Pasted text #1]"
+        assert_eq!(input.value(), "[Pasted text #1]");
+        assert_eq!(input.submit(), big);
+    }
+
+    #[test]
+    fn deleted_pill_token_content_is_not_sent() {
+        let mut input = fresh();
+        input.insert_paste(&"q".repeat(900));
+        // ONE backspace atomically removes the whole pill token.
+        input.handle_event(&key(KeyCode::Backspace));
+        assert_eq!(input.value(), "");
+        input.insert_str("typed instead");
+        assert_eq!(input.submit(), "typed instead");
+    }
+
+    // ── Paste normalization (CC onTextPaste, verbatim) ──────────────────────
+
+    #[test]
+    fn normalize_strips_ansi_crs_and_tabs() {
+        let raw = "\u{1b}[31mred\u{1b}[0m\r\n\tdone";
+        // CC verbatim: EVERY \r becomes \n (CRLF → two newlines), tab → 4sp.
+        assert_eq!(normalize_paste(raw), "red\n\n    done");
+    }
+
+    #[test]
+    fn normalize_strips_osc_sequences() {
+        let raw = "\u{1b}]0;title\u{7}text";
+        assert_eq!(normalize_paste(raw), "text");
+    }
+
+    // ── Atomic chip hop / delete ────────────────────────────────────────────
+
+    #[test]
+    fn backspace_after_chip_deletes_whole_token() {
+        let mut input = fresh();
+        input.set_content("[Image #1]");
+        input.handle_event(&key(KeyCode::Backspace));
+        assert_eq!(input.value(), "");
+    }
+
+    #[test]
+    fn backspace_mid_word_after_bracket_stays_char_wise() {
+        // Char after the caret is NOT a boundary → no token delete (CC guard).
+        let mut input = fresh();
+        input.set_content("[Image #1]x");
+        input.cursor = "[Image #1]".len();
+        input.handle_event(&key(KeyCode::Backspace));
+        assert_eq!(input.value(), "[Image #1x"); // plain ']' delete
+    }
+
+    #[test]
+    fn arrows_hop_over_chip_atomically() {
+        let mut input = fresh();
+        input.set_content("[Image #1] hi");
+        input.cursor = "[Image #1]".len();
+        input.handle_event(&key(KeyCode::Left));
+        assert_eq!(input.cursor(), 0); // snapped over the whole chip
+        input.handle_event(&key(KeyCode::Right));
+        assert_eq!(input.cursor(), "[Image #1]".len());
+    }
+
+    #[test]
+    fn pill_token_grammar() {
+        assert!(is_chip_token("[Pasted text #3]"));
+        assert!(is_chip_token("[Pasted text #3 +12 lines]"));
+        assert!(!is_chip_token("[Pasted text #]"));
+        assert!(!is_chip_token("[Pasted text #3 +x lines]"));
+        assert!(is_chip_token("[Image #2]"));
+        assert_eq!(pill_id("[Pasted text #7 +2 lines]"), Some(7));
+        assert_eq!(pill_id("[Image #7]"), None);
+    }
+
+    // ── Wrapped-visual-line cursor motion ───────────────────────────────────
+
+    #[test]
+    fn up_climbs_wrapped_visual_rows_before_leaving_the_line() {
+        let mut input = fresh();
+        input.set_width(20); // wrap width = 20 - 3 = 17
+        let line2 = "b".repeat(40); // wraps to 3 visual rows (17+17+6)
+        input.set_content(&format!("aaa\n{}", line2));
+        // Caret at very end: visual row 2, vcol 6.
+        input.handle_event(&key(KeyCode::Up));
+        assert_eq!(input.cursor(), 4 + 23); // row 1, same vcol (17 + 6)
+        input.handle_event(&key(KeyCode::Up));
+        assert_eq!(input.cursor(), 4 + 6); // row 0, vcol 6
+        input.handle_event(&key(KeyCode::Up));
+        // Off the top visual row → previous logical line "aaa", clamped.
+        assert_eq!(input.cursor(), 3);
+    }
+
+    #[test]
+    fn down_descends_wrapped_visual_rows() {
+        let mut input = fresh();
+        input.set_width(20); // wrap width 17
+        let line1 = "c".repeat(40);
+        input.set_content(&format!("{}\nzz", line1));
+        input.cursor = 5; // row 0, vcol 5
+        input.handle_event(&key(KeyCode::Down));
+        assert_eq!(input.cursor(), 17 + 5); // row 1, same vcol
+        input.handle_event(&key(KeyCode::Down));
+        assert_eq!(input.cursor(), 34 + 5); // row 2
+        input.handle_event(&key(KeyCode::Down));
+        // Last visual row → next logical line "zz", vcol clamped to its end.
+        assert_eq!(input.cursor(), 41 + 2);
     }
 }

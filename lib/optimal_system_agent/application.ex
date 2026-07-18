@@ -103,6 +103,17 @@ defmodule OptimalSystemAgent.Application do
     # (same concurrency rationale as :osa_cancel_flags). See Loop.Steer.
     :ets.new(:osa_steer_queue, [:named_table, :public, :ordered_set])
 
+    # WS6 — background task-notification queue. Rows {{session_id, seq}, map}
+    # (ordered_set, FIFO drain). Drained beside the steer queue by a BUSY
+    # ReactLoop, or by Loop.poke/1 as a synthetic turn when idle. Public for
+    # the same reason as :osa_steer_queue. See Agent.TaskNotifications.
+    :ets.new(:osa_task_notifications, [:named_table, :public, :ordered_set])
+
+    # WS6 — per-task "notified" check-and-set flags ({task_id, ts}) so a
+    # bash_output poll and the completion broadcast race to exactly ONE
+    # <task-notification> per task.
+    :ets.new(:osa_task_notified, [:named_table, :public, :set])
+
     # WS5 — per-session buffer of in-flight streamed text: {session_id, [delta | acc]}
     # (reverse iodata). Written by LLMClient's text_delta callback, read on a hard
     # interrupt so the partial assistant text survives the stream abort.

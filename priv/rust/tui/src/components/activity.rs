@@ -277,6 +277,17 @@ impl Activity {
         self.active_verb = verb.filter(|v| !v.trim().is_empty());
     }
 
+    /// The spinner's verb: the active task's present-continuous form when a
+    /// task is in progress, otherwise ONE flavor verb held for the whole turn
+    /// (CC parity — seeded per request via `verb_offset`, never cycled
+    /// mid-turn).
+    fn spinner_verb(&self) -> &str {
+        match self.active_verb.as_deref() {
+            Some(v) => v,
+            None => SPINNER_VERBS[self.verb_offset % SPINNER_VERBS.len()],
+        }
+    }
+
     /// Set processing phase (auto-activates if inactive)
     pub fn set_phase(&mut self, phase: ProcessingPhase) {
         self.phase = phase;
@@ -461,12 +472,10 @@ impl Component for Activity {
         let spinner_char = spinner_frames[(self.phrase_tick as usize) % spinner_frames.len()];
 
         // When a task is in progress, show its concrete active step (Claude Code's
-        // activeForm). Otherwise fall back to the 179 rotating flavor verbs — each
-        // request starts on a different one (verb_offset) and switches every ~2s.
-        let word: &str = match self.active_verb.as_deref() {
-            Some(v) => v,
-            None => SPINNER_VERBS[(self.verb_offset + elapsed as usize / 2) % SPINNER_VERBS.len()],
-        };
+        // activeForm). Otherwise ONE flavor verb per turn (CC parity): each
+        // request seeds a different verb and keeps it for the whole turn instead
+        // of cycling every ~2s — see spinner_verb().
+        let word: &str = self.spinner_verb();
 
         // Output-token count for the "↓ N tokens" suffix. Fall back to a char-based
         // estimate (~4 chars/token) while streaming if tokens aren't reported yet.
@@ -484,9 +493,10 @@ impl Component for Activity {
             Span::styled(format!("{}\u{2026}", word), theme.spinner_verb()),
             Span::styled(
                 // Only surface the "↓ N tokens" segment once tokens are actually
-                // flowing — during the initial thinking phase it reads 0, which looks
-                // broken. Just the elapsed timer until then.
-                if tokens > 0 {
+                // flowing AND the turn has run 30s (CC's token gate — short turns
+                // never flash a count; during the initial thinking phase it reads
+                // 0, which looks broken). Just the elapsed timer until then.
+                if tokens > 0 && elapsed >= 30 {
                     format!(" ({} \u{00b7} \u{2193} {} tokens)", elapsed_str, format_count(tokens))
                 } else {
                     format!(" ({})", elapsed_str)
@@ -611,5 +621,21 @@ mod activity_tests {
         act.tool_start("Read", "short ascii");
         act.tool_start("Web", &"\u{1f600}".repeat(30)); // 4-byte emoji run
         assert!(!act.tool_feed.is_empty());
+    }
+
+    #[test]
+    fn spinner_verb_is_stable_for_a_turn() {
+        let mut act = Activity::new();
+        act.start();
+        let v1 = act.spinner_verb().to_string();
+        act.tick();
+        act.tick();
+        // One verb per turn — ticks/time never rotate it.
+        assert_eq!(act.spinner_verb(), v1);
+        // A concrete task step (activeForm) still overrides the flavor verb.
+        act.set_active_verb(Some("Wiring the checklist".into()));
+        assert_eq!(act.spinner_verb(), "Wiring the checklist");
+        act.set_active_verb(None);
+        assert_eq!(act.spinner_verb(), v1);
     }
 }

@@ -48,6 +48,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     buffer: [],
     bytes: 0,
     truncated: false,
+    notified: false,
     max_bytes: @default_max_bytes,
     retain_ms: @default_retain_ms
   ]
@@ -114,6 +115,12 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       truncated: bytes >= max_bytes
     }
 
+    # WS6: seed the on-disk output file with what the foreground run captured
+    # before the Ctrl+B hand-off, so the file holds the FULL stream.
+    if is_binary(initial) and initial != "" do
+      OptimalSystemAgent.Shell.TaskOutput.append(session_id, id, initial)
+    end
+
     {:ok, state}
   end
 
@@ -165,6 +172,9 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
 
   @impl true
   def handle_info({port, {:data, data}}, %{port: port} = state) do
+    # WS6: mirror every chunk to the per-task disk file so the FULL output
+    # survives the in-memory head-truncation and is readable via the read tool.
+    OptimalSystemAgent.Shell.TaskOutput.append(state.session_id, state.id, data)
     {:noreply, append(state, data)}
   end
 
@@ -175,7 +185,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
 
     state = %{state | status: status, exit_code: code, finished_at: DateTime.utc_now(), port: nil}
 
-    notify_completion(state)
+    state = maybe_notify(state)
 
     # Retire after the retention window so output stays pollable for a while.
     Process.send_after(self(), :retire, state.retain_ms)
@@ -206,7 +216,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
         finished_at: state.finished_at || DateTime.utc_now()
     }
 
-    notify_completion(state)
+    state = maybe_notify(state)
 
     # Ensure the worker is retired even if no exit_status arrives.
     Process.send_after(self(), :retire, state.retain_ms)
@@ -256,6 +266,22 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
   # into the parent Loop) and the HTTP SSE loop (→ TUI toast + live count) pick
   # it up. Guarded so a PubSub failure never crashes the worker before it
   # schedules :retire. No-op when the command wasn't started with a session.
+  # Exactly-once completion notification (WS6). Guards the in-process double
+  # (kill followed by the port's exit_status). The cross-process race — a
+  # bash_output poll vs this broadcast — is arbitrated separately by the
+  # shared Agent.TaskNotifications.mark_notified check-and-set.
+  defp maybe_notify(%{notified: true} = state), do: state
+
+  defp maybe_notify(state) do
+    notify_completion(state)
+    %{state | notified: true}
+  end
+
+  defp output_file(%{session_id: nil}), do: nil
+
+  defp output_file(state),
+    do: OptimalSystemAgent.Shell.TaskOutput.path(state.session_id, state.id)
+
   defp notify_completion(%{session_id: nil}), do: :ok
 
   defp notify_completion(state) do
@@ -272,6 +298,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
          status: state.status,
          exit_code: state.exit_code,
          output_tail: tail,
+         output_file: output_file(state),
          session_id: state.session_id,
          running_count: OptimalSystemAgent.Shell.BackgroundManager.running_count()
        }}
@@ -296,9 +323,11 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
       id: state.id,
       command: state.command,
       cwd: state.cwd,
+      session_id: state.session_id,
       status: state.status,
       exit_code: state.exit_code,
       output: output_string(state),
+      output_file: output_file(state),
       bytes: state.bytes,
       truncated: state.truncated,
       started_at: state.started_at,

@@ -86,6 +86,7 @@ defmodule OptimalSystemAgent.Agent.Hooks do
           | :worktree_create
           | :worktree_remove
           | :stop
+          | :notification
 
   @type hook_fn :: Dispatch.hook_fn()
   @type hook_entry :: %{

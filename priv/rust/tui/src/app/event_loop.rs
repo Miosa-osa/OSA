@@ -201,6 +201,11 @@ impl App {
                 let _ = terminal.clear();
             }
 
+            // 2c. WS12 chrome: terminal tab title (busy animation) + the 6s
+            // unanswered-permission desktop ping. Deduped internally, so the
+            // 200ms tick cadence costs nothing when idle.
+            self.sync_chrome();
+
             // 3. Draw the live region (inline) or the modal / fullscreen view (full).
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -228,6 +233,7 @@ impl App {
         }
 
         // Cleanup
+        self.chrome_title.reset(); // hand the tab title back to the shell
         tick_handle.abort();
         term_handle.abort();
         if let Some(cancel) = self.sse_cancel.take() {
@@ -548,6 +554,28 @@ impl App {
     /// top divider (mirrors Claude Code's notification row above the prompt).
     fn draw_context_hint(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
+            return;
+        }
+        // WS12 — CC TokenWarning parity: once the backend's context_pressure
+        // report crosses the low threshold, the passive "N% context used" hint
+        // becomes an explicit red warning showing the % LEFT until auto-compact
+        // and the action to take.
+        if self.status.context_low() {
+            let left = self.status.percent_left().unwrap_or(0);
+            let text = format!(
+                "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
+                left
+            );
+            let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    text,
+                    ratatui::style::Style::default()
+                        .fg(crate::style::theme().colors.error)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+            ))
+            .alignment(ratatui::layout::Alignment::Right);
+            frame.render_widget(para, area);
             return;
         }
         let pct = (self.status.context_utilization() * 100.0).round() as u32;

@@ -142,6 +142,13 @@ pub enum BackendEvent {
         command: String,
         task_id: String,
     },
+    /// Queued background `<task-notification>`s were folded into the agent's
+    /// context (busy-turn drain or idle poke). Rendered as a system line so
+    /// the user sees WHY the agent pivots to a finished background task.
+    TaskNotification {
+        count: u32,
+        summary: String,
+    },
     /// Result of a Ctrl+B mid-run detach request (POST /sessions/:id/detach-shell).
     /// `Ok(background_id)` when the running foreground command was promoted to the
     /// background; `Err(reason)` when there was nothing to detach (or it failed).
@@ -162,6 +169,11 @@ pub enum BackendEvent {
         utilization: f64,
         estimated_tokens: u64,
         max_tokens: u64,
+        /// WS8/WS12 — CC token-warning parity: % of usable context left before
+        /// auto-compact, and whether the low-context threshold is crossed.
+        /// None/absent from older backends.
+        percent_left: Option<u32>,
+        context_low: Option<bool>,
     },
 
     // === Tasks ===

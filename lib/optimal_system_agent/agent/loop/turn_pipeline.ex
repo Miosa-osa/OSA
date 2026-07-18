@@ -65,12 +65,16 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # Clear per-message process caches
       clear_message_caches()
 
-      # -1. UserPromptSubmit hook — can modify or block the message
-      {message, state} = run_user_prompt_submit_hook(message, state)
+      # -1. UserPromptSubmit hook — can modify or block the message.
+      # CC parity: a block is VISIBLE (the hook's reason is shown to the
+      # user) and exit-0 stdout / additionalContext is injected into the turn.
+      {message, hook_context, block_reason, state} =
+        run_user_prompt_submit_hook(message, state)
 
       if is_nil(message) do
-        broadcast_terminal(state, "Message blocked by hook")
-        {:reply, {:error, "Message blocked by hook"}, state}
+        reason = "Prompt blocked by hook: #{block_reason || "no reason given"}"
+        broadcast_terminal(state, reason)
+        {:reply, {:error, reason}, state}
       else
         # 0. Prompt injection guard
         if Guardrails.prompt_injection?(message) do
@@ -80,6 +84,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
           {:reply, {:ok, refusal}, state}
         else
           state = prepare_turn(message, opts, state)
+          state = inject_hook_context(state, hook_context)
           route_genre(message, opts, state, skip_plan)
         end
       end
@@ -142,6 +147,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     Process.put(:osa_memory_version, 0)
   end
 
+  # Returns {message | nil, injected_context, block_reason | nil, state}.
   defp run_user_prompt_submit_hook(message, state) do
     try do
       case Hooks.run(:user_prompt_submit, %{
@@ -150,16 +156,42 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
              turn_count: state.turn_count,
              working_dir: Map.get(state, :working_dir)
            }) do
-        {:ok, %{message: modified}} when is_binary(modified) -> {modified, state}
-        {:blocked, _reason} -> {nil, %{state | status: :idle}}
-        _ -> {message, state}
+        {:ok, %{message: modified} = final} when is_binary(modified) ->
+          {modified, Map.get(final, :injected_context, []), nil, state}
+
+        {:blocked, reason} ->
+          {nil, [], reason, %{state | status: :idle}}
+
+        _ ->
+          {message, [], nil, state}
       end
     rescue
-      _ -> {message, state}
+      _ -> {message, [], nil, state}
     catch
-      :exit, _ -> {message, state}
+      :exit, _ -> {message, [], nil, state}
     end
   end
+
+  # Append UserPromptSubmit hook context (CC additionalContext / exit-0
+  # stdout) as a system message so the model sees it within this turn.
+  defp inject_hook_context(state, []), do: state
+
+  defp inject_hook_context(state, context) when is_list(context) do
+    text = context |> Enum.map(&to_string/1) |> Enum.join("\n") |> String.trim()
+
+    if text == "" do
+      state
+    else
+      msg = %{
+        role: "system",
+        content: "<user-prompt-submit-hook>\n#{text}\n</user-prompt-submit-hook>"
+      }
+
+      %{state | messages: state.messages ++ [msg]}
+    end
+  end
+
+  defp inject_hook_context(state, _), do: state
 
   # signal weight, compaction, decorated message build, and per-turn state reset
   defp prepare_turn(message, opts, state) do

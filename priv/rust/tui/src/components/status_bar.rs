@@ -161,6 +161,12 @@ pub struct StatusBar {
     effort: Option<String>,
     /// Billing snapshot from `/health.billing`. None ⇒ omit the spend chip.
     billing: Option<crate::client::types::HealthBilling>,
+    /// WS12 — % of usable context left before auto-compact (backend
+    /// context_pressure `percent_left`). None until the first report.
+    percent_left: Option<u32>,
+    /// WS12 — backend crossed the low-context warning threshold
+    /// (context_pressure `context_low`); drives the red hint + % styling.
+    context_low: bool,
 }
 
 impl StatusBar {
@@ -197,6 +203,8 @@ impl StatusBar {
             goal_label: None,
             effort: None,
             billing: None,
+            percent_left: None,
+            context_low: false,
         }
     }
 
@@ -251,6 +259,24 @@ impl StatusBar {
         self.context_utilization = utilization.clamp(0.0, 1.0);
         self.context_estimated = estimated;
         self.context_max = max;
+    }
+
+    /// WS12 — CC TokenWarning parity fields from the backend's context_pressure
+    /// event: percent of usable context left before auto-compact, and whether
+    /// the low-context warning threshold has been crossed.
+    pub fn set_context_warning(&mut self, percent_left: Option<u32>, context_low: bool) {
+        self.percent_left = percent_left;
+        self.context_low = context_low;
+    }
+
+    /// Whether the backend flagged low context (warning threshold crossed).
+    pub fn context_low(&self) -> bool {
+        self.context_low
+    }
+
+    /// Percent of usable context left before auto-compact, if reported.
+    pub fn percent_left(&self) -> Option<u32> {
+        self.percent_left
     }
 
     pub fn set_stats(&mut self, input: u64, output: u64, elapsed: u64) {
@@ -512,7 +538,16 @@ impl Component for StatusBar {
             spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
         }
         let pct = (self.context_utilization * 100.0).round() as u32;
-        spans.push(Span::styled(format!(" {}%", pct), theme.progress_label()));
+        // WS12 — once the backend flags low context, the usage % turns red so
+        // the statusline telegraphs pressure even before the hint line is read.
+        let pct_style = if self.context_low {
+            Style::default()
+                .fg(theme.colors.error)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.progress_label()
+        };
+        spans.push(Span::styled(format!(" {}%", pct), pct_style));
 
         // Decorative accent.
         spans.push(Span::styled(" \u{2606}", theme.status_glyph())); // ☆
@@ -654,5 +689,33 @@ impl Component for StatusBar {
             }
             frame.render_widget(Paragraph::new(Line::from(extras)), row1);
         }
+    }
+}
+
+#[cfg(test)]
+mod status_bar_tests {
+    use super::*;
+
+    #[test]
+    fn context_warning_roundtrip() {
+        let mut sb = StatusBar::new();
+        assert!(!sb.context_low());
+        assert_eq!(sb.percent_left(), None);
+        sb.set_context_warning(Some(18), true);
+        assert!(sb.context_low());
+        assert_eq!(sb.percent_left(), Some(18));
+        // A fresh report after compaction clears both.
+        sb.set_context_warning(None, false);
+        assert!(!sb.context_low());
+        assert_eq!(sb.percent_left(), None);
+    }
+
+    #[test]
+    fn braille_bar_cell_count_is_stable() {
+        let (f, e) = braille_bar(0.0, 8);
+        assert_eq!(f.chars().count() + e.chars().count(), 8);
+        let (f, e) = braille_bar(1.0, 8);
+        assert_eq!(f.chars().count(), 8);
+        assert!(e.is_empty());
     }
 }

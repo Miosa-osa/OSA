@@ -295,6 +295,8 @@ impl App {
                 utilization,
                 estimated_tokens,
                 max_tokens,
+                percent_left,
+                context_low,
             } => {
                 // Normalize at the handler level: the backend sends utilization as
                 // a 0-100 percentage. If it's absent/zero but the token counts are
@@ -305,6 +307,10 @@ impl App {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }
                 self.status.set_context(ratio, estimated_tokens, max_tokens);
+                // WS12 — feed the CC token-warning state to the status bar; the
+                // context-low hint above the composer keys off these.
+                self.status
+                    .set_context_warning(percent_left, context_low.unwrap_or(false));
                 self.sidebar.set_context(ratio);
             }
             BackendEvent::TaskCreated {
@@ -802,6 +808,20 @@ impl App {
                 };
                 self.chat.add_system_message(&note, severity);
                 self.toasts.push(note, level);
+                self.recompute_layout();
+            }
+            BackendEvent::TaskNotification { count, summary } => {
+                // WS6: the backend just folded completed background task(s) into
+                // the agent's context — show why the agent is about to pivot.
+                let note = if summary.trim().is_empty() {
+                    format!("\u{2699} Reacting to {} completed background task(s)", count)
+                } else {
+                    format!(
+                        "\u{2699} Reacting to {} completed background task(s) \u{2014} {}",
+                        count, summary
+                    )
+                };
+                self.chat.add_system_message(&note, "info");
                 self.recompute_layout();
             }
             BackendEvent::ShellDetached(result) => {
@@ -1485,16 +1505,12 @@ fn is_run_in_background(args: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Write a completion ping to the terminal: an OSC 9 desktop notification
-/// ("OSA: response ready") for terminals that support it, plus a BEL for those
-/// that don't. Both are control sequences the terminal consumes, so this does
-/// not disturb the ratatui render.
+/// Write a completion ping to the terminal via the channel-selected notifier
+/// (ghostty OSC 777 / kitty OSC 99 / OSC 9 fallback, tmux-wrapped, plus a BEL
+/// for terminals with no notification support). Control sequences the terminal
+/// consumes — never disturbs the ratatui render.
 fn emit_completion_notification() {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    // OSC 9 desktop notification, then a terminal bell.
-    let _ = out.write_all(b"\x1b]9;OSA: response ready\x07\x07");
-    let _ = out.flush();
+    crate::components::notify::notify("OSA", "Response ready");
 }
 
 /// Commands the TUI handles locally (or wants surfaced) that must appear in the

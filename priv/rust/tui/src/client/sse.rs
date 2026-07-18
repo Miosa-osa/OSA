@@ -574,6 +574,21 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "task_notification" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                count: u32,
+                #[serde(default)]
+                summary: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("task_notification", e)),
+            };
+            Some(BackendEvent::TaskNotification { count: ev.count, summary: ev.summary })
+        }
+
         "turn_recap" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -879,12 +894,21 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 utilization: f64,
                 estimated_tokens: u64,
                 max_tokens: u64,
+                // WS8/WS12 — CC token-warning fields (percent of usable context
+                // left before auto-compact; low-context threshold crossed).
+                // Defaulted so frames from older backends still parse.
+                #[serde(default)]
+                percent_left: Option<u32>,
+                #[serde(default)]
+                context_low: Option<bool>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::ContextPressure {
                 utilization: ev.utilization,
                 estimated_tokens: ev.estimated_tokens,
                 max_tokens: ev.max_tokens,
+                percent_left: ev.percent_left,
+                context_low: ev.context_low,
             })
         }
 

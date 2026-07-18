@@ -140,6 +140,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # just one-shot context) so the directive is visible for the rest of the turn.
     state = inject_pending_steer(state)
 
+    # WS6: drain background task-notifications at the same step boundary — a
+    # BUSY turn sees background completions here; an IDLE loop is handled by
+    # Loop.poke/1 instead. The drain is destructive → exactly-once either way.
+    state = inject_pending_task_notifications(state)
+
     # Proactive context compaction: shrink history before building context /
     # calling the model so the window stays under threshold. Complementary to
     # the reactive ContextCollapse fallback in handle_result/3 (413 retry).
@@ -882,25 +887,57 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-  # Run stop hooks — allows hooks to override response or force continuation
+  # Run Stop hooks (CC protocol). A command hook that exits 2 (or returns
+  # decision:"block") surfaces through Dispatch as {:blocked, reason}: the
+  # agent must NOT stop — the reason is injected as feedback and the loop
+  # continues. `stop_hook_active` is set in the payload on continuation so
+  # hook scripts can detect they already blocked once (CC's infinite-loop
+  # guard); a hard cap of consecutive stop-hook continuations backstops
+  # buggy hooks that ignore the flag.
+  @stop_hook_max_continues 5
+
   defp run_stop_hooks(content, state) do
+    continues = Process.get(:osa_stop_hook_continues, 0)
+
     payload = %{
       content: content,
       session_id: state.session_id,
       iteration: state.iteration,
-      turn_count: state.turn_count
+      turn_count: state.turn_count,
+      stop_hook_active: continues > 0
     }
 
     try do
       case OptimalSystemAgent.Agent.Hooks.run(:stop, payload) do
+        {:blocked, reason} when continues < @stop_hook_max_continues ->
+          Process.put(:osa_stop_hook_continues, continues + 1)
+
+          inject = %{
+            role: "system",
+            content: "[Stop hook feedback — do not stop yet]\n" <> to_string(reason)
+          }
+
+          {:continue, inject, state}
+
+        {:blocked, reason} ->
+          Logger.warning(
+            "[loop] Stop hook still blocking after #{continues} continuations — stopping anyway: #{inspect(reason)}"
+          )
+
+          clear_stop_hook_state()
+          {:ok, state}
+
         {:ok, %{continue: true, message: msg}} ->
+          Process.put(:osa_stop_hook_continues, continues + 1)
           inject = %{role: "system", content: msg}
           {:continue, inject, state}
 
         {:ok, %{override: new_content}} ->
+          clear_stop_hook_state()
           {:override, new_content, state}
 
         _ ->
+          clear_stop_hook_state()
           {:ok, state}
       end
     rescue
@@ -909,6 +946,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       :exit, _ -> {:ok, state}
     end
   end
+
+  defp clear_stop_hook_state, do: Process.delete(:osa_stop_hook_continues)
 
   # Inject pre-fetched memory results into context (from async prefetch)
   defp inject_prefetched_memory(context, memories) when is_list(memories) do
@@ -1050,6 +1089,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         %{
           state
           | messages: state.messages ++ OptimalSystemAgent.Agent.Loop.Steer.to_messages(texts)
+        }
+    end
+  end
+
+  # WS6 — background task-notification drain. Runs at the same step boundary
+  # as the steer drain: pulls queued <task-notification> payloads for this
+  # session and appends them as system messages, so a BUSY turn reacts to
+  # background completions on its very next LLM call. Announces the drain on
+  # the session topic so the TUI shows why the agent pivots.
+  defp inject_pending_task_notifications(%{session_id: sid} = state) do
+    case OptimalSystemAgent.Agent.TaskNotifications.drain(sid) do
+      [] ->
+        state
+
+      notifs ->
+        Logger.info(
+          "[loop] Task notifications: folded #{length(notifs)} into session #{sid} at iteration #{state.iteration}"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :task_notification_injected,
+          session_id: sid,
+          iteration: state.iteration,
+          count: length(notifs)
+        })
+
+        OptimalSystemAgent.Agent.TaskNotifications.announce(sid, notifs)
+
+        %{
+          state
+          | messages:
+              state.messages ++ OptimalSystemAgent.Agent.TaskNotifications.to_messages(notifs)
         }
     end
   end

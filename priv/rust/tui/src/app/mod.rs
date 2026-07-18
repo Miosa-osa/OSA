@@ -244,6 +244,13 @@ pub struct App {
     pub notify_on_complete: bool,
     pub last_user_input: Option<Instant>,
 
+    // WS12 chrome — deduping terminal-title writer (OSC 0, tmux-wrapped) and
+    // the unanswered-permission ping state: when the permission dialog opened
+    // and whether its 6s desktop ping already fired (CC useNotifyAfterTimeout).
+    pub chrome_title: crate::components::title::TitleState,
+    pub permission_wait_since: Option<Instant>,
+    pub permission_pinged: bool,
+
     // Background-agent dashboard (AppState::AgentsDashboard): index of the
     // currently-selected agent row, for cancel targeting.
     pub agents_dashboard_selected: usize,
@@ -453,6 +460,9 @@ impl App {
             transcript: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
+            chrome_title: crate::components::title::TitleState::new(),
+            permission_wait_since: None,
+            permission_pinged: false,
             agents_dashboard_selected: 0,
             message_queue: Vec::new(),
             esc_tracker: EscTracker::default(),
@@ -560,6 +570,40 @@ impl App {
             self.input.set_processing(true);
         } else if from == AppState::Processing && to != AppState::Processing {
             self.input.set_processing(false);
+        }
+    }
+
+    /// WS12 chrome sync — runs once per event-loop iteration, just before draw
+    /// (the 200ms tick guarantees cadence even while idle).
+    ///
+    /// 1. Terminal tab title: "OSA — <dir>", with a ✳/✻ glyph animating at
+    ///    960ms while a turn runs (CC `use-terminal-title`). The TitleState
+    ///    writer dedups, so unchanged frames cost zero pty writes.
+    /// 2. Unanswered-permission ping: when a permission dialog has been open
+    ///    6s with no decision, fire one desktop notification + bell (CC
+    ///    `useNotifyAfterTimeout`). Resets when the dialog closes; honours the
+    ///    OSA_NO_NOTIFY opt-out via `notify_on_complete`.
+    pub(crate) fn sync_chrome(&mut self) {
+        let basename = std::path::Path::new(&self.working_dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "~".to_string());
+        let busy = self.state == AppState::Processing;
+        let title = crate::components::title::compose(busy, &basename);
+        self.chrome_title.update(&title);
+
+        if self.permissions.is_some() {
+            let since = *self.permission_wait_since.get_or_insert_with(Instant::now);
+            if !self.permission_pinged
+                && self.notify_on_complete
+                && since.elapsed() >= Duration::from_secs(6)
+            {
+                crate::components::notify::notify("OSA", "Waiting for your permission");
+                self.permission_pinged = true;
+            }
+        } else {
+            self.permission_wait_since = None;
+            self.permission_pinged = false;
         }
     }
 }

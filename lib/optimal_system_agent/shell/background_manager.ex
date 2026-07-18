@@ -77,6 +77,22 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
   @spec kill(String.t()) :: {:ok, map()} | {:error, :not_found}
   def kill(id), do: with_worker(id, &BackgroundTask.kill/1)
 
+  @doc """
+  Kill every RUNNING background command belonging to `session_id` — orphan
+  reaping when the owning session ends (WS6). Returns the number killed.
+  """
+  @spec kill_for_session(String.t()) :: non_neg_integer()
+  def kill_for_session(session_id) when is_binary(session_id) do
+    list()
+    |> Enum.filter(&(&1.status == :running and &1[:session_id] == session_id))
+    |> Enum.reduce(0, fn snap, acc ->
+      case kill(snap.id) do
+        {:ok, _} -> acc + 1
+        _ -> acc
+      end
+    end)
+  end
+
   @doc "Number of background commands currently in the `:running` state."
   @spec running_count() :: non_neg_integer()
   def running_count do

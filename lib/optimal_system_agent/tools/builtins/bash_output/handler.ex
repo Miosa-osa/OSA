@@ -49,8 +49,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
       end
 
     case result do
-      {:ok, snapshot} -> {:ok, format_snapshot(snapshot)}
-      {:error, :not_found} -> {:ok, not_found_message(id)}
+      {:ok, snapshot} ->
+        # WS6: the model has now SEEN a terminal status — claim the per-task
+        # notified flag so the completion broadcast doesn't ALSO queue a
+        # <task-notification> (poll + completion race → exactly one).
+        if snapshot.status != :running do
+          OptimalSystemAgent.Agent.TaskNotifications.mark_notified(snapshot.id)
+        end
+
+        {:ok, format_snapshot(snapshot)}
+
+      {:error, :not_found} ->
+        {:ok, not_found_message(id)}
     end
   rescue
     e -> {:error, "Failed to get background output: #{Exception.message(e)}"}
@@ -77,6 +87,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
         "- Command: #{snap.command}",
         "- Status: #{snap.status}",
         exit_line(snap),
+        output_file_line(snap),
         "- Output bytes: #{snap.bytes}#{if snap.truncated, do: " (truncated)", else: ""}"
       ]
       |> Enum.reject(&is_nil/1)
@@ -93,4 +104,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
 
   defp exit_line(%{exit_code: nil}), do: nil
   defp exit_line(%{exit_code: code}), do: "- Exit code: #{code}"
+
+  defp output_file_line(%{output_file: file}) when is_binary(file),
+    do: "- Full output file: #{file} (read with the read tool)"
+
+  defp output_file_line(_), do: nil
 end

@@ -281,15 +281,45 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp run_pipeline(messages, tokens_before, severity, max_tok, session_id) do
-    # PreCompact hook — fire-and-forget; observers can record/telemetry the compaction.
-    try do
-      OptimalSystemAgent.Agent.Hooks.run_async(:pre_compact, %{
-        phase: :pre,
-        tokens_before: tokens_before,
-        severity: severity
-      })
-    rescue
-      _ -> :ok
+    # PreCompact hook — SYNCHRONOUS (CC parity). Command hooks receive the
+    # full event on stdin and can contribute custom summarization
+    # instructions (additionalContext / exit-0 stdout), threaded into every
+    # summary LLM prompt for this compaction run. PreCompact cannot veto
+    # compaction — a blocking hook is logged and compaction proceeds.
+    compact_instructions =
+      try do
+        case OptimalSystemAgent.Agent.Hooks.run(:pre_compact, %{
+               phase: :pre,
+               trigger: "auto",
+               custom_instructions: "",
+               tokens_before: tokens_before,
+               severity: severity,
+               session_id: session_id
+             }) do
+          {:ok, final} ->
+            final
+            |> Map.get(:injected_context, [])
+            |> Enum.map(&to_string/1)
+            |> Enum.join("\n")
+            |> String.trim()
+
+          {:blocked, reason} ->
+            Logger.warning("Compactor: PreCompact hook reported #{inspect(reason)} — proceeding")
+            ""
+
+          _ ->
+            ""
+        end
+      rescue
+        _ -> ""
+      catch
+        :exit, _ -> ""
+      end
+
+    if compact_instructions == "" do
+      Process.delete(:osa_compact_instructions)
+    else
+      Process.put(:osa_compact_instructions, compact_instructions)
     end
 
     # Determine target: bring usage to 70% for background, 60% for aggressive/emergency
@@ -718,6 +748,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
           template <> "\n\n" <> formatted
         end
 
+      prompt = append_compact_instructions(prompt)
+
       try do
         Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
         |> case do
@@ -807,6 +839,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
           )
           |> String.replace("%MESSAGES%", formatted)
         end
+
+      # PreCompact hook instructions (CC parity): custom_instructions from the
+      # PreCompact hook are appended to the key-facts prompt as well.
+      prompt = append_compact_instructions(prompt)
 
       try do
         Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
@@ -917,6 +953,19 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   defp safe_to_string(val),
     do: OptimalSystemAgent.Utils.Text.safe_to_string(val)
+
+  # Append PreCompact hook instructions (set per-run in the process dict by
+  # run_pipeline) to a summarization prompt.
+  defp append_compact_instructions(prompt) do
+    case Process.get(:osa_compact_instructions) do
+      instr when is_binary(instr) and instr != "" ->
+        prompt <>
+          "\n\nAdditional instructions for this summary (from PreCompact hook):\n" <> instr
+
+      _ ->
+        prompt
+    end
+  end
 
   defp compactor_llm_enabled? do
     Application.get_env(:optimal_system_agent, :compactor_llm_enabled, true)
