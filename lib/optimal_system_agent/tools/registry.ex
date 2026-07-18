@@ -738,14 +738,47 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "skill_manager" => OptimalSystemAgent.Tools.Builtins.SkillManager,
 
       # ── Flat-layout tools (pending migration) ──────────────────────────
-      "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill,
-      "list_skills" => OptimalSystemAgent.Tools.Builtins.ListSkills,
+      # create_skill / list_skills now register their structured `.Tool` module
+      # directly. Dispatch is identical (both the flat shim and the `.Tool`
+      # module export execute/2 → LegacyAdapter structured path), so this is a
+      # behavior-preserving consistency fix that also makes the redundant
+      # `CreateSkill` / `ListSkills` defdelegate shims safe to delete.
+      "create_skill" => OptimalSystemAgent.Tools.Builtins.CreateSkill.Tool,
+      "list_skills" => OptimalSystemAgent.Tools.Builtins.ListSkills.Tool,
       "save_skill" => OptimalSystemAgent.Tools.Builtins.SaveSkill,
       "find_skill" => OptimalSystemAgent.Tools.Builtins.FindSkill,
       "computer_use" => OptimalSystemAgent.Tools.Builtins.ComputerUse,
       "verify_loop" => OptimalSystemAgent.Verification.Tools.VerifyLoop,
       "spawn_conversation" => OptimalSystemAgent.Conversations.Tools.SpawnConversation,
-      "start_speculative" => OptimalSystemAgent.Speculative.Tools.StartSpeculative
+      "start_speculative" => OptimalSystemAgent.Speculative.Tools.StartSpeculative,
+
+      # ── Previously-orphaned builtins (now wired) ───────────────────────
+      # Fully-implemented, behaviour-conforming tools that were sitting on disk
+      # unregistered (invisible to the model). Each conforms to the flat
+      # contract (name/0 + execute/1 + description/0 + parameters/0) and gates
+      # its own availability via available?/0 where the capability needs an
+      # env/binary/service (browser HTTP-fallback, code_sandbox docker,
+      # wallet_ops :wallet_enabled). Guarded against future drift by
+      # test/optimal_system_agent/tools/registry_coverage_test.exs.
+      "browser" => OptimalSystemAgent.Tools.Builtins.Browser,
+      "github" => OptimalSystemAgent.Tools.Builtins.Github,
+      "semantic_search" => OptimalSystemAgent.Tools.Builtins.SemanticSearch,
+      "codebase_explore" => OptimalSystemAgent.Tools.Builtins.CodebaseExplore,
+      "code_sandbox" => OptimalSystemAgent.Tools.Builtins.CodeSandbox,
+      "knowledge" => OptimalSystemAgent.Tools.Builtins.Knowledge,
+      "orchestrate" => OptimalSystemAgent.Tools.Builtins.Orchestrate,
+      "mcts_index" => OptimalSystemAgent.Tools.Builtins.MCTSIndex,
+      "diff" => OptimalSystemAgent.Tools.Builtins.Diff,
+      "wallet_ops" => OptimalSystemAgent.Tools.Builtins.WalletOps,
+      "budget_status" => OptimalSystemAgent.Tools.Builtins.BudgetStatus,
+
+      # ── Memory-vault tools ─────────────────────────────────────────────
+      "vault_checkpoint" => OptimalSystemAgent.Tools.Builtins.VaultCheckpoint,
+      "vault_context" => OptimalSystemAgent.Tools.Builtins.VaultContext,
+      "vault_inject" => OptimalSystemAgent.Tools.Builtins.VaultInject,
+      "vault_remember" => OptimalSystemAgent.Tools.Builtins.VaultRemember,
+      "vault_sleep" => OptimalSystemAgent.Tools.Builtins.VaultSleep,
+      "vault_wake" => OptimalSystemAgent.Tools.Builtins.VaultWake
     }
   end
 
