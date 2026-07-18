@@ -1957,6 +1957,7 @@ dependencies = [
  "fuzzy-matcher",
  "hound",
  "image",
+ "libc",
  "ratatui",
  "reqwest",
  "serde",

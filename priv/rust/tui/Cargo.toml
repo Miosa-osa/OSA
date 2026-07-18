@@ -43,3 +43,7 @@ zip = "2"
 lto = "thin"
 strip = true
 opt-level = "z"
+
+# Ctrl+Z suspend (SIGTSTP job control) — unix only
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
