@@ -17,6 +17,10 @@ pub enum AppState {
     AgentsDashboard,
     Rewind,
     Status,
+    ThemePicker,
+    Keybindings,
+    Tools,
+    ContextBreakdown,
 }
 
 impl AppState {
@@ -42,6 +46,10 @@ impl AppState {
                 | (Idle, AgentsDashboard)
                 | (Idle, Rewind)
                 | (Idle, Status)
+                | (Idle, ThemePicker)
+                | (Idle, Keybindings)
+                | (Idle, Tools)
+                | (Idle, ContextBreakdown)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -53,6 +61,10 @@ impl AppState {
                 | (Processing, AgentsDashboard)
                 | (Processing, Rewind)
                 | (Processing, Status)
+                | (Processing, ThemePicker)
+                | (Processing, Keybindings)
+                | (Processing, Tools)
+                | (Processing, ContextBreakdown)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -74,6 +86,14 @@ impl AppState {
                 | (Rewind, Processing)
                 | (Status, Idle)
                 | (Status, Processing)
+                | (ThemePicker, Idle)
+                | (ThemePicker, Processing)
+                | (Keybindings, Idle)
+                | (Keybindings, Processing)
+                | (Tools, Idle)
+                | (Tools, Processing)
+                | (ContextBreakdown, Idle)
+                | (ContextBreakdown, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -93,6 +113,10 @@ impl AppState {
                 | AppState::AgentsDashboard
                 | AppState::Rewind
                 | AppState::Status
+                | AppState::ThemePicker
+                | AppState::Keybindings
+                | AppState::Tools
+                | AppState::ContextBreakdown
         )
     }
 
@@ -128,6 +152,10 @@ impl std::fmt::Display for AppState {
             AppState::AgentsDashboard => write!(f, "Agent Dashboard"),
             AppState::Rewind => write!(f, "Rewind"),
             AppState::Status => write!(f, "Status"),
+            AppState::ThemePicker => write!(f, "Theme"),
+            AppState::Keybindings => write!(f, "Keybindings"),
+            AppState::Tools => write!(f, "Tools"),
+            AppState::ContextBreakdown => write!(f, "Context"),
         }
     }
 }

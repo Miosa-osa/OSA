@@ -415,6 +415,26 @@ impl App {
                                 };
                                 crate::dialogs::status_dashboard::draw(frame, area, &view);
                             }
+                            AppState::ThemePicker => {
+                                if let Some(ref d) = self.theme_picker {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Keybindings => {
+                                if let Some(ref d) = self.keybindings_viewer {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::Tools => {
+                                if let Some(ref d) = self.tools_browser {
+                                    d.draw(frame, area);
+                                }
+                            }
+                            AppState::ContextBreakdown => {
+                                if let Some(ref s) = self.context_stats {
+                                    crate::dialogs::context_breakdown::draw(frame, area, s);
+                                }
+                            }
                             _ => {}
                         }
                     }

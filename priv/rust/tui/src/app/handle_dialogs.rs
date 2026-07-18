@@ -452,6 +452,51 @@ impl App {
         self.reasoning_selector = Some(ReasoningSelector::new(ReasoningLevel::Off));
     }
 
+    // ── /theme, /keybindings, /tools, /context overlays ──────────────────
+
+    /// `/theme` — open the palette picker seeded with the active theme so the
+    /// current row is pre-selected and its swatch shows immediately.
+    pub(crate) fn open_theme_picker(&mut self) {
+        if self.state.can_transition_to(AppState::ThemePicker) {
+            self.theme_picker =
+                Some(crate::dialogs::theme_picker::ThemePicker::new(self.config.theme.clone()));
+            self.enter_overlay(AppState::ThemePicker);
+        }
+    }
+
+    /// `/keybindings` — open the scrollable key→action viewer built from the
+    /// live keymap description (sync; no backend round-trip).
+    pub(crate) fn open_keybindings_viewer(&mut self) {
+        if self.state.can_transition_to(AppState::Keybindings) {
+            self.keybindings_viewer = Some(
+                crate::dialogs::keybindings_viewer::KeybindingsViewer::new(self.keymap.describe()),
+            );
+            self.enter_overlay(AppState::Keybindings);
+        }
+    }
+
+    /// `/tools` — kick off the shared tool-list fetch and flag it so the
+    /// `ToolsLoaded` handler opens the browser rather than only updating counts.
+    pub(crate) fn open_tools_browser(&mut self) {
+        self.tools_browser_pending = true;
+        self.load_tools();
+    }
+
+    /// `/context` — fetch the token-usage breakdown; the `ContextLoaded`
+    /// handler stores the snapshot and opens the overlay.
+    pub(crate) fn open_context_breakdown(&mut self) {
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let event = match client.get_context(&sid).await {
+                Ok(stats) => crate::event::backend::BackendEvent::ContextLoaded(Ok(stats)),
+                Err(e) => crate::event::backend::BackendEvent::ContextLoaded(Err(e.to_string())),
+            };
+            let _ = tx.send(crate::event::Event::Backend(event));
+        });
+    }
+
     // ── Rewind (/rewind) ────────────────────────────────────────────────
 
     /// Fetch recent rewind checkpoints for the current session and open the

@@ -3,7 +3,9 @@
 
 pub mod command_palette;
 pub mod config_editor;
+pub mod context_breakdown;
 pub mod file_picker;
+pub mod keybindings_viewer;
 pub mod mcp_approval;
 pub mod model_picker;
 pub mod onboarding;
@@ -17,6 +19,8 @@ pub mod rewind;
 pub mod sessions;
 pub mod status_dashboard;
 pub mod survey;
+pub mod theme_picker;
+pub mod tools_browser;
 pub mod transcript_viewer;
 pub mod trust;
 

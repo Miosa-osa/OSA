@@ -151,11 +151,9 @@ impl App {
             }
             "/theme" => {
                 if arg.is_empty() {
-                    let themes = crate::style::themes::available().join(", ");
-                    self.toasts.push(
-                        format!("Themes: {} (current: {})", themes, self.config.theme),
-                        crate::components::toast::ToastLevel::Info,
-                    );
+                    // Open the picker with a live palette swatch. A direct
+                    // `/theme <name>` still applies without the overlay.
+                    self.open_theme_picker();
                 } else if let Some(theme) = crate::style::themes::by_name(arg) {
                     self.config.theme = arg.to_string();
                     let _ = self.config.save();
@@ -176,16 +174,22 @@ impl App {
                 }
             }
             "/keybindings" => {
-                let path = self.config.profile_dir.join("keybindings.json");
-                let mut msg = format!(
-                    "Keybindings file: {}\nFormat: [{{\"context\": \"global|idle|processing\", \"bindings\": {{\"ctrl+n\": \"app:newSession\"}}}}]\nUse \"none\" to unbind; values starting with / run that slash command.\nCurrent bindings:\n{}",
-                    path.display(),
-                    self.keymap.describe(),
-                );
-                for w in self.keymap.load_warnings() {
-                    msg.push_str(&format!("\nwarning: {}", w));
+                // Open the scrollable key→action viewer. a11y path keeps the
+                // flat scrollback dump a screen reader can consume.
+                if self.activity.a11y() {
+                    let path = self.config.profile_dir.join("keybindings.json");
+                    let mut msg = format!(
+                        "Keybindings file: {}\nCurrent bindings:\n{}",
+                        path.display(),
+                        self.keymap.describe(),
+                    );
+                    for w in self.keymap.load_warnings() {
+                        msg.push_str(&format!("\nwarning: {}", w));
+                    }
+                    self.chat.add_system_message(&msg, "info");
+                } else {
+                    self.open_keybindings_viewer();
                 }
-                self.chat.add_system_message(&msg, "info");
             }
             "/models" => {
                 self.load_models();
@@ -383,11 +387,9 @@ impl App {
                 self.execute_backend_command("auto_mode", if turning_on { "on" } else { "off" });
             }
             "/tools" => {
-                let count = self.header.tool_count();
-                self.toasts.push(
-                    format!("{} tools available", count),
-                    crate::components::toast::ToastLevel::Info,
-                );
+                // Fetch the full tool list and open the searchable browser when
+                // it arrives (ToolsLoaded handler checks tools_browser_pending).
+                self.open_tools_browser();
             }
             "/usage" => {
                 self.toasts.push(
@@ -536,8 +538,13 @@ impl App {
                 self.execute_backend_command("desktop", arg);
             }
             "/context" => {
-                // Fetch token-usage breakdown and render a compact summary in chat.
-                self.show_context();
+                // a11y: flat chat summary. Otherwise: open the segmented
+                // breakdown overlay once the fetch returns (ContextLoaded).
+                if self.activity.a11y() {
+                    self.show_context();
+                } else {
+                    self.open_context_breakdown();
+                }
             }
             "/compact" => {
                 // Trigger proactive compaction on the live loop now. An optional

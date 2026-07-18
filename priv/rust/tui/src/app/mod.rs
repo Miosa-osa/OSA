@@ -106,6 +106,19 @@ pub struct App {
     pub config_editor: Option<ConfigEditor>,
     pub file_picker: Option<FilePicker>,
     pub survey: Option<crate::dialogs::survey::SurveyDialog>,
+    /// `/theme` — palette picker with a live swatch (AppState::ThemePicker).
+    pub theme_picker: Option<crate::dialogs::theme_picker::ThemePicker>,
+    /// `/keybindings` — scrollable key→action viewer (AppState::Keybindings).
+    pub keybindings_viewer: Option<crate::dialogs::keybindings_viewer::KeybindingsViewer>,
+    /// `/tools` — searchable, module-grouped tool browser (AppState::Tools).
+    pub tools_browser: Option<crate::dialogs::tools_browser::ToolsBrowser>,
+    /// `/context` — token-window breakdown; the last fetched stats snapshot
+    /// rendered by the stateless overlay (AppState::ContextBreakdown).
+    pub context_stats: Option<crate::dialogs::context_breakdown::ContextStats>,
+    /// True between a `/tools` invocation and its `ToolsLoaded` reply, so the
+    /// shared tool-list fetch knows to open the browser (vs. the startup load
+    /// that only updates the tool count / welcome).
+    pub tools_browser_pending: bool,
     /// One-shot overdrive (full-auto) entry confirmation overlay. When Some, it
     /// takes key priority; `overdrive_prev_mode` is the mode to revert to on
     /// cancel.
@@ -400,6 +413,11 @@ impl App {
             config_editor: None,
             file_picker: None,
             survey: None,
+            theme_picker: None,
+            keybindings_viewer: None,
+            tools_browser: None,
+            context_stats: None,
+            tools_browser_pending: false,
             overdrive_confirm: None,
             overdrive_prev_mode: crate::components::status_bar::PermissionMode::Default,
             startup_continue: cli.continue_last,

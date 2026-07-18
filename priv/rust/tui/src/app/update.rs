@@ -201,7 +201,83 @@ impl App {
             AppState::Recording => self.handle_recording_key(key),
             AppState::AgentsDashboard => self.handle_agents_dashboard_key(key),
             AppState::Status => self.handle_status_dashboard_key(key),
+            AppState::ThemePicker => self.handle_theme_picker_key(key),
+            AppState::Keybindings => self.handle_keybindings_key(key),
+            AppState::Tools => self.handle_tools_browser_key(key),
+            AppState::ContextBreakdown => self.handle_context_breakdown_key(key),
             _ => false,
+        }
+    }
+
+    /// `/theme` picker: ↑/↓ move, Enter applies the highlighted theme (persists
+    /// + repaints live), Esc closes without changing the theme.
+    fn handle_theme_picker_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::dialogs::theme_picker::ThemeAction;
+        let action = self.theme_picker.as_mut().and_then(|d| d.handle_key(key));
+        match action {
+            Some(ThemeAction::Apply(name)) => {
+                if let Some(theme) = crate::style::themes::by_name(&name) {
+                    self.config.theme = name.clone();
+                    let _ = self.config.save();
+                    crate::style::set_theme(theme);
+                    self.toasts.push(
+                        format!("Theme: {name}"),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
+                self.theme_picker = None;
+                self.exit_overlay();
+                true
+            }
+            Some(ThemeAction::Close) => {
+                self.theme_picker = None;
+                self.exit_overlay();
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// `/keybindings` viewer: scroll keys handled inside; Esc/q close.
+    fn handle_keybindings_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::dialogs::keybindings_viewer::ViewerAction;
+        let action = self
+            .keybindings_viewer
+            .as_mut()
+            .map(|d| d.handle_key(key))
+            .unwrap_or(ViewerAction::Close);
+        if matches!(action, ViewerAction::Close) {
+            self.keybindings_viewer = None;
+            self.exit_overlay();
+        }
+        true
+    }
+
+    /// `/tools` browser: type-to-filter + navigation handled inside; the
+    /// browser signals Close (Esc on an empty filter).
+    fn handle_tools_browser_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crate::dialogs::tools_browser::ToolsBrowserAction;
+        let action = self
+            .tools_browser
+            .as_mut()
+            .map(|d| d.handle_key(key))
+            .unwrap_or(ToolsBrowserAction::Close);
+        if matches!(action, ToolsBrowserAction::Close) {
+            self.tools_browser = None;
+            self.exit_overlay();
+        }
+        true
+    }
+
+    /// `/context` breakdown: read-only; any dismiss key closes.
+    fn handle_context_breakdown_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char(' ') => {
+                self.context_stats = None;
+                self.exit_overlay();
+                true
+            }
+            _ => true,
         }
     }
 

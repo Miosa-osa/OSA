@@ -404,8 +404,57 @@ impl App {
                             Some(self.header.model_name().to_string()),
                         ));
                     }
+
+                    // If this fetch was triggered by `/tools`, open the browser now
+                    // that the full list is in hand.
+                    if self.tools_browser_pending {
+                        self.tools_browser_pending = false;
+                        let entries: Vec<crate::dialogs::tools_browser::ToolEntry> = tools
+                            .iter()
+                            .map(|t| crate::dialogs::tools_browser::ToolEntry {
+                                name: t.name.clone(),
+                                description: t.description.clone(),
+                                module: t.module.clone(),
+                            })
+                            .collect();
+                        if self.state.can_transition_to(AppState::Tools) {
+                            self.tools_browser =
+                                Some(crate::dialogs::tools_browser::ToolsBrowser::new(entries));
+                            self.enter_overlay(AppState::Tools);
+                        }
+                    }
                 }
-                Err(e) => warn!("Failed to load tools: {}", e),
+                Err(e) => {
+                    if self.tools_browser_pending {
+                        self.tools_browser_pending = false;
+                        self.toasts.push(
+                            format!("Could not load tools: {e}"),
+                            crate::components::toast::ToastLevel::Error,
+                        );
+                    }
+                    warn!("Failed to load tools: {}", e);
+                }
+            },
+            BackendEvent::ContextLoaded(result) => match result {
+                Ok(stats) => {
+                    self.context_stats =
+                        Some(crate::dialogs::context_breakdown::ContextStats {
+                            system_tokens: stats.system_tokens,
+                            conversation_tokens: stats.conversation_tokens,
+                            tool_result_tokens: stats.tool_result_tokens,
+                            max_tokens: stats.max_tokens,
+                            used_tokens: stats.used_tokens,
+                        });
+                    if self.state.can_transition_to(AppState::ContextBreakdown) {
+                        self.enter_overlay(AppState::ContextBreakdown);
+                    }
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("Could not load context: {e}"),
+                        crate::components::toast::ToastLevel::Error,
+                    );
+                }
             },
             BackendEvent::OrchestrateResult(result) => match result {
                 Ok(resp) => {

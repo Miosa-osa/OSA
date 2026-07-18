@@ -260,6 +260,8 @@ pub enum BackendEvent {
     OrchestrateResult(Result<OrchestrateResponse, String>),
     CommandsLoaded(Result<Vec<CommandEntry>, String>),
     ToolsLoaded(Result<Vec<ToolEntry>, String>),
+    /// `/context` fetch result → opens the breakdown overlay.
+    ContextLoaded(Result<crate::client::types::ContextStats, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
