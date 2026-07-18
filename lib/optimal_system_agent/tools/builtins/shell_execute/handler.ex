@@ -89,8 +89,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"command" => command} = params, ctx) do
-    workspace = Path.expand("~/.osa/workspace")
-    File.mkdir_p(workspace)
+    # Default to the SESSION's real working directory (the user's project, via
+    # the P0 cwd source of truth) — NOT ~/.osa/workspace. A coding agent has to
+    # operate in the user's repo; caging it in an empty sandbox dir left it
+    # unable to find or touch the project (CC runs in the real cwd + prompts).
+    workspace =
+      case OptimalSystemAgent.Workspace.Cwd.get() do
+        dir when is_binary(dir) and dir != "" -> dir
+        _ -> Path.expand("~/.osa/workspace") |> tap(&File.mkdir_p/1)
+      end
 
     effective_cwd =
       case params["cwd"] do
