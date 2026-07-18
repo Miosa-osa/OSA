@@ -765,6 +765,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tokens_used: u32,
                 #[serde(default)]
                 description: String,
+                #[serde(default)]
+                recent_actions: Vec<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -773,6 +775,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tool_uses: ev.tool_uses,
                 tokens_used: ev.tokens_used,
                 subject: ev.description,
+                recent_actions: ev.recent_actions,
             })
         }
 

@@ -50,14 +50,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler do
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
   def execute(%{"action" => "send", "to" => to, "message" => message} = args, ctx) do
-    team_id = team_id(args, ctx)
-    from = agent_id(args, ctx)
-    Team.send_message(team_id, from, to, message)
-    # Best-effort: surface it to the human on the recipient's SESSION topic
-    # (shared contract %{type: :agent_message, from, text}) if the target maps to
-    # a running session. Team mailbox delivery is unchanged.
-    surface_agent_message(to, from, message)
-    {:ok, "Message sent to #{to}."}
+    # WS7 — SendMessage-style resume (CC parity): when the target names a
+    # FINISHED subagent run, "send" resumes it with its full prior transcript
+    # instead of dropping mail into a mailbox nobody will read. Live sessions
+    # and unknown handles keep the team-mailbox behaviour.
+    case resume_target(to) do
+      {:resume, resumable_id} ->
+        case OptimalSystemAgent.Orchestrator.resume_subagent(resumable_id, message) do
+          {:ok, id} ->
+            {:ok,
+             "Resumed agent #{id} with your message — its full prior transcript was " <>
+               "restored. It runs in the background and will report back on completion."}
+
+          {:error, reason} ->
+            {:ok, "Could not resume #{resumable_id}: #{reason}"}
+        end
+
+      :mailbox ->
+        team_id = team_id(args, ctx)
+        from = agent_id(args, ctx)
+        Team.send_message(team_id, from, to, message)
+        # Best-effort: surface it to the human on the recipient's SESSION topic
+        # (shared contract %{type: :agent_message, from, text}) if the target maps to
+        # a running session. Team mailbox delivery is unchanged.
+        surface_agent_message(to, from, message)
+        {:ok, "Message sent to #{to}."}
+    end
   end
 
   def execute(%{"action" => "read"} = args, ctx) do
@@ -91,6 +109,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.MessageAgent.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  # A "send" target resolves to resume when it names a subagent run whose Loop
+  # is no longer alive (completed/failed/stopped). Anything else — live
+  # sessions, unknown handles — stays on the mailbox path.
+  defp resume_target(to) do
+    handle = to |> to_string() |> String.trim_leading("@")
+
+    run =
+      OptimalSystemAgent.Agent.RunStore.get(handle) ||
+        (OptimalSystemAgent.Agent.RunStore.list(limit: 100)
+         |> Enum.find(fn r -> String.ends_with?(r.agent_id, ":" <> handle) end))
+
+    cond do
+      is_nil(run) -> :mailbox
+      run_alive?(run.agent_id) -> :mailbox
+      true -> {:resume, run.agent_id}
+    end
+  rescue
+    _ -> :mailbox
+  end
+
+  defp run_alive?(id) do
+    match?([{_pid, _}], Registry.lookup(OptimalSystemAgent.SessionRegistry, id))
+  rescue
+    _ -> false
+  end
 
   defp surface_agent_message(to, from, message) do
     target = to |> to_string() |> String.trim_leading("@")

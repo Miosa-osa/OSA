@@ -159,6 +159,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
     end
   end
 
+  # ── Workspace trust (CC parity: TrustDialog; WS15 deferred endpoints) ─────
+  #
+  #   GET  /trust?path=<dir> → full trust status for the TUI trust dialog
+  #   POST /trust/accept     → accept trust for {"path": <dir>} (default cwd)
+
+  get "/trust" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    path = conn.query_params["path"] || File.cwd!()
+    status = OptimalSystemAgent.Workspace.Trust.status(path)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(status))
+  end
+
+  post "/trust/accept" do
+    path =
+      case conn.body_params do
+        %{"path" => p} when is_binary(p) and p != "" -> p
+        _ -> File.cwd!()
+      end
+
+    :ok = OptimalSystemAgent.Workspace.Trust.accept(path)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(OptimalSystemAgent.Workspace.Trust.status(path)))
+  end
+
   match _ do
     json_error(conn, 404, "not_found", "Workspace endpoint not found")
   end

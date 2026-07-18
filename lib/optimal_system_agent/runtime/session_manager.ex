@@ -197,7 +197,8 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   @doc "Proactively compact a live session's context buffer (summarize older turns)."
   @spec proactive_compact(session_id()) :: {:ok, map()} | {:error, term()}
-  def proactive_compact(session_id), do: Loop.proactive_compact(session_id)
+  def proactive_compact(session_id, instructions \\ nil),
+    do: Loop.proactive_compact(session_id, instructions)
 
   @doc "Look up a live loop process."
   @spec lookup_loop(session_id()) :: {:ok, pid(), term()} | :error

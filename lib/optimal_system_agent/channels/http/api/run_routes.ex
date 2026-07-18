@@ -60,6 +60,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RunRoutes do
     end
   end
 
+  # ── GET /:id/transcript — full sidechain transcript (nested Ctrl+O view) ──
+
+  get "/:id/transcript" do
+    run_id = conn.params["id"]
+
+    case RunStore.transcript(run_id) do
+      {:ok, content} ->
+        json(conn, 200, %{id: run_id, transcript: content})
+
+      {:error, msg} ->
+        json_error(conn, 404, "not_found", msg)
+    end
+  end
+
   # ── POST /:id/cancel — cancel a run ────────────────────────────────
 
   post "/:id/cancel" do

@@ -237,6 +237,10 @@ pub struct App {
     // native scrollback; `transcript` is the open overlay state (None = closed).
     pub transcript_log: Vec<crate::dialogs::transcript_viewer::TranscriptEntry>,
     pub transcript: Option<crate::dialogs::transcript_viewer::TranscriptViewer>,
+    /// When set, the transcript overlay renders THESE entries instead of
+    /// `transcript_log` — used for nested subagent transcripts fetched from the
+    /// backend (dashboard "view"). Cleared when the overlay closes.
+    pub transcript_override: Option<Vec<crate::dialogs::transcript_viewer::TranscriptEntry>>,
 
     // Completion notification: bell / OSC 9 when a turn ends while the user is
     // likely away. `notify_on_complete` toggles it (off via OSA_NO_NOTIFY);
@@ -458,6 +462,7 @@ impl App {
 
             transcript_log: Vec::new(),
             transcript: None,
+            transcript_override: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
             chrome_title: crate::components::title::TitleState::new(),

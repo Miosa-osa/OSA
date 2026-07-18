@@ -289,14 +289,23 @@ impl App {
     /// Route a key to the open transcript overlay and act on its result.
     fn handle_transcript_key(&mut self, key: KeyEvent) -> bool {
         use crate::dialogs::transcript_viewer::TranscriptAction;
-        // Disjoint field borrows: `transcript` (mut) and `transcript_log` (shared).
+        // Disjoint field borrows: `transcript` (mut) and the entry source (shared).
+        let entries: &[crate::dialogs::transcript_viewer::TranscriptEntry] =
+            if let Some(ref o) = self.transcript_override {
+                o
+            } else {
+                &self.transcript_log
+            };
         let action = match self.transcript {
-            Some(ref mut tv) => tv.handle_key(key, &self.transcript_log),
+            Some(ref mut tv) => tv.handle_key(key, entries),
             None => return false,
         };
         match action {
             TranscriptAction::None => {}
-            TranscriptAction::Close => self.transcript = None,
+            TranscriptAction::Close => {
+                self.transcript = None;
+                self.transcript_override = None;
+            }
             TranscriptAction::Toast(msg) => {
                 self.toasts
                     .push(msg, crate::components::toast::ToastLevel::Info);
@@ -311,7 +320,13 @@ impl App {
         // Transcript overlay takes the whole viewport when open (additive reader;
         // native scrollback is untouched underneath).
         if let Some(ref tv) = self.transcript {
-            tv.draw(frame, area, &self.transcript_log);
+            let entries: &[crate::dialogs::transcript_viewer::TranscriptEntry] =
+                if let Some(ref o) = self.transcript_override {
+                    o
+                } else {
+                    &self.transcript_log
+                };
+            tv.draw(frame, area, entries);
             if self.toasts.has_toasts() {
                 self.toasts.draw(frame, toast_rect(area).intersection(area));
             }
@@ -554,6 +569,22 @@ impl App {
     /// top divider (mirrors Claude Code's notification row above the prompt).
     fn draw_context_hint(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
+            return;
+        }
+        // WS13 — surface the SSE reconnect state (previously a dead flag):
+        // while the event stream is down and being re-established, this row
+        // shows a reconnect notice instead of the passive context hint.
+        if self.sse_reconnecting {
+            let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    "Reconnecting to backend\u{2026}",
+                    ratatui::style::Style::default()
+                        .fg(crate::style::theme().colors.warning)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+            ))
+            .alignment(ratatui::layout::Alignment::Right);
+            frame.render_widget(para, area);
             return;
         }
         // WS12 — CC TokenWarning parity: once the backend's context_pressure
@@ -1152,7 +1183,14 @@ mod render_tests {
                         format!("investigating subject number {i}"),
                         Some("background".to_string()),
                     );
-                    agents.agent_progress(&format!("agent-{i}"), "reading files", i as u32, 100, "");
+                    agents.agent_progress(
+                        &format!("agent-{i}"),
+                        "reading files",
+                        i as u32,
+                        100,
+                        "",
+                        vec!["file_read: a.rs".into(), "file_grep: foo".into()],
+                    );
                 }
                 agents.set_bg_summary(bg);
                 for_each_size(|frame, area| {
@@ -1179,7 +1217,14 @@ mod render_tests {
                     format!("investigating a fairly long subject line number {i}"),
                     Some("batch-1".to_string()),
                 );
-                agents.agent_progress(&format!("agent-{i}"), "reading files", i as u32, 100, "");
+                agents.agent_progress(
+                    &format!("agent-{i}"),
+                    "reading files",
+                    i as u32,
+                    100,
+                    "",
+                    Vec::new(),
+                );
             }
             let bg_rows = vec![
                 crate::components::agents::BgTerminalRow {

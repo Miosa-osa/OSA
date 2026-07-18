@@ -150,7 +150,7 @@ impl Agents {
         if self.collapsed {
             return 1 + summary_line;
         }
-        let agent_lines = (self.entries.len() as u16) * 2; // 2 rows per agent
+        let agent_lines: u16 = self.entries.iter().map(Self::entry_rows).sum();
         let batch_header_lines = {
             let groups = self.grouped_entries();
             // Only show batch headers if any entry has a batch_id
@@ -167,6 +167,22 @@ impl Agents {
         let total =
             summary_line + 1 + batch_header_lines + agent_lines + synth_lines + swarm_lines;
         total.min(30)
+    }
+
+    /// Rows the tree needs for one agent: 1 subject row + the action trail.
+    /// Running agents show up to the last 3 recent actions plus a "+N more tool
+    /// uses" counter line (CC MAX_PROGRESS_MESSAGES_TO_SHOW=3); terminal agents
+    /// keep the compact 2-row layout. MUST stay in lockstep with the trail
+    /// built in `draw_tree` or the layout desyncs.
+    pub(super) fn entry_rows(entry: &AgentEntry) -> u16 {
+        match entry.status {
+            AgentStatus::Running | AgentStatus::Spawning => {
+                let shown = entry.recent_actions.len().min(3);
+                let more = usize::from(entry.tool_uses as usize > shown);
+                1 + (shown + more).max(1) as u16
+            }
+            _ => 2,
+        }
     }
 
     /// Advance spinner animation frame.
@@ -198,6 +214,7 @@ impl Agents {
                     subject: String::new(),
                     status: AgentStatus::Spawning,
                     current_action: String::new(),
+                    recent_actions: Vec::new(),
                     tool_uses: 0,
                     tokens_used: 0,
                     batch_id: None,
@@ -228,6 +245,7 @@ impl Agents {
                 entry.subject = subject;
             }
             entry.current_action = String::new();
+            entry.recent_actions.clear();
             entry.tool_uses = 0;
             entry.tokens_used = 0;
             entry.started_at = std::time::Instant::now();
@@ -243,6 +261,7 @@ impl Agents {
                 subject,
                 status: AgentStatus::Running,
                 current_action: String::new(),
+                recent_actions: Vec::new(),
                 tool_uses: 0,
                 tokens_used: 0,
                 batch_id,
@@ -260,12 +279,24 @@ impl Agents {
         tool_uses: u32,
         tokens: u32,
         subject: impl Into<String>,
+        recent: Vec<String>,
     ) {
         let subject = subject.into();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.current_action = action.into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
+            if !recent.is_empty() {
+                entry.recent_actions = recent;
+            } else {
+                // Older backends don't send the trail — synthesize it from the
+                // successive current_action values (newest first, keep 5).
+                let cur = entry.current_action.clone();
+                if !cur.is_empty() && entry.recent_actions.first() != Some(&cur) {
+                    entry.recent_actions.insert(0, cur);
+                    entry.recent_actions.truncate(5);
+                }
+            }
             if !subject.is_empty() && entry.subject.is_empty() {
                 entry.subject = subject;
             }

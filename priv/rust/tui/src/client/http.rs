@@ -280,12 +280,16 @@ impl ApiClient {
     }
 
     /// POST /api/v1/sessions/:id/compact — trigger proactive compaction now.
-    pub async fn compact_session(&self, id: &str) -> Result<CompactResponse> {
+    /// A non-empty `instructions` string is sent as custom summarization
+    /// guidance (CC `/compact <instructions>` parity).
+    pub async fn compact_session(&self, id: &str, instructions: &str) -> Result<CompactResponse> {
+        let body = if instructions.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "instructions": instructions })
+        };
         let resp = self
-            .post(
-                &format!("/api/v1/sessions/{}/compact", id),
-                &serde_json::json!({}),
-            )
+            .post(&format!("/api/v1/sessions/{}/compact", id), &body)
             .await?;
         Ok(resp.json().await?)
     }
@@ -491,6 +495,23 @@ impl ApiClient {
     pub async fn cancel_agent(&self, id: &str) -> Result<()> {
         let _ = self.delete(&format!("/api/v1/agents/{}", id)).await?;
         Ok(())
+    }
+
+    /// GET /api/v1/runs/:id/transcript — full sidechain transcript for a
+    /// subagent run (nested Ctrl+O expansion / dashboard view).
+    pub async fn agent_transcript(&self, id: &str) -> Result<String> {
+        let resp = self.get(&format!("/api/v1/runs/{}/transcript", id)).await?;
+        let v: serde_json::Value = resp.json().await?;
+        match v.get("transcript").and_then(|t| t.as_str()) {
+            Some(t) => Ok(t.to_string()),
+            None => {
+                let msg = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("no transcript for this agent");
+                Err(anyhow::anyhow!("{}", msg))
+            }
+        }
     }
 
     /// POST /api/v1/sessions/:id/cancel — cancel a running agent loop.

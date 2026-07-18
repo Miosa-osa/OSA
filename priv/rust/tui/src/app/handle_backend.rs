@@ -658,8 +658,10 @@ impl App {
                 self.sidebar.set_current_agent(display);
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorAgentProgress { agent_name, current_action, tool_uses, tokens_used, subject } => {
-                self.agents.agent_progress(&agent_name, &current_action, tool_uses, tokens_used, &subject);
+            BackendEvent::OrchestratorAgentProgress { agent_name, current_action, tool_uses, tokens_used, subject, recent_actions } => {
+                self.agents.agent_progress(&agent_name, &current_action, tool_uses, tokens_used, &subject, recent_actions);
+                // Trail length can change the panel height — keep layout in sync.
+                self.recompute_layout();
             }
             BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, .. } => {
                 self.agents.agent_completed(&agent_name, tool_uses, tokens_used);
@@ -703,6 +705,31 @@ impl App {
                 self.agents.swarm_failed(&swarm_id, "timeout");
                 self.recompute_layout();
             }
+
+            // === Nested subagent transcript (dashboard "view" / Ctrl+O) ===
+            BackendEvent::AgentTranscript(result) => match result {
+                Ok((agent_id, transcript)) => {
+                    let entries = vec![
+                        crate::dialogs::transcript_viewer::TranscriptEntry {
+                            role: crate::dialogs::transcript_viewer::TranscriptRole::System,
+                            text: format!("Agent transcript — {}", agent_id),
+                        },
+                        crate::dialogs::transcript_viewer::TranscriptEntry {
+                            role: crate::dialogs::transcript_viewer::TranscriptRole::Agent,
+                            text: transcript,
+                        },
+                    ];
+                    self.transcript =
+                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(&entries));
+                    self.transcript_override = Some(entries);
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("Transcript unavailable: {}", e),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
+            },
 
             // === Background agents (fire-and-forget subagents) ===
             // Reuse the Agents panel: the background agent's id is its stable

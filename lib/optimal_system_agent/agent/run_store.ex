@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           duration_ms: non_neg_integer() | nil,
           tool_count: non_neg_integer(),
           tokens_used: non_neg_integer(),
+          recent_actions: [String.t()],
           result: map() | nil,
           transcript_path: String.t()
         }
@@ -54,6 +55,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         duration_ms: nil,
         tool_count: 0,
         tokens_used: 0,
+        recent_actions: [],
         result: nil,
         transcript_path: transcript_path
       }
@@ -65,7 +67,17 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   @doc "Record a progress line for a running agent."
   @spec progress(String.t(), String.t(), non_neg_integer()) :: :ok
   def progress(agent_id, action, tool_count \\ 0) do
-    update(agent_id, fn run -> %{run | tool_count: max(run.tool_count, tool_count)} end)
+    update(agent_id, fn run ->
+      run
+      |> Map.put(:tool_count, max(run.tool_count, tool_count))
+      # Newest-first ring of the last 5 actions (CC recentActivities parity);
+      # consecutive duplicates collapse so start/end pairs don't double up.
+      |> Map.update(:recent_actions, [action], fn
+        [^action | _] = actions -> actions
+        actions -> Enum.take([action | actions], 5)
+      end)
+    end)
+
     append(agent_id, "PROGRESS tools=#{tool_count}\n\n#{action}")
   end
 
@@ -155,6 +167,53 @@ defmodule OptimalSystemAgent.Agent.RunStore do
       {:error, reason} -> {:error, "Could not read transcript: #{inspect(reason)}"}
     end
   end
+
+  @doc """
+  Persist the child Loop's full message history + resume metadata so a run can
+  later be resumed with COMPLETE context (CC resumeAgent parity). Stored as ETF
+  next to the markdown transcript — shape-preserving and lossless. Best-effort.
+  """
+  @spec save_messages(String.t(), [map()], map()) :: :ok
+  def save_messages(agent_id, messages, meta \\ %{}) when is_list(messages) do
+    path = messages_path(agent_id)
+    File.mkdir_p!(Path.dirname(path))
+    File.write(path, :erlang.term_to_binary(%{messages: messages, meta: meta}))
+    :ok
+  rescue
+    e ->
+      Logger.debug("[RunStore] save_messages failed for #{agent_id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  @doc "Load the saved message history + metadata for a run, if present."
+  @spec load_messages(String.t()) :: {:ok, [map()], map()} | {:error, :not_found}
+  def load_messages(agent_id) do
+    case File.read(messages_path(agent_id)) do
+      {:ok, bin} ->
+        # :safe — a tampered file cannot create new atoms or run code.
+        case :erlang.binary_to_term(bin, [:safe]) do
+          %{messages: messages, meta: meta} when is_list(messages) and is_map(meta) ->
+            {:ok, messages, meta}
+
+          _ ->
+            {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :not_found}
+  end
+
+  @doc """
+  Deterministic transcript (output-file) path for an agent id — safe to hand to
+  the model BEFORE the run row exists (async-launch contract).
+  """
+  @spec transcript_path_for(String.t()) :: String.t()
+  def transcript_path_for(agent_id), do: transcript_path(agent_id)
+
+  defp messages_path(agent_id), do: transcript_path(agent_id) <> ".messages.etf"
 
   @doc "Format a structured result for legacy string-return callers."
   @spec format_result(map()) :: String.t()

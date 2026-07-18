@@ -47,6 +47,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("memory", "Save or recall a memory"),
     ("channels", "Show channel connectivity"),
     ("doctor", "Run backend diagnostics"),
+    ("permissions", "View and manage permission rules"),
+    ("hooks", "View registered + settings hooks"),
+    ("add-dir", "Allow file access in an additional directory"),
+    ("trust", "Show or accept workspace trust"),
     ("desktop", "Open the desktop GUI"),
     ("retry", "Re-send the last prompt"),
     ("undo", "Drop the last exchange"),
@@ -512,12 +516,14 @@ impl App {
                 self.show_context();
             }
             "/compact" => {
-                // Trigger proactive compaction on the live loop now.
+                // Trigger proactive compaction on the live loop now. An optional
+                // argument becomes custom summarization instructions (CC parity:
+                // `/compact <instructions>`).
                 self.toasts.push(
                     "Compacting context...".into(),
                     crate::components::toast::ToastLevel::Info,
                 );
-                self.do_compact();
+                self.do_compact(arg);
             }
             "/recap" => {
                 // Ask the backend for a short LLM summary of the session so far.
@@ -610,13 +616,16 @@ impl App {
         });
     }
 
-    /// POST /sessions/:id/compact → trigger proactive compaction, confirm in chat.
-    fn do_compact(&self) {
+    /// POST /sessions/:id/compact → trigger proactive compaction, confirm in
+    /// chat. A non-empty `instructions` string is threaded into the summary
+    /// prompt (CC `/compact <instructions>` parity).
+    fn do_compact(&self, instructions: &str) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         let sid = self.session_id.clone();
+        let instructions = instructions.to_string();
         tokio::spawn(async move {
-            let event = match client.compact_session(&sid).await {
+            let event = match client.compact_session(&sid, &instructions).await {
                 Ok(r) => {
                     let output = format!(
                         "Context compacted: {} → {} messages (~{} → ~{} tokens)",

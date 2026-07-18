@@ -41,7 +41,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskResume.Handler do
   # ── Stage 3: Execute ───────────────────────────────────────────────────
 
   @spec execute(map(), UseContext.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def execute(%{"agent_id" => agent_id}, ctx) do
+  def execute(%{"agent_id" => agent_id} = input, ctx) do
     case RunStore.get(agent_id) do
       nil ->
         {:ok, "No task found for #{agent_id}. Nothing to resume."}
@@ -51,11 +51,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskResume.Handler do
           {:ok, "Agent #{agent_id} is still running — nothing to resume."}
         else
           # A stale :running row (process gone) — safe to re-dispatch.
-          do_resume(run, ctx)
+          do_resume(run, ctx, input)
         end
 
       run ->
-        do_resume(run, ctx)
+        do_resume(run, ctx, input)
     end
   rescue
     e -> {:error, "Failed to resume agent: #{Exception.message(e)}"}
@@ -65,49 +65,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskResume.Handler do
 
   # ── Private ────────────────────────────────────────────────────────────
 
-  defp do_resume(run, ctx) do
-    parent = run.parent_session_id || (ctx && Map.get(ctx, :session_id))
+  # WS7 — full-context resume (CC resumeAgent parity). The orchestrator replays
+  # the child's saved message history (unresolved tool_uses filtered, worktree
+  # restored when it still exists) under the ORIGINAL agent id, so the resumed
+  # agent cites its own earlier findings. Pre-WS7 runs with no saved messages
+  # fall back to a legacy task + transcript-tail re-seed inside
+  # `Orchestrator.resume_subagent/2`.
+  defp do_resume(run, _ctx, input) do
+    case Orchestrator.resume_subagent(run.agent_id, resume_message(run, input)) do
+      {:ok, agent_id} ->
+        {:ok,
+         "Resumed #{agent_id} (role=#{run.role}) with its prior transcript restored. " <>
+           "Running in the background; it will report back on completion."}
 
-    if is_binary(parent) and is_binary(run.task) and String.trim(run.task) != "" do
-      config = %{
-        role: run.role,
-        name: handle_of(run.agent_id),
-        task: resume_task(run)
-      }
-
-      {:ok, new_id} = Orchestrator.run_background(parent, config)
-
-      {:ok,
-       "Resumed #{run.agent_id} as #{new_id} (role=#{run.role}). " <>
-         "Running in the background; it will report back on completion."}
-    else
-      {:ok,
-       "Cannot resume #{run.agent_id}: no original task or parent session recorded."}
+      {:error, reason} ->
+        {:ok, "Cannot resume #{run.agent_id}: #{reason}"}
     end
   end
 
-  # Re-seed the prior task plus a tail of the transcript so the resumed agent has
-  # continuity with the earlier run.
-  defp resume_task(run) do
-    run.task <>
-      "\n\n[Resuming a previously stopped run of this task. Prior progress:]\n" <>
-      prior_context(run.agent_id)
-  end
-
-  defp prior_context(agent_id) do
-    case RunStore.transcript(agent_id) do
-      {:ok, content} when is_binary(content) ->
-        content |> String.slice(-2000, 2000) |> to_string()
+  # Optional "message" param carries follow-up instructions (SendMessage-style
+  # continue); default asks the agent to pick up its original task.
+  defp resume_message(run, input) do
+    case Map.get(input, "message") do
+      m when is_binary(m) and m != "" ->
+        m
 
       _ ->
-        "(no prior transcript available)"
+        "Continue the task you were working on. Original task:\n#{run.task}\n\n" <>
+          "Pick up where your transcript left off and finish."
     end
-  rescue
-    _ -> "(no prior transcript available)"
-  end
-
-  defp handle_of(agent_id) do
-    agent_id |> to_string() |> String.split(":") |> List.last()
   end
 
   defp alive?(agent_id) do

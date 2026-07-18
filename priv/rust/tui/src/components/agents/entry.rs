@@ -16,6 +16,9 @@ pub struct AgentEntry {
     pub subject: String,
     pub status: AgentStatus,
     pub current_action: String,
+    /// Last few completed tool actions, NEWEST FIRST (backend sends up to 5);
+    /// the tree renders the last 3 as a trail with a "+N more" counter.
+    pub recent_actions: Vec<String>,
     pub tool_uses: u32,
     pub tokens_used: u32,
     pub batch_id: Option<String>,

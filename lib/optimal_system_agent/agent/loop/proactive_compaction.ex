@@ -150,10 +150,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   circuit breaker) so callers can safely fall through to the reactive
   `ContextCollapse` path without breaking the turn.
   """
-  @spec compact([map()], String.t() | nil) :: [map()]
-  def compact(messages, session_id \\ nil)
+  @spec compact([map()], String.t() | nil, String.t() | nil) :: [map()]
+  def compact(messages, session_id \\ nil, instructions \\ nil)
 
-  def compact(messages, session_id) when is_list(messages) do
+  def compact(messages, session_id, instructions) when is_list(messages) do
     {older, recent} = split_turns(messages, keep_turns())
     older_tokens = Compactor.estimate_tokens(older)
 
@@ -172,7 +172,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
           tokens_before: older_tokens
         })
 
-        case summarize_with_retries(older, @summary_retries) do
+        case summarize_with_retries(older, @summary_retries, instructions) do
           {:ok, summary} ->
             reset_failures(session_id)
 
@@ -224,7 +224,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     end
   end
 
-  def compact(messages, _session_id), do: messages
+  def compact(messages, _session_id, _instructions), do: messages
 
   # Compact-boundary message: CC continuation preamble + formatted summary
   # (analysis scratchpad stripped) + resume-without-recap instruction.
@@ -256,6 +256,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     |> String.replace(~r/\n\n+/, "\n\n")
     |> String.trim()
   end
+
+  # `/compact <instructions>` (CC parity): append the user's custom
+  # summarization guidance to the compact prompt for this run only.
+  defp append_user_instructions(prompt, nil), do: prompt
+
+  defp append_user_instructions(prompt, instructions) when is_binary(instructions) do
+    case String.trim(instructions) do
+      "" ->
+        prompt
+
+      instr ->
+        prompt <>
+          "\n\nAdditional instructions from the user for this summary:\n" <> instr
+    end
+  end
+
+  defp append_user_instructions(prompt, _), do: prompt
 
   # ---------------------------------------------------------------------------
   # Turn splitting
@@ -299,28 +316,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   # Retry the summarization LLM call up to `retries_left` additional times
   # (CC compact does 2 streaming retries before giving up).
-  defp summarize_with_retries(messages, retries_left) do
-    case summarize(messages) do
+  defp summarize_with_retries(messages, retries_left, instructions \\ nil) do
+    case summarize(messages, instructions) do
       {:ok, _} = ok ->
         ok
 
       {:error, _reason} when retries_left > 0 ->
-        summarize_with_retries(messages, retries_left - 1)
+        summarize_with_retries(messages, retries_left - 1, instructions)
 
       error ->
         error
     end
   end
 
-  @spec summarize([map()]) :: {:ok, String.t()} | {:error, term()}
-  defp summarize([]), do: {:error, :empty}
+  @spec summarize([map()], String.t() | nil) :: {:ok, String.t()} | {:error, term()}
+  defp summarize([], _instructions), do: {:error, :empty}
 
-  defp summarize(messages) do
+  defp summarize(messages, instructions) do
     if not llm_enabled?() do
       # Test/offline stub — mirrors Compactor's :compactor_llm_enabled gate.
       {:ok, "<summary>[Stub summary of #{length(messages)} messages]</summary>"}
     else
-      prompt = String.replace(@compact_prompt, "%MESSAGES%", format_messages(messages))
+      prompt =
+        @compact_prompt
+        |> String.replace("%MESSAGES%", format_messages(messages))
+        |> append_user_instructions(instructions)
 
       try do
         case Providers.chat([%{role: "user", content: prompt}],

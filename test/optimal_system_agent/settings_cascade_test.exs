@@ -50,7 +50,24 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
     assert Settings.get(:osa_fresh_key) == 42
   end
 
-  test "get_merged_hooks concatenates hook lists across layers" do
+  test "get_merged_hooks concatenates hook lists across layers (trusted workspace)" do
+    alias OptimalSystemAgent.Workspace.Trust
+    cwd = File.cwd!()
+    old_home = System.get_env("OSA_HOME")
+    # Redirect the trust store into the tmp workspace so no real ~/.osa state
+    # is read or written, then accept trust for this directory.
+    System.put_env("OSA_HOME", cwd)
+
+    on_exit(fn ->
+      Trust.forget(cwd)
+
+      if old_home,
+        do: System.put_env("OSA_HOME", old_home),
+        else: System.delete_env("OSA_HOME")
+    end)
+
+    Trust.accept(cwd)
+
     project_hook = %{"type" => "shell", "command" => "echo project"}
     local_hook = %{"type" => "shell", "command" => "echo local"}
 
@@ -66,6 +83,39 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
 
     hooks = Settings.get_merged_hooks() |> Map.get("post_tool_use", [])
     assert project_hook in hooks
+    assert local_hook in hooks
+  end
+
+  test "get_merged_hooks keeps project hooks inert in an UNTRUSTED workspace" do
+    alias OptimalSystemAgent.Workspace.Trust
+    cwd = File.cwd!()
+    old_home = System.get_env("OSA_HOME")
+    # Empty trust store inside the tmp workspace → this directory is untrusted.
+    System.put_env("OSA_HOME", cwd)
+
+    on_exit(fn ->
+      Trust.forget(cwd)
+
+      if old_home,
+        do: System.put_env("OSA_HOME", old_home),
+        else: System.delete_env("OSA_HOME")
+    end)
+
+    project_hook = %{"type" => "shell", "command" => "echo project"}
+    local_hook = %{"type" => "shell", "command" => "echo local"}
+
+    File.write!(
+      ".osa/settings.json",
+      Jason.encode!(%{"hooks" => %{"post_tool_use" => [project_hook]}})
+    )
+
+    File.write!(
+      ".osa/settings.local.json",
+      Jason.encode!(%{"hooks" => %{"post_tool_use" => [local_hook]}})
+    )
+
+    hooks = Settings.get_merged_hooks() |> Map.get("post_tool_use", [])
+    refute project_hook in hooks
     assert local_hook in hooks
   end
 end

@@ -287,9 +287,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
   Returns `{:ok, %{messages_before, messages_after, tokens_before, tokens_after}}`
   or `{:error, :no_session}`.
   """
-  @spec proactive_compact(String.t()) :: {:ok, map()} | {:error, :no_session | term()}
-  def proactive_compact(session_id) do
-    GenServer.call(via(session_id), :proactive_compact, 120_000)
+  @spec proactive_compact(String.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, :no_session | term()}
+  def proactive_compact(session_id, instructions \\ nil) do
+    GenServer.call(via(session_id), {:proactive_compact, instructions}, 120_000)
   catch
     :exit, _ -> {:error, :no_session}
   end
@@ -635,10 +636,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, :ok, %{state | messages: compacted}}
   end
 
-  def handle_call(:proactive_compact, _from, state) do
+  # Legacy atom form kept for any pre-instructions caller.
+  def handle_call(:proactive_compact, from, state),
+    do: handle_call({:proactive_compact, nil}, from, state)
+
+  def handle_call({:proactive_compact, instructions}, _from, state) do
     messages = state.messages || []
     compacted =
-      OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(messages, state.session_id)
+      OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(
+        messages,
+        state.session_id,
+        instructions
+      )
 
     stats = %{
       messages_before: length(messages),

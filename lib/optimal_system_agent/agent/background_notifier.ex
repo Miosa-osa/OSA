@@ -141,13 +141,25 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
           "Background agent '#{role}' (#{agent_id}) failed#{dur_str}: #{error}"
       end
 
+    # WS7 — structured usage rendered as a compact string so the model reads
+    # real numbers in the <usage> field instead of an inspected map.
+    usage =
+      case Map.get(ev, :usage) do
+        %{total_tokens: t, tool_uses: u, duration_ms: d} ->
+          "total_tokens=#{t} tool_uses=#{u} duration_ms=#{d}"
+
+        other ->
+          other
+      end
+
     # WS6: queue + poke instead of a bare transcript append — an idle parent
     # now reacts to the completion instead of the result rotting in history.
     TaskNotifications.queue(parent_id, %{
       task_id: to_string(agent_id),
       status: outcome,
       summary: summary,
-      usage: Map.get(ev, :usage)
+      output_file: Map.get(ev, :output_file),
+      usage: usage
     })
 
     Loop.poke(parent_id)

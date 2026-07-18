@@ -80,6 +80,8 @@ pub enum BackendEvent {
         tool_uses: u32,
         tokens_used: u32,
         subject: String,
+        /// Last few tool actions, newest first (empty from older backends).
+        recent_actions: Vec<String>,
     },
     OrchestratorAgentCompleted {
         agent_name: String,
@@ -101,6 +103,9 @@ pub enum BackendEvent {
     OrchestratorTaskCompleted { task_id: String },
 
     // === Background Agents (fire-and-forget subagents) ===
+    /// Fetched sidechain transcript for a subagent run (dashboard "view" /
+    /// nested Ctrl+O expansion). Ok payload is (agent_id, transcript text).
+    AgentTranscript(Result<(String, String), String>),
     /// A subagent was launched in the background via `run_background`.
     BackgroundAgentStarted {
         agent_id: String,

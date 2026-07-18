@@ -881,9 +881,27 @@ impl App {
         let sel = self.agents_dashboard_selected;
         let agents = self.agents.entry_count();
         if sel < agents {
+            // Instant feedback while the full nested transcript loads.
             if let Some(summary) = self.agents.entry_summary_at(sel) {
                 self.toasts
                     .push(summary, crate::components::toast::ToastLevel::Info);
+            }
+            // Fetch the child's sidechain transcript from the backend and open
+            // it in the transcript viewer (CC Ctrl+O expanded-subagent parity).
+            if let Some(id) = self.agents.agent_id_at(sel) {
+                let client = self.client.clone();
+                let tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    let ev = match client.agent_transcript(&id).await {
+                        Ok(text) => crate::event::backend::BackendEvent::AgentTranscript(Ok((
+                            id, text,
+                        ))),
+                        Err(e) => crate::event::backend::BackendEvent::AgentTranscript(Err(
+                            e.to_string(),
+                        )),
+                    };
+                    let _ = tx.send(crate::event::Event::Backend(ev));
+                });
             }
         } else {
             self.view_background_terminal(sel - agents);

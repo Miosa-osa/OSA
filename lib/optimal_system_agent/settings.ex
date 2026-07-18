@@ -171,7 +171,14 @@ defmodule OptimalSystemAgent.Settings do
   files all fire. Duplicate hook entries are removed.
   """
   def get_merged_hooks do
-    [layer(:user), layer(:project), layer(:local), layer(:flag), layer(:session)]
+    # Workspace trust (CC parity, WS15 enforcement): checked-in project
+    # settings are workspace-supplied executable config — their hooks stay
+    # inert until the user accepts trust for the cwd (/trust accept or the
+    # trust dialog). User/local/flag/session layers are authored on this
+    # machine and always apply.
+    project_layers = if project_trusted?(), do: [layer(:project)], else: []
+
+    ([layer(:user)] ++ project_layers ++ [layer(:local), layer(:flag), layer(:session)])
     |> Enum.map(&layer_hooks/1)
     |> Enum.reduce(%{}, fn hooks, acc ->
       Map.merge(acc, hooks, fn _event, a, b -> a ++ b end)
@@ -190,6 +197,17 @@ defmodule OptimalSystemAgent.Settings do
     rescue
       _ -> %{}
     end
+  end
+
+  # True when the current working directory has accepted workspace trust.
+  # Fails CLOSED (false — project hooks stay inert) on any Trust error so a
+  # crash can never widen the executable-config surface.
+  defp project_trusted? do
+    OptimalSystemAgent.Workspace.Trust.trusted?(File.cwd!())
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp layer_hooks(layer) when is_map(layer) do

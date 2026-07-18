@@ -420,8 +420,11 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     # Generate the ID upfront so we can return it immediately. A caller-supplied
     # `name` yields a stable @handle id.
+    # An explicit :agent_id (resume path) is honoured so the resumed run keeps
+    # its ORIGINAL id — RunStore row, transcript file and @handle stay stable.
     subagent_id =
-      (config[:name] && "agent:#{parent_id}:#{sanitize_name(config[:name])}") ||
+      Map.get(config, :agent_id) ||
+        (config[:name] && "agent:#{parent_id}:#{sanitize_name(config[:name])}") ||
         "agent:#{parent_id}:#{next_subagent_number(parent_id)}"
 
     emit_event(parent_id, %{
@@ -482,6 +485,18 @@ defmodule OptimalSystemAgent.Orchestrator do
           :ok
       end
 
+      # WS7 — structured usage + output-file for the <task-notification> the
+      # parent model receives (CC enqueueAgentNotification parity).
+      final_run = RunStore.get(subagent_id)
+
+      usage = %{
+        total_tokens: (final_run && final_run.tokens_used) || 0,
+        tool_uses: (final_run && final_run.tool_count) || 0,
+        duration_ms: duration_ms
+      }
+
+      output_file = RunStore.transcript_path_for(subagent_id)
+
       case result do
         {:ok, response} ->
           Bus.emit(:system_event, %{
@@ -504,7 +519,9 @@ defmodule OptimalSystemAgent.Orchestrator do
                display_name: display_name,
                role: role,
                result: String.slice(response, 0, 500),
-               duration_ms: duration_ms
+               duration_ms: duration_ms,
+               usage: usage,
+               output_file: output_file
              }}
           )
 
@@ -531,7 +548,9 @@ defmodule OptimalSystemAgent.Orchestrator do
                display_name: display_name,
                role: role,
                error: inspect(reason),
-               duration_ms: duration_ms
+               duration_ms: duration_ms,
+               usage: usage,
+               output_file: output_file
              }}
           )
 
@@ -540,6 +559,142 @@ defmodule OptimalSystemAgent.Orchestrator do
     end)
 
     {:ok, subagent_id}
+  end
+
+  @doc """
+  Resume a previously-run subagent with a new message, restoring its FULL
+  transcript (CC `resumeAgent` parity — SendMessage-style continue).
+
+  The child's saved message history (persisted by `execute_and_collect` before
+  the Loop terminates) is replayed as the resumed agent's initial conversation
+  with system messages and unresolved tool_uses filtered out, and its worktree
+  path is restored when the directory still exists. The run restarts in the
+  background under the ORIGINAL agent id, so the RunStore row, transcript file
+  and @handle stay stable. Pre-WS7 runs (no saved messages) fall back to
+  re-seeding the original task plus a transcript tail.
+  """
+  @spec resume_subagent(String.t(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def resume_subagent(agent_id, message) when is_binary(agent_id) and is_binary(message) do
+    run = RunStore.get(agent_id)
+
+    cond do
+      is_nil(run) ->
+        {:error, "No run found for #{agent_id}"}
+
+      run.status == :running and
+          Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) != [] ->
+        {:error, "Agent #{agent_id} is still running — message it after it finishes"}
+
+      true ->
+        {transcript, meta} =
+          case RunStore.load_messages(agent_id) do
+            {:ok, messages, meta} ->
+              filtered =
+                messages
+                |> Enum.reject(fn m ->
+                  (Map.get(m, :role) || Map.get(m, "role")) == "system"
+                end)
+                |> filter_unresolved_tool_uses()
+
+              {filtered, meta}
+
+            _ ->
+              {[], %{}}
+          end
+
+        working_dir =
+          case Map.get(meta, :worktree_path) do
+            path when is_binary(path) -> if File.dir?(path), do: path, else: nil
+            _ -> nil
+          end
+
+        task =
+          if transcript == [] do
+            # Pre-WS7 run — legacy re-seed with the original task + transcript
+            # tail for continuity (better than a cold start, worse than replay).
+            prior =
+              case RunStore.transcript(agent_id) do
+                {:ok, content} -> content |> String.slice(-2000, 2000) |> to_string()
+                _ -> "(no prior transcript available)"
+              end
+
+            run.task <>
+              "\n\n[Resuming a previous run of this task. Prior progress:]\n" <>
+              prior <> "\n\n[New instruction:]\n" <> message
+          else
+            message
+          end
+
+        config =
+          %{
+            task: task,
+            role: run.role,
+            agent_id: agent_id,
+            fork_messages: transcript,
+            working_dir: working_dir
+          }
+          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+          |> Map.new()
+
+        run_background(run.parent_session_id, config)
+    end
+  end
+
+  @doc false
+  # Drop tool-call/result pairs that never resolved (CC filterUnresolvedToolUses):
+  # assistant tool_calls with no matching tool result are stripped (the message is
+  # dropped entirely when it has no text), and orphan tool-result messages are
+  # removed. Public only for tests.
+  def filter_unresolved_tool_uses(messages) when is_list(messages) do
+    resolved_ids =
+      messages
+      |> Enum.map(fn m -> Map.get(m, :tool_call_id) || Map.get(m, "tool_call_id") end)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    called_ids =
+      messages
+      |> Enum.flat_map(fn m -> List.wrap(Map.get(m, :tool_calls) || Map.get(m, "tool_calls")) end)
+      |> Enum.map(fn tc -> Map.get(tc, :id) || Map.get(tc, "id") end)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    messages
+    |> Enum.map(fn m ->
+      case List.wrap(Map.get(m, :tool_calls) || Map.get(m, "tool_calls")) do
+        [] ->
+          m
+
+        tcs ->
+          kept =
+            Enum.filter(tcs, fn tc ->
+              MapSet.member?(resolved_ids, Map.get(tc, :id) || Map.get(tc, "id"))
+            end)
+
+          if kept == [] and blank_content?(m), do: nil, else: put_tool_calls(m, kept)
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(fn m ->
+      tcid = Map.get(m, :tool_call_id) || Map.get(m, "tool_call_id")
+      is_binary(tcid) and not MapSet.member?(called_ids, tcid)
+    end)
+  end
+
+  defp blank_content?(m) do
+    case Map.get(m, :content) || Map.get(m, "content") do
+      c when is_binary(c) -> String.trim(c) == ""
+      nil -> true
+      _ -> false
+    end
+  end
+
+  defp put_tool_calls(m, kept) do
+    cond do
+      Map.has_key?(m, :tool_calls) -> Map.put(m, :tool_calls, kept)
+      Map.has_key?(m, "tool_calls") -> Map.put(m, "tool_calls", kept)
+      true -> m
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -573,6 +728,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     files_changed = changed_files(worktree_info)
     child_messages = safe_get_messages(subagent_id)
     commands_run = extract_commands_run(child_messages)
+
+    # WS7 — snapshot the child's FULL message history + resume metadata BEFORE
+    # the Loop is terminated, so resume_subagent/2 can restore complete context
+    # (CC recordSidechainTranscript/writeAgentMetadata parity).
+    RunStore.save_messages(subagent_id, child_messages, %{
+      role: role,
+      worktree_path: worktree_info && worktree_info.path
+    })
 
     case result do
       {:ok, response} when is_binary(response) ->
@@ -825,6 +988,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           current_action: action,
           tool_uses: tool_count,
           tokens_used: forwarder_tokens(subagent_id),
+          recent_actions: recent_actions(subagent_id),
           description: ""
         })
 
@@ -842,6 +1006,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           current_action: to_string(tool_name),
           tool_uses: new_count,
           tokens_used: forwarder_tokens(subagent_id),
+          recent_actions: recent_actions(subagent_id),
           description: ""
         })
 
@@ -886,6 +1051,15 @@ defmodule OptimalSystemAgent.Orchestrator do
     _ -> 0
   catch
     :exit, _ -> 0
+  end
+
+  # Last-N tool actions (newest first) for the TUI trail — the FE renders the
+  # last 3 with a "+N more tool uses" counter (CC MAX_PROGRESS_MESSAGES_TO_SHOW).
+  defp recent_actions(subagent_id) do
+    case RunStore.get(subagent_id) do
+      %{recent_actions: actions} when is_list(actions) -> Enum.take(actions, 5)
+      _ -> []
+    end
   end
 
   defp stop_event_forwarder({:ok, pid}) when is_pid(pid) do

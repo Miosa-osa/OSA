@@ -71,6 +71,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "rename" => {"Rename the current session", :cmd_rename},
     "tag" => {"Tag the current session for search", :cmd_tag},
     "sandbox" => {"Show or switch the sandbox backend", :cmd_sandbox},
+    "add-dir" => {"Allow file access in an additional directory", :cmd_add_dir},
+    "trust" => {"Show or accept workspace trust for this directory", :cmd_trust},
     "exit" => {"Exit OSA", :cmd_exit}
   }
 
@@ -146,10 +148,42 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     new_id
   end
 
-  def cmd_compact(_args, session_id) do
+  def cmd_compact(args, session_id) do
     IO.puts("")
     IO.puts("  #{@dim}Compacting context...#{@reset}")
 
+    # CC parity: `/compact <instructions>` threads user guidance into the
+    # summary prompt via the proactive path; bare `/compact` keeps the
+    # legacy reactive Loop.compact path.
+    case String.trim(args || "") do
+      "" ->
+        compact_without_instructions(session_id)
+
+      instructions ->
+        case Loop.proactive_compact(session_id, instructions) do
+          {:ok, stats} ->
+            IO.puts(
+              "  #{@green}#{@reset} Compacted: #{format_tokens(stats.tokens_before)} -> #{format_tokens(stats.tokens_after)}"
+            )
+
+          {:error, :no_session} ->
+            IO.puts("  #{@yellow}error: no active session#{@reset}")
+
+          {:error, reason} ->
+            IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+        end
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: compaction failed#{@reset}\n")
+      session_id
+  end
+
+  # Bare `/compact` — original reactive compaction with before/after stats.
+  defp compact_without_instructions(session_id) do
     case Loop.get_state(session_id) do
       {:ok, state} ->
         before_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
@@ -177,13 +211,6 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       _ ->
         IO.puts("  #{@yellow}error: no active session#{@reset}")
     end
-
-    IO.puts("")
-    session_id
-  rescue
-    _ ->
-      IO.puts("  #{@yellow}error: compaction failed#{@reset}\n")
-      session_id
   end
 
   def cmd_model(args, session_id) do
@@ -1551,6 +1578,95 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     session_id
   end
 
+  # ── Additional Directories (/add-dir) ────────────────────────────────
+
+  def cmd_add_dir(args, session_id) do
+    IO.puts("")
+
+    case String.trim(args) do
+      "" ->
+        dirs = Permissions.additional_directories()
+
+        if dirs == [] do
+          IO.puts("  #{@dim}No additional directories configured.#{@reset}")
+        else
+          IO.puts("  #{@bold}Additional Directories#{@reset}")
+          Enum.each(dirs, fn d -> IO.puts("  #{@green}+#{@reset} #{d}") end)
+        end
+
+        IO.puts("  #{@dim}Usage: /add-dir <path>#{@reset}")
+
+      raw ->
+        path = Path.expand(raw)
+
+        cond do
+          not File.exists?(path) ->
+            IO.puts("  #{@red}error:#{@reset} #{path} does not exist")
+
+          not File.dir?(path) ->
+            IO.puts("  #{@red}error:#{@reset} #{path} is not a directory")
+
+          true ->
+            :ok = Permissions.add_directory(path)
+            IO.puts("  #{@green}✓#{@reset} Added working directory: #{path}")
+        end
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  # ── Workspace Trust (/trust) ─────────────────────────────────────────
+
+  def cmd_trust(args, session_id) do
+    IO.puts("")
+    cwd = File.cwd!()
+
+    case String.trim(args) do
+      "accept" ->
+        :ok = OptimalSystemAgent.Workspace.Trust.accept(cwd)
+        IO.puts("  #{@green}✓#{@reset} Workspace trusted: #{cwd}")
+        IO.puts("  #{@dim}Project hooks and workspace config are now active.#{@reset}")
+
+      "" ->
+        status = OptimalSystemAgent.Workspace.Trust.status(cwd)
+
+        state =
+          cond do
+            status.trusted and status.session_only ->
+              "#{@green}trusted#{@reset} (this session only)"
+
+            status.trusted ->
+              "#{@green}trusted#{@reset}"
+
+            true ->
+              "#{@yellow}not trusted#{@reset}"
+          end
+
+        IO.puts("  #{@bold}Workspace#{@reset} #{cwd} — #{state}")
+
+        if status.risks != [] do
+          IO.puts("")
+          IO.puts("  #{@bold}Workspace-supplied config found here:#{@reset}")
+          Enum.each(status.risks, fn r -> IO.puts("  #{@yellow}!#{@reset} #{r.label}") end)
+        end
+
+        unless status.trusted do
+          IO.puts("")
+
+          IO.puts(
+            "  #{@dim}Project hooks stay inert until trusted. /trust accept to trust this directory.#{@reset}"
+          )
+        end
+
+      _ ->
+        IO.puts("  #{@dim}Usage: /trust [accept]#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
   # ── Hooks Viewer ─────────────────────────────────────────────────────
 
   def cmd_hooks(_args, session_id) do
@@ -1578,6 +1694,40 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       end
     rescue
       _ -> IO.puts("  #{@dim}Hooks system not available.#{@reset}")
+    end
+
+    # Settings-configured hooks (CC-style entries from the user/project/local
+    # settings cascade), listed per event. Project-layer entries only appear
+    # once the workspace is trusted (see Settings.get_merged_hooks).
+    try do
+      merged = OptimalSystemAgent.Settings.get_merged_hooks()
+
+      if map_size(merged) > 0 do
+        IO.puts("")
+        IO.puts("  #{@bold}Settings Hooks#{@reset}")
+
+        merged
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.each(fn {event, entries} ->
+          Enum.each(entries, fn entry ->
+            label =
+              case entry do
+                %{"matcher" => m, "hooks" => hs} when is_list(hs) ->
+                  "matcher=#{inspect(m)} (#{length(hs)} hook(s))"
+
+                %{"command" => command} ->
+                  command
+
+                other ->
+                  other |> inspect() |> String.slice(0, 80)
+              end
+
+            IO.puts("  #{@cyan}#{event}#{@reset} #{label}")
+          end)
+        end)
+      end
+    rescue
+      _ -> :ok
     end
 
     IO.puts("")

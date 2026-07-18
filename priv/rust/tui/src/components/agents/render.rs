@@ -127,7 +127,10 @@ impl Agents {
 
             // Render batch header if any entries use batch_id
             if has_batches {
-                let label = match &group.batch_id {
+                let label = match group.batch_id.as_deref() {
+                    // Foreground-vs-background display: background agents get a
+                    // named section instead of an opaque "Batch N: background".
+                    Some("background") => "─── Background agents ".to_string(),
                     Some(id) => format!("─── Batch {}: {} ", group_idx + 1, id),
                     None => "─── Ungrouped ".to_string(),
                 };
@@ -205,45 +208,59 @@ impl Agents {
                 );
                 y += 1;
 
-                // Row 2: continuation + action line
-                if y < area.y + area.height {
-                    let action_display = match entry.status {
-                        AgentStatus::Completed => "Done".to_string(),
-                        AgentStatus::Failed => {
-                            if entry.current_action.is_empty() {
-                                "Failed".to_string()
-                            } else {
-                                entry.current_action.clone()
-                            }
+                // Rows 2+: action trail. Running agents show the last up-to-3
+                // recent actions (oldest first) preceded by a "+N more tool
+                // uses" counter (CC AgentTool UI parity); terminal agents keep
+                // a single Done/Failed row. Row count MUST match
+                // `Agents::entry_rows` or the layout desyncs.
+                let trail: Vec<(String, Style)> = match entry.status {
+                    AgentStatus::Completed => vec![("Done".to_string(), theme.task_done())],
+                    AgentStatus::Failed => {
+                        let msg = if entry.current_action.is_empty() {
+                            "Failed".to_string()
+                        } else {
+                            entry.current_action.clone()
+                        };
+                        vec![(msg, theme.error_text())]
+                    }
+                    _ => {
+                        let mut rows: Vec<(String, Style)> = Vec::new();
+                        let shown = entry.recent_actions.len().min(3);
+                        if entry.tool_uses as usize > shown {
+                            rows.push((
+                                format!("+{} more tool uses", entry.tool_uses as usize - shown),
+                                theme.faint(),
+                            ));
                         }
-                        _ => {
-                            if entry.current_action.is_empty() {
+                        // recent_actions is newest-first; display oldest → newest.
+                        for a in entry.recent_actions.iter().take(3).rev() {
+                            rows.push((a.clone(), theme.faint()));
+                        }
+                        if rows.is_empty() {
+                            let msg = if entry.current_action.is_empty() {
                                 "Starting…".to_string()
                             } else {
                                 entry.current_action.clone()
-                            }
+                            };
+                            rows.push((msg, theme.faint()));
                         }
-                    };
+                        rows
+                    }
+                };
 
-                    let action_style = match entry.status {
-                        AgentStatus::Completed => theme.task_done(),
-                        AgentStatus::Failed => theme.error_text(),
-                        _ => theme.faint(),
-                    };
-
-                    // Truncate action
-                    let max_action = (area.width as usize).saturating_sub(continuation.len() + 4).max(8);
-                    let action_truncated = truncate_str(&action_display, max_action);
-
-                    let row2 = Line::from(vec![
+                for (line_text, line_style) in trail {
+                    if y >= area.y + area.height {
+                        break;
+                    }
+                    let max_action =
+                        (area.width as usize).saturating_sub(continuation.len() + 4).max(8);
+                    let action_truncated = truncate_str(&line_text, max_action);
+                    let row = Line::from(vec![
                         Span::styled(continuation, theme.faint()),
                         Span::styled("└─ ", theme.faint()),
-                        Span::styled(action_truncated, action_style),
+                        Span::styled(action_truncated, line_style),
                     ]);
-                    frame.render_widget(
-                        Paragraph::new(row2),
-                        Rect::new(area.x, y, area.width, 1),
-                    );
+                    frame.render_widget(Paragraph::new(row), Rect::new(area.x, y, area.width, 1));
                     y += 1;
                 }
             }

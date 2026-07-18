@@ -841,7 +841,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   post "/:id/compact" do
     session_id = conn.params["id"]
 
-    case SessionManager.proactive_compact(session_id) do
+    # Optional CC-style custom summarization instructions (`/compact <text>`).
+    instructions =
+      case conn.body_params do
+        %{"instructions" => instr} when is_binary(instr) and instr != "" -> instr
+        _ -> nil
+      end
+
+    case SessionManager.proactive_compact(session_id, instructions) do
       {:ok, stats} ->
         json(conn, 200, Map.merge(%{status: "compacted", session_id: session_id}, stats))
 

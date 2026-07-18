@@ -339,12 +339,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     end
   end
 
+  # Async-launch result contract (CC AgentTool asyncOutputSchema parity):
+  # agentId + output_file + anti-duplication + don't-poll discipline.
   defp dispatch_background(parent_id, config) do
     {:ok, agent_id} = Orchestrator.run_background(parent_id, config)
+    output_file = OptimalSystemAgent.Agent.RunStore.transcript_path_for(agent_id)
 
     {:ok,
-     "Agent '#{config.role}' spawned in background (#{agent_id}). " <>
-       "You'll be notified when it completes. Continue with other work."}
+     """
+     Async agent launched.
+     agentId: #{agent_id}
+     output_file: #{output_file}
+
+     The '#{config.role}' agent is running in the background. A <task-notification> \
+     will be injected into this conversation when it completes — do NOT poll for it \
+     with task_output, and do NOT read the output file before that notification \
+     arrives. Do not duplicate this agent's work yourself. Briefly tell the user \
+     the agent was launched, then continue with other work or end your response. \
+     Use task_resume (or message_agent send to: "#{agent_id}") to continue it later \
+     with its full context.
+     """}
   end
 
   defp resolve_parent_id(_args, %UseContext{session_id: sid}) when is_binary(sid), do: sid
@@ -402,12 +416,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         try do
           state = :sys.get_state(pid)
 
+          # WS7 — full-context fork (CC forkSubagent parity): the child inherits
+          # the parent's ENTIRE non-system conversation, not a 20-message tail.
           state.messages
           |> Enum.reject(fn msg ->
             role = Map.get(msg, :role) || Map.get(msg, "role")
             role == "system"
           end)
-          |> Enum.take(-20)
         rescue
           _ -> []
         end

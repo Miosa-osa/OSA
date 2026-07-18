@@ -46,6 +46,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Prompt do
     - Tasks needing user interaction (use #{ask_user_name} instead)
     - Quick file reads (use #{file_read_name} directly)
 
+    ## Foreground vs Background
+    - Foreground (default): you BLOCK until the agent returns. Use when the result
+      gates your next step.
+    - background=true: returns immediately with an agentId + output_file; a
+      <task-notification> is injected here when it finishes. Use for long-running
+      or independent work. While it runs: do NOT poll with task_output, do NOT
+      read its output file, and do NOT redo its work yourself.
+    - Parallel work: prefer ONE call with tasks:[...] (a single wave with grouped
+      display) over sequential delegate calls.
+    - Continue a finished agent with task_resume or message_agent (send to its
+      agentId) — it resumes with its full prior transcript.
+
     ## Writing the Prompt
     Brief the agent like a colleague who just walked in — they haven't seen this conversation.
     - Explain what you're trying to accomplish and why
