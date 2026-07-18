@@ -61,13 +61,28 @@ pub fn is_insert_newline(event: &KeyEvent) -> bool {
 /// map it. Shift/Alt+Enter are deliberately excluded — those insert a newline
 /// (see [`is_insert_newline`]).
 ///
-/// Part of the normalization layer's public surface: the input component keeps
-/// its literal Enter-submit arm today, but this is the single source of truth
-/// for "is this a submit?" that new handlers route through.
-#[allow(dead_code)]
+/// The single source of truth for "is this a submit?": the input component's
+/// submit arm routes through this rather than re-encoding the Enter match, so
+/// submit and newline stay defined in exactly one place.
 pub fn is_submit(event: &KeyEvent) -> bool {
     event.code == KeyCode::Enter
         && (event.modifiers == KeyModifiers::NONE || event.modifiers == KeyModifiers::CONTROL)
+}
+
+/// True when a plain Enter should insert a newline via the universal
+/// backslash-continuation mechanism: the buffer is non-empty and the character
+/// immediately left of the cursor is a literal backslash. This is the ONE
+/// newline path that works on every terminal regardless of keyboard protocol
+/// (Claude Code's `useTextInput` handleEnter), so it stays reliable even where
+/// Shift+Enter collapses to a bare Enter and `is_insert_newline` never fires.
+/// `cursor` is a byte offset into `content`; the caller replaces the trailing
+/// backslash with `\n`. Panic-safe: an out-of-range or non-boundary cursor
+/// returns false rather than slicing.
+pub fn newline_via_backslash(content: &str, cursor: usize) -> bool {
+    cursor > 0
+        && cursor <= content.len()
+        && content.is_char_boundary(cursor)
+        && content[..cursor].chars().next_back() == Some('\\')
 }
 
 /// True when `event` is Ctrl+O (the transcript-viewer toggle). Matched via
@@ -135,5 +150,23 @@ mod tests {
     fn ctrl_o_detected() {
         assert!(is_ctrl_o(&ev(KeyCode::Char('o'), KeyModifiers::CONTROL)));
         assert!(!is_ctrl_o(&ev(KeyCode::Char('o'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn backslash_continuation_detected_at_cursor() {
+        // Backslash immediately before the cursor -> newline.
+        assert!(newline_via_backslash("foo\\", 4));
+        // Backslash before the cursor with text after it.
+        assert!(newline_via_backslash("a\\bc", 2));
+        // No backslash before the cursor.
+        assert!(!newline_via_backslash("foo", 3));
+        // Empty buffer / cursor at start.
+        assert!(!newline_via_backslash("", 0));
+        assert!(!newline_via_backslash("\\", 0));
+        // A backslash that is NOT immediately before the cursor.
+        assert!(!newline_via_backslash("\\ab", 3));
+        // Out-of-range and non-boundary cursors are rejected, never panic.
+        assert!(!newline_via_backslash("foo", 99));
+        assert!(!newline_via_backslash("é", 1));
     }
 }

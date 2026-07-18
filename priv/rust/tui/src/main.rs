@@ -93,7 +93,12 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // to a bare Enter (submit). Supported by ghostty/wezterm/kitty/foot; a no-op on
     // terminals that don't advertise support, so it's safe to attempt unconditionally
     // behind the capability probe.
-    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+    // Capture whether the protocol was actually pushed so the runtime knows if
+    // Shift+Enter is a reliable newline chord (kitty terminals) or collapses to a
+    // bare Enter (Apple Terminal / VS Code / tmux / SSH). Threaded into App::new so
+    // the composer's newline hint matches reality without a re-probe syscall.
+    let kbd_enhanced = matches!(supports_keyboard_enhancement(), Ok(true));
+    if kbd_enhanced {
         let _ = execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -160,7 +165,7 @@ fn run(cli: config::cli::Cli) -> Result<()> {
 
     // Run the app
     runtime.block_on(async {
-        let mut app = app::App::new(cfg, cli).await?;
+        let mut app = app::App::new(cfg, cli, kbd_enhanced).await?;
         app.run(terminal, viewport_h).await
     })
 }

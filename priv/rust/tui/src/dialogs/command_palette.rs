@@ -195,12 +195,14 @@ impl CommandPalette {
         let list_y = inner.y + 2;
         let list_height = inner.height.saturating_sub(2);
 
-        // Scroll window so the selected item is always visible.
-        let scroll_start = if self.selected >= MAX_VISIBLE {
-            self.selected - MAX_VISIBLE + 1
-        } else {
-            0
-        };
+        // Scroll window so the selected item is always visible. Base it on the
+        // ACTUAL visible row count (`list_height`), NOT the fixed MAX_VISIBLE
+        // cap: on a short terminal fewer than MAX_VISIBLE rows fit, and keying
+        // past them must still scroll — otherwise the highlighted row renders
+        // below `inner.y + inner.height`, gets clipped by the `break` below, and
+        // the user loses sight of their selection while navigating.
+        let visible_rows = (list_height as usize).max(1);
+        let scroll_start = self.selected.saturating_sub(visible_rows.saturating_sub(1));
 
         for (row, &item_idx) in self
             .filtered

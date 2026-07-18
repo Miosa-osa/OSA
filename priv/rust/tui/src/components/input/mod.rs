@@ -70,6 +70,12 @@ pub struct InputComponent {
     /// Number of messages queued while the agent is Processing. Purely for the
     /// small "N queued" indicator; set by the app via `set_queued_count`.
     queued_count: usize,
+    /// Whether the kitty keyboard-enhancement protocol (DISAMBIGUATE_ESCAPE_CODES)
+    /// was enabled at startup. Drives the terminal-aware newline hint: when true
+    /// the composer advertises "shift+enter newline"; when false it advertises the
+    /// universal backslash-continuation that works on every terminal. Set once from
+    /// `main.rs` via [`InputComponent::set_kbd_enhanced`].
+    kbd_enhanced: bool,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -106,6 +112,10 @@ impl InputComponent {
             redo_stack: Vec::new(),
             reverse_search: None,
             queued_count: 0,
+            // Conservative default: assume no enhancement until main.rs probes the
+            // terminal, so the always-works backslash hint shows if never set. The
+            // test-only InputComponent::new() call sites (event_loop.rs) rely on this.
+            kbd_enhanced: false,
         }
     }
 
@@ -113,6 +123,13 @@ impl InputComponent {
     /// finish). 0 hides it.
     pub fn set_queued_count(&mut self, n: usize) {
         self.queued_count = n;
+    }
+
+    /// Record whether the keyboard-enhancement protocol is active (set once from
+    /// `main.rs` at startup) so the newline hint matches the terminal's real
+    /// capabilities without a per-frame syscall.
+    pub fn set_kbd_enhanced(&mut self, enabled: bool) {
+        self.kbd_enhanced = enabled;
     }
 
     pub fn value(&self) -> &str {
@@ -913,10 +930,39 @@ impl Component for InputComponent {
                         self.file_matches.clear();
                         return ComponentAction::Consumed;
                     }
-                    // Enter ALWAYS submits — both single-line and multiline. (Ctrl+Enter
+                    // Universal backslash-continuation newline: works on EVERY
+                    // terminal regardless of keyboard protocol. When a plain Enter
+                    // arrives and the char immediately left of the cursor is a literal
+                    // backslash, drop that backslash and insert a newline instead of
+                    // submitting (Claude Code's useTextInput handleEnter). This is the
+                    // one newline path that stays reliable even where Shift+Enter
+                    // collapses to a bare Enter. Skipped while the @-file dropdown is
+                    // active so a plain Enter still selects a match.
+                    _ if key.code == KeyCode::Enter
+                        && key.modifiers == KeyModifiers::NONE
+                        && !self.file_search_active
+                        && crate::app::key_normalize::newline_via_backslash(
+                            &self.content,
+                            self.cursor,
+                        ) =>
+                    {
+                        self.snapshot();
+                        // Replace the trailing "\" (1 ASCII byte) with a newline; the
+                        // cursor byte offset is unchanged (one byte removed and one
+                        // inserted, both at the same spot before the cursor).
+                        self.content.remove(self.cursor - 1);
+                        self.content.insert(self.cursor - 1, '\n');
+                        self.multiline = true;
+                        self.tab_matches.clear();
+                        self.completions.hide();
+                        return ComponentAction::Consumed;
+                    }
+                    // Enter ALWAYS submits — both single-line and multiline. Submit
+                    // routing goes through the key-normalization layer (the single
+                    // source of truth) rather than a second literal Enter match, so
+                    // "what is a submit?" is answered in exactly one place. (Ctrl+Enter
                     // is accepted too for muscle-memory / terminals that map it.)
-                    (KeyCode::Enter, m)
-                        if m == KeyModifiers::NONE || m == KeyModifiers::CONTROL =>
+                    _ if crate::app::key_normalize::is_submit(key) =>
                     {
                         // If file search dropdown is active and we have matches, select current match
                         if self.file_search_active && !self.file_matches.is_empty() {
@@ -1188,10 +1234,21 @@ impl Component for InputComponent {
             // Keep this minimal — the essentials only, so the composer reads calm
             // rather than busy. Shell (`!`) / newline / palette stay discoverable
             // via /help and the welcome hint instead of crowding this line.
-            let hint = if (area.width as usize) >= 60 {
-                "  / commands \u{00b7} @ files  "
+            // Terminal-aware newline affordance (mirrors Claude Code's
+            // getNewlineInstructions): when the kitty keyboard protocol is active
+            // Shift+Enter reliably inserts a newline, so advertise it; otherwise
+            // advertise the universal backslash-continuation ("\\\u{23ce}"), the one
+            // newline that works on every terminal. Fixes the discoverability gap
+            // where the only working newline key was invisible. Shown only on wide
+            // enough composers so narrow terminals stay calm.
+            let nl = if self.kbd_enhanced { "shift+\u{23ce}" } else { "\\\u{23ce}" };
+            let w = area.width as usize;
+            let hint = if w >= 76 {
+                format!("  / commands \u{00b7} @ files \u{00b7} {} newline  ", nl)
+            } else if w >= 60 {
+                "  / commands \u{00b7} @ files  ".to_string()
             } else {
-                ""
+                String::new()
             };
             let hw = hint.chars().count() as u16;
             if hw > 0 && area.width > hw + 2 {

@@ -244,7 +244,7 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(config: Config, cli: Cli) -> Result<Self> {
+    pub async fn new(config: Config, cli: Cli, kbd_enhanced: bool) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         // Create API client
@@ -317,6 +317,10 @@ impl App {
         // merges in / overrides this once it loads.
         let mut input = InputComponent::new();
         input.set_commands_with_descriptions(crate::app::commands::builtin_slash_commands());
+        // Record whether the kitty keyboard-enhancement protocol is active (probed
+        // once in main.rs) so the composer's newline hint matches the terminal's
+        // real capabilities: "shift+enter" when enhanced, backslash+enter otherwise.
+        input.set_kbd_enhanced(kbd_enhanced);
 
         Ok(Self {
             header: Header::new(),
@@ -385,7 +389,12 @@ impl App {
             active_fg_shell_count: 0,
             backend_spawn_attempted: false,
             health_retry_count: 0,
-            command_entries: Vec::new(),
+            // Seed the Ctrl+K palette / `/help` with the full built-in set at
+            // construction, mirroring the inline `/` completions seed above, so
+            // the palette is populated immediately — before (or entirely
+            // without) the backend `GET /commands` response. `CommandsLoaded`
+            // replaces this with the merged backend registry once it arrives.
+            command_entries: crate::app::handle_backend::builtin_command_entries(),
             available_tools: HashSet::new(),
 
             voice: VoiceState::new(),

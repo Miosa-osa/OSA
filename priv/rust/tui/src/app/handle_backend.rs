@@ -1482,3 +1482,18 @@ fn merge_tui_native_commands(commands: &mut Vec<crate::client::types::CommandEnt
         }
     }
 }
+
+/// Build the full built-in command set (every `BUILTIN_SLASH_COMMANDS` entry as
+/// a `CommandEntry`), used to seed `command_entries` at App construction so the
+/// Ctrl+K palette and `/help` are populated INSTANTLY — before, or entirely
+/// without, the backend `GET /commands` response. Mirrors the inline `/`
+/// completions seed (mod.rs, `set_commands_with_descriptions`). The
+/// `CommandsLoaded` handler later REPLACES this seed with the richer backend
+/// list (built-ins + api-only + ~/.osa/commands custom entries); if that fetch
+/// fails or the backend never connects, `merge_tui_native_commands` still
+/// guarantees the built-ins survive, so the palette is never empty.
+pub(crate) fn builtin_command_entries() -> Vec<crate::client::types::CommandEntry> {
+    let mut v = Vec::new();
+    merge_tui_native_commands(&mut v);
+    v
+}

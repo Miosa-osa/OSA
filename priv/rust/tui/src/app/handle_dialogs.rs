@@ -968,14 +968,18 @@ impl App {
     }
 
     pub(super) fn open_command_palette(&mut self) {
-        // Single source of truth: the backend command registry (GET
-        // /api/v1/commands), fetched once at startup into `command_entries` and
-        // also used to drive the inline `/` completions. No hardcoded list — new
-        // backend commands appear here automatically.
+        // `command_entries` is the single source of truth for this palette. It
+        // is seeded at construction with the full built-in set
+        // (builtin_command_entries) so Ctrl+K / `/help` are populated instantly
+        // — before, or entirely without, the backend `GET /api/v1/commands`
+        // response — and is then REPLACED by the merged backend registry
+        // (built-ins + api-only + ~/.osa/commands custom entries) once
+        // `CommandsLoaded` arrives. New backend commands appear here
+        // automatically after connect.
         // Capability-gated: hide commands whose required tools aren't present in
         // this session, so `/help` never offers a dead command (mirrors the
         // inline `/` completions filter).
-        let items: Vec<PaletteItem> = self
+        let mut items: Vec<PaletteItem> = self
             .command_entries
             .iter()
             .filter(|c| self.command_capability_met(&c.required_tools))
@@ -985,6 +989,22 @@ impl App {
                 category: c.category.clone().unwrap_or_default(),
             })
             .collect();
+
+        // Floor guarantee (mirrors Claude Code's `getCommands`, which never
+        // returns empty): if capability-gating filtered everything out, or a
+        // future code path cleared `command_entries`, fall back to the
+        // always-available built-in set so the palette can never open blank.
+        // With the construction-time seed in place this is normally unreachable.
+        if items.is_empty() {
+            items = crate::app::handle_backend::builtin_command_entries()
+                .into_iter()
+                .map(|c| PaletteItem {
+                    name: c.name,
+                    description: c.description,
+                    category: c.category.unwrap_or_default(),
+                })
+                .collect();
+        }
 
         self.palette.open(items);
         self.transition(AppState::Palette);
