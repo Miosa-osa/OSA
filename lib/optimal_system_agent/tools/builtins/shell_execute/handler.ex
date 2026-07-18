@@ -180,7 +180,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # until the env var is fixed). Public so it can be unit-tested without mutating
   # the process-global env (which flakes under parallel test runs).
   @doc false
-  def parse_timeout_ms(nil), do: Constants.default_timeout_ms()
+  def parse_timeout_ms(nil), do: Constants.effective_timeout_ms()
 
   def parse_timeout_ms(s) when is_binary(s) do
     # Require the value to be a bare positive integer (milliseconds). A trailing
@@ -193,11 +193,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
       _ ->
         Logger.warning("[shell_execute] invalid OSA_SHELL_TIMEOUT_MS=#{inspect(s)} — using default")
-        Constants.default_timeout_ms()
+        Constants.effective_timeout_ms()
     end
   end
 
-  def parse_timeout_ms(_), do: Constants.default_timeout_ms()
+  def parse_timeout_ms(_), do: Constants.effective_timeout_ms()
 
   # True when a trimmed command ends with an incomplete/dangling shell operator:
   #   * `&&` / `||`  — logical connective with no right-hand command
@@ -294,10 +294,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   defp classify_command(command) do
     cond do
-      catastrophic?(command) ->
+      # Catastrophic (built-in defaults + operator [permissions].catastrophic_patterns
+      # + [permissions].deny) is checked FIRST — an operator `allow` can never
+      # downgrade an unrecoverable operation.
+      catastrophic?(command) or denied?(command) ->
         {:deny,
          "Blocked: refusing an unrecoverable operation (filesystem/disk destruction). " <>
            "If this is genuinely intended, run it yourself."}
+
+      # Operator `[permissions].allow` — downgrade an otherwise-risky command to
+      # :allow (but never a catastrophic/denied one, handled above).
+      allowed?(command) ->
+        :allow
 
       risky?(command) ->
         {:ask, "This command is powerful (#{risk_label(command)}) — approve to run it?"}
@@ -324,13 +332,40 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   end
 
   defp catastrophic?(command) do
-    Enum.any?(Constants.catastrophic_patterns(), &Regex.match?(&1, command))
+    Enum.any?(Constants.effective_catastrophic_patterns(), &Regex.match?(&1, command))
+  end
+
+  # Operator hard-deny: any command head listed in [permissions].deny.
+  defp denied?(command) do
+    heads = command_heads(command)
+    deny = Constants.deny_commands()
+    deny != [] and Enum.any?(heads, &(&1 in deny))
+  end
+
+  # Operator allow-list: every command head is explicitly allowed, or the whole
+  # command matches an allow pattern. Requiring ALL heads to be allowed keeps a
+  # piped `allowed | risky` from being blanket-approved.
+  defp allowed?(command) do
+    allow_cmds = Constants.allow_commands()
+    allow_pats = Constants.allow_patterns()
+
+    cond do
+      Enum.any?(allow_pats, &Regex.match?(&1, command)) ->
+        true
+
+      allow_cmds == [] ->
+        false
+
+      true ->
+        heads = command_heads(command)
+        heads != [] and Enum.all?(heads, &(&1 in allow_cmds))
+    end
   end
 
   defp risky?(command) do
     heads = command_heads(command)
-    Enum.any?(heads, &(&1 in Constants.ask_commands())) or
-      Enum.any?(Constants.ask_patterns(), &Regex.match?(&1, command))
+    Enum.any?(heads, &(&1 in Constants.effective_ask_commands())) or
+      Enum.any?(Constants.effective_ask_patterns(), &Regex.match?(&1, command))
   end
 
   # Short human-readable reason for the permission prompt.
@@ -338,10 +373,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     heads = command_heads(command)
 
     cond do
-      Enum.any?(Constants.ask_patterns(), &Regex.match?(&1, command)) ->
+      Enum.any?(Constants.effective_ask_patterns(), &Regex.match?(&1, command)) ->
         "runs downloaded/redirected code or force-rewrites"
 
-      head = Enum.find(heads, &(&1 in Constants.ask_commands())) ->
+      head = Enum.find(heads, &(&1 in Constants.effective_ask_commands())) ->
         head
 
       true ->

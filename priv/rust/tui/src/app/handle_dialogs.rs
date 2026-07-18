@@ -113,16 +113,15 @@ impl App {
                 match action {
                     crate::dialogs::sessions::SessionAction::Switch(id) => {
                         self.exit_overlay();
-                        self.session_id = id;
-                        self.chat.clear();
-                        self.tasks.clear();
-                        self.stream_buf.clear();
-                        self.thinking_buf.clear();
-                        self.agent_header_sent = false;
-                        self.toasts.push(
-                            "Session switched".into(),
-                            crate::components::toast::ToastLevel::Info,
-                        );
+                        // Reuse the proven switch helper (same path as startup
+                        // `--resume <id>`): it clears the view, reconnects the SSE
+                        // stream to the selected session, AND fetches its transcript
+                        // (get_session_messages → SessionMessages) to REPLAY the
+                        // prior conversation into the chat view. The old hand-rolled
+                        // arm only cleared + set the id, so picking a past chat showed
+                        // an EMPTY conversation ("it didn't save / won't continue")
+                        // and streamed responses to the wrong session.
+                        self.switch_session(&id);
                     }
                     crate::dialogs::sessions::SessionAction::Create => {
                         self.exit_overlay();

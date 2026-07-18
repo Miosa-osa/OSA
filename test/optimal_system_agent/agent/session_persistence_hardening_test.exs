@@ -65,4 +65,43 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceHardeningTest do
       assert {:ok, []} = SessionPersistence.load(id)
     end
   end
+
+  describe "resume round-trip (save → resolve → load → replay)" do
+    # This is the backbone the TUI /resume + /continue picker and the CLI
+    # /resume command both depend on: a saved conversation must be resolvable
+    # by working directory and load back with restorable role/content turns so
+    # the chat view can replay it.
+    test "find_latest_for_dir resolves a saved session and load restores turns",
+         %{id: id} do
+      dir = Path.expand("~/.osa/sessions")
+
+      convo = [
+        %{role: "user", content: "first question"},
+        %{role: "assistant", content: "first answer"},
+        %{role: "user", content: "second question"}
+      ]
+
+      assert :ok = SessionPersistence.save(id, convo, dir)
+
+      # Directory-scoped resolution (the /continue + POST /sessions path).
+      assert SessionPersistence.find_latest_for_dir(dir) == id
+
+      # Load restores the turns with keys usable by the replay renderers.
+      assert {:ok, restored} = SessionPersistence.load(id)
+      assert length(restored) == 3
+
+      [u1 | _] = restored
+      assert (u1[:role] || u1["role"]) == "user"
+      assert (u1[:content] || u1["content"]) == "first question"
+
+      # Only user/assistant text turns are what the chat view replays.
+      replayable =
+        Enum.filter(restored, fn m ->
+          (m[:role] || m["role"]) in ["user", "assistant"] and
+            is_binary(m[:content] || m["content"])
+        end)
+
+      assert length(replayable) == 3
+    end
+  end
 end

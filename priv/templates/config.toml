@@ -1,0 +1,108 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  OSA configuration  —  ~/.osa/config.toml
+# ═══════════════════════════════════════════════════════════════════════
+#
+# This is OSA's standard, user-editable config file. It is safe to edit by
+# hand. OSA re-reads it automatically when it changes (no restart needed).
+#
+# Precedence, lowest → highest:
+#
+#     built-in defaults  <  ~/.osa/config.json  <  THIS FILE
+#
+# `config.json` is the legacy selection written by onboarding / the model
+# picker; anything you set here overrides it. You only need to specify the
+# keys you want to change — every omitted key falls back to its default.
+#
+# Full reference: docs/configuration.md
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# ── [model] ────────────────────────────────────────────────────────────
+# Which provider + model OSA talks to, and how it's tuned.
+[model]
+# provider: the LLM backend id, e.g. "ollama", "miosa", "openai", "anthropic".
+# Leave commented to keep whatever onboarding configured in config.json / .env.
+# provider = "ollama"
+
+# model: the model slug for that provider, e.g. "glm-4.7:cloud".
+# model = "glm-4.7:cloud"
+
+# effort: reasoning-effort hint for models that support it ("low"/"medium"/"high").
+# effort = "high"
+
+# params: free-form generation parameters passed through to the provider.
+# Any key/value here is forwarded as-is.
+[model.params]
+# temperature = 0.7
+# top_p = 0.95
+# max_tokens = 8192
+
+
+# ── [permissions] ──────────────────────────────────────────────────────
+# OSA runs locally AS you, so it is not caged. Shell commands are sorted into
+# three tiers (see the shell_execute security model):
+#
+#   catastrophic → HARD-DENIED, never offered (disk/home/system destruction)
+#   risky (ask)  → routed to the inline approval prompt (rm, sudo, chmod, …)
+#   safe         → run outright
+#
+# The lists below EXTEND / OVERRIDE the built-in defaults. They are additive:
+# your entries are merged on top of OSA's baseline, they don't replace it.
+[permissions]
+
+# ask_commands: extra command names that should require approval (risky tier).
+# Example: treat your deploy + terraform wrappers as approval-gated.
+ask_commands = []
+# ask_commands = ["deploy", "terraform", "kubectl"]
+
+# ask_patterns: extra REGEX (Elixir/PCRE-style) matched against the whole
+# command line; a match routes the command to the approval prompt.
+ask_patterns = []
+# ask_patterns = ['\bdocker\s+system\s+prune\b']
+
+# catastrophic_patterns: extra REGEX that HARD-DENY a command (never offered).
+# Use for things you never want the agent to run, even with approval.
+catastrophic_patterns = []
+# catastrophic_patterns = ['\bterraform\s+destroy\b']
+
+# allow: overrides that DOWNGRADE a command to run without a prompt. Each entry
+# is either a bare command name (matched against the command head) or a regex.
+# NOTE: `allow` can never override a catastrophic/deny match — safety wins.
+allow = []
+# allow = ["git", "docker"]
+
+# deny: overrides that HARD-DENY a command. Bare command names or regex.
+# Anything here is treated as catastrophic (blocked, never offered).
+deny = []
+# deny = ["shutdown", "reboot"]
+
+
+# ── [shell] ────────────────────────────────────────────────────────────
+[shell]
+# timeout_ms: hard wall-clock cap for a single foreground command, in ms.
+# Omit (or comment out) to use the built-in default (120000 = 2 min).
+# Per-call override is still available via the OSA_SHELL_TIMEOUT_MS env var.
+# timeout_ms = 120000
+
+
+# ── [tui] ──────────────────────────────────────────────────────────────
+[tui]
+# theme: "dark" (default) or "light".
+theme = "dark"
+# verbosity: "quiet" | "normal" | "verbose".
+verbosity = "normal"
+
+
+# ── [mcp_servers.*] ────────────────────────────────────────────────────
+# Model Context Protocol servers, passed through as-is (Codex-compatible shape).
+# Each server is its own table: [mcp_servers.<name>]. Use either a `command`
+# (+ optional `args`, `env`) for a stdio server, or a `url` for a remote one.
+# Set `enabled = false` to keep a definition without loading it.
+#
+# [mcp_servers.linear]
+# url = "https://mcp.linear.app/mcp"
+#
+# [mcp_servers.local-tools]
+# command = "bun"
+# args = ["run", "packages/mcp/src/bin.ts"]
+# enabled = true

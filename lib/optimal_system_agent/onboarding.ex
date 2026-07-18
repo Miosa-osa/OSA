@@ -777,6 +777,14 @@ defmodule OptimalSystemAgent.Onboarding do
         Logger.debug("[Onboarding] Seeded #{filename} → #{dest}")
       end
     end)
+
+    # Seed the documented, user-editable config.toml (never clobbers an
+    # existing one). This is the standard config surface — see ConfigFile.
+    try do
+      OptimalSystemAgent.ConfigFile.write_default_template()
+    rescue
+      e -> Logger.debug("[Onboarding] config.toml seed skipped: #{inspect(e)}")
+    end
   end
 
   @doc "Run post-setup health checks."

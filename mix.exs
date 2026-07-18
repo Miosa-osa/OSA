@@ -82,6 +82,9 @@ defmodule OptimalSystemAgent.MixProject do
       # JSON
       {:jason, "~> 1.4"},
 
+      # TOML parsing (user-editable ~/.osa/config.toml) — pure Elixir, no NIFs
+      {:tomerl, "~> 0.5"},
+
       # JSON Schema validation (tool argument validation)
       {:ex_json_schema, "~> 0.11"},
 

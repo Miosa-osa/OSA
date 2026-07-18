@@ -102,4 +102,60 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   # are no longer blocked, so this is now informational only.)
   @safe_env_vars ~w(HOME PATH SHELL USER LANG TMPDIR TERM EDITOR)
   def safe_env_vars, do: @safe_env_vars
+
+  # ── Config overlay accessors (~/.osa/config.toml) ──────────────────────
+  #
+  # The lists above are the DEFAULTS. An operator can extend/override them via
+  # the `[permissions]` section of `~/.osa/config.toml` (see
+  # `OptimalSystemAgent.ConfigFile`). These `effective_*` accessors merge the
+  # config on top of the defaults and are what the handler consults at runtime.
+  # The raw `@defaults` accessors above are preserved unchanged for callers /
+  # tests that want the built-in baseline.
+
+  alias OptimalSystemAgent.ConfigFile
+
+  @doc "Defaults ++ operator `[permissions].ask_commands` (risky :ask tier)."
+  def effective_ask_commands do
+    (@ask_commands ++ safe(fn -> ConfigFile.permission_ask_commands() end, []))
+    |> Enum.uniq()
+  end
+
+  @doc "Defaults ++ operator `[permissions].ask_patterns` (risky :ask tier)."
+  def effective_ask_patterns do
+    @ask_patterns ++ safe(fn -> ConfigFile.permission_ask_patterns() end, [])
+  end
+
+  @doc """
+  Defaults ++ operator `[permissions].catastrophic_patterns` ++ patterns from
+  `[permissions].deny` (hard-deny tier).
+  """
+  def effective_catastrophic_patterns do
+    @catastrophic_patterns ++
+      safe(fn -> ConfigFile.permission_catastrophic_patterns() end, []) ++
+      safe(fn -> ConfigFile.permission_deny_patterns() end, [])
+  end
+
+  @doc "Command heads the operator hard-denies via `[permissions].deny`."
+  def deny_commands, do: safe(fn -> ConfigFile.permission_deny_commands() end, [])
+
+  @doc "Command heads the operator always allows via `[permissions].allow`."
+  def allow_commands, do: safe(fn -> ConfigFile.permission_allow_commands() end, [])
+
+  @doc "Regex patterns the operator always allows via `[permissions].allow`."
+  def allow_patterns, do: safe(fn -> ConfigFile.permission_allow_patterns() end, [])
+
+  @doc "Operator shell timeout override (`[shell].timeout_ms`) or the default."
+  def effective_timeout_ms do
+    safe(fn -> ConfigFile.shell_timeout_ms() end, nil) || @default_timeout_ms
+  end
+
+  # Never let a malformed config crash the permission gate — fall back to the
+  # built-in defaults if ConfigFile raises for any reason.
+  defp safe(fun, fallback) do
+    fun.()
+  rescue
+    _ -> fallback
+  catch
+    _, _ -> fallback
+  end
 end

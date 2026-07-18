@@ -131,11 +131,52 @@ defmodule OptimalSystemAgent.Channels.CLI.Session do
       )
 
     register_permission_hook(target_id)
+
+    # Replay the restored conversation into the terminal (Claude Code / Codex
+    # resume parity): the Loop restores its own agent context from `messages`,
+    # but the user also needs to SEE where they left off — otherwise the screen
+    # is blank and resume "looks broken" even though state was restored.
+    replay_transcript(messages)
+
     dim = IO.ANSI.faint()
     reset = IO.ANSI.reset()
     IO.puts("#{dim}  resumed: #{target_id} (#{length(messages)} messages restored)#{reset}\n")
     target_id
   end
+
+  # Re-render a restored message list to the terminal so the prior conversation
+  # is visible after /resume. Only user/assistant text turns are shown (tool and
+  # system turns are agent-internal and would be noise). Best-effort: a malformed
+  # turn is skipped, never crashes the resume.
+  defp replay_transcript(messages) when is_list(messages) do
+    turns =
+      messages
+      |> Enum.map(fn m -> {msg_field(m, :role), msg_field(m, :content)} end)
+      |> Enum.filter(fn {role, content} ->
+        role in ["user", "assistant", "agent"] and is_binary(content) and content != ""
+      end)
+
+    unless turns == [] do
+      IO.puts("")
+
+      Enum.each(turns, fn
+        {"user", content} -> Renderer.print_user_message(content)
+        {_assistant, content} -> Renderer.print_response(content)
+      end)
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp replay_transcript(_), do: :ok
+
+  # Message maps may carry atom OR string keys depending on their persistence
+  # round-trip; read both.
+  defp msg_field(m, key) when is_map(m) do
+    m[key] || m[Atom.to_string(key)]
+  end
+
+  defp msg_field(_, _), do: nil
 
   def stop_session(session_id) do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, session_id) do
