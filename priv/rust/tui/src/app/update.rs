@@ -36,6 +36,17 @@ pub(crate) fn paste_is_file_paths(text: &str) -> bool {
     any
 }
 
+/// True only for the two keys that dismiss a read-only overlay: Esc, or an
+/// unmodified `q`. Enter/Space/other keys (and Ctrl/Alt-chorded `q`) return
+/// false so a stray keypress — or key-noise a terminal emits when a click is
+/// delivered as a degraded mouse report — can never close a read-only surface.
+fn is_overlay_dismiss(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        (key.code, key.modifiers),
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE)
+    )
+}
+
 impl App {
     /// Main update function. Returns true if the app should quit.
     pub fn update(&mut self, event: Event) -> bool {
@@ -304,33 +315,26 @@ impl App {
         true
     }
 
-    /// `/context` breakdown: read-only; any dismiss key closes.
+    /// `/context` breakdown: read-only. Only Esc or an unmodified 'q' dismiss it
+    /// — Enter, Space, and every other key are swallowed so a stray keypress (or
+    /// key noise from a click when mouse capture is degraded) can never close it.
+    /// Proper mouse events are already dropped by `handle_mouse` for overlays.
     fn handle_context_breakdown_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char(' ') => {
-                self.context_stats = None;
-                self.exit_overlay();
-                true
-            }
-            _ => true,
+        if is_overlay_dismiss(key) {
+            self.context_stats = None;
+            self.exit_overlay();
         }
+        true
     }
 
-    /// Key handling for the `/status` dashboard: any dismiss key closes it and
-    /// returns to whatever state opened it. It is read-only, so there is no
-    /// navigation — Esc/q/Enter/Space all close.
+    /// Key handling for the `/status` dashboard. Read-only, no navigation: only
+    /// Esc or an unmodified 'q' close it; Enter/Space/other keys are swallowed
+    /// so a stray keypress (or click key-noise) can never dismiss it.
     fn handle_status_dashboard_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc
-            | KeyCode::Enter
-            | KeyCode::Char('q')
-            | KeyCode::Char(' ')
-            | KeyCode::Char('\n') => {
-                self.exit_overlay();
-                true
-            }
-            _ => true, // swallow other keys while the overlay is up
+        if is_overlay_dismiss(key) {
+            self.exit_overlay();
         }
+        true
     }
 
     /// Key handling for the full-screen management dashboard.
@@ -850,8 +854,15 @@ impl App {
                 self.status.clear_download_progress();
                 self.status.set_transcribing(false);
                 if err.contains("whisper-cli not found") || err.contains("whisper not found") {
+                    let install_hint = if cfg!(target_os = "macos") {
+                        "brew install whisper-cpp"
+                    } else if cfg!(target_os = "windows") {
+                        "auto-downloads on Windows; retry, or set VOICE_PROVIDER=cloud"
+                    } else {
+                        "build whisper.cpp from source: https://github.com/ggerganov/whisper.cpp"
+                    };
                     self.toasts.push(
-                        "Install: brew install whisper-cpp (or set VOICE_PROVIDER=cloud)".into(),
+                        format!("Install whisper-cli: {} (or set VOICE_PROVIDER=cloud)", install_hint),
                         crate::components::toast::ToastLevel::Error,
                     );
                 } else {

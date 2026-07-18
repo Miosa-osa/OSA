@@ -1,22 +1,28 @@
 // Phase 2+: dialog action variants — some dialog actions not yet dispatched
 #![allow(dead_code)]
 
+pub mod channels_panel;
 pub mod command_palette;
 pub mod config_editor;
 pub mod context_breakdown;
+pub mod cost_dashboard;
 pub mod file_picker;
+pub mod hooks_viewer;
 pub mod keybindings_viewer;
 pub mod mcp_approval;
+pub mod mcp_servers;
 pub mod model_picker;
 pub mod onboarding;
 pub mod overdrive_confirm;
 pub mod permissions;
+pub mod permissions_manager;
 pub mod picker;
 pub mod plan_review;
 pub mod quit_confirm;
 pub mod reasoning;
 pub mod rewind;
 pub mod sessions;
+pub mod skills_browser;
 pub mod status_dashboard;
 pub mod survey;
 pub mod theme_picker;
