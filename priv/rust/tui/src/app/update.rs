@@ -786,7 +786,8 @@ impl App {
         // Execution continues below after `fg` delivers SIGCONT.
         let _ = unsafe { libc::raise(libc::SIGTSTP) };
         let _ = enable_raw_mode();
-        let _ = execute!(out, EnableBracketedPaste, EnableMouseCapture);
+        // No mouse capture — keep the terminal's native scrollback (see main.rs).
+        let _ = execute!(out, EnableBracketedPaste);
         if matches!(supports_keyboard_enhancement(), Ok(true)) {
             let _ = execute!(
                 out,

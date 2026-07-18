@@ -86,7 +86,12 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // instead of the terminal's native scrollback; users reach scrollback with
     // Shift+wheel (terminal bypass) or the Ctrl+O transcript reader.
     enable_raw_mode()?;
-    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+    // NOTE: mouse capture is intentionally NOT enabled. Capturing the mouse
+    // steals the wheel from the terminal's native scrollback, which forced an
+    // in-app transcript overlay on scroll — jarring and un-terminal-like. Like
+    // Claude Code, we leave the mouse to the terminal so scroll-up/down just
+    // scrolls the conversation, nothing changes. Bracketed paste stays on.
+    execute!(io::stdout(), EnableBracketedPaste)?;
 
     // Enable the kitty keyboard protocol's disambiguation so distinct keys like
     // Shift+Enter (insert newline) are reported as Enter+SHIFT instead of collapsing
