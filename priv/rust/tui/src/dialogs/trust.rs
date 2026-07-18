@@ -103,7 +103,7 @@ impl TrustDialog {
         // Bold cwd
         put(
             frame,
-            Paragraph::new(truncate_chars(&self.cwd, max_w)).style(
+            Paragraph::new(crate::util::ellipsize_path_middle(&self.cwd, max_w)).style(
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),

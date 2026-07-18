@@ -435,9 +435,23 @@ impl SurveyDialog {
         );
         cy += 2;
 
-        // Options
+        // Options — window scrolled so the cursor row (plus its description or
+        // the free-text input line) is always visible on short terminals.
         let option_area_bottom = inner.y + inner.height.saturating_sub(2);
-        for (i, opt) in question.options.iter().enumerate() {
+        let mut costs: Vec<u16> = question
+            .options
+            .iter()
+            .map(|o| if o.description.is_some() { 2 } else { 1 })
+            .collect();
+        costs.push(2); // "Type your own answer" row + its input line
+        let avail = option_area_bottom.saturating_sub(cy);
+        let mut start = self.cursor.min(costs.len().saturating_sub(1));
+        let mut used = costs[start];
+        while start > 0 && used + costs[start - 1] <= avail {
+            start -= 1;
+            used += costs[start];
+        }
+        for (i, opt) in question.options.iter().enumerate().skip(start) {
             if cy >= option_area_bottom {
                 break;
             }
@@ -541,44 +555,37 @@ impl SurveyDialog {
             }
         }
 
-        // ── Bottom bar ──────────────────────────────────────────────────────
+        // ── Bottom bar: keyboard hints (left: dismiss · right: nav) ─────────
         let bottom_y = inner.y + inner.height.saturating_sub(1);
-        let mut btn_spans: Vec<Span> = Vec::new();
-
-        // Dismiss (left, only if skippable)
         if self.skippable {
-            btn_spans.push(Span::styled(
-                "Dismiss",
-                Style::default().fg(theme.colors.dim),
-            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Esc", theme.dialog_help_key()),
+                    Span::styled(" dismiss", theme.dialog_help()),
+                ])),
+                Rect::new(inner.x, bottom_y, inner.width, 1),
+            );
         }
 
-        // Spacer to push Back/Next to the right
-        let spacer_width = if self.skippable {
-            inner.width.saturating_sub(30) as usize
-        } else {
-            inner.width.saturating_sub(20) as usize
-        };
-        btn_spans.push(Span::raw(" ".repeat(spacer_width)));
-
-        // Back (if not first step)
+        let mut right: Vec<Span> = Vec::new();
+        if question.multi_select {
+            right.push(Span::styled("Space", theme.dialog_help_key()));
+            right.push(Span::styled(" toggle   ", theme.dialog_help()));
+        }
         if self.current_step > 0 {
-            btn_spans.push(Span::styled("Back", theme.dialog_help_key()));
-            btn_spans.push(Span::raw("   "));
+            right.push(Span::styled("←", theme.dialog_help_key()));
+            right.push(Span::styled(" back   ", theme.dialog_help()));
         }
-
-        // Next / Submit
         let is_last = self.current_step + 1 >= self.questions.len();
-        let next_label = if is_last { "Submit" } else { "Next" };
-        btn_spans.push(Span::styled(
-            next_label,
+        right.push(Span::styled("Enter", theme.dialog_help_key()));
+        right.push(Span::styled(
+            if is_last { " submit" } else { " next" },
             Style::default()
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD),
         ));
-
         frame.render_widget(
-            Paragraph::new(Line::from(btn_spans)),
+            Paragraph::new(Line::from(right)).alignment(Alignment::Right),
             Rect::new(inner.x, bottom_y, inner.width, 1),
         );
     }

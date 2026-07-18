@@ -62,22 +62,31 @@ impl ToolRenderer for AgentRenderer {
         ];
 
         if !opts.expanded {
-            // Collapsed summary: "3 tools, 1.7s"
-            let mut summary_parts: Vec<String> = Vec::new();
+            // CC parity (AgentTool/UI.tsx): "⎿ Done (2 tool uses · 45s)".
+            let header = Line::from(header_spans);
+            if result.trim().is_empty() {
+                return vec![header];
+            }
+            let mut parts: Vec<String> = Vec::new();
             if tool_count > 0 {
-                summary_parts.push(format!("{} tools", tool_count));
+                let noun = if tool_count == 1 { "tool use" } else { "tool uses" };
+                parts.push(format!("{} {}", tool_count, noun));
             }
             if !dur.is_empty() {
-                summary_parts.push(dur.clone());
+                parts.push(dur.clone());
             }
-            if !summary_parts.is_empty() {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(Span::styled(
-                    summary_parts.join(", "),
-                    theme.tool_duration(),
-                ));
-            }
-            return vec![Line::from(header_spans)];
+            let text = if parts.is_empty() {
+                "Done".to_string()
+            } else {
+                format!("Done ({})", parts.join(" · "))
+            };
+            return render_tool_box(
+                header,
+                vec![Line::from(Span::styled(
+                    text,
+                    Style::default().fg(theme.colors.muted),
+                ))],
+            );
         }
 
         if !dur.is_empty() {

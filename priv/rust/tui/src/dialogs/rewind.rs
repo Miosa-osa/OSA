@@ -185,6 +185,9 @@ impl RewindDialog {
         let footer = if self.mode == Mode::PickScope { 6 } else { 2 };
         let list_h = inner.height.saturating_sub((cy - inner.y) + footer);
         let list_h = list_h.max(1) as usize;
+        // Hard clip: the selected row's extra meta line must never bleed into
+        // the reserved footer (it overwrote the scope panel title before).
+        let list_bottom = cy + list_h as u16;
 
         // Simple scroll window around the cursor.
         let start = if self.cursor >= list_h {
@@ -200,6 +203,9 @@ impl RewindDialog {
             .skip(start)
             .take(list_h)
         {
+            if cy >= list_bottom {
+                break;
+            }
             let is_cursor = i == self.cursor && self.mode == Mode::PickCheckpoint;
             let is_selected = i == self.cursor;
 
@@ -237,17 +243,15 @@ impl RewindDialog {
             );
             cy += 1;
 
-            if is_selected {
+            if is_selected && cy < list_bottom {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
                         format!("    {}", meta),
                         Style::default().fg(theme.colors.dim),
                     ))),
-                    Rect::new(inner.x, cy.min(inner.y + inner.height - 1), inner.width, 1),
+                    Rect::new(inner.x, cy, inner.width, 1),
                 );
-                if cy < inner.y + inner.height {
-                    cy += 1;
-                }
+                cy += 1;
             }
         }
 

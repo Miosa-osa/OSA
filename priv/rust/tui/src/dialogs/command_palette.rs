@@ -139,9 +139,10 @@ impl CommandPalette {
 
         // Width: half the terminal, clamped to [MIN_WIDTH, area.width - 4].
         let w = (area.width / 2).max(MIN_WIDTH).min(area.width.saturating_sub(4));
-        // Height: 3 (border + filter + separator) + visible items + 1 bottom border.
-        let item_count = self.filtered.len().min(MAX_VISIBLE) as u16;
-        let h = (3 + item_count + 1).min(area.height.saturating_sub(4));
+        // Height: 3 (border + filter + separator) + visible items (≥1 row so
+        // the empty state fits) + help row + bottom border.
+        let item_count = (self.filtered.len().min(MAX_VISIBLE) as u16).max(1);
+        let h = (3 + item_count + 2).min(area.height.saturating_sub(4));
 
         let x = area.x + area.width.saturating_sub(w) / 2;
         let y = area.y + area.height.saturating_sub(h) / 4; // Upper-center feels natural for palettes.
@@ -191,9 +192,9 @@ impl CommandPalette {
             Rect::new(inner.x, sep_y, inner.width, 1),
         );
 
-        // Item list starts at inner.y + 2.
+        // Item list starts at inner.y + 2; the last inner row is the help bar.
         let list_y = inner.y + 2;
-        let list_height = inner.height.saturating_sub(2);
+        let list_height = inner.height.saturating_sub(3);
 
         // Scroll window so the selected item is always visible. Base it on the
         // ACTUAL visible row count (`list_height`), NOT the fixed MAX_VISIBLE
@@ -215,7 +216,7 @@ impl CommandPalette {
             let is_selected = row == self.selected;
             let row_y = list_y + (row - scroll_start) as u16;
 
-            if row_y >= inner.y + inner.height {
+            if row_y >= inner.y + inner.height.saturating_sub(1) {
                 break;
             }
 
@@ -261,6 +262,34 @@ impl CommandPalette {
             frame.render_widget(
                 Paragraph::new(line),
                 Rect::new(inner.x, row_y, inner.width, 1),
+            );
+        }
+
+        // Empty state (CC parity: never a silent blank list).
+        if self.filtered.is_empty() && list_height > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "  No matching commands",
+                    Style::default().fg(theme.colors.dim),
+                )),
+                Rect::new(inner.x, list_y, inner.width, 1),
+            );
+        }
+
+        // Bottom keyboard hints (consistent with every other dialog).
+        let hint_y = inner.y + inner.height.saturating_sub(1);
+        if hint_y > sep_y {
+            let help = Line::from(vec![
+                Span::styled("↑↓", theme.dialog_help_key()),
+                Span::styled(" nav  ", theme.dialog_help()),
+                Span::styled("Enter", theme.dialog_help_key()),
+                Span::styled(" run  ", theme.dialog_help()),
+                Span::styled("Esc", theme.dialog_help_key()),
+                Span::styled(" close", theme.dialog_help()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(help).alignment(Alignment::Center),
+                Rect::new(inner.x, hint_y, inner.width, 1),
             );
         }
     }

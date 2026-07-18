@@ -14,6 +14,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
+use std::cell::Cell;
+
 use crate::client::types::SessionInfo;
 
 const MAX_W: u16 = 80;
@@ -52,6 +54,8 @@ pub struct SessionBrowser {
     mode: SessionMode,
     rename_buf: String,
     delete_confirm: bool,
+    /// Rows the list can actually show — measured on each draw via `Cell`.
+    list_viewport: Cell<usize>,
 }
 
 impl SessionBrowser {
@@ -67,6 +71,7 @@ impl SessionBrowser {
             mode: SessionMode::Browse,
             rename_buf: String::new(),
             delete_confirm: false,
+            list_viewport: Cell::new((MAX_H as usize).saturating_sub(7)),
         }
     }
 
@@ -103,7 +108,7 @@ impl SessionBrowser {
     }
 
     fn adjust_scroll(&mut self) {
-        let visible: usize = (MAX_H as usize).saturating_sub(7);
+        let visible: usize = self.list_viewport.get().max(1);
         if self.cursor < self.scroll_offset {
             self.scroll_offset = self.cursor;
         } else if self.cursor >= self.scroll_offset + visible {
@@ -312,14 +317,20 @@ impl SessionBrowser {
 
         // List
         let list_h = inner.height.saturating_sub(cy - inner.y + 2);
+        self.list_viewport.set((list_h as usize).max(1));
+        let scroll = super::clamp_scroll_to_cursor(
+            self.scroll_offset,
+            self.cursor,
+            (list_h as usize).max(1),
+        );
         let visible_sessions = self
             .filtered
             .iter()
-            .skip(self.scroll_offset)
+            .skip(scroll)
             .take(list_h as usize);
 
         for (rel_i, &idx) in visible_sessions.enumerate() {
-            let abs_i = rel_i + self.scroll_offset;
+            let abs_i = rel_i + scroll;
             let ry = cy + rel_i as u16;
             if ry >= cy + list_h {
                 break;

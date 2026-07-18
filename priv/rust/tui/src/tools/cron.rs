@@ -58,11 +58,18 @@ impl ToolRenderer for CronRenderer {
 
         let header = make_header(opts.status, opts.spinner_frame, label, &detail, opts.duration_ms);
 
-        if !opts.expanded || result.is_empty() {
+        if result.is_empty() {
             return vec![header];
         }
 
-        let mut body: Vec<Line<'static>> = vec![header];
+        if !opts.expanded {
+            // CC parity (ScheduleCronTool/UI.tsx): the result always shows
+            // under `⎿` ("Scheduled <id> (schedule)", "No scheduled jobs", …).
+            let body = super::collapsed_result_block(result, opts.width, false);
+            return super::render_tool_box(header, body);
+        }
+
+        let mut body: Vec<Line<'static>> = Vec::new();
 
         match action.as_str() {
             "list" => render_job_list(&mut body, result, &theme),
@@ -70,7 +77,7 @@ impl ToolRenderer for CronRenderer {
             _ => render_plain_result(&mut body, result, &theme),
         }
 
-        body
+        super::render_tool_box(header, body)
     }
 }
 
@@ -98,7 +105,6 @@ fn render_job_list(body: &mut Vec<Line<'static>>, result: &str, theme: &crate::s
             };
 
             body.push(Line::from(vec![
-                Span::styled("  ".to_string(), Style::default()),
                 Span::styled(
                     id.to_string(),
                     Style::default().fg(theme.colors.muted).add_modifier(Modifier::DIM),
@@ -124,13 +130,10 @@ fn render_job_list(body: &mut Vec<Line<'static>>, result: &str, theme: &crate::s
 
 fn render_create_result(body: &mut Vec<Line<'static>>, result: &str, theme: &crate::style::Theme) {
     for line in result.lines() {
-        body.push(Line::from(vec![
-            Span::styled("  ".to_string(), Style::default()),
-            Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.colors.success),
-            ),
-        ]));
+        body.push(Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.colors.success),
+        )));
     }
 }
 

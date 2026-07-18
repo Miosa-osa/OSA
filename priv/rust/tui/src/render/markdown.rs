@@ -42,7 +42,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 in_code_block = false;
                 let code = code_lines.join("\n");
                 let highlighted = crate::render::syntax::highlight(&code, &code_lang);
-                lines.extend(highlighted);
+                push_code_lines(&mut lines, highlighted, width);
                 code_lang.clear();
                 code_lines.clear();
             } else {
@@ -254,7 +254,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
     if in_code_block && !code_lines.is_empty() {
         let code = code_lines.join("\n");
         let highlighted = crate::render::syntax::highlight(&code, &code_lang);
-        lines.extend(highlighted);
+        push_code_lines(&mut lines, highlighted, width);
     }
 
     // If we hit EOF still inside a table, flush what we have.
@@ -264,6 +264,36 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
     }
 
     Text::from(lines)
+}
+
+/// Append syntax-highlighted code lines, wrapping any line wider than `width`
+/// on grapheme boundaries so code blocks never clip horizontally (CC parity —
+/// HighlightedCode wraps to the render width).
+fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>, width: u16) {
+    let max_w = (width as usize).max(1);
+    for line in highlighted {
+        let total: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        if total <= max_w {
+            out.push(line);
+            continue;
+        }
+        let parts: Vec<(String, Style)> = line
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect();
+        for row in crate::render::diff::wrap_styled(parts, max_w) {
+            out.push(Line::from(
+                row.into_iter()
+                    .map(|(t, st)| Span::styled(t, st))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
 }
 
 // ─── GFM pipe table renderer ─────────────────────────────────────────────────

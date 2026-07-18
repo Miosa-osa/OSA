@@ -8,6 +8,8 @@
 /// FilePickerSelect(String),  // absolute path
 /// FilePickerCancel,
 /// ```
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -47,6 +49,8 @@ pub struct FilePicker {
     scroll_offset: usize,
     /// Error message from last `read_dir`, if any
     error: Option<String>,
+    /// Rows the list can actually show — measured on each draw via `Cell`.
+    list_viewport: Cell<usize>,
 }
 
 impl FilePicker {
@@ -66,6 +70,7 @@ impl FilePicker {
             cursor: 0,
             scroll_offset: 0,
             error: None,
+            list_viewport: Cell::new((MAX_H as usize).saturating_sub(8)),
         };
         picker.load_entries();
         picker
@@ -147,7 +152,7 @@ impl FilePicker {
     }
 
     fn adjust_scroll(&mut self) {
-        let visible = (MAX_H as usize).saturating_sub(8);
+        let visible = self.list_viewport.get().max(1);
         if self.cursor < self.scroll_offset {
             self.scroll_offset = self.cursor;
         } else if self.cursor >= self.scroll_offset + visible {
@@ -265,11 +270,9 @@ impl FilePicker {
         // Current path (truncated to fit)
         let path_str = self.current_dir.to_string_lossy();
         let max_path_w = inner.width.saturating_sub(4) as usize;
-        let path_display = if path_str.len() > max_path_w {
-            format!("…{}", crate::util::truncate_str_start(&path_str, max_path_w.saturating_sub(1)))
-        } else {
-            path_str.to_string()
-        };
+        // Width-aware middle ellipsis (CC truncatePathMiddle parity). The old
+        // byte-length check let multibyte paths overflow the dialog width.
+        let path_display = crate::util::ellipsize_path_middle(&path_str, max_path_w);
         frame.render_widget(
             Paragraph::new(format!("  {}", path_display))
                 .style(Style::default().fg(theme.colors.secondary)),
@@ -311,14 +314,20 @@ impl FilePicker {
 
         // File list
         let list_h = inner.height.saturating_sub(cy - inner.y + 2);
+        self.list_viewport.set((list_h as usize).max(1));
+        let scroll = super::clamp_scroll_to_cursor(
+            self.scroll_offset,
+            self.cursor,
+            (list_h as usize).max(1),
+        );
         let visible = self
             .filtered
             .iter()
-            .skip(self.scroll_offset)
+            .skip(scroll)
             .take(list_h as usize);
 
         for (rel_i, &idx) in visible.enumerate() {
-            let abs_i = rel_i + self.scroll_offset;
+            let abs_i = rel_i + scroll;
             let ry = cy + rel_i as u16;
             if ry >= cy + list_h {
                 break;

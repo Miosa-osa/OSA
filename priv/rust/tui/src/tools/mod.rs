@@ -243,6 +243,78 @@ pub(crate) fn truncate_lines(mut lines: Vec<Line<'static>>, max: usize) -> Vec<L
     lines
 }
 
+/// CC's OutputLine wrap width: terminal width minus the `  ⎿  ` gutter and a
+/// small overflow guard (PADDING_TO_PREVENT_OVERFLOW), never below 10 columns.
+pub(crate) fn body_wrap_width(width: u16) -> usize {
+    (width as usize).saturating_sub(7).max(10)
+}
+
+/// Width-aware hard wrap of one logical line into visual rows so tool output
+/// never clips horizontally — the chat Paragraph for tool cards does not wrap,
+/// and CC counts WRAPPED rows for its 3-line cap (renderTruncatedContent).
+pub(crate) fn wrap_plain(s: &str, cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > cols && !cur.is_empty() {
+            rows.push(std::mem::take(&mut cur));
+            w = 0;
+        }
+        cur.push(ch);
+        w += cw;
+    }
+    rows.push(cur);
+    rows
+}
+
+/// CC's collapsed output cap (utils/terminal.ts MAX_LINES_TO_SHOW).
+pub(crate) const MAX_LINES_TO_SHOW: usize = 3;
+
+/// CC's collapsed tool output (OutputLine/renderTruncatedContent): up to 3
+/// dimmed, width-wrapped visual lines; exactly 4 print in full (CC's
+/// remainingLines==1 case); more get "… +N lines (ctrl+o to expand)".
+/// Errors render red. Empty result → empty vec (caller decides fallback).
+pub(crate) fn collapsed_result_block(
+    result: &str,
+    width: u16,
+    is_error: bool,
+) -> Vec<Line<'static>> {
+    let theme = crate::style::theme();
+    let trimmed = result.trim_end();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let cols = body_wrap_width(width);
+    let out_style = if is_error {
+        Style::default().fg(theme.colors.error)
+    } else {
+        Style::default().fg(theme.colors.muted)
+    };
+    let all: Vec<String> = trimmed.lines().flat_map(|l| wrap_plain(l, cols)).collect();
+    let shown = if all.len() == MAX_LINES_TO_SHOW + 1 {
+        all.len()
+    } else {
+        all.len().min(MAX_LINES_TO_SHOW)
+    };
+    let mut body: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
+    for line in &all[..shown] {
+        body.push(Line::from(Span::styled(line.clone(), out_style)));
+    }
+    if all.len() > shown {
+        body.push(Line::from(Span::styled(
+            format!("… +{} lines (ctrl+o to expand)", all.len() - shown),
+            Style::default().fg(theme.colors.dim),
+        )));
+    }
+    body
+}
+
 /// Claude Code's result connector (MessageResponse.tsx): the first body line
 /// hangs off the header with a dim `  ⎿  `; continuation lines get a matching
 /// 5-column indent so the block stays aligned under the connector.

@@ -5,6 +5,30 @@ use super::{
     make_header, parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
 };
 
+/// CC's SearchResultSummary collapsed row: `Found N files  (ctrl+o to expand)`
+/// — bold count, singular/plural noun, dim expand hint only when N > 0.
+fn found_line(verb: &str, n: usize, singular: &str, plural: &str) -> Line<'static> {
+    let theme = crate::style::theme();
+    let noun = if n == 1 { singular } else { plural };
+    let mut spans = vec![
+        Span::raw(format!("{} ", verb)),
+        Span::styled(n.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(format!(" {}", noun)),
+    ];
+    if n > 0 {
+        spans.push(Span::styled(
+            "  (ctrl+o to expand)".to_string(),
+            Style::default().fg(theme.colors.dim),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Header-only while the tool is still running (avoids bogus "Found 0 …").
+fn resolved(status: super::ToolStatus) -> bool {
+    matches!(status, super::ToolStatus::Success | super::ToolStatus::Error)
+}
+
 // ─── GlobRenderer ─────────────────────────────────────────────────────────────
 
 pub struct GlobRenderer;
@@ -26,7 +50,11 @@ impl ToolRenderer for GlobRenderer {
         );
 
         if !opts.expanded {
-            return vec![header];
+            if !resolved(opts.status) {
+                return vec![header];
+            }
+            let n = result.lines().filter(|l| !l.trim().is_empty()).count();
+            return render_tool_box(header, vec![found_line("Found", n, "file", "files")]);
         }
 
         let file_style = Style::default()
@@ -78,7 +106,11 @@ impl ToolRenderer for GrepRenderer {
         );
 
         if !opts.expanded {
-            return vec![header];
+            if !resolved(opts.status) {
+                return vec![header];
+            }
+            let n = result.lines().filter(|l| !l.trim().is_empty()).count();
+            return render_tool_box(header, vec![found_line("Found", n, "line", "lines")]);
         }
 
         let file_style = Style::default()
@@ -160,7 +192,11 @@ impl ToolRenderer for LsRenderer {
         );
 
         if !opts.expanded {
-            return vec![header];
+            if !resolved(opts.status) {
+                return vec![header];
+            }
+            let n = result.lines().filter(|l| !l.trim().is_empty()).count();
+            return render_tool_box(header, vec![found_line("Listed", n, "path", "paths")]);
         }
 
         let dir_style = Style::default()

@@ -31,19 +31,39 @@ impl ToolRenderer for WebFetchRenderer {
             opts.duration_ms,
         );
 
+        // Size annotation — CC formatFileSize tiers (B / KB / MB).
+        let byte_count = result.len();
+        let size_str = if byte_count >= 1024 * 1024 {
+            format!("{:.1}MB", byte_count as f64 / (1024.0 * 1024.0))
+        } else if byte_count >= 1024 {
+            format!("{:.1}KB", byte_count as f64 / 1024.0)
+        } else {
+            format!("{}B", byte_count)
+        };
+
         if !opts.expanded {
-            return vec![header];
+            // CC parity (WebFetchTool/UI.tsx): "⎿ Received 12.3KB".
+            if result.is_empty() {
+                return vec![header];
+            }
+            return render_tool_box(
+                header,
+                vec![Line::from(vec![
+                    Span::raw("Received ".to_string()),
+                    Span::styled(
+                        size_str.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
+                    ),
+                ])],
+            );
         }
 
         let mut body: Vec<Line<'static>> = Vec::new();
-
-        // Size annotation
-        let byte_count = result.len();
-        let size_label = if byte_count >= 1024 {
-            format!("({:.1}KB)", byte_count as f64 / 1024.0)
-        } else {
-            format!("({}B)", byte_count)
-        };
+        let size_label = format!("({})", size_str);
 
         body.push(Line::from(vec![
             Span::styled(
@@ -97,7 +117,26 @@ impl ToolRenderer for WebSearchRenderer {
         );
 
         if !opts.expanded {
-            return vec![header];
+            // CC parity (WebSearchTool/UI.tsx): "⎿ Did 1 search in 2s".
+            if result.is_empty() {
+                return vec![header];
+            }
+            let dur = super::format_duration(opts.duration_ms);
+            let text = if dur.is_empty() {
+                "Did 1 search".to_string()
+            } else {
+                format!("Did 1 search in {}", dur)
+            };
+            return render_tool_box(
+                header,
+                vec![Line::from(vec![
+                    Span::raw(text),
+                    Span::styled(
+                        "  (ctrl+o to expand)".to_string(),
+                        Style::default().fg(theme.colors.dim),
+                    ),
+                ])],
+            );
         }
 
         let mut body: Vec<Line<'static>> = Vec::new();

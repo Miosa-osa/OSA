@@ -51,7 +51,13 @@ impl ToolRenderer for McpRenderer {
         let header = Line::from(header_spans);
 
         if !opts.expanded {
-            return vec![header];
+            // CC parity (MCPTool/UI.tsx): results render through OutputLine
+            // even collapsed — dimmed, width-wrapped, 3-line capped preview.
+            let body = super::collapsed_result_block(result, opts.width, false);
+            if body.is_empty() {
+                return vec![header];
+            }
+            return render_tool_box(header, body);
         }
 
         // Expanded body

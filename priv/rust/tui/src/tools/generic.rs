@@ -25,28 +25,11 @@ impl ToolRenderer for GenericRenderer {
 
         if !opts.expanded {
             // CC parity: unknown tools still show a short dimmed result block
-            // under a `⎿` connector — 3 lines max plus a ctrl+o hint.
-            let trimmed = result.trim_end();
-            if trimmed.is_empty() {
+            // under a `⎿` connector — 3 width-wrapped lines max plus a ctrl+o
+            // hint (OutputLine).
+            let body = super::collapsed_result_block(result, opts.width, false);
+            if body.is_empty() {
                 return vec![header];
-            }
-            let out_style = Style::default().fg(theme.colors.muted);
-            const MAX_LINES_TO_SHOW: usize = 3;
-            let all: Vec<&str> = trimmed.lines().collect();
-            let shown = if all.len() == MAX_LINES_TO_SHOW + 1 {
-                all.len()
-            } else {
-                all.len().min(MAX_LINES_TO_SHOW)
-            };
-            let mut body: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
-            for line in &all[..shown] {
-                body.push(Line::from(Span::styled((*line).to_string(), out_style)));
-            }
-            if all.len() > shown {
-                body.push(Line::from(Span::styled(
-                    format!("… +{} lines (ctrl+o to expand)", all.len() - shown),
-                    Style::default().fg(theme.colors.dim),
-                )));
             }
             return render_tool_box(header, body);
         }

@@ -54,3 +54,16 @@ pub enum DialogAction {
     /// User committed a value in the /config editor (field label + new value).
     ConfigSetValue { field: String, value: String },
 }
+
+/// Clamp a stored scroll offset so `cursor` always falls inside the `viewport`
+/// rows starting at the returned offset. Dialogs call this at render time with
+/// the REAL measured list height, guaranteeing the selected row is visible even
+/// when the stored offset was computed against a stale height (e.g. right
+/// after a terminal resize, or before the first frame measured the viewport).
+pub(crate) fn clamp_scroll_to_cursor(stored: usize, cursor: usize, viewport: usize) -> usize {
+    let mut s = stored.min(cursor);
+    if viewport > 0 && cursor >= s + viewport {
+        s = cursor + 1 - viewport;
+    }
+    s
+}

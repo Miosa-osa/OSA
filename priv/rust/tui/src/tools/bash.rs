@@ -39,35 +39,26 @@ impl ToolRenderer for BashRenderer {
         );
 
         if !opts.expanded {
-            // CC parity (OutputLine/renderTruncatedContent): up to 3 dimmed
-            // output lines under a `⎿` connector; exactly 4 lines print in
-            // full (CC's remainingLines==1 special case); more get a dim
-            // "… +N lines (ctrl+o to expand)" hint. Errors render red.
-            let trimmed = result.trim_end();
-            if trimmed.is_empty() {
-                return vec![header];
-            }
-            let out_style = if opts.status == ToolStatus::Error {
-                Style::default().fg(theme.colors.error)
-            } else {
-                Style::default().fg(theme.colors.muted)
-            };
-            const MAX_LINES_TO_SHOW: usize = 3;
-            let all: Vec<&str> = trimmed.lines().collect();
-            let shown = if all.len() == MAX_LINES_TO_SHOW + 1 {
-                all.len() // exactly one extra line: just show it
-            } else {
-                all.len().min(MAX_LINES_TO_SHOW)
-            };
-            let mut body: Vec<Line<'static>> = Vec::with_capacity(shown + 1);
-            for line in &all[..shown] {
-                body.push(Line::from(Span::styled((*line).to_string(), out_style)));
-            }
-            if all.len() > shown {
-                body.push(Line::from(Span::styled(
-                    format!("… +{} lines (ctrl+o to expand)", all.len() - shown),
-                    Style::default().fg(theme.colors.dim),
-                )));
+            // CC parity (BashToolResultMessage/OutputLine): up to 3 dimmed,
+            // WIDTH-WRAPPED output lines under the `⎿` connector; exactly 4
+            // print in full; more get "… +N lines (ctrl+o to expand)".
+            // Errors render red; finished-but-empty shows "(No output)".
+            let body = super::collapsed_result_block(
+                result,
+                opts.width,
+                opts.status == ToolStatus::Error,
+            );
+            if body.is_empty() {
+                if !matches!(opts.status, ToolStatus::Success | ToolStatus::Error) {
+                    return vec![header];
+                }
+                return render_tool_box(
+                    header,
+                    vec![Line::from(Span::styled(
+                        "(No output)".to_string(),
+                        Style::default().fg(theme.colors.dim),
+                    ))],
+                );
             }
             return render_tool_box(header, body);
         }
@@ -107,12 +98,20 @@ impl ToolRenderer for BashRenderer {
             Style::default().fg(theme.colors.muted)
         };
 
+        let cols = super::body_wrap_width(opts.width);
         for line in result.lines() {
-            body.push(Line::from(Span::styled(line.to_string(), output_style)));
+            for row in super::wrap_plain(line, cols) {
+                body.push(Line::from(Span::styled(row, output_style)));
+            }
         }
 
-        let max_lines = if opts.compact { 8 } else { 15 };
-        let body = truncate_lines(body, max_lines);
+        // CC parity: expanded (ctrl+o / verbose) shows the full output; only
+        // compact contexts keep a cap.
+        let body = if opts.compact {
+            truncate_lines(body, 8)
+        } else {
+            body
+        };
 
         render_tool_box(header, body)
     }

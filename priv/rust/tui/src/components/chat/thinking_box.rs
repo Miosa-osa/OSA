@@ -136,14 +136,20 @@ impl ThinkingBox {
                 result.push(String::new());
                 continue;
             }
-            // Chunk each source line into width-sized segments.
-            let chars: Vec<char> = raw_line.chars().collect();
-            let mut start = 0;
-            while start < chars.len() {
-                let end = (start + width).min(chars.len());
-                result.push(chars[start..end].iter().collect());
-                start = end;
+            // Chunk each source line into width-sized segments
+            // (display-width aware — CJK/emoji safe).
+            let mut current = String::new();
+            let mut col = 0usize;
+            for g in unicode_segmentation::UnicodeSegmentation::graphemes(raw_line, true) {
+                let gw = unicode_width::UnicodeWidthStr::width(g);
+                if col + gw > width && col > 0 {
+                    result.push(std::mem::take(&mut current));
+                    col = 0;
+                }
+                current.push_str(g);
+                col += gw;
             }
+            result.push(current);
         }
         result
     }

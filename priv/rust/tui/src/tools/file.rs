@@ -305,155 +305,17 @@ fn render_collapsed_diff_preview(
     out
 }
 
-/// Inline unified diff renderer with hunk grouping and WORD-LEVEL highlighting.
-///
-/// CC parity (`StructuredDiff*` / `Fallback.tsx`):
-///   - hunks come from `grouped_ops(3)` (3 context lines) with a dim `…`
-///     separator line between hunks;
-///   - within a change run, the i-th removed line pairs with the i-th added
-///     line for word-level highlights (runs of N deletes + N inserts pair,
-///     not just 1:1);
-///   - word highlights apply only when the pair is similar enough
-///     (`CHANGE_THRESHOLD = 0.4` — more than 40% changed renders plain).
+/// Inline unified diff renderer — delegates to the shared CC-style renderer
+/// in `render::diff` (line-number gutter, solid +/- background bars,
+/// bg-only word-level highlights, `…` hunk separators, width-aware wrapping
+/// so nothing clips horizontally).
 fn render_inline_diff(
     old: &str,
     new: &str,
-    _width: u16,
-    theme: &crate::style::Theme,
+    width: u16,
+    _theme: &crate::style::Theme,
 ) -> Vec<Line<'static>> {
-    use similar::{ChangeTag, TextDiff};
-
-    let line_diff = TextDiff::from_lines(old, new);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    let groups = line_diff.grouped_ops(3);
-    for (gi, group) in groups.iter().enumerate() {
-        if gi > 0 {
-            // Dim ellipsis separator between hunks (StructuredDiffList parity).
-            lines.push(Line::from(Span::styled(
-                "  …".to_string(),
-                Style::default().fg(theme.colors.dim),
-            )));
-        }
-        for op in group {
-            let mut dels: Vec<String> = Vec::new();
-            let mut inss: Vec<String> = Vec::new();
-            for change in line_diff.iter_changes(op) {
-                let content = change.value().trim_end_matches('\n').to_string();
-                match change.tag() {
-                    ChangeTag::Equal => {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ".to_string(), Style::default().fg(theme.colors.muted)),
-                            Span::styled(content, Style::default().fg(theme.colors.muted)),
-                        ]));
-                    }
-                    ChangeTag::Delete => dels.push(content),
-                    ChangeTag::Insert => inss.push(content),
-                }
-            }
-            render_change_run(&dels, &inss, theme, &mut lines);
-        }
-    }
-
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(no changes)".to_string(),
-            Style::default().fg(theme.colors.muted),
-        )));
-    }
-
-    lines
-}
-
-/// Proportion of a paired line that may change before word-level highlighting
-/// is skipped in favor of plain +/- lines (CC `Fallback.tsx` CHANGE_THRESHOLD).
-const WORD_DIFF_CHANGE_THRESHOLD: f32 = 0.4;
-
-fn word_diff_pairs_well(old_line: &str, new_line: &str) -> bool {
-    if old_line.trim().is_empty() || new_line.trim().is_empty() {
-        return false;
-    }
-    let ratio = similar::TextDiff::from_words(old_line, new_line).ratio();
-    (1.0 - ratio) <= WORD_DIFF_CHANGE_THRESHOLD
-}
-
-/// Render a run of removed lines followed by added lines, pairing the i-th
-/// delete with the i-th insert for word-level highlights when similar enough.
-fn render_change_run(
-    dels: &[String],
-    inss: &[String],
-    theme: &crate::style::Theme,
-    out: &mut Vec<Line<'static>>,
-) {
-    use similar::{ChangeTag, TextDiff};
-
-    let paired = dels.len().min(inss.len());
-
-    for (i, old_line) in dels.iter().enumerate() {
-        if i < paired && word_diff_pairs_well(old_line, &inss[i]) {
-            let word_diff = TextDiff::from_words(old_line.as_str(), inss[i].as_str());
-            let del_bg = theme.colors.diff_del_bg;
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                "- ".to_string(),
-                Style::default().fg(theme.colors.error).bg(del_bg),
-            )];
-            for wc in word_diff.iter_all_changes() {
-                match wc.tag() {
-                    ChangeTag::Equal => spans.push(Span::styled(
-                        wc.value().to_string(),
-                        Style::default().fg(theme.colors.error).bg(del_bg),
-                    )),
-                    ChangeTag::Delete => spans.push(Span::styled(
-                        wc.value().to_string(),
-                        Style::default()
-                            .fg(theme.colors.diff_del_highlight_fg)
-                            .bg(theme.colors.diff_del_highlight_bg)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    ChangeTag::Insert => {} // shown in the add line
-                }
-            }
-            out.push(Line::from(spans));
-        } else {
-            out.push(Line::from(vec![
-                Span::styled("- ".to_string(), Style::default().fg(theme.colors.error)),
-                Span::styled(old_line.clone(), Style::default().fg(theme.colors.error)),
-            ]));
-        }
-    }
-
-    for (i, new_line) in inss.iter().enumerate() {
-        if i < paired && word_diff_pairs_well(&dels[i], new_line) {
-            let word_diff = TextDiff::from_words(dels[i].as_str(), new_line.as_str());
-            let add_bg = theme.colors.diff_add_bg;
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                "+ ".to_string(),
-                Style::default().fg(theme.colors.success).bg(add_bg),
-            )];
-            for wc in word_diff.iter_all_changes() {
-                match wc.tag() {
-                    ChangeTag::Equal => spans.push(Span::styled(
-                        wc.value().to_string(),
-                        Style::default().fg(theme.colors.success).bg(add_bg),
-                    )),
-                    ChangeTag::Insert => spans.push(Span::styled(
-                        wc.value().to_string(),
-                        Style::default()
-                            .fg(theme.colors.diff_add_highlight_fg)
-                            .bg(theme.colors.diff_add_highlight_bg)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    ChangeTag::Delete => {} // shown in the del line
-                }
-            }
-            out.push(Line::from(spans));
-        } else {
-            out.push(Line::from(vec![
-                Span::styled("+ ".to_string(), Style::default().fg(theme.colors.success)),
-                Span::styled(new_line.clone(), Style::default().fg(theme.colors.success)),
-            ]));
-        }
-    }
+    crate::render::diff::render_diff_body(old, new, width, 1)
 }
 
 #[cfg(test)]
@@ -473,29 +335,29 @@ mod diff_render_tests {
         let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
         let theme = crate::style::theme();
         let rendered = text(&render_inline_diff(old, new, 80, &theme));
-        assert!(rendered.iter().any(|l| l == "  …"), "{:?}", rendered);
+        assert!(rendered.iter().any(|l| l.trim() == "…"), "{:?}", rendered);
     }
 
     #[test]
     fn heavily_rewritten_pair_skips_word_highlights() {
         let theme = crate::style::theme();
         let lines = render_inline_diff("alpha beta\n", "zq xw yv\n", 80, &theme);
-        let has_bold = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
-        assert!(!has_bold);
+        let has_highlight = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
+            s.style.bg == Some(theme.colors.diff_add_highlight_bg)
+                || s.style.bg == Some(theme.colors.diff_del_highlight_bg)
+        });
+        assert!(!has_highlight);
     }
 
     #[test]
     fn small_change_gets_word_highlights() {
         let theme = crate::style::theme();
         let lines = render_inline_diff("let count = 1;\n", "let count = 2;\n", 80, &theme);
-        let has_bold = lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.style.add_modifier.contains(Modifier::BOLD));
-        assert!(has_bold);
+        let has_highlight = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
+            s.style.bg == Some(theme.colors.diff_add_highlight_bg)
+                || s.style.bg == Some(theme.colors.diff_del_highlight_bg)
+        });
+        assert!(has_highlight);
     }
 
     #[test]
@@ -503,7 +365,7 @@ mod diff_render_tests {
         let theme = crate::style::theme();
         let lines = render_inline_diff("one\ntwo\nthree\n", "uno\n", 80, &theme);
         let rendered = text(&lines);
-        assert_eq!(rendered.iter().filter(|l| l.starts_with("- ")).count(), 3);
-        assert_eq!(rendered.iter().filter(|l| l.starts_with("+ ")).count(), 1);
+        assert_eq!(rendered.iter().filter(|l| l.contains(" - ")).count(), 3);
+        assert_eq!(rendered.iter().filter(|l| l.contains(" + ")).count(), 1);
     }
 }

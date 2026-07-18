@@ -39,20 +39,17 @@ impl ToolRenderer for SleepRenderer {
             return vec![header];
         }
 
-        let mut body: Vec<Line<'static>> = vec![header];
+        let mut body: Vec<Line<'static>> = Vec::new();
 
         for line in result.lines() {
-            body.push(Line::from(vec![
-                Span::styled("  ".to_string(), Style::default()),
-                Span::styled(
-                    line.to_string(),
-                    Style::default()
-                        .fg(theme.colors.muted)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]));
+            body.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default()
+                    .fg(theme.colors.muted)
+                    .add_modifier(Modifier::ITALIC),
+            )));
         }
 
-        body
+        super::render_tool_box(header, body)
     }
 }

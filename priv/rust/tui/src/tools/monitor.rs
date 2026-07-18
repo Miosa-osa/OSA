@@ -40,7 +40,7 @@ impl ToolRenderer for MonitorRenderer {
             return vec![header];
         }
 
-        let mut body: Vec<Line<'static>> = vec![header];
+        let mut body: Vec<Line<'static>> = Vec::new();
 
         // First line is usually the summary; rest is before/after diff
         let mut iter = result.lines();
@@ -53,15 +53,12 @@ impl ToolRenderer for MonitorRenderer {
                 Style::default().fg(theme.colors.muted)
             };
 
-            body.push(Line::from(vec![
-                Span::styled("  ".to_string(), Style::default()),
-                Span::styled(summary.to_string(), style),
-            ]));
+            body.push(Line::from(Span::styled(summary.to_string(), style)));
         }
 
         for line in iter {
             body.push(Line::from(vec![
-                Span::styled("    ".to_string(), Style::default()),
+                Span::styled("  ".to_string(), Style::default()),
                 Span::styled(
                     line.to_string(),
                     Style::default().fg(theme.colors.dim),
@@ -69,6 +66,6 @@ impl ToolRenderer for MonitorRenderer {
             ]));
         }
 
-        body
+        super::render_tool_box(header, body)
     }
 }

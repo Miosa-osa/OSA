@@ -6,6 +6,8 @@
 /// Reverse-engineered from Claude Code / OpenCode: status tags, configured
 /// indicators ("Anthropic (api)"), a "Default (recommended)" top row, and a
 /// dedicated key screen instead of the clunky 7-step onboarding wizard.
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -134,6 +136,11 @@ pub struct ModelPicker {
     models_base_url: Option<String>,
 
     key_entry: Option<KeyEntryState>,
+
+    /// Rows the provider/model list can actually show — measured on every draw
+    /// (via `Cell`, since `draw` takes `&self`) so handle_key scroll math
+    /// matches the real dialog height instead of the MAX_H upper bound.
+    list_viewport: Cell<usize>,
 }
 
 impl ModelPicker {
@@ -160,6 +167,7 @@ impl ModelPicker {
             models_provider: String::new(),
             models_base_url: None,
             key_entry: None,
+            list_viewport: Cell::new((MAX_H as usize).saturating_sub(6)),
         }
     }
 
@@ -636,7 +644,11 @@ impl ModelPicker {
     // ── Scroll helpers ───────────────────────────────────────────────────────
 
     fn list_height(&self) -> usize {
-        (MAX_H as usize).saturating_sub(6)
+        // Measured from the last draw; the MAX_H-derived estimate only applies
+        // before the first frame. Fixes the short-terminal bug where scroll
+        // math assumed the full-height dialog and let the cursor walk off the
+        // visible list.
+        self.list_viewport.get().max(1)
     }
 
     fn adjust_prov_scroll(&mut self) {
@@ -723,12 +735,20 @@ impl ModelPicker {
         cy += 1;
 
         let list_h = inner.height.saturating_sub(cy - inner.y + 1);
+        self.list_viewport.set((list_h as usize).max(1));
+        // Render-time clamp: the cursor row stays inside the window even when
+        // the stored offset predates a terminal resize.
+        let scroll = super::clamp_scroll_to_cursor(
+            self.prov_scroll,
+            self.prov_cursor,
+            (list_h as usize).max(1),
+        );
 
         // Build the flat renderable row list: Default + visible providers.
         // Row 0 is the Default (recommended) entry.
         let total_rows = vis.len() + 1;
         for rel in 0..(list_h as usize) {
-            let abs = rel + self.prov_scroll;
+            let abs = rel + scroll;
             if abs >= total_rows {
                 break;
             }
@@ -842,6 +862,12 @@ impl ModelPicker {
         cy += 1;
 
         let list_h = inner.height.saturating_sub(cy - inner.y + 1);
+        self.list_viewport.set((list_h as usize).max(1));
+        let scroll = super::clamp_scroll_to_cursor(
+            self.models_scroll,
+            self.models_cursor,
+            (list_h as usize).max(1),
+        );
 
         if vis.is_empty() {
             frame.render_widget(
@@ -855,7 +881,7 @@ impl ModelPicker {
         }
 
         for rel in 0..(list_h as usize) {
-            let abs = rel + self.models_scroll;
+            let abs = rel + scroll;
             if abs >= vis.len() {
                 break;
             }

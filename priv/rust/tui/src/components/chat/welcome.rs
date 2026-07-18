@@ -81,7 +81,7 @@ pub fn welcome_lines(
     let make_bordered = |content: &str, style: Style| -> Line<'static> {
         // Inner width = box_width - 2 (for the padding spaces in left/right)
         let inner = box_width;
-        let visible_len = content.chars().count();
+        let visible_len = unicode_width::UnicodeWidthStr::width(content);
         let padded = if visible_len < inner {
             format!("{}{}", content, " ".repeat(inner - visible_len))
         } else {

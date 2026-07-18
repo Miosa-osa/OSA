@@ -45,7 +45,9 @@ impl ToolRenderer for TodosRenderer {
             for todo in &todos {
                 let (icon, icon_style) = todo_icon(&todo.status, &theme);
                 let content_style = match todo.status {
-                    TodoStatus::Completed => Style::default().fg(theme.colors.muted),
+                    TodoStatus::Completed => Style::default()
+                        .fg(theme.colors.muted)
+                        .add_modifier(Modifier::CROSSED_OUT),
                     TodoStatus::Failed => Style::default().fg(theme.colors.error),
                     TodoStatus::InProgress => Style::default()
                         .fg(theme.colors.primary)
