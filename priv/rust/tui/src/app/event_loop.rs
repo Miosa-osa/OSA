@@ -28,8 +28,10 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 }
 
 /// Compute the inline-viewport height the live region wants, given the
-/// composer's current needed height. The chrome overhead (streaming preview +
-/// activity + context hint + 2-row status) is a fixed 5 rows, sized so an empty
+/// composer's current needed height. The chrome overhead (context hint +
+/// 2-row status) is a fixed 3 rows — the streaming preview and activity rows are
+/// added on demand (they are 0 when idle), so an idle live region reserves NO dead
+/// rows and the composer sits tight against the last message. An empty
 /// composer (needed height 3) yields exactly [`crate::LIVE_H_BASE`]. Only the
 /// composer's own height drives growth, so the viewport doesn't churn as
 /// transient activity rows come and go mid-turn. The result is clamped to
@@ -41,7 +43,7 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
 
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
-    const OVERHEAD: u16 = 5;
+    const OVERHEAD: u16 = 3;
     let want = OVERHEAD.saturating_add(input_needed);
     let hi = term_rows.saturating_sub(1).max(1);
     let lo = crate::LIVE_H_BASE.min(hi);
@@ -94,6 +96,16 @@ impl App {
         // height the viewport is currently built at and is rebuilt when the wanted
         // height changes. Seeded with the height main.rs constructed the viewport.
         let mut cur_inline_h = inline_h;
+        // Shrink-debounce state for the inline viewport (see the rebuild block
+        // below). The wanted height dips transiently almost every tick (activity
+        // spinner, streaming quantization, transient notices). Rebuilding on each
+        // dip churns the viewport and, because every rebuild issues a DSR cursor
+        // query tmux can drop, degrades into stale copies of the composer +
+        // status bar stacked into scrollback. Count consecutive iterations a
+        // *smaller* height has been wanted and only give the rows back once it
+        // settles; grows still commit immediately.
+        let mut shrink_streak: u8 = 0;
+        const SHRINK_SETTLE_TICKS: u8 = 4; // ~0.8s at the 200ms tick cadence
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
@@ -121,21 +133,48 @@ impl App {
                 }
                 was_full = want_full;
             } else if !was_full && desired_inline_h != cur_inline_h {
-                // Staying inline, but the wanted height changed — the composer
-                // grew/shrank or the terminal was resized. Rebuild the inline
-                // viewport at the new height so it fits (grow) and so ratatui's
-                // in-place inline-resize path (which can misplace the viewport on
-                // a shrink) is bypassed entirely. Clear first so no stale rows of
-                // the previous, differently-sized live region are left behind —
-                // this is what kills the duplicated banners / status lines the
-                // user saw after resizing. Pause the reader around the DSR query,
-                // exactly as the full→inline switch does.
-                let _ = terminal.clear();
-                term_handle.abort();
-                let _ = term_handle.await;
-                rebuild_inline(&mut terminal, desired_inline_h)?;
-                term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
-                cur_inline_h = desired_inline_h;
+                // Staying inline, but the wanted height changed. Rebuilding the
+                // inline viewport issues a DSR cursor query that tmux can drop,
+                // so every rebuild risks leaving a stale copy of the composer +
+                // status bar in scrollback. The wanted height oscillates tick to
+                // tick (activity spinner, streaming quantization, transient
+                // notices such as "Reconnecting to backend…" that live in the
+                // fixed hint row), so rebuilding on every change churns the
+                // viewport and stacks duplicate chrome into scrollback.
+                //
+                // Debounce it as a high-water mark. A GROW commits immediately
+                // (the composer must feel responsive and streaming content must
+                // never clip off the bottom); a SHRINK is held until the smaller
+                // height has been wanted for SHRINK_SETTLE_TICKS consecutive
+                // iterations. A momentary dip that bounces back up to the current
+                // height therefore never triggers a rebuild at all.
+                let commit = if desired_inline_h > cur_inline_h {
+                    shrink_streak = 0;
+                    true
+                } else {
+                    shrink_streak = shrink_streak.saturating_add(1);
+                    shrink_streak >= SHRINK_SETTLE_TICKS
+                };
+                if commit {
+                    shrink_streak = 0;
+                    // Clear first so no stale rows of the previous,
+                    // differently-sized live region are left behind — this is
+                    // what kills the duplicated banners / status lines. Rebuild
+                    // fresh to bypass ratatui's in-place inline-resize (which can
+                    // misplace the viewport on a shrink). Pause the reader around
+                    // the DSR query, exactly as the full→inline switch does.
+                    let _ = terminal.clear();
+                    term_handle.abort();
+                    let _ = term_handle.await;
+                    rebuild_inline(&mut terminal, desired_inline_h)?;
+                    term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                    cur_inline_h = desired_inline_h;
+                }
+            } else if !was_full {
+                // Wanted height already matches what's built — reset the shrink
+                // debounce so a later transient dip starts its settle window
+                // fresh instead of firing on the first dip.
+                shrink_streak = 0;
             }
 
             // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
@@ -387,8 +426,11 @@ impl App {
                                 }
                             }
                             AppState::Permissions => {
+                                // Now rendered inline via draw_inline (see
+                                // draw_inline()); this full-viewport branch is
+                                // unreachable because Permissions left is_overlay().
                                 if let Some(ref d) = self.permissions {
-                                    d.draw(frame, area);
+                                    d.draw_inline(frame, area);
                                 }
                             }
                             AppState::PlanReview => {
@@ -538,12 +580,26 @@ impl App {
         // activity component, so the per-tool feed drawn by draw_inline would
         // be clipped off the bottom of the inline viewport. `think_row_height`
         // is the shared source of truth, so viewport and layout grow together.
-        let activity_feed_extra = self.think_row_height().saturating_sub(1);
+        let activity_feed_extra = self.think_row_height();
         let base = live_region_height(input_needed, term_rows)
             .saturating_add(agents_h)
             .saturating_add(popup_h)
             .saturating_add(activity_feed_extra)
             .min(hi0);
+
+        // A pending permission prompt renders inline above the composer; grow the
+        // live region to fit its compact height so the ask isn't clipped.
+        if let Some(ref perm) = self.permissions {
+            let perm_rows = perm.content_height(self.width);
+            let overhead: u16 = self.think_row_height() + 1 + 2;
+            let want = overhead
+                .saturating_add(input_needed)
+                .saturating_add(perm_rows)
+                .saturating_add(agents_h)
+                .saturating_add(popup_h);
+            let hi = term_rows.saturating_sub(1).max(1);
+            return want.clamp(base, hi);
+        }
 
         // Rows the streaming reply currently renders to (0 when idle).
         let stream_rows = self.chat.streaming_height(self.width);
@@ -620,12 +676,12 @@ impl App {
         let input_h = self
             .input
             .needed_height()
-            .min(area.height.saturating_sub(overhead + 1)) // keep >=1 for streaming
+            .min(area.height.saturating_sub(overhead)) // streaming row is content-sized (0 when idle)
             .max(1);
         let rows = RLayout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),           // streaming preview
+                Constraint::Min(0),           // streaming preview (collapses to 0 when idle - no dead rows)
                 Constraint::Length(think_h),  // thinking / activity
                 Constraint::Length(agents_h), // agents panel / background summary
                 Constraint::Length(1),        // right-aligned "N% context used" hint
@@ -652,7 +708,12 @@ impl App {
         let a_input = clamp_to_frame(frame, rows[4]);
         let a_status = clamp_to_frame(frame, rows[5]);
 
-        self.chat.draw_live(frame, a_stream);
+        if let Some(ref perm) = self.permissions {
+            // Inline approval prompt takes over the stream band while pending.
+            perm.draw_inline(frame, a_stream);
+        } else {
+            self.chat.draw_live(frame, a_stream);
+        }
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
         if !self.thinking_box.is_empty() && !self.activity.a11y() {
@@ -669,7 +730,7 @@ impl App {
         // (Claude Code's todo panel). It self-positions and no-ops when empty.
         // It additionally clamps its own panel to the frame internally.
         // Ctrl+T (chat:todosToggle) hides it.
-        if !self.task_checklist_hidden {
+        if !self.task_checklist_hidden && self.permissions.is_none() {
             self.task_checklist.draw(frame, a_stream);
         }
         if self.toasts.has_toasts() {
@@ -1281,8 +1342,8 @@ mod render_tests {
         use super::live_region_height;
         // Idle composer (needs 3 rows) → exactly the base height.
         assert_eq!(live_region_height(3, 40), crate::LIVE_H_BASE);
-        // 5-line composer (needs 7 rows) → grows to fit (overhead 5 + 7 = 12).
-        assert_eq!(live_region_height(7, 40), 12);
+        // 5-line composer (needs 7 rows) → grows to fit (overhead 3 + 7 = 10).
+        assert_eq!(live_region_height(7, 40), 10);
         // Never exceeds term_rows - 1 (tiny terminal).
         assert_eq!(live_region_height(7, 6), 5);
         // Never below the base on a roomy terminal.

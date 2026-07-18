@@ -7,7 +7,7 @@ use std::cell::Cell;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 
 use super::DialogAction;
@@ -211,60 +211,82 @@ impl Permissions {
         }
     }
 
-    /// Draw the centered modal over `area`.
-    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+    /// Rows this inline prompt wants: header + optional warning/reason + a
+    /// separator + a capped body preview + choice row + hint row. Capped so a
+    /// large diff can never let the prompt swallow the compact live region.
+    pub fn content_height(&self, width: u16) -> u16 {
+        const BODY_CAP: u16 = 8;
+        let mut h: u16 = 1; // header (tool) line
+        if self.warning.is_some() {
+            h += 1;
+        }
+        if self.reason.is_some() {
+            h += 1;
+        }
+        h += 1; // separator
+        let body: u16 = match (&self.diff_old, &self.diff_new) {
+            (Some(old), Some(new)) => {
+                crate::render::diff::render_diff(old, new, width).len() as u16
+            }
+            _ => self.tool_args.lines().count().max(1) as u16,
+        };
+        h += body.clamp(1, BODY_CAP);
+        h + 2 // choice row + hint row
+    }
+
+    /// Draw the approval prompt INLINE in the live region, bottom-anchored within
+    /// `area` (the row band directly above the composer). Borderless + compact so
+    /// the approval reads as part of the conversation flow, Claude-Code style —
+    /// NOT a full-screen modal. Same actions + key handling as before.
+    pub fn draw_inline(&self, frame: &mut Frame, area: Rect) {
         let theme = crate::style::theme();
-
-        // Compute dialog dimensions.
-        let w = (area.width * 3 / 4).max(MIN_W).min(MAX_W).min(area.width);
-        let h = (area.height * 2 / 3).max(MIN_H).min(area.height);
-
-        let x = area.x + area.width.saturating_sub(w) / 2;
-        let y = area.y + area.height.saturating_sub(h) / 2;
-        let dialog_rect = Rect::new(x, y, w, h);
-
-        frame.render_widget(Clear, dialog_rect);
-
-        // Title uses a gradient-style two-span sequence (primary → secondary).
-        let title_line = Line::from(vec![
-            Span::styled(
-                " Permission ",
-                theme.banner_title(),
-            ),
-            Span::styled(
-                "Request ",
-                Style::default()
-                    .fg(theme.colors.secondary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-
-        let block = Block::default()
-            .title(title_line)
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.colors.warning))
-            .style(Style::default().bg(theme.colors.dialog_bg));
-        frame.render_widget(block, dialog_rect);
-
-        let inner = Rect::new(
-            dialog_rect.x + 1,
-            dialog_rect.y + 1,
-            dialog_rect.width.saturating_sub(2),
-            dialog_rect.height.saturating_sub(2),
-        );
-
-        if inner.height < 4 {
+        if area.width == 0 || area.height == 0 {
             return;
         }
+
+        // Content-driven, capped height; hug the composer by anchoring to the
+        // bottom of the band.
+        let h = self.content_height(area.width).min(area.height);
+
+        // Degenerate room: collapse to a single-line ask so the prompt is never
+        // invisible (the user can still answer with y/s/a/n).
+        if h < 4 {
+            let line = Line::from(vec![
+                Span::styled(
+                    "▐ ",
+                    Style::default()
+                        .fg(theme.colors.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
+                Span::styled(self.tool_name.clone(), theme.tool_name()),
+                Span::styled("?  ", Style::default().fg(theme.colors.muted)),
+                Span::styled("y/s/a/n", Style::default().fg(theme.colors.dim)),
+            ]);
+            let y = area.y + area.height.saturating_sub(1);
+            frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+            return;
+        }
+
+        let inner = Rect::new(area.x, area.y + area.height - h, area.width, h);
+        // Wipe the band so stale streaming rows don't bleed through behind the
+        // prompt.
+        frame.render_widget(Clear, inner);
 
         let mut cursor_y = inner.y;
 
         // ── Tool name ────────────────────────────────────────────────────────
         if cursor_y < inner.y + inner.height {
             let tool_line = Line::from(vec![
-                Span::styled("  Tool:  ", Style::default().fg(theme.colors.muted)),
+                Span::styled(
+                    "▐ ",
+                    Style::default()
+                        .fg(theme.colors.warning)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
                 Span::styled(self.tool_name.clone(), theme.tool_name()),
+                Span::styled("?", Style::default().fg(theme.colors.muted)),
             ]);
             frame.render_widget(
                 Paragraph::new(tool_line),

@@ -63,12 +63,14 @@ fn main() -> Result<()> {
     result
 }
 
-/// Inline viewport height for the live region (Claude-Code chrome). Sized to fit:
-///   streaming preview (1) + thinking/activity (1) + ctx-hint (1) +
-///   input box (3: top divider + text + bottom divider) + status region
-///   (2: status line + permission/shell line) = 8 rows minimum.
-/// Finished replies go to native scrollback, so the live preview stays compact.
-pub const LIVE_H_BASE: u16 = 8;
+/// Inline viewport height for the live region (Claude-Code chrome). Sized to the
+/// ALWAYS-present chrome only, so an idle live region reserves NO dead rows:
+///   ctx-hint (1) + input box (3: top divider + text + bottom divider) +
+///   status region (2: status line + permission/shell line) = 6 rows minimum.
+/// The streaming preview and thinking/activity rows are added on demand (they are
+/// 0 when idle), so the composer sits tight against the last scrollback message —
+/// no big gap. Finished replies go to native scrollback, keeping the preview compact.
+pub const LIVE_H_BASE: u16 = 6;
 
 /// Clamp the inline viewport height to something sane for the terminal size.
 /// Never exceed `term_rows - 1` so tiny terminals don't overflow the viewport.

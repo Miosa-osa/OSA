@@ -164,7 +164,6 @@ impl AppState {
         matches!(
             self,
             AppState::Palette
-                | AppState::Permissions
                 | AppState::PlanReview
                 | AppState::Quit
                 | AppState::Sessions
