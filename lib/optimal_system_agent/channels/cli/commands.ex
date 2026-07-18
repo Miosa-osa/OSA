@@ -1014,7 +1014,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     case String.trim(args) do
-      "" ->
+      s when s in ["", "current", "status"] ->
         current = Effort.current()
         config = Effort.get(current)
         IO.puts("  #{@bold}Effort Level: #{current}#{@reset}")
@@ -1926,7 +1926,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case positional do
       [name, target | rest] ->
-        url_like = String.starts_with?(target, "http://") or String.starts_with?(target, "https://")
+        url_like =
+          String.starts_with?(target, "http://") or String.starts_with?(target, "https://") or
+            String.ends_with?(target, "/sse")
 
         if is_nil(transport) and url_like do
           IO.puts(

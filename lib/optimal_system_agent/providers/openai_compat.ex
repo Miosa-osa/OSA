@@ -53,11 +53,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     body =
       %{
         model: model,
-        messages: format_messages(messages),
-        temperature: Keyword.get(opts, :temperature, 0.7)
+        messages: format_messages(messages)
       }
+      |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
-      |> maybe_add_max_tokens(opts)
+      |> maybe_add_max_tokens(model, opts)
       |> maybe_add_reasoning(model, opts)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
@@ -122,11 +122,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       %{
         model: model,
         messages: format_messages(messages),
-        temperature: Keyword.get(opts, :temperature, 0.7),
         stream: true
       }
+      |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
-      |> maybe_add_max_tokens(opts)
+      |> maybe_add_max_tokens(model, opts)
       |> maybe_add_reasoning(model, opts)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
@@ -709,11 +709,45 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
-  defp maybe_add_max_tokens(body, opts) do
+  # OpenAI o-series reasoning models (o1/o3/o4) reject the classic `max_tokens`
+  # field and require `max_completion_tokens`. Every other OpenAI-compatible
+  # provider uses `max_tokens`. Route the value to the right key so o-series
+  # calls don't 400 ("max_tokens is not supported with this model").
+  defp maybe_add_max_tokens(body, model, opts) do
     case Keyword.get(opts, :max_tokens) do
-      nil -> body
-      n -> Map.put(body, :max_tokens, n)
+      nil ->
+        body
+
+      n when is_integer(n) and n > 0 ->
+        if openai_reasoning_model?(model),
+          do: Map.put(body, :max_completion_tokens, n),
+          else: Map.put(body, :max_tokens, n)
+
+      _ ->
+        body
     end
+  end
+
+  # OpenAI o-series reasoning models only support the default temperature (1) and
+  # 400 on any explicit `temperature`. Omit the field for them; every other model
+  # gets the requested temperature (default 0.7). Mirrors CC's rule of dropping
+  # temperature when a reasoning/thinking mode is active.
+  defp maybe_add_temperature(body, model, opts) do
+    if openai_reasoning_model?(model) do
+      body
+    else
+      Map.put(body, :temperature, Keyword.get(opts, :temperature, 0.7))
+    end
+  end
+
+  # Narrow: ONLY OpenAI o-series (o1/o3/o4). deepseek-reasoner and kimi are
+  # reasoning models too (reasoning_model?/1) but DO accept temperature/max_tokens,
+  # so they must NOT be swept in here.
+  defp openai_reasoning_model?(model) do
+    name = String.downcase(to_string(model))
+
+    String.starts_with?(name, "o1") or String.starts_with?(name, "o3") or
+      String.starts_with?(name, "o4")
   end
 
   # Add reasoning_effort for OpenAI o-series models.

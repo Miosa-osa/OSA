@@ -70,7 +70,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     body =
       %{
         model: model,
-        max_tokens: Keyword.get(opts, :max_tokens, 8192),
+        max_tokens: resolve_max_tokens(model, opts),
         messages: chat_msgs
       }
       |> maybe_add_system(system_text)
@@ -140,7 +140,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     body =
       %{
         model: model,
-        max_tokens: Keyword.get(opts, :max_tokens, 8192),
+        max_tokens: resolve_max_tokens(model, opts),
         messages: chat_msgs,
         stream: true
       }
@@ -458,6 +458,28 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   # --- Private ---
+
+  # Default output cap when the caller omits :max_tokens. Mirrors CC's per-model
+  # defaults (getModelMaxOutputTokens); the old flat 8192 sat far below the
+  # model ceiling and silently truncated long responses. Overridable via
+  # :anthropic_max_tokens app env (ANTHROPIC / CLAUDE_CODE_MAX_OUTPUT_TOKENS).
+  defp resolve_max_tokens(model, opts) do
+    Keyword.get(opts, :max_tokens) ||
+      Application.get_env(:optimal_system_agent, :anthropic_max_tokens) ||
+      default_max_tokens(model)
+  end
+
+  defp default_max_tokens(model) do
+    m = String.downcase(to_string(model))
+
+    cond do
+      String.contains?(m, "opus-4-6") -> 64_000
+      String.contains?(m, "haiku") -> 32_000
+      String.contains?(m, "sonnet-4") or String.contains?(m, "opus-4") -> 32_000
+      String.contains?(m, "claude-3") -> 8_192
+      true -> 32_000
+    end
+  end
 
   @doc false
   def format_messages(messages) do

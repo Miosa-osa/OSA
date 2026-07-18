@@ -79,7 +79,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
       json_error(conn, 400, "invalid_request", "Missing required query param: q")
     else
       mode = conn.query_params["mode"] || "keyword"
-      limit = parse_int(conn.query_params["limit"]) || 10
+      limit =
+        case parse_int(conn.query_params["limit"]) do
+          n when is_integer(n) and n > 0 -> min(n, 100)
+          _ -> 10
+        end
       category = conn.query_params["category"]
       sort = parse_sort_atom(conn.query_params["sort"])
 
@@ -151,6 +155,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
     valid_names = Enum.map(valid_providers, &Atom.to_string/1)
 
     with %{"provider" => prov_str, "model" => model_name} <- conn.body_params,
+         true <- is_binary(prov_str) and prov_str != "",
+         true <- is_binary(model_name) and model_name != "",
          true <- prov_str in valid_names,
          provider <- String.to_existing_atom(prov_str) do
       Application.put_env(:optimal_system_agent, :default_provider, provider)

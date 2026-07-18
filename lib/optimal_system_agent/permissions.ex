@@ -359,6 +359,37 @@ defmodule OptimalSystemAgent.Permissions do
 
   defp segment(rev_chars), do: rev_chars |> Enum.reverse() |> List.to_string()
 
+  # ── defaultMode (CC permissions.defaultMode) ─────────────────────────
+
+  # CC `permissions.defaultMode` string → OSA permission-mode atom. Unmapped
+  # values (incl. CC "dontAsk", which has no faithful OSA equivalent) fall back
+  # to :ask — the safe interactive default — rather than over-permissioning.
+  @default_mode_map %{
+    "default" => :ask,
+    "acceptEdits" => :accept_edits,
+    "bypassPermissions" => :overdrive,
+    "plan" => :plan
+  }
+
+  @doc """
+  Startup permission mode from settings `permissions.defaultMode` (CC parity).
+  Maps the CC mode string to an OSA mode atom
+  (`:ask | :accept_edits | :plan | :overdrive`), defaulting to `:ask` when the
+  key is absent or unrecognized. Seed `Loop` initial state with this so the
+  settings `defaultMode` is honored on session start.
+  """
+  def default_mode do
+    case Settings.get("permissions") do
+      %{"defaultMode" => mode} when is_binary(mode) ->
+        Map.get(@default_mode_map, mode, :ask)
+
+      _ ->
+        :ask
+    end
+  rescue
+    _ -> :ask
+  end
+
   # ── additionalDirectories + path scope ───────────────────────────────
 
   @doc "Extra directories (beyond cwd/tmp) writes are scoped to — settings `permissions.additionalDirectories`."

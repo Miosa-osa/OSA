@@ -150,7 +150,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: false,
-        keep_alive: "30m",
+        keep_alive: keep_alive(),
         options: build_options(opts, messages, model)
       }
       |> maybe_add_tools(model, opts)
@@ -210,6 +210,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: true,
+        keep_alive: keep_alive(),
         options: build_options(opts, messages, model)
       }
 
@@ -379,6 +380,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         model: model,
         messages: format_messages(messages),
         stream: true,
+        keep_alive: keep_alive(),
         options: build_options(opts, messages, model)
       }
       |> maybe_add_tools(model, opts)
@@ -526,6 +528,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   defp round_up_ctx(n) when n <= 32768, do: 32768
   defp round_up_ctx(n) when n <= 65536, do: 65536
   defp round_up_ctx(_), do: 131072
+
+  # Keep the model resident between turns. Default 30m, overridable via
+  # :ollama_keep_alive app env (OLLAMA_KEEP_ALIVE). Applied to sync AND streaming
+  # bodies so a streamed turn doesn't unload the model after Ollama's 5m default
+  # and pay a cold reload on the next turn.
+  defp keep_alive do
+    Application.get_env(:optimal_system_agent, :ollama_keep_alive, "30m")
+  end
 
   defp format_messages(messages) do
     Enum.map(messages, fn

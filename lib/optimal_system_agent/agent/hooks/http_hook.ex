@@ -68,12 +68,21 @@ defmodule OptimalSystemAgent.Agent.Hooks.HttpHook do
   Called at session startup.
   """
   def register_from_settings do
-    hooks_config = OptimalSystemAgent.Settings.get_merged_hooks()
+    if OptimalSystemAgent.Settings.get("disableAllHooks", false) == true do
+      Logger.info("[http_hook] disableAllHooks is set — skipping HTTP hooks")
+      :ok
+    else
+      register_http_hooks(OptimalSystemAgent.Settings.get_merged_hooks())
+    end
+  rescue
+    _ -> :ok
+  end
 
+  defp register_http_hooks(hooks_config) do
     Enum.each(hooks_config, fn {event_name, hook_list} ->
-      event = String.to_existing_atom(event_name)
+      event = resolve_event(event_name)
 
-      if is_list(hook_list) do
+      if not is_nil(event) and is_list(hook_list) do
         Enum.each(hook_list, fn
           %{"type" => "http", "url" => url} = hook_config ->
             headers = Map.get(hook_config, "headers", %{})
@@ -92,7 +101,37 @@ defmodule OptimalSystemAgent.Agent.Hooks.HttpHook do
         end)
       end
     end)
+  end
+
+  # CC PascalCase hook-event names → OSA snake_case event atoms (the atoms the
+  # dispatcher actually fires with). Snake_case names pass through only when the
+  # atom already exists; unknown names return nil so a single bad key cannot
+  # abort registration of the rest.
+  @cc_events %{
+    "PreToolUse" => :pre_tool_use,
+    "PostToolUse" => :post_tool_use,
+    "PostToolUseFailure" => :post_tool_use_failure,
+    "UserPromptSubmit" => :user_prompt_submit,
+    "Stop" => :stop,
+    "SubagentStart" => :subagent_start,
+    "SubagentStop" => :subagent_stop,
+    "SessionStart" => :session_start,
+    "SessionEnd" => :session_end,
+    "PreCompact" => :pre_compact,
+    "PostCompact" => :post_compact,
+    "Notification" => :notification,
+    "PermissionRequest" => :permission_request,
+    "PermissionDenied" => :permission_denied
+  }
+
+  defp resolve_event(name) when is_binary(name),
+    do: Map.get(@cc_events, name) || safe_existing_atom(name)
+
+  defp resolve_event(_), do: nil
+
+  defp safe_existing_atom(name) do
+    String.to_existing_atom(name)
   rescue
-    _ -> :ok
+    ArgumentError -> nil
   end
 end
