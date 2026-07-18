@@ -4,6 +4,7 @@
 pub mod command_palette;
 pub mod config_editor;
 pub mod file_picker;
+pub mod mcp_approval;
 pub mod model_picker;
 pub mod onboarding;
 pub mod overdrive_confirm;

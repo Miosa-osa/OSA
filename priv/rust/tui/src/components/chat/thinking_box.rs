@@ -35,8 +35,8 @@ impl ThinkingBox {
         self.content.clear();
     }
 
-    // Thinking panel expand/collapse (alt+t — chat:thinkingToggle)
-    #[allow(dead_code)]
+    // Thinking panel expand/collapse (alt+t — chat:thinkingToggle). Wired via
+    // keymap_dispatch Action::ThinkingToggle.
     pub fn toggle(&mut self) {
         self.expanded = !self.expanded;
     }
