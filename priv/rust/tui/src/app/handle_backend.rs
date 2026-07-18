@@ -104,14 +104,16 @@ impl App {
                     }
                     self.stream_buf.push_str(&text);
                     self.chat.update_streaming(&self.stream_buf);
-                    self.activity.add_stream_chars(text.len());
+                    // Count CHARACTERS, not UTF-8 bytes — the ~4-chars/token
+                    // estimate inflates badly on non-ASCII output if we use len().
+                    self.activity.add_stream_chars(text.chars().count());
                     self.activity.set_phase(ProcessingPhase::Streaming);
                 }
             }
             BackendEvent::ThinkingDelta { text } => {
                 self.thinking_buf.push_str(&text);
                 self.thinking_box.update(&text);
-                self.activity.add_thinking_chars(text.len());
+                self.activity.add_thinking_chars(text.chars().count());
                 self.activity.set_phase(ProcessingPhase::Thinking);
             }
             BackendEvent::AgentResponse {
@@ -1041,6 +1043,17 @@ impl App {
             }
             BackendEvent::OrchestratorAgentProgress { agent_name, current_action, tool_uses, tokens_used, subject, recent_actions } => {
                 self.agents.agent_progress(&agent_name, &current_action, tool_uses, tokens_used, &subject, recent_actions);
+                // Codex-style live naming: during orchestration the leader spinner
+                // otherwise shows a generic flavor verb while sub-agents do the
+                // real work. Surface the running sub-agent by name + subject on the
+                // spinner row ("@deep-scan: scanning modules") so the user always
+                // sees WHAT is happening, not just that something is.
+                let label = if subject.trim().is_empty() {
+                    format!("@{}: {}", agent_name, current_action)
+                } else {
+                    format!("@{}: {}", agent_name, subject)
+                };
+                self.activity.set_active_verb(Some(label));
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }

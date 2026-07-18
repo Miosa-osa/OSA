@@ -3,6 +3,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   Exported constants for `shell_execute`. Mirrors the pattern established by
   `FileRead.Constants` — other tools' prompts can reference `tool_name/0` so
   a rename propagates automatically.
+
+  ## Security model (Claude-Code aligned)
+
+  The agent runs locally AS the operator, who WANTS it to do real work — build,
+  edit, run multi-step tasks. So we do NOT cage it. Instead there are three
+  tiers, matching how Claude Code treats shell:
+
+    * **catastrophic** (`catastrophic_patterns/0`) — unrecoverable disk/system
+      destruction (wipe `/` or `$HOME`, `mkfs`, `dd` to a device, fork bomb,
+      power off). These are HARD-DENIED, never even offered.
+    * **risky** (`ask_commands/0`, `ask_patterns/0`) — powerful but legitimate
+      (`rm`, `sudo`, `chmod`, `kill`, `systemctl`, pipe-to-shell). These route
+      to the inline permission PROMPT so the operator approves in-context.
+    * **safe** — everything else (including command substitution `$(...)`,
+      backticks, `$VAR`, reading `/etc/*`, relative `../` paths, `cd` anywhere,
+      `env`/`export`). Allowed outright.
+
+  The old blocklist hard-denied command substitution, `/etc` reads, `.env`
+  reads, and caged `cd` to `~/.osa/` — which broke ordinary development and made
+  the agent untrustworthy. That paranoia is gone; the permission prompt is the
+  gate now.
   """
 
   @tool_name "shell_execute"
@@ -18,76 +39,67 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   @default_timeout_ms 120_000
   def default_timeout_ms, do: @default_timeout_ms
 
-  # Blocked command names — matched at word boundaries across pipes,
-  # semicolons, && and ||.
-  @blocked_commands ~w(
-    rm sudo dd mkfs fdisk chmod chown kill killall pkill
-    reboot shutdown halt poweroff mount umount
-    iptables systemctl passwd useradd userdel
-    nc ncat
-    env printenv export set declare compgen
-  )
-  def blocked_commands, do: @blocked_commands
-
-  # Download commands with output flags — matched as patterns.
-  @download_patterns [
-    ~r/\bcurl\b.*(-o|--output)\b/,
-    ~r/\bwget\b.*-O\b/
+  # ── Tier 1: CATASTROPHIC — always hard-denied (unrecoverable) ──────────
+  #
+  # Targeted, high-specificity patterns. We deliberately keep this SMALL: only
+  # actions that destroy the disk/home/system with no recovery. Anything that is
+  # merely powerful (a scoped `rm -rf ./build`) is NOT here — it goes to `:ask`.
+  # NOTE: all sigils use the `/` delimiter with internal `/` escaped as `\/`.
+  # (An earlier `~r|…|` form broke compilation — the `|` delimiter collided with
+  # the `|` alternations inside the patterns.)
+  @catastrophic_patterns [
+    # rm -rf targeting a filesystem/home ROOT (not a scoped subdir):
+    #   rm -rf /        rm -rf /*        rm -rf ~        rm -rf $HOME
+    #   rm --recursive --force /   (long flags, any order)
+    ~r/\brm\s+(?:-[a-zA-Z]*\s+|--[a-z]+\s+)*(?:\/|~|\$HOME|\/\*|~\/\*|\$HOME\/\*)\s*$/,
+    ~r/\brm\s+(?:-[a-zA-Z]*\s+|--[a-z]+\s+)*(?:\/|~|\$HOME)\/?\*/,
+    # Classic fork bomb :(){ :|:& };:
+    ~r/:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+    # Filesystem formatting / partitioning
+    ~r/\bmkfs(\.\w+)?\b/,
+    ~r/\bfdisk\b/,
+    ~r/\bmkswap\b/,
+    # dd writing directly to a block device
+    ~r/\bdd\b[^|;&]*\bof=\/dev\//,
+    # Redirect into a raw disk device
+    ~r/>\s*\/dev\/(sd|nvme|hd|vd|mmcblk)/,
+    # Recursive chmod/chown on a filesystem root
+    ~r/\bch(mod|own)\s+(-[a-zA-Z]*R[a-zA-Z]*\s+|--recursive\s+)\S*\s+\/\s*$/
   ]
-  def download_patterns, do: @download_patterns
+  def catastrophic_patterns, do: @catastrophic_patterns
 
-  # Environment variables that are universally safe to expand.
-  # These hold read-only runtime context (paths/identity) and carry no
-  # secret material; blocking them prevents legitimate commands like
-  # `echo $HOME` or `ls $PATH` from working.
+  # ── Tier 2: RISKY — route to the inline permission PROMPT (:ask) ───────
+  #
+  # Legitimate but powerful. The operator approves in-context. These are the
+  # first word (command name) of any pipe/;/&&/|| segment.
+  @ask_commands ~w(
+    rm sudo dd chmod chown kill killall pkill
+    mount umount iptables nftables
+    passwd useradd userdel usermod groupadd
+    systemctl service launchctl
+    nc ncat socat
+    shutdown reboot halt poweroff
+  )
+  def ask_commands, do: @ask_commands
+
+  # Risky PATTERNS that also route to :ask (pipe-to-shell is the big one — the
+  # canonical `curl … | sh` remote-code path; legitimate for installs but must
+  # be seen). Downloads-with-output are fine to run once approved.
+  @ask_patterns [
+    # pipe into a shell interpreter: `… | sh`, `… | bash`, `… | zsh`
+    ~r/\|\s*(sudo\s+)?(sh|bash|zsh|fish|dash)\b/,
+    # curl/wget piped or fetched for execution
+    ~r/\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh)\b/,
+    # writing/appending into a system config dir via redirect
+    ~r/>>?\s*\/(etc|boot|sys|usr\/bin|usr\/sbin|bin|sbin)\//,
+    # git hard reset / clean / force-push (destructive to work)
+    ~r/\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+.*--force|push\s+.*-f\b)/
+  ]
+  def ask_patterns, do: @ask_patterns
+
+  # Environment variables that are universally safe to expand — retained for any
+  # callers that still reference the allowlist. (Command substitution and $VAR
+  # are no longer blocked, so this is now informational only.)
   @safe_env_vars ~w(HOME PATH SHELL USER LANG TMPDIR TERM EDITOR)
   def safe_env_vars, do: @safe_env_vars
-
-  # Shell injection patterns.
-  #
-  # NOTE on bare $VAR handling: we block most $VAR expansions to prevent
-  # exfiltration (e.g. `echo $AWS_SECRET_KEY`) but we allow the small
-  # allowlist of @safe_env_vars above (HOME, PATH, SHELL, USER, LANG,
-  # TMPDIR, TERM, EDITOR).  The regex therefore uses a negative lookahead
-  # to skip those safe names before the generic $IDENTIFIER block fires.
-  @injection_patterns [
-    # backtick substitution
-    ~r/`/,
-    # $() command substitution
-    ~r/\$\(/,
-    # ${} variable expansion
-    ~r/\$\{/,
-    # bare $VAR expansion — blocked EXCEPT for the safe envvar allowlist.
-    # The lookahead skips e.g. $HOME, $PATH, $SHELL … so they pass through.
-    ~r/\$(?!(?:HOME|PATH|SHELL|USER|LANG|TMPDIR|TERM|EDITOR)(?:\s|$|[^A-Za-z0-9_]))[A-Za-z_]\w*/,
-    # redirect to /etc/
-    ~r/>\s*\/etc\//,
-    # redirect to /usr/
-    ~r/>\s*\/usr\//
-  ]
-  def injection_patterns, do: @injection_patterns
-
-  # Path traversal / sensitive file patterns.
-  @path_patterns [
-    # ../ traversal
-    ~r/\.\.\//,
-    # /etc/ access
-    ~r/\/etc\//,
-    # .ssh/ access
-    ~r/\.ssh\//,
-    # .env file access (including .env.backup, .environment, etc.)
-    ~r/\.env/
-  ]
-  def path_patterns, do: @path_patterns
-
-  # /proc environ leak patterns — catches attempts to read env vars via procfs.
-  @env_leak_patterns [
-    ~r|/proc/\w+/environ|,
-    ~r|/proc/self/environ|
-  ]
-  def env_leak_patterns, do: @env_leak_patterns
-
-  # cd restriction — only allow cd within ~/.osa/
-  @cd_pattern ~r/\bcd\s+(?!~?\/?\.osa)/
-  def cd_pattern, do: @cd_pattern
 end

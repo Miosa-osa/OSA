@@ -18,7 +18,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     * Rich `{:ok, result, metadata}` return with diff text + stats when content changes
   """
 
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
   alias OptimalSystemAgent.Tools.Builtins.FileWrite.Constants
+  alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -79,7 +81,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
           {:ok, String.t()}
           | {:ok, String.t(), map()}
           | {:error, String.t()}
-  def execute(%{"path" => path, "content" => content}, _ctx) do
+  def execute(%{"path" => path, "content" => content}, ctx) do
     normalized =
       if relative_path?(path),
         do: Path.join("~/.osa/workspace", path),
@@ -92,7 +94,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     # LegacyAdapter validate → check_permissions → execute pipeline). Mirrors
     # check_permissions/2 exactly and fails closed.
     case execute_guard(path, expanded) do
-      :allow -> do_execute(path, content, expanded)
+      :allow -> do_execute(path, content, expanded, session_id(ctx))
       {:deny, msg} -> {:error, msg}
     end
   end
@@ -115,7 +117,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
     end
   end
 
-  defp do_execute(path, content, expanded) do
+  defp do_execute(path, content, expanded, session) do
     # Read existing content for diff generation (if file exists)
     old_content =
       case File.read(expanded) do
@@ -123,6 +125,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
         {:error, _} -> nil
       end
 
+    # Read-before-overwrite (P0-1): overwriting an EXISTING file requires it was
+    # read this session and hasn't changed since. Creating a NEW file (old_content
+    # == nil) is always allowed — there is nothing to clobber.
+    read_guard =
+      if is_nil(old_content), do: :ok, else: FileState.check_read(session, expanded)
+
+    case read_guard do
+      {:error, msg} -> {:error, msg}
+      :ok -> do_write(path, content, expanded, old_content, session)
+    end
+  end
+
+  defp do_write(path, content, expanded, old_content, session) do
     case File.mkdir_p(Path.dirname(expanded)) do
       :ok ->
         case File.write(expanded, content) do
@@ -130,18 +145,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
             # Reload Soul cache when agent writes to ~/.osa/ identity/personality files
             maybe_reload_soul(expanded)
 
-            # Emit file_changed hook (async, fire-and-forget, errors swallowed)
             operation = if old_content, do: :overwrite, else: :create
 
-            try do
-              OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
+            # Refresh read-state to the just-written file so a follow-up edit in
+            # the same turn is not falsely flagged stale, and so a freshly-created
+            # file counts as "read" for subsequent edits (P0-1).
+            FileState.record_write(session, expanded)
+
+            # Post-write validation hook (P1-4): run SYNCHRONOUSLY and surface any
+            # compile/lint failure on the written file into this observation, same
+            # turn. Non-fatal — the write already landed. Reuses FileEdit's helper.
+            hook_note =
+              FileEditHandler.file_changed_note(%{
                 path: expanded,
                 tool: "file_write",
                 operation: operation
               })
-            rescue
-              _ -> :ok
-            end
 
             line_count = content |> String.split("\n") |> length()
             preview = content |> String.split("\n") |> Enum.take(10) |> Enum.join("\n")
@@ -159,7 +178,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
                   OptimalSystemAgent.Utils.Diff.unified(old, content, path)
               end
 
-            result = "#{expanded}\n#{line_count} lines written\n---\n#{preview}"
+            result = "#{expanded}\n#{line_count} lines written\n---\n#{preview}" <> hook_note
 
             # Attach diff metadata for SSE consumers
             if diff_text != "" do
@@ -178,6 +197,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  defp session_id(%{session_id: s}), do: s
+  defp session_id(_), do: nil
 
   defp relative_path?(path) do
     not (String.starts_with?(path, "~") or

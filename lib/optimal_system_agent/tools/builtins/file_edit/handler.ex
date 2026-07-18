@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
 
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Constants
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
+  alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -69,7 +70,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
           {:ok, String.t()}
           | {:ok, String.t(), map()}
           | {:error, String.t()}
-  def execute(%{"path" => path, "old_string" => old, "new_string" => new} = params, _ctx) do
+  def execute(%{"path" => path, "old_string" => old, "new_string" => new} = params, ctx) do
     expanded = Path.expand(path)
     replace_all = params["replace_all"] == true
     resolved = resolve_real_path(expanded)
@@ -82,7 +83,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
         {:error, "old_string cannot be empty"}
 
       true ->
-        do_edit(resolved, path, old, new, replace_all)
+        do_edit(resolved, path, old, new, replace_all, session_id(ctx))
     end
   end
 
@@ -91,60 +92,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
 
   # ── Private ───────────────────────────────────────────────────────────
 
-  defp do_edit(expanded, display_path, old, new, replace_all) do
+  defp do_edit(expanded, display_path, old, new, replace_all, session) do
     case File.read(expanded) do
       {:ok, content} ->
-        # Codex V4A-style 3-stage cascade (exact → line-endings → whitespace) so
-        # trivial whitespace / line-ending drift doesn't fail an otherwise-valid
-        # edit. Matcher.replace preserves the exact-match fast path verbatim.
-        case Matcher.replace(content, old, new, replace_all) do
-          {:error, :not_found} ->
-            {:error, "old_string not found in #{display_path}"}
-
-          {:error, :ambiguous, count} ->
-            {:error,
-             "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
-
-          {:ok, new_content, occurrences, stage} ->
-            # Non-bang write with clean error reporting (mirrors file_write). A
-            # read-only file / read-only mount / ENOSPC otherwise raises File.Error
-            # and surfaces as the opaque blanket registry rescue message.
-            case File.write(expanded, new_content) do
-              {:error, reason} ->
-                {:error, "Cannot write #{display_path}: #{:file.format_error(reason)}"}
-
-              :ok ->
-                # Emit file_changed hook — fire-and-forget, never crash caller
-                try do
-                  OptimalSystemAgent.Agent.Hooks.run_async(:file_changed, %{
-                    path: expanded,
-                    tool: "file_edit",
-                    operation: :edit
-                  })
-                rescue
-                  _ -> :ok
-                end
-
-                # Generate unified diff (delegates to Utils.Diff for proper unified format)
-                {diff_text, diff_stats} =
-                  OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
-
-                fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
-
-                result =
-                  if replace_all and occurrences > 1 do
-                    "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
-                  else
-                    "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
-                  end
-
-                # Attach diff metadata for SSE consumers (3-tuple) when diff is non-empty
-                if diff_text != "" do
-                  {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
-                else
-                  {:ok, result}
-                end
-            end
+        # Read-before-edit / stale-write guard (P0-1). The file exists and is
+        # readable here; reject if the model never read it this session or if it
+        # changed on disk since that read (linter/user/sub-agent touched it).
+        case FileState.check_read(session, expanded) do
+          {:error, msg} -> {:error, msg}
+          :ok -> do_edit_apply(expanded, display_path, old, new, replace_all, content, session)
         end
 
       {:error, :enoent} ->
@@ -152,6 +108,123 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
 
       {:error, reason} ->
         {:error, "Cannot read #{display_path}: #{reason}"}
+    end
+  end
+
+  defp do_edit_apply(expanded, display_path, old, new, replace_all, content, session) do
+    # Codex V4A-style 3-stage cascade (exact → line-endings → whitespace) so
+    # trivial whitespace / line-ending drift doesn't fail an otherwise-valid
+    # edit. Matcher.replace preserves the exact-match fast path verbatim.
+    case Matcher.replace(content, old, new, replace_all) do
+      {:error, :not_found} ->
+        {:error, "old_string not found in #{display_path}"}
+
+      {:error, :ambiguous, count} ->
+        {:error,
+         "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
+
+      {:ok, new_content, occurrences, stage} ->
+        # Non-bang write with clean error reporting (mirrors file_write). A
+        # read-only file / read-only mount / ENOSPC otherwise raises File.Error
+        # and surfaces as the opaque blanket registry rescue message.
+        case File.write(expanded, new_content) do
+          {:error, reason} ->
+            {:error, "Cannot write #{display_path}: #{:file.format_error(reason)}"}
+
+          :ok ->
+            # Refresh read-state to the just-written file so a follow-up edit in
+            # the same turn is not falsely flagged stale (P0-1).
+            FileState.record_write(session, expanded)
+
+            # Post-edit validation hook (P1-4). Run SYNCHRONOUSLY (was
+            # fire-and-forget with errors swallowed) so a compile/lint failure on
+            # the edited file is surfaced to the model in the SAME observation
+            # instead of being discovered 20 tool-calls later. Non-fatal: the
+            # edit already landed; we only append the diagnostic.
+            hook_note =
+              file_changed_note(%{
+                path: expanded,
+                tool: "file_edit",
+                operation: :edit
+              })
+
+            # Generate unified diff (delegates to Utils.Diff for proper unified format)
+            {diff_text, diff_stats} =
+              OptimalSystemAgent.Utils.Diff.unified(content, new_content, display_path)
+
+            fuzzy_note = if stage == :exact, do: "", else: " (fuzzy #{stage} match)"
+
+            base_result =
+              if replace_all and occurrences > 1 do
+                "Replaced #{occurrences} occurrences in #{display_path}#{fuzzy_note}"
+              else
+                "Replaced in #{display_path}#{fuzzy_note}\n#{format_diff(old, new, content, display_path)}"
+              end
+
+            result = base_result <> hook_note
+
+            # Attach diff metadata for SSE consumers (3-tuple) when diff is non-empty
+            if diff_text != "" do
+              {:ok, result, %{diff: diff_text, stats: diff_stats, path: expanded}}
+            else
+              {:ok, result}
+            end
+        end
+    end
+  end
+
+  defp session_id(%{session_id: s}), do: s
+  defp session_id(_), do: nil
+
+  # Run the :file_changed validation hook SYNCHRONOUSLY and turn any reported
+  # failure (a compile/lint diagnostic on the edited file) into a note appended
+  # to the tool observation, so the model self-corrects in the same turn (P1-4).
+  #
+  # Returns "" when the hook reports nothing (the common case: no post-edit
+  # validation hook registered). Always non-fatal — never raises into the caller.
+  @spec file_changed_note(map()) :: String.t()
+  def file_changed_note(payload) do
+    diagnostic =
+      try do
+        case OptimalSystemAgent.Agent.Hooks.run(:file_changed, payload) do
+          {:ok, result} when is_map(result) -> extract_diagnostic(result)
+          {:blocked, reason} when is_binary(reason) -> reason
+          _ -> nil
+        end
+      rescue
+        _ -> nil
+      catch
+        _, _ -> nil
+      end
+
+    case diagnostic do
+      nil -> ""
+      "" -> ""
+      text -> "\n\n⚠ Post-edit validation reported a problem — fix before continuing:\n" <> text
+    end
+  end
+
+  # Pull human-readable diagnostics out of the hook's final payload. A hook can
+  # report a problem via the standard {:inject_context, text} channel (lands in
+  # :injected_context) or by setting a :diagnostics / :validation_error field.
+  defp extract_diagnostic(result) do
+    [
+      Map.get(result, :injected_context, []),
+      Map.get(result, :diagnostics),
+      Map.get(result, :validation_error)
+    ]
+    |> Enum.flat_map(fn
+      nil -> []
+      list when is_list(list) -> list
+      other -> [other]
+    end)
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      text -> text
     end
   end
 

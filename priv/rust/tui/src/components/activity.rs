@@ -126,6 +126,15 @@ pub struct Activity {
     last_tool_name: String,
     input_tokens: u64,
     output_tokens: u64,
+    /// Cumulative OUTPUT tokens across ALL LLM iterations this turn. `set_tokens`
+    /// reports the CURRENT iteration's absolute count (which resets to a small
+    /// number each new iteration), so the live "↓ N tokens" must sum them here
+    /// or it visibly jumps DOWN mid-turn. Reset in `start()`.
+    turn_output_tokens: u64,
+    /// The last iteration's absolute output count, so `set_tokens` can add only
+    /// the DELTA to `turn_output_tokens` (handles both per-iteration-reset and
+    /// monotonic-within-iteration reporting without double counting).
+    last_iter_output: u64,
     stream_chars: usize,
     thinking_chars: usize,
     model_name: String,
@@ -210,6 +219,8 @@ impl Activity {
             last_tool_name: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            turn_output_tokens: 0,
+            last_iter_output: 0,
             stream_chars: 0,
             thinking_chars: 0,
             model_name: String::new(),
@@ -260,6 +271,8 @@ impl Activity {
         self.last_tool_name.clear();
         self.input_tokens = 0;
         self.output_tokens = 0;
+        self.turn_output_tokens = 0;
+        self.last_iter_output = 0;
         self.stream_chars = 0;
         self.thinking_chars = 0;
         self.llm_iteration = 0;
@@ -408,9 +421,22 @@ impl Activity {
         }
     }
 
+    /// Report token counts for the CURRENT LLM iteration. `output` is the
+    /// iteration's absolute running count (resets each new iteration), so we add
+    /// only the delta into `turn_output_tokens` — the number shown to the user —
+    /// which keeps the live count monotonic across a multi-iteration turn instead
+    /// of jumping down when a new iteration starts.
     pub fn set_tokens(&mut self, input: u64, output: u64) {
         self.input_tokens = input;
         self.output_tokens = output;
+        let delta = if output >= self.last_iter_output {
+            output - self.last_iter_output
+        } else {
+            // New iteration reset the per-iteration count — start it from zero.
+            output
+        };
+        self.turn_output_tokens += delta;
+        self.last_iter_output = output;
     }
 
     /// Advance spinner animation on each tick
@@ -477,11 +503,8 @@ impl Component for Activity {
         // spinner glyph, no braille feed, no color — just plain language a screen
         // reader can announce ("OSA: running (bash) (12s, 1.5k tokens)").
         if self.a11y {
-            let tokens = if self.output_tokens > 0 {
-                self.output_tokens as usize
-            } else {
-                (self.stream_chars + self.thinking_chars) / 4
-            };
+            let tokens =
+                (self.turn_output_tokens as usize).max((self.stream_chars + self.thinking_chars) / 4);
             let mut text = format!("OSA: {} ({}", self.a11y_status(), crate::util::fmt_elapsed(elapsed));
             if tokens > 0 {
                 text.push_str(&format!(", {} tokens", format_count(tokens)));
@@ -507,12 +530,13 @@ impl Component for Activity {
         // of cycling every ~2s — see spinner_verb().
         let word: &str = self.spinner_verb();
 
-        // Output-token count for the "↓ N tokens" suffix. Fall back to a char-based
-        // estimate (~4 chars/token) while streaming if tokens aren't reported yet.
-        let tokens = if self.output_tokens > 0 {
-            self.output_tokens as usize
-        } else {
-            (self.stream_chars + self.thinking_chars) / 4
+        // Output-token count for the "↓ N tokens" suffix. Use the turn-cumulative
+        // count (summed across iterations), and fall back to / floor with a
+        // char-based estimate (~4 chars/token) while streaming before the backend
+        // reports the first count — so the number only ever grows within a turn.
+        let tokens = {
+            let est = (self.stream_chars + self.thinking_chars) / 4;
+            (self.turn_output_tokens as usize).max(est)
         };
 
         // Claude-Code line: "✻ Zesting… (28s · ↓ 1.5k tokens)". Sub-phase detail
@@ -526,10 +550,10 @@ impl Component for Activity {
         // all joined with " · " inside one dim paren group:
         //   ✳ Pondering… (esc to interrupt · 12s · ↓ 1.2k tokens · thinking)
         let mut parts: Vec<String> = vec!["esc to interrupt".to_string(), elapsed_str];
-        // Token gate (CC SHOW_TOKENS_AFTER_MS): only once tokens actually flow
-        // AND the turn has run 30s — short turns never flash a count. Verbose
-        // display surfaces it immediately (CC `verbose || …`).
-        if tokens > 0 && (elapsed >= 30 || self.verbosity == Verbosity::Verbose) {
+        // Show the live token count as soon as tokens actually flow — no 30s
+        // gate. On a long in-depth turn the user needs to SEE tokens ticking to
+        // trust that work is happening; hiding the count for 30s read as "frozen".
+        if tokens > 0 {
             let arrow = if self.phase == ProcessingPhase::Waiting {
                 "\u{2191}"
             } else {
@@ -581,17 +605,10 @@ impl Component for Activity {
             spinner_spans.push(Span::styled(label, style));
         }
 
-        // Token counts from LlmResponse events
-        if self.input_tokens > 0 || self.output_tokens > 0 {
-            spinner_spans.push(Span::styled(
-                format!(
-                    "  \u{25b8} {}in/{}out",
-                    self.input_tokens, self.output_tokens
-                ),
-                theme.faint(),
-            ));
-        }
-
+        // NOTE: token counts are NOT rendered a second time here. They already
+        // appear in the CC-style paren group above ("↓ 1.2k tokens"). A separate
+        // "▸ Nin/Nout" span duplicated the count on the same line and read as two
+        // token displays — removed for a single, uncluttered status line.
 
         let spinner_line = Line::from(spinner_spans);
         frame.render_widget(

@@ -737,6 +737,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
     end
 
+    # P1-3: record this call in the grounded-verification evidence ledger. A
+    # successful write marks a changed file; a successful check (shell build/
+    # test, re-read of the file, grep referencing it) is the evidence the gate
+    # requires before the model may declare completion. `not tool_failed` is
+    # the exit-0 / no-error signal.
+    OptimalSystemAgent.Agent.Loop.VerificationEvidence.record(state.session_id, %{
+      tool: tool_call.name,
+      args: Map.get(tool_call, :arguments) || %{},
+      success: not tool_failed
+    })
+
     # Record telemetry
     try do
       OptimalSystemAgent.Telemetry.Metrics.record_tool(
@@ -978,9 +989,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     end
   end
 
-  # Execute a tool with fallback support and metadata capture.
+  # Execute a tool with transient-retry, fallback support, and metadata capture.
+  #
+  # P0-2: a bounded, jittered retry wraps the dispatch so a CLEARLY-TRANSIENT
+  # failure (timeout, connection reset, EAGAIN, 429/5xx, ephemeral lock) is
+  # retried up to 3 attempts before surfacing — instead of killing a long
+  # build/test/run on a one-off hiccup. SEMANTIC failures (old_string not
+  # found, ambiguous, validation, permission denied) are never retried; those
+  # are handled by the deterministic {:error, reason} path below.
   defp execute_tool(tool_name, enriched_args) do
-    case Tools.execute(tool_name, enriched_args) do
+    session_id = Map.get(enriched_args, "__session_id__")
+
+    result =
+      OptimalSystemAgent.Agent.Loop.ToolRetry.run(
+        fn -> Tools.execute(tool_name, enriched_args) end,
+        tool: tool_name,
+        session_id: session_id
+      )
+
+    handle_execute_result(result, tool_name, enriched_args)
+  end
+
+  defp handle_execute_result(result, tool_name, enriched_args) do
+    case result do
       {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
         {:image, mt, b64, p}
 

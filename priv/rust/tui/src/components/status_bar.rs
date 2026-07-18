@@ -571,20 +571,10 @@ impl Component for StatusBar {
         // Signal pill — still surfaced when classified.
         self.push_signal_pill(&mut spans, &theme);
 
-        // Active extras: elapsed time so streaming still shows progress.
-        if self.active && self.elapsed_ms > 0 {
-            let elapsed_label = if self.elapsed_ms >= 60_000 {
-                let mins = self.elapsed_ms / 60_000;
-                let secs = (self.elapsed_ms % 60_000) / 1000;
-                format!("{}m{}s", mins, secs)
-            } else if self.elapsed_ms >= 1_000 {
-                format!("{:.1}s", self.elapsed_ms as f64 / 1000.0)
-            } else {
-                format!("{}ms", self.elapsed_ms)
-            };
-            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            spans.push(Span::styled(elapsed_label, theme.progress_label()));
-        }
+        // NOTE: the turn elapsed timer is intentionally NOT rendered here. It
+        // already lives in the Activity spinner row ("✳ Working… (12s · …)").
+        // Rendering it a second time on the status bar produced the "two timers"
+        // the user saw — elapsed now has exactly one home (the activity row).
 
         if self.hands_free {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));

@@ -79,9 +79,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
   def check_permissions(%{"command" => command} = input, _ctx) do
-    case validate_command(command) do
-      :ok -> {:allow, input}
-      {:error, reason} -> {:deny, reason}
+    case classify_command(command) do
+      :allow -> {:allow, input}
+      {:ask, reason} -> {:ask, reason}
+      {:deny, reason} -> {:deny, reason}
     end
   end
 
@@ -283,113 +284,68 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     e -> {:error, "Sandbox execution error: #{Exception.message(e)}"}
   end
 
-  # ── Private: validation helpers ───────────────────────────────────────
+  # ── Private: command classification (deny / ask / allow) ──────────────
+  #
+  # Claude-Code-aligned three-tier policy (see Constants moduledoc):
+  #   catastrophic → :deny   (unrecoverable — hard block, never offered)
+  #   risky        → :ask    (powerful but legitimate — inline permission prompt)
+  #   safe         → :allow  (everything else — command substitution, /etc reads,
+  #                           relative paths, `cd` anywhere, `env`, …)
 
-  defp validate_command(command) do
-    # Split on pipes, semicolons, && and || to check each segment.
-    segments =
-      command
-      |> String.split(~r/\s*[|;&]{1,2}\s*/)
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
+  defp classify_command(command) do
+    cond do
+      catastrophic?(command) ->
+        {:deny,
+         "Blocked: refusing an unrecoverable operation (filesystem/disk destruction). " <>
+           "If this is genuinely intended, run it yourself."}
 
-    with :ok <- check_blocked_commands(segments),
-         :ok <- check_download_patterns(command),
-         :ok <- check_injection_patterns(command),
-         :ok <- check_path_patterns(command),
-         :ok <- check_env_leak_patterns(command),
-         :ok <- check_cd_restriction(command) do
-      :ok
+      risky?(command) ->
+        {:ask, "This command is powerful (#{risk_label(command)}) — approve to run it?"}
+
+      true ->
+        :allow
     end
   end
 
-  defp check_blocked_commands(segments) do
-    Enum.reduce_while(segments, :ok, fn segment, :ok ->
-      # Extract the first word (the command name) from the segment.
-      # Strip leading backslashes to catch \rm -rf style bypass attempts.
-      first_word =
-        segment
-        |> String.split(~r/\s+/, parts: 2)
-        |> hd()
-        |> String.replace(~r/^\\+/, "")
-
-      # Also check without path prefix (e.g., /usr/bin/rm → rm).
-      base_name = Path.basename(first_word)
-
-      matched =
-        Enum.find(Constants.blocked_commands(), fn cmd ->
-          base_name == cmd or first_word == cmd
-        end)
-
-      if matched do
-        {:halt, {:error, "Blocked: blocked pattern matched: #{matched}"}}
-      else
-        {:cont, :ok}
-      end
+  # First word (command name) of each pipe/;/&&/|| segment, with leading
+  # backslashes and any path prefix stripped (`\rm`, `/usr/bin/rm` → `rm`).
+  defp command_heads(command) do
+    command
+    |> String.split(~r/\s*[|;&]{1,2}\s*/)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(fn segment ->
+      segment
+      |> String.split(~r/\s+/, parts: 2)
+      |> hd()
+      |> String.replace(~r/^\\+/, "")
+      |> Path.basename()
     end)
   end
 
-  defp check_download_patterns(command) do
-    matched = Enum.find(Constants.download_patterns(), &Regex.match?(&1, command))
-
-    if matched do
-      {:error, "Blocked: blocked pattern matched: download with output flag"}
-    else
-      :ok
-    end
+  defp catastrophic?(command) do
+    Enum.any?(Constants.catastrophic_patterns(), &Regex.match?(&1, command))
   end
 
-  defp check_injection_patterns(command) do
-    matched = Enum.find(Constants.injection_patterns(), &Regex.match?(&1, command))
-
-    if matched do
-      {:error, "Blocked: blocked pattern matched: shell injection"}
-    else
-      :ok
-    end
+  defp risky?(command) do
+    heads = command_heads(command)
+    Enum.any?(heads, &(&1 in Constants.ask_commands())) or
+      Enum.any?(Constants.ask_patterns(), &Regex.match?(&1, command))
   end
 
-  defp check_path_patterns(command) do
-    matched = Enum.find(Constants.path_patterns(), &Regex.match?(&1, command))
+  # Short human-readable reason for the permission prompt.
+  defp risk_label(command) do
+    heads = command_heads(command)
 
-    if matched do
-      {:error, "Blocked: blocked pattern matched: sensitive path access"}
-    else
-      :ok
-    end
-  end
+    cond do
+      Enum.any?(Constants.ask_patterns(), &Regex.match?(&1, command)) ->
+        "runs downloaded/redirected code or force-rewrites"
 
-  defp check_env_leak_patterns(command) do
-    matched = Enum.find(Constants.env_leak_patterns(), &Regex.match?(&1, command))
+      head = Enum.find(heads, &(&1 in Constants.ask_commands())) ->
+        head
 
-    if matched do
-      {:error, "Blocked: blocked pattern matched: /proc environ access"}
-    else
-      :ok
-    end
-  end
-
-  defp check_cd_restriction(command) do
-    # Check for attempts to cd outside ~/.osa/ via the pattern.
-    if Regex.match?(Constants.cd_pattern(), command) do
-      {:error, "Blocked: cd outside ~/.osa/ is not allowed"}
-    else
-      # Also reject any cd path that contains .. after expansion,
-      # to prevent cd ~/.osa/../../etc style traversal.
-      osa_root = Path.expand("~/.osa")
-
-      traversal_found =
-        Regex.scan(~r/\bcd\s+(\S+)/, command)
-        |> Enum.any?(fn [_full, path] ->
-          expanded = Path.expand(path)
-          not String.starts_with?(expanded, osa_root)
-        end)
-
-      if traversal_found do
-        {:error, "Blocked: cd path traverses outside ~/.osa/"}
-      else
-        :ok
-      end
+      true ->
+        "elevated action"
     end
   end
 

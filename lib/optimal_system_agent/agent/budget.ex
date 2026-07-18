@@ -38,6 +38,10 @@ defmodule OptimalSystemAgent.Agent.Budget do
             per_call_limit: 5.0,
             daily_spent: 0.0,
             monthly_spent: 0.0,
+            # Cumulative tokens (in+out) spent today. Meaningful even when USD
+            # spend is $0 — providers without per-token USD pricing (GLM/Ollama)
+            # surface this in the status bar instead of a meaningless "$0 today".
+            daily_tokens: 0,
             daily_reset_at: nil,
             monthly_reset_at: nil,
             ledger: []
@@ -178,6 +182,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
       state
       | daily_spent: new_daily,
         monthly_spent: new_monthly,
+        daily_tokens: state.daily_tokens + tokens_in + tokens_out,
         ledger: Enum.take([entry | state.ledger], 10_000)
     }
 
@@ -268,6 +273,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
     state = %{
       state
       | daily_spent: 0.0,
+        daily_tokens: 0,
         daily_reset_at: DateTime.add(DateTime.utc_now(), @daily_reset_ms, :millisecond)
     }
 
@@ -318,6 +324,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
       per_call_limit: state.per_call_limit,
       daily_spent: Float.round(state.daily_spent, 4),
       monthly_spent: Float.round(state.monthly_spent, 4),
+      daily_tokens: state.daily_tokens,
       daily_remaining: Float.round(state.daily_limit - state.daily_spent, 2),
       monthly_remaining: Float.round(state.monthly_limit - state.monthly_spent, 2),
       daily_reset_at: state.daily_reset_at,
@@ -342,6 +349,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
     state = %{
       state
       | daily_spent: 0.0,
+        daily_tokens: 0,
         daily_reset_at: DateTime.add(DateTime.utc_now(), @daily_reset_ms, :millisecond)
     }
 

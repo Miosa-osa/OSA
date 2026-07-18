@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   """
 
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Constants
+  alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -51,7 +52,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
 
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t()} | {:ok, {:image, map()}} | {:error, String.t()}
-  def execute(%{"path" => path} = input, _ctx) do
+  def execute(%{"path" => path} = input, ctx) do
+    result = do_read(input)
+
+    # Record read-state for read-before-edit / stale-write enforcement (P0-1).
+    # Only successful reads of an actual file are recorded; canonical() inside
+    # FileState re-stats the path, so a directory/enoent that slipped through is
+    # a harmless no-op.
+    if match?({:ok, _}, result) do
+      expanded = path |> Path.expand() |> resolve_real_path()
+      FileState.record_read(session_id(ctx), expanded)
+    end
+
+    result
+  end
+
+  defp do_read(%{"path" => path} = input) do
     expanded = path |> Path.expand() |> resolve_real_path()
     offset = input["offset"]
     limit = input["limit"]
@@ -127,6 +143,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileRead.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  defp session_id(%{session_id: s}), do: s
+  defp session_id(_), do: nil
 
   defp read_with_range(expanded, display_path, offset, limit) do
     cond do

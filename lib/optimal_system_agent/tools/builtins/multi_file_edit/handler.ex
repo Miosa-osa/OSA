@@ -28,7 +28,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
   pattern established by `FileEdit.Handler`.
   """
 
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.Handler, as: FileEditHandler
   alias OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Constants
+  alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -82,9 +84,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t(), map()} | {:error, String.t()}
-  def execute(%{"edits" => edits}, _ctx) when is_list(edits) do
+  def execute(%{"edits" => edits}, ctx) when is_list(edits) do
+    session = session_id(ctx)
     resolved = Enum.map(edits, &resolve_edit/1)
-    validation_results = Enum.map(resolved, &validate_edit/1)
+    validation_results = Enum.map(resolved, &validate_edit(&1, session))
 
     errors =
       Enum.filter(validation_results, fn
@@ -104,6 +107,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
       # that fails partway can never leave the repo half-edited (BUG B).
       case apply_atomic(validation_results) do
         {:ok, per_file} ->
+          # Refresh read-state for every edited file (P0-1) and run the
+          # post-edit validation hook synchronously per file, aggregating any
+          # diagnostics into the observation (P1-4).
+          edited_paths =
+            for {:valid, _dp, ep, _o, _n, _c} <- validation_results, do: ep
+
+          Enum.each(edited_paths, &FileState.record_write(session, &1))
+
+          hook_note =
+            edited_paths
+            |> Enum.map(fn ep ->
+              FileEditHandler.file_changed_note(%{
+                path: ep,
+                tool: "multi_file_edit",
+                operation: :edit
+              })
+            end)
+            |> Enum.join("")
+
           summary =
             Enum.map_join(per_file, "\n", fn %{path: dp, lines_changed: lc} ->
               "  #{dp} (#{lc} lines changed)"
@@ -112,7 +134,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
           count = length(per_file)
 
           result =
-            "Edited #{count} #{if count == 1, do: "file", else: "files"}:\n#{summary}"
+            "Edited #{count} #{if count == 1, do: "file", else: "files"}:\n#{summary}" <> hook_note
 
           {:ok, result, %{results: per_file, count: count}}
 
@@ -126,6 +148,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
   # ── Private ───────────────────────────────────────────────────────────
 
+  defp session_id(%{session_id: s}), do: s
+  defp session_id(_), do: nil
+
   defp resolve_edit(%{"path" => path, "old_string" => old, "new_string" => new}) do
     expanded = resolve_path(path)
     %{display_path: path, expanded_path: expanded, old_string: old, new_string: new}
@@ -133,11 +158,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
 
   defp resolve_edit(edit), do: {:invalid, inspect(edit)}
 
-  defp validate_edit({:invalid, raw}) do
+  defp validate_edit({:invalid, raw}, _session) do
     {:error, raw, "malformed edit (missing path, old_string, or new_string)"}
   end
 
-  defp validate_edit(%{display_path: dp, expanded_path: ep, old_string: old, new_string: new}) do
+  defp validate_edit(
+         %{display_path: dp, expanded_path: ep, old_string: old, new_string: new},
+         session
+       ) do
     cond do
       old == "" ->
         {:error, dp, "old_string cannot be empty"}
@@ -163,7 +191,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
                  "old_string found multiple times — must be unique; add surrounding context"}
 
               true ->
-                {:valid, dp, ep, old, new, content}
+                # Read-before-edit / stale-write guard (P0-1). Any un-read or
+                # stale target fails the whole atomic batch — no files modified.
+                case FileState.check_read(session, ep) do
+                  {:error, msg} -> {:error, dp, msg}
+                  :ok -> {:valid, dp, ep, old, new, content}
+                end
             end
 
           {:error, reason} ->
