@@ -115,6 +115,9 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       :model_not_found ->
         model_not_found_message(reason)
 
+      :connection_error ->
+        connection_error_message(reason)
+
       :unknown ->
         "#{@api_error_prefix}: #{truncate(to_string_reason(reason), 300)} · Try again, or run /model to switch models."
 
@@ -307,6 +310,28 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
 
       p ->
         "#{@api_error_prefix}: Model not found for #{p} (404) · Run /model to pick a valid model."
+    end
+  end
+
+  # Actionable, provider-aware message for a connection failure. The generic
+  # message ("check your internet connection") is actively misleading for a
+  # `:econnrefused` against `Ollama.chat`'s own error strings ("Ollama
+  # connection failed: ...", "Ollama returned ...") — that's a LOCAL daemon
+  # that isn't running, not an internet/proxy problem (P1). Detect the
+  # Ollama-specific wording and name it explicitly with the actual URL and
+  # both fixes (start it, or switch provider); anything else keeps the
+  # generic internet/proxy guidance, which is still correct for a real cloud
+  # provider being unreachable.
+  defp connection_error_message(reason) do
+    text = to_string_reason(reason)
+
+    if String.contains?(String.downcase(text), "ollama") do
+      url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+
+      "#{@api_error_prefix}: Ollama is not running at #{url} · Start it with `ollama serve`, " <>
+        "or run `osa setup` to pick a cloud provider instead."
+    else
+      "#{@api_error_prefix}: #{Map.fetch!(@messages, :connection_error)}"
     end
   end
 

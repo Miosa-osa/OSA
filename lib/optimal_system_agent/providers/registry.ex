@@ -577,8 +577,21 @@ defmodule OptimalSystemAgent.Providers.Registry do
       :ok
     end
 
-    [on_retry: on_retry]
+    [on_retry: on_retry] ++ fail_fast_opts(provider)
   end
+
+  # `:ollama` (the strictly-local daemon on localhost, NOT `:ollama_cloud`,
+  # which proxies to ollama.com and can have real transient network issues)
+  # gets a connection-refused fail-fast: retrying `econnrefused` against a
+  # daemon that simply isn't running burns the full ~10-retry / ~200s backoff
+  # budget before surfacing an error that then got its "Ollama" mention
+  # stripped by ErrorCatalog anyway (P1). A connection refusal to localhost
+  # will not fix itself between attempt 1 and attempt 2 either, so fail on
+  # the first failure and let the actionable, Ollama-named message through
+  # immediately. Every other Ollama error (timeout on a slow local
+  # generation, a mid-download 500, …) keeps the normal retry budget.
+  defp fail_fast_opts(:ollama), do: [fail_fast_categories: [:connection_error]]
+  defp fail_fast_opts(_provider), do: []
 
   defp emit_retry_event(provider, info) do
     OptimalSystemAgent.Events.Bus.emit(:system_event, %{
@@ -1102,21 +1115,108 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def provider_configured?(:ollama_cloud) do
     case Application.get_env(:optimal_system_agent, :ollama_api_key) do
       key when is_binary(key) and key != "" -> true
-      _ -> provider_configured?(:ollama)
+      _ -> live_cloud_key_present?(:ollama_cloud) or provider_configured?(:ollama)
     end
   end
 
+  # Boot-time `Application.get_env` is a one-shot snapshot taken when
+  # `config/runtime.exs` ran. A key added to `~/.osa/.env` afterward by a
+  # different OS process (the CLI setup wizard, `osa setup`, a hand edit)
+  # never reaches it, so a lone cloud key can report "not configured" even
+  # though it plainly is (P2/P3). Fall back to a live re-read before saying no.
   def provider_configured?(provider) do
     key = :"#{provider}_api_key"
 
     case Application.get_env(:optimal_system_agent, key) do
-      nil -> false
-      "" -> false
+      nil -> live_cloud_key_present?(provider)
+      "" -> live_cloud_key_present?(provider)
       _ -> true
     end
   end
 
+  # Local/keyless providers are excluded from live key checks and from the
+  # "did the user configure exactly one cloud provider" default-provider
+  # heuristic below — Ollama's own reachability probe already covers it, and
+  # checking it here would mean a network round-trip on every chat call.
+  @keyless_providers [:ollama, :ollama_cloud, :lmstudio, :llamacpp, :mock]
+
+  defp live_cloud_key_present?(provider) do
+    env_var = provider |> Atom.to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
+
+    case OptimalSystemAgent.Onboarding.live_env(env_var) do
+      v when is_binary(v) and v != "" -> true
+      _ -> false
+    end
+  end
+
+  # Provider selected for the next turn when the caller didn't ask for a
+  # specific one. Order of precedence:
+  #
+  #   1. An explicit `OSA_DEFAULT_PROVIDER`, read LIVE (System env, then a
+  #      fresh re-parse of `~/.osa/.env`) — not just the boot-time snapshot —
+  #      so a value written after this node started is honored without a
+  #      restart (F1/P2).
+  #   2. If nothing explicit is set and the boot-time snapshot fell back to
+  #      the `:ollama` default (i.e. no key was configured at boot time),
+  #      but exactly ONE cloud provider now has a live key, prefer that
+  #      provider over silently routing to a possibly-absent local Ollama
+  #      (P2: "a lone cloud key is invisible unless it was the boot
+  #      default").
+  #   3. Otherwise, the boot-time snapshot (`config/runtime.exs`'s own
+  #      detection, e.g. an explicit choice or MIOSA_API_KEY/OLLAMA_API_KEY
+  #      priority order) — unchanged behavior.
+  @doc false
+  # Test/introspection seam for `default_provider/0` (private so `chat/2`
+  # can't be called with a bogus provider from outside, but the resolution
+  # logic itself — live explicit override / lone-live-key heuristic / boot
+  # snapshot — is exercised directly in tests without a real network call).
+  @spec resolved_default_provider() :: atom()
+  def resolved_default_provider, do: default_provider()
+
   defp default_provider do
-    Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    case live_explicit_default_provider() do
+      {:ok, provider} ->
+        provider
+
+      :error ->
+        boot_default = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+        if boot_default == :ollama do
+          case lone_live_cloud_provider() do
+            {:ok, provider} -> provider
+            :error -> boot_default
+          end
+        else
+          boot_default
+        end
+    end
+  end
+
+  defp live_explicit_default_provider do
+    case OptimalSystemAgent.Onboarding.live_env("OSA_DEFAULT_PROVIDER") do
+      nil ->
+        :error
+
+      value ->
+        try do
+          atom = value |> String.trim() |> String.downcase() |> String.to_existing_atom()
+          if Map.has_key?(@providers, atom), do: {:ok, atom}, else: :error
+        rescue
+          ArgumentError -> :error
+        end
+    end
+  end
+
+  defp lone_live_cloud_provider do
+    configured =
+      @providers
+      |> Map.keys()
+      |> Enum.reject(&(&1 in @keyless_providers))
+      |> Enum.filter(&live_cloud_key_present?/1)
+
+    case configured do
+      [provider] -> {:ok, provider}
+      _ -> :error
+    end
   end
 end

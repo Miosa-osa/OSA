@@ -34,6 +34,15 @@ config :optimal_system_agent, classifier_llm_enabled: false
 # fire spurious settings_changed events / cache resets. The watcher's own test
 # re-enables it explicitly around a supervised instance.
 config :optimal_system_agent, settings_watcher_enabled: false
+
+# Disable Onboarding.live_env/1's ~/.osa/.env (and ./.env) disk fallback in
+# tests — same reasoning as the .env FILE load config/runtime.exs itself
+# skips under config_env() == :test: the suite must never read the
+# OPERATOR's real ~/.osa/.env (provider keys, default provider, ...) and
+# become flaky depending on whose machine runs it. System.get_env is still
+# consulted; tests exercise the live-env-var path via System.put_env.
+config :optimal_system_agent, live_env_file_fallback: false
+
 # Isolate the ~/.osa bootstrap dir so tests NEVER touch the operator's real
 # config. Without this, HTTP route tests that exercise POST /switch call
 # persist_model_selection, which writes ~/.osa/config.json — silently clobbering

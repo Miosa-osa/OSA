@@ -768,11 +768,37 @@ else
   echo -e "${DIM}Backend ready. It stays warm in the background — ${RESET}${CYAN}osa stop${RESET}${DIM} to shut it down.${RESET}"
 fi
 
-# First-run: if no ~/.osa/.env exists, run the setup wizard
+# First-run: if no ~/.osa/.env exists, run the setup wizard.
+#
+# The wizard runs as its OWN OS process (not the daemon warmed above), so its
+# System.put_env/Application.put_env calls (onboarding.ex apply_env_vars) only
+# mutate that subprocess and are lost the instant it exits. The already-warm
+# daemon never sees the key it just wrote to ~/.osa/.env and keeps serving
+# from its stale boot-time config (default_provider=:ollama, every
+# *_api_key=nil) — the first turn then fails despite a valid key just having
+# been entered. Restart the daemon here so config/runtime.exs re-reads the
+# freshly written .env before the TUI ever attaches.
 if [ ! -f "$OSA_HOME/.env" ]; then
   echo -e "${CYAN}→${RESET} First-time setup..."
-  (cd "$ROOT" && mix osa.setup.wizard) || \
+  if (cd "$ROOT" && mix osa.setup.wizard); then
+    if [ -f "$OSA_HOME/.env" ]; then
+      echo -e "${CYAN}→${RESET} Restarting backend to load your new configuration…"
+      stop_daemon
+      clear_stale_pid
+      start_daemon
+      rc=0
+      wait_health 90 || rc=$?
+      if [ "${rc:-0}" -ne 0 ]; then
+        echo -e "${RED}✗ Backend did not come back up after setup.${RESET}"
+        echo "  Last log lines:"
+        tail -15 "$LOG_FILE" 2>/dev/null | sed 's/^/    /'
+        echo -e "  ${DIM}Try:${RESET} ${CYAN}osa stop && osa${RESET}"
+        exit 1
+      fi
+    fi
+  else
     echo -e "${YELLOW}⚠${RESET} Setup skipped. Run 'osa setup' later to configure."
+  fi
 fi
 
 # Show the overdrive warning right before handing off to the TUI.

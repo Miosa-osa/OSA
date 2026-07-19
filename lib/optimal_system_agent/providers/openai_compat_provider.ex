@@ -129,6 +129,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     Map.get(config, :available_models, [config.default_model])
   end
 
+  @doc false
+  # Test/introspection seam for the private `resolve_api_key/2` — lets the
+  # live-fallback resolution (P2/P3: Application snapshot → System.get_env →
+  # ~/.osa/.env) be asserted directly without driving a real HTTP call.
+  @spec resolved_api_key(atom()) :: String.t() | nil
+  def resolved_api_key(provider), do: resolve_api_key(provider, get_config!(provider))
+
   @doc "Send a chat completion request through the named provider."
   def chat(provider, messages, opts \\ []) do
     config = get_config!(provider)
@@ -187,14 +194,33 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   # llama.cpp) accept any bearer token, so when none is configured we substitute
   # a harmless placeholder rather than short-circuiting with
   # "API key not configured" — this keeps the local OpenAI-compatible path usable.
+  #
+  # `Application.get_env` is a one-shot snapshot taken when `config/runtime.exs`
+  # ran at boot. A key added to `~/.osa/.env` afterward by a different OS
+  # process (the CLI setup wizard, `osa setup`, a hand edit) never reaches it,
+  # so a lone cloud key can silently sit unused while the compat provider keeps
+  # reporting "API key not configured" (P2/P3). Fall back to a live re-read
+  # (`Onboarding.live_env/1`: `System.get_env` then a fresh `.env` parse)
+  # before giving up.
   defp resolve_api_key(provider, config) do
     case Application.get_env(:optimal_system_agent, :"#{provider}_api_key") do
       key when is_binary(key) and key != "" ->
         key
 
       _ ->
-        if Map.get(config, :keyless, false), do: "not-needed", else: nil
+        case live_env_api_key(provider) do
+          key when is_binary(key) and key != "" ->
+            key
+
+          _ ->
+            if Map.get(config, :keyless, false), do: "not-needed", else: nil
+        end
     end
+  end
+
+  defp live_env_api_key(provider) do
+    env_var = provider |> Atom.to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
+    OptimalSystemAgent.Onboarding.live_env(env_var)
   end
 
   defp maybe_add_headers(opts, %{extra_headers: headers}),

@@ -60,6 +60,54 @@ defmodule OptimalSystemAgent.Onboarding do
     not (File.exists?(env_file) and env_has_provider?(env_file))
   end
 
+  @doc """
+  Live-read a single env var: checks the process's live `System.get_env`
+  first (covers exported shell vars and anything set via `System.put_env`
+  since boot), then falls back to re-parsing `./.env` and `~/.osa/.env`
+  straight off disk.
+
+  Exists so provider/key resolution never has to trust a boot-time
+  `Application.get_env` snapshot alone — that goes stale the instant a
+  *different* OS process (the standalone CLI setup wizard `bin/osa` shells
+  out to, `osa setup`, a hand edit) writes `~/.osa/.env` while this node
+  keeps running. Mirrors the precedence `config/runtime.exs` uses at boot
+  (explicit env wins over `.env`, project `.env` wins over `~/.osa/.env`),
+  just re-evaluated on every call instead of once.
+
+  The `.env`-file fallback is disabled in `:test` (`config :optimal_system_agent,
+  :live_env_file_fallback, false` in `config/test.exs`) — same reason
+  `config/runtime.exs` skips loading `.env` files under `config_env() ==
+  :test`: the suite must never read the OPERATOR's real `~/.osa/.env` and
+  become flaky depending on whose machine runs it. `System.get_env` is still
+  checked (tests exercise that path explicitly via `System.put_env`).
+  """
+  @spec live_env(String.t()) :: String.t() | nil
+  def live_env(key) when is_binary(key) do
+    case System.get_env(key) do
+      v when is_binary(v) and v != "" ->
+        v
+
+      _ ->
+        if env_file_fallback_enabled?() do
+          [Path.expand(".env"), Path.join(@osa_dir, ".env")]
+          |> Enum.find_value(fn path ->
+            if File.exists?(path) do
+              case List.keyfind(parse_env_file(path), key, 0) do
+                {^key, v} when is_binary(v) and v != "" -> v
+                _ -> nil
+              end
+            end
+          end)
+        end
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp env_file_fallback_enabled? do
+    Application.get_env(:optimal_system_agent, :live_env_file_fallback, true)
+  end
+
   @doc "Return system information for the onboarding UI."
   def detect_system do
     %{
@@ -587,7 +635,20 @@ defmodule OptimalSystemAgent.Onboarding do
   Write setup configuration and seed workspace.
 
   1. Writes ~/.osa/.env with provider config
-  2. Sets env vars in-process (takes effect immediately, no restart)
+  2. Sets env vars in-process — takes effect immediately, no restart, **but
+     only for the OS process this function runs in**. Called from the
+     in-daemon HTTP flow (`POST /onboarding/setup`, `/setup` in the TUI) that
+     process IS the serving daemon, so this is true and the very next request
+     picks up the new key. Called from a separate short-lived OS process
+     (the standalone `mix osa.setup.wizard` that `bin/osa` shells out to on
+     first run) these `System.put_env`/`Application.put_env` calls only
+     mutate that subprocess and are discarded when it exits a moment later —
+     the serving daemon never sees them. `bin/osa` restarts the daemon right
+     after that wizard exits so `config/runtime.exs` reloads the freshly
+     written `.env`; provider/key resolution in `Providers.Registry` and
+     `Providers.OpenAICompatProvider` also re-reads `~/.osa/.env` live via
+     `live_env/1` as a second line of defense, so a key already works even
+     if some other caller skips the restart.
   3. Seeds workspace templates (BOOTSTRAP.md, IDENTITY.md, USER.md, SOUL.md, HEARTBEAT.md)
   4. Reloads Soul cache
   """

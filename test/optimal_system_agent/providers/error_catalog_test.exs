@@ -87,6 +87,45 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "osa setup"
       assert msg =~ "No API key configured"
     end
+
+    test "P4: Anthropic's own no-key/no-OAuth phrasing classifies as missing_api_key" do
+      # anthropic.ex resolve_auth/0's error when neither an API key nor a
+      # valid OAuth token is present. Previously read "No Anthropic API key
+      # or OAuth token configured." which never matched the "not configured"
+      # substring the missing_api_key? guard looks for (the word "not" never
+      # appears), so it fell through to :unknown and skipped the actionable
+      # `osa setup` guidance for the provider a Claude-first user is most
+      # likely to hit first.
+      reason = "ANTHROPIC_API_KEY not configured (no API key or OAuth token). Run `osa setup` or set ANTHROPIC_API_KEY."
+      assert Catalog.classify(reason) == :missing_api_key
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "Anthropic"
+      assert msg =~ "ANTHROPIC_API_KEY"
+      assert msg =~ "osa setup"
+    end
+  end
+
+  describe "P1: connection_error names Ollama instead of a generic internet message" do
+    test "an Ollama-sourced connection failure gets an Ollama-named, actionable message" do
+      reason = "Ollama connection failed: :econnrefused"
+      assert Catalog.classify(reason) == :connection_error
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "Ollama"
+      assert msg =~ "ollama serve"
+      assert msg =~ "osa setup"
+      # Must not degrade to the misleading generic guidance that drops the
+      # word "Ollama" entirely.
+      refute msg =~ "Check your internet connection"
+    end
+
+    test "a non-Ollama connection failure keeps the generic internet/proxy guidance" do
+      reason = "Anthropic connection failed: :econnrefused"
+      msg = Catalog.user_message(reason)
+      assert msg =~ "internet connection"
+      refute msg =~ "Ollama"
+    end
   end
 
   describe "model-not-found (404) is a CLEAR, actionable, non-retryable error (finding #9)" do

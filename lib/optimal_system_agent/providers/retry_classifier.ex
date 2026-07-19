@@ -142,16 +142,30 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
 
     * `:rate_limit_threshold` — cap on consecutive 429 retries
       (default #{@rate_limit_retry_threshold}).
+    * `:fail_fast_categories` — `ErrorCatalog` category atoms that must be
+      treated as `{:fatal, reason}` regardless of how they'd normally
+      classify — e.g. `:connection_error` for a strictly-local provider
+      (Ollama not running): retrying `econnrefused` against localhost won't
+      fix itself between attempts, so burn zero of the retry budget on it
+      and surface the actionable error immediately (P1). Checked first, so
+      it overrides every other category including auth/rate-limit.
 
   Pure: no sleep, no logging, no I/O. Order mirrors grok's `classify_error`:
-  auth → image-strip (413) → context-overflow/fatal → rate-limit → retryable.
+  fail-fast override → auth → image-strip (413) → context-overflow/fatal →
+  rate-limit → retryable.
   """
   @spec classify(term(), non_neg_integer(), non_neg_integer(), keyword()) :: decision()
   def classify(reason, retry_count, max_retries, opts \\ []) do
     threshold = Keyword.get(opts, :rate_limit_threshold, @rate_limit_retry_threshold)
+    fail_fast_categories = Keyword.get(opts, :fail_fast_categories, [])
     category = category_of(reason)
 
     cond do
+      # 0. Caller-supplied fail-fast override — never retried, no matter what
+      #    category it would otherwise land in.
+      category in fail_fast_categories ->
+        {:fatal, reason}
+
       # 1. Auth / credential errors are session-owned (re-auth, /login).
       category in @auth_categories ->
         {:emit_to_session, reason}

@@ -214,6 +214,12 @@ defmodule OptimalSystemAgent.Providers.Resilience do
       `:delay_ms`, and `:reason`. Exceptions raised here are swallowed.
     * `:sleep`        — `fn ms -> any end` sleep function (default
       `Process.sleep/1`); injectable for tests.
+    * `:fail_fast_categories` — list of `ErrorCatalog` category atoms that
+      should NOT be retried even though they'd otherwise be classified as
+      transient (e.g. `:connection_error` for a strictly-local provider
+      whose daemon simply isn't running — see `Providers.Registry`'s
+      per-provider `retry_opts/2`). Forwarded verbatim to
+      `RetryClassifier.classify/4`.
   """
   @spec with_retry((-> term()) | (map() -> term()), keyword()) :: term()
   def with_retry(fun, opts \\ []) when is_function(fun, 0) or is_function(fun, 1) do
@@ -249,7 +255,8 @@ defmodule OptimalSystemAgent.Providers.Resilience do
           # tightens the budget. The outer guard owns overall termination.
           decision =
             RetryClassifier.classify(reason, attempt - 1, max_attempts,
-              rate_limit_threshold: @rate_limit_threshold
+              rate_limit_threshold: @rate_limit_threshold,
+              fail_fast_categories: Keyword.get(opts, :fail_fast_categories, [])
             )
 
           act_on(decision, result, reason, fun, attempt, max_attempts, opts, overloaded_count, stripped?)

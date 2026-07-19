@@ -122,6 +122,39 @@ defmodule OptimalSystemAgent.Providers.RetryClassifierTest do
     end
   end
 
+  describe "classify/4 — :fail_fast_categories override (P1: local-provider connection refusal)" do
+    test "connection refused is normally retryable" do
+      err = "econnrefused"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+    end
+
+    test "connection refused becomes fatal on the FIRST attempt when fail-fast-listed" do
+      err = "Ollama connection failed: :econnrefused"
+
+      assert {:fatal, ^err} =
+               RC.classify(err, 0, @max, fail_fast_categories: [:connection_error])
+    end
+
+    test "fail-fast override wins even though the retry budget is nowhere near exhausted" do
+      err = "econnrefused"
+
+      assert {:fatal, ^err} =
+               RC.classify(err, 0, 15, fail_fast_categories: [:connection_error])
+    end
+
+    test "an unrelated category is unaffected by an unrelated fail-fast list" do
+      err = {:http_error, 500, "boom"}
+
+      assert {:retry_with_client_rebuild, _} =
+               RC.classify(err, 0, @max, fail_fast_categories: [:connection_error])
+    end
+
+    test "omitting :fail_fast_categories defaults to no override (backward compatible)" do
+      err = "econnrefused"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max, [])
+    end
+  end
+
   describe "classify/4 — fatal client errors" do
     test "400 invalid request is fatal" do
       err = {:http_error, 400, "Invalid model parameter"}

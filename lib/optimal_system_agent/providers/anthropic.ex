@@ -911,8 +911,17 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             {:oauth, token}
 
           {:error, _} ->
+            # Phrased so `ErrorCatalog.missing_api_key?/1` (which matches "not
+            # configured") catches it — previously "No Anthropic API key or
+            # OAuth token configured." fell through that matcher (the word
+            # "not" never appeared) and got classified :unknown, skipping the
+            # actionable `osa setup`/env-var guidance for exactly the provider
+            # a Claude-first user is most likely to hit first (P4). Leads with
+            # "ANTHROPIC_API_KEY" so the message-level regex
+            # (`missing_api_key_message/1`) also names the right env var.
             {:error,
-             "No Anthropic API key or OAuth token configured. Run onboarding or set ANTHROPIC_API_KEY."}
+             "ANTHROPIC_API_KEY not configured (no API key or OAuth token). Run `osa setup` " <>
+               "or set ANTHROPIC_API_KEY."}
         end
     end
   end
