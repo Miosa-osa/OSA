@@ -5,7 +5,7 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, Terminal, TerminalOptions, Viewport};
 use std::io::{self, Write};
@@ -104,24 +104,31 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // Shift+Enter is a reliable newline chord (kitty terminals) or collapses to a
     // bare Enter (Apple Terminal / VS Code / tmux / SSH). Threaded into App::new so
     // the composer's newline hint matches reality without a re-probe syscall.
-    // The single `supports_keyboard_enhancement()` probe races OSA's busy startup
-    // (bracketed-paste enable + the cursor-position priming burst below) and can
-    // flake to `false` on the first try even on terminals that DO support the
-    // kitty keyboard protocol — which then silently breaks Shift+Enter (it
-    // collapses to a bare Enter and submits). Two hardening steps:
-    //   1. Retry the probe a few times before giving up.
-    //   2. Trust terminals we KNOW implement the protocol (Ghostty/Kitty/WezTerm/
-    //      foot) even if the probe never answers — pushing the flag is harmless on
-    //      any terminal (unsupported ones ignore the CSI sequence).
-    let kbd_enhanced = {
-        let probed = (0..5).any(|i| {
-            if i > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            matches!(supports_keyboard_enhancement(), Ok(true))
-        });
-        probed || terminal_known_kitty_protocol()
-    };
+    //
+    // BATCHED STARTUP PROBE (replaces the old sequential probes). Previously OSA
+    // ran a `supports_keyboard_enhancement()` retry loop AND a separate
+    // `cursor::position()` priming loop; they raced each other during OSA's busy
+    // startup, which flaked the inline-viewport DSR query AND made Shift+Enter
+    // unreliable (the kbd probe would return `false` on a terminal that actually
+    // supports the kitty protocol). Instead we now fire ONE burst — CPR cursor +
+    // OSC10/11 default colors + kitty keyboard flags + DA1 done-marker — under a
+    // single deadline (dup tty + O_NONBLOCK + poll), warming the terminal, learning
+    // the cursor position, and resolving keyboard-enhancement support in one pass.
+    // The probe NEVER hangs: unanswered fields come back `None` and we degrade.
+    let probe = app::terminal_probe::run(app::terminal_probe::DEFAULT_TIMEOUT);
+    tracing::info!(
+        cursor_position = probe.cursor_position.is_some(),
+        default_colors = probe.default_colors.is_some(),
+        keyboard_enhancement_supported = ?probe.keyboard_enhancement_supported,
+        "batched startup terminal probe completed"
+    );
+
+    // Trust the probe's answer, and keep the env-based fallback for terminals we
+    // KNOW implement the kitty protocol (Ghostty/Kitty/WezTerm/foot) even if the
+    // probe never answered — pushing the flag is harmless on any terminal
+    // (unsupported ones ignore the CSI sequence).
+    let kbd_enhanced =
+        probe.keyboard_enhancement_supported.unwrap_or(false) || terminal_known_kitty_protocol();
     if kbd_enhanced {
         let _ = execute!(
             io::stdout(),
@@ -130,18 +137,10 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     }
     tracing::info!(kbd_enhanced, "keyboard enhancement (Shift+Enter newline) status");
 
-    // ratatui's Viewport::Inline queries the terminal for the cursor position at
-    // construction (a DSR request). Some terminals/launch contexts drop the very
-    // first query and it times out ("cursor position could not be read"), which
-    // aborts startup entirely. Prime it first: retry the query until the terminal
-    // actually answers, so ratatui's query lands on a warmed-up terminal.
-    for _ in 0..40 {
-        if crossterm::cursor::position().is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-
+    // The burst above already sent a CPR (ESC[6n) and drained its response, so the
+    // terminal is warmed up before ratatui's Viewport::Inline construction issues
+    // its own DSR cursor query below. The inline-viewport creation still retries
+    // (see below) as a final graceful fallback for stubborn launch contexts.
     let (_cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let viewport_h = compute_viewport_height(rows);
 

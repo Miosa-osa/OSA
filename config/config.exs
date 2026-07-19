@@ -40,6 +40,17 @@ config :optimal_system_agent,
   # so an autonomous run isn't killed at 100. Runtime-tunable (get_env).
   doom_loop_max_calls: 2000,
 
+  # Doom-loop *resample* recovery (grok's DoomLoopRecoverySettings). When a
+  # detector flags a repetition / reasoning-only loop, DISCARD the offending
+  # assistant response and re-sample the turn (re-rolling is the remedy, not
+  # waiting) up to `max_retries` times with near-zero backoff, only then falling
+  # back to the existing surface/permission-prompt/abort behavior.
+  #   enabled     — master switch (default true)
+  #   max_retries — resample budget per stuck stretch (default 2)
+  #   backoff_ms  — delay between resamples (default 0 — the fix is re-rolling)
+  #   threshold   — identical-call repeats before a loop is declared (default 4)
+  doom_loop_resample: [enabled: true, max_retries: 2, backoff_ms: 0, threshold: 4],
+
   # Wall-clock ceiling on a single agent turn (the GenServer.call in
   # Loop.process_message). `:infinity` because the turn is already bounded
   # logically by max_iterations + max_budget_usd; a wall-clock cap here just

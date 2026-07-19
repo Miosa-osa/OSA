@@ -10,6 +10,7 @@ mod keymap_dispatch;
 pub mod keys;
 pub mod layout;
 pub mod state;
+pub mod terminal_probe;
 pub mod update;
 
 use anyhow::Result;

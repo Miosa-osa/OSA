@@ -1,81 +1,160 @@
 defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
   @moduledoc """
-  Loads and parses SKILL.md skill definitions from priv/skills/ and ~/.osa/skills/.
+  Loads and parses SKILL.md skill definitions with **progressive disclosure**.
 
-  Built-in skills are loaded from the application's priv/skills/ directory tree.
-  User skills are loaded from the directory configured in :skills_dir (default
-  ~/.osa/skills/). User skills take precedence over built-in skills with the
-  same name.
+  A skill *is* a `SKILL.md` file: YAML frontmatter + a markdown instruction
+  body. Discovery reads the **frontmatter only** (bounded to the first
+  `#{4096}` bytes) to build the listing — the body is never loaded for a
+  listing. The body is loaded on demand via `load_body/1` /
+  `load_skill_with_body/1` when a skill is actually invoked.
+
+  ## Scopes and precedence (lower wins)
+
+  Skills are discovered across several scopes, Claude-compatible. For a given
+  skill name, the entry from the lowest-ranked scope wins:
+
+    * `:local`   (rank 0) — `<cwd>/{.osa,.claude,.agents,.grok}/skills`
+    * `:repo`    (rank 1) — the same dirs at any ancestor up to the git root
+    * `:user`    (rank 2) — the configured `:skills_dir` (default `~/.osa/skills`)
+      plus `~/{.claude,.agents,.grok}/skills`
+    * `:bundled` (rank 3) — the application's `priv/skills` tree
+
+  Vendor directories (`node_modules`, `.git`, `_build`, `deps`, …) are skipped.
+
+  ## `paths`-glob lazy surfacing
+
+  A skill may declare `paths:` globs in its frontmatter. Such a skill is held
+  back from the model-facing listing until a file matching one of the globs is
+  touched this session (see `SkillTouch` and `list_for_model/2`).
   """
 
   require Logger
 
+  alias OptimalSystemAgent.Tools.Registry.SkillTouch
+
+  @frontmatter_max_bytes 4_096
+
   @known_skill_categories ~w(core automation reasoning)
+
+  # Config directory names scanned for a `skills/` subtree (Claude-compatible).
+  @external_cfg_dirs ~w(.osa .claude .agents .grok)
+  # User-scope config dirs other than .osa (whose skills dir is :skills_dir).
+  @user_ext_dirs ~w(.claude .agents .grok)
+  @skills_subdir "skills"
+
+  # Path segments that must never be scanned for skills.
+  @vendor_denylist ~w(node_modules .git _build deps vendor target dist build .elixir_ls .venv)
+
+  @scope_rank %{local: 0, repo: 1, user: 2, bundled: 3}
 
   defp skills_dir, do: Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills")
 
   # ── Public API ────────────────────────────────────────────────────────
 
   @doc """
-  Load all skills: built-in (priv/skills/) merged with user (~/.osa/skills/).
-  User skills override built-in skills with the same name.
+  Load all skills across scopes as a `name => entry` map (frontmatter only).
+
+  Each entry is a map with `:name`, `:description`, `:triggers`, `:tools`,
+  `:priority`, `:paths` (globs or `nil`), `:scope`, and `:path` (absolute
+  SKILL.md path). The instruction body is **not** included — load it on demand
+  with `load_body/1` or `load_skill_with_body/1`.
+
+  Options:
+    * `:cwd` — override the current working directory used for local/repo scopes.
   """
-  @spec load_skills() :: map()
-  def load_skills do
-    priv_dir = resolve_priv_skills_path()
+  @spec load_skills(keyword()) :: %{optional(String.t()) => map()}
+  def load_skills(opts \\ []) do
+    cwd = Keyword.get(opts, :cwd) || cwd_default()
 
-    priv_skills =
-      load_skill_definitions()
-      |> Enum.reduce(%{}, fn skill, acc ->
-        abs_path =
-          if priv_dir, do: Path.join(priv_dir, skill.source_path), else: skill.source_path
-
-        entry = %{
-          name: skill.name,
-          description: skill.description,
-          triggers: skill.triggers,
-          tools: Map.get(skill, :tools, []),
-          path: abs_path
-        }
-
-        Map.put(acc, skill.name, entry)
-      end)
-
-    user_dir = Path.expand(skills_dir())
-
-    user_skills =
-      if File.dir?(user_dir) do
-        user_dir
-        |> File.ls!()
-        |> Enum.filter(&File.dir?(Path.join(user_dir, &1)))
-        |> Enum.reduce(%{}, fn skill_dir, acc ->
-          skill_file = Path.join([user_dir, skill_dir, "SKILL.md"])
-
-          if File.exists?(skill_file) do
-            case parse_skill_file(skill_file) do
-              {:ok, skill} -> Map.put(acc, skill.name, skill)
-              :error -> acc
-            end
-          else
-            acc
-          end
-        end)
-      else
-        %{}
-      end
-
-    Map.merge(priv_skills, user_skills)
+    cwd
+    |> discover_entries()
+    |> merge_by_scope()
   end
 
   @doc """
-  Discover all skill definitions from priv/skills/.
+  Frontmatter-only listing intended for the model-facing surface.
 
-  Walks the directory tree, finds all .md files, parses YAML frontmatter, and
-  returns a list of skill definition maps. Returns [] when the directory is
-  absent.
+  Applies `paths`-glob lazy surfacing: a skill with `:paths` globs is only
+  included once one of `touched_paths` matches. Skills without `:paths` are
+  always included. Returns a name-sorted list of entry maps.
+  """
+  @spec list_for_model(%{optional(String.t()) => map()} | [map()], [String.t()]) :: [map()]
+  def list_for_model(skills, touched_paths \\ [])
 
-  Each map contains: :name, :description, :category, :triggers, :priority,
-  :instructions, :source_path, :metadata.
+  def list_for_model(skills, touched_paths) when is_map(skills) do
+    skills |> Map.values() |> list_for_model(touched_paths)
+  end
+
+  def list_for_model(skills, touched_paths) when is_list(skills) do
+    skills
+    |> Enum.filter(&surfaced?(&1, touched_paths))
+    |> Enum.sort_by(& &1.name)
+  end
+
+  @doc """
+  Whether a skill entry should surface, given the paths touched this session.
+
+  Always true when the skill declares no `:paths` globs; otherwise true only
+  when a touched path matches one of the globs.
+  """
+  @spec surfaced?(map(), [String.t()]) :: boolean()
+  def surfaced?(%{paths: paths}, touched_paths)
+      when is_list(paths) and paths != [] and is_list(touched_paths) do
+    Enum.any?(touched_paths, fn p ->
+      Enum.any?(paths, fn glob -> path_matches_glob?(p, glob) end)
+    end)
+  end
+
+  def surfaced?(_entry, _touched), do: true
+
+  @doc "Match a path against a gitignore-style glob (`**`, `*`, `?`)."
+  @spec path_matches_glob?(String.t(), String.t()) :: boolean()
+  def path_matches_glob?(path, glob) when is_binary(path) and is_binary(glob) do
+    regex = glob_to_regex(glob)
+    Regex.match?(regex, path) or Regex.match?(regex, Path.basename(path))
+  rescue
+    _ -> false
+  end
+
+  def path_matches_glob?(_, _), do: false
+
+  @doc """
+  Load only the instruction body of a SKILL.md (frontmatter stripped).
+
+  This is the on-demand half of progressive disclosure.
+  """
+  @spec load_body(String.t() | nil) :: {:ok, String.t()} | {:error, term()}
+  def load_body(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, extract_body(content)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def load_body(_), do: {:error, :no_path}
+
+  @doc """
+  Return a skill entry augmented with its instruction body under `:instructions`.
+
+  Accepts a listing entry (must carry `:path`). Loads the full file on demand.
+  """
+  @spec load_skill_with_body(map()) :: {:ok, map()} | {:error, term()}
+  def load_skill_with_body(%{path: path} = entry) when is_binary(path) do
+    case load_body(path) do
+      {:ok, body} -> {:ok, Map.put(entry, :instructions, body)}
+      {:error, _} = err -> err
+    end
+  end
+
+  def load_skill_with_body(_), do: {:error, :no_path}
+
+  @doc """
+  Discover skill definitions from `priv/skills/` (bundled), frontmatter only.
+
+  Returns a list of maps with `:name`, `:description`, `:category`,
+  `:triggers`, `:priority`, `:tools`, `:source_path`, `:metadata`. Kept for
+  callers that only want the bundled catalog summary (e.g. HTTP routes); does
+  not include instruction bodies.
   """
   @spec load_skill_definitions() :: [map()]
   def load_skill_definitions do
@@ -84,121 +163,268 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
     if skills_path && File.dir?(skills_path) do
       skills_path
       |> find_md_files()
-      |> Enum.map(fn path -> parse_skill_definition(path, skills_path) end)
-      |> Enum.reject(&is_nil/1)
+      |> Enum.reject(&vendor_below_root?(&1, skills_path))
+      |> Enum.flat_map(fn path -> definition_summary(path, skills_path) end)
     else
       []
     end
   end
 
-  # ── Private: SKILL.md Parsing ─────────────────────────────────────────
+  # ── Discovery (frontmatter only) ──────────────────────────────────────
 
-  defp parse_skill_file(path) do
-    content = File.read!(path)
+  defp discover_entries(cwd) do
+    cwd
+    |> scope_roots()
+    |> dedupe_roots()
+    |> Enum.flat_map(fn {scope, root} -> scan_root(scope, root) end)
+  end
 
-    case String.split(content, "---", parts: 3) do
-      ["", frontmatter, body] ->
-        case YamlElixir.read_from_string(frontmatter) do
-          {:ok, meta} ->
-            {:ok,
-             %{
-               name: meta["name"] || Path.basename(Path.dirname(path)),
-               description: meta["description"] || "",
-               triggers: meta["triggers"] || [],
-               tools: meta["tools"] || [],
-               path: path,
-               instructions: String.trim(body)
-             }}
-
-          _ ->
-            :error
+  defp scan_root(scope, root) do
+    if File.dir?(root) do
+      root
+      |> Path.join("**/SKILL.md")
+      |> Path.wildcard()
+      |> Enum.reject(&vendor_below_root?(&1, root))
+      |> Enum.flat_map(fn path ->
+        case read_frontmatter_entry(path, scope) do
+          {:ok, entry} -> [entry]
+          :error -> []
         end
-
-      _ ->
-        {:ok,
-         %{
-           name: Path.basename(Path.dirname(path)),
-           description: String.slice(content, 0, 100),
-           triggers: [],
-           tools: [],
-           path: path,
-           instructions: content
-         }}
+      end)
+    else
+      []
     end
   rescue
-    # One unreadable/malformed SKILL.md (perms 000, broken symlink, removed in
-    # the exists?→read race) must not crash SkillLoader.load_skills and take down
-    # the Registry GenServer. Degrade to :error and skip, mirroring
-    # parse_skill_definition/1's rescue.
+    e ->
+      Logger.warning("[skill_loader] Failed to scan #{root}: #{Exception.message(e)}")
+      []
+  end
+
+  # Later collision losers keep the lower-ranked scope's entry.
+  defp merge_by_scope(entries) do
+    Enum.reduce(entries, %{}, fn entry, acc ->
+      case Map.get(acc, entry.name) do
+        nil ->
+          Map.put(acc, entry.name, entry)
+
+        current ->
+          if rank(entry.scope) < rank(current.scope) do
+            Map.put(acc, entry.name, entry)
+          else
+            acc
+          end
+      end
+    end)
+  end
+
+  defp scope_roots(cwd) do
+    project = project_roots(cwd)
+
+    user =
+      [{:user, Path.expand(skills_dir())}] ++
+        Enum.map(@user_ext_dirs, fn ext -> {:user, Path.expand("~/#{ext}/#{@skills_subdir}")} end)
+
+    bundled =
+      case resolve_priv_skills_path() do
+        nil -> []
+        path -> [{:bundled, path}]
+      end
+
+    project ++ user ++ bundled
+  end
+
+  defp project_roots(cwd) do
+    cwd
+    |> ancestor_dirs()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {dir, idx} ->
+      scope = if idx == 0, do: :local, else: :repo
+      Enum.map(@external_cfg_dirs, fn ext -> {scope, Path.join([dir, ext, @skills_subdir])} end)
+    end)
+  end
+
+  # cwd first (nearest), then ancestors up to and including the git root. Bounded.
+  defp ancestor_dirs(cwd) do
+    collect_up(Path.expand(cwd), [])
+  end
+
+  defp collect_up(dir, acc) do
+    acc = acc ++ [dir]
+    parent = Path.dirname(dir)
+
+    cond do
+      File.dir?(Path.join(dir, ".git")) -> acc
+      parent == dir -> acc
+      length(acc) >= 25 -> acc
+      true -> collect_up(parent, acc)
+    end
+  end
+
+  # Collapse identical absolute roots, keeping the lowest-ranked scope.
+  defp dedupe_roots(roots) do
+    roots
+    |> Enum.reduce(%{}, fn {scope, path}, acc ->
+      abs = Path.expand(path)
+
+      case Map.get(acc, abs) do
+        nil ->
+          Map.put(acc, abs, scope)
+
+        existing ->
+          if rank(scope) < rank(existing), do: Map.put(acc, abs, scope), else: acc
+      end
+    end)
+    |> Enum.map(fn {abs, scope} -> {scope, abs} end)
+  end
+
+  defp rank(scope), do: Map.get(@scope_rank, scope, 99)
+
+  # Reject a skill file only when a vendor directory appears *below* the scan
+  # root. The root's own prefix is exempt: the bundled scope legitimately lives
+  # under `_build`/`deps` (dev) or a release lib dir, and must not self-exclude.
+  defp vendor_below_root?(path, root) do
+    path
+    |> Path.relative_to(root)
+    |> Path.split()
+    |> Enum.any?(&(&1 in @vendor_denylist))
+  end
+
+  # ── Frontmatter parsing (bounded) ─────────────────────────────────────
+
+  defp read_frontmatter_entry(path, scope) do
+    data = bounded_read(path, @frontmatter_max_bytes)
+
+    case parse_frontmatter(data) do
+      {:ok, meta} -> {:ok, build_entry(meta, path, scope)}
+      :error -> {:ok, fallback_entry(path, scope, data)}
+    end
+  rescue
     e ->
       Logger.warning("[skill_loader] Skipping unreadable skill #{path}: #{Exception.message(e)}")
       :error
   end
 
-  defp parse_skill_definition(path, base_path) do
-    content = File.read!(path)
-    relative_path = Path.relative_to(path, base_path)
-    category = derive_category(relative_path)
+  # Read at most `n` bytes without slurping the whole (possibly large) body.
+  defp bounded_read(path, n) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, io} ->
+        data =
+          case IO.binread(io, n) do
+            bin when is_binary(bin) -> bin
+            _ -> ""
+          end
 
-    case String.split(content, "---", parts: 3) do
-      ["", frontmatter, body] ->
+        File.close(io)
+        data
+
+      {:error, _} ->
+        ""
+    end
+  end
+
+  # Parse only the frontmatter block. If the closing `---` is not within the
+  # bounded window (or YAML is invalid) return :error so the caller falls back.
+  defp parse_frontmatter(data) do
+    case String.split(data, "---", parts: 3) do
+      ["", frontmatter, _rest] ->
         case YamlElixir.read_from_string(frontmatter) do
-          {:ok, meta} ->
-            build_skill_def(meta, body, relative_path, category)
-
-          {:error, reason} ->
-            Logger.debug(
-              "[Tools.Registry] YAML frontmatter parse failed for #{relative_path}: #{inspect(reason)} — treating as plain content"
-            )
-
-            build_skill_def_from_content(content, relative_path, category)
-
-          _ ->
-            build_skill_def_from_content(content, relative_path, category)
+          {:ok, meta} when is_map(meta) -> {:ok, meta}
+          _ -> :error
         end
 
       _ ->
-        build_skill_def_from_content(content, relative_path, category)
+        :error
     end
-  rescue
-    e ->
-      Logger.warning("Failed to parse skill definition at #{path}: #{inspect(e)}")
-      nil
   end
 
-  defp build_skill_def(meta, body, relative_path, category) do
+  defp build_entry(meta, path, scope) do
     name =
-      meta["name"] ||
-        meta["skill_name"] ||
-        meta["skill"] ||
-        derive_name_from_path(relative_path)
-
-    triggers = normalize_triggers(meta)
-
-    priority =
-      case meta["priority"] do
-        p when is_integer(p) -> p
-        p when is_binary(p) -> parse_priority(p)
-        _ -> 5
-      end
-
-    standard_keys =
-      ~w(name skill_name skill description trigger triggers trigger_keywords priority tools)
-
-    metadata = Map.drop(meta, standard_keys)
+      meta["name"] || meta["skill_name"] || meta["skill"] ||
+        Path.basename(Path.dirname(path))
 
     %{
       name: to_string(name),
       description: to_string(meta["description"] || ""),
-      category: category,
-      triggers: triggers,
-      priority: priority,
-      instructions: String.trim(body),
-      source_path: relative_path,
+      triggers: normalize_triggers(meta),
       tools: normalize_tools(meta["tools"]),
-      metadata: metadata
+      priority: parse_priority_meta(meta["priority"]),
+      paths: normalize_paths(meta["paths"]),
+      scope: scope,
+      path: path
     }
   end
+
+  defp fallback_entry(path, scope, data) do
+    %{
+      name: Path.basename(Path.dirname(path)),
+      description: data |> String.slice(0, 100) |> String.trim(),
+      triggers: [],
+      tools: [],
+      priority: 5,
+      paths: nil,
+      scope: scope,
+      path: path
+    }
+  end
+
+  # Strip YAML frontmatter, returning only the instruction body.
+  defp extract_body(content) do
+    case String.split(content, "---", parts: 3) do
+      ["", _frontmatter, body] -> String.trim(body)
+      _ -> String.trim(content)
+    end
+  end
+
+  # ── Bundled-catalog summaries (priv/skills) ───────────────────────────
+
+  defp definition_summary(path, base_path) do
+    relative_path = Path.relative_to(path, base_path)
+    category = derive_category(relative_path)
+    data = bounded_read(path, @frontmatter_max_bytes)
+
+    case parse_frontmatter(data) do
+      {:ok, meta} ->
+        name =
+          meta["name"] || meta["skill_name"] || meta["skill"] ||
+            derive_name_from_path(relative_path)
+
+        standard_keys =
+          ~w(name skill_name skill description trigger triggers trigger_keywords priority tools paths)
+
+        [
+          %{
+            name: to_string(name),
+            description: to_string(meta["description"] || ""),
+            category: category,
+            triggers: normalize_triggers(meta),
+            priority: parse_priority_meta(meta["priority"]),
+            tools: normalize_tools(meta["tools"]),
+            source_path: relative_path,
+            metadata: Map.drop(meta, standard_keys)
+          }
+        ]
+
+      :error ->
+        [
+          %{
+            name: derive_name_from_path(relative_path),
+            description: data |> String.slice(0, 100) |> String.trim(),
+            category: category,
+            triggers: [],
+            priority: 5,
+            tools: [],
+            source_path: relative_path,
+            metadata: %{}
+          }
+        ]
+    end
+  rescue
+    e ->
+      Logger.warning("[skill_loader] Failed to summarize #{path}: #{Exception.message(e)}")
+      []
+  end
+
+  # ── Normalizers ───────────────────────────────────────────────────────
 
   # A skill's declared tool allowlist may be a YAML list or a comma-separated
   # string. Normalize to a list of tool-name strings ([] = unrestricted).
@@ -214,18 +440,47 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
 
   defp normalize_tools(_), do: []
 
-  defp build_skill_def_from_content(content, relative_path, category) do
-    %{
-      name: derive_name_from_path(relative_path),
-      description: content |> String.slice(0, 100) |> String.trim(),
-      category: category,
-      triggers: [],
-      priority: 5,
-      instructions: content,
-      source_path: relative_path,
-      metadata: %{}
-    }
+  # `paths` frontmatter: a YAML list or comma-separated string of globs.
+  # Returns nil (never gated) when absent or empty.
+  defp normalize_paths(nil), do: nil
+
+  defp normalize_paths(list) when is_list(list) do
+    case list |> List.flatten() |> Enum.map(&to_string/1) |> Enum.reject(&(&1 == "")) do
+      [] -> nil
+      globs -> globs
+    end
   end
+
+  defp normalize_paths(str) when is_binary(str) do
+    case str |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) do
+      [] -> nil
+      globs -> globs
+    end
+  end
+
+  defp normalize_paths(_), do: nil
+
+  defp normalize_triggers(meta) do
+    cond do
+      is_list(meta["triggers"]) ->
+        meta["triggers"] |> List.flatten() |> Enum.map(&to_string/1)
+
+      is_list(meta["trigger_keywords"]) ->
+        meta["trigger_keywords"] |> List.flatten() |> Enum.map(&to_string/1)
+
+      is_binary(meta["trigger"]) ->
+        meta["trigger"]
+        |> String.split(~r/[|,]/, trim: true)
+        |> Enum.map(&String.trim/1)
+
+      true ->
+        []
+    end
+  end
+
+  defp parse_priority_meta(p) when is_integer(p), do: p
+  defp parse_priority_meta(p) when is_binary(p), do: parse_priority(p)
+  defp parse_priority_meta(_), do: 5
 
   defp parse_priority(str) do
     case Integer.parse(str) do
@@ -243,28 +498,23 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
     end
   end
 
-  defp normalize_triggers(meta) do
-    cond do
-      is_list(meta["triggers"]) ->
-        List.flatten(meta["triggers"]) |> Enum.map(&to_string/1)
+  # ── Glob → Regex (gitignore-ish) ──────────────────────────────────────
 
-      is_list(meta["trigger_keywords"]) ->
-        List.flatten(meta["trigger_keywords"]) |> Enum.map(&to_string/1)
-
-      is_binary(meta["trigger"]) ->
-        meta["trigger"]
-        |> String.split(~r/[|,]/, trim: true)
-        |> Enum.map(&String.trim/1)
-
-      true ->
-        []
-    end
+  defp glob_to_regex(glob) do
+    body = translate_glob(String.graphemes(glob), [])
+    Regex.compile!("(?:^|/)" <> body <> "$")
   end
 
-  defp derive_category(relative_path) do
-    parts = Path.split(relative_path)
+  defp translate_glob([], acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+  defp translate_glob(["*", "*" | rest], acc), do: translate_glob(rest, [".*" | acc])
+  defp translate_glob(["*" | rest], acc), do: translate_glob(rest, ["[^/]*" | acc])
+  defp translate_glob(["?" | rest], acc), do: translate_glob(rest, ["[^/]" | acc])
+  defp translate_glob([c | rest], acc), do: translate_glob(rest, [Regex.escape(c) | acc])
 
-    case parts do
+  # ── Paths / categories ────────────────────────────────────────────────
+
+  defp derive_category(relative_path) do
+    case Path.split(relative_path) do
       [dir, _file] when dir in @known_skill_categories -> dir
       [_dir, "SKILL.md"] -> "standalone"
       _ -> "standalone"
@@ -281,8 +531,14 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
     end
   end
 
-  defp find_md_files(dir) do
-    Path.wildcard(Path.join(dir, "**/*.md"))
+  defp find_md_files(dir), do: Path.wildcard(Path.join(dir, "**/*.md"))
+
+  defp cwd_default do
+    OptimalSystemAgent.Workspace.Cwd.get()
+  rescue
+    _ -> File.cwd!()
+  catch
+    _, _ -> File.cwd!()
   end
 
   defp resolve_priv_skills_path do
@@ -300,7 +556,16 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
         Path.join(to_string(priv_dir), "skills")
     end
   rescue
-    _ ->
-      Path.join([File.cwd!(), "priv", "skills"])
+    _ -> Path.join([File.cwd!(), "priv", "skills"])
   end
+
+  # ── Convenience: touched-path helpers (delegate to SkillTouch) ─────────
+
+  @doc "Record a touched path for `paths`-glob lazy surfacing (delegates to SkillTouch)."
+  @spec record_touch(term(), String.t()) :: :ok
+  defdelegate record_touch(session_id, path), to: SkillTouch, as: :record
+
+  @doc "List paths touched this session (delegates to SkillTouch)."
+  @spec touched_paths(term()) :: [String.t()]
+  defdelegate touched_paths(session_id), to: SkillTouch, as: :list
 end

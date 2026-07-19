@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
+  alias OptimalSystemAgent.Agent.Loop.DoomLoop.Resample
   alias OptimalSystemAgent.Agent.Loop.Telemetry
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.Limits
@@ -637,6 +638,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Tool calls — execute in parallel and loop
   defp handle_result({:ok, %{content: content, tool_calls: tool_calls} = resp}, state, _context)
        when is_list(tool_calls) do
+    # Doom-loop resample snapshot: the loop state BEFORE this turn's assistant
+    # response (and its tool results) is appended. If a doom-loop is detected
+    # below, `Resample` rewinds to this snapshot to DISCARD the offending
+    # response and re-roll the turn, up to a bounded budget, before falling back
+    # to the existing halt behavior.
+    resample_snapshot = state
+
     state = %{state | iteration: state.iteration + 1}
 
     content =
@@ -752,8 +760,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # identical-call / absolute call-cap safety net, and so these calls count
       # toward total_tool_calls (DoomLoop.check increments it). Respect a halt.
       case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, state} -> {doom_message, state}
-        {:ok, state} -> {summary, state}
+        {:halt, doom_message, halted_state} ->
+          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
+
+        {:ok, state} ->
+          {summary, Map.put(state, :doom_resamples, 0)}
       end
     else
       Checkpoint.checkpoint_state(state)
@@ -771,10 +782,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       state = inject_post_tool_nudges(state, tool_calls)
 
       case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, state} ->
-          {doom_message, state}
+        {:halt, doom_message, halted_state} ->
+          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
 
         {:ok, state} ->
+          # Clean turn — reset the consecutive-resample budget so recovery
+          # attempts bound only a *stuck* stretch, not the session lifetime.
+          state = Map.put(state, :doom_resamples, 0)
+
           # Auto-mode: if the safety Guardian paused this session after N blocked
           # dangerous actions, halt the loop and surface a review prompt instead
           # of recursing into another unattended iteration.

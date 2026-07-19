@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.Tools.Registry.{Search, SkillLoader, SkillUsage}
+  alias OptimalSystemAgent.Tools.Registry.{Search, SkillLoader, SkillTouch, SkillUsage}
 
   defstruct builtin_tools: %{}, skills: %{}, tools: []
 
@@ -385,17 +385,27 @@ defmodule OptimalSystemAgent.Tools.Registry do
       skills_dir =
         Path.expand(Application.get_env(:optimal_system_agent, :skills_dir, "~/.osa/skills"))
 
+      # Progressive disclosure: skills declaring `paths:` globs stay hidden from
+      # the model-facing listing until a matching file is touched this session.
+      touched =
+        case Process.get(:osa_session_id) do
+          nil -> []
+          session_id -> SkillTouch.list(session_id)
+        end
+
       active =
-        Enum.reject(skills, fn {name, _skill} ->
-          File.exists?(Path.join([skills_dir, name, ".disabled"]))
+        skills
+        |> SkillLoader.list_for_model(touched)
+        |> Enum.reject(fn skill ->
+          File.exists?(Path.join([skills_dir, skill.name, ".disabled"]))
         end)
 
       if active == [] do
         nil
       else
         lines =
-          Enum.map_join(active, "\n", fn {name, skill} ->
-            "- **#{name}**: #{skill.description}"
+          Enum.map_join(active, "\n", fn skill ->
+            "- **#{skill.name}**: #{skill.description}"
           end)
 
         "## Custom Skills\n\nThe following skills are available:\n#{lines}"
@@ -444,7 +454,13 @@ defmodule OptimalSystemAgent.Tools.Registry do
         if remaining <= 0 do
           {acc, used}
         else
-          inst = skill[:instructions] |> to_string() |> String.trim()
+          # Progressive disclosure: the listing carries no body, so load the
+          # instruction body on demand only for skills whose triggers matched.
+          inst =
+            case SkillLoader.load_body(skill[:path]) do
+              {:ok, body} -> String.trim(body)
+              _ -> skill[:instructions] |> to_string() |> String.trim()
+            end
 
           if inst == "" do
             {acc, used}
@@ -523,6 +539,35 @@ defmodule OptimalSystemAgent.Tools.Registry do
     :persistent_term.get({__MODULE__, :skills}, %{}) |> Map.get(name)
   end
 
+  @doc """
+  Record a filesystem path touched this session for `paths`-glob skill surfacing.
+
+  Integration hook: call this whenever a file tool touches a path so that skills
+  gated behind `paths:` globs can surface in the model-facing listing. Delegates
+  to the session-scoped `SkillTouch` tracker.
+  """
+  @spec record_touched_path(term(), String.t()) :: :ok
+  def record_touched_path(session_id, path) do
+    SkillTouch.record(session_id, path)
+  end
+
+  @doc """
+  Load a skill's instruction body on demand (progressive disclosure).
+
+  The listing built by `load_skills/1` never carries bodies; use this when a
+  skill is actually invoked. Accepts a skill name or a full entry map.
+  """
+  @spec load_skill_body(String.t() | map()) :: {:ok, String.t()} | {:error, term()}
+  def load_skill_body(name) when is_binary(name) do
+    case get_skill(name) do
+      %{path: path} -> SkillLoader.load_body(path)
+      _ -> {:error, :not_found}
+    end
+  end
+
+  def load_skill_body(%{path: _} = entry), do: SkillLoader.load_body(entry.path)
+  def load_skill_body(_), do: {:error, :no_path}
+
   @doc "Return all loaded skills as a list."
   @spec list_skills() :: [map()]
   def list_skills do
@@ -583,6 +628,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
     )
 
     SkillUsage.init()
+
+    # Own the touched-path table on the long-lived Registry process so
+    # `paths`-glob lazy surfacing state survives for the life of the node.
+    SkillTouch.ensure_table()
 
     {:ok, %__MODULE__{builtin_tools: builtin_tools, skills: skills, tools: tools}}
   end
