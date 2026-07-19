@@ -49,6 +49,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       start_link/1          — GenServer lifecycle
       utilization/1         — context-window utilization percentage
       estimate_tokens/1     — token estimate for a string or message list
+      micro_compact/1       — P5 token-protected prune tier, standalone
+      format_for_summary/1  — P6 media-strip + tool-output-cap text formatter
   """
 
   use GenServer
@@ -433,58 +435,151 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
-  # Step 0: Micro-compact — truncate old tool results without LLM call.
-  # Keeps the last N tool results intact, truncates older ones.
-  # This is the cheapest possible compaction step.
-  @micro_compact_keep Application.compile_env(
-                        :optimal_system_agent,
-                        :micro_compact_keep_recent,
-                        5
-                      )
+  # ---------------------------------------------------------------------------
+  # P5: opencode-style token-protected prune tier (compaction.ts `prune`,
+  # PRUNE_PROTECT / PRUNE_MINIMUM / PRUNE_PROTECTED_TOOLS).
+  #
+  # Replaces the old "keep last N tool results BY COUNT, truncate the rest to
+  # 100 chars" heuristic with a non-LLM tier that walks the tool-result
+  # messages **newest-first**, accumulating a running token estimate of their
+  # (still-intact) output. Everything within `@compaction_prune_protect_tokens`
+  # (default 40_000, opencode's PRUNE_PROTECT) stays completely untouched.
+  # Once the running total crosses that budget, every OLDER tool result's
+  # output is erased (content replaced with a short marker noting how many
+  # tokens were reclaimed) — protected-tool names
+  # (`compaction_prune_protected_tools`, default mirrors opencode's
+  # `PRUNE_PROTECTED_TOOLS = ["skill"]` plus OSA's plan/task-tracking tools)
+  # are skipped entirely: never counted against the budget, never erased.
+  #
+  # Like opencode's `pruned > PRUNE_MINIMUM` gate, this only actually mutates
+  # anything when the tokens reclaimable by erasure exceed
+  # `@compaction_prune_minimum_tokens` (default 20_000) — a partial win below
+  # that gate isn't worth spending a compaction pass over.
+  # ---------------------------------------------------------------------------
+
+  @compaction_prune_protect_tokens_default 40_000
+  @compaction_prune_minimum_tokens_default 20_000
+  @compaction_prune_protected_tools_default [
+    "skill",
+    "use_skill",
+    "find_skill",
+    "save_skill",
+    "create_skill",
+    "list_skills",
+    "task_write",
+    "exit_plan_mode",
+    "enter_plan_mode"
+  ]
+
+  defp prune_protect_tokens,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :compaction_prune_protect_tokens,
+        @compaction_prune_protect_tokens_default
+      )
+
+  defp prune_minimum_tokens,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :compaction_prune_minimum_tokens,
+        @compaction_prune_minimum_tokens_default
+      )
+
+  defp prune_protected_tools,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :compaction_prune_protected_tools,
+        @compaction_prune_protected_tools_default
+      )
+      |> MapSet.new()
+
+  # Best-effort tool name for a tool-result message — mirrors the field
+  # fallback the old truncation path used (`:name`, then `:tool_call_id`).
+  defp tool_name_of(msg), do: Map.get(msg, :name, Map.get(msg, :tool_call_id, "tool"))
+
+  # Recognizes content already rewritten by a previous prune pass, so a
+  # message pruned on an earlier micro_compact run is never double-counted
+  # against the budget (its remaining text is a small fixed marker, not real
+  # tool output) nor re-added to `pruned_tokens` savings.
+  defp pruned_marker?(content) when is_binary(content),
+    do:
+      String.starts_with?(content, "[") and
+        String.contains?(content, "output pruned to reclaim context")
+
+  defp pruned_marker?(_), do: false
 
   @doc false
   defp apply_step(:micro_compact, annotated, system_msgs, _target) do
-    total = length(annotated)
+    protect_budget = prune_protect_tokens()
+    min_savings = prune_minimum_tokens()
+    protected = prune_protected_tools()
 
-    # Find indices of tool result messages (role == "tool")
-    tool_indices =
+    tool_entries_newest_first =
       annotated
       |> Enum.with_index()
       |> Enum.filter(fn {{msg, _imp}, _idx} ->
         safe_to_string(Map.get(msg, :role)) == "tool"
       end)
-      |> Enum.map(fn {_, idx} -> idx end)
+      |> Enum.reverse()
 
-    # Keep the last @micro_compact_keep tool results intact
-    truncate_indices =
-      if length(tool_indices) > @micro_compact_keep do
-        Enum.drop(tool_indices, -@micro_compact_keep) |> MapSet.new()
-      else
-        MapSet.new()
-      end
+    # Walk backward (newest tool result first). Protected-tool output is
+    # skipped entirely — never counted toward the protect budget, never
+    # erased. Everything else accumulates into `total`; once `total` exceeds
+    # `protect_budget` the tool result that crossed the line (and everything
+    # older) becomes a prune candidate.
+    {_total, prune_candidates, pruned_tokens} =
+      Enum.reduce(tool_entries_newest_first, {0, [], 0}, fn {{msg, _imp}, idx},
+                                                              {total, candidates, pruned} ->
+        if MapSet.member?(protected, tool_name_of(msg)) do
+          {total, candidates, pruned}
+        else
+          content = safe_to_string(Map.get(msg, :content))
 
-    if MapSet.size(truncate_indices) == 0 do
-      {annotated, system_msgs, :micro_compact}
-    else
+          # Already-pruned output costs ~0 tokens to re-estimate and must not
+          # be double-counted against the budget or re-flagged as savings.
+          if pruned_marker?(content) do
+            {total, candidates, pruned}
+          else
+            estimate = estimate_tokens(content)
+            new_total = total + estimate
+
+            if new_total <= protect_budget do
+              {new_total, candidates, pruned}
+            else
+              {new_total, [{idx, estimate} | candidates], pruned + estimate}
+            end
+          end
+        end
+      end)
+
+    if pruned_tokens > min_savings and prune_candidates != [] do
+      prune_map = Map.new(prune_candidates)
+
       compacted =
         annotated
         |> Enum.with_index()
         |> Enum.map(fn {{msg, imp}, idx} ->
-          if idx in truncate_indices do
-            content = safe_to_string(Map.get(msg, :content))
-            tool_name = Map.get(msg, :name, Map.get(msg, :tool_call_id, "tool"))
-            preview = String.slice(content, 0, 100)
+          case Map.fetch(prune_map, idx) do
+            {:ok, estimate} ->
+              tool_name = tool_name_of(msg)
 
-            truncated_content =
-              "[#{tool_name} result — #{preview}#{if String.length(content) > 100, do: "...", else: ""} (truncated)]"
+              pruned_content =
+                "[#{tool_name} output pruned to reclaim context — ~#{estimate} tokens erased. " <>
+                  "Re-run the tool if the original output is needed again.]"
 
-            {Map.put(msg, :content, truncated_content), imp * 0.5}
-          else
-            {msg, imp}
+              {Map.put(msg, :content, pruned_content), imp * 0.5}
+
+            :error ->
+              {msg, imp}
           end
         end)
 
       {compacted, system_msgs, :micro_compact}
+    else
+      {annotated, system_msgs, :micro_compact}
     end
   end
 
@@ -1366,12 +1461,39 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end)
   end
 
-  @doc false
-  defp format_for_summary(messages) do
+  # ---------------------------------------------------------------------------
+  # P6: media-strip + tool-output cap inside the summarization call (opencode
+  # compaction.ts `stripMedia: true` / `toolOutputMaxChars: 2_000`).
+  #
+  # Applied to EVERY summarization prompt assembly point (`call_summary_llm`,
+  # `call_key_facts_llm`, `summarize_chunk` — all three funnel through this
+  # function), so a media-heavy history can never overflow the summarizer's
+  # own context window the way it could when raw base64 image payloads were
+  # JSON-encoded straight into the prompt by `safe_to_string/1`.
+  # ---------------------------------------------------------------------------
+
+  @tool_output_max_chars 2_000
+
+  @doc """
+  Formats a message list into the plain-text block fed to summarization LLM
+  calls, with media stripped to `[Attached <type>]` placeholders and tool
+  output capped at `@tool_output_max_chars` (P6). Public (rather than `defp`)
+  so it is directly unit-testable — mirrors `micro_compact/1`'s exposure of
+  an internal pipeline step for the same reason.
+  """
+  @spec format_for_summary([map()]) :: String.t()
+  def format_for_summary(messages) do
     messages
     |> Enum.map(fn msg ->
       role = safe_to_string(Map.get(msg, :role, "unknown"))
-      content = safe_to_string(Map.get(msg, :content))
+      content = strip_media_content(Map.get(msg, :content))
+
+      content =
+        if role == "tool" do
+          cap_tool_output(content)
+        else
+          content
+        end
 
       tool_info =
         case Map.get(msg, :tool_calls) do
@@ -1393,6 +1515,64 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end)
     |> Enum.join("\n")
   end
+
+  # Strips images/media from message content, replacing each media block with
+  # a `[Attached <type>]` text placeholder — same placeholder shape opencode's
+  # overflow `replay` path uses (`[Attached ${mime}: ${filename}]`), so the
+  # LEAD's react_loop media-replay hook can mirror this format exactly.
+  #
+  # Plain string content passes through untouched (there is no structured
+  # media to strip). List content (multimodal blocks, e.g. Anthropic-style
+  # `%{"type" => "image", "source" => %{...}}` — see `ImageBudget`) has each
+  # media block collapsed to its placeholder and each text block extracted;
+  # any other shape falls back to `safe_to_string/1`.
+  @doc false
+  defp strip_media_content(content) when is_binary(content), do: content
+  defp strip_media_content(nil), do: ""
+
+  defp strip_media_content(content) when is_list(content) do
+    content
+    |> Enum.map(&strip_media_block/1)
+    |> Enum.join("\n")
+  end
+
+  defp strip_media_content(content), do: safe_to_string(content)
+
+  @media_types ~w(image video audio file)
+
+  defp strip_media_block(block) when is_map(block) do
+    type = block_type(block)
+
+    cond do
+      type in @media_types -> "[Attached #{type}]"
+      type == "text" -> block_text(block)
+      true -> safe_to_string(block)
+    end
+  end
+
+  defp strip_media_block(block), do: safe_to_string(block)
+
+  defp block_type(block), do: to_string(Map.get(block, "type", Map.get(block, :type, "")))
+
+  defp block_text(block),
+    do: safe_to_string(Map.get(block, "text", Map.get(block, :text, "")))
+
+  # Caps a (already media-stripped) tool-result string at
+  # `@tool_output_max_chars`, matching opencode's `toolOutputMaxChars`. Only
+  # applied to `role: "tool"` content — assistant/user prose is left to the
+  # existing zone/importance compression to size down.
+  @doc false
+  defp cap_tool_output(content) when is_binary(content) do
+    if String.length(content) > @tool_output_max_chars do
+      truncated = String.slice(content, 0, @tool_output_max_chars)
+      omitted = String.length(content) - @tool_output_max_chars
+      "#{truncated}\n[... #{omitted} more characters truncated for summarization]"
+    else
+      content
+    end
+  end
+
+  defp cap_tool_output(content), do: content
 
   @doc false
   defp extract_topics(messages) do

@@ -31,6 +31,9 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
   defp user(content), do: msg("user", content)
   defp asst(content), do: msg("assistant", content)
 
+  defp tool_msg(name, content, id),
+    do: %{role: "tool", content: content, tool_call_id: id, name: name}
+
   # Force the pipeline into the deterministic "background" severity tier
   # (compaction_warn=0.0 guarantees it always fires; aggressive/emergency are
   # pushed above 1.0 so a large single-run heuristic-token ratio never
@@ -575,6 +578,172 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
     after
       Application.delete_env(:optimal_system_agent, :compaction_preserve_recent_tokens)
       clear_severity_env()
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # P5 — token-protected prune tier (opencode compaction.ts `prune`:
+  # PRUNE_PROTECT 40k, PRUNE_MINIMUM 20k, PRUNE_PROTECTED_TOOLS)
+  # ---------------------------------------------------------------------------
+
+  describe "P5 — token-protected prune tier (micro_compact/1)" do
+    setup do
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :compaction_prune_protect_tokens)
+        Application.delete_env(:optimal_system_agent, :compaction_prune_minimum_tokens)
+        Application.delete_env(:optimal_system_agent, :compaction_prune_protected_tools)
+      end)
+
+      :ok
+    end
+
+    test "protects the newest ~N-token window of tool output and erases older tool output" do
+      filler = String.duplicate("word ", 50)
+      per_tool_tokens = Compactor.estimate_tokens(filler <> "MARKER")
+
+      # Protect budget fits exactly the newest two tool results.
+      Application.put_env(
+        :optimal_system_agent,
+        :compaction_prune_protect_tokens,
+        per_tool_tokens * 2 + 5
+      )
+
+      Application.put_env(:optimal_system_agent, :compaction_prune_minimum_tokens, 10)
+
+      messages = [
+        user("q1"),
+        tool_msg("shell", filler <> "OLD1_MARKER", "t1"),
+        user("q2"),
+        tool_msg("shell", filler <> "OLD2_MARKER", "t2"),
+        user("q3"),
+        tool_msg("shell", filler <> "OLD3_MARKER", "t3"),
+        user("q4"),
+        tool_msg("shell", filler <> "NEW1_MARKER", "t4"),
+        user("q5"),
+        tool_msg("shell", filler <> "NEW2_MARKER", "t5")
+      ]
+
+      result = Compactor.micro_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      assert Enum.any?(contents, &String.contains?(&1, "NEW1_MARKER")),
+             "the newest-window tool output must survive verbatim"
+
+      assert Enum.any?(contents, &String.contains?(&1, "NEW2_MARKER")),
+             "the newest-window tool output must survive verbatim"
+
+      for marker <- ["OLD1_MARKER", "OLD2_MARKER", "OLD3_MARKER"] do
+        refute Enum.any?(contents, &String.contains?(&1, marker)),
+               "#{marker} is outside the protect window and should have been erased"
+      end
+
+      pruned_count =
+        Enum.count(contents, &String.contains?(&1, "output pruned to reclaim context"))
+
+      assert pruned_count == 3
+    end
+
+    test "never erases output from a protected tool, even outside the protect window" do
+      filler = String.duplicate("word ", 50)
+      per_tool_tokens = Compactor.estimate_tokens(filler <> "MARKER")
+
+      Application.put_env(:optimal_system_agent, :compaction_prune_protect_tokens, per_tool_tokens)
+      Application.put_env(:optimal_system_agent, :compaction_prune_minimum_tokens, 10)
+      Application.put_env(:optimal_system_agent, :compaction_prune_protected_tools, ["skill"])
+
+      messages = [
+        user("q1"),
+        tool_msg("skill", filler <> "PROTECTED_MARKER", "t1"),
+        user("q2"),
+        tool_msg("shell", filler <> "OLD_MARKER", "t2"),
+        user("q3"),
+        tool_msg("shell", filler <> "NEWEST_MARKER", "t3")
+      ]
+
+      result = Compactor.micro_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      assert Enum.any?(contents, &String.contains?(&1, "PROTECTED_MARKER")),
+             "a protected tool's output must never be erased regardless of age"
+
+      refute Enum.any?(contents, &String.contains?(&1, "OLD_MARKER")),
+             "a non-protected tool outside the budget should still be pruned"
+    end
+
+    test "does nothing when reclaimable tokens are below the minimum-savings gate" do
+      filler = String.duplicate("word ", 50)
+
+      # Protect budget of 0 makes everything a prune candidate, but the
+      # minimum-savings gate is set far above what these few messages could
+      # ever reclaim — so the pass must be a no-op.
+      Application.put_env(:optimal_system_agent, :compaction_prune_protect_tokens, 0)
+      Application.put_env(:optimal_system_agent, :compaction_prune_minimum_tokens, 1_000_000)
+
+      messages = [
+        user("q1"),
+        tool_msg("shell", filler <> "KEEP1_MARKER", "t1"),
+        user("q2"),
+        tool_msg("shell", filler <> "KEEP2_MARKER", "t2")
+      ]
+
+      result = Compactor.micro_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      assert Enum.any?(contents, &String.contains?(&1, "KEEP1_MARKER"))
+      assert Enum.any?(contents, &String.contains?(&1, "KEEP2_MARKER"))
+      refute Enum.any?(contents, &String.contains?(&1, "output pruned to reclaim context"))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # P6 — media-strip + tool-output cap inside the summary call (opencode
+  # compaction.ts `stripMedia: true` / `toolOutputMaxChars: 2_000`)
+  # ---------------------------------------------------------------------------
+
+  describe "P6 — media-strip + tool-output cap (format_for_summary/1)" do
+    test "strips image/media blocks to [Attached <type>] placeholders" do
+      fake_base64 = String.duplicate("QUJDRA==", 500)
+
+      messages = [
+        %{
+          role: "tool",
+          name: "screenshot",
+          tool_call_id: "t1",
+          content: [
+            %{"type" => "text", "text" => "TEXT_MARKER before the image"},
+            %{"type" => "image", "source" => %{"data" => fake_base64, "media_type" => "image/png"}}
+          ]
+        }
+      ]
+
+      formatted = Compactor.format_for_summary(messages)
+
+      assert String.contains?(formatted, "TEXT_MARKER before the image")
+      assert String.contains?(formatted, "[Attached image]")
+      refute String.contains?(formatted, fake_base64),
+             "raw media payload must never reach the summarization prompt"
+    end
+
+    test "caps tool output at ~2000 chars before it reaches the summarization prompt" do
+      long_output = String.duplicate("x", 5_000)
+      messages = [%{role: "tool", name: "shell", tool_call_id: "t1", content: long_output}]
+
+      formatted = Compactor.format_for_summary(messages)
+
+      assert String.length(formatted) < 2_500,
+             "tool output must be capped well below its original 5_000-char length"
+
+      assert String.contains?(formatted, "truncated")
+    end
+
+    test "does not cap non-tool (assistant/user) message content" do
+      long_content = String.duplicate("y", 5_000)
+      messages = [asst(long_content)]
+
+      formatted = Compactor.format_for_summary(messages)
+
+      assert String.length(formatted) >= 5_000,
+             "only role: tool content is capped by the summarization formatter"
     end
   end
 
