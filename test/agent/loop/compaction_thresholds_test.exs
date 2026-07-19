@@ -23,6 +23,35 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholdsTest do
     assert T.compact_at(cw) == trunc(cw * 0.75)
   end
 
+  test "used_percent measures against the effective window (CC parity)" do
+    cw = 200_000
+    # Effective window is 180k, so half-full-of-effective reads 50%.
+    assert T.used_percent(90_000, cw) == 50.0
+    # Empty session reads 0%.
+    assert T.used_percent(0, cw) == 0.0
+    # At the auto-compact threshold the meter should read ~93% (compact_at is one
+    # 13k buffer below the 180k effective window), NOT ~84% (against raw 200k).
+    pct_at_compact = T.used_percent(T.compact_at(cw), cw)
+    assert_in_delta pct_at_compact, 92.8, 0.2
+    assert pct_at_compact > 90.0
+  end
+
+  test "used_percent clamps over-full and guards bad input" do
+    # A transient over-count never renders above 100%.
+    assert T.used_percent(500_000, 200_000) == 100.0
+    # Zero / non-positive window degrades to 0.0 rather than dividing by zero.
+    assert T.used_percent(1_000, 0) == 0.0
+    assert T.used_percent(-5, 200_000) == 0.0
+  end
+
+  test "used_percent on a tiny local window falls back to the raw window" do
+    # effective_window(8_000) is negative, so the denominator falls back to the
+    # raw window and stays aligned with the 75% ratio-based compaction fallback.
+    cw = 8_000
+    assert T.used_percent(4_000, cw) == 50.0
+    assert T.used_percent(T.compact_at(cw), cw) == 75.0
+  end
+
   test "warning_state classifies bands" do
     cw = 200_000
 

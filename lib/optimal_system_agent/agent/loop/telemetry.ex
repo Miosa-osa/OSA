@@ -17,14 +17,26 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   """
   @spec emit_context_pressure(map()) :: :ok
   def emit_context_pressure(state) do
-    max_tok = OptimalSystemAgent.Providers.Registry.context_window(state.model)
+    # Provider-aware window: for local providers (Ollama/LM Studio/llama.cpp) the
+    # usable window is min(config num_ctx, trained window), not the catalog's
+    # trained size. `effective_context_window/2` resolves that; for hosted
+    # providers it is identical to the trained `context_window/1`.
+    max_tok = provider_context_window(state)
 
+    # Actual current usage: prefer the provider-reported input tokens; when the
+    # provider does not return usage (glm/Ollama) fall back to the char/word
+    # estimate so the meter reflects real occupancy instead of sticking at 0.
     estimated =
       if state.last_input_tokens > 0,
         do: state.last_input_tokens,
         else: OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
 
-    utilization = if max_tok > 0, do: Float.round(estimated / max_tok * 100, 1), else: 0.0
+    # Percent is measured against the EFFECTIVE window (window - output reserve),
+    # Claude Code parity, so "N% used" lines up with the auto-compact threshold.
+    utilization =
+      if max_tok > 0,
+        do: OptimalSystemAgent.Agent.Loop.CompactionThresholds.used_percent(estimated, max_tok),
+        else: 0.0
 
     warning =
       if is_integer(max_tok) and max_tok > 0 do
@@ -74,6 +86,43 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   rescue
     e -> Logger.debug("emit_context_pressure failed: #{inspect(e)}")
   end
+
+  # Resolve the usable context window for the state's model + provider. Falls
+  # back to the trained window (and 0 on total failure) so a provider lookup
+  # miss never crashes the telemetry path.
+  @spec provider_context_window(map()) :: non_neg_integer()
+  defp provider_context_window(state) do
+    alias OptimalSystemAgent.Providers.Registry
+
+    model = Map.get(state, :model)
+    provider = normalize_provider(Map.get(state, :provider))
+
+    cond do
+      is_nil(model) ->
+        0
+
+      is_nil(provider) ->
+        Registry.context_window(model)
+
+      true ->
+        case Registry.effective_context_window(model, provider) do
+          cw when is_integer(cw) and cw > 0 -> cw
+          _ -> Registry.context_window(model)
+        end
+    end
+  rescue
+    _ -> 0
+  end
+
+  defp normalize_provider(p) when is_atom(p) and not is_nil(p), do: p
+
+  defp normalize_provider(p) when is_binary(p) do
+    String.to_existing_atom(p)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp normalize_provider(_), do: nil
 
   @doc """
   Estimate token count for session introspection (`:get_state` response).

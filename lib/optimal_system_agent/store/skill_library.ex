@@ -3,6 +3,11 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
   Voyager-style skill library — a persistent store of verified, reusable
   procedures that accumulate across sessions and projects.
 
+  This is the STORE stage of the Skills subsystem (see
+  `OptimalSystemAgent.Skills` for the full capture -> store -> rank -> surface ->
+  invoke design). Persistence only: admission policy is delegated to
+  `Skills.Capture` and relevance ranking to `Skills.Ranker`.
+
   Unlike the SKILL.md skills discovered by `Tools.Registry` (author-curated,
   shipped with the agent), skill-library entries are *learned at runtime*: the
   agent records a procedure it has verified works, tags it, and later retrieves
@@ -33,6 +38,8 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Skills.Capture
+  alias OptimalSystemAgent.Skills.Ranker
 
   @type skill :: %{optional(String.t()) => term()}
 
@@ -52,14 +59,13 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
     attrs = stringify_keys(attrs)
     title = attrs["title"] |> to_string() |> String.trim()
 
-    cond do
-      title == "" ->
-        {:error, "skill requires a non-empty title"}
+    # CAPTURE gate: admit only high-signal, reusable procedures. Trivial
+    # one-offs are rejected before they can pollute the store or ranking.
+    case Capture.validate(attrs) do
+      {:error, reason} ->
+        {:error, reason}
 
-      to_string(attrs["body"] || "") |> String.trim() == "" ->
-        {:error, "skill requires a non-empty body (the procedure/steps)"}
-
-      true ->
+      :ok ->
         slug = normalize_slug(attrs["slug"] || title)
         existing = get_skill(slug)
         now = now_iso()
@@ -83,8 +89,10 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
   def save_skill(_), do: {:error, "skill attrs must be a map"}
 
   @doc """
-  Find skills relevant to a free-text query, ranked by a simple keyword /
-  substring match against title, description, when_to_use, and tags.
+  Find skills relevant to a free-text query. Delegates ordering to
+  `Skills.Ranker`, which scores by fuzzy field-weighted relevance to the query
+  and then boosts by recency and usage. Relevance is the gate — unrelated skills
+  never surface.
 
   Options:
     * `:limit` — max results (default 5)
@@ -94,19 +102,7 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
 
   def find_skills(query, opts) when is_binary(query) do
     limit = Keyword.get(opts, :limit, 5)
-    query_down = String.downcase(String.trim(query))
-
-    keywords =
-      query_down
-      |> String.split(~r/\s+/, trim: true)
-      |> Enum.reject(&(String.length(&1) < 2))
-
-    list_skills()
-    |> Enum.map(fn skill -> {skill, score(skill, query_down, keywords)} end)
-    |> Enum.filter(fn {_skill, score} -> score > 0.0 end)
-    |> Enum.sort_by(fn {_skill, score} -> score end, :desc)
-    |> Enum.take(limit)
-    |> Enum.map(fn {skill, _score} -> skill end)
+    Ranker.rank(list_skills(), query, limit: limit)
   end
 
   def find_skills(_, _), do: []
@@ -203,34 +199,6 @@ defmodule OptimalSystemAgent.Store.SkillLibrary do
     e ->
       Logger.warning("[skill_library] write failed for #{slug}: #{Exception.message(e)}")
       {:error, Exception.message(e)}
-  end
-
-  @spec score(skill(), String.t(), [String.t()]) :: float()
-  defp score(skill, query_down, keywords) do
-    haystacks = [
-      {String.downcase(to_string(skill["title"])), 3.0},
-      {String.downcase(to_string(skill["when_to_use"])), 2.0},
-      {String.downcase(to_string(skill["description"])), 1.5},
-      {skill["tags"] |> List.wrap() |> Enum.join(" ") |> String.downcase(), 2.5},
-      {String.downcase(to_string(skill["body"])), 0.5}
-    ]
-
-    phrase_bonus =
-      Enum.reduce(haystacks, 0.0, fn {text, weight}, acc ->
-        if query_down != "" and String.contains?(text, query_down), do: acc + weight, else: acc
-      end)
-
-    keyword_score =
-      Enum.reduce(keywords, 0.0, fn kw, acc ->
-        hit =
-          Enum.reduce(haystacks, 0.0, fn {text, weight}, inner ->
-            if String.contains?(text, kw), do: max(inner, weight), else: inner
-          end)
-
-        acc + hit
-      end)
-
-    phrase_bonus + keyword_score
   end
 
   defp emit_saved(skill) do

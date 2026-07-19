@@ -643,23 +643,31 @@ impl Component for StatusBar {
         // Braille context-usage bar + percentage.
         spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
         let (bar_filled, bar_empty) = braille_bar(self.context_utilization, 8);
+        // Severity color grades the meter as it approaches the auto-compact
+        // threshold (CC parity): primary < 75%, amber >= 75%, red >= 90% OR once
+        // the backend flags the low-context warning band (`context_low`, keyed on
+        // the real `warn_at` threshold). Both the filled bar and the percentage
+        // share the color so the statusline telegraphs pressure at a glance.
+        let ctx_color = if self.context_low {
+            theme.colors.error
+        } else {
+            theme.context_bar_color(self.context_utilization)
+        };
         if !bar_filled.is_empty() {
-            spans.push(Span::styled(bar_filled, theme.ctx_bar_fill()));
+            spans.push(Span::styled(bar_filled, Style::default().fg(ctx_color)));
         }
         if !bar_empty.is_empty() {
             spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
         }
         let pct = (self.context_utilization * 100.0).round() as u32;
-        // WS12 — once the backend flags low context, the usage % turns red so
-        // the statusline telegraphs pressure even before the hint line is read.
         let pct_style = if self.context_low {
-            Style::default()
-                .fg(theme.colors.error)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(ctx_color).add_modifier(Modifier::BOLD)
         } else {
-            theme.progress_label()
+            Style::default().fg(ctx_color)
         };
-        spans.push(Span::styled(format!(" {}%", pct), pct_style));
+        // "N% ctx" — labelled like CC's "N% context used" so the number reads as
+        // context occupancy (measured against the effective window server-side).
+        spans.push(Span::styled(format!(" {}% ctx", pct), pct_style));
 
         // Decorative accent.
         spans.push(Span::styled(" \u{2606}", theme.status_glyph())); // ☆

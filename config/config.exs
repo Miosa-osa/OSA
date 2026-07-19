@@ -100,6 +100,11 @@ config :optimal_system_agent,
   # Skills directory (SKILL.md files)
   skills_dir: Path.expand("~/.osa/skills"),
 
+  # Auto-generate SKILL.md files from recurring SICA patterns. OFF by default:
+  # a recurring tool outcome is telemetry, not a reusable skill. Even when true,
+  # every candidate must pass Memory.SkillGenerator.skill_worthy?/1.
+  auto_skill_generation: false,
+
   # Episodic memory directory (durable task-attempt episodes, JSON per session)
   episodic_dir: Path.expand("~/.osa/memory/episodic"),
 

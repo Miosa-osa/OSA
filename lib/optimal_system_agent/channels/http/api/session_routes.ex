@@ -303,7 +303,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
       case SessionManager.get_state(session_id) do
         {:ok, state} ->
-          max_tokens = Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+          # Ceiling is the model's REAL usable window (provider-aware), not a
+          # hardcoded 128k config default, so the breakdown agrees with the
+          # status-bar meter. Prefer the window resolved on the live state
+          # (`effective_context_window`); fall back to a Registry lookup, then
+          # the legacy config default only if both are unavailable.
+          max_tokens = context_ceiling(state)
           total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
           static_tokens = OptimalSystemAgent.Soul.static_token_count()
           conversation_tokens = max(total_tokens - static_tokens, 0)
@@ -331,6 +336,29 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       _ ->
         json_error(conn, 500, "context_error", "Failed to retrieve context stats")
     end
+  end
+
+  # Usable context window for the /context breakdown ceiling. Prefers the window
+  # already resolved on the live session, then a provider-aware Registry lookup,
+  # then the legacy config default — never crashes on a lookup miss.
+  defp context_ceiling(state) do
+    alias OptimalSystemAgent.Providers.Registry
+
+    cond do
+      is_integer(state[:effective_context_window]) and state[:effective_context_window] > 0 ->
+        state[:effective_context_window]
+
+      is_binary(state[:model]) ->
+        case Registry.effective_context_window(state[:model], state[:provider]) do
+          cw when is_integer(cw) and cw > 0 -> cw
+          _ -> Registry.context_window(state[:model])
+        end
+
+      true ->
+        Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    end
+  rescue
+    _ -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
   end
 
   # ── GET /sessions/:id/messages ─────────────────────────────────────

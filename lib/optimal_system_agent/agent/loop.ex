@@ -758,7 +758,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     snap = %{
       session_id: state.session_id,
       iteration: state.iteration,
-      tokens_used: Telemetry.estimate_tokens(state),
+      tokens_used: used_context_tokens(state),
       tools_called: state.last_meta[:tools_used] || [],
       status: state.status,
       started_at: state.started_at,
@@ -1281,6 +1281,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # --- Helpers ---
 
   defp via(session_id), do: {:via, Registry, {OptimalSystemAgent.SessionRegistry, session_id}}
+
+  # Current context occupancy for `get_state` / the `/context` breakdown: prefer
+  # the provider-reported input tokens (real usage) and fall back to the
+  # char/word estimate when the provider returns none (glm/Ollama), matching the
+  # status-bar context-pressure telemetry rather than always estimating.
+  defp used_context_tokens(state) do
+    case Map.get(state, :last_input_tokens, 0) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> Telemetry.estimate_tokens(state)
+    end
+  end
 
   # permission_mode (CC-parity): the session's starting mode when none is passed
   # explicitly. Delegates to Permissions.default_mode/0 — the single source of

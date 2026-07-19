@@ -245,10 +245,17 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     with path when is_binary(path) <- touched_path(tool_call),
          abs <- Path.expand(path) do
       root = working_dir(state)
+      query = recent_query(state)
 
       abs
       |> discover_skill_files(root)
       |> Enum.filter(fn skill_path -> claim(session_id, {:skill, skill_path}) end)
+      # Read each description once, relevance-rank against the current task, THEN
+      # cap. The @max_skill_reminders cap is a flood floor; ranking is what makes
+      # the surfaced few the RELEVANT few, not just the nearest on disk. When
+      # there is no query the sort is stable, preserving closest-dir order.
+      |> Enum.map(fn skill_path -> {skill_path, skill_description(skill_path)} end)
+      |> rank_skill_candidates(query)
       |> Enum.take(@max_skill_reminders)
       |> Enum.map(&format_skill_reminder/1)
     else
@@ -256,6 +263,40 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     end
   rescue
     _ -> []
+  end
+
+  # Stable relevance-sort of {path, desc} candidates against the current task.
+  # A blank query yields all-zero scores, so the stable sort leaves the
+  # closest-dir order (from discover_skill_files) intact.
+  defp rank_skill_candidates(candidates, query) do
+    candidates
+    |> Enum.map(fn {skill_path, desc} ->
+      name = skill_path |> Path.dirname() |> Path.basename()
+      score = OptimalSystemAgent.Skills.Ranker.relevance("#{name} #{desc}", query)
+      {skill_path, desc, score}
+    end)
+    |> Enum.sort_by(fn {_path, _desc, score} -> score end, :desc)
+    |> Enum.map(fn {skill_path, desc, _score} -> {skill_path, desc} end)
+  rescue
+    _ -> candidates
+  end
+
+  # Best-effort latest user message text, used only to relevance-rank skill
+  # hints. Nil/blank when unavailable — ranking then degrades to closest-dir.
+  defp recent_query(state) do
+    (Map.get(state, :messages) || [])
+    |> Enum.reverse()
+    |> Enum.find_value("", fn msg ->
+      if to_string(Map.get(msg, :role)) == "user" do
+        case Map.get(msg, :content) do
+          c when is_binary(c) -> c
+          _ -> nil
+        end
+      end
+    end)
+    |> to_string()
+  rescue
+    _ -> ""
   end
 
   # The path a filesystem tool operated on, or nil for non-path tools.
@@ -336,14 +377,13 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     _ -> false
   end
 
-  defp format_skill_reminder(skill_path) do
+  defp format_skill_reminder({skill_path, desc}) do
     name =
       skill_path
       |> Path.dirname()
       |> Path.basename()
 
-    desc = skill_description(skill_path)
-    tail = if desc == "", do: "", else: " — #{desc}"
+    tail = if desc == "", do: "", else: " - #{desc}"
 
     "A skill \"#{name}\" is available near a path you just accessed" <>
       tail <>

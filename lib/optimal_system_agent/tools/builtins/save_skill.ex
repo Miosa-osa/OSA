@@ -30,8 +30,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SaveSkill do
   def description do
     "Save a verified, reusable procedure to the persistent skill library so it " <>
       "can be reused in future sessions and projects. Call this only AFTER you have " <>
-      "confirmed the procedure actually works. Provide a clear title, a description, " <>
-      "when_to_use (the trigger), and the body (the concrete steps or code)."
+      "confirmed the procedure actually works, and only for GENERALISABLE know-how " <>
+      "worth recalling later — not trivial one-offs, and not a paraphrase of the title. " <>
+      "A skill is rejected unless it has a descriptive title, a real when_to_use trigger " <>
+      "(so it can be matched to future tasks), and a substantive body of concrete steps. " <>
+      "Provide title, description, when_to_use (the trigger), and body (the steps or code)."
   end
 
   @impl true

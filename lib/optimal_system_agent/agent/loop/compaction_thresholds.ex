@@ -69,6 +69,35 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   end
 
   @doc """
+  Context used as a percent of the *usable* (effective) window — the number the
+  status bar shows.
+
+  Claude Code parity: the displayed "N% context used" is measured against the
+  effective window (`context_window - output_reserve`), not the raw model window,
+  so the meter reads ~93% exactly when auto-compact fires (`compact_at` sits one
+  `@autocompact_buffer` below the effective window). Returns a float 0.0..100.0,
+  clamped so a transient over-count never renders above 100%.
+
+  For tiny local windows where the reserve math collapses (effective_window would
+  be zero or negative), the raw window is used as the denominator instead, which
+  keeps the meter aligned with the ratio-based compaction fallback (compact at
+  75%).
+  """
+  @spec used_percent(non_neg_integer(), pos_integer()) :: float()
+  def used_percent(tokens, cw)
+      when is_integer(tokens) and tokens >= 0 and is_integer(cw) and cw > 0 do
+    denom =
+      case effective_window(cw) do
+        eff when eff > 0 -> eff
+        _ -> cw
+      end
+
+    Float.round(min(tokens / denom * 100, 100.0), 1)
+  end
+
+  def used_percent(_, _), do: 0.0
+
+  @doc """
   Classify current token usage against the thresholds.
 
   Returns `%{percent_left, above_warning, above_compact, at_blocking_limit}` —
