@@ -74,6 +74,27 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     :exit, _ -> {:error, "FSCheckpoint server unavailable"}
   end
 
+  @doc """
+  Compute an additions/deletions/files-changed summary between two shadow-repo
+  commits, mirroring opencode `snapshot.diff` used by `/rewind` diff summaries.
+
+  `from_commit` and `to_commit` default `to_commit` to the shadow repo's
+  current `HEAD`. Binary files are counted toward `files` but contribute 0 to
+  `additions`/`deletions` (git reports `-`/`-` for them in `--numstat`).
+  """
+  @spec diff_stat(String.t() | nil, String.t()) ::
+          {:ok, %{additions: integer(), deletions: integer(), files: integer(), paths: [String.t()]}}
+          | {:error, String.t()}
+  def diff_stat(from_commit, to_commit \\ "HEAD")
+
+  def diff_stat(nil, _to_commit), do: {:error, "no code snapshot to diff from"}
+
+  def diff_stat(from_commit, to_commit) when is_binary(from_commit) do
+    GenServer.call(__MODULE__, {:diff_stat, from_commit, to_commit})
+  catch
+    :exit, _ -> {:error, "FSCheckpoint server unavailable"}
+  end
+
   # ── Server callbacks ──────────────────────────────────────────────────
 
   @impl true
@@ -130,6 +151,12 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   @impl true
   def handle_call({:restore_to, commit}, _from, state) do
     result = do_restore_to(state.repo_path, commit)
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:diff_stat, from_commit, to_commit}, _from, state) do
+    result = do_diff_stat(state.repo_path, from_commit, to_commit)
     {:reply, result, state}
   end
 
@@ -371,6 +398,56 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
          ) do
       {output, 0} -> {:ok, output}
       {err, _} -> {:error, "Failed to show diff: #{err}"}
+    end
+  end
+
+  # ── Private: diff_stat (numstat summary, for /rewind diff) ────────────
+
+  defp do_diff_stat(repo_path, from_commit, to_commit) do
+    with {:ok, from_hash} <- rev_parse(repo_path, from_commit),
+         {:ok, to_hash} <- rev_parse(repo_path, to_commit) do
+      case System.cmd("git", ["diff", "--numstat", from_hash, to_hash],
+             cd: repo_path,
+             stderr_to_stdout: true
+           ) do
+        {output, 0} ->
+          {additions, deletions, paths} =
+            output
+            |> String.trim()
+            |> String.split("\n", trim: true)
+            |> Enum.reduce({0, 0, []}, fn line, {add_acc, del_acc, paths_acc} ->
+              case String.split(line, "\t", parts: 3) do
+                [add, del, path] ->
+                  {add_acc + numstat_int(add), del_acc + numstat_int(del), [path | paths_acc]}
+
+                _ ->
+                  {add_acc, del_acc, paths_acc}
+              end
+            end)
+
+          paths = Enum.reverse(paths)
+          {:ok, %{additions: additions, deletions: deletions, files: length(paths), paths: paths}}
+
+        {err, _} ->
+          {:error, "Failed to diff checkpoints: #{err}"}
+      end
+    end
+  end
+
+  defp rev_parse(repo_path, commit) do
+    case System.cmd("git", ["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
+      {hash, 0} -> {:ok, String.trim(hash)}
+      {_, _} -> {:error, "Commit '#{commit}' not found in shadow repo"}
+    end
+  end
+
+  # git --numstat reports "-" for binary files; count the file but not lines.
+  defp numstat_int("-"), do: 0
+
+  defp numstat_int(str) do
+    case Integer.parse(str) do
+      {n, _} -> n
+      :error -> 0
     end
   end
 

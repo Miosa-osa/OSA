@@ -123,6 +123,63 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.RewindRoutesTest do
     end
   end
 
+  describe "POST /to and POST /unrevert" do
+    test "atomically rewinds, returns a diff, and can be undone", %{session: session, checkpoint_id: id} do
+      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => id, "scope" => "conversation"})
+      assert conn.status == 200
+      body = decode(conn)
+      assert body["scope"] == "conversation"
+      assert body["message_count"] == 1
+      assert is_map(body["diff"])
+      assert is_binary(body["undo_id"])
+
+      conn = conn(:get, "/#{session}/last") |> call()
+      assert conn.status == 200
+      assert decode(conn)["last_rewind"]["target_id"] == id
+
+      conn = post_json("/unrevert", %{"session_id" => session})
+      assert conn.status == 200
+      assert decode(conn)["scope"] == "both"
+
+      conn = post_json("/unrevert", %{"session_id" => session})
+      assert conn.status == 404
+      assert decode(conn)["error"] == "no_rewind_to_undo"
+    end
+
+    test "404 for unknown checkpoint on /to", %{session: session} do
+      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => "missing", "scope" => "both"})
+      assert conn.status == 404
+    end
+
+    test "400 on invalid scope for /to", %{session: session, checkpoint_id: id} do
+      conn = post_json("/to", %{"session_id" => session, "checkpoint_id" => id, "scope" => "bogus"})
+      assert conn.status == 400
+    end
+
+    test "400 when /unrevert missing session_id" do
+      conn = post_json("/unrevert", %{})
+      assert conn.status == 400
+    end
+  end
+
+  describe "GET /:session_id/diff/:id" do
+    test "returns a diff summary", %{session: session, checkpoint_id: id} do
+      conn = conn(:get, "/#{session}/diff/#{id}") |> call()
+      assert conn.status == 200
+      diff = decode(conn)["diff"]
+      assert diff["files"] == 0
+      assert is_map(diff["messages"])
+    end
+  end
+
+  describe "GET /:session_id/last" do
+    test "returns nil when nothing has been rewound", %{session: session} do
+      conn = conn(:get, "/#{session}/last") |> call()
+      assert conn.status == 200
+      assert decode(conn)["last_rewind"] == nil
+    end
+  end
+
   describe "unknown route" do
     test "404" do
       conn = conn(:put, "/whatever") |> call()
