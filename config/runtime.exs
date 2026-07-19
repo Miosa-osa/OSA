@@ -1,5 +1,13 @@
 import Config
 
+# ── User config dir resolved at RUNTIME, not compile time ────────────────
+# config/config.exs sets config_dir with Path.expand("~/.osa"), which is
+# evaluated during `mix release` on the build host (HOME=/home/runner on CI)
+# and would otherwise bake that path into the release. Resolve it here at boot
+# so it tracks the running user's home (or OSA_HOME override).
+config :optimal_system_agent,
+  config_dir: System.get_env("OSA_HOME") || Path.expand("~/.osa")
+
 # ── Logger level override via env var ────────────────────────────────────
 case System.get_env("LOGGER_LEVEL") do
   "warning" -> config :logger, level: :warning

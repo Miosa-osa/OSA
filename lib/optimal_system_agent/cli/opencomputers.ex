@@ -5,10 +5,10 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   Verbs: status | login | connect | enable | disable | logout
   """
 
-  @osa_dir Path.join(System.user_home!(), ".osa")
-  @toml_path Path.join([@osa_dir, "open_computers.toml"])
-  @fingerprint_path Path.join([@osa_dir, "open_computers.ed25519"])
-  @marker_path Path.join([@osa_dir, ".open_computers_enabled"])
+  defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
+  defp toml_path, do: Path.join([osa_dir(), "open_computers.toml"])
+  defp fingerprint_path, do: Path.join([osa_dir(), "open_computers.ed25519"])
+  defp marker_path, do: Path.join([osa_dir(), ".open_computers_enabled"])
   @default_control_url "wss://api.miosa.ai/api/v1/opencomputers/hosts/ws"
   @env_var "OSA_OPEN_COMPUTERS_ENABLED"
 
@@ -35,7 +35,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     cfg = read_toml()
     config_enabled = Application.get_env(:optimal_system_agent, :open_computers_enabled, false)
     env_enabled = System.get_env(@env_var) == "true"
-    marker_enabled = File.exists?(@marker_path)
+    marker_enabled = File.exists?(marker_path())
     enabled = config_enabled or env_enabled or marker_enabled
 
     IO.puts("")
@@ -116,7 +116,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
 
     maybe_confirm_overwrite(opts[:force])
 
-    File.mkdir_p!(@osa_dir)
+    File.mkdir_p!(osa_dir())
 
     toml = """
     control_url      = "#{control_url}"
@@ -126,17 +126,17 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     heartbeat_ms     = 30000
     """
 
-    case File.write(@toml_path, toml) do
+    case File.write(toml_path(), toml) do
       :ok ->
-        File.chmod!(@toml_path, 0o600)
+        File.chmod!(toml_path(), 0o600)
         ensure_fingerprint_file()
-        IO.puts("Written: #{@toml_path} (0600)")
+        IO.puts("Written: #{toml_path()} (0600)")
         IO.puts("Control URL: #{control_url}")
         IO.puts("")
         IO.puts("Run `osa opencomputers enable` then restart OSA to connect.")
 
       {:error, reason} ->
-        IO.puts("Error: cannot write #{@toml_path}: #{inspect(reason)}")
+        IO.puts("Error: cannot write #{toml_path()}: #{inspect(reason)}")
         System.halt(1)
     end
   end
@@ -155,8 +155,8 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   defp maybe_confirm_overwrite(true), do: :ok
 
   defp maybe_confirm_overwrite(_) do
-    if File.exists?(@toml_path) do
-      IO.write("#{@toml_path} already exists. Overwrite? [y/N] ")
+    if File.exists?(toml_path()) do
+      IO.write("#{toml_path()} already exists. Overwrite? [y/N] ")
       answer = IO.gets("") |> String.trim() |> String.downcase()
 
       unless answer in ["y", "yes"] do
@@ -167,11 +167,11 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   end
 
   defp ensure_fingerprint_file do
-    unless File.exists?(@fingerprint_path) do
+    unless File.exists?(fingerprint_path()) do
       # Write a placeholder — Session.Fingerprint generates the real keypair at startup.
       # We create the file now so there is no race on first connect.
-      case File.write(@fingerprint_path, "") do
-        :ok -> File.chmod!(@fingerprint_path, 0o600)
+      case File.write(fingerprint_path(), "") do
+        :ok -> File.chmod!(fingerprint_path(), 0o600)
         _ -> :ok
       end
     end
@@ -185,8 +185,8 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
         strict: [profile: :boolean, no_profile: :boolean]
       )
 
-    File.mkdir_p!(@osa_dir)
-    File.write!(@marker_path, "")
+    File.mkdir_p!(osa_dir())
+    File.write!(marker_path(), "")
 
     wrote_profile =
       if Keyword.get(opts, :no_profile, false) do
@@ -198,7 +198,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
 
     IO.puts("OpenComputers enabled.")
     if wrote_profile, do: IO.puts("Added #{@env_var}=true to your shell profile")
-    IO.puts("Marker written: #{@marker_path}")
+    IO.puts("Marker written: #{marker_path()}")
     IO.puts("")
 
     if is_nil(Process.whereis(OptimalSystemAgent.OpenComputers.Supervisor)) do
@@ -259,7 +259,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   # ── disable ──────────────────────────────────────────────────────
 
   defp cmd_disable do
-    File.rm(@marker_path)
+    File.rm(marker_path())
 
     shell = detect_shell()
     remove_env_from_profile(shell)
@@ -312,7 +312,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     {opts, _} = OptionParser.parse!(args, strict: [force: :boolean])
 
     unless opts[:force] do
-      IO.write("Clear host_key from #{@toml_path}? [y/N] ")
+      IO.write("Clear host_key from #{toml_path()}? [y/N] ")
       answer = IO.gets("") |> String.trim() |> String.downcase()
 
       unless answer in ["y", "yes"] do
@@ -325,10 +325,10 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
       cfg when map_size(cfg) > 0 ->
         updated = Map.put(cfg, :host_key, "")
         write_toml(updated)
-        IO.puts("host_key cleared from #{@toml_path}")
+        IO.puts("host_key cleared from #{toml_path()}")
 
       _ ->
-        IO.puts("No config found at #{@toml_path} — nothing to clear.")
+        IO.puts("No config found at #{toml_path()} — nothing to clear.")
     end
 
     case Process.whereis(OptimalSystemAgent.OpenComputers.Session) do
@@ -344,7 +344,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   # ── TOML helpers ─────────────────────────────────────────────────
 
   defp read_toml do
-    case File.read(@toml_path) do
+    case File.read(toml_path()) do
       {:ok, body} -> parse_toml(body)
       _ -> %{}
     end
@@ -397,8 +397,8 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
       ~s(heartbeat_ms     = #{cfg[:heartbeat_ms] || 30_000})
     ]
 
-    File.write!(@toml_path, Enum.join(lines, "\n") <> "\n")
-    File.chmod!(@toml_path, 0o600)
+    File.write!(toml_path(), Enum.join(lines, "\n") <> "\n")
+    File.chmod!(toml_path(), 0o600)
   end
 
   defp format_modes(nil), do: ~s(["direct"])

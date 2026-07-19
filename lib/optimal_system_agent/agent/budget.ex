@@ -393,11 +393,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
 
   # ── Ledger Persistence ────────────────────────────────────────────
 
-  @ledger_dir Path.join(System.user_home!(), ".osa")
-  @ledger_file Path.join(@ledger_dir, "cost_ledger.jsonl")
+  defp ledger_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
+  defp ledger_file, do: Path.join(ledger_dir(), "cost_ledger.jsonl")
 
   defp append_ledger_entry(entry) do
-    File.mkdir_p!(@ledger_dir)
+    File.mkdir_p!(ledger_dir())
 
     serialized = %{
       id: entry.id,
@@ -411,13 +411,13 @@ defmodule OptimalSystemAgent.Agent.Budget do
     }
 
     line = Jason.encode!(serialized) <> "\n"
-    File.write(@ledger_file, line, [:append])
+    File.write(ledger_file(), line, [:append])
   rescue
     _ -> :ok
   end
 
   defp load_ledger_from_disk do
-    case File.read(@ledger_file) do
+    case File.read(ledger_file()) do
       {:ok, content} ->
         content
         |> String.split("\n", trim: true)

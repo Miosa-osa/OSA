@@ -14,7 +14,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   alias OptimalSystemAgent.CLI.Prompt
   alias OptimalSystemAgent.Onboarding
 
-  @osa_dir Path.join(System.user_home!(), ".osa")
+  defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   @providers [
     %{value: :ollama, label: "Ollama (Local)", hint: "Free, runs on your machine"},
@@ -393,7 +393,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   # F3 fix: re-running `/setup` to switch provider must actually take effect.
   # The previous version only ever APPENDED `OSA_DEFAULT_PROVIDER=...` and
-  # skipped it whenever the key already existed in `.env` — so switching from
+  # skipped it whenever the key already existed in `.env`, so switching from
   # Ollama to Anthropic left `OSA_DEFAULT_PROVIDER=ollama` on disk untouched
   # and the new provider was silently dropped. This now upserts
   # (replace-in-place, like `Onboarding.write_setup`'s `keyreplace` merge):
@@ -403,8 +403,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # Public (not `defp`) so the upsert behavior (F3) is directly unit-testable
   # without driving the interactive prompt flow; still internal API.
   def write_config(provider, api_key) do
-    File.mkdir_p!(@osa_dir)
-    env_path = Path.join(@osa_dir, ".env")
+    File.mkdir_p!(osa_dir())
+    env_path = Path.join(osa_dir(), ".env")
 
     pairs =
       [{"OSA_DEFAULT_PROVIDER", to_string(provider)}] ++
@@ -460,8 +460,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   defp save_env(key, value) do
-    env_path = Path.join(@osa_dir, ".env")
-    File.mkdir_p!(@osa_dir)
+    env_path = Path.join(osa_dir(), ".env")
+    File.mkdir_p!(osa_dir())
 
     existing =
       case File.read(env_path) do

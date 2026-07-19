@@ -20,7 +20,7 @@ defmodule OptimalSystemAgent.Auth.OAuth do
 
   @scopes ~w(org:create_api_key user:profile user:inference)
 
-  @osa_dir Path.join(System.user_home!(), ".osa")
+  defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   # ── Public API ──────────────────────────────────────────────────────
 
@@ -216,8 +216,8 @@ defmodule OptimalSystemAgent.Auth.OAuth do
   @doc "Save OAuth credentials to ~/.osa/oauth.json"
   @spec save_oauth_credentials(map()) :: :ok
   def save_oauth_credentials(tokens) do
-    File.mkdir_p!(@osa_dir)
-    path = Path.join(@osa_dir, "oauth.json")
+    File.mkdir_p!(osa_dir())
+    path = Path.join(osa_dir(), "oauth.json")
     data = Jason.encode!(tokens, pretty: true)
     File.write!(path, data)
     # Restrict permissions
@@ -228,7 +228,7 @@ defmodule OptimalSystemAgent.Auth.OAuth do
   @doc "Read OAuth credentials from ~/.osa/oauth.json"
   @spec read_oauth_credentials() :: {:ok, map()} | {:error, String.t()}
   def read_oauth_credentials do
-    path = Path.join(@osa_dir, "oauth.json")
+    path = Path.join(osa_dir(), "oauth.json")
 
     case File.read(path) do
       {:ok, data} ->
@@ -257,7 +257,7 @@ defmodule OptimalSystemAgent.Auth.OAuth do
   @doc "Delete stored OAuth credentials."
   @spec clear_credentials() :: :ok
   def clear_credentials do
-    path = Path.join(@osa_dir, "oauth.json")
+    path = Path.join(osa_dir(), "oauth.json")
     File.rm(path)
     :ok
   end
