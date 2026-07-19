@@ -1,6 +1,8 @@
 use anyhow::Result;
 use crossterm::{
-    event::{Event as CrosstermEvent, KeyEvent, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEvent, KeyEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -125,6 +127,15 @@ impl App {
         // The terminal was built Inline; the app boots in Connecting (which wants
         // the full viewport), so the first iteration flips to full before drawing.
         let mut was_full = false;
+        // Whether mouse capture is currently enabled. It is scoped ONLY to the
+        // transcript overlay's lifetime: enabled when the reader opens, disabled
+        // the instant it closes (Esc, q, Ctrl+O, scroll-off, backend swap, error —
+        // every path funnels through `self.transcript` going back to None, which
+        // this reconciler observes). The main view therefore never inherits a
+        // stuck capture, which is what would break native wheel scrollback. A
+        // final release also runs on loop exit, and `restore_terminal` disables it
+        // unconditionally on process teardown / panic — three independent nets.
+        let mut mouse_captured = false;
         // Current inline-viewport height. The composer grows the live region (up
         // to ~5 text lines) and a terminal resize reshapes it, so this tracks the
         // height the viewport is currently built at and is rebuilt when the wanted
@@ -209,6 +220,23 @@ impl App {
                 // debounce so a later transient dip starts its settle window
                 // fresh instead of firing on the first dip.
                 shrink_streak = 0;
+            }
+
+            // 1a2. Reconcile mouse capture with the transcript overlay lifetime.
+            // Capture is scoped to the reader ONLY: enabling it globally would
+            // steal the wheel from the terminal's native scrollback in the main
+            // view. This transition-driven reconcile guarantees release on EVERY
+            // close path (the overlay just sets `self.transcript = None`), so a
+            // leaked EnableMouseCapture can never strand the main view.
+            let want_mouse = self.transcript.is_some();
+            if want_mouse != mouse_captured {
+                let mut out = std::io::stdout();
+                let _ = if want_mouse {
+                    execute!(out, EnableMouseCapture)
+                } else {
+                    execute!(out, DisableMouseCapture)
+                };
+                mouse_captured = want_mouse;
             }
 
             // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
@@ -322,6 +350,12 @@ impl App {
         }
 
         // Cleanup
+        // Belt-and-braces: if the loop broke while the overlay was still open,
+        // release mouse capture so the shell never inherits a captured terminal.
+        // (`restore_terminal` also disables it unconditionally on teardown/panic.)
+        if mouse_captured {
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        }
         self.chrome_title.reset(); // hand the tab title back to the shell
         tick_handle.abort();
         term_handle.abort();
@@ -364,6 +398,15 @@ impl App {
                 }
             }
         }
+        // Mouse capture is enabled ONLY while the transcript overlay is open (see
+        // the run-loop reconciler), so mouse reports arrive only then — route them
+        // to the reader for wheel-scroll / drag-select / copy. Outside the overlay
+        // no capture is active and the main view keeps native wheel scrollback.
+        if let Event::Terminal(CrosstermEvent::Mouse(me)) = &event {
+            if self.transcript.is_some() {
+                return self.handle_transcript_mouse(*me);
+            }
+        }
         self.update(event)
     }
 
@@ -398,6 +441,35 @@ impl App {
             };
         let action = match self.transcript {
             Some(ref mut tv) => tv.handle_key(key, entries),
+            None => return false,
+        };
+        match action {
+            TranscriptAction::None => {}
+            TranscriptAction::Close => {
+                self.transcript = None;
+                self.transcript_override = None;
+            }
+            TranscriptAction::Toast(msg) => {
+                self.toasts
+                    .push(msg, crate::components::toast::ToastLevel::Info);
+            }
+        }
+        false
+    }
+
+    /// Route a mouse event to the open transcript overlay (wheel scroll, drag
+    /// selection, copy-on-release). Only reached while `transcript.is_some()`,
+    /// which is also the only time mouse capture is enabled.
+    fn handle_transcript_mouse(&mut self, me: crossterm::event::MouseEvent) -> bool {
+        use crate::dialogs::transcript_viewer::TranscriptAction;
+        let entries: &[crate::dialogs::transcript_viewer::TranscriptEntry] =
+            if let Some(ref o) = self.transcript_override {
+                o
+            } else {
+                &self.transcript_log
+            };
+        let action = match self.transcript {
+            Some(ref mut tv) => tv.handle_mouse(me, entries),
             None => return false,
         };
         match action {
