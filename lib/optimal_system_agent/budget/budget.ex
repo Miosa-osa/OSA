@@ -2,12 +2,15 @@ defmodule OptimalSystemAgent.Budget do
   @moduledoc """
   Budget GenServer — token/cost tracking with daily and monthly limits.
 
-  Tracks provider API spend across sessions. When started from the supervisor,
-  limits come from application env:
+  Tracks provider API spend across sessions. Budgets are opt-in: with no
+  limit configured, spend is tracked but nothing is ever reported as over
+  limit. When started from the supervisor, limits come from application env:
 
       config :optimal_system_agent,
         daily_budget_usd: 50.0,
         monthly_budget_usd: 200.0
+
+  Leaving these unset (or nil) means no daily/monthly cap is enforced.
 
   When started directly (e.g. in tests), limits can be passed as keyword opts:
 
@@ -34,8 +37,10 @@ defmodule OptimalSystemAgent.Budget do
   use GenServer
   require Logger
 
-  @daily_default_usd 50.0
-  @monthly_default_usd 200.0
+  # No default caps. A daily/monthly/per-call limit only applies once a user
+  # (or config/env var) explicitly sets one; nil means "unlimited".
+  @daily_default_usd nil
+  @monthly_default_usd nil
 
   # USD per 1M tokens — {input_rate, output_rate}
   @provider_rates %{
@@ -156,7 +161,7 @@ defmodule OptimalSystemAgent.Budget do
     }
 
     Logger.info(
-      "[Budget] started — daily: $#{state.daily_limit}, monthly: $#{state.monthly_limit}"
+      "[Budget] started, daily: #{limit_label(state.daily_limit)}, monthly: #{limit_label(state.monthly_limit)}"
     )
 
     {:ok, state}
@@ -167,15 +172,15 @@ defmodule OptimalSystemAgent.Budget do
   @impl true
   def handle_call(:check_budget, _from, state) do
     state = maybe_reset(state)
-    daily_remaining = max(0.0, state.daily_limit - state.daily_spent)
-    monthly_remaining = max(0.0, state.monthly_limit - state.monthly_spent)
+    daily_remaining = remaining(state.daily_limit, state.daily_spent)
+    monthly_remaining = remaining(state.monthly_limit, state.monthly_spent)
 
     result =
       cond do
-        state.daily_spent >= state.daily_limit ->
+        over_limit?(state.daily_limit, state.daily_spent) ->
           {:over_limit, :daily}
 
-        state.monthly_spent >= state.monthly_limit ->
+        over_limit?(state.monthly_limit, state.monthly_spent) ->
           {:over_limit, :monthly}
 
         true ->
@@ -197,8 +202,8 @@ defmodule OptimalSystemAgent.Budget do
       monthly_spent: state.monthly_spent,
       daily_tokens: state.daily_tokens,
       monthly_tokens: state.monthly_tokens,
-      daily_remaining: max(0.0, state.daily_limit - state.daily_spent),
-      monthly_remaining: max(0.0, state.monthly_limit - state.monthly_spent),
+      daily_remaining: remaining(state.daily_limit, state.daily_spent),
+      monthly_remaining: remaining(state.monthly_limit, state.monthly_spent),
       daily_reset_at: state.daily_reset_at,
       monthly_reset_at: state.monthly_reset_at,
       ledger_entries: length(state.entries)
@@ -251,6 +256,17 @@ defmodule OptimalSystemAgent.Budget do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # A nil limit means "no budget configured": never over limit.
+  defp over_limit?(limit, spent) when is_number(limit), do: spent >= limit
+  defp over_limit?(_limit, _spent), do: false
+
+  # A nil limit has no remaining amount to report.
+  defp remaining(limit, spent) when is_number(limit), do: max(0.0, limit - spent)
+  defp remaining(_limit, _spent), do: nil
+
+  defp limit_label(limit) when is_number(limit), do: "$#{limit}"
+  defp limit_label(_limit), do: "none"
 
   defp maybe_reset(state) do
     now = DateTime.utc_now()

@@ -381,10 +381,12 @@ config :optimal_system_agent,
          end
      end),
 
-  # Budget limits (USD)
-  daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), 50.0),
-  monthly_budget_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), 500.0),
-  per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), 5.0),
+  # Budget limits (USD) are opt-in. No env var/config set means no limit
+  # at all: the Budget GenServer tracks spend but never reports over-limit,
+  # and the status-bar budget chip stays hidden.
+  daily_budget_usd: parse_float.(System.get_env("OSA_DAILY_BUDGET_USD"), nil),
+  monthly_budget_usd: parse_float.(System.get_env("OSA_MONTHLY_BUDGET_USD"), nil),
+  per_call_limit_usd: parse_float.(System.get_env("OSA_PER_CALL_LIMIT_USD"), nil),
 
   # Treasury — keys match Treasury GenServer expectations
   treasury_enabled: System.get_env("OSA_TREASURY_ENABLED") == "true",

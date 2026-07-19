@@ -116,6 +116,57 @@ defmodule OptimalSystemAgent.Agent.BudgetTest do
   end
 
   # ---------------------------------------------------------------------------
+  # opt-in budgets (no limit configured)
+  # ---------------------------------------------------------------------------
+
+  describe "opt-in budgets" do
+    test "check_budget/0 returns :ok with nil remaining when no limit is set" do
+      name = :"budget_test_optin_#{:erlang.unique_integer([:positive])}"
+      {:ok, pid} = GenServer.start_link(Budget, [], name: name)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, %{daily_remaining: nil, monthly_remaining: nil}} = check_budget(name)
+    end
+
+    test "record_cost/5 never trips over-limit when no limit is set" do
+      name = :"budget_test_optin_#{:erlang.unique_integer([:positive])}"
+      {:ok, pid} = GenServer.start_link(Budget, [], name: name)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      # A large enough spend to exceed any sane default budget.
+      record_cost(name, :anthropic, "claude-sonnet-4-6", 10_000_000, 10_000_000, "session_1")
+
+      assert {:ok, %{daily_remaining: nil, monthly_remaining: nil}} = check_budget(name)
+
+      {:ok, status} = get_status(name)
+      assert status.daily_limit == nil
+      assert status.monthly_limit == nil
+      assert status.daily_remaining == nil
+      assert status.monthly_remaining == nil
+      assert status.daily_spent > 0.0
+    end
+
+    test "get_status/0 reports nil limits when none configured" do
+      name = :"budget_test_optin_#{:erlang.unique_integer([:positive])}"
+      {:ok, pid} = GenServer.start_link(Budget, [], name: name)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, status} = get_status(name)
+      assert status.daily_limit == nil
+      assert status.monthly_limit == nil
+      assert status.per_call_limit == nil
+    end
+
+    test "a configured limit still enforces exactly as before" do
+      {_pid, name} = start_budget(daily_limit: 0.001, monthly_limit: 1000.0)
+
+      record_cost(name, :anthropic, "claude-sonnet-4-6", 10_000, 10_000, "session_1")
+
+      assert {:over_limit, :daily} = check_budget(name)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # get_status
   # ---------------------------------------------------------------------------
 

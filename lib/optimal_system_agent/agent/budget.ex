@@ -6,10 +6,11 @@ defmodule OptimalSystemAgent.Agent.Budget do
   Maintains an in-memory ledger of all cost entries and schedules automatic
   daily/monthly resets via Process.send_after.
 
-  Limits default to environment variables or application config:
-  - OSA_DAILY_BUDGET_USD (default 50.0)
-  - OSA_MONTHLY_BUDGET_USD (default 500.0)
-  - OSA_PER_CALL_LIMIT_USD (default 5.0)
+  All limits are opt-in (nil by default, meaning unlimited/no enforcement).
+  They can be set via environment variables or application config:
+  - OSA_DAILY_BUDGET_USD (default: unset / no limit)
+  - OSA_MONTHLY_BUDGET_USD (default: unset / no limit)
+  - OSA_PER_CALL_LIMIT_USD (default: unset / no limit)
 
   Events emitted on :system_event:
   - :budget_warning — when spend exceeds 80% of daily or monthly limit
@@ -33,9 +34,9 @@ defmodule OptimalSystemAgent.Agent.Budget do
 
   # ── State ────────────────────────────────────────────────────────────
 
-  defstruct daily_limit: 50.0,
-            monthly_limit: 500.0,
-            per_call_limit: 5.0,
+  defstruct daily_limit: nil,
+            monthly_limit: nil,
+            per_call_limit: nil,
             daily_spent: 0.0,
             monthly_spent: 0.0,
             # Cumulative tokens (in+out) spent today. Meaningful even when USD
@@ -110,7 +111,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
         Keyword.get(
           opts,
           :daily_limit,
-          Application.get_env(:optimal_system_agent, :daily_budget_usd, 50.0)
+          Application.get_env(:optimal_system_agent, :daily_budget_usd, nil)
         )
       )
 
@@ -120,7 +121,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
         Keyword.get(
           opts,
           :monthly_limit,
-          Application.get_env(:optimal_system_agent, :monthly_budget_usd, 500.0)
+          Application.get_env(:optimal_system_agent, :monthly_budget_usd, nil)
         )
       )
 
@@ -130,7 +131,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
         Keyword.get(
           opts,
           :per_call_limit,
-          Application.get_env(:optimal_system_agent, :per_call_limit_usd, 5.0)
+          Application.get_env(:optimal_system_agent, :per_call_limit_usd, nil)
         )
       )
 
@@ -154,7 +155,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
     schedule_monthly_reset()
 
     Logger.info(
-      "[Agent.Budget] Started — daily: $#{daily_limit}, monthly: $#{monthly_limit}, per-call: $#{per_call_limit}"
+      "[Agent.Budget] Started, daily: #{limit_label(daily_limit)}, monthly: #{limit_label(monthly_limit)}, per-call: #{limit_label(per_call_limit)}"
     )
 
     {:ok, state}
@@ -189,8 +190,10 @@ defmodule OptimalSystemAgent.Agent.Budget do
     # Persist ledger entry to disk for crash recovery
     append_ledger_entry(entry)
 
-    # Emit warnings at 80% thresholds
-    if new_daily > state.daily_limit * 0.8 and new_daily - cost <= state.daily_limit * 0.8 do
+    # Emit warnings at 80% thresholds. A nil limit means no budget is
+    # configured, so there is nothing to warn about.
+    if is_number(state.daily_limit) and new_daily > state.daily_limit * 0.8 and
+         new_daily - cost <= state.daily_limit * 0.8 do
       Bus.emit(:system_event, %{
         event: :budget_warning,
         type: :daily,
@@ -203,7 +206,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
       })
     end
 
-    if new_monthly > state.monthly_limit * 0.8 and new_monthly - cost <= state.monthly_limit * 0.8 do
+    if is_number(state.monthly_limit) and new_monthly > state.monthly_limit * 0.8 and
+         new_monthly - cost <= state.monthly_limit * 0.8 do
       Bus.emit(:system_event, %{
         event: :budget_warning,
         type: :monthly,
@@ -216,8 +220,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
       })
     end
 
-    # Emit exceeded events
-    if new_daily > state.daily_limit do
+    # Emit exceeded events. Same nil-guard: an unset limit is never exceeded.
+    if is_number(state.daily_limit) and new_daily > state.daily_limit do
       Bus.emit(:system_event, %{
         event: :budget_exceeded,
         type: :daily,
@@ -232,7 +236,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
       )
     end
 
-    if new_monthly > state.monthly_limit do
+    if is_number(state.monthly_limit) and new_monthly > state.monthly_limit do
       Bus.emit(:system_event, %{
         event: :budget_exceeded,
         type: :monthly,
@@ -299,17 +303,17 @@ defmodule OptimalSystemAgent.Agent.Budget do
   def handle_call(:check_budget, _from, state) do
     result =
       cond do
-        state.daily_spent >= state.daily_limit ->
+        over_limit?(state.daily_limit, state.daily_spent) ->
           {:over_limit, :daily}
 
-        state.monthly_spent >= state.monthly_limit ->
+        over_limit?(state.monthly_limit, state.monthly_spent) ->
           {:over_limit, :monthly}
 
         true ->
           {:ok,
            %{
-             daily_remaining: Float.round(state.daily_limit - state.daily_spent, 2),
-             monthly_remaining: Float.round(state.monthly_limit - state.monthly_spent, 2)
+             daily_remaining: remaining(state.daily_limit, state.daily_spent),
+             monthly_remaining: remaining(state.monthly_limit, state.monthly_spent)
            }}
       end
 
@@ -325,8 +329,8 @@ defmodule OptimalSystemAgent.Agent.Budget do
       daily_spent: Float.round(state.daily_spent, 4),
       monthly_spent: Float.round(state.monthly_spent, 4),
       daily_tokens: state.daily_tokens,
-      daily_remaining: Float.round(state.daily_limit - state.daily_spent, 2),
-      monthly_remaining: Float.round(state.monthly_limit - state.monthly_spent, 2),
+      daily_remaining: remaining(state.daily_limit, state.daily_spent),
+      monthly_remaining: remaining(state.monthly_limit, state.monthly_spent),
       daily_reset_at: state.daily_reset_at,
       monthly_reset_at: state.monthly_reset_at,
       ledger_entries: length(state.ledger)
@@ -374,6 +378,18 @@ defmodule OptimalSystemAgent.Agent.Budget do
   end
 
   # ── Private ─────────────────────────────────────────────────────────
+
+  # A nil limit means no budget is configured for that period, so it is
+  # never treated as exceeded.
+  defp over_limit?(limit, spent) when is_number(limit), do: spent >= limit
+  defp over_limit?(_limit, _spent), do: false
+
+  # A nil limit has no meaningful "remaining" amount to report.
+  defp remaining(limit, spent) when is_number(limit), do: Float.round(limit - spent, 2)
+  defp remaining(_limit, _spent), do: nil
+
+  defp limit_label(limit) when is_number(limit), do: "$#{limit}"
+  defp limit_label(_limit), do: "none"
 
   # ── Ledger Persistence ────────────────────────────────────────────
 
