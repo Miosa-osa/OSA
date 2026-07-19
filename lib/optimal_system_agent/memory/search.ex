@@ -21,29 +21,53 @@ defmodule OptimalSystemAgent.Memory.Search do
   pulled, Ollama not running, timeout, provider disabled) — recall NEVER
   hard-fails; callers fall back to keyword-only scoring.
 
-  ## Vector storage
+  ## Vector storage — persisted SQLite (BLOB/TEXT column), warmed into ETS
 
-  Chose an **in-memory ETS cache** (`:osa_memory_vectors`, keyed by memory
-  entry id, storing `{content_hash, vector}`), NOT a persisted SQLite/
-  sqlite-vec column. Reasons:
+  Vectors are now DURABLY persisted, one row per memory `id`, in a dedicated
+  `memory_vectors` table (`priv/repo/migrations/20260719000001_create_memory_vectors.exs`,
+  schema `Memory.VectorEntry`) in the SAME SQLite database the memory store
+  uses (`OptimalSystemAgent.Store.Repo`). The in-memory ETS table
+  (`:osa_memory_vectors`) is kept as a **warm read cache** in front of it —
+  first access after boot lazily loads (or is populated by writes to) SQLite;
+  subsequent lookups in the same run stay ETS-speed.
 
-    1. `sqlite-vec` is a native SQLite extension; the `ecto_sqlite3`/`exqlite`
-       stack this project uses does not load arbitrary loadable extensions
-       out of the box, and wiring that up is its own infra project.
-    2. Persisting vectors in the `memories` table requires a schema migration
-       (`priv/repo/migrations/`), which sits outside this task's owned file
-       set (`lib/optimal_system_agent/memory/*`) and is shared/lead-owned
-       territory per the task's disjoint-ownership rule.
-    3. Vectors are cheap to recompute lazily (one embedding call per memory,
-       cached for the life of the node) and OSA's memory table size is small
-       enough that a full re-embed after a restart is not a concern.
+  ### Why a plain column instead of `sqlite-vec`
 
-  A follow-up can add a persisted `embedding` column (same cache-key shape)
-  via a migration owned by the lead/DB-owning agent without changing this
-  module's public API.
+  `sqlite-vec` is a native SQLite loadable extension. This project's SQLite
+  access goes through `ecto_sqlite3` / `exqlite`
+  (`OptimalSystemAgent.Store.Repo`, `adapter: Ecto.Adapters.SQLite3`), and
+  `exqlite` does not expose a way to `load_extension` an arbitrary native
+  extension from application code — that would mean patching `exqlite`'s NIF
+  build itself, well outside this change's scope. Instead, each embedding is
+  stored as a JSON-encoded float array in a `:text` column
+  (`Memory.VectorEntry.embedding`) and cosine similarity/KNN stays exactly
+  what it already was: an in-Elixir scan (`cosine_similarity/2`, `knn/2`,
+  unchanged). OSA's memory table is small (hundreds—low thousands of rows),
+  so an O(n) in-memory cosine scan over a per-run-warmed ETS table is not a
+  bottleneck.
+
+  ### Invalidation
+
+  Every persisted row carries `content_hash` (`:erlang.phash2/1` of the
+  embedded text — the SAME hash the ETS cache always used). On lookup, a
+  mismatched hash (content changed since it was embedded) is treated as a
+  cache miss: the entry is re-embedded and the persisted row is upserted.
+  `forget/1` deletes both the ETS entry and the persisted row (e.g. after a
+  memory entry is deleted or its content is merged into another row).
+
+  ### Degradation
+
+  Every SQLite read/write here is wrapped and rescued — a DB error never
+  prevents recall from working, it just falls back to a live (or failed)
+  embed exactly as before this persistence layer existed. When no embedding
+  provider is configured (`available?/0` false), nothing is embedded or
+  persisted at all and callers degrade to keyword-only scoring, unchanged.
   """
 
   require Logger
+
+  alias OptimalSystemAgent.Store.Repo
+  alias OptimalSystemAgent.Memory.VectorEntry
 
   @vector_table :osa_memory_vectors
   @default_embed_model "nomic-embed-text"
@@ -121,9 +145,13 @@ defmodule OptimalSystemAgent.Memory.Search do
   end
 
   @doc """
-  Embed with a per-entry ETS cache, keyed by `id` and content hash (so an
-  edited/merged entry's stale vector is never served). Returns `{:ok, vector}`
-  or `{:error, reason}`.
+  Embed with a per-entry cache — ETS (hot) in front of persisted SQLite
+  (durable) — keyed by `id` and content hash, so an edited/merged entry's
+  stale vector is never served AND a node restart never forces a re-embed of
+  unchanged content. Returns `{:ok, vector}` or `{:error, reason}`.
+
+  Lookup order: ETS (this run) -> persisted `memory_vectors` row (warms ETS
+  on hit) -> live embed (persists to both on success).
   """
   @spec embed_cached(String.t(), String.t()) :: {:ok, [float()]} | {:error, term()}
   def embed_cached(id, text) when is_binary(id) and is_binary(text) do
@@ -135,13 +163,21 @@ defmodule OptimalSystemAgent.Memory.Search do
         {:ok, vec}
 
       _ ->
-        case embed(text) do
+        case load_persisted(id, hash) do
           {:ok, vec} ->
             safe_insert(id, hash, vec)
             {:ok, vec}
 
-          error ->
-            error
+          :miss ->
+            case embed(text) do
+              {:ok, vec} ->
+                safe_insert(id, hash, vec)
+                persist(id, hash, vec)
+                {:ok, vec}
+
+              error ->
+                error
+            end
         end
     end
   end
@@ -158,6 +194,8 @@ defmodule OptimalSystemAgent.Memory.Search do
     rescue
       ArgumentError -> :ok
     end
+
+    delete_persisted(id)
 
     :ok
   end
@@ -217,6 +255,98 @@ defmodule OptimalSystemAgent.Memory.Search do
   end
 
   def knn(_query_vector, _entries), do: {[], %{}}
+
+  # ---------------------------------------------------------------------------
+  # Persisted (SQLite) vector storage
+  # ---------------------------------------------------------------------------
+
+  # Reads a persisted vector row by id. Returns `{:ok, vector}` only when the
+  # row exists AND its content_hash matches (i.e. the memory hasn't changed
+  # since it was embedded) — otherwise `:miss`, which the caller treats
+  # exactly like a fresh entry (re-embed). Any DB error also degrades to
+  # `:miss` so persistence is never a hard dependency for recall to work.
+  defp load_persisted(id, hash) do
+    case Repo.get(VectorEntry, id) do
+      %VectorEntry{content_hash: ^hash, embedding: json} ->
+        case decode_vector(json) do
+          {:ok, vec} -> {:ok, vec}
+          :error -> :miss
+        end
+
+      _ ->
+        :miss
+    end
+  rescue
+    e ->
+      Logger.debug("[Memory.Search] load_persisted failed: #{Exception.message(e)}")
+      :miss
+  catch
+    :exit, _ -> :miss
+  end
+
+  # Upsert a persisted vector row. Never raises — a persistence failure just
+  # means this vector will be re-embedded next time (same as before this
+  # layer existed), it never blocks the caller from getting its embedding.
+  defp persist(id, hash, vec) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    attrs = %{
+      id: id,
+      content_hash: hash,
+      embedding: Jason.encode!(vec),
+      dim: length(vec),
+      model: Application.get_env(:optimal_system_agent, :embedding_model, @default_embed_model),
+      created_at: now,
+      updated_at: now
+    }
+
+    case Repo.get(VectorEntry, id) do
+      nil ->
+        %VectorEntry{} |> VectorEntry.changeset(attrs) |> Repo.insert()
+
+      existing ->
+        existing |> VectorEntry.changeset(Map.put(attrs, :created_at, existing.created_at)) |> Repo.update()
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("[Memory.Search] persist failed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp delete_persisted(id) do
+    case Repo.get(VectorEntry, id) do
+      nil -> :ok
+      row -> Repo.delete(row)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("[Memory.Search] delete_persisted failed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp decode_vector(json) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, list} when is_list(list) and list != [] ->
+        if Enum.all?(list, &is_number/1) do
+          {:ok, Enum.map(list, &(&1 * 1.0))}
+        else
+          :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp decode_vector(_), do: :error
 
   # ---------------------------------------------------------------------------
   # ETS cache
