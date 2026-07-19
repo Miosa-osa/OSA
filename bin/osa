@@ -341,46 +341,43 @@ do_update_source() {
   old_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)"
 
   if [ -d "$ROOT/.git" ] && command -v git >/dev/null 2>&1; then
-    echo -e "${CYAN}→${RESET} Fetching latest…"
+    echo -e "${CYAN}→${RESET} Checking for updates..."
     ( cd "$ROOT" && git fetch --quiet --tags origin 2>/dev/null ) || \
-      echo -e "${YELLOW}⚠${RESET} git fetch failed — updating from local tree."
+      echo -e "${YELLOW}⚠${RESET} git fetch failed (offline or remote unreachable), updating from the local tree."
     if ! ( cd "$ROOT" && git pull --ff-only --quiet origin main 2>/dev/null ); then
-      echo -e "${YELLOW}⚠${RESET} Could not fast-forward (local changes?). Continuing with current tree."
+      echo -e "${YELLOW}⚠${RESET} Could not fast-forward (local changes?). Continuing with the current tree."
     fi
-    echo ""
-    echo -e "  ${BOLD}What's new${RESET}"
-    ( cd "$ROOT" && git log --oneline -8 2>/dev/null | sed 's/^/    · /' ) || true
-    echo ""
   else
-    echo -e "${YELLOW}⚠${RESET} Not a git checkout — rebuilding from the current tree."
+    echo -e "${YELLOW}⚠${RESET} Not a git checkout, rebuilding from the current tree."
   fi
 
-  echo -e "${CYAN}→${RESET} Fetching dependencies…"
+  echo -e "${CYAN}→${RESET} Building (this can take a minute)..."
   ( cd "$ROOT" && mix deps.get 2>&1 | tail -3 ) || true
-  echo -e "${CYAN}→${RESET} Compiling…"
   ( cd "$ROOT" && mix compile 2>&1 | tail -3 ) || true
   if [ -f "$TUI_DIR/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-    echo -e "${CYAN}→${RESET} Rebuilding TUI…"
     ( cd "$TUI_DIR" && cargo build --release 2>&1 | grep -E "Compiling|Finished|error" | tail -3 ) || true
   fi
 
   new_ver="$(cat "$ROOT/VERSION" 2>/dev/null || echo "$old_ver")"
   echo ""
   if [ "$old_ver" = "$new_ver" ]; then
-    echo -e "${GREEN}✓${RESET} Up to date ${DIM}(v${new_ver})${RESET}"
+    echo -e "${GREEN}✓${RESET} Already up to date: v${new_ver}"
   else
-    echo -e "${GREEN}✓${RESET} Updated ${DIM}v${old_ver}${RESET} → ${BOLD}v${new_ver}${RESET}"
+    echo -e "${GREEN}✓${RESET} Updated: v${old_ver} -> v${new_ver}"
   fi
 
   # Show the newest release-notes entry from the bundled CHANGELOG resource.
   print_release_notes
+
+  echo ""
+  echo -e "  ${DIM}Tip: ${RESET}${CYAN}osa update --staged${RESET}${DIM} stages, builds, and health-checks before switching, with automatic rollback if anything looks wrong.${RESET}"
 
   # A fresh backend must pick up the new build.
   stop_daemon >/dev/null 2>&1 || true
 
   echo ""
   if [ -t 0 ]; then
-    printf "  %bPress Enter to launch OSA…%b " "$DIM" "$RESET" >&2
+    printf "  %bPress Enter to launch OSA...%b " "$DIM" "$RESET" >&2
     read -r _ || true
   fi
 }
@@ -403,7 +400,7 @@ do_update_staged() {
   local updater="$ROOT/bin/osa-update"
   [ -x "$updater" ] || updater="$SCRIPT_DIR/osa-update"
   if [ ! -x "$updater" ]; then
-    echo -e "${RED}✗${RESET} bin/osa-update not found — cannot do a staged update." >&2
+    echo -e "${RED}✗${RESET} bin/osa-update not found, cannot do a staged update." >&2
     return 1
   fi
 
@@ -531,7 +528,7 @@ case "${1:-}" in
           *" --dry-run "*) exit 0 ;;
         esac
       else
-        echo -e "${RED}✗${RESET} Staged update failed — current install left untouched." >&2
+        echo -e "${RED}✗${RESET} Staged update failed. Current install left untouched." >&2
         exit 1
       fi
     else

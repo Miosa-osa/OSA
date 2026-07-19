@@ -197,6 +197,108 @@ case "$out" in *"Planned rollback"*) assert "rollback --dry-run prints a plan" 0
 assert_eq "rollback --dry-run leaves current untouched" "$before_current" "$(readlink "$HOME_DIR/current")"
 assert_eq "rollback --dry-run leaves previous untouched" "$before_previous" "$(readlink "$HOME_DIR/previous")"
 
+# ── 11. lock contention: a second update refuses to run while one holds the
+# lock, and never touches current/previous ─────────────────────────────────
+echo ""
+echo "-- lock contention: concurrent update is refused --"
+before_current="$(readlink "$HOME_DIR/current")"
+before_previous="$(readlink "$HOME_DIR/previous")"
+echo "1.0.5b" > "$SRC/VERSION"
+git -C "$SRC" add -A
+git -C "$SRC" commit --quiet -m "v6b (lock-contention test, distinct from current)"
+V6B_REV="$(git -C "$SRC" rev-parse --short=12 HEAD)"
+mkdir -p "$HOME_DIR/.update.lock.d"
+echo $$ > "$HOME_DIR/.update.lock.d/pid"   # this test process is definitely alive
+set +e
+out="$(OSA_UPDATE_BUILD_CMD="true" OSA_UPDATE_HEALTH_CMD="true" \
+  "$UPDATER" update --root "$SRC" --home "$HOME_DIR" --ref "$V6B_REV" 2>&1)"
+rc=$?
+set -e
+assert "concurrent update exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)"
+case "$out" in *"already running"*) assert "concurrent update reports the lock" 0 ;; *) assert "concurrent update reports the lock" 1 ;; esac
+assert_eq "current untouched during lock contention" "$before_current" "$(readlink "$HOME_DIR/current")"
+assert_eq "previous untouched during lock contention" "$before_previous" "$(readlink "$HOME_DIR/previous")"
+rm -rf "$HOME_DIR/.update.lock.d"
+
+# ── 12. stale lock (owning pid no longer alive) is auto-cleared, update
+# proceeds normally ─────────────────────────────────────────────────────────
+echo ""
+echo "-- stale lock from a dead process is cleared automatically --"
+mkdir -p "$HOME_DIR/.update.lock.d"
+# A pid that is virtually guaranteed not to be running right now.
+echo 999999 > "$HOME_DIR/.update.lock.d/pid"
+echo "1.0.5" > "$SRC/VERSION"
+git -C "$SRC" add -A
+git -C "$SRC" commit --quiet -m "v6 (stale-lock test)"
+V6_REV="$(git -C "$SRC" rev-parse --short=12 HEAD)"
+out="$(OSA_UPDATE_BUILD_CMD="true" OSA_UPDATE_HEALTH_CMD="true" \
+  "$UPDATER" update --root "$SRC" --home "$HOME_DIR" --ref "$V6_REV" 2>&1)"
+rc=$?
+assert "update past a stale lock exits 0" "$rc"
+case "$out" in *"stale update lock"*) assert "stale lock is reported and cleared" 0 ;; *) assert "stale lock is reported and cleared" 1 ;; esac
+assert_eq "current advanced to v6 despite the stale lock" "$HOME_DIR/versions/$V6_REV" "$(readlink "$HOME_DIR/current")"
+assert "lock released after a successful run" "$([ ! -d "$HOME_DIR/.update.lock.d" ] && echo 0 || echo 1)"
+
+# ── 13. interrupted mid-build (SIGINT) leaves current/previous exactly as
+# they were, releases the lock, and cleans up ──────────────────────────────
+# Job control (`set -m`) is enabled for this one block: without it, a
+# non-interactive/non-job-control shell puts asynchronous ("&") commands'
+# SIGINT handling into SIG_IGN before exec, which a real interactive
+# terminal (where a user would actually hit Ctrl+C on `osa update`) never
+# does. Enabling job control here makes the test match how a real terminal
+# delivers the signal, instead of exercising a bash scripting quirk that has
+# nothing to do with bin/osa-update's own interrupt handling.
+echo ""
+echo "-- interrupted update (SIGINT during build) leaves current untouched --"
+before_current="$(readlink "$HOME_DIR/current")"
+before_previous="$(readlink "$HOME_DIR/previous")"
+echo "1.0.6" > "$SRC/VERSION"
+git -C "$SRC" add -A
+git -C "$SRC" commit --quiet -m "v7 (interrupt test)"
+V7_REV="$(git -C "$SRC" rev-parse --short=12 HEAD)"
+set +e
+set -m
+OSA_UPDATE_BUILD_CMD="sleep 5" OSA_UPDATE_HEALTH_CMD="true" \
+  "$UPDATER" update --root "$SRC" --home "$HOME_DIR" --ref "$V7_REV" >"$TMP/interrupt.log" 2>&1 &
+UPDATE_PID=$!
+# Give it time to acquire the lock and get into the build phase, then interrupt.
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  [ -d "$HOME_DIR/.update.lock.d" ] && break
+  sleep 0.2
+done
+kill -INT "$UPDATE_PID" 2>/dev/null || true
+wait "$UPDATE_PID" 2>/dev/null
+rc=$?
+set +m
+set -e
+assert "interrupted update exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)"
+assert_eq "current untouched after SIGINT" "$before_current" "$(readlink "$HOME_DIR/current")"
+assert_eq "previous untouched after SIGINT" "$before_previous" "$(readlink "$HOME_DIR/previous")"
+assert "lock released after interrupt" "$([ ! -d "$HOME_DIR/.update.lock.d" ] && echo 0 || echo 1)"
+assert "no stray tmp symlink left behind after interrupt" \
+  "$([ -z "$(find "$HOME_DIR" -maxdepth 1 -name '*.tmp.*' 2>/dev/null)" ] && echo 0 || echo 1)"
+
+# ── 14. permission-denied on versions dir aborts cleanly, current untouched ─
+echo ""
+echo "-- permission denied on versions dir aborts cleanly --"
+before_current="$(readlink "$HOME_DIR/current")"
+before_previous="$(readlink "$HOME_DIR/previous")"
+chmod 555 "$HOME_DIR/versions"
+echo "1.0.7" > "$SRC/VERSION"
+git -C "$SRC" add -A
+git -C "$SRC" commit --quiet -m "v8 (permission test)"
+V8_REV="$(git -C "$SRC" rev-parse --short=12 HEAD)"
+set +e
+out="$(OSA_UPDATE_BUILD_CMD="true" OSA_UPDATE_HEALTH_CMD="true" \
+  "$UPDATER" update --root "$SRC" --home "$HOME_DIR" --ref "$V8_REV" 2>&1)"
+rc=$?
+set -e
+chmod 755 "$HOME_DIR/versions"
+assert "permission-denied update exits non-zero" "$([ "$rc" != "0" ] && echo 0 || echo 1)"
+case "$out" in *"permission"*|*"Permission"*|*"cannot create"*) assert "permission-denied update reports the failure plainly" 0 ;; *) assert "permission-denied update reports the failure plainly" 1 ;; esac
+assert_eq "current untouched after permission failure" "$before_current" "$(readlink "$HOME_DIR/current")"
+assert_eq "previous untouched after permission failure" "$before_previous" "$(readlink "$HOME_DIR/previous")"
+
 echo ""
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
