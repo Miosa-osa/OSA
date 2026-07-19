@@ -610,6 +610,19 @@ impl App {
         turn_active(self.state, &self.return_stack)
     }
 
+    /// Which floating `Option`-overlay currently owns the screen and keys, if
+    /// any. The ONE place draw priority and key priority are decided, so they
+    /// can never drift apart. Returns `None` when only the base state machine
+    /// (Idle/Processing/overlay-states) is active.
+    pub(crate) fn active_modal_overlay(&self) -> Option<ModalOverlay> {
+        topmost_modal(
+            self.overdrive_confirm.is_some(),
+            self.config_editor.is_some(),
+            self.file_picker.is_some(),
+            self.reasoning_selector.is_some(),
+        )
+    }
+
     /// End the in-flight turn after a passive backend disconnect: stop the
     /// activity spinner and return to `Idle`. If the turn is parked under an
     /// open overlay, rewrite the parked `Processing` so closing the overlay
@@ -735,6 +748,44 @@ fn turn_active(state: AppState, return_stack: &[AppState]) -> bool {
     state.is_processing() || return_stack.contains(&AppState::Processing)
 }
 
+/// The mutually-exclusive `Option<_>`-backed modal overlays that float above the
+/// state machine, in priority order (highest first). A single source of truth so
+/// the draw layer (`event_loop::draw`) and the key router (`update::handle_key`)
+/// can never disagree about which overlay is on top — the bug where one overlay
+/// was DRAWN while a *different* one consumed keystrokes (e.g. a config-editor
+/// drawn over an invisible file-picker that ate the keys).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalOverlay {
+    /// One-time overdrive (full-auto) confirmation — the most modal thing there
+    /// is; nothing may run while it awaits yes/no.
+    Overdrive,
+    ConfigEditor,
+    FilePicker,
+    Reasoning,
+}
+
+/// Pure priority resolver over the four Option-overlay presence flags. Extracted
+/// so the draw/key ordering invariant is unit-testable without an `App`. The
+/// order here is authoritative: both the draw match and the key match consume it.
+pub(crate) fn topmost_modal(
+    overdrive: bool,
+    config_editor: bool,
+    file_picker: bool,
+    reasoning: bool,
+) -> Option<ModalOverlay> {
+    if overdrive {
+        Some(ModalOverlay::Overdrive)
+    } else if config_editor {
+        Some(ModalOverlay::ConfigEditor)
+    } else if file_picker {
+        Some(ModalOverlay::FilePicker)
+    } else if reasoning {
+        Some(ModalOverlay::Reasoning)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod turn_active_tests {
     use super::turn_active;
@@ -768,5 +819,52 @@ mod turn_active_tests {
             AppState::ContextBreakdown,
             &[AppState::Idle]
         ));
+    }
+}
+
+#[cfg(test)]
+mod modal_overlay_tests {
+    use super::{topmost_modal, ModalOverlay};
+
+    #[test]
+    fn none_when_no_overlay() {
+        assert_eq!(topmost_modal(false, false, false, false), None);
+    }
+
+    #[test]
+    fn overdrive_beats_everything() {
+        // Even with all four present, overdrive is the topmost — it is the
+        // hard modal that must win draw AND keys.
+        assert_eq!(
+            topmost_modal(true, true, true, true),
+            Some(ModalOverlay::Overdrive)
+        );
+    }
+
+    #[test]
+    fn config_editor_beats_file_picker_and_reasoning() {
+        // The regression this locks: draw drew config_editor above file_picker,
+        // but the key router routed to file_picker — they must agree, and the
+        // single resolver guarantees config_editor wins both.
+        assert_eq!(
+            topmost_modal(false, true, true, true),
+            Some(ModalOverlay::ConfigEditor)
+        );
+    }
+
+    #[test]
+    fn file_picker_beats_reasoning() {
+        assert_eq!(
+            topmost_modal(false, false, true, true),
+            Some(ModalOverlay::FilePicker)
+        );
+    }
+
+    #[test]
+    fn reasoning_alone() {
+        assert_eq!(
+            topmost_modal(false, false, false, true),
+            Some(ModalOverlay::Reasoning)
+        );
     }
 }

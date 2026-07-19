@@ -226,6 +226,11 @@ fn terminal_known_kitty_protocol() -> bool {
 
 fn restore_terminal() -> Result<()> {
     let mut stdout = io::stdout();
+    // Defensive: if a panic unwound between the paired BeginSynchronizedUpdate /
+    // EndSynchronizedUpdate around a frame draw (event_loop), the terminal could
+    // be left holding output. Close any open synchronized update first so the
+    // shell never inherits a frozen screen.
+    let _ = execute!(stdout, crossterm::terminal::EndSynchronizedUpdate);
     // Best-effort: if we crashed while in a modal we may still be on the alt screen.
     let _ = execute!(stdout, LeaveAlternateScreen);
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);

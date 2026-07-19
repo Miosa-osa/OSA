@@ -283,7 +283,9 @@ pub enum BackendEvent {
     SessionCreated(Result<SessionCreateResponse, String>),
     RewindCheckpointsLoaded(Result<Vec<RewindCheckpoint>, String>),
     RewindRestored(Result<RewindRestoreResponse, String>),
-    ModelsLoaded(Result<ModelListResponse, String>),
+    // (removed: legacy `ModelsLoaded` flat-model-list event — it had no producer
+    // and its handler was a no-op. The picker is provider-first via
+    // `ProviderPickerData`.)
     ModelSwitched(Result<ModelSwitchResponse, String>),
     OnboardingStatus(Result<OnboardingStatusResponse, String>),
 

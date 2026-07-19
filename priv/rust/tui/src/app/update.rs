@@ -197,21 +197,21 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        // The overdrive confirmation is a modal overlay with the highest key
-        // priority — nothing else may run while it awaits a yes/no.
-        if self.overdrive_confirm.is_some() {
-            return self.handle_overdrive_confirm_key(key);
-        }
-        // File picker and reasoning selector are overlays that take priority
-        // regardless of the current app state.
-        if self.file_picker.is_some() {
-            return self.handle_file_picker_key(key);
-        }
-        if self.reasoning_selector.is_some() {
-            return self.handle_reasoning_key(key);
-        }
-        if self.config_editor.is_some() {
-            return self.handle_config_editor_key(key);
+        // Floating Option-overlays take key priority over the base state machine,
+        // in the SAME order the draw layer paints them (see
+        // `App::active_modal_overlay` / `event_loop::draw`). Routing here and
+        // painting there both consume the one resolver, so the overlay drawn on
+        // top is always the overlay that receives the keys — the previous hand-
+        // maintained chains disagreed (config-editor drawn over file-picker while
+        // file-picker ate the keys).
+        if let Some(modal) = self.active_modal_overlay() {
+            use crate::app::ModalOverlay;
+            return match modal {
+                ModalOverlay::Overdrive => self.handle_overdrive_confirm_key(key),
+                ModalOverlay::ConfigEditor => self.handle_config_editor_key(key),
+                ModalOverlay::FilePicker => self.handle_file_picker_key(key),
+                ModalOverlay::Reasoning => self.handle_reasoning_key(key),
+            };
         }
 
         match self.state {

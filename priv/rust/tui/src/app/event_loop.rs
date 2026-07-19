@@ -247,7 +247,17 @@ impl App {
             self.sync_chrome();
 
             // 3. Draw the live region (inline) or the modal / fullscreen view (full).
-            terminal.draw(|frame| self.draw(frame))?;
+            // Wrap the frame in a DEC 2026 synchronized update (BSU/ESU) so the
+            // terminal composites the whole frame atomically — no tearing or
+            // half-drawn streaming rows on the frequently-rebuilt inline viewport.
+            // The pair is written synchronously around this single draw (no await
+            // between), so it can never dangle; unsupported terminals ignore the
+            // private-mode sequence. Errors are non-fatal — the frame still draws.
+            let mut sync_out = std::io::stdout();
+            let _ = execute!(sync_out, crossterm::terminal::BeginSynchronizedUpdate);
+            let draw_res = terminal.draw(|frame| self.draw(frame));
+            let _ = execute!(sync_out, crossterm::terminal::EndSynchronizedUpdate);
+            draw_res?;
 
             // 4. Block until at least one event is available.
             let event = match self.event_rx.recv().await {
@@ -397,23 +407,38 @@ impl App {
                     );
                 }
                 _ => {
-                    // Config editor and file picker overlays take highest modal
-                    // priority (drawn over whatever state is underneath). The
-                    // overdrive confirm sits above even those.
-                    if let Some(ref d) = self.overdrive_confirm {
-                        d.draw(frame, area);
-                    } else if let Some(ref editor) = self.config_editor {
-                        editor.draw(frame, area);
-                    } else if let Some(ref picker) = self.file_picker {
-                        picker.draw(frame, area);
-                    } else if let Some(ref sel) = self.reasoning_selector {
-                        // `/reasoning` (no arg) sets this Option-overlay and its key
-                        // handler is wired (update.rs), but the draw was missing —
-                        // so it opened an INVISIBLE modal that swallowed keystrokes.
-                        // Draw it here alongside the other Option-overlays.
-                        sel.draw(frame, area);
-                    } else {
-                        match self.state {
+                    // Floating Option-overlays take highest modal priority (drawn
+                    // over whatever state is underneath). The priority order is
+                    // resolved ONCE by `active_modal_overlay`, shared verbatim with
+                    // the key router (update.rs) so the overlay painted on top is
+                    // always the one that receives the keys.
+                    use crate::app::ModalOverlay;
+                    match self.active_modal_overlay() {
+                        Some(ModalOverlay::Overdrive) => {
+                            if let Some(ref d) = self.overdrive_confirm {
+                                d.draw(frame, area);
+                            }
+                        }
+                        Some(ModalOverlay::ConfigEditor) => {
+                            if let Some(ref editor) = self.config_editor {
+                                editor.draw(frame, area);
+                            }
+                        }
+                        Some(ModalOverlay::FilePicker) => {
+                            if let Some(ref picker) = self.file_picker {
+                                picker.draw(frame, area);
+                            }
+                        }
+                        Some(ModalOverlay::Reasoning) => {
+                            // `/reasoning` (no arg) sets this Option-overlay and its
+                            // key handler is wired (update.rs); without this arm it
+                            // opened an INVISIBLE modal that swallowed keystrokes.
+                            if let Some(ref sel) = self.reasoning_selector {
+                                sel.draw(frame, area);
+                            }
+                        }
+                        None => {
+                            match self.state {
                             AppState::Quit => self.quit_dialog.draw(frame, area),
                             AppState::Palette => self.palette.draw(frame, area),
                             AppState::ModelPicker => {
@@ -431,14 +456,11 @@ impl App {
                                     d.draw(frame, area);
                                 }
                             }
-                            AppState::Permissions => {
-                                // Now rendered inline via draw_inline (see
-                                // draw_inline()); this full-viewport branch is
-                                // unreachable because Permissions left is_overlay().
-                                if let Some(ref d) = self.permissions {
-                                    d.draw_inline(frame, area);
-                                }
-                            }
+                            // AppState::Permissions has no draw arm here: the
+                            // permission ask renders inline (see draw_inline), and
+                            // Permissions is not an is_overlay() state, so this
+                            // full-viewport branch was unreachable dead code and was
+                            // removed. It falls through to the `_ => {}` no-op.
                             AppState::PlanReview => {
                                 if let Some(ref r) = self.plan_review {
                                     r.draw(frame, area);
@@ -545,6 +567,7 @@ impl App {
                                 }
                             }
                             _ => {}
+                            }
                         }
                     }
                 }

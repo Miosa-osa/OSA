@@ -955,12 +955,6 @@ impl App {
                     );
                 }
             },
-            // === Models/Sessions loaded (dialog triggers) ===
-            // ModelsLoaded is legacy (the flat model list). The picker is now
-            // provider-first and opens via ProviderPickerData; this arm is kept
-            // only to remain exhaustive over the event enum.
-            BackendEvent::ModelsLoaded(_result) => {}
-
             // === Provider-first picker: catalog + detection loaded ===
             BackendEvent::ProviderPickerData(result) => match result {
                 Ok(resp) => {
