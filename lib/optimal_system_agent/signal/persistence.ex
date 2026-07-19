@@ -13,11 +13,34 @@ defmodule OptimalSystemAgent.Signal.Persistence do
 
   @impl true
   def init(_opts) do
-    ref = Bus.register_handler(:signal_classified, &handle_signal_event/1)
-    {:ok, %{handler_ref: ref}}
+    {:ok, %{handler_ref: nil}, {:continue, :register_bus_handler}}
+  end
+
+  # Deferred to handle_continue so a boot-time hiccup on Events.Bus (e.g.
+  # transiently unreachable while Infrastructure is still settling under
+  # load) degrades Signal.Persistence instead of crashing it and taking
+  # down the whole AgentServices supervisor.
+  @impl true
+  def handle_continue(:register_bus_handler, state) do
+    try do
+      ref = Bus.register_handler(:signal_classified, &handle_signal_event/1)
+      {:noreply, %{state | handler_ref: ref}}
+    catch
+      :exit, reason ->
+        Logger.warning("[Persistence] Events.Bus unavailable, will retry: #{inspect(reason)}")
+        Process.send_after(self(), :retry_register_bus_handler, 500)
+        {:noreply, state}
+    end
   end
 
   @impl true
+  def handle_info(:retry_register_bus_handler, state) do
+    {:noreply, state, {:continue, :register_bus_handler}}
+  end
+
+  @impl true
+  def terminate(_reason, %{handler_ref: nil}), do: :ok
+
   def terminate(_reason, %{handler_ref: ref}) do
     Bus.unregister_handler(:signal_classified, ref)
     :ok

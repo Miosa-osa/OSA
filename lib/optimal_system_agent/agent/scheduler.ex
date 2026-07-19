@@ -164,7 +164,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
     state = %{state | heartbeat_started_at: DateTime.utc_now()}
     state = load_crons(state)
-    state = load_triggers(state)
+    state = load_trigger_state(state)
 
     Logger.info(
       "Scheduler started — heartbeat every #{div(heartbeat_interval(), 60_000)} min, " <>
@@ -172,7 +172,25 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
         "#{map_size(state.trigger_handlers)} trigger(s)"
     )
 
-    {:ok, state}
+    {:ok, state, {:continue, :register_bus_triggers}}
+  end
+
+  # Registering triggers with Events.Bus is deferred to handle_continue so a
+  # boot-time hiccup there — e.g. Bus transiently unreachable while
+  # Infrastructure is still settling under load — degrades the bus-trigger
+  # bridge instead of crashing the Scheduler, which would otherwise take
+  # down the whole AgentServices supervisor (and hence the entire app).
+  @impl true
+  def handle_continue(:register_bus_triggers, state) do
+    try do
+      register_event_triggers(state.triggers_raw)
+      {:noreply, state}
+    catch
+      :exit, reason ->
+        Logger.warning("[Scheduler] Events.Bus unavailable, will retry: #{inspect(reason)}")
+        Process.send_after(self(), :retry_register_bus_triggers, 500)
+        {:noreply, state}
+    end
   end
 
   # ── Cast Handlers ─────────────────────────────────────────────────────
@@ -440,6 +458,11 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
   # ── Info Handlers ─────────────────────────────────────────────────────
 
   @impl true
+  def handle_info(:retry_register_bus_triggers, state) do
+    {:noreply, state, {:continue, :register_bus_triggers}}
+  end
+
+  @impl true
   def handle_info(:heartbeat, state) do
     state = run_heartbeat(state)
     schedule_heartbeat()
@@ -455,6 +478,10 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
 
   # ── CRONS/TRIGGERS I/O (delegated to Scheduler.Persistence) ────────
   defp load_crons(state), do: Persistence.load_crons(state)
+
+  # Loads trigger state only — used at init/1, where bus registration is
+  # deferred to handle_continue(:register_bus_triggers, ...) instead.
+  defp load_trigger_state(state), do: Persistence.load_triggers(state)
 
   defp load_triggers(state) do
     state = Persistence.load_triggers(state)
