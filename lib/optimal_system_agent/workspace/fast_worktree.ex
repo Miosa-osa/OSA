@@ -1,0 +1,374 @@
+defmodule OptimalSystemAgent.Workspace.FastWorktree do
+  @moduledoc """
+  Copy-on-write isolated git worktrees for parallel sub-agents.
+
+  An Elixir port of grok-build's `xai-fast-worktree`. Instead of a plain
+  `git worktree add` that walks and checks out every tracked file (tens of
+  seconds on a 100k-file repo), this creates a worktree whose files are
+  populated by the fastest strategy the host filesystem supports, mirroring the
+  source repo's *current working-tree state* (tracked + dirty + untracked-non-
+  ignored), and finalizes the git index so `git status` is instant.
+
+  ## Tier ladder (fastest → most portable)
+
+  Mirrors grok's `Linked`/`Standalone` fast paths + `GitCheckout` fallback:
+
+    1. `:btrfs`   — O(1) `btrfs subvolume snapshot` (btrfs subvolume repos only)
+    2. `:reflink` — per-file `cp --reflink=always` CoW clone (XFS/btrfs)
+    3. `:copy`    — parallel plain copy (works on **every** filesystem)
+    4. `:git`     — plain `git worktree add` full checkout (ultimate fallback)
+
+  `:overlayfs` is detected (`Capabilities`) but not used for population — a
+  faithful overlay mount needs a FUSE-lower/btrfs-upper stack and CAP_SYS_ADMIN
+  that a general deployment cannot assume; we fall through to a supported tier.
+
+  The chosen tier is logged. On a plain ext4 box (no reflink/btrfs) the `:copy`
+  tier carries the feature and is fully exercised.
+
+  ## Crash recovery
+
+  Every worktree writes a JSON sidecar (`Metadata`) carrying a per-VM boot
+  token. `sweep/1` reclaims worktrees whose token is from a previous (crashed)
+  run or whose directory has vanished — `git worktree remove` + `rm -rf` +
+  deregister — so a killed OSA never leaks worktrees.
+
+  ## Relationship to `Agent.Worktree`
+
+  This module supersedes `Agent.Worktree.create/2` for the tiered creation +
+  metadata + sweep. It reuses `Agent.Worktree`'s merge-back logic for the
+  `merge: true` teardown path so the existing merge semantics are unchanged.
+  The `enter_worktree`/`exit_worktree` LLM tools continue to use their own
+  simple path and are untouched.
+  """
+
+  require Logger
+
+  alias OptimalSystemAgent.Workspace.Cwd
+  alias OptimalSystemAgent.Workspace.FastWorktree.{Capabilities, Metadata, Populate}
+
+  @default_worktrees_dir Path.expand("~/.osa/worktrees")
+
+  @type create_result :: %{
+          path: String.t(),
+          branch: String.t(),
+          tier: atom(),
+          repo_dir: String.t()
+        }
+
+  @doc """
+  Managed directory that holds all fast worktrees. Overridable at runtime via
+  `config :optimal_system_agent, :worktrees_dir, "..."` (used by tests to keep
+  worktrees + sidecars out of the real `~/.osa`).
+  """
+  @spec worktrees_dir() :: String.t()
+  def worktrees_dir do
+    Application.get_env(:optimal_system_agent, :worktrees_dir, @default_worktrees_dir)
+  end
+
+  @doc """
+  Detected filesystem capabilities for the repo backing `dir` (default: the
+  agent cwd). Cached per device. See `Capabilities`.
+  """
+  @spec capabilities(String.t() | nil) :: Capabilities.t()
+  def capabilities(dir \\ nil) do
+    Capabilities.detect(dir || Cwd.get())
+  end
+
+  @doc """
+  Create an isolated CoW worktree for `id`.
+
+  Options:
+    * `:repo_dir` — source repository (default: `Workspace.Cwd.get/0`, which
+      resolves to the user's project — never the OSA source tree)
+    * `:ref`      — git ref/commit-ish to base on (default: `"HEAD"`)
+    * `:branch`   — branch name to create (default: generated, stable per id)
+    * `:path`     — worktree directory (default: `<worktrees_dir>/<id>`)
+    * `:prefer`   — explicit tier list override (e.g. `[:copy]`), mainly for tests
+
+  Returns `{:ok, %{path, branch, tier, repo_dir}}` or `{:error, reason}`.
+  Compatible superset of `Agent.Worktree.create/2`'s `%{path, branch}` shape.
+  """
+  @spec create(String.t(), keyword()) :: {:ok, create_result()} | {:error, term()}
+  def create(id, opts \\ []) do
+    repo_dir = Path.expand(opts[:repo_dir] || Cwd.get())
+    ref = opts[:ref] || "HEAD"
+    safe_id = sanitize(id)
+    branch = opts[:branch] || "osa-wt-#{safe_id}-#{System.unique_integer([:positive])}"
+    path = Path.expand(opts[:path] || Path.join(worktrees_dir(), safe_id))
+
+    cond do
+      not inside_git_repo?(repo_dir) ->
+        {:error, "#{repo_dir} is not inside a git repository"}
+
+      File.exists?(path) ->
+        # Idempotency: reclaim a stale worktree left at this path.
+        _ = fast_remove(path, repo_dir)
+        do_create(safe_id, branch, path, repo_dir, ref, opts)
+
+      true ->
+        do_create(safe_id, branch, path, repo_dir, ref, opts)
+    end
+  rescue
+    e ->
+      Logger.error("[fast_worktree] create crashed: #{Exception.message(e)}")
+      {:error, "fast_worktree create error: #{Exception.message(e)}"}
+  end
+
+  defp do_create(safe_id, branch, path, repo_dir, ref, opts) do
+    File.mkdir_p!(worktrees_dir())
+    caps = capabilities(repo_dir)
+    tiers = tier_order(caps, opts)
+
+    case run_tiers(tiers, branch, path, repo_dir, ref, caps) do
+      {:ok, tier} ->
+        Logger.info(
+          "[fast_worktree] created #{path} on #{branch} via #{tier} tier " <>
+            "(fs=#{caps.fs_type})"
+        )
+
+        Metadata.write(worktrees_dir(), %{
+          id: safe_id,
+          path: path,
+          branch: branch,
+          repo_dir: repo_dir,
+          tier: tier
+        })
+
+        emit_hook(:worktree_create, %{path: path, branch: branch, repo_dir: repo_dir, tier: tier})
+
+        {:ok, %{path: path, branch: branch, tier: tier, repo_dir: repo_dir}}
+
+      {:error, reason} ->
+        Logger.error("[fast_worktree] all tiers failed for #{path}: #{inspect(reason)}")
+        _ = fast_remove(path, repo_dir)
+        {:error, "worktree creation failed: #{inspect(reason)}"}
+    end
+  end
+
+  # Build the ordered tier list from capabilities. An explicit :prefer overrides
+  # detection (tests / callers that want to force a tier). The plain `:git`
+  # checkout is always appended as the guaranteed final fallback.
+  defp tier_order(caps, opts) do
+    base =
+      case opts[:prefer] do
+        list when is_list(list) and list != [] ->
+          list
+
+        _ ->
+          [] ++
+            if(caps.btrfs, do: [:btrfs], else: []) ++
+            if(caps.reflink, do: [:reflink], else: []) ++
+            [:copy]
+      end
+
+    Enum.uniq(base ++ [:git])
+  end
+
+  # Try each populate tier against a freshly-registered --no-checkout worktree.
+  # `:git` is special — it does its own full-checkout `git worktree add`.
+  defp run_tiers([], _branch, _path, _repo, _ref, _caps), do: {:error, :no_tiers}
+
+  defp run_tiers([:git | _rest], branch, path, repo_dir, ref, _caps) do
+    # Ultimate fallback: exactly the legacy behavior — a full checkout. Clean
+    # HEAD (no dirty mirroring), but guaranteed to work anywhere git does.
+    ensure_absent(path, repo_dir)
+
+    case git(["worktree", "add", "-b", branch, path, ref], repo_dir) do
+      {_out, 0} -> {:ok, :git}
+      {out, _} -> {:error, {:git_checkout, String.trim(out)}}
+    end
+  end
+
+  defp run_tiers([tier | rest], branch, path, repo_dir, ref, caps) do
+    ensure_absent(path, repo_dir)
+
+    with {_out, 0} <-
+           git(["worktree", "add", "--no-checkout", "-b", branch, path, ref], repo_dir),
+         :ok <- Populate.run(tier, repo_dir, path, caps) do
+      {:ok, tier}
+    else
+      :unsupported ->
+        Logger.debug("[fast_worktree] tier #{tier} unsupported, falling through")
+        run_tiers(rest, branch, path, repo_dir, ref, caps)
+
+      {:error, reason} ->
+        Logger.warning(
+          "[fast_worktree] tier #{tier} failed (#{inspect(reason)}), falling through"
+        )
+
+        run_tiers(rest, branch, path, repo_dir, ref, caps)
+
+      {out, _code} ->
+        Logger.warning("[fast_worktree] worktree add failed for #{tier}: #{String.trim(out)}")
+        run_tiers(rest, branch, path, repo_dir, ref, caps)
+    end
+  end
+
+  @doc """
+  Tear down a worktree. Honors the same options as `Agent.Worktree.cleanup/2`:
+
+    * `merge: true`   — merge the branch back (delegates to `Agent.Worktree`),
+      then remove.
+    * `discard: true` — remove even a dirty worktree.
+    * default         — a dirty worktree is preserved for parent review; a clean
+      one is removed.
+
+  Removal is the O(1)-ish path: `rm -rf` + `git worktree prune` + `branch -D`,
+  which is dramatically faster than `git worktree remove` walking every file on
+  a large tree. The sidecar is deleted once the directory is gone.
+  """
+  @spec teardown(String.t(), keyword()) :: :ok | {:error, term()}
+  def teardown(path, opts \\ []) do
+    path = Path.expand(path)
+    repo_dir = Path.expand(opts[:repo_dir] || Cwd.get())
+    merge = Keyword.get(opts, :merge, false)
+    discard = Keyword.get(opts, :discard, false)
+    has_changes = worktree_has_changes?(path)
+
+    result =
+      cond do
+        merge and has_changes ->
+          # Reuse the audited merge-back path, then ensure fast removal + prune.
+          r = OptimalSystemAgent.Agent.Worktree.cleanup(path, merge: true, repo_dir: repo_dir)
+          _ = fast_remove(path, repo_dir)
+          r
+
+        has_changes and not discard ->
+          Logger.info("[fast_worktree] preserving dirty worktree #{path} for review")
+          :ok
+
+        true ->
+          fast_remove(path, repo_dir)
+      end
+
+    unless File.dir?(path), do: Metadata.delete_by_path(worktrees_dir(), path)
+
+    emit_hook(:worktree_remove, %{
+      path: path,
+      had_changes: has_changes,
+      merged: merge and has_changes,
+      preserved: has_changes and not merge and not discard
+    })
+
+    result
+  end
+
+  @doc """
+  Crash-recovery sweep. Reclaims orphaned worktrees.
+
+  A worktree is an orphan when (default `stale_only: true`):
+    * its sidecar's boot token differs from the current VM's (created by a
+      previous, likely crashed, run), or
+    * its directory has vanished (dangling sidecar / half-removed).
+
+  With `stale_only: false`, **all** managed worktrees are reclaimed (hard reset).
+  Returns `{:ok, %{removed: [path], kept: [path]}}`.
+  """
+  @spec sweep(keyword()) :: {:ok, %{removed: [String.t()], kept: [String.t()]}}
+  def sweep(opts \\ []) do
+    stale_only = Keyword.get(opts, :stale_only, true)
+    current = Metadata.boot_token()
+    default_repo = Path.expand(opts[:repo_dir] || Cwd.get())
+
+    {removed, kept} =
+      worktrees_dir()
+      |> Metadata.list()
+      |> Enum.reduce({[], []}, fn rec, {rm, kp} ->
+        wt_path = rec["path"]
+
+        orphan? =
+          cond do
+            not stale_only -> true
+            rec["boot_token"] != current -> true
+            is_binary(wt_path) and not File.dir?(wt_path) -> true
+            true -> false
+          end
+
+        if orphan? do
+          repo = rec["repo_dir"] || default_repo
+          if is_binary(wt_path), do: fast_remove(wt_path, repo, rec["branch"])
+          Metadata.delete(worktrees_dir(), rec["id"])
+          Logger.info("[fast_worktree] swept orphan worktree #{wt_path}")
+          {[wt_path | rm], kp}
+        else
+          {rm, [wt_path | kp]}
+        end
+      end)
+
+    {:ok, %{removed: Enum.reverse(removed), kept: Enum.reverse(kept)}}
+  end
+
+  @doc "List active worktrees tracked by sidecar metadata."
+  @spec list() :: [map()]
+  def list do
+    worktrees_dir()
+    |> Metadata.list()
+    |> Enum.map(fn r ->
+      %{path: r["path"], branch: r["branch"], tier: r["tier"], repo_dir: r["repo_dir"]}
+    end)
+  end
+
+  # ── Private ────────────────────────────────────────────────────────────
+
+  # O(1)-ish removal: bulk rm then deregister, instead of git worktree remove
+  # walking every file. Reads the branch first (needs the worktree to exist);
+  # a caller that already knows the branch (e.g. the sweep, from the sidecar)
+  # can pass it so a vanished-dir worktree still gets its branch cleaned up.
+  defp fast_remove(path, repo_dir, branch \\ nil) do
+    branch = branch || current_branch(path)
+    _ = File.rm_rf(path)
+    _ = git(["worktree", "prune"], repo_dir)
+    if is_binary(branch) and branch != "", do: git(["branch", "-D", branch], repo_dir)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # Ensure `path` is not registered/present before a fresh `git worktree add`.
+  defp ensure_absent(path, repo_dir) do
+    if File.exists?(path), do: fast_remove(path, repo_dir)
+    _ = git(["worktree", "prune"], repo_dir)
+    :ok
+  end
+
+  defp current_branch(path) do
+    # Guard on existence: System.cmd with a `cd:` into a vanished dir prints a
+    # noisy `spawn: Could not cd` to stderr. A vanished worktree has no
+    # recoverable branch anyway.
+    if File.dir?(path) do
+      case git(["branch", "--show-current"], path) do
+        {out, 0} -> String.trim(out)
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp worktree_has_changes?(path) do
+    case git(["status", "--porcelain"], path) do
+      {out, 0} -> String.trim(out) != ""
+      _ -> false
+    end
+  end
+
+  defp inside_git_repo?(dir) do
+    match?({_, 0}, git(["rev-parse", "--git-dir"], dir))
+  end
+
+  defp git(args, cd) do
+    System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+  rescue
+    e -> {Exception.message(e), 1}
+  end
+
+  defp sanitize(id), do: Regex.replace(~r/[^a-zA-Z0-9_\-]/, to_string(id), "_")
+
+  defp emit_hook(event, payload) do
+    OptimalSystemAgent.Agent.Hooks.run_async(event, payload)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+end

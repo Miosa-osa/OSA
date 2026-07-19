@@ -65,8 +65,11 @@ agent-*-completion.md
 # Test prompts (internal testing)
 test-prompts/
 
-# Workspace scratch files
-workspace/
+# Workspace scratch files (repo-root scratch dir only — do NOT swallow the
+# source tree lib/optimal_system_agent/workspace/, which the un-anchored
+# `workspace/` pattern was silently ignoring, leaving cwd.ex / trust.ex /
+# fast_worktree* untracked).
+/workspace/
 
 # Internal audit/dev docs (not for public repo)
 tasks/

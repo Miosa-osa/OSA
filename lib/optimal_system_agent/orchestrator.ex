@@ -268,14 +268,24 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     worktree_info =
       if isolation == :worktree do
-        case OptimalSystemAgent.Agent.Worktree.create(subagent_id) do
+        # FastWorktree picks the fastest CoW tier the filesystem supports
+        # (btrfs/reflink/copy) and falls back to a plain checkout. repo_dir is
+        # the agent's resolved cwd (the user's project), NOT File.cwd! which
+        # under `mix osa.serve` would be the OSA source tree.
+        repo_dir = Map.get(config, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
+
+        case OptimalSystemAgent.Workspace.FastWorktree.create(subagent_id, repo_dir: repo_dir) do
           {:ok, info} ->
-            Logger.info("[Orchestrator] Worktree created for #{subagent_id} at #{info.path}")
+            Logger.info(
+              "[Orchestrator] Worktree created for #{subagent_id} at #{info.path} " <>
+                "(#{info.tier} tier)"
+            )
+
             info
 
           {:error, reason} ->
             Logger.warning(
-              "[Orchestrator] Worktree creation failed: #{reason}, running without isolation"
+              "[Orchestrator] Worktree creation failed: #{inspect(reason)}, running without isolation"
             )
 
             nil
@@ -363,9 +373,10 @@ defmodule OptimalSystemAgent.Orchestrator do
         if worktree_info do
           merge = match?({:ok, _}, result) and Map.get(config, :merge_worktree, false)
 
-          OptimalSystemAgent.Agent.Worktree.cleanup(worktree_info.path,
+          OptimalSystemAgent.Workspace.FastWorktree.teardown(worktree_info.path,
             merge: merge,
-            discard: Map.get(config, :discard_worktree, false)
+            discard: Map.get(config, :discard_worktree, false),
+            repo_dir: Map.get(worktree_info, :repo_dir)
           )
         end
 
@@ -382,9 +393,10 @@ defmodule OptimalSystemAgent.Orchestrator do
         RunStore.complete(subagent_id, failure_result(subagent_id, parent_id, role, reason))
 
         if worktree_info do
-          OptimalSystemAgent.Agent.Worktree.cleanup(worktree_info.path,
+          OptimalSystemAgent.Workspace.FastWorktree.teardown(worktree_info.path,
             merge: false,
-            discard: Map.get(config, :discard_worktree, false)
+            discard: Map.get(config, :discard_worktree, false),
+            repo_dir: Map.get(worktree_info, :repo_dir)
           )
         end
 
