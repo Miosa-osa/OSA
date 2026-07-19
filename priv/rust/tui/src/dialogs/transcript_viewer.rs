@@ -613,8 +613,11 @@ fn highlight(text: &str, q: &str, base: Style, theme: &style::Theme) -> Vec<Span
 }
 
 fn copy_to_clipboard(text: &str, ok_msg: &str) -> TranscriptAction {
-    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
-        Ok(_) => TranscriptAction::Toast(ok_msg.to_string()),
-        Err(e) => TranscriptAction::Toast(format!("Copy failed: {}", e)),
+    // U-T7/U-T19 — layered clipboard cascade (native CLI → tmux buffer → OSC 52)
+    // so copy works over SSH / headless / tmux, not just on a local windowing
+    // system as the old arboard-only path did.
+    match crate::clipboard::copy(text) {
+        Some(_) => TranscriptAction::Toast(ok_msg.to_string()),
+        None => TranscriptAction::Toast("Copy failed".to_string()),
     }
 }

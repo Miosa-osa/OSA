@@ -1,16 +1,9 @@
 use crate::app::state::AppState;
 use crate::components::activity::ProcessingPhase;
 use crate::event::backend::BackendEvent;
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use super::App;
-
-/// How long the terminal must be free of keystrokes before a turn-completion
-/// notification is emitted. Approximates "user stepped away / terminal unfocused"
-/// (crossterm focus reporting is not enabled), so quick turns the user is
-/// actively watching stay silent while long unattended ones ping.
-const NOTIFY_IDLE_THRESHOLD: Duration = Duration::from_secs(10);
 
 impl App {
     /// Flush the collapsed-tool accumulator: emit the pending run (e.g. three
@@ -23,20 +16,16 @@ impl App {
         }
     }
 
-    /// Emit a completion notification (terminal bell + OSC 9 desktop notice) when
-    /// a turn finishes and the user is likely away. Gated by `notify_on_complete`
-    /// (disable with the OSA_NO_NOTIFY env var) and an idle heuristic so turns the
-    /// user is actively watching don't ping.
+    /// Emit a turn-complete notification when the terminal is UNFOCUSED (U-T11).
+    /// Replaces the old last-keypress idle heuristic with the real DECSET-1004
+    /// focus signal folded in by `focus::note_event`: a turn the user is actively
+    /// watching (focused) never dings, while one finishing while they're away
+    /// fires through the configured channel (bell / kitty / hooks). The channel
+    /// itself honours the OSA_NO_NOTIFY opt-out (`NotificationConfig::from_env`
+    /// sets the channel to `None`, so this becomes a no-op + user hooks only).
     pub(super) fn notify_turn_complete(&mut self) {
-        if !self.notify_on_complete {
-            return;
-        }
-        let idle_enough = self
-            .last_user_input
-            .map(|t| t.elapsed() >= NOTIFY_IDLE_THRESHOLD)
-            .unwrap_or(true);
-        if idle_enough {
-            emit_completion_notification();
+        if crate::notification::focus::is_unfocused() {
+            crate::notification::on_turn_complete(&mut self.notify_cfg);
         }
     }
 
@@ -2101,10 +2090,6 @@ fn tool_result_should_stash(call_args_still_queued: bool) -> bool {
 /// (ghostty OSC 777 / kitty OSC 99 / OSC 9 fallback, tmux-wrapped, plus a BEL
 /// for terminals with no notification support). Control sequences the terminal
 /// consumes — never disturbs the ratatui render.
-fn emit_completion_notification() {
-    crate::components::notify::notify("OSA", "Response ready");
-}
-
 /// Commands the TUI handles locally (or wants surfaced) that must appear in the
 /// Ctrl+K palette and inline `/` completions. Appended to whatever the backend
 /// `GET /commands` returns, de-duplicated by name (the backend wins on a name

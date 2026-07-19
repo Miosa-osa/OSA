@@ -176,6 +176,8 @@ pub enum Action {
     ThinkingToggle,
     TodosToggle,
     CopyLast,
+    /// U-T7 — flip the chat between rendered markdown and its raw source view.
+    RawToggle,
     /// WS5 — interrupt the running turn (chat:interrupt). Esc / Ctrl+C are
     /// hardwired to the same path in update.rs (non-rebindable); this action
     /// lets users bind ADDITIONAL keys to interrupt.
@@ -204,6 +206,7 @@ impl Action {
             "chat:thinkingToggle" => Action::ThinkingToggle,
             "chat:todosToggle" => Action::TodosToggle,
             "chat:copyLast" => Action::CopyLast,
+            "chat:rawToggle" => Action::RawToggle,
             "chat:interrupt" => Action::Interrupt,
             s if s.starts_with('/') => Action::Command(s.to_string()),
             _ => return None,
@@ -231,6 +234,7 @@ impl Action {
             Action::ThinkingToggle => "chat:thinkingToggle".into(),
             Action::TodosToggle => "chat:todosToggle".into(),
             Action::CopyLast => "chat:copyLast".into(),
+            Action::RawToggle => "chat:rawToggle".into(),
             Action::Interrupt => "chat:interrupt".into(),
             Action::Command(c) => c.clone(),
         }
@@ -334,6 +338,8 @@ impl Keybindings {
             (Context::Global, "alt+p", Action::ModelPicker),
             (Context::Global, "alt+t", Action::ThinkingToggle),
             (Context::Global, "ctrl+t", Action::TodosToggle),
+            // U-T7 — raw-markdown view toggle (Ctrl+R is reverse-search, so alt+r).
+            (Context::Global, "alt+r", Action::RawToggle),
             // Display/parity entry: the hardcoded is_permission_cycle check
             // runs first (Shift+Tab encodings are quirky), so this binding is
             // authoritative for shortcut_display but not for dispatch.

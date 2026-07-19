@@ -280,6 +280,11 @@ impl App {
             // 200ms tick cadence costs nothing when idle.
             self.sync_chrome();
 
+            // 2d. U-T12/T15 — reconcile taskbar progress + sleep inhibitor with
+            // the live-turn state (start on turn entry, keepalive on tick, clear
+            // on turn end). Cheap when idle; the reconciler self-throttles.
+            self.sync_turn_effects();
+
             // 3. Draw the live region (inline) or the modal / fullscreen view (full).
             // Wrap the frame in a DEC 2026 synchronized update (BSU/ESU) so the
             // terminal composites the whole frame atomically — no tearing or
@@ -333,6 +338,13 @@ impl App {
     /// input while open, toggles from the plain chat surface, and records keypress
     /// activity for the completion-notification idle heuristic.
     fn dispatch_event(&mut self, event: Event) -> bool {
+        // U-T11 — fold terminal focus transitions (DECSET 1004 FocusGained/Lost,
+        // enabled in main.rs) into the process-global focus flag so the
+        // turn-complete notifier can gate on real "user is away" state. A no-op
+        // for every non-focus event.
+        if let Event::Terminal(ref ev) = event {
+            crate::notification::focus::note_event(ev);
+        }
         if let Event::Terminal(CrosstermEvent::Key(key)) = &event {
             if key.kind == KeyEventKind::Press {
                 // Any keypress counts as activity (turn-complete idle heuristic).
@@ -364,6 +376,10 @@ impl App {
             && !self.agents.is_active()
             && self.file_picker.is_none()
             && self.reasoning_selector.is_none()
+            // U-B2 — when the last tool result is still collapsed, Ctrl+O should
+            // EXPAND it first (via chat:expandTools in the update layer). Only
+            // once nothing is expandable does Ctrl+O open the transcript reader.
+            && !self.chat.has_expandable_last_tool()
             && matches!(
                 self.state,
                 AppState::Idle | AppState::Processing | AppState::Recording

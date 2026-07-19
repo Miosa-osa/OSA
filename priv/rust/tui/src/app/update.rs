@@ -668,7 +668,13 @@ impl App {
         let _ = enable_raw_mode();
         // No mouse capture — keep the terminal's native scrollback (see main.rs).
         let _ = execute!(out, EnableBracketedPaste);
-        if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        // U-B3 — re-push the kitty keyboard protocol on resume. Trust the runtime
+        // probe when it gives a definitive answer, else fall back to env detection
+        // so a kitty-family terminal reached through tmux/SSH (which the runtime
+        // probe misreports) keeps Shift+Enter working across suspend/resume.
+        if crate::notification::kitty::should_repush_kitty_protocol(
+            supports_keyboard_enhancement().ok(),
+        ) {
             let _ = execute!(
                 out,
                 PushKeyboardEnhancementFlags(

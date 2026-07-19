@@ -61,6 +61,22 @@ pub fn is_image_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// U-T1 — the on-disk IMAGE paths among composer `@`-mention attachments, so an
+/// `@photo.png` mention rides the same vision `images` wire as a pasted image.
+/// Non-image file mentions and `@agent` mentions are intentionally excluded:
+/// they already reach the model as inline prompt text, and the `images` wire is
+/// image-semantic (a non-image path there would be misinterpreted). Pure over
+/// its input (existence is checked by the caller) so it is unit-testable.
+pub fn mention_image_paths(atts: &[crate::components::input::mentions::Attachment]) -> Vec<String> {
+    use crate::components::input::mentions::Attachment as M;
+    atts.iter()
+        .filter_map(|a| match a {
+            M::File { path, .. } if is_image_path(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Strip a single matching pair of surrounding quotes.
 fn unquote(s: &str) -> String {
     let s = s.trim();
@@ -225,6 +241,23 @@ mod prune_tests {
         let mut atts = vec![att(1, true)];
         retain_referenced(&mut atts, "[File #1]");
         assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn mention_image_paths_keeps_only_image_files() {
+        use crate::components::input::mentions::{Attachment as M, LineRange};
+        let atts = vec![
+            M::File { path: "docs/diagram.PNG".into(), range: None },
+            M::File { path: "src/main.rs".into(), range: Some(LineRange { start: 1, end: None }) },
+            M::File { path: "shot.jpeg".into(), range: None },
+            M::Agent { name: "reviewer".into() },
+        ];
+        // Only the two image files survive; the .rs mention and the @agent are
+        // excluded (they stay inline prompt text, not on the vision wire).
+        assert_eq!(
+            mention_image_paths(&atts),
+            vec!["docs/diagram.PNG".to_string(), "shot.jpeg".to_string()]
+        );
     }
 
     #[test]

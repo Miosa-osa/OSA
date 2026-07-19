@@ -212,6 +212,21 @@ impl App {
                 self.copy_last_message();
                 Some(false)
             }
+            Action::RawToggle => {
+                // U-T7 — flip rendered markdown ↔ raw source and confirm via toast.
+                let raw = self.chat.toggle_raw_view();
+                self.recompute_layout();
+                self.toasts.push(
+                    if raw {
+                        "Raw markdown view on"
+                    } else {
+                        "Rendered view on"
+                    }
+                    .into(),
+                    ToastLevel::Info,
+                );
+                Some(false)
+            }
             Action::Interrupt => {
                 // WS5 — interrupt through the action layer. Declines at Idle so
                 // a bound key falls through to the composer.

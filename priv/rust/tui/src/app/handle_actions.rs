@@ -551,12 +551,39 @@ impl App {
         self.prune_orphaned_attachments_in(text);
         // Collect pasted/dropped attachments for this turn, then clear them so the
         // next prompt starts fresh (the chips already left the input on submit).
-        let images = if self.attachments.is_empty() {
+        let mut wire_images: Vec<String> =
+            self.attachments.iter().map(|a| a.wire_value()).collect();
+        self.attachments.clear();
+        // U-T1/U-T4 — consume the structured composer submit metadata. Drain the
+        // `@`-mention attachments the composer resolved for this line
+        // (`take_attachments` clears them so they never leak to a later turn) and
+        // carry any real on-disk IMAGE mentions onto the same vision `images`
+        // wire, so `@photo.png` now actually attaches instead of being only
+        // inline text. `last_submit_kind` is consulted for logging only: SHELL
+        // lines (`!cmd`) are already routed to the shell tool by `submit_input`
+        // before this path, and MEMORY lines (`#note`) are intercepted at the
+        // key layer — so here the kind is always Prompt. Non-image file mentions
+        // and `@agent` mentions stay inline prompt text (carrying those as
+        // structured backend refs needs an OrchestrateRequest field — deferred).
+        let mention_atts = self.input.take_attachments();
+        let submit_kind = self.input.last_submit_kind();
+        for p in crate::app::attachment::mention_image_paths(&mention_atts) {
+            if std::path::Path::new(&p).is_file() && !wire_images.contains(&p) {
+                wire_images.push(p);
+            }
+        }
+        if !mention_atts.is_empty() {
+            tracing::debug!(
+                kind = ?submit_kind,
+                mentions = mention_atts.len(),
+                "consumed composer submit metadata"
+            );
+        }
+        let images = if wire_images.is_empty() {
             None
         } else {
-            Some(self.attachments.iter().map(|a| a.wire_value()).collect::<Vec<_>>())
+            Some(wire_images)
         };
-        self.attachments.clear();
 
         tokio::spawn(async move {
             let req = crate::client::types::OrchestrateRequest {
@@ -1199,28 +1226,18 @@ impl App {
 
     pub(super) fn copy_last_message(&mut self) {
         if let Some(msg) = self.chat.last_agent_message() {
-            // Try OSC 52 first: it routes the copy through the terminal, so it
-            // works over SSH where arboard (local windowing system) silently
-            // fails. Fall back to arboard when the escape can't be written
-            // (e.g. stdout redirected) so local sessions still copy.
-            if crate::components::osc52::copy(&msg).is_ok() {
-                self.toasts.push(
+            // U-T7/U-T19 — layered clipboard cascade (native CLI → tmux buffer →
+            // OSC 52). Works locally, over SSH, on headless boxes and through
+            // tmux, unlike the old arboard-only path (local windowing only).
+            match crate::clipboard::copy(&msg) {
+                Some(_) => self.toasts.push(
                     "Copied to clipboard".into(),
                     crate::components::toast::ToastLevel::Info,
-                );
-                return;
-            }
-            match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(msg)) {
-                Ok(_) => {
+                ),
+                None => {
+                    warn!("Clipboard copy failed on every transport");
                     self.toasts.push(
-                        "Copied to clipboard".into(),
-                        crate::components::toast::ToastLevel::Info,
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to copy: {}", e);
-                    self.toasts.push(
-                        format!("Copy failed: {}", e),
+                        "Copy failed".into(),
                         crate::components::toast::ToastLevel::Warning,
                     );
                 }

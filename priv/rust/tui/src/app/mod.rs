@@ -306,6 +306,20 @@ pub struct App {
     // `last_user_input` tracks the last keypress for the idle heuristic.
     pub notify_on_complete: bool,
     pub last_user_input: Option<Instant>,
+    /// U-T18 — notification channel + user hooks, built once from env/config.
+    /// Consumed by the focus-gated turn-complete notifier.
+    pub notify_cfg: crate::notification::NotificationConfig,
+
+    // U-T12/T15 — turn-activity side effects reconciled once per tick from
+    // `turn_is_active()` (robust across overlays parking a live turn, cancels
+    // and disconnects). `turn_effects_active` tracks whether the effects are
+    // currently engaged so start/stop fire exactly on the turn edges.
+    /// U-T15 — OS sleep inhibitor held for the duration of a turn (Drop releases).
+    pub inhibitor: Option<crate::notification::SleepInhibitor>,
+    /// True while the taskbar-progress bar + sleep inhibitor are engaged.
+    pub turn_effects_active: bool,
+    /// Throttle for the OSC 9;4 progress keepalive re-emit (~3s cadence).
+    pub last_progress_keepalive: Option<Instant>,
 
     // WS12 chrome — deduping terminal-title writer (OSC 0, tmux-wrapped) and
     // the unanswered-permission ping state: when the permission dialog opened
@@ -544,6 +558,10 @@ impl App {
             transcript_override: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
+            notify_cfg: crate::notification::NotificationConfig::from_env(),
+            inhibitor: None,
+            turn_effects_active: false,
+            last_progress_keepalive: None,
             chrome_title: crate::components::title::TitleState::new(),
             permission_wait_since: None,
             permission_pinged: false,
@@ -751,6 +769,43 @@ impl App {
         } else {
             self.permission_wait_since = None;
             self.permission_pinged = false;
+        }
+    }
+
+    /// U-T12 + U-T15 — reconcile the turn-lifecycle side effects (taskbar
+    /// progress bar + OS sleep inhibitor) with whether a turn is in flight.
+    /// Runs once per event-loop iteration (the 200ms tick guarantees cadence).
+    ///
+    /// Driving both effects off `turn_is_active()` — rather than hooking every
+    /// individual Processing-enter / Idle-return site — keeps them correct across
+    /// the ~20 overlays that park a live turn on the return stack, and across
+    /// cancels, backend disconnects and errors that end a turn without a plain
+    /// `transition(Idle)`. Engaged on the rising edge, released on the falling
+    /// edge, and re-asserted (progress keepalive) on a slow cadence so terminals
+    /// that time the bar out keep it lit.
+    pub(crate) fn sync_turn_effects(&mut self) {
+        let active = self.turn_is_active();
+        if active {
+            if !self.turn_effects_active {
+                self.turn_effects_active = true;
+                self.inhibitor = Some(crate::notification::SleepInhibitor::begin());
+                crate::notification::progress::start();
+                self.last_progress_keepalive = Some(Instant::now());
+            } else {
+                let due = self
+                    .last_progress_keepalive
+                    .map(|t| t.elapsed() >= Duration::from_secs(3))
+                    .unwrap_or(true);
+                if due {
+                    crate::notification::progress::keepalive();
+                    self.last_progress_keepalive = Some(Instant::now());
+                }
+            }
+        } else if self.turn_effects_active {
+            self.turn_effects_active = false;
+            self.inhibitor = None; // Drop releases the OS inhibitor.
+            crate::notification::progress::done();
+            self.last_progress_keepalive = None;
         }
     }
 }

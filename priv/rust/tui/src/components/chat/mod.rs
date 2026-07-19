@@ -296,6 +296,20 @@ impl Chat {
         }
     }
 
+    /// U-B2 — whether the most recent live-tail tool call is currently collapsed
+    /// (i.e. `Ctrl+O` / `chat:expandTools` has something to expand right now).
+    /// Only in-progress tool messages in `messages` are expandable; once
+    /// finalized into native scrollback a tool call becomes static, so this
+    /// returns `false` for them. Used to make Ctrl+O expand the last tool result
+    /// FIRST and only open the transcript reader when nothing is expandable.
+    pub(crate) fn has_expandable_last_tool(&self) -> bool {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|m| m.tool_data.as_ref())
+            .map_or(false, |td| !td.expanded)
+    }
+
     /// Finalize a specific in-progress tool call (by name) into scrollback.
     pub fn finalize_tool(&mut self, name: &str) {
         if let Some(idx) = self
