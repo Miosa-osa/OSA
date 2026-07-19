@@ -309,6 +309,20 @@ config :optimal_system_agent, :auto_mode,
     model: nil,
     max_tokens: 128
   ],
+  # Opt-in auto-permission classifier (P2 #19, grok permission/auto_mode.rs). When
+  # `enabled: true`, before OSA surfaces the DEFAULT interactive :ask prompt for a
+  # mutating tool call, a fast-path (structured shell parser) + optional cheap LLM
+  # verdict may DOWNGRADE that ask to :allow. It can only downgrade the default
+  # ask — never overrides a deny/catastrophic/safety-ask/explicit-ask-rule — and
+  # fails safe to the prompt on any doubt. OFF by default (behavior unchanged).
+  auto_allow: [
+    enabled: false,
+    use_llm: true,
+    provider: nil,
+    model: nil,
+    max_tokens: 64,
+    context_turns: 6
+  ],
   untrusted_host_allowlist: [
     "github.com",
     "raw.githubusercontent.com",

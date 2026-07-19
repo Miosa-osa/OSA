@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
   alias OptimalSystemAgent.Permissions
+  alias OptimalSystemAgent.Permissions.AutoClassifier
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
@@ -394,7 +395,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
               :allow
 
             true ->
-              {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
+              # Auto-permission classifier (opt-in, default off): before surfacing
+              # the DEFAULT ask, let the classifier downgrade a provably-safe /
+              # model-approved call to :allow. It can ONLY downgrade this default
+              # ask — deny/catastrophic/safety asks and explicit ask rules never
+              # reach here — and it fails safe to the prompt on any doubt.
+              case AutoClassifier.maybe_allow(tool_call, state) do
+                :allow ->
+                  :allow
+
+                _ ->
+                  {:ask, PermissionBroker.new_request_id(),
+                   permission_summary(tool_call, reason)}
+              end
           end
       end
     end
