@@ -549,7 +549,14 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         %{tools_used: tools, total_tool_calls: count, input: input, session_id: sid} = payload
       )
       when is_list(tools) and is_integer(count) and count >= 5 do
-    if is_binary(sid) and not String.starts_with?(sid, "agent:") do
+    # OFF by default. This scraped a "skill" from every 5+ tool turn and named it
+    # after the raw user message, so low-signal chatter ("nice", "okay", "what can
+    # u do") became junk skills that then flooded the skill-discovery reminders.
+    # Real skills are created deliberately via save_skill/create_skill. Opt in
+    # with `config :optimal_system_agent, auto_skill_capture: true` only if you
+    # want (and then it still needs a proper quality gate, tracked separately).
+    if auto_skill_capture_enabled?() and is_binary(sid) and
+         not String.starts_with?(sid, "agent:") do
       Task.start(fn ->
         try do
           tool_names = tools |> Enum.map(&to_string/1) |> Enum.uniq()
@@ -576,4 +583,8 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   end
 
   def auto_skill_creator(payload), do: {:ok, payload}
+
+  defp auto_skill_capture_enabled? do
+    Application.get_env(:optimal_system_agent, :auto_skill_capture, false)
+  end
 end
