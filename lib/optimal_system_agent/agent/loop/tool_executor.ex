@@ -238,7 +238,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     circuit_breaker =
       OptimalSystemAgent.Agent.Safety.DangerousCommands.blocked?(tool_call)
 
-    mode = Map.get(state, :permission_mode, :ask)
+    # Resolve the mode from the sticky store FIRST (it is the durable, disk-backed
+    # record of what the operator last chose in the TUI), falling back to the live
+    # loop state. This is what makes overdrive actually hold: a mode set before the
+    # loop existed, a loop recreated fresh, or the whole daemon restarted (wiping
+    # the live state) all leave the store correct, so the check no longer silently
+    # reverts to :ask and prompt while the TUI shows "overdrive on".
+    mode =
+      OptimalSystemAgent.Agent.PermissionMode.get(Map.get(state, :session_id)) ||
+        Map.get(state, :permission_mode, :ask)
 
     # Bypass-immune safety paths (.git internals, OSA settings/permission
     # files, shell rc). Computed once, consumed by step 1c below.

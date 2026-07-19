@@ -22,7 +22,12 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
   settings default. Subagent spawn consults the parent's sticky mode to inherit
   overdrive.
 
-  Lazily-created public ETS table, mirroring `PermissionBroker`.
+  Lazily-created public ETS table, mirroring `PermissionBroker`. The ETS table is
+  ALSO backed by a small on-disk JSON file (`~/.osa/permission_mode.json`), so the
+  chosen mode survives a daemon restart — otherwise an operator who turned on
+  overdrive would silently drop back to `:ask` the next time the backend bounced,
+  while the TUI kept showing "overdrive on". The disk file is loaded into ETS the
+  first time the table is created (post-restart) and rewritten on every put/clear.
   """
 
   @table :osa_session_permission_mode
@@ -36,6 +41,7 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
   def put(session_id, mode) when is_binary(session_id) and mode in @valid_modes do
     ensure_table()
     :ets.insert(@table, {session_id, canonical(mode)})
+    persist_to_disk()
     :ok
   rescue
     ArgumentError -> :ok
@@ -67,6 +73,7 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
   def clear(session_id) when is_binary(session_id) do
     ensure_table()
     :ets.delete(@table, session_id)
+    persist_to_disk()
     :ok
   rescue
     ArgumentError -> :ok
@@ -81,6 +88,9 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
     case :ets.whereis(@table) do
       :undefined ->
         :ets.new(@table, [:named_table, :public, read_concurrency: true])
+        # First creation after a (re)start: rehydrate from disk so overdrive and
+        # other sticky modes survive a daemon bounce.
+        load_from_disk()
         :ok
 
       _ ->
@@ -88,5 +98,57 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
     end
   rescue
     ArgumentError -> :ok
+  end
+
+  # ── Disk persistence (~/.osa/permission_mode.json) ─────────────────────
+
+  defp disk_path do
+    base = System.get_env("OSA_HOME") || Path.expand("~/.osa")
+    Path.join(base, "permission_mode.json")
+  end
+
+  # Dump the whole ETS table to disk atomically (temp + rename). Best-effort:
+  # a persistence failure must never break a permission decision.
+  defp persist_to_disk do
+    path = disk_path()
+
+    map =
+      :ets.tab2list(@table)
+      |> Map.new(fn {sid, mode} -> {sid, Atom.to_string(mode)} end)
+
+    File.mkdir_p(Path.dirname(path))
+    tmp = path <> ".tmp"
+    File.write!(tmp, Jason.encode!(map))
+    File.rename!(tmp, path)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # Load persisted modes into ETS (called once on table creation). Unknown /
+  # malformed entries are skipped; a missing file is fine (empty store).
+  defp load_from_disk do
+    with {:ok, body} <- File.read(disk_path()),
+         {:ok, map} when is_map(map) <- Jason.decode(body) do
+      for {sid, mode_str} <- map, is_binary(sid), is_binary(mode_str) do
+        mode = safe_to_mode(mode_str)
+        if mode, do: :ets.insert(@table, {sid, mode})
+      end
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp safe_to_mode(str) do
+    mode = String.to_existing_atom(str)
+    if mode in @valid_modes, do: canonical(mode), else: nil
+  rescue
+    ArgumentError -> nil
   end
 end
