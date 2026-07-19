@@ -424,15 +424,57 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
-  Cancel a running agent loop for the given session.
+  Cancel a running agent loop for the given session — TRANSITIVELY.
 
   Sets a flag in an ETS table that ReactLoop.run/1 checks at each iteration.
   Concurrent-safe: ETS reads work even while handle_call blocks the mailbox.
+
+  Cancelling a parent also cancels its WHOLE subtree: every descendant
+  subagent (children, grandchildren, ...), not just direct
+  `agent:<session_id>:*` children. A grandchild's session id is
+  `agent:agent:<session_id>:N:M` and would not match the old flat prefix
+  fold, leaving it (and its background shell jobs) running after Esc/interrupt.
+
+  Approach (opencode `run-state.ts:111-143` `cancelBackgroundJobs` /
+  `session.ts:608-629` recursive `remove` parity): BFS the
+  `RunStore.parent_session_id` chain starting at `session_id`, growing a seen
+  set so a malformed/cyclic parent chain still terminates. Every discovered
+  descendant gets the cooperative cancel flag AND has its background shell
+  jobs killed via `BackgroundManager.cancel_for_sessions/1`.
   """
   def cancel(session_id) do
     :ets.insert(@cancel_table, {session_id, true})
     Logger.info("[loop] Cancel requested for session #{session_id}")
 
+    descendants = descendant_session_ids(session_id)
+
+    Enum.each(descendants, fn id ->
+      :ets.insert(@cancel_table, {id, true})
+      Logger.info("[loop] Cancel propagated to descendant sub-agent #{id}")
+    end)
+
+    subtree = [session_id | descendants]
+
+    try do
+      case OptimalSystemAgent.Shell.BackgroundManager.cancel_for_sessions(subtree) do
+        n when is_integer(n) and n > 0 ->
+          Logger.info(
+            "[loop] Cancelled #{n} background shell job(s) for subtree of #{session_id}"
+          )
+
+        _ ->
+          :ok
+      end
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Base case retained: single-prefix fold over the cancel table itself
+    # and the live SessionRegistry, in case a sub-agent hasn't hit
+    # `RunStore.start_run/1` yet (registration race) or was launched by a
+    # path that doesn't go through RunStore at all.
     prefix = "agent:#{session_id}:"
 
     try do
@@ -469,6 +511,42 @@ defmodule OptimalSystemAgent.Agent.Loop do
     ArgumentError ->
       Logger.warning("[loop] Cancel table not found — agent may not be running")
       {:error, :not_running}
+  end
+
+  @doc false
+  # BFS over RunStore's parent_session_id chain from `root_session_id`.
+  # Returns every reachable descendant `agent_id`, deepest included
+  # (transitive: grandchildren, great-grandchildren, ...). A `seen` set
+  # guards against a cyclic/malformed parent chain looping forever — each
+  # id is only ever expanded once.
+  @spec descendant_session_ids(String.t()) :: [String.t()]
+  def descendant_session_ids(root_session_id) do
+    runs = OptimalSystemAgent.Agent.RunStore.list(limit: 100_000)
+
+    children_by_parent =
+      Enum.reduce(runs, %{}, fn run, acc ->
+        parent = Map.get(run, :parent_session_id)
+        agent_id = Map.get(run, :agent_id)
+
+        if is_binary(parent) and is_binary(agent_id) do
+          Map.update(acc, parent, [agent_id], &[agent_id | &1])
+        else
+          acc
+        end
+      end)
+
+    bfs_descendants(children_by_parent, [root_session_id], MapSet.new([root_session_id]), [])
+  rescue
+    _ -> []
+  end
+
+  defp bfs_descendants(_children_by_parent, [], _seen, acc), do: acc
+
+  defp bfs_descendants(children_by_parent, [current | rest], seen, acc) do
+    children = Map.get(children_by_parent, current, [])
+    new_children = Enum.reject(children, &MapSet.member?(seen, &1))
+    new_seen = Enum.reduce(new_children, seen, &MapSet.put(&2, &1))
+    bfs_descendants(children_by_parent, rest ++ new_children, new_seen, acc ++ new_children)
   end
 
   @doc """

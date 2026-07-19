@@ -93,6 +93,27 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
     end)
   end
 
+  @doc """
+  Kill every RUNNING background command belonging to ANY of `session_ids` —
+  transitive/cascading cancel (Loop.cancel/1 subtree fan-out). Same shape as
+  `kill_for_session/1` but batched across a whole cancelled-session subtree
+  (parent + every BFS-discovered descendant) in one pass. Returns the number
+  killed.
+  """
+  @spec cancel_for_sessions([String.t()]) :: non_neg_integer()
+  def cancel_for_sessions(session_ids) when is_list(session_ids) do
+    wanted = MapSet.new(session_ids)
+
+    list()
+    |> Enum.filter(&(&1.status == :running and MapSet.member?(wanted, &1[:session_id])))
+    |> Enum.reduce(0, fn snap, acc ->
+      case kill(snap.id) do
+        {:ok, _} -> acc + 1
+        _ -> acc
+      end
+    end)
+  end
+
   @doc "Number of background commands currently in the `:running` state."
   @spec running_count() :: non_neg_integer()
   def running_count do
