@@ -808,7 +808,68 @@ impl App {
         );
     }
 
+    /// `#` memory quick-add: a leading '#' in the composer captures the rest of
+    /// the line straight to memory without consuming a turn (CC's `# note`
+    /// quick-capture, mirroring the '!' shell branch). Fire-and-forget so it
+    /// never changes app state — the same backend "memory" command the
+    /// `/memory save` subcommand uses, plus an immediate confirmation toast.
+    pub(crate) fn memory_quick_add(&mut self, note: &str) {
+        let note = note.trim();
+        if note.is_empty() {
+            self.toasts.push(
+                "Usage: # <note to remember>".into(),
+                crate::components::toast::ToastLevel::Warning,
+            );
+            return;
+        }
+        let client = self.client.clone();
+        let session_id = self.session_id.clone();
+        let arg = format!("save {note}");
+        tokio::spawn(async move {
+            let req = crate::client::types::CommandExecuteRequest {
+                command: "memory".to_string(),
+                arg,
+                session_id,
+            };
+            if let Err(e) = client.execute_command(&req).await {
+                tracing::warn!("memory quick-add failed: {}", e);
+            }
+        });
+        self.toasts.push(
+            format!("Saved to memory: {note}"),
+            crate::components::toast::ToastLevel::Success,
+        );
+    }
+
+    /// Send a key straight to the composer, then apply the standard post-edit
+    /// bookkeeping: layout recompute, submit / '#' memory routing, orphan prune.
+    /// Shared by the vim first-refusal path (both Idle and Processing).
+    fn route_composer_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let action = self
+            .input
+            .handle_event(&Event::Terminal(CrosstermEvent::Key(key)));
+        self.recompute_layout();
+        match action {
+            ComponentAction::Emit(AppAction::Submit(text)) => {
+                if let Some(note) = text.strip_prefix('#') {
+                    self.memory_quick_add(note);
+                } else {
+                    self.submit_input(&text);
+                }
+            }
+            _ => self.prune_orphaned_attachments(),
+        }
+        false
+    }
+
     fn handle_idle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Vim modal layer gets first refusal on keys when enabled, so Esc and
+        // Normal-mode motions aren't stolen by the app-level Esc chord. A no-op
+        // when vim is disabled (never interferes with the default bindings).
+        if self.input.vim_wants_key(&key) {
+            return self.route_composer_key(key);
+        }
+
         // Any non-Esc key breaks a pending double-Esc pair so a stale first Esc
         // can never combine with a much later one.
         if key.code != KeyCode::Esc {
@@ -960,7 +1021,13 @@ impl App {
                 self.recompute_layout();
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
-                        self.submit_input(&text);
+                        // '#' quick-adds to memory without a turn; everything
+                        // else routes through the normal submit path.
+                        if let Some(note) = text.strip_prefix('#') {
+                            self.memory_quick_add(note);
+                        } else {
+                            self.submit_input(&text);
+                        }
                         false
                     }
                     _ => {
@@ -976,6 +1043,12 @@ impl App {
     }
 
     fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // NOTE: vim does NOT get Esc first-refusal while Processing — Esc must
+        // interrupt the running turn ("esc to interrupt"). Non-Esc Normal-mode
+        // motions still reach the composer via the `_` fall-through arm below
+        // (the input component applies its vim layer internally), so vim editing
+        // of a queued message keeps working mid-turn.
+
         // Shift+Tab cycles the permission mode even mid-turn, matching Claude Code.
         if crate::app::keys::is_permission_cycle(&key) {
             self.cycle_permission_mode();
@@ -1034,7 +1107,13 @@ impl App {
                 self.recompute_layout();
                 match action {
                     ComponentAction::Emit(AppAction::Submit(text)) => {
-                        self.submit_input(&text);
+                        // '#' quick-adds to memory without a turn; everything
+                        // else routes through the normal submit path.
+                        if let Some(note) = text.strip_prefix('#') {
+                            self.memory_quick_add(note);
+                        } else {
+                            self.submit_input(&text);
+                        }
                         false
                     }
                     _ => {

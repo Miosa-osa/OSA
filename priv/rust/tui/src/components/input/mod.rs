@@ -4,6 +4,9 @@
 pub mod completions;
 pub mod history;
 pub mod textarea;
+pub mod vim;
+
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
@@ -89,6 +92,14 @@ pub struct InputComponent {
     /// Whether voice input is currently usable (local engine present/
     /// provisionable, or a cloud API key configured). Greys the mic when false.
     voice_available: bool,
+    /// Whether the optional vim modal-editing layer is active. Off by default;
+    /// enabled via the `OSA_TUI_VIM` env flag or the `/vim` toggle
+    /// (`toggle_vim`). When false, the vim layer is bypassed entirely so it
+    /// never interferes with the default emacs/readline bindings.
+    vim_enabled: bool,
+    /// Current vim modal state (normal/insert + pending operator). Only
+    /// consulted while `vim_enabled`.
+    vim: vim::VimState,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -133,6 +144,12 @@ impl InputComponent {
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
             voice_available: true,
+            // Opt-in via env; default off. A `/vim` command can flip it at
+            // runtime through `toggle_vim`.
+            vim_enabled: std::env::var("OSA_TUI_VIM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            vim: vim::VimState::default(),
         }
     }
 
@@ -240,7 +257,9 @@ impl InputComponent {
             .content
             .split('\n')
             .map(|line| {
-                let n = line.chars().count();
+                // Wrap by DISPLAY width so a CJK/emoji line reserves the right
+                // number of rows (a wide char occupies 2 columns).
+                let n = display_width(line);
                 (n / avail + usize::from(n % avail != 0)).max(1) as u16
             })
             .sum();
@@ -324,24 +343,25 @@ impl InputComponent {
         self.cursor = self.content.len();
     }
 
-    /// Set cursor to approximate column position (for mouse click).
+    /// Set cursor to an approximate DISPLAY column (for mouse click). `col` is a
+    /// terminal column, so wide (2-col) chars advance it by 2 — matching how the
+    /// text was drawn.
     pub fn set_cursor_col(&mut self, col: u16) {
         let target = col as usize;
         let mut byte_pos = 0;
-        let mut char_col = 0;
+        let mut disp_col = 0;
         for ch in self.content.chars() {
             // Stop at the target column OR at the first newline. `set_cursor_col`
             // is only used to place the caret from a first-visual-row mouse
             // click, so counting must never run past the end of line 0. Without
             // the '\n' guard a click in the blank space to the right of a SHORT
-            // first line kept counting characters into line 2+, dropping the
-            // caret onto a later line instead of clamping it to the first line's
-            // end.
-            if char_col >= target || ch == '\n' {
+            // first line kept counting into line 2+, dropping the caret onto a
+            // later line instead of clamping it to the first line's end.
+            if disp_col >= target || ch == '\n' {
                 break;
             }
             byte_pos += ch.len_utf8();
-            char_col += 1;
+            disp_col += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
         self.cursor = byte_pos.min(self.content.len());
     }
@@ -524,29 +544,39 @@ impl InputComponent {
         }
     }
 
-    /// Current cursor column, counted in chars from the start of its line.
+    /// Current cursor column, measured in DISPLAY columns from the start of its
+    /// line (CJK/emoji count as 2, zero-width as 0) so the caret x-position is
+    /// correct on wide text. Byte-index editing is unaffected — this is only a
+    /// measurement of the text left of the caret.
     fn cursor_column(&self) -> usize {
         let line_start = self.content[..self.cursor]
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        self.content[line_start..self.cursor].chars().count()
+        display_width(&self.content[line_start..self.cursor])
     }
 
-    /// Byte offset of `col` chars into the line spanning `[start, end)`,
-    /// clamped to the line's end.
+    /// Byte offset of DISPLAY column `col` into the line spanning `[start, end)`,
+    /// clamped to the line's end. A target column landing in the middle of a
+    /// wide (2-col) char resolves to that char's start, so the caret never
+    /// splits a glyph.
     fn byte_at_column(&self, start: usize, end: usize, col: usize) -> usize {
         let line = &self.content[start..end];
-        match line.char_indices().nth(col) {
-            Some((b, _)) => start + b,
-            None => end,
+        let mut acc = 0usize;
+        for (b, ch) in line.char_indices() {
+            if acc >= col {
+                return start + b;
+            }
+            acc += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
+        end
     }
 
-    /// Effective wrap width for cursor motion — the same formula
-    /// `needed_height` uses for its wrap estimate, so caret motion and box
-    /// growth agree on where a logical line folds. Char-count based;
-    /// display-width (CJK/emoji) precision is the separate unicode-width item.
+    /// Effective wrap width for cursor motion, in DISPLAY columns — the same
+    /// formula `needed_height` uses for its wrap estimate, so caret motion and
+    /// box growth agree on where a logical line folds. Columns are measured
+    /// with `unicode_width`, so CJK/emoji fold at the same place the terminal
+    /// wraps them.
     fn wrap_width(&self) -> usize {
         let prompt_len: usize = if self.processing { 4 } else { 2 };
         (self.width as usize).saturating_sub(prompt_len + 1).max(1)
@@ -565,7 +595,7 @@ impl InputComponent {
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let col = self.content[cur_start..self.cursor].chars().count();
+        let col = display_width(&self.content[cur_start..self.cursor]);
         let (vrow, vcol) = (col / w, col % w);
         if vrow > 0 {
             // Up one wrapped visual row within the same logical line.
@@ -588,7 +618,7 @@ impl InputComponent {
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let prev_len = self.content[prev_start..prev_end].chars().count();
+        let prev_len = display_width(&self.content[prev_start..prev_end]);
         let last_row_start = if prev_len == 0 { 0 } else { ((prev_len - 1) / w) * w };
         self.cursor = self.byte_at_column(prev_start, prev_end, last_row_start + vcol);
     }
@@ -606,9 +636,9 @@ impl InputComponent {
             .find('\n')
             .map(|p| cur_start + p)
             .unwrap_or(self.content.len());
-        let col = self.content[cur_start..self.cursor].chars().count();
+        let col = display_width(&self.content[cur_start..self.cursor]);
         let (vrow, vcol) = (col / w, col % w);
-        let line_len = self.content[cur_start..cur_end].chars().count();
+        let line_len = display_width(&self.content[cur_start..cur_end]);
         let last_vrow = if line_len == 0 { 0 } else { (line_len - 1) / w };
         if vrow < last_vrow {
             // Down one wrapped visual row within the same logical line.
@@ -1049,6 +1079,308 @@ impl InputComponent {
         result
     }
 
+    // ── Vim modal-editing layer (optional; gated by `vim_enabled`) ───────────
+
+    /// Whether vim mode is currently enabled.
+    pub fn vim_enabled(&self) -> bool {
+        self.vim_enabled
+    }
+
+    /// Toggle vim mode (for a `/vim` command). Returns the new enabled state and
+    /// resets the modal state to Insert so the composer stays usable either way.
+    pub fn toggle_vim(&mut self) -> bool {
+        self.vim_enabled = !self.vim_enabled;
+        self.vim = vim::VimState::default();
+        self.vim_enabled
+    }
+
+    /// Whether the vim layer needs first refusal on `key` (consulted by the
+    /// app's key dispatch). In Normal mode it claims Esc and every unmodified /
+    /// shifted key (Ctrl/Alt combos stay with the app: interrupt, suspend,
+    /// palette…). In Insert mode it claims only Esc, to drop into Normal — every
+    /// other key flows through the normal composer path untouched. Always false
+    /// when vim is disabled, so there is zero interference.
+    pub fn vim_wants_key(&self, key: &KeyEvent) -> bool {
+        if !self.vim_enabled {
+            return false;
+        }
+        match self.vim.mode {
+            vim::VimMode::Normal => {
+                key.code == KeyCode::Esc
+                    || matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            }
+            vim::VimMode::Insert => {
+                key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE
+            }
+        }
+    }
+
+    /// Enter Normal mode, clamping the caret so it rests ON a char (vim never
+    /// leaves the caret past the last char of a non-empty line).
+    fn enter_normal_mode(&mut self) {
+        self.vim.mode = vim::VimMode::Normal;
+        self.vim.pending = None;
+        self.completions.hide();
+        self.vim_clamp_cursor();
+    }
+
+    /// If the caret sits just past the last char of a non-empty line, step it
+    /// back onto that char (Normal-mode invariant).
+    fn vim_clamp_cursor(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        let le = vim::line_end(&self.content, self.cursor);
+        if self.cursor == le && le > ls {
+            let prev = self.content[..self.cursor]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.cursor -= prev;
+        }
+    }
+
+    /// Dispatch a key in Normal mode. Returns Consumed for handled keys and
+    /// Emit(Submit) when Enter sends the buffer (submit still works modelessly).
+    fn handle_vim_normal_key(&mut self, key: KeyEvent) -> ComponentAction {
+        use vim::VimMode;
+
+        // Enter submits from Normal mode too (then resets to Insert for the
+        // next prompt).
+        if crate::app::key_normalize::is_submit(&key) {
+            self.vim.pending = None;
+            if self.content.trim().is_empty() {
+                return ComponentAction::Consumed;
+            }
+            let text = self.submit();
+            self.vim = vim::VimState::default();
+            return ComponentAction::Emit(AppAction::Submit(text));
+        }
+
+        let c = match key.code {
+            KeyCode::Char(c) => c,
+            other => {
+                // Non-char keys: arrows / edges / Esc still navigate.
+                match other {
+                    KeyCode::Esc => self.vim.pending = None,
+                    KeyCode::Left | KeyCode::Backspace => self.vim_move_left(),
+                    KeyCode::Right => self.vim_move_right(),
+                    KeyCode::Up => self.move_cursor_up(),
+                    KeyCode::Down => self.move_cursor_down(),
+                    KeyCode::Home => self.cursor = vim::line_start(&self.content, self.cursor),
+                    KeyCode::End => self.vim_line_end_normal(),
+                    _ => {}
+                }
+                return ComponentAction::Consumed;
+            }
+        };
+
+        // Second key of a pending operator (dd / dw / cc / gg).
+        if let Some(op) = self.vim.pending.take() {
+            self.vim_apply_operator(op, c);
+            return ComponentAction::Consumed;
+        }
+
+        match c {
+            // Motions.
+            'h' => self.vim_move_left(),
+            'l' => self.vim_move_right(),
+            'j' => self.move_cursor_down(),
+            'k' => self.move_cursor_up(),
+            'w' => self.cursor = vim::word_forward(&self.content, self.cursor),
+            'b' => self.cursor = vim::word_back(&self.content, self.cursor),
+            'e' => self.cursor = vim::word_end(&self.content, self.cursor),
+            '0' => self.cursor = vim::line_start(&self.content, self.cursor),
+            '$' => self.vim_line_end_normal(),
+            '^' => self.cursor = vim::first_non_blank(&self.content, self.cursor),
+            'G' => {
+                self.cursor = self.content.len();
+                self.vim_clamp_cursor();
+            }
+            // Operators / two-key prefixes.
+            'd' | 'c' | 'g' => self.vim.pending = Some(c),
+            'x' => self.vim_delete_under(),
+            'D' => self.vim_delete_to_line_end(),
+            'u' => {
+                self.undo();
+                self.vim_clamp_cursor();
+            }
+            // Insert-mode transitions.
+            'i' => self.vim.mode = VimMode::Insert,
+            'a' => {
+                self.vim_move_right_append();
+                self.vim.mode = VimMode::Insert;
+            }
+            'A' => {
+                self.cursor = vim::line_end(&self.content, self.cursor);
+                self.vim.mode = VimMode::Insert;
+            }
+            'I' => {
+                self.cursor = vim::first_non_blank(&self.content, self.cursor);
+                self.vim.mode = VimMode::Insert;
+            }
+            'o' => self.vim_open_below(),
+            'O' => self.vim_open_above(),
+            _ => {} // swallow unbound keys (never inserts text in Normal mode)
+        }
+        ComponentAction::Consumed
+    }
+
+    /// Apply a two-key operator (the first key was `op`, the second `c`).
+    fn vim_apply_operator(&mut self, op: char, c: char) {
+        match (op, c) {
+            ('g', 'g') => self.cursor = 0,          // gg → top of buffer
+            ('d', 'd') => self.vim_delete_line(),   // dd → delete line
+            ('d', 'w') => self.vim_delete_word_forward(), // dw
+            ('c', 'c') => self.vim_change_line(),   // cc → change line
+            _ => {}                                  // unknown combo: ignore
+        }
+    }
+
+    /// Normal-mode `h`: one char left, never past line start.
+    fn vim_move_left(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        if self.cursor > ls {
+            let prev = self.content[..self.cursor]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.cursor -= prev;
+        }
+    }
+
+    /// Normal-mode `l`: one char right, resting ON the last char (never past it).
+    fn vim_move_right(&mut self) {
+        let le = vim::line_end(&self.content, self.cursor);
+        if let Some(ch) = self.content[self.cursor..].chars().next() {
+            if ch != '\n' {
+                let cand = self.cursor + ch.len_utf8();
+                if cand < le {
+                    self.cursor = cand;
+                }
+            }
+        }
+    }
+
+    /// `a` helper: step right by one, allowed to land just past the last char so
+    /// insert appends after it.
+    fn vim_move_right_append(&mut self) {
+        let le = vim::line_end(&self.content, self.cursor);
+        if self.cursor < le {
+            let next = self.content[self.cursor..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.cursor += next;
+        }
+    }
+
+    /// Normal-mode `$` / End: caret on the LAST char of the line (not past it).
+    fn vim_line_end_normal(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        let le = vim::line_end(&self.content, self.cursor);
+        if le > ls {
+            let prev = self.content[..le]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.cursor = le - prev;
+        } else {
+            self.cursor = le;
+        }
+    }
+
+    /// `x`: delete the char under the caret.
+    fn vim_delete_under(&mut self) {
+        if let Some(ch) = self.content[self.cursor..].chars().next() {
+            if ch != '\n' {
+                self.snapshot();
+                self.content.drain(self.cursor..self.cursor + ch.len_utf8());
+                self.after_edit();
+                self.vim_clamp_cursor();
+            }
+        }
+    }
+
+    /// `D`: delete from the caret to the end of the line.
+    fn vim_delete_to_line_end(&mut self) {
+        let le = vim::line_end(&self.content, self.cursor);
+        if le > self.cursor {
+            self.snapshot();
+            self.content.drain(self.cursor..le);
+            self.after_edit();
+            self.vim_clamp_cursor();
+        }
+    }
+
+    /// `dd`: delete the whole logical line (plus one bounding newline).
+    fn vim_delete_line(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        let le = vim::line_end(&self.content, self.cursor);
+        self.snapshot();
+        if le < self.content.len() {
+            // Not the last line: drop the line and its trailing newline.
+            self.content.drain(ls..le + 1);
+            self.cursor = ls;
+        } else if ls > 0 {
+            // Last line, has a preceding newline: drop it and the line.
+            self.content.drain(ls - 1..le);
+            self.cursor = ls - 1;
+        } else {
+            // Only line: clear it.
+            self.content.drain(ls..le);
+            self.cursor = 0;
+        }
+        self.after_edit();
+        self.vim_clamp_cursor();
+    }
+
+    /// `dw`: delete from the caret to the start of the next word.
+    fn vim_delete_word_forward(&mut self) {
+        let target = vim::word_forward(&self.content, self.cursor);
+        if target > self.cursor {
+            self.snapshot();
+            self.content.drain(self.cursor..target);
+            self.after_edit();
+            self.vim_clamp_cursor();
+        }
+    }
+
+    /// `cc`: clear the line's content and enter Insert at its start.
+    fn vim_change_line(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        let le = vim::line_end(&self.content, self.cursor);
+        self.snapshot();
+        self.content.drain(ls..le);
+        self.cursor = ls;
+        self.after_edit();
+        self.vim.mode = vim::VimMode::Insert;
+    }
+
+    /// `o`: open a new line below and enter Insert.
+    fn vim_open_below(&mut self) {
+        let le = vim::line_end(&self.content, self.cursor);
+        self.snapshot();
+        self.content.insert(le, '\n');
+        self.cursor = le + 1;
+        self.multiline = true;
+        self.vim.mode = vim::VimMode::Insert;
+        self.after_edit();
+    }
+
+    /// `O`: open a new line above and enter Insert.
+    fn vim_open_above(&mut self) {
+        let ls = vim::line_start(&self.content, self.cursor);
+        self.snapshot();
+        self.content.insert(ls, '\n');
+        self.cursor = ls;
+        self.multiline = true;
+        self.vim.mode = vim::VimMode::Insert;
+        self.after_edit();
+    }
+
     /// Handle a key while Ctrl+R reverse-search is active.
     fn handle_reverse_search_key(&mut self, key: KeyEvent) -> ComponentAction {
         let Some(mut rs) = self.reverse_search.take() else {
@@ -1108,6 +1440,23 @@ impl Component for InputComponent {
 
         match event {
             Event::Terminal(CrosstermEvent::Key(key)) => {
+                // Vim modal layer (opt-in). In Normal mode it owns the key
+                // outright; in Insert mode only Esc is intercepted (→ Normal),
+                // leaving reverse-search / completions their own Esc cancel.
+                if self.vim_enabled {
+                    if self.vim.mode == vim::VimMode::Normal {
+                        return self.handle_vim_normal_key(*key);
+                    }
+                    if key.code == KeyCode::Esc
+                        && key.modifiers == KeyModifiers::NONE
+                        && self.reverse_search.is_none()
+                        && !self.completions.is_visible()
+                    {
+                        self.enter_normal_mode();
+                        return ComponentAction::Consumed;
+                    }
+                }
+
                 // Ctrl+R reverse-incremental history search owns all keys while active.
                 if self.reverse_search.is_some() {
                     return self.handle_reverse_search_key(*key);
@@ -1458,11 +1807,15 @@ impl Component for InputComponent {
         }
 
         // Shell mode: a leading '!' routes the line to OSA's bash tool on submit.
-        // Recolor the frame with OSA blue and flag it with a "shell" badge so the
-        // switch is obvious while typing.
+        // Memory mode: a leading '#' quick-adds the line to memory on submit
+        // (mirrors the shell branch — CC's `# note` quick-capture). Each recolors
+        // the frame and flags a badge so the active mode is obvious while typing.
         let shell_mode = self.content.starts_with('!');
+        let memory_mode = self.content.starts_with('#');
         let divider_style = if shell_mode {
             Style::default().fg(theme.colors.primary)
+        } else if memory_mode {
+            Style::default().fg(theme.colors.secondary)
         } else {
             theme.prompt_border()
         };
@@ -1473,9 +1826,15 @@ impl Component for InputComponent {
             Paragraph::new("\u{2500}".repeat(area.width as usize)).style(divider_style);
         frame.render_widget(separator, sep_area);
 
-        // Right-aligned "shell" badge on the top divider while in shell mode.
-        if shell_mode {
-            let badge = " shell ";
+        // Right-aligned mode badge on the top divider ("shell" / "memory").
+        let mode_badge = if shell_mode {
+            Some(" shell ")
+        } else if memory_mode {
+            Some(" memory ")
+        } else {
+            None
+        };
+        if let Some(badge) = mode_badge {
             let bw = badge.chars().count() as u16;
             if area.width > bw + 4 {
                 let badge_area = Rect::new(area.x + area.width - bw - 1, area.y, bw, 1);
@@ -1510,9 +1869,11 @@ impl Component for InputComponent {
             // enough composers so narrow terminals stay calm.
             let nl = if self.kbd_enhanced { "shift+\u{23ce}" } else { "\\\u{23ce}" };
             let w = area.width as usize;
-            let hint = if w >= 76 {
-                format!("  / commands \u{00b7} @ files \u{00b7} {} newline  ", nl)
-            } else if w >= 60 {
+            let hint = if w >= 88 {
+                format!("  / commands \u{00b7} @ files \u{00b7} # memory \u{00b7} {} newline  ", nl)
+            } else if w >= 68 {
+                "  / commands \u{00b7} @ files \u{00b7} # memory  ".to_string()
+            } else if w >= 50 {
                 "  / commands \u{00b7} @ files  ".to_string()
             } else {
                 String::new()
@@ -1524,6 +1885,25 @@ impl Component for InputComponent {
                     Paragraph::new(Span::styled(hint, theme.hint())),
                     hint_area,
                 );
+            }
+
+            // Vim mode indicator, left-aligned on the bottom divider. Only shown
+            // when vim mode is enabled so the default composer stays uncluttered.
+            if self.vim_enabled {
+                let vlabel = format!(" {} ", self.vim.label());
+                let vw = vlabel.chars().count() as u16;
+                let vstyle = if self.vim.is_normal() {
+                    theme.button_active()
+                } else {
+                    theme.hint()
+                };
+                if area.width > vw + 2 {
+                    let v_area = Rect::new(area.x + 1, bot_area.y, vw, 1);
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(vlabel, vstyle)),
+                        v_area,
+                    );
+                }
             }
         }
 
@@ -1637,15 +2017,17 @@ impl Component for InputComponent {
                         text_lines.push(Line::from(spans));
                     }
                 }
-            } else if avail > 0 && content_str.chars().count() > avail {
-                // Single-line but too long: horizontal scroll to keep cursor visible
-                let cursor_char_pos = content_str[..self.cursor].chars().count();
-                let start = if cursor_char_pos >= avail {
-                    cursor_char_pos - avail + 1
+            } else if avail > 0 && display_width(content_str) > avail {
+                // Single-line but too long: horizontal scroll to keep cursor
+                // visible. Measured in DISPLAY columns so a wide-char line
+                // scrolls by the right amount and never clips a glyph.
+                let cursor_col = display_width(&content_str[..self.cursor]);
+                let start = if cursor_col >= avail {
+                    cursor_col - avail + 1
                 } else {
                     0
                 };
-                let visible: String = content_str.chars().skip(start).take(avail).collect();
+                let visible: String = slice_by_display_cols(content_str, start, avail);
                 let mut spans = vec![Span::styled(prompt, prompt_style)];
                 spans.extend(chip_spans(&visible, theme.attachment_chip()));
                 text_lines.push(Line::from(spans));
@@ -1787,8 +2169,8 @@ impl Component for InputComponent {
                 let line_idx = before_cursor.matches('\n').count();
                 let last_newline = before_cursor.rfind('\n');
                 let col = match last_newline {
-                    Some(pos) => before_cursor[pos + 1..].chars().count(),
-                    None => before_cursor.chars().count(),
+                    Some(pos) => display_width(&before_cursor[pos + 1..]),
+                    None => display_width(before_cursor),
                 };
                 let indent: u16 = if line_idx == 0 { prompt_len as u16 } else { 2 };
                 let cursor_x = area.x + indent + col as u16;
@@ -1799,14 +2181,15 @@ impl Component for InputComponent {
                     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
                 }
             } else {
-                // Single-line cursor (accounts for horizontal scroll)
-                let cursor_char_pos = self.content[..self.cursor].chars().count();
-                let scroll_start = if avail > 0 && cursor_char_pos >= avail {
-                    cursor_char_pos - avail + 1
+                // Single-line cursor (accounts for horizontal scroll), measured
+                // in display columns so the caret tracks wide chars correctly.
+                let cursor_col = display_width(&self.content[..self.cursor]);
+                let scroll_start = if avail > 0 && cursor_col >= avail {
+                    cursor_col - avail + 1
                 } else {
                     0
                 };
-                let visible_cursor = (cursor_char_pos - scroll_start) as u16;
+                let visible_cursor = (cursor_col - scroll_start) as u16;
                 let cursor_x = area.x + prompt_len as u16 + visible_cursor;
                 let cursor_y = area.y + 1;
                 if cursor_x < area.x + area.width {
@@ -1865,9 +2248,7 @@ impl InputComponent {
                 && !self.content.contains('\n')
                 && avail > 0
             {
-                let cur = self.content[..self.cursor.min(self.content.len())]
-                    .chars()
-                    .count();
+                let cur = display_width(&self.content[..self.cursor.min(self.content.len())]);
                 if cur >= avail { cur - avail + 1 } else { 0 }
             } else {
                 0
@@ -1913,6 +2294,36 @@ fn down_crosses_to_history(content: &str, cursor: usize) -> bool {
 /// Chars of pasted text handled inline before collapsing into a pill token —
 /// ported verbatim from Claude Code (imagePaste.ts PASTE_THRESHOLD).
 pub const PASTE_THRESHOLD: usize = 800;
+
+/// Display width (terminal columns) of `s`, honoring CJK/emoji wide chars and
+/// zero-width combining marks — matches `render/markdown.rs` + `message.rs`
+/// so the composer measures text the same way the transcript does.
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Substring of `s` starting at display column `start_col`, spanning at most
+/// `max_cols` display columns. Drives the composer's single-line horizontal
+/// scroll so a wide-char window advances by columns, not chars, and never
+/// clips a glyph mid-cell.
+fn slice_by_display_cols(s: &str, start_col: usize, max_cols: usize) -> String {
+    let mut col = 0usize;
+    let mut taken = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col < start_col {
+            col += w;
+            continue;
+        }
+        if taken + w > max_cols {
+            break;
+        }
+        out.push(ch);
+        taken += w;
+    }
+    out
+}
 
 /// True when `tok` is a chip token: "[Image #3]", "[File #12]",
 /// "[Pasted text #1]" or "[Pasted text #1 +10 lines]".
@@ -2250,6 +2661,224 @@ mod input_edit_tests {
         let act = input.handle_event(&key(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert!(matches!(act, ComponentAction::Ignored));
         assert_eq!(input.value(), "x");
+    }
+}
+
+#[cfg(test)]
+mod display_width_tests {
+    use super::*;
+
+    /// Build an input with `content` and the cursor at byte `cursor`.
+    fn at(content: &str, cursor: usize) -> InputComponent {
+        let mut input = InputComponent::new();
+        input.content = content.to_string();
+        input.cursor = cursor.min(input.content.len());
+        input.multiline = input.content.contains('\n');
+        input
+    }
+
+    #[test]
+    fn cursor_column_counts_display_width_not_chars() {
+        // "中" is a wide (2-col) CJK char, 3 bytes. Caret after it → column 2.
+        let input = at("中x", "中".len());
+        assert_eq!(input.cursor_column(), 2);
+        // After "中x" the column is 3 (2 + 1), not the 2 a char count would give.
+        let input = at("中x", "中x".len());
+        assert_eq!(input.cursor_column(), 3);
+    }
+
+    #[test]
+    fn byte_at_column_lands_on_wide_char_start() {
+        let input = at("中x", 0);
+        let end = "中x".len();
+        // Column 0 → byte 0 (start of "中").
+        assert_eq!(input.byte_at_column(0, end, 0), 0);
+        // Columns 1 and 2 both resolve to the start of "x" (byte 3): a target
+        // inside the wide glyph snaps to the following char, never splitting it.
+        assert_eq!(input.byte_at_column(0, end, 1), 3);
+        assert_eq!(input.byte_at_column(0, end, 2), 3);
+    }
+
+    #[test]
+    fn needed_height_wraps_by_display_width() {
+        // Width 10 → prompt 2, usable 7 columns. Five CJK chars = 10 display
+        // columns → 2 wrapped rows (a char count of 5 would wrongly say 1).
+        let mut input = at("中中中中中", 0);
+        input.set_width(10);
+        // top divider + 2 text rows + bottom divider = 4.
+        assert_eq!(input.needed_height(), 4);
+    }
+
+    #[test]
+    fn vertical_motion_tracks_display_columns() {
+        // Up from "ab" (col 2) onto the wide first line lands at the byte that
+        // sits at display column 2 — the start of the 2nd "中" (byte 3).
+        let mut input = at("中中中\nab", "中中中\nab".len());
+        input.set_width(40); // no wrapping
+        input.move_cursor_up();
+        assert_eq!(input.cursor(), 3);
+    }
+
+    #[test]
+    fn emoji_line_caret_math() {
+        // A wide emoji (2 cols) followed by ASCII.
+        let input = at("😀ok", "😀".len());
+        assert_eq!(input.cursor_column(), 2);
+    }
+}
+
+#[cfg(test)]
+mod vim_and_memory_tests {
+    use super::*;
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+    fn ch(c: char) -> Event {
+        key(KeyCode::Char(c))
+    }
+
+    fn vim_input(content: &str, mode: vim::VimMode) -> InputComponent {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.vim_enabled = true;
+        input.vim = vim::VimState { mode, pending: None };
+        input.content = content.to_string();
+        input.cursor = 0;
+        input.multiline = input.content.contains('\n');
+        input
+    }
+
+    // ── '#' memory mode: submit round-trips the raw text for app routing ─────
+
+    #[test]
+    fn hash_prefixed_line_submits_verbatim_for_memory_routing() {
+        // The composer keeps the leading '#'; the app layer (update.rs) strips
+        // it and routes to memory_quick_add. Here we only assert the text
+        // survives submit intact.
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.set_content("#remember the port is 19001");
+        assert_eq!(input.submit(), "#remember the port is 19001");
+    }
+
+    // ── vim state machine ────────────────────────────────────────────────────
+
+    #[test]
+    fn disabled_vim_types_letters_normally() {
+        // Fresh input has vim off (env unset in tests): 'i' inserts an 'i',
+        // it does NOT act as an insert-mode command.
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.handle_event(&ch('i'));
+        assert!(!input.vim_enabled());
+        assert_eq!(input.value(), "i");
+    }
+
+    #[test]
+    fn esc_enters_normal_and_clamps_caret() {
+        let mut input = vim_input("hi", vim::VimMode::Insert);
+        input.cursor = input.content.len();
+        input.handle_event(&key(KeyCode::Esc));
+        assert_eq!(input.vim.mode, vim::VimMode::Normal);
+        // Caret clamped onto the last char ('i'), not past it.
+        assert_eq!(input.cursor(), 1);
+    }
+
+    #[test]
+    fn normal_mode_motions_and_x() {
+        let mut input = vim_input("hello", vim::VimMode::Normal);
+        input.handle_event(&ch('0')); // start of line
+        assert_eq!(input.cursor(), 0);
+        input.handle_event(&ch('x')); // delete 'h'
+        assert_eq!(input.value(), "ello");
+        input.handle_event(&ch('$')); // last char ('o')
+        assert_eq!(input.cursor(), 3);
+    }
+
+    #[test]
+    fn word_motion_w() {
+        let mut input = vim_input("one two", vim::VimMode::Normal);
+        input.handle_event(&ch('w'));
+        assert_eq!(input.cursor(), 4); // start of "two"
+    }
+
+    #[test]
+    fn dd_deletes_current_line() {
+        let mut input = vim_input("a\nb\nc", vim::VimMode::Normal);
+        input.handle_event(&ch('d'));
+        assert_eq!(input.vim.pending, Some('d'));
+        input.handle_event(&ch('d'));
+        assert_eq!(input.value(), "b\nc");
+        assert_eq!(input.vim.pending, None);
+    }
+
+    #[test]
+    fn dw_deletes_word_forward() {
+        let mut input = vim_input("one two", vim::VimMode::Normal);
+        input.handle_event(&ch('d'));
+        input.handle_event(&ch('w'));
+        assert_eq!(input.value(), "two");
+    }
+
+    #[test]
+    fn gg_and_capital_g_jump_edges() {
+        let mut input = vim_input("a\nb\nc", vim::VimMode::Normal);
+        input.handle_event(&ch('G'));
+        // End of buffer, clamped onto the last char 'c' (byte 4 of "a\nb\nc").
+        assert_eq!(input.cursor(), 4);
+        input.handle_event(&ch('g'));
+        input.handle_event(&ch('g'));
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn append_a_enters_insert_after_char() {
+        let mut input = vim_input("ab", vim::VimMode::Normal);
+        input.cursor = 0;
+        input.handle_event(&ch('a')); // insert after 'a'
+        assert_eq!(input.vim.mode, vim::VimMode::Insert);
+        assert_eq!(input.cursor(), 1);
+        input.handle_event(&ch('X'));
+        assert_eq!(input.value(), "aXb");
+    }
+
+    #[test]
+    fn cc_clears_line_and_enters_insert() {
+        let mut input = vim_input("hello", vim::VimMode::Normal);
+        input.handle_event(&ch('c'));
+        input.handle_event(&ch('c'));
+        assert_eq!(input.value(), "");
+        assert_eq!(input.vim.mode, vim::VimMode::Insert);
+    }
+
+    #[test]
+    fn u_undoes_last_normal_edit() {
+        let mut input = vim_input("hello", vim::VimMode::Normal);
+        input.handle_event(&ch('x')); // delete 'h' → "ello"
+        assert_eq!(input.value(), "ello");
+        input.handle_event(&ch('u')); // undo
+        assert_eq!(input.value(), "hello");
+    }
+
+    #[test]
+    fn toggle_vim_flips_state() {
+        let mut input = InputComponent::new();
+        let before = input.vim_enabled();
+        assert_eq!(input.toggle_vim(), !before);
+        assert_eq!(input.vim_enabled(), !before);
+    }
+
+    #[test]
+    fn vim_wants_key_leaves_ctrl_combos_to_app() {
+        let input = vim_input("x", vim::VimMode::Normal);
+        // Ctrl+C is not claimed by vim even in Normal mode → app can interrupt.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!input.vim_wants_key(&ctrl_c));
+        // A plain motion key IS claimed.
+        let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(input.vim_wants_key(&h));
     }
 }
 

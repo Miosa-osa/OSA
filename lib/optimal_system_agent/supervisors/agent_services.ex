@@ -16,6 +16,9 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
     children = [
       OptimalSystemAgent.Memory.Store,
       OptimalSystemAgent.Memory.Learning,
+      # Dream-memory — idle-gated background consolidation of recent sessions
+      # into durable long-term memory (writes via Memory.Store).
+      OptimalSystemAgent.Memory.Dream,
       OptimalSystemAgent.Agent.Memory.Episodic,
       OptimalSystemAgent.Agent.Tasks,
       OptimalSystemAgent.Budget,

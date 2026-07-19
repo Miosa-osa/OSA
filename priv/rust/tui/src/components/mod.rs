@@ -7,6 +7,7 @@ pub mod chat;
 pub mod header;
 pub mod input;
 pub mod notify;
+pub mod osc8;
 pub mod osc52;
 pub mod status_bar;
 pub mod title;

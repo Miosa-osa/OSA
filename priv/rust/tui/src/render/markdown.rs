@@ -595,11 +595,13 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
     let mut chars = input.chars().peekable();
     let mut plain = String::new();
 
-    // Helper to flush the accumulated plain buffer.
+    // Helper to flush the accumulated plain buffer. Bare http(s)/file URLs in
+    // the flushed run are turned into clickable OSC 8 links (cyan+underline) on
+    // capable terminals; everything else stays plain text.
     macro_rules! flush_plain {
         () => {
             if !plain.is_empty() {
-                spans.push(Span::raw(plain.clone()));
+                push_plain_autolinked(&mut spans, &plain, theme);
                 plain.clear();
             }
         };
@@ -734,22 +736,46 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                         } else {
                             None
                         };
-                        spans.push(Span::styled(link_text, link_style));
+                        // The visible text is the OSC 8 link; the target is the
+                        // raw url (mailto: preserved so it opens a mail client).
+                        spans.push(crate::components::osc8::hyperlink_span(
+                            link_text, &url, link_style,
+                        ));
                         if let Some(s) = url_suffix {
                             spans.push(s);
                         }
                     } else if !display_url.is_empty() {
                         // `[](url)` — show the URL itself as the link text.
                         flush_plain!();
-                        spans.push(Span::styled(display_url.to_string(), link_style));
+                        spans.push(crate::components::osc8::hyperlink_span(
+                            display_url.to_string(),
+                            &url,
+                            link_style,
+                        ));
                     }
-                } else {
-                    // Not a valid link — emit literally.
-                    plain.push('[');
-                    plain.push_str(&link_text);
-                    if found_bracket {
+                } else if found_bracket {
+                    // `[…]` with no `(url)` — either an attachment chip
+                    // (`[Image #N]` / `[File #N]`) which we linkify to its
+                    // stored file, or a plain bracketed run emitted literally.
+                    if let Some(idx) = parse_chip_index(&link_text) {
+                        flush_plain!();
+                        let chip_style = Style::default().fg(theme.colors.secondary);
+                        let display = format!("[{}]", link_text);
+                        match crate::components::osc8::attachment_file_url(idx) {
+                            Some(url) => spans.push(crate::components::osc8::hyperlink_span(
+                                display, &url, chip_style,
+                            )),
+                            None => spans.push(Span::styled(display, chip_style)),
+                        }
+                    } else {
+                        plain.push('[');
+                        plain.push_str(&link_text);
                         plain.push(']');
                     }
+                } else {
+                    // Unterminated `[` — emit literally.
+                    plain.push('[');
+                    plain.push_str(&link_text);
                 }
             }
 
@@ -765,12 +791,137 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
     spans
 }
 
+// ─── Bare-URL autolinking + attachment chips ─────────────────────────────────
+
+/// Push `text` as spans, turning bare `http(s)://` / `file://` URLs into
+/// clickable OSC 8 links (cyan+underline) on capable terminals. Non-URL text is
+/// emitted as plain `Span::raw`.
+fn push_plain_autolinked(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    theme: &crate::style::Theme,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let link_style = Style::default()
+        .fg(theme.colors.secondary)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut rest = text;
+    while let Some((start, len)) = next_bare_url(rest) {
+        let (pre, tail) = rest.split_at(start);
+        if !pre.is_empty() {
+            spans.push(Span::raw(pre.to_string()));
+        }
+        let (url, after) = tail.split_at(len);
+        spans.push(crate::components::osc8::hyperlink_span(
+            url.to_string(),
+            url,
+            link_style,
+        ));
+        rest = after;
+    }
+    if !rest.is_empty() {
+        spans.push(Span::raw(rest.to_string()));
+    }
+}
+
+/// Locate the next bare URL in `s`. Returns `(byte_start, byte_len)` of the URL
+/// run, or `None`. Recognises `https://`, `http://`, `file://`; the run extends
+/// to the first whitespace/delimiter, then trailing sentence punctuation and
+/// unbalanced closing brackets are trimmed off. The returned length is always
+/// ≥ the scheme length, so callers always make progress.
+fn next_bare_url(s: &str) -> Option<(usize, usize)> {
+    const SCHEMES: [&str; 3] = ["https://", "http://", "file://"];
+    let start = SCHEMES.iter().filter_map(|sc| s.find(sc)).min()?;
+    let bytes = s.as_bytes();
+    let mut end = start;
+    while end < s.len() {
+        match bytes[end] {
+            b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'"' | b'`' | b'\'' => break,
+            _ => end += 1,
+        }
+    }
+    let url = &s[start..end];
+    let trimmed = trim_url_trailing(url);
+    Some((start, trimmed))
+}
+
+/// Byte length of `url` after stripping trailing sentence punctuation and
+/// unbalanced closing brackets (kept ASCII-only so the cut stays on a char
+/// boundary). Never trims below the scheme's `://`.
+fn trim_url_trailing(url: &str) -> usize {
+    let bytes = url.as_bytes();
+    let min = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let mut end = url.len();
+    while end > min {
+        match bytes[end - 1] {
+            b'.' | b',' | b';' | b':' | b'!' | b'?' => end -= 1,
+            b')' => {
+                let seg = &url[..end];
+                if seg.bytes().filter(|&b| b == b')').count()
+                    > seg.bytes().filter(|&b| b == b'(').count()
+                {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            }
+            b']' => {
+                let seg = &url[..end];
+                if seg.bytes().filter(|&b| b == b']').count()
+                    > seg.bytes().filter(|&b| b == b'[').count()
+                {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    end
+}
+
+/// If `s` is an attachment chip label (`Image #N` / `File #N`), return its
+/// 1-based index `N`.
+fn parse_chip_index(s: &str) -> Option<usize> {
+    let num = s
+        .strip_prefix("Image #")
+        .or_else(|| s.strip_prefix("File #"))?;
+    num.parse::<usize>().ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_list_number, parse_inline, wrap_text};
+    use super::{
+        format_list_number, next_bare_url, parse_chip_index, parse_inline, trim_url_trailing,
+        wrap_text,
+    };
+
+    /// Strip OSC 8 wrappers so assertions test the *visible* text regardless of
+    /// whether the test host's terminal enabled hyperlinks.
+    fn strip_osc8(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Consume through the String Terminator (`ESC \`).
+                for n in chars.by_ref() {
+                    if n == '\\' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
 
     fn flat(spans: &[ratatui::text::Span<'_>]) -> String {
-        spans.iter().map(|s| s.content.as_ref()).collect()
+        let raw: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        strip_osc8(&raw)
     }
 
     #[test]
@@ -813,6 +964,50 @@ mod tests {
         assert_eq!(format_list_number(2, 2), "b.");
         assert_eq!(format_list_number(4, 3), "iv.");
         assert_eq!(format_list_number(27, 2), "aa.");
+    }
+
+    #[test]
+    fn bare_url_is_autolinked_and_visible() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("see https://osa.dev/docs for more", &theme);
+        // Visible text is unchanged (link escapes, if any, are stripped).
+        assert_eq!(flat(&spans), "see https://osa.dev/docs for more");
+    }
+
+    #[test]
+    fn next_bare_url_finds_and_bounds_url() {
+        let (start, len) = next_bare_url("go to https://a.co/x now").unwrap();
+        assert_eq!(&"go to https://a.co/x now"[start..start + len], "https://a.co/x");
+        assert!(next_bare_url("no url here").is_none());
+    }
+
+    #[test]
+    fn trailing_punctuation_is_trimmed_from_url() {
+        // Sentence period is not part of the URL.
+        let s = "https://osa.dev.";
+        assert_eq!(&s[..trim_url_trailing(s)], "https://osa.dev");
+        // Balanced parens inside a path are kept.
+        let s = "https://en.wikipedia.org/wiki/Rust_(programming)";
+        assert_eq!(&s[..trim_url_trailing(s)], s);
+        // An unbalanced trailing paren is dropped.
+        let s = "https://osa.dev)";
+        assert_eq!(&s[..trim_url_trailing(s)], "https://osa.dev");
+    }
+
+    #[test]
+    fn chip_index_parses_image_and_file() {
+        assert_eq!(parse_chip_index("Image #3"), Some(3));
+        assert_eq!(parse_chip_index("File #12"), Some(12));
+        assert_eq!(parse_chip_index("not a chip"), None);
+        assert_eq!(parse_chip_index("Image #x"), None);
+    }
+
+    #[test]
+    fn image_chip_renders_as_styled_token() {
+        let theme = crate::style::theme();
+        // No registered path → styled chip, visible token preserved.
+        let spans = parse_inline("look at [Image #1] please", &theme);
+        assert_eq!(flat(&spans), "look at [Image #1] please");
     }
 
     #[test]

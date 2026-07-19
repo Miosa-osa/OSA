@@ -402,6 +402,60 @@ pub(crate) fn make_header(
     Line::from(spans)
 }
 
+/// Like [`make_header`], but the parenthesized `detail` is an OSC 8 hyperlink to
+/// `full_path` (its `file://` URL) on capable terminals — so the file path in a
+/// tool header (`● Read(src/main.rs)`) is cmd/ctrl-clickable and opens in the
+/// user's editor/viewer. `display_detail` is what's shown (already ellipsized /
+/// `$HOME`-shortened by the caller path); `full_path` is the absolute path used
+/// only to build the link target. Falls back to plain text exactly like
+/// `make_header` when hyperlinks are unsupported or the path can't be resolved.
+pub(crate) fn make_header_path(
+    status: ToolStatus,
+    spinner: Option<char>,
+    tool_display: &str,
+    display_detail: &str,
+    full_path: &str,
+    duration_ms: u64,
+) -> Line<'static> {
+    let theme = crate::style::theme();
+    let (icon, icon_style) = status_icon(status, spinner);
+
+    // Shorten $HOME → ~ for display (matches make_header).
+    let detail = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && !display_detail.is_empty() => display_detail.replace(&h, "~"),
+        _ => display_detail.to_string(),
+    };
+
+    let mut spans = vec![
+        Span::styled(icon, icon_style),
+        Span::raw(" "),
+        Span::styled(
+            tool_display.to_string(),
+            theme.tool_name().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !detail.is_empty() {
+        spans.push(Span::raw("(".to_string()));
+        match crate::components::osc8::path_to_file_url(full_path) {
+            Some(url) => spans.push(crate::components::osc8::hyperlink_span(
+                detail,
+                &url,
+                Style::default(),
+            )),
+            None => spans.push(Span::styled(detail, Style::default())),
+        }
+        spans.push(Span::raw(")".to_string()));
+    }
+
+    let dur = format_duration(duration_ms);
+    if !dur.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(dur, theme.tool_duration()));
+    }
+
+    Line::from(spans)
+}
+
 /// Create a tree-line result row: └ Done · 31ms  or  └ Error · reason
 pub(crate) fn make_result_line(
     status: ToolStatus,
