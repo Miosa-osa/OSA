@@ -532,17 +532,12 @@ impl Component for StatusBar {
         }
         spans.push(Span::styled(self.cwd_basename.clone(), theme.header_provider()));
 
-        // Mode chip: ▣ mode
-        spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+        // Permission mode is shown exactly ONCE — on the ⏵⏵ line (row 1),
+        // matching Claude Code's single mode indicator
+        // (PromptInputFooterLeftSide.tsx: `{symbol} {title.toLowerCase()} on`).
+        // The old row-0 "▣ mode" chip duplicated it (mode rendered twice) and has
+        // been removed. The color binding is retained for row 1 and the bg chip.
         let mode_color = self.permission_mode.color(&theme);
-        spans.push(Span::styled(
-            "\u{25A3} ".to_string(), // ▣
-            Style::default().fg(mode_color),
-        ));
-        spans.push(Span::styled(
-            self.permission_mode.short_title().to_string(),
-            Style::default().fg(mode_color),
-        ));
 
         // Braille context-usage bar + percentage.
         spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
@@ -714,6 +709,52 @@ mod status_bar_tests {
         sb.set_context_warning(None, false);
         assert!(!sb.context_low());
         assert_eq!(sb.percent_left(), None);
+    }
+
+    /// Render the two-row status bar for `mode` and flatten its cells to a
+    /// single string (parity with event_loop's buffer-content harness).
+    fn render_status_text(mode: PermissionMode) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut sb = StatusBar::new();
+        sb.set_permission_mode(mode);
+        sb.set_width(120);
+        let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        term.draw(|f| sb.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn permission_mode_renders_exactly_once() {
+        // The mode label must appear once (the ⏵⏵…on line, CC-parity), never
+        // twice. Before the fix a "▣ mode" chip on row 0 duplicated it.
+        for (mode, label) in [
+            (PermissionMode::BypassPermissions, "overdrive (full auto)"),
+            (PermissionMode::AcceptEdits, "auto-edit"),
+            (PermissionMode::Plan, "plan mode"),
+        ] {
+            let text = render_status_text(mode);
+            assert_eq!(
+                text.matches(label).count(),
+                1,
+                "mode {:?} label {:?} must render exactly once, got: {:?}",
+                mode,
+                label,
+                text
+            );
+        }
+        // The removed row-0 chip glyph (▣) must never appear.
+        assert!(
+            !render_status_text(PermissionMode::BypassPermissions).contains('\u{25A3}'),
+            "the duplicate ▣ mode chip must be gone"
+        );
+        // Default (ask) mode shows no persistent mode banner at all (CC hides it).
+        let def = render_status_text(PermissionMode::Default);
+        assert!(!def.contains("ask on"), "default mode must not print a mode banner");
     }
 
     #[test]

@@ -72,17 +72,26 @@ defmodule OptimalSystemAgent.Utils.Text do
   @doc """
   Strips model reasoning/thinking blocks from raw LLM output.
 
-  Handles `<think>`, `<|start|>...<|end|>`, and `<reasoning>` tags
-  emitted by DeepSeek, Qwen, and other reasoning models.
+  Handles `<think>`, `<thinking>`, `<reason>`, `<reasoning>`,
+  `<|start|>...<|end|>` reasoning tags emitted by GLM, DeepSeek, Qwen, and
+  other reasoning models that inline their reasoning in the content channel.
+
+  Both closed blocks and an UNCLOSED leading reasoning tag (a `<think>` that
+  never closes — e.g. a truncated stream) are stripped, so the persisted
+  transcript is always clean. Matching is case-insensitive.
   """
   @spec strip_thinking_tokens(String.t() | nil | any()) :: String.t()
   def strip_thinking_tokens(nil), do: ""
 
   def strip_thinking_tokens(content) when is_binary(content) do
     content
-    |> String.replace(~r/<think>[\s\S]*?<\/think>/m, "")
+    |> String.replace(~r/<think>[\s\S]*?<\/think>/mi, "")
+    |> String.replace(~r/<thinking>[\s\S]*?<\/thinking>/mi, "")
+    |> String.replace(~r/<reason>[\s\S]*?<\/reason>/mi, "")
+    |> String.replace(~r/<reasoning>[\s\S]*?<\/reasoning>/mi, "")
     |> String.replace(~r/<\|start\|>[\s\S]*?<\|end\|>/m, "")
-    |> String.replace(~r/<reasoning>[\s\S]*?<\/reasoning>/m, "")
+    # Unclosed leading reasoning tag: strip from the opening tag to end-of-string.
+    |> String.replace(~r/<(?:think|thinking|reason|reasoning)>[\s\S]*$/i, "")
     |> String.trim()
   end
 

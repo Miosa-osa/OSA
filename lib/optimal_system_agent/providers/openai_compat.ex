@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   require Logger
 
+  alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
 
@@ -149,7 +150,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # index → %{id, name, arguments_json}
       tool_calls: %{},
       usage: %{},
-      finish_reason: nil
+      finish_reason: nil,
+      # Streaming splitter for inline <think>…</think> reasoning tags (GLM et al.)
+      think: ThinkStreamParser.new()
     })
 
     into = fn {:data, data}, {req, resp} ->
@@ -262,12 +265,21 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     acc =
       case delta do
         %{"content" => text} when is_binary(text) and text != "" ->
-          # Suppress XML tool-call markup from streaming output — it will be stripped in finalize
-          unless xml_tool_call_content?(acc.content <> text) do
-            callback.({:text_delta, text})
-          end
+          full = acc.content <> text
 
-          %{acc | content: acc.content <> text}
+          # Suppress XML tool-call markup from streaming output — it will be stripped in finalize
+          if xml_tool_call_content?(full) do
+            %{acc | content: full}
+          else
+            # Split inline <think>…</think> reasoning out of the visible stream:
+            # reasoning is routed to the thinking box, the tags + reasoning are
+            # stripped from what the user sees. Handled streaming (tags may span
+            # chunks) — see ThinkStreamParser.
+            {visible, thinking, think_state} = ThinkStreamParser.feed(acc.think, text)
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+            %{acc | content: full, think: think_state}
+          end
 
         _ ->
           acc
@@ -321,6 +333,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp maybe_append_args(tc, _), do: tc
 
   defp finalize_sse_stream(acc, callback, model) do
+    # Drain any tag tail the streaming splitter was holding back, so the live
+    # display never loses trailing characters at end-of-stream.
+    case Map.get(acc, :think) do
+      %ThinkStreamParser{} = ts ->
+        {leftover_vis, leftover_think, _} = ThinkStreamParser.flush(ts)
+        if leftover_think != "", do: callback.({:thinking_delta, leftover_think})
+        if leftover_vis != "", do: callback.({:text_delta, leftover_vis})
+
+      _ ->
+        :ok
+    end
+
     content = Text.strip_thinking_tokens(acc.content)
 
     # Build tool_calls from accumulated deltas
