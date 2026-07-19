@@ -94,11 +94,25 @@ defmodule OptimalSystemAgent.Agent.Progress do
 
   @impl true
   def init(state) do
-    # Register handlers for orchestrator events on the event bus
-    register_event_handlers()
+    {:ok, state, {:continue, :register_bus_handler}}
+  end
 
-    Logger.info("[Progress] Progress tracker started")
-    {:ok, state}
+  # Registering with Events.Bus is deferred to handle_continue (rather than
+  # done inline in init/1) so a boot-time hiccup there — e.g. Bus transiently
+  # unreachable while Infrastructure is still settling under load — degrades
+  # Progress instead of crashing it, which would otherwise take down the
+  # whole AgentServices supervisor (and hence the entire app) on startup.
+  @impl true
+  def handle_continue(:register_bus_handler, state) do
+    case try_register_event_handlers() do
+      :ok ->
+        Logger.info("[Progress] Progress tracker started")
+        {:noreply, state}
+
+      :error ->
+        Process.send_after(self(), :retry_register_bus_handler, 500)
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -184,9 +198,23 @@ defmodule OptimalSystemAgent.Agent.Progress do
   end
 
   @impl true
+  def handle_info(:retry_register_bus_handler, state) do
+    {:noreply, state, {:continue, :register_bus_handler}}
+  end
+
+  @impl true
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Event Handlers ──────────────────────────────────────────────────
+
+  defp try_register_event_handlers do
+    register_event_handlers()
+    :ok
+  catch
+    :exit, reason ->
+      Logger.warning("[Progress] Events.Bus unavailable, will retry: #{inspect(reason)}")
+      :error
+  end
 
   defp register_event_handlers do
     progress_pid = self()
