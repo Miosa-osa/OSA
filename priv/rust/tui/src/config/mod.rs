@@ -99,6 +99,12 @@ mod version_display_tests {
         assert_eq!(pad_version_display("1.0.0"), "1.0.000");
         assert_eq!(pad_version_display("1.0.1"), "1.0.001");
         assert_eq!(pad_version_display("1.0.17"), "1.0.017");
+        // The current version: semver-internal "1.0.9"/"1.0.10" MUST display
+        // zero-padded as "1.0.009"/"1.0.010" (leading zeros are illegal in the
+        // internal semver, so padding happens only at display time).
+        assert_eq!(pad_version_display("1.0.9"), "1.0.009");
+        assert_eq!(pad_version_display("1.0.10"), "1.0.010");
+        assert_eq!(pad_version_display("1.0.11"), "1.0.011");
     }
 
     #[test]
