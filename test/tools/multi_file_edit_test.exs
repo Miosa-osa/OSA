@@ -5,7 +5,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEditTest do
   alias OptimalSystemAgent.Tools.Builtins.MultiFileEdit.{Constants, Handler, Tool}
   alias OptimalSystemAgent.Tools.UseContext
 
-  defp ctx, do: %UseContext{session_id: "mfe_test"}
+  # "test" is FileState's read-before-edit exempt sentinel — these tests exercise
+  # multi_file_edit's atomicity / return-shape, not read-before-edit (that is
+  # covered by file_state_enforcement_test), so they run exempt rather than
+  # threading a file_read before every edit.
+  defp ctx, do: %UseContext{session_id: "test"}
 
   # ---------------------------------------------------------------------------
   # Structured layout — identity callbacks

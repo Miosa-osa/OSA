@@ -8,7 +8,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.AtomicTest do
   alias OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler
   alias OptimalSystemAgent.Tools.UseContext
 
-  defp ctx, do: %UseContext{session_id: "mfe_atomic_test"}
+  # "test" = FileState read-before-edit exempt sentinel (see multi_file_edit_test);
+  # this suite tests apply-phase atomicity/rollback, not read-before-edit.
+  defp ctx, do: %UseContext{session_id: "test"}
 
   defp tmp_dir do
     dir = Path.join(System.tmp_dir!(), "osa_mfe_atomic_#{System.unique_integer([:positive])}")
