@@ -7,8 +7,28 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   This is different from session_transcript (FTS search) — this stores the
   actual message list needed to restore agent state.
+
+  ## Two-log persistence
+
+  Every save maintains two files per session, mirroring grok-build's split:
+
+    * `<id>.json` — the **mutable**, compaction-pruned transcript. Rewritten
+      crash-atomically (temp + rename) each turn; this is the list `/resume`
+      reads back and replays. Compaction shrinks it.
+    * `<id>.updates.jsonl` — the **immutable**, append-only event log. Only ever
+      appended to (see `Jsonl` for the self-healing/locked append and
+      corruption-tolerant read), so it is the full source of truth for
+      replay/rewind and is NEVER touched by compaction.
+
+  The split means compaction (which rewrites `<id>.json`) and the event history
+  can never corrupt each other. `load/1` returns the mutable transcript for
+  resume; `load_events/1` returns the immutable stream for full-history replay.
+  Sessions saved before this feature simply have no `.updates.jsonl` yet and
+  load exactly as before.
   """
   require Logger
+
+  alias OptimalSystemAgent.Agent.SessionPersistence.Jsonl
 
   @sessions_dir Path.expand("~/.osa/sessions")
   @max_sessions 50
@@ -42,6 +62,15 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
         File.write!(tmp, json)
         File.rename!(tmp, path)
+
+        # Two-log persistence: alongside the mutable, compaction-pruned transcript
+        # written above (<id>.json), append any newly-seen messages to the
+        # IMMUTABLE append-only event log (<id>.updates.jsonl). Compaction shrinks
+        # `messages` and rewrites <id>.json, but the immutable log is only ever
+        # appended to — it stays the full source of truth for replay/rewind.
+        # Best-effort: a failure here never breaks the (already-committed) save.
+        append_updates(session_id, messages)
+
         Logger.debug("[session_persist] Saved #{length(messages)} messages for #{session_id}")
         :ok
 
@@ -153,9 +182,13 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   end
 
-  @doc "Delete a saved session."
+  @doc "Delete a saved session (mutable transcript + immutable event log sidecars)."
   def delete(session_id) do
     path = session_path(session_id)
+    # Remove the immutable event log and its lock/quarantine sidecars too, so a
+    # deleted session leaves nothing behind.
+    Jsonl.delete(updates_path(session_id))
+    _ = File.rm(path <> ".corrupt")
     File.rm(path)
   end
 
@@ -180,6 +213,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
             case File.stat(path, time: :posix) do
               {:ok, %{mtime: mtime}} when days == 0 or mtime < cutoff ->
+                # Purge the immutable event log + sidecars alongside the mutable
+                # transcript so an expired session leaves no orphaned files.
+                session_id = String.trim_trailing(file, ".json")
+                Jsonl.delete(updates_path(session_id))
+                _ = File.rm(path <> ".corrupt")
                 File.rm(path) == :ok
 
               _ ->
@@ -285,11 +323,132 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     end
   end
 
+  @doc """
+  Load the IMMUTABLE event stream for a session as an ordered list of messages.
+
+  This reads `<id>.updates.jsonl` — the append-only source of truth that
+  compaction never prunes — and returns the `msg` payload of each recorded event
+  in append order. Corruption-tolerant (a torn line is skipped, not fatal).
+
+  Distinct from `load/1`, which returns the mutable, compaction-pruned transcript
+  that `/resume` replays. Use this for full-history replay/rewind. Returns `[]`
+  when the session has no event log yet (e.g. sessions saved before this feature).
+  """
+  @spec load_events(String.t()) :: [map()]
+  def load_events(session_id) do
+    case Jsonl.read(updates_path(session_id)) do
+      {:ok, events, _skipped} -> Enum.map(events, &Map.get(&1, "msg", &1))
+      _ -> []
+    end
+  end
+
+  @doc "Number of events in a session's immutable event log (0 if none)."
+  @spec event_count(String.t()) :: non_neg_integer()
+  def event_count(session_id) do
+    case Jsonl.read(updates_path(session_id)) do
+      {:ok, events, _skipped} -> length(events)
+      _ -> 0
+    end
+  end
+
   # ── Private ──────────────────────────────────────────────────────────
 
   defp session_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
     Path.join(@sessions_dir, "#{safe_id}.json")
+  end
+
+  # Path of the immutable append-only event log, sitting next to <id>.json.
+  # Named `.updates.jsonl` (not `.json`) so `list/1` and `purge_expired/0` —
+  # which filter on `.json` — never treat it as a session record.
+  defp updates_path(session_id) do
+    safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
+    Path.join(@sessions_dir, "#{safe_id}.updates.jsonl")
+  end
+
+  # Append only the messages not already present in the immutable log.
+  #
+  # `save/3` is called every turn with the full CURRENT (post-compaction)
+  # message list — not a delta — so we diff against what the log already holds.
+  # Identity is a content hash counted as a MULTISET: the log already has
+  # `seen[h]` copies of a message that hashes to `h`; we append the current
+  # list's occurrences beyond that. This is compaction-safe by construction:
+  #
+  #   * a normal turn appends the turn's new tail messages,
+  #   * compaction (a shorter list) appends nothing — the log keeps every
+  #     pruned message,
+  #   * a compaction summary is a brand-new message (new hash) → appended as an
+  #     event, and post-compaction regrowth appends the fresh turns,
+  #   * legitimately duplicated content (e.g. "ok" twice) is preserved via the
+  #     occurrence count rather than being collapsed.
+  #
+  # Best-effort: never raises, so the already-committed <id>.json save stands.
+  defp append_updates(session_id, messages) do
+    path = updates_path(session_id)
+
+    existing =
+      case Jsonl.read(path) do
+        {:ok, events, _skipped} -> events
+        _ -> []
+      end
+
+    new_events = compute_new_events(messages, existing)
+    Jsonl.append(path, new_events)
+    :ok
+  rescue
+    e ->
+      Logger.warning("[session_persist] updates log append failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp compute_new_events(messages, existing_events) do
+    seen =
+      Enum.reduce(existing_events, %{}, fn e, acc ->
+        Map.update(acc, Map.get(e, "hash"), 1, &(&1 + 1))
+      end)
+
+    max_seq =
+      Enum.reduce(existing_events, -1, fn e, m -> max(m, seq_of(e)) end)
+
+    ts = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    {rev_new, _cur, _seq} =
+      messages
+      |> sanitize_messages()
+      |> Enum.reduce({[], %{}, max_seq}, fn msg, {acc, cur, seq} ->
+        h = event_hash(msg)
+        occurrence = Map.get(cur, h, 0) + 1
+        cur = Map.put(cur, h, occurrence)
+
+        if occurrence > Map.get(seen, h, 0) do
+          seq = seq + 1
+          env = %{"seq" => seq, "ts" => ts, "hash" => h, "msg" => msg}
+          {[env | acc], cur, seq}
+        else
+          {acc, cur, seq}
+        end
+      end)
+
+    Enum.reverse(rev_new)
+  end
+
+  defp seq_of(%{"seq" => n}) when is_integer(n), do: n
+  defp seq_of(_), do: -1
+
+  # Stable content hash of a (string-keyed, sanitized) message. Sorted key-value
+  # pairs make the JSON deterministic regardless of map iteration order, so the
+  # same message hashes identically across saves.
+  defp event_hash(msg) when is_map(msg) do
+    canonical =
+      msg
+      |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
+      |> Enum.map(fn {k, v} -> [to_string(k), v] end)
+      |> Jason.encode!()
+
+    :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower) |> binary_part(0, 16)
+  rescue
+    _ ->
+      :crypto.hash(:sha256, inspect(msg)) |> Base.encode16(case: :lower) |> binary_part(0, 16)
   end
 
   # Bounded key→atom conversion. Message maps only ever use a small fixed set of

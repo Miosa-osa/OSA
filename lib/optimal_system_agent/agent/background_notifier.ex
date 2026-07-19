@@ -154,15 +154,25 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
 
     # WS6: queue + poke instead of a bare transcript append — an idle parent
     # now reacts to the completion instead of the result rotting in history.
-    TaskNotifications.queue(parent_id, %{
-      task_id: to_string(agent_id),
-      status: outcome,
-      summary: summary,
-      output_file: Map.get(ev, :output_file),
-      usage: usage
-    })
+    #
+    # Exactly-once across surfaces: the per-tool-call `Agent.Reminders`
+    # pipeline can surface the SAME completed subagent as a `<system-reminder>`
+    # when the loop is busy. Both paths arbitrate on `mark_notified/1` (the
+    # shell path already does), so whichever reaches the id first delivers it
+    # and the other skips — mirroring the `background_command_completed` guard.
+    task_id = to_string(agent_id)
 
-    Loop.poke(parent_id)
+    if task_id in ["", "unknown"] or TaskNotifications.mark_notified(task_id) do
+      TaskNotifications.queue(parent_id, %{
+        task_id: task_id,
+        status: outcome,
+        summary: summary,
+        output_file: Map.get(ev, :output_file),
+        usage: usage
+      })
+
+      Loop.poke(parent_id)
+    end
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")
   end

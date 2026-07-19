@@ -82,6 +82,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
+      # Keep the serialized body under Anthropic's request-size cap by evicting
+      # the oldest inline images to an honest placeholder (see ImageBudget).
+      # Strict no-op — body byte-for-byte unchanged — when already under budget.
+      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :anthropic)
 
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing output
@@ -153,6 +157,10 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_system(system_text)
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
+      # Keep the serialized body under Anthropic's request-size cap by evicting
+      # the oldest inline images to an honest placeholder (see ImageBudget).
+      # Strict no-op — body byte-for-byte unchanged — when already under budget.
+      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :anthropic)
 
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing the first token

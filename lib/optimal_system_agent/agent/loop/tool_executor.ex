@@ -729,9 +729,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
     result_str = consume_post_hooks(result_str, post_payload)
 
-    # Fire distinct failure hook if tool errored
+    # Fire distinct failure hook if tool errored. Computed on the CLEAN
+    # post-hook result, BEFORE cross-cutting reminders are appended, so an
+    # appended "<system-reminder>" can never flip the Error:/Blocked: prefix
+    # test or the grounded-verification success signal below.
     tool_failed =
       String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+
+    # Cross-cutting <system-reminder> pipeline (grok src/reminders parity):
+    # surface finished background tasks / subagents, a SKILL.md near a touched
+    # path, and post-edit diagnostics — deduped per session, non-fatal. Both
+    # the model-facing tool message and the returned observation carry these.
+    result_str = maybe_append_reminders(result_str, tool_call, state)
 
     if tool_failed do
       run_hooks_async(:post_tool_use_failure, Map.put(post_payload, :error, result_str))
@@ -894,6 +903,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       _ ->
         result_str
     end
+  end
+
+  # Cross-cutting reminder append (primitive #18). Thin, fault-isolated
+  # delegate to Agent.Reminders so a reminder failure can never break a tool
+  # observation. Skips subagent turns: reminders about background completions /
+  # skills are for the user-facing loop, not a delegated worker.
+  defp maybe_append_reminders(result_str, tool_call, state) do
+    if Map.get(state, :permission_tier) == :subagent do
+      result_str
+    else
+      OptimalSystemAgent.Agent.Reminders.append(result_str, tool_call, state)
+    end
+  rescue
+    e ->
+      Logger.debug("[loop] reminder append failed (non-critical): #{inspect(e)}")
+      result_str
   end
 
   # For file_edit: send full JSON args so TUI can render the diff with

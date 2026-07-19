@@ -18,9 +18,22 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceHardeningTest do
     Path.join(@dir, "#{safe}.json")
   end
 
+  defp updates_file(id) do
+    safe = Regex.replace(~r/[^a-zA-Z0-9_\-]/, id, "_")
+    Path.join(@dir, "#{safe}.updates.jsonl")
+  end
+
   setup do
     id = "osa_persist_hard_#{System.unique_integer([:positive])}"
-    on_exit(fn -> File.rm(session_file(id)) end)
+
+    on_exit(fn ->
+      # save/3 now also maintains the immutable event log; clean its sidecars too.
+      Enum.each(
+        [session_file(id), updates_file(id), updates_file(id) <> ".lock", updates_file(id) <> ".corrupt"],
+        &File.rm/1
+      )
+    end)
+
     {:ok, id: id}
   end
 
