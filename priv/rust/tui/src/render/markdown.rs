@@ -139,57 +139,48 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         if raw_line.starts_with("###### ") {
             flush_para!();
             let text = &raw_line[7..];
-            let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.muted).add_modifier(Modifier::ITALIC))
-            }).collect();
-            lines.push(Line::from(styled_spans));
+            let style = Style::default().fg(theme.colors.muted).add_modifier(Modifier::ITALIC);
+            push_heading_inline(&mut lines, text, width, style, &theme);
             continue;
         }
         if raw_line.starts_with("##### ") {
             flush_para!();
             let text = &raw_line[6..];
-            let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.muted))
-            }).collect();
-            lines.push(Line::from(styled_spans));
+            let style = Style::default().fg(theme.colors.muted);
+            push_heading_inline(&mut lines, text, width, style, &theme);
             continue;
         }
         if raw_line.starts_with("#### ") {
             flush_para!();
             let text = &raw_line[5..];
-            let spans = parse_inline(text, &theme);
-            let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
-                Span::styled(s.content, Style::default().fg(theme.colors.secondary).add_modifier(Modifier::BOLD))
-            }).collect();
-            lines.push(Line::from(styled_spans));
+            let style = Style::default().fg(theme.colors.secondary).add_modifier(Modifier::BOLD);
+            push_heading_inline(&mut lines, text, width, style, &theme);
             continue;
         }
         if raw_line.starts_with("### ") {
             flush_para!();
-            let text = raw_line[4..].to_owned();
+            let text = &raw_line[4..];
             let style = Style::default()
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD);
-            lines.push(Line::from(Span::styled(text, style)));
+            push_heading_raw(&mut lines, text, width, style);
             continue;
         }
         if raw_line.starts_with("## ") {
-            let text = raw_line[3..].to_owned();
+            let text = &raw_line[3..];
             let style = Style::default()
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD);
-            lines.push(Line::from(Span::styled(text, style)));
+            push_heading_raw(&mut lines, text, width, style);
             lines.push(Line::from(Span::raw(""))); // breathing room after h2
             continue;
         }
         if raw_line.starts_with("# ") {
-            let text = raw_line[2..].to_owned();
+            let text = &raw_line[2..];
             let style = Style::default()
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-            lines.push(Line::from(Span::styled(text, style)));
+            push_heading_raw(&mut lines, text, width, style);
             lines.push(Line::from(Span::raw("")));
             continue;
         }
@@ -232,23 +223,38 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             let indent_level = indent / 2;
             let indent_str = "  ".repeat(indent_level);
 
-            let icon = if checked {
-                Span::styled(format!("{}✓ ", indent_str), Style::default().fg(Color::Green))
+            let icon_str = if checked {
+                format!("{}✓ ", indent_str)
             } else {
-                Span::styled(format!("{}○ ", indent_str), theme.faint())
+                format!("{}○ ", indent_str)
             };
-
-            let mut spans = vec![icon];
+            let icon_style = if checked {
+                Style::default().fg(Color::Green)
+            } else {
+                theme.faint()
+            };
             let text_style = if checked {
                 theme.faint().add_modifier(Modifier::CROSSED_OUT)
             } else {
                 Style::default()
             };
-            let inline_spans = parse_inline(text, &theme);
-            for s in inline_spans {
-                spans.push(Span::styled(s.content, text_style));
+            // Hanging-indent wrap: marker on the first line, blank padding of the
+            // same display width on continuation lines, so a long checkbox item
+            // wraps instead of clipping at the pane edge.
+            let prefix_width = UnicodeWidthStr::width(icon_str.as_str());
+            let wrap_width = (width as usize).saturating_sub(prefix_width);
+            for (i, wline) in wrap_text(text, wrap_width).iter().enumerate() {
+                let mut spans = Vec::new();
+                if i == 0 {
+                    spans.push(Span::styled(icon_str.clone(), icon_style));
+                } else {
+                    spans.push(Span::styled(" ".repeat(prefix_width), Style::default()));
+                }
+                for s in parse_inline(wline, &theme) {
+                    spans.push(Span::styled(s.content, text_style));
+                }
+                lines.push(Line::from(spans));
             }
-            lines.push(Line::from(spans));
             continue;
         }
 
@@ -295,11 +301,23 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                     Ok(n) => format_list_number(n, indent_level),
                     Err(_) => format!("{}.", num_part),
                 };
-                let mut spans = vec![
-                    Span::styled(format!("{}{} ", indent_str, marker), Style::default().fg(theme.colors.muted)),
-                ];
-                spans.extend(parse_inline(text, &theme));
-                lines.push(Line::from(spans));
+                // Hanging-indent wrap, mirroring the unordered-list branch: the
+                // numbered marker on the first line, blank padding of the same
+                // width on continuation lines. Without this a long numbered item
+                // clipped at the pane edge and its tail was silently lost.
+                let prefix = format!("{}{} ", indent_str, marker);
+                let prefix_len = prefix.len();
+                let wrap_width = (width as usize).saturating_sub(prefix_len);
+                for (i, wline) in wrap_text(text, wrap_width).iter().enumerate() {
+                    let mut spans = Vec::new();
+                    if i == 0 {
+                        spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
+                    } else {
+                        spans.push(Span::styled(" ".repeat(prefix_len), Style::default()));
+                    }
+                    spans.extend(parse_inline(wline, &theme));
+                    lines.push(Line::from(spans));
+                }
                 continue;
             }
         }
@@ -403,6 +421,33 @@ fn flush_paragraph(
         }
     }
     para.clear();
+}
+
+/// Emit a heading as word-wrapped styled lines (raw text, no inline parsing —
+/// matches the h1/h2/h3 behaviour where markup stays literal). Without this a
+/// heading wider than the pane clips and its tail is silently lost.
+fn push_heading_raw(out: &mut Vec<Line<'static>>, text: &str, width: u16, style: Style) {
+    for wline in wrap_text(text, (width as usize).max(1)) {
+        out.push(Line::from(Span::styled(wline, style)));
+    }
+}
+
+/// Emit a heading as word-wrapped lines, re-parsing each wrapped segment for
+/// inline markup and layering the heading `style` on top (h4/h5/h6 behaviour).
+fn push_heading_inline(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    width: u16,
+    style: Style,
+    theme: &crate::style::Theme,
+) {
+    for wline in wrap_text(text, (width as usize).max(1)) {
+        let spans: Vec<Span<'static>> = parse_inline(&wline, theme)
+            .into_iter()
+            .map(|s| Span::styled(s.content, style))
+            .collect();
+        out.push(Line::from(spans));
+    }
 }
 
 /// Expand tab characters to spaces on `tabstop`-column stops (display-width
@@ -1459,5 +1504,49 @@ mod tests {
         // Trailing two spaces force a hard break → two output lines.
         let l = render_lines("line one  \nline two\n", 80);
         assert_eq!(l, vec!["line one".to_string(), "line two".to_string()]);
+    }
+
+    // ── B1: ordered lists / checkboxes / headings must word-wrap, not clip ────
+
+    #[test]
+    fn long_ordered_list_item_wraps_instead_of_clipping() {
+        // A numbered item far wider than the pane must span multiple lines with
+        // no visible text lost (previously it rendered one clipped line).
+        let src = "1. alpha beta gamma delta epsilon zeta eta theta iota kappa\n";
+        let l = render_lines(src, 20);
+        assert!(l.len() > 1, "expected wrapping, got {:?}", l);
+        // Every source word survives across the wrapped lines.
+        let joined = l.join(" ");
+        for word in ["alpha", "kappa", "epsilon", "theta"] {
+            assert!(joined.contains(word), "lost word {word:?}: {:?}", l);
+        }
+        // Continuation lines are hanging-indented (start with spaces, no marker).
+        assert!(l[0].starts_with("1."), "{:?}", l);
+        assert!(l[1].starts_with(' '), "continuation not indented: {:?}", l);
+    }
+
+    #[test]
+    fn long_heading_wraps_instead_of_clipping() {
+        let src = "## alpha beta gamma delta epsilon zeta eta theta iota kappa\n";
+        let l = render_lines(src, 20);
+        // Drop the trailing breathing-room blank line before counting.
+        let content: Vec<&String> = l.iter().filter(|s| !s.is_empty()).collect();
+        assert!(content.len() > 1, "expected heading to wrap: {:?}", l);
+        let joined = l.join(" ");
+        for word in ["alpha", "kappa", "iota"] {
+            assert!(joined.contains(word), "lost word {word:?}: {:?}", l);
+        }
+    }
+
+    #[test]
+    fn long_checkbox_item_wraps_instead_of_clipping() {
+        let src = "- [ ] alpha beta gamma delta epsilon zeta eta theta iota kappa\n";
+        let l = render_lines(src, 20);
+        assert!(l.len() > 1, "expected checkbox to wrap: {:?}", l);
+        let joined = l.join(" ");
+        for word in ["alpha", "kappa", "zeta"] {
+            assert!(joined.contains(word), "lost word {word:?}: {:?}", l);
+        }
+        assert!(l[0].starts_with('○'), "{:?}", l);
     }
 }

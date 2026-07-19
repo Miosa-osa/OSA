@@ -724,13 +724,15 @@ impl App {
                     crate::components::toast::ToastLevel::Error,
                 ),
             },
-            BackendEvent::McpServersLoaded(result) => match result {
+            BackendEvent::McpServersLoaded(result, open) => match result {
                 Ok(resp) => {
                     // U-T26 — surface a persistent "N MCP" status-bar chip from
                     // the count of connected (enabled) servers. (OSA has no LSP
-                    // concept, so no "N LSP" half is shown.)
+                    // concept, so no "N LSP" half is shown.) Runs on session start
+                    // (quiet refresh) as well as `/mcp`, so the chip appears
+                    // automatically instead of only after the dialog is opened.
                     let enabled = resp.servers.iter().filter(|s| s.enabled).count();
-                    self.status.set_mcp(enabled, false);
+                    self.status.set_mcp(enabled);
                     let servers = resp
                         .servers
                         .into_iter()
@@ -744,14 +746,21 @@ impl App {
                         .collect();
                     self.mcp_servers =
                         Some(crate::dialogs::mcp_servers::McpServers::new(servers));
-                    if self.state.can_transition_to(AppState::Mcp) {
+                    // Only an explicit `/mcp` opens the dialog; the background
+                    // chip refresh just updates the count above.
+                    if open && self.state.can_transition_to(AppState::Mcp) {
                         self.enter_overlay(AppState::Mcp);
                     }
                 }
-                Err(e) => self.toasts.push(
-                    format!("Could not load MCP servers: {e}"),
-                    crate::components::toast::ToastLevel::Error,
-                ),
+                // A quiet background refresh failing must not spam a toast.
+                Err(e) => {
+                    if open {
+                        self.toasts.push(
+                            format!("Could not load MCP servers: {e}"),
+                            crate::components::toast::ToastLevel::Error,
+                        );
+                    }
+                }
             },
             BackendEvent::CostLoaded(result) => match result {
                 Ok(r) => {
@@ -1002,6 +1011,13 @@ impl App {
                     // Reset context bar with new model's window size
                     if let Some(ctx) = resp.context_window {
                         self.status.set_context(0.0, 0, ctx);
+                    }
+                    // A2 — refresh the effort chip so it reflects the new model's
+                    // reasoning effort instead of staying stuck on the previous
+                    // model's value. Only when the backend reports it (absent ⇒
+                    // leave the chip untouched rather than clearing a good value).
+                    if let Some(effort) = resp.effort.clone() {
+                        self.status.set_effort(Some(effort));
                     }
                     self.toasts.push(
                         format!("Model: {}/{}", resp.provider, resp.model),

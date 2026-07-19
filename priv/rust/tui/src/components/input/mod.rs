@@ -147,6 +147,10 @@ pub struct InputComponent {
     /// U-T6 — frecency ranker for the `@`-file/dir recall popup: a candidate
     /// selected often & recently floats to the top on the next open.
     file_frecency: Frecency,
+    /// C5 — a half-typed line stashed when history recall begins, so stepping
+    /// back down past the newest entry restores it instead of wiping it
+    /// (readline/fish keep the working line in a virtual newest slot).
+    history_draft: Option<String>,
 }
 
 /// The kind of the previous composer command — drives kill-ring accumulation
@@ -215,6 +219,7 @@ impl InputComponent {
             last_submit_kind: SubmitKind::Prompt,
             shell_history: history::History::shell_persistent(),
             file_frecency: Frecency::new(),
+            history_draft: None,
         }
     }
 
@@ -265,6 +270,23 @@ impl InputComponent {
     /// dropdown) instead of triggering the global single/double-Esc handling.
     pub fn file_search_active(&self) -> bool {
         self.file_search_active
+    }
+
+    /// Whether the `/`-command completions popup is currently open. The app
+    /// checks this so a single Esc can dismiss the popup (like the `@`-dropdown)
+    /// instead of falling through to the global double-Esc clear-draft chord.
+    pub fn completions_visible(&self) -> bool {
+        self.completions.is_visible()
+    }
+
+    /// Close the `/`-command completions popup. Returns `true` if it was open.
+    pub fn dismiss_completions(&mut self) -> bool {
+        if self.completions.is_visible() {
+            self.completions.hide();
+            true
+        } else {
+            false
+        }
     }
 
     /// True when the stored `@`-search anchor is still coherent with the live
@@ -1160,6 +1182,31 @@ impl InputComponent {
         }
     }
 
+    /// Whether either history bucket is mid-recall (see [`History::is_navigating`]).
+    fn is_navigating_history(&self) -> bool {
+        self.history.is_navigating() || self.shell_history.is_navigating()
+    }
+
+    /// C5 — recall the previous entry, stashing the current half-typed line as a
+    /// draft on the FIRST step into history so a later step back down restores
+    /// it. Idempotent: re-stashing is skipped once a walk is in progress.
+    fn history_recall_prev(&mut self) -> Option<String> {
+        if !self.is_navigating_history() {
+            self.history_draft = Some(self.content.clone());
+        }
+        self.hist_prev()
+    }
+
+    /// C5 — recall the next (newer) entry, or, when stepping past the newest
+    /// history entry, restore the stashed half-typed draft. Returns `None` only
+    /// when there is neither a newer entry nor a stashed draft (leave as-is).
+    fn history_recall_next(&mut self) -> Option<String> {
+        match self.hist_next() {
+            Some(text) => Some(text),
+            None => self.history_draft.take(),
+        }
+    }
+
     /// U-T2 — emacs Ctrl+P, mirroring the ↑ arrow: cycle file matches, else
     /// climb wrapped/logical lines, crossing into (bucket-aware) history recall
     /// only at the buffer's top edge.
@@ -1174,7 +1221,7 @@ impl InputComponent {
         }
         if self.multiline || self.content.contains('\n') {
             if up_crosses_to_history(&self.content, self.cursor) {
-                if let Some(text) = self.hist_prev() {
+                if let Some(text) = self.history_recall_prev() {
                     self.content = text;
                     self.cursor = self.content.len();
                     self.multiline = self.content.contains('\n');
@@ -1182,7 +1229,7 @@ impl InputComponent {
             } else {
                 self.move_cursor_up();
             }
-        } else if let Some(text) = self.hist_prev() {
+        } else if let Some(text) = self.history_recall_prev() {
             self.content = text;
             self.cursor = self.content.len();
             self.multiline = self.content.contains('\n');
@@ -1197,7 +1244,7 @@ impl InputComponent {
         }
         if self.multiline || self.content.contains('\n') {
             if down_crosses_to_history(&self.content, self.cursor) {
-                if let Some(text) = self.hist_next() {
+                if let Some(text) = self.history_recall_next() {
                     self.content = text;
                     self.cursor = self.content.len();
                     self.multiline = self.content.contains('\n');
@@ -1205,14 +1252,14 @@ impl InputComponent {
             } else {
                 self.move_cursor_down();
             }
-        } else if let Some(text) = self.hist_next() {
+        } else if let Some(text) = self.history_recall_next() {
+            // C5 — a newer history entry, or the restored half-typed draft.
             self.content = text;
             self.cursor = self.content.len();
             self.multiline = self.content.contains('\n');
-        } else {
-            self.content.clear();
-            self.cursor = 0;
         }
+        // No newer entry and no stashed draft → leave the buffer untouched
+        // (never wipe a half-typed line, readline/fish parity).
     }
 
     /// U-T3 — the dimmed inline autocomplete suffix shown after the caret, or
@@ -2059,8 +2106,8 @@ impl Component for InputComponent {
                         if self.multiline || self.content.contains('\n') =>
                     {
                         if up_crosses_to_history(&self.content, self.cursor) {
-                            if let Some(text) = self.history.prev() {
-                                self.content = text.to_string();
+                            if let Some(text) = self.history_recall_prev() {
+                                self.content = text;
                                 self.cursor = self.content.len();
                                 self.multiline = self.content.contains('\n');
                             }
@@ -2073,13 +2120,13 @@ impl Component for InputComponent {
                         if self.multiline || self.content.contains('\n') =>
                     {
                         if down_crosses_to_history(&self.content, self.cursor) {
-                            if let Some(text) = self.history.next() {
-                                self.content = text.to_string();
+                            if let Some(text) = self.history_recall_next() {
+                                self.content = text;
                                 self.cursor = self.content.len();
                                 self.multiline = self.content.contains('\n');
                             }
-                            // else: already at newest / not navigating — stay put
-                            // (cursor is at the buffer end), never wipe the draft.
+                            // else: already at newest with no stashed draft — stay
+                            // put (cursor at buffer end), never wipe the draft.
                         } else {
                             self.move_cursor_down();
                         }
@@ -2113,19 +2160,19 @@ impl Component for InputComponent {
                     // search). Routed through the bucket-aware helpers so a
                     // `!`-shell line recalls shell history (U-T4).
                     (KeyCode::Up, KeyModifiers::NONE) if !self.multiline => {
-                        if let Some(text) = self.hist_prev() {
+                        if let Some(text) = self.history_recall_prev() {
                             self.content = text;
                             self.cursor = self.content.len();
                         }
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Down, KeyModifiers::NONE) if !self.multiline => {
-                        if let Some(text) = self.hist_next() {
+                        // C5 — a newer entry or the restored half-typed draft; no
+                        // stash and no newer entry → leave the buffer untouched
+                        // instead of wiping the in-progress line.
+                        if let Some(text) = self.history_recall_next() {
                             self.content = text;
                             self.cursor = self.content.len();
-                        } else {
-                            self.content.clear();
-                            self.cursor = 0;
                         }
                         return ComponentAction::Consumed;
                     }
@@ -3179,6 +3226,45 @@ mod input_edit_tests {
         assert_eq!(input.value(), "line one\nline two");
         // Caret moved onto the first line.
         assert!(cursor_on_first_line(input.value(), input.cursor()));
+    }
+
+    // ── C5: history recall stashes/restores a half-typed draft ───────────────
+
+    #[test]
+    fn up_stashes_half_typed_draft_and_down_restores_it() {
+        let mut input = at("half typed", "half typed".len());
+        input.history = history::History::new(10);
+        input.history.push("older command".to_string());
+        // ↑ recalls the history entry, stashing the in-progress line.
+        input.handle_event(&key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(input.value(), "older command");
+        // ↓ past the newest entry restores the draft rather than wiping it.
+        input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(input.value(), "half typed");
+    }
+
+    #[test]
+    fn down_without_history_nav_does_not_wipe_single_line_draft() {
+        // ↓ with no prior ↑ (not navigating, nothing stashed) must leave the
+        // half-typed line intact instead of clearing it.
+        let mut input = at("keep me", "keep me".len());
+        input.history = history::History::new(10);
+        input.handle_event(&key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(input.value(), "keep me");
+    }
+
+    // ── C3: Esc dismisses the `/`-completions popup via the app helper ───────
+
+    #[test]
+    fn dismiss_completions_hides_the_slash_popup() {
+        let mut input = InputComponent::new();
+        input.set_commands_with_descriptions(vec![("model".into(), "switch model".into())]);
+        // Typing '/' opens the slash-command completions popup.
+        input.handle_event(&key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(input.completions_visible(), "popup should open on '/'");
+        assert!(input.dismiss_completions(), "dismiss reports it closed one");
+        assert!(!input.completions_visible());
+        assert!(!input.dismiss_completions(), "second dismiss is a no-op");
     }
 
     // ── Double-Esc clear-to-history + Ctrl+_ undo rebind ────────────────────

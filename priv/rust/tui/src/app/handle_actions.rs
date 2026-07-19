@@ -96,6 +96,9 @@ impl App {
                 // Load commands and tools in parallel
                 self.load_commands();
                 self.load_tools();
+                // Populate the "N MCP" status-bar chip up front so connected
+                // servers are visible without the user opening `/mcp` first.
+                self.refresh_mcp_status();
                 // Start SSE
                 self.start_sse();
                 // Check if onboarding is needed

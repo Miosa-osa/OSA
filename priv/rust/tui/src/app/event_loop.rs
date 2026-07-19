@@ -947,11 +947,18 @@ impl App {
         // becomes an explicit red warning showing the % LEFT until auto-compact
         // and the action to take.
         if self.status.context_low() {
-            let left = self.status.percent_left().unwrap_or(0);
-            let text = format!(
-                "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
-                left
-            );
+            // Suppress the misleading "0% remaining" when the backend flagged
+            // context_low but sent no percent_left (phantom-zero, budget-chip
+            // class): show the warning without a fabricated number.
+            let text = match self.status.percent_left() {
+                Some(left) => format!(
+                    "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
+                    left
+                ),
+                None => {
+                    "Context low \u{00b7} Run /compact to compact & continue".to_string()
+                }
+            };
             let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
                     text,

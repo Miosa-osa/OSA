@@ -163,13 +163,11 @@ fn watcher_label(monitors: usize, loops: usize) -> Option<String> {
     Some(s)
 }
 
-/// U-T26 — the MCP chip text. Shows a transient "MCP starting…" while the fetch
-/// is in flight, else "N MCP" once servers are known. `None` ⇒ nothing to show.
-/// (LSP is not modelled by the OSA backend, so no "N LSP" half is emitted.)
-fn mcp_label(count: usize, starting: bool) -> Option<String> {
-    if starting {
-        Some("MCP starting\u{2026}".to_string())
-    } else if count > 0 {
+/// U-T26 — the MCP chip text: "N MCP" once servers are known, `None` when there
+/// are none. (LSP is not modelled by the OSA backend, so no "N LSP" half is
+/// emitted.)
+fn mcp_label(count: usize) -> Option<String> {
+    if count > 0 {
         Some(format!("{} MCP", count))
     } else {
         None
@@ -214,10 +212,8 @@ pub struct StatusBar {
     /// (context_pressure `context_low`); drives the red hint + % styling.
     context_low: bool,
     /// U-T26 — number of connected MCP servers (from `McpServersLoaded`). 0 ⇒
-    /// no chip. Set once the `/mcp` fetch resolves; `mcp_starting` shows the
-    /// transient "MCP starting…" state while that fetch is in flight.
+    /// no chip. Populated on session start and on `/mcp`.
     mcp_count: usize,
-    mcp_starting: bool,
     /// U-B5 — live swarm-intelligence status ("swarm · round N"), driven by the
     /// SwarmIntelligence* events. None ⇒ no swarm running ⇒ chip omitted.
     swarm_label: Option<String>,
@@ -264,7 +260,6 @@ impl StatusBar {
             percent_left: None,
             context_low: false,
             mcp_count: 0,
-            mcp_starting: false,
             swarm_label: None,
             subagent_count: 0,
             subagent_cost: None,
@@ -297,11 +292,9 @@ impl StatusBar {
         self.goal_label = label;
     }
 
-    /// U-T26 — number of connected MCP servers, and whether the MCP fetch is in
-    /// flight (shows a transient "MCP starting…"). Both feed the row-0 MCP chip.
-    pub fn set_mcp(&mut self, count: usize, starting: bool) {
+    /// U-T26 — number of connected MCP servers, feeding the row-0 MCP chip.
+    pub fn set_mcp(&mut self, count: usize) {
         self.mcp_count = count;
-        self.mcp_starting = starting;
     }
 
     /// U-B5 — set (or clear with None) the live swarm-intelligence chip.
@@ -713,14 +706,10 @@ impl Component for StatusBar {
             spans.push(Span::styled(format!("effort:{}", effort), style));
         }
 
-        // MCP chip (`3 MCP` / `MCP starting…`). U-T26. Omitted when no servers.
-        if let Some(mcp) = mcp_label(self.mcp_count, self.mcp_starting) {
+        // MCP chip (`3 MCP`). U-T26. Omitted when no servers.
+        if let Some(mcp) = mcp_label(self.mcp_count) {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            let style = if self.mcp_starting {
-                theme.faint()
-            } else {
-                Style::default().fg(theme.colors.primary)
-            };
+            let style = Style::default().fg(theme.colors.primary);
             spans.push(Span::styled(mcp, style));
         }
 
@@ -958,10 +947,9 @@ mod status_bar_tests {
             watcher_label(3, 2).unwrap(),
             "watching \u{00b7} 3 monitors \u{00b7} 2 loops"
         );
-        // U-T26 — MCP chip: starting state wins, else count, else nothing.
-        assert_eq!(mcp_label(0, false), None);
-        assert_eq!(mcp_label(3, false).unwrap(), "3 MCP");
-        assert_eq!(mcp_label(3, true).unwrap(), "MCP starting\u{2026}");
+        // U-T26 — MCP chip: count when non-zero, else nothing.
+        assert_eq!(mcp_label(0), None);
+        assert_eq!(mcp_label(3).unwrap(), "3 MCP");
     }
 
     #[test]
@@ -1047,7 +1035,7 @@ mod status_bar_tests {
         let mut sb = StatusBar::new();
         sb.set_width(120);
         sb.set_subagents(3, Some(0.42));
-        sb.set_mcp(2, false);
+        sb.set_mcp(2);
         sb.set_swarm(Some("swarm \u{00b7} round 4".to_string()));
         let text = render_sb(&sb);
         assert!(text.contains("3 subagents"), "subagent footer, got: {text:?}");
@@ -1057,7 +1045,7 @@ mod status_bar_tests {
         assert!(text.contains("round 4"), "swarm chip");
         // Cleared state drops the chips.
         sb.set_subagents(0, None);
-        sb.set_mcp(0, false);
+        sb.set_mcp(0);
         sb.set_swarm(None);
         let cleared = render_sb(&sb);
         assert!(!cleared.contains("subagents") && !cleared.contains("MCP"));

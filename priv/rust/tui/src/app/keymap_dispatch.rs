@@ -122,8 +122,16 @@ impl App {
                 Some(false)
             }
             Action::NewSession => {
-                self.create_session();
-                Some(false)
+                // Ctrl+N is also the composer's emacs history-next. With a draft
+                // in the composer, decline so the key falls through and navigates
+                // history (CC/fish parity, like Palette on Ctrl+K); an empty
+                // composer starts a new session.
+                if self.input.is_empty() {
+                    self.create_session();
+                    Some(false)
+                } else {
+                    None
+                }
             }
             Action::Suspend => {
                 self.suspend_to_shell();

@@ -804,6 +804,14 @@ impl App {
                     self.esc_tracker.reset();
                     return false;
                 }
+                // The `/`-command completions popup, like the @-dropdown, gets
+                // the Esc first: dismiss it and never start the double-Esc chord
+                // (which would otherwise clear the whole `/…` draft on a 2nd Esc).
+                if self.input.completions_visible() {
+                    self.input.dismiss_completions();
+                    self.esc_tracker.reset();
+                    return false;
+                }
                 // WS5 — queued messages pending at Idle (e.g. after an
                 // interrupt): Esc pops them into the composer for editing (CC
                 // CancelRequestHandler priority 2) instead of starting the

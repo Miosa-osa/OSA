@@ -524,11 +524,27 @@ impl App {
 
     /// `/mcp` — fetch configured MCP servers, open the list.
     pub(crate) fn open_mcp_servers(&mut self) {
+        self.fetch_mcp_servers(true);
+    }
+
+    /// Quietly fetch the MCP server list to populate the status-bar chip on
+    /// session start, without opening the `/mcp` dialog. Fixes the chip staying
+    /// hidden until the user manually ran `/mcp`.
+    pub(crate) fn refresh_mcp_status(&mut self) {
+        self.fetch_mcp_servers(false);
+    }
+
+    /// Shared fetch for both the `/mcp` dialog and the background chip refresh.
+    /// `open` routes the result: `true` opens the dialog, `false` only updates
+    /// the chip count.
+    fn fetch_mcp_servers(&mut self, open: bool) {
         let (client, tx) = (self.client.clone(), self.event_tx.clone());
         tokio::spawn(async move {
             let ev = match client.get_mcp_servers().await {
-                Ok(r) => crate::event::backend::BackendEvent::McpServersLoaded(Ok(r)),
-                Err(e) => crate::event::backend::BackendEvent::McpServersLoaded(Err(e.to_string())),
+                Ok(r) => crate::event::backend::BackendEvent::McpServersLoaded(Ok(r), open),
+                Err(e) => {
+                    crate::event::backend::BackendEvent::McpServersLoaded(Err(e.to_string()), open)
+                }
             };
             let _ = tx.send(crate::event::Event::Backend(ev));
         });

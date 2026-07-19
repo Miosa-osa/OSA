@@ -269,7 +269,10 @@ pub enum BackendEvent {
     /// Management-surface fetch results → open their overlays.
     PermissionRulesLoaded(Result<crate::client::types::PermissionRulesResponse, String>),
     HooksLoaded(Result<crate::client::types::HooksResponse, String>),
-    McpServersLoaded(Result<crate::client::types::McpServersResponse, String>),
+    /// MCP server list fetch. The `bool` is `open`: `true` opens the `/mcp`
+    /// dialog (an explicit `/mcp` request), `false` is a quiet background
+    /// refresh that only updates the status-bar chip count.
+    McpServersLoaded(Result<crate::client::types::McpServersResponse, String>, bool),
     CostLoaded(Result<crate::client::types::CostResponse, String>),
     SkillsBrowserLoaded(Result<Vec<crate::client::types::SkillEntry>, String>),
     MemoriesLoaded(Result<crate::client::types::MemoriesResponse, String>),

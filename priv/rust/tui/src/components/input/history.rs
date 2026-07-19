@@ -187,6 +187,13 @@ impl History {
         self.index = None;
     }
 
+    /// Whether a history-recall walk is in progress (the caller is showing a
+    /// recalled entry rather than editing a fresh line). Used to decide when to
+    /// stash a half-typed draft before the first step into history.
+    pub fn is_navigating(&self) -> bool {
+        self.index.is_some()
+    }
+
     /// All entries, oldest-first. Used by reverse-incremental search.
     pub fn entries(&self) -> &[String] {
         &self.entries

@@ -413,6 +413,11 @@ pub struct ModelSwitchResponse {
     pub status: String,
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Reasoning effort of the newly-selected model. When present it refreshes
+    /// the status-bar effort chip so it never shows the previous model's value
+    /// after a switch (A2). Absent ⇒ the chip is left as-is.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 // === Classify ===
