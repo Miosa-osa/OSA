@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.Limits
   alias OptimalSystemAgent.Agent.Loop.VerificationGate
+  alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
@@ -140,7 +141,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
       iter >= max_iter ->
         Logger.warning("Agent loop hit max iterations (#{max_iter}) for session #{sid}")
-        tools_used = Telemetry.extract_tools_used(state.messages) |> Enum.join(", ")
 
         # Typed terminal event (item 9) so consumers render the iteration-cap stop
         # distinctly rather than as a plain agent_response. Parallels the
@@ -152,8 +152,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           max_iterations: max_iter
         })
 
-        {"I've used all #{max_iter} iterations on this task.\n\n**Tools used:** #{tools_used}\n\nIf the task isn't complete, try breaking it into smaller steps or giving more specific instructions.",
-         state}
+        # Forced model-authored wrap-up turn (opencode MAX_STEPS_PROMPT parity):
+        # instead of a canned string, make ONE final tools-disabled model call so
+        # the user gets a real handoff — what was accomplished, what remains, and
+        # a recommended next step — authored from the actual conversation. Falls
+        # back to a static line if that call fails.
+        forced_wrapup(state, max_iter)
 
       true ->
         do_iteration(state)
@@ -544,6 +548,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   # No tool calls — final response or behavioural nudge
   defp handle_result({:ok, %{content: content, tool_calls: []}}, state, _context) do
+    # Capture whether the model produced NO visible answer (pure reasoning / an
+    # empty generation) BEFORE we substitute a "..." placeholder. This is what
+    # distinguishes a genuine reasoning-only spin (wasted generation) from a
+    # normal final text answer — the reasoning-only doom-loop guard keys on it.
+    visible_empty? = is_nil(content) or String.trim(content) == ""
     content = if is_nil(content) or String.trim(content) == "", do: "...", else: content
 
     content =
@@ -636,28 +645,154 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         run(state)
 
-      true ->
-        # Run stop hooks — hooks can override the response or force continuation
-        case run_stop_hooks(content, state) do
-          {:continue, inject_msg, state} ->
-            # Hook wants the agent to continue with an injected message
+      # Reasoning-only spin backstop: the model produced NO visible answer AND no
+      # tool calls — a wasted, pure-reasoning generation. A real text answer
+      # (non-empty content) is normal termination and MUST NOT count, so this is
+      # guarded on `visible_empty?`; the streak resets on any tool call (see the
+      # tool-calls clause). Bounded by ReasoningOnly.threshold/0: below it we
+      # nudge for concrete progress and loop; at it we stop with an honest handoff
+      # rather than burning the budget in thought.
+      visible_empty? ->
+        case DoomLoop.ReasoningOnly.check([], state) do
+          {:halt, msg, state} ->
+            Bus.emit(:system_event, %{
+              event: :reasoning_only_halt,
+              session_id: state.session_id,
+              iteration: state.iteration
+            })
+
+            {msg, state}
+
+          {:ok, state} ->
+            nudge = %{
+              role: "system",
+              content:
+                "[System: your last generation produced no answer and called no tools. " <>
+                  "Either give a concrete answer now, or call a specific tool to make " <>
+                  "progress. Do not respond with only reasoning.]"
+            }
+
             state = %{
               state
-              | messages: state.messages ++ [%{role: "assistant", content: content}, inject_msg],
+              | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+                iteration: state.iteration + 1
+            }
+
+            run(state)
+        end
+
+      # Goal-level verifier: an independent read-only skeptic panel reads the diff
+      # and votes whether the user's GOAL (not just "a file compiles") was met.
+      # Off by default (cost/latency: spawns N subagents per turn, and skeptics
+      # fail closed to "incomplete" on flaky providers) — enable for autonomous
+      # runs via `config :optimal_system_agent, goal_verifier_enabled: true`.
+      # `needs_verification?/1` self-gates on accumulated work + a run cap + a
+      # stall early-exit, so it never fires on read-only turns. :gate injects the
+      # panel's directive and loops; :pass falls through to the terminal finish.
+      goal_verifier_enabled?() and GoalVerifier.needs_verification?(state) ->
+        case GoalVerifier.check(state) do
+          {:gate, directive, state} ->
+            state = %{
+              state
+              | messages: state.messages ++ [%{role: "assistant", content: content}, directive],
                 iteration: state.iteration + 1
             }
 
             run(state)
 
-          {:override, new_content, state} ->
-            # Hook overrides the final response
-            {new_content, state}
-
-          {:ok, state} ->
-            # No hook intervention — return normally
-            {content, state}
+          {:pass, state} ->
+            finish_turn(content, state)
         end
+
+      true ->
+        finish_turn(content, state)
     end
+  end
+
+  # Terminal finish for a no-tool-call turn: run stop hooks (which may override
+  # the response or force continuation), else return the content as the final
+  # answer. Extracted so both the clean `true ->` path and the GoalVerifier
+  # `{:pass, _}` path share one copy of the stop-hook dispatch.
+  defp finish_turn(content, state) do
+    case run_stop_hooks(content, state) do
+      {:continue, inject_msg, state} ->
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, inject_msg],
+            iteration: state.iteration + 1
+        }
+
+        run(state)
+
+      {:override, new_content, state} ->
+        {new_content, state}
+
+      {:ok, state} ->
+        {content, state}
+    end
+  end
+
+  # Goal-level verifier feature flag (default off — see the clause above).
+  defp goal_verifier_enabled? do
+    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false)
+  end
+
+  # Forced model-authored wrap-up at the iteration cap. One tools-disabled model
+  # turn so the user gets a real state summary + handoff instead of a canned
+  # line. Fully guarded (try/rescue/catch + static fallback) so hitting the cap
+  # can never itself crash the turn.
+  defp forced_wrapup(state, max_iter) do
+    directive = %{
+      role: "system",
+      content:
+        "[System: You have reached the maximum of #{max_iter} steps for this task and " <>
+          "tools are now DISABLED for this final turn. Do not attempt to call any tool. " <>
+          "Write a concise plain-text wrap-up with three parts: (1) what you accomplished, " <>
+          "(2) what remains to be done, (3) your recommended next step. Be specific and " <>
+          "reference the actual work from this conversation.]"
+    }
+
+    try do
+      context = cached_context(state)
+      messages = context.messages ++ [directive]
+
+      llm_opts = [
+        tools: [],
+        temperature: LLMClient.temperature(),
+        max_tokens: max_response_tokens()
+      ]
+
+      # Mirror do_iteration's streaming setup so llm_chat_stream has a valid
+      # tool-executor context in the process dict. With tools: [] nothing will
+      # actually execute — this is purely to satisfy the streaming contract.
+      streaming_ctx = StreamingToolExecutor.start(state)
+      Process.put(:osa_streaming_tool_ctx, streaming_ctx)
+
+      case LLMClient.llm_chat_stream(state, messages, llm_opts) do
+        {:ok, resp} ->
+          content = Map.get(resp, :content, "")
+
+          if is_binary(content) and String.trim(content) != "" do
+            {content, state}
+          else
+            {wrapup_fallback(state, max_iter), state}
+          end
+
+        _ ->
+          {wrapup_fallback(state, max_iter), state}
+      end
+    rescue
+      _ -> {wrapup_fallback(state, max_iter), state}
+    catch
+      :exit, _ -> {wrapup_fallback(state, max_iter), state}
+    end
+  end
+
+  defp wrapup_fallback(state, max_iter) do
+    tools_used = Telemetry.extract_tools_used(state.messages) |> Enum.join(", ")
+
+    "I've used all #{max_iter} iterations on this task.\n\n**Tools used:** #{tools_used}\n\n" <>
+      "If the task isn't complete, try breaking it into smaller steps or giving more specific instructions."
   end
 
   # Tool calls — execute in parallel and loop
@@ -670,7 +805,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # to the existing halt behavior.
     resample_snapshot = state
 
-    state = %{state | iteration: state.iteration + 1}
+    # Forward progress: a tool call resets the reasoning-only spin streak (the
+    # reasoning-only doom-loop backstop counts only wasted, tool-less, empty
+    # generations — see the no-tool-call clause above). Map.put (not struct
+    # update) mirrors the ReasoningOnly detector's own state access.
+    state = Map.put(%{state | iteration: state.iteration + 1}, :reasoning_only_streak, 0)
 
     content =
       if Scratchpad.inject?(state.provider) do

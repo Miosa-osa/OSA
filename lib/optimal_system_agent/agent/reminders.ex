@@ -8,7 +8,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   opencode's post-read `<system-reminder>` injection: steering the model
   without polluting the system prompt and without the model having to poll.
 
-  Three collectors run, in order, and their outputs are concatenated:
+  Four collectors run, in order, and their outputs are concatenated:
 
     1. **task-completion** — background shell commands
        (`Shell.BackgroundManager`) and background subagents (`Agent.RunStore`)
@@ -29,6 +29,17 @@ defmodule OptimalSystemAgent.Agent.Reminders do
        provider is configured (`:optimal_system_agent, :diagnostics_provider`).
        OSA ships no LSP backend, so this is a no-op by default and a clean
        extension point; it never blocks and never fabricates output.
+
+    4. **self-correction** (P7) — a one-shot reflection nudge on the FIRST
+       *semantic* (non-transient, not auto-retried) failure of a given
+       tool+error signature. Distinct from `VerificationGate`, which only
+       fires on an *unverified write*: this fires on the failed call itself,
+       right where the model sees the result, so a bad edit/command doesn't
+       just land as an ignorable tool result until `FailureSignature` trips at
+       3x repeats. Uses the SAME semantic-vs-transient classification
+       `ToolExecutor.semantic_tool_error?/1` already applies before deciding
+       whether to try a sibling tool, so this never nudges on a merely
+       transient failure (those are handled by `ToolRetry`).
 
   ## Dedup
 
@@ -82,7 +93,8 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     reminders =
       collect_task_completions(session_id) ++
         collect_skill_discovery(session_id, tool_call, state) ++
-        collect_diagnostics(tool_call, state)
+        collect_diagnostics(tool_call, state) ++
+        collect_self_correction(session_id, tool_call, result_str)
 
     format_with_reminders(result_str, reminders)
   rescue
@@ -371,6 +383,73 @@ defmodule OptimalSystemAgent.Agent.Reminders do
     end
   rescue
     _ -> []
+  end
+
+  # ── Collector 4: self-correction after a failed tool (P7) ─────────────────
+  #
+  # Fires ONLY on:
+  #   - a result that reads as a failure (`String.starts_with?(result_str,
+  #     "Error:")` — the same prefix `ToolExecutor.finalize_result/5` already
+  #     uses to derive `tool_failed`; `"Blocked:"` results are a permission
+  #     decision, not a mistake to reflect on, so they're excluded), AND
+  #   - a SEMANTIC failure per `ToolExecutor.semantic_tool_error?/1` (the tool
+  #     ran and rejected the args — old_string not found, ambiguous match,
+  #     etc.) — a transient failure was either already retried by `ToolRetry`
+  #     or will be retried by the fallback-tool path, so it gets no nudge here.
+  #
+  # Deduped via the SAME per-session claim table the other collectors use,
+  # keyed on `{tool_name, normalized_error_prefix}` — the first occurrence of
+  # a given failure signature gets one nudge; repeats of the identical
+  # signature are silent (avoids spamming a message the model already saw,
+  # and `FailureSignature`/`Escalation` already own the "keeps repeating"
+  # case at 2x/3x).
+  defp collect_self_correction(session_id, tool_call, result_str) do
+    if semantic_failure?(result_str) do
+      tool_name = Map.get(tool_call, :name)
+      signature = self_correction_signature(tool_name, result_str)
+
+      if claim(session_id, {:self_correction, signature}) do
+        [format_self_correction(tool_name, result_str)]
+      else
+        []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp semantic_failure?(result_str) when is_binary(result_str) do
+    String.starts_with?(result_str, "Error:") and
+      OptimalSystemAgent.Agent.Loop.ToolExecutor.semantic_tool_error?(
+        String.trim_leading(result_str, "Error:")
+      )
+  end
+
+  defp semantic_failure?(_), do: false
+
+  defp self_correction_signature(tool_name, result_str) do
+    prefix =
+      result_str
+      |> String.slice(0, 120)
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    "#{tool_name}:#{prefix}"
+  end
+
+  defp format_self_correction(tool_name, result_str) do
+    reason =
+      result_str
+      |> String.trim_leading("Error:")
+      |> String.trim()
+      |> String.slice(0, 240)
+
+    "Self-correction: the #{tool_name} call above failed because: #{reason} " <>
+      "Before retrying, reconsider your approach — re-check your assumptions (e.g. re-read the " <>
+      "target file/state if relevant) rather than reissuing the same call with the same " <>
+      "arguments. This is a one-time nudge for this failure; it will not repeat."
   end
 
   defp run_diagnostics_provider(fun, path, state) when is_function(fun, 2),

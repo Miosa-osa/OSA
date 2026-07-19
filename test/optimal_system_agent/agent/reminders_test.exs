@@ -169,6 +169,72 @@ defmodule OptimalSystemAgent.Agent.RemindersTest do
     end
   end
 
+  describe "self-correction collector (P7)" do
+    test "first semantic tool failure gets a one-shot reflection nudge" do
+      s = sid()
+      tc = %{name: "file_edit", arguments: %{"path" => "x.ex"}, id: "e1"}
+
+      out = Reminders.append("Error: old_string not found in x.ex", tc, s |> then(&%{session_id: &1}))
+
+      assert out =~ "<system-reminder>"
+      assert out =~ "Self-correction"
+      assert out =~ "old_string not found"
+    end
+
+    test "a second occurrence of the identical failure signature does not repeat the nudge" do
+      s = sid()
+      tc = %{name: "file_edit", arguments: %{"path" => "x.ex"}, id: "e1"}
+      state = %{session_id: s}
+      error = "Error: old_string not found in x.ex"
+
+      out1 = Reminders.append(error, tc, state)
+      assert out1 =~ "Self-correction"
+
+      out2 = Reminders.append(error, tc, state)
+      refute out2 =~ "Self-correction"
+    end
+
+    test "a DIFFERENT failure signature (different tool/error) still gets its own nudge" do
+      s = sid()
+      state = %{session_id: s}
+
+      tc1 = %{name: "file_edit", arguments: %{"path" => "x.ex"}, id: "e1"}
+      out1 = Reminders.append("Error: old_string not found in x.ex", tc1, state)
+      assert out1 =~ "Self-correction"
+
+      tc2 = %{name: "file_edit", arguments: %{"path" => "y.ex"}, id: "e2"}
+      out2 = Reminders.append("Error: ambiguous match — old_string found 3 times", tc2, state)
+      assert out2 =~ "Self-correction"
+    end
+
+    test "a transient (non-semantic) failure gets no nudge" do
+      s = sid()
+      tc = %{name: "web_fetch", arguments: %{"url" => "http://x"}, id: "e1"}
+      state = %{session_id: s}
+
+      out = Reminders.append("Error: connection timeout", tc, state)
+      refute out =~ "Self-correction"
+    end
+
+    test "a permission block (\"Blocked:\") gets no self-correction nudge" do
+      s = sid()
+      tc = %{name: "shell_execute", arguments: %{"command" => "rm -rf /"}, id: "e1"}
+      state = %{session_id: s}
+
+      out = Reminders.append("Blocked: dangerous command", tc, state)
+      refute out =~ "Self-correction"
+    end
+
+    test "a successful result gets no nudge" do
+      s = sid()
+      tc = %{name: "file_read", arguments: %{"path" => "x.ex"}, id: "e1"}
+      state = %{session_id: s}
+
+      out = Reminders.append("file contents here", tc, state)
+      refute out =~ "Self-correction"
+    end
+  end
+
   # Poll BackgroundManager.output until the task is no longer :running.
   defp wait_terminal(_id, 0), do: :timeout
 

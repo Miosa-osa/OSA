@@ -190,9 +190,36 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
             {:error, reason} = error ->
               # Try fallback chain on retryable errors
               if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+                # Header-aware: honor a server-supplied Retry-After (parsed by
+                # RetryClassifier off the original reason) before switching
+                # providers, and surface it via the SAME {:provider_retry} UI
+                # event the same-provider retry loop uses, so "Retrying in
+                # Ns…" reflects the real server-requested wait instead of
+                # silently switching providers with no delay at all.
+                delay_ms = OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason) || 0
+
                 Logger.warning(
-                  "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain"
+                  "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
+                    if(delay_ms > 0, do: " (honoring #{delay_ms}ms retry-after)", else: "")
                 )
+
+                if delay_ms > 0 do
+                  Phoenix.PubSub.broadcast(
+                    OptimalSystemAgent.PubSub,
+                    "osa:session:#{session_id}",
+                    {:osa_event,
+                     %{
+                       type: :provider_retry,
+                       session_id: session_id,
+                       attempt: 1,
+                       max_attempts: 1,
+                       delay_ms: delay_ms,
+                       reason: OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
+                     }}
+                  )
+
+                  Process.sleep(delay_ms)
+                end
 
                 case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
                        messages,

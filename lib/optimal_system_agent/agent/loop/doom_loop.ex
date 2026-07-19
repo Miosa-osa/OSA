@@ -5,6 +5,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.IdenticalCall
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Stall
+  alias OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature
 
   # Runtime-tunable (not compile_env) so the absolute tool-call cap can be
@@ -27,6 +28,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
 
     * `DoomLoop.IdenticalCall`     — same tool+args repeated back-to-back
     * `DoomLoop.Stall`             — no forward progress over a window
+    * `DoomLoop.ReasoningOnly`     — reasoning-only / turn-errored spin, zero tool calls
     * `DoomLoop.FailureSignature`  — same tool+error signature repeats
     * `DoomLoop.Escalation`        — shared graded "nudge before halt" sequence
 
@@ -83,7 +85,15 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     with {:ok, state} <- IdenticalCall.check(tool_calls, state),
          # --- Stall detection ---
          # No newly-distinct tool and no file write/edit over the last N calls.
-         {:ok, state} <- Stall.check(tool_calls, state) do
+         {:ok, state} <- Stall.check(tool_calls, state),
+         # --- Reasoning-only / turn-errored detection ---
+         # Catches a model spinning in thought with zero tool calls (and/or a
+         # turn the caller flags as errored via state.turn_errored) — a loop
+         # shape none of the tool-call-keyed detectors above can see. Ordered
+         # BEFORE FailureSignature per spec: an empty `tool_calls`/`results`
+         # this turn would otherwise just fall through FailureSignature as a
+         # silent no-op, wasting a whole detection pass.
+         {:ok, state} <- ReasoningOnly.check(tool_calls, state) do
       cond do
         new_total >= max_calls ->
           handle_call_cap_exceeded(new_total, max_calls, state)

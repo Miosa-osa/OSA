@@ -1177,8 +1177,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   # A semantic/domain tool error (the tool ran and rejected the args) vs. a
   # tool-availability/dispatch failure (unknown tool / tool crashed). We only
-  # fall back to a sibling tool for the latter.
-  defp semantic_tool_error?(reason) do
+  # fall back to a sibling tool for the latter. Public (not `defp`) so
+  # `Agent.Reminders`' self-correction collector (P7) can reuse the exact same
+  # classification instead of duplicating the keyword list — a self-correction
+  # nudge should only fire on the same "semantic, not transient" failures this
+  # module already declines to retry-with-a-sibling-tool for.
+  @spec semantic_tool_error?(term()) :: boolean()
+  def semantic_tool_error?(reason) do
     text = if is_binary(reason), do: reason, else: inspect(reason)
     down = String.downcase(text)
 

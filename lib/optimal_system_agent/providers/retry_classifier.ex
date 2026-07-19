@@ -114,6 +114,27 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   def rate_limit_retry_threshold, do: @rate_limit_retry_threshold
 
   @doc """
+  True when `reason` is a context-window-overflow error — deterministically
+  fatal (re-sending the same-or-larger prompt against ANY provider will fail
+  the same way; only compaction fixes it). Public so cross-provider callers
+  (`Providers.FallbackChain`) can exclude it from a fallback attempt too, not
+  just the same-provider retry loop `classify/4` already guards.
+  """
+  @spec context_overflow?(term()) :: boolean()
+  def context_overflow?(reason), do: do_context_overflow?(reason)
+
+  @doc """
+  Public accessor for the server-supplied `Retry-After` delay (in
+  milliseconds) carried by a structured error reason (`{:rate_limited, secs}`,
+  or a `{:stream_error, ...}` wrapping one), or `nil` when the reason carries
+  none. Mirrors the private extraction `classify/4` uses internally for the
+  same-provider retry loop; exposed so `Providers.FallbackChain` can honor the
+  same server directive when switching providers instead of ignoring it.
+  """
+  @spec reason_retry_after_ms(term()) :: non_neg_integer() | nil
+  def reason_retry_after_ms(reason), do: retry_after_ms(reason)
+
+  @doc """
   Classify a provider error into a `t:decision/0`.
 
   `retry_count` is the number of retries already performed (0 on the first
@@ -147,7 +168,7 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
       #    prompt-too-long 500 reads as :server_error — detect it by message
       #    here). It is deterministic: re-sending the same-or-larger payload
       #    always fails. Surfaced up unchanged for the compaction path.
-      context_overflow?(reason) ->
+      do_context_overflow?(reason) ->
         {:fatal, reason}
 
       # 3b. Other deterministic client errors are fatal.
@@ -277,6 +298,8 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   defp retry_after_ms({:rate_limited, secs}) when is_integer(secs) and secs > 0,
     do: min(secs * 1_000, @retry_after_cap_ms)
 
+  defp retry_after_ms({:stream_error, reason}), do: retry_after_ms(reason)
+  defp retry_after_ms({:stream_error, reason, _partial}), do: retry_after_ms(reason)
   defp retry_after_ms(_), do: nil
 
   defp rate_limited?({:rate_limited, _}), do: true
@@ -288,7 +311,7 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
 
   # Context-window overflow, detected by message text regardless of the HTTP
   # status the backend used to carry it (mirrors ErrorCatalog.context_overflow?).
-  defp context_overflow?(reason) do
+  defp do_context_overflow?(reason) do
     text = reason_text(reason)
 
     String.contains?(text, "prompt is too long") or

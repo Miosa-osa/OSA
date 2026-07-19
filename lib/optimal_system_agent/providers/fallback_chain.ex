@@ -12,8 +12,16 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
   require Logger
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
+  alias OptimalSystemAgent.Providers.{ErrorCatalog, Resilience, RetryClassifier}
 
   @default_chain [:anthropic, :openai, :groq, :ollama]
+
+  # Categories that always warrant a cross-provider fallback attempt: server
+  # overload/5xx and rate-limit are provider-specific (another provider is not
+  # currently overloaded/limited just because this one is), unlike
+  # context-overflow which is prompt-size-driven and would fail identically
+  # against the next provider too (excluded below, ahead of this list).
+  @always_retryable_categories [:server_error, :server_overload, :rate_limit]
 
   @doc "Get the configured fallback chain."
   def chain do
@@ -128,8 +136,48 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       )
   end
 
-  @doc "Check if an error is retryable (rate limit, overloaded, timeout, etc.)"
-  def retryable_error?(reason) when is_binary(reason) do
+  @doc """
+  Check if an error is worth a cross-provider fallback attempt.
+
+  Header-aware / classified (opencode `session/retry.ts` `retryable()`
+  parity):
+
+    * **Never** retried: context-window overflow. It is deterministic — the
+      same-or-larger prompt fails against the next provider identically; only
+      compaction can fix it (`RetryClassifier.context_overflow?/1`).
+    * **Always** retried: 5xx server errors, overload, and rate-limit — these
+      are provider-specific, so a *different* provider is likely fine.
+    * Everything else falls back to the legacy substring classifier (kept as
+      the fallback path for plain-string / unrecognized error shapes that
+      carry no structured category — a provider crash message, for example).
+  """
+  @spec retryable_error?(term()) :: boolean()
+  def retryable_error?(reason) do
+    cond do
+      RetryClassifier.context_overflow?(reason) ->
+        false
+
+      ErrorCatalog.classify(reason) in @always_retryable_categories ->
+        true
+
+      is_binary(reason) ->
+        substring_retryable?(reason)
+
+      true ->
+        substring_retryable?(Resilience.reason_to_string(reason))
+    end
+  end
+
+  @doc """
+  Server-directed `Retry-After` delay (ms) for a fallback-chain error reason,
+  or `nil` when the reason carries none (the caller should fall back to its
+  own fixed/backoff schedule). Mirrors opencode `retry.ts` `delay()` — a
+  server directive, when present, always wins over a guessed backoff.
+  """
+  @spec retry_delay_ms(term()) :: non_neg_integer() | nil
+  def retry_delay_ms(reason), do: RetryClassifier.reason_retry_after_ms(reason)
+
+  defp substring_retryable?(reason) do
     reason_down = String.downcase(reason)
 
     Enum.any?(
@@ -148,6 +196,4 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       fn pattern -> String.contains?(reason_down, pattern) end
     )
   end
-
-  def retryable_error?(_), do: true
 end

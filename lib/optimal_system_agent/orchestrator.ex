@@ -36,6 +36,17 @@ defmodule OptimalSystemAgent.Orchestrator do
   """
   alias OptimalSystemAgent.Team
 
+  # Tool inventory a read-only panel spawn is allowed to carry, mirroring
+  # ToolExecutor's @read_only_tools. Intersected against every config's
+  # :tools_allowed in run_read_only_panel/2 so a caller can never grant a
+  # "read-only panel" a write/exec tool, even by mistake.
+  @read_only_panel_tools ~w(
+    file_read file_glob dir_list file_grep file_search
+    memory_recall session_search semantic_search
+    code_symbols web_fetch web_search list_skills
+    list_dir read_file grep_search
+  )
+
   @doc """
   Run multiple subagents in parallel and collect all results.
 
@@ -419,6 +430,39 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         {:error, reason}
     end
+  end
+
+  @doc """
+  Spawn N independent READ-ONLY subagents in parallel and collect their
+  results — the generic primitive behind the goal-level verifier
+  (`Agent.Loop.GoalVerifier`)'s adversarial skeptic panel, but reusable by
+  any caller needing a read-only judgement/inspection panel.
+
+  This is a thin, defense-in-depth wrapper over `run_parallel/3`: every
+  config is force-locked to `permission_tier: :read_only` and its
+  `:tools_allowed` is intersected with the read-only tool set, REGARDLESS of
+  what the caller passed — a caller cannot accidentally (or via a crafted
+  config) grant a "read-only panel" member a write or exec tool. This backs
+  up (does not replace) `ToolExecutor.permission_tier_allows?/2`'s per-call
+  enforcement.
+
+  Returns a list of `{:ok, result} | {:error, reason}` in the same order as
+  `configs`, same contract as `run_parallel/3`.
+  """
+  @spec run_read_only_panel(String.t(), [map()], keyword()) :: [
+          {:ok, String.t()} | {:error, term()}
+        ]
+  def run_read_only_panel(parent_id, configs, opts \\ []) when is_list(configs) do
+    locked_configs =
+      Enum.map(configs, fn config ->
+        allowed = Map.get(config, :tools_allowed) || @read_only_panel_tools
+
+        config
+        |> Map.put(:permission_tier, :read_only)
+        |> Map.put(:tools_allowed, Enum.filter(allowed, &(&1 in @read_only_panel_tools)))
+      end)
+
+    run_parallel(parent_id, locked_configs, opts)
   end
 
   @doc """
