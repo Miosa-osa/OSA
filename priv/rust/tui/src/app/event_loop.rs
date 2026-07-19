@@ -50,6 +50,40 @@ pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     want.clamp(lo, hi)
 }
 
+/// Fixed row count of the inline streaming-preview slot (the "real cure").
+///
+/// While a reply streams, the newest lines scroll INTERNALLY within this
+/// constant slot — `Chat::draw_live` bottom-anchors the tail — rather than the
+/// inline viewport growing per token. Keeping the reserved height constant for
+/// the whole turn is what eliminates the mid-turn viewport rebuild (and its DSR
+/// cursor re-anchor under tmux/SSH) that produced the stacking / whitespace
+/// artifacts. Mirrors Claude Code's Ink `<Static>` + transient split and grok's
+/// fixed `xai-grok-pager` preview window: a bounded window over a growing body.
+pub(crate) const STREAM_PREVIEW_ROWS: u16 = 10;
+
+/// Inline-viewport height while a reply is streaming.
+///
+/// Deliberately takes NO measure of how much has streamed: the preview slot is a
+/// constant [`STREAM_PREVIEW_ROWS`]. That is the fixed-height invariant — for a
+/// given terminal size and chrome, the streaming height does not change as the
+/// reply grows, so the viewport is never rebuilt mid-turn. Kept as a free pure
+/// function so the invariant is unit-testable without constructing a full `App`.
+pub(crate) fn streaming_inline_height(
+    base: u16,
+    overhead: u16,
+    input_needed: u16,
+    agents_h: u16,
+    popup_h: u16,
+    hi: u16,
+) -> u16 {
+    let want = overhead
+        .saturating_add(input_needed)
+        .saturating_add(STREAM_PREVIEW_ROWS)
+        .saturating_add(agents_h)
+        .saturating_add(popup_h);
+    want.clamp(base, hi)
+}
+
 /// Render `widget` into `rect` after clipping it to the frame's drawable area.
 /// Skips the draw entirely when nothing survives the clip. This is the single
 /// choke point that guarantees a widget can never index outside the frame
@@ -461,11 +495,11 @@ impl App {
                             // Permissions is not an is_overlay() state, so this
                             // full-viewport branch was unreachable dead code and was
                             // removed. It falls through to the `_ => {}` no-op.
-                            AppState::PlanReview => {
-                                if let Some(ref r) = self.plan_review {
-                                    r.draw(frame, area);
-                                }
-                            }
+                            // AppState::PlanReview has no draw arm here: like the
+                            // permission ask, the plan-review panel renders INLINE
+                            // (see draw_inline), and PlanReview is no longer an
+                            // is_overlay() state, so this full-viewport branch was
+                            // unreachable. It falls through to the `_ => {}` no-op.
                             AppState::Survey => {
                                 if let Some(ref s) = self.survey {
                                     s.draw(frame, area);
@@ -586,13 +620,16 @@ impl App {
     /// the terminal size — see [`live_region_height`]. Kept independent of
     /// transient activity rows so the viewport doesn't churn mid-turn.
     ///
-    /// While a reply is streaming, the live region additionally grows to fit the
-    /// in-progress message so it renders TOP-TO-BOTTOM in place — tokens landing
-    /// at the bottom, the region auto-scrolling to follow — with the same
-    /// markdown/wrapping render as the finalized transcript message, instead of
-    /// a self-replacing 1-row preview. Growth is quantized into coarse steps so
-    /// the viewport rebuilds only a handful of times per turn (not once per
-    /// line), and is capped so it never swallows the whole terminal.
+    /// While a reply is streaming, the live region reserves a FIXED-height
+    /// preview slot ([`STREAM_PREVIEW_ROWS`]) instead of growing with the reply.
+    /// The newest lines scroll INTERNALLY within the slot (`Chat::draw_live`
+    /// bottom-anchors the tail, same markdown/wrapping render as the finalized
+    /// transcript), so the inline-viewport height is constant for the whole turn.
+    /// This is the "real cure": the old growth branch rebuilt the viewport
+    /// mid-turn, and each rebuild issued a DSR cursor query tmux/SSH can drop,
+    /// leaving stacked / whitespace artifacts. A pending plan-review panel is
+    /// reserved the same way (fixed slot), and completed content still flushes to
+    /// native scrollback as before.
     pub fn desired_inline_height(&self, term_rows: u16) -> u16 {
         let input_needed = self.input.needed_height();
         // Grow the viewport to fit the inline agents panel (multi-agent activity /
@@ -630,38 +667,47 @@ impl App {
             return want.clamp(base, hi);
         }
 
-        // Rows the streaming reply currently renders to (0 when idle).
-        let stream_rows = self.chat.streaming_height(self.width);
-        if stream_rows <= 1 {
-            return base;
+        // A pending plan-review panel renders INLINE in the stream band (it is no
+        // longer an is_overlay() full-viewport state — see state.rs). Reserve its
+        // fixed panel height so the inline viewport is built tall enough to show
+        // the bordered panel without clipping. The plan text scrolls internally
+        // (j/k), so this reserved height is constant regardless of plan length —
+        // the same fixed-slot principle as the streaming preview below. Mirrors
+        // the permission-prompt branch above.
+        if let Some(ref review) = self.plan_review {
+            let overhead: u16 = self.think_row_height() + 1 + 2;
+            let want = overhead
+                .saturating_add(input_needed)
+                .saturating_add(review.content_height(self.width))
+                .saturating_add(agents_h)
+                .saturating_add(popup_h);
+            let hi = term_rows.saturating_sub(1).max(1);
+            return want.clamp(base, hi);
         }
 
+        // Streaming preview — FIXED-height, internally-scrolled slot (the real
+        // cure). `streaming_height` is consulted ONLY as a boolean "is anything
+        // streaming?" gate, NEVER for sizing: the reserved slot is a constant
+        // STREAM_PREVIEW_ROWS, so the inline-viewport height stays CONSTANT for the
+        // whole turn. Previously this branch grew (quantized) with the reply, which
+        // rebuilt the inline viewport mid-turn → a DSR cursor re-anchor tmux/SSH can
+        // drop → the stacked / whitespace artifacts. With a fixed slot the viewport
+        // is built once per turn; the newest lines scroll WITHIN the slot
+        // (`Chat::draw_live` bottom-anchors the tail) and completed content still
+        // flushes to native scrollback exactly as before.
+        let streaming = self.chat.streaming_height(self.width) > 1;
+        if !streaming {
+            return base;
+        }
         // Chrome below the streaming preview: thinking/activity row (dynamic —
-        // shared with draw_inline via think_row_height so the two can never
-        // drift a row apart) + ctx-hint(1) + status(2). The streaming region
-        // gets `stream_preview` rows on top.
+        // shared with draw_inline via think_row_height so the two can never drift a
+        // row apart) + ctx-hint(1) + status(2). `agents_h`/`popup_h` are counted in
+        // BOTH branches so viewport sizing and the draw_inline layout stay in
+        // lockstep — a 1-row disagreement is the height-thrash that stacked a ghost
+        // Thinking box + composer.
         let overhead: u16 = self.think_row_height() + 1 + 2;
-        const MAX_STREAM_PREVIEW: u16 = 18;
-        const STEP: u16 = 6;
-        // Quantize upward to the next STEP so a growing reply changes the
-        // viewport height in a few discrete jumps rather than every new line.
-        let stepped = ((stream_rows.min(MAX_STREAM_PREVIEW) + STEP - 1) / STEP) * STEP;
-        let stream_preview = stepped.clamp(STEP, MAX_STREAM_PREVIEW);
-
-        // `agents_h` MUST be added here too: `draw_inline` reserves a dedicated
-        // agents-panel row, so if the streaming viewport the event loop builds
-        // omits it, the terminal viewport ends up shorter than the layout
-        // `draw_inline` produces. That height disagreement makes the rebuild
-        // logic (`desired_inline_h != cur_inline_h`) thrash and leaves a ghost
-        // copy of the live-region chrome — the second Thinking box + composer the
-        // user saw stacked. Counting it in both branches keeps them in lockstep.
-        let want = overhead
-            .saturating_add(input_needed)
-            .saturating_add(stream_preview)
-            .saturating_add(agents_h)
-            .saturating_add(popup_h);
         let hi = term_rows.saturating_sub(1).max(1);
-        want.clamp(base, hi)
+        streaming_inline_height(base, overhead, input_needed, agents_h, popup_h, hi)
     }
 
     /// Height of the thinking/activity row. The SINGLE source of truth used by
@@ -740,6 +786,11 @@ impl App {
         if let Some(ref perm) = self.permissions {
             // Inline approval prompt takes over the stream band while pending.
             perm.draw_inline(frame, a_stream);
+        } else if let Some(ref review) = self.plan_review {
+            // Plan-review panel renders inline in the stream band (no longer a
+            // full-viewport is_overlay() state — see state.rs). Its fixed height is
+            // reserved by desired_inline_height's plan_review branch.
+            review.draw(frame, a_stream);
         } else {
             self.chat.draw_live(frame, a_stream);
         }
@@ -759,7 +810,10 @@ impl App {
         // (Claude Code's todo panel). It self-positions and no-ops when empty.
         // It additionally clamps its own panel to the frame internally.
         // Ctrl+T (chat:todosToggle) hides it.
-        if !self.task_checklist_hidden && self.permissions.is_none() {
+        if !self.task_checklist_hidden
+            && self.permissions.is_none()
+            && self.plan_review.is_none()
+        {
             self.task_checklist.draw(frame, a_stream);
         }
         if self.toasts.has_toasts() {
@@ -1377,6 +1431,51 @@ mod render_tests {
         assert_eq!(live_region_height(7, 6), 5);
         // Never below the base on a roomy terminal.
         assert!(live_region_height(1, 40) >= crate::LIVE_H_BASE);
+    }
+
+    #[test]
+    fn streaming_inline_height_is_fixed_across_stream_progress() {
+        // The real cure: the inline-viewport height reserved while streaming must
+        // NOT track how much has streamed, so the viewport is built once per turn
+        // (no mid-turn rebuild / DSR re-anchor → no stacked/whitespace artifacts).
+        use super::{streaming_inline_height, STREAM_PREVIEW_ROWS};
+        let base = crate::LIVE_H_BASE; // 6
+        let overhead = 3u16;
+        let input_needed = 3u16;
+        let hi = 40u16;
+
+        // Simulate a reply growing from 1 to thousands of rendered rows. The stream
+        // row count deliberately does NOT appear in the call — proving the reserved
+        // height cannot track it — so every height is identical.
+        let h0 = streaming_inline_height(base, overhead, input_needed, 0, 0, hi);
+        for _simulated_stream_rows in [1u16, 5, 20, 200, 9999] {
+            let h = streaming_inline_height(base, overhead, input_needed, 0, 0, hi);
+            assert_eq!(
+                h, h0,
+                "streaming inline height must stay constant as the reply grows"
+            );
+        }
+        // The slot is exactly the fixed preview window stacked on the chrome, and
+        // it sits above the idle base (so a preview row band is actually reserved).
+        assert_eq!(h0, overhead + input_needed + STREAM_PREVIEW_ROWS);
+        assert!(h0 > base, "streaming reserves the fixed preview slot above idle base");
+    }
+
+    #[test]
+    fn streaming_inline_height_clamps_to_base_and_terminal() {
+        use super::streaming_inline_height;
+        // Never exceed the terminal clamp (term_rows - 1) on a tiny terminal.
+        let hi = 5u16;
+        assert_eq!(streaming_inline_height(3, 3, 3, 0, 0, hi), hi);
+        // Never drop below the idle base even when the chrome is minimal.
+        let base = 20u16;
+        assert!(streaming_inline_height(base, 1, 0, 0, 0, 40) >= base);
+        // Agents panel + slash popup rows are additive in the streaming branch too
+        // (kept in lockstep with draw_inline's layout), still independent of stream
+        // length.
+        let with_extras = streaming_inline_height(6, 3, 3, 4, 3, 40);
+        let without = streaming_inline_height(6, 3, 3, 0, 0, 40);
+        assert_eq!(with_extras, without + 4 + 3);
     }
 
     #[test]

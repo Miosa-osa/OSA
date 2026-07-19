@@ -164,7 +164,12 @@ impl AppState {
         matches!(
             self,
             AppState::Palette
-                | AppState::PlanReview
+                // PlanReview is intentionally NOT an overlay: like Permissions, it
+                // renders INLINE in the stream band (see event_loop draw_inline /
+                // desired_inline_height), not via the full-viewport overlay path.
+                // Reserving the full viewport for it forced a viewport mode switch
+                // — part of the mid-turn rebuild / re-anchor churn the fixed-height
+                // inline cure removes.
                 | AppState::Quit
                 | AppState::Sessions
                 | AppState::ModelPicker

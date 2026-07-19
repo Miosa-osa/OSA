@@ -98,6 +98,17 @@ impl PlanReview {
     }
 
     /// Draw the panel into `area` (full-width inline below the chat).
+    /// Fixed inline height reserved for the panel in the stream band (2 border
+    /// rows + a scrollable body + a gap + the option row). The plan text scrolls
+    /// INTERNALLY (j/k) within the body, so this height is constant regardless of
+    /// plan length — the same fixed-slot principle as the streaming preview. The
+    /// `_width` is accepted for signature parity with the permission prompt's
+    /// `content_height` (the panel is full-width, so width does not change it).
+    pub fn content_height(&self, _width: u16) -> u16 {
+        // 2 borders + ~10 body rows + 1 gap + 1 option row.
+        14
+    }
+
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         if area.height < 4 {
             return;
