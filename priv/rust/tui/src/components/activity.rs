@@ -58,6 +58,7 @@ fn tool_display(name: &str) -> (&'static str, &'static str) {
         // Agent tools
         "delegate" | "Delegate" | "Task" => (">", "delegating"),
         "orchestrate" => (">", "orchestrating"),
+        "use_skill" => (">", "using skill"),
 
         // Task tools
         "task_write" | "TaskWrite" | "TaskCreate" => (">", "planning"),

@@ -1798,6 +1798,7 @@ impl App {
                 tool,
                 args,
                 request_id,
+                target,
                 kind: _,
                 old_content,
                 new_content,
@@ -1809,6 +1810,7 @@ impl App {
                 // resume the exact parked tool call via POST /permissions/respond.
                 let mut dialog = crate::dialogs::permissions::Permissions::new();
                 dialog.set_tool(tool, args, request_id);
+                dialog.set_target(target);
                 if let (Some(old), Some(new)) = (old_content, new_content) {
                     dialog.set_diff(old, new);
                 }

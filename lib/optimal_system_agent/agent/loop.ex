@@ -388,13 +388,31 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   Used by the HTTP `set_permission_mode <mode>` command (the Shift+Tab cycle and
   `/overdrive`) so the ToolExecutor gate takes effect server-side.
+
+  The chosen mode is ALSO recorded in the sticky per-session
+  `Agent.PermissionMode` store BEFORE touching the live loop. That makes the
+  choice survive two ways the old behavior lost it: (a) a mode set before the
+  turn's loop exists (`{:error, :no_session}` — `Loop.init` will now seed from
+  the sticky store), and (b) a loop later (re)created fresh for the session.
+  On the `:no_session` race we therefore report `{:ok, mode}` (pending) rather
+  than a hard error — the mode WILL apply when the loop starts.
   """
   @spec set_permission_mode(String.t(), atom()) ::
           {:ok, atom()} | {:error, :invalid_mode | :no_session}
   def set_permission_mode(session_id, mode) do
+    # Persist first so the choice is sticky even if no live loop picks it up.
+    OptimalSystemAgent.Agent.PermissionMode.put(session_id, mode)
+
     GenServer.call(via(session_id), {:set_permission_mode, mode})
   catch
-    :exit, _ -> {:error, :no_session}
+    :exit, _ ->
+      # No live loop yet. The sticky store seeds the mode on Loop.init, so the
+      # request is honored — surface it as a pending success, not a lost error.
+      if mode in [:ask, :accept_edits, :plan, :overdrive, :bypass] do
+        {:ok, mode}
+      else
+        {:error, :no_session}
+      end
   end
 
   @doc "Get the current permission mode for a running session."
@@ -530,7 +548,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
       plan_mode_enabled: Application.get_env(:optimal_system_agent, :plan_mode_enabled, false),
       permission_tier: Keyword.get(opts, :permission_tier, :full),
-      permission_mode: Keyword.get(opts, :permission_mode, default_permission_mode()),
+      # Mode precedence: an explicit opt (subagent inheritance, autonomous
+      # preset) wins; then the sticky per-session store (the TUI's runtime
+      # overdrive/Shift+Tab choice, which survives a fresh/late loop); then the
+      # settings-file default. This is what makes overdrive STICK across a turn
+      # whose loop is created after the toggle, or re-created fresh.
+      permission_mode:
+        Keyword.get(opts, :permission_mode) ||
+          OptimalSystemAgent.Agent.PermissionMode.get(session_id) ||
+          default_permission_mode(),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       delegation_policy: Keyword.get(opts, :delegation_policy),
       parent_session_id: Keyword.get(opts, :parent_session_id),

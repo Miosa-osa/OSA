@@ -333,6 +333,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       Observability.annotate(state, source: "agent.react_loop")
     )
 
+    # Bridge REAL per-iteration token usage to the SSE topic the TUI listens on
+    # (BUG: the live token counter never populated mid-turn). The streaming
+    # `:done` path in LLMClient only bridges usage when the provider includes it
+    # in the streaming terminator — many providers (and every non-streaming
+    # round-trip) don't, so the TUI saw only the char-estimate. This fires for
+    # EVERY completed round-trip with usage. `activity.set_tokens` accumulates by
+    # delta and is idempotent for a repeated same-value emit, so a provider that
+    # ALSO bridged via the streaming path is not double-counted.
+    if is_map(usage) and usage != %{} do
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{state.session_id}",
+        {:osa_event,
+         %{
+           type: :llm_response,
+           session_id: state.session_id,
+           duration_ms: duration_ms,
+           usage: %{
+             input_tokens: Map.get(usage, :input_tokens, 0),
+             output_tokens: Map.get(usage, :output_tokens, 0)
+           }
+         }}
+      )
+    end
+
     # OpenTelemetry GenAI chat-response span carrying real token usage
     # (no-op unless otel_enabled).
     Observability.otel_model_response(state, usage)

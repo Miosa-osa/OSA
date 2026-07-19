@@ -322,6 +322,10 @@ pub enum BackendEvent {
         tool: String,
         args: String,
         request_id: String,
+        /// Human-facing target of the call (skill name, shell command, file
+        /// path, delegate task). Shown in the dialog title in place of the bare
+        /// tool name — e.g. "Allow skill: lavish?". `None` falls back to `tool`.
+        target: Option<String>,
         /// Request kind: "bash" | "file_edit" | "file_write" | "file_delete" | "fetch" | "mcp" | "other".
         kind: String,
         /// Old/new content when the request is an edit/write (diff rendering).

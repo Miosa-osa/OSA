@@ -35,6 +35,9 @@ const MIN_H: u16 = 10;
 /// steer the agent with a short clarification instead of a binary decision.
 pub struct Permissions {
     pub tool_name: String,
+    /// Human-facing target of the call (skill name, shell command, path). When
+    /// present it replaces the bare tool name in the title: "Allow skill: x?".
+    pub target: Option<String>,
     pub tool_args: String,
     /// Opaque identifier echoed back to the backend when the user responds.
     request_id: String,
@@ -66,6 +69,7 @@ impl Permissions {
     pub fn new() -> Self {
         Self {
             tool_name: String::new(),
+            target: None,
             tool_args: String::new(),
             request_id: String::new(),
             diff_old: None,
@@ -83,6 +87,7 @@ impl Permissions {
     /// Set the tool being requested and the backend-assigned request identifier.
     pub fn set_tool(&mut self, name: String, args: String, request_id: String) {
         self.tool_name = name;
+        self.target = None;
         self.tool_args = args;
         self.request_id = request_id;
         self.diff_old = None;
@@ -98,6 +103,21 @@ impl Permissions {
     /// Returns the opaque request identifier assigned by the backend.
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// Attach the human-facing target (skill name, command, path). Empty/blank
+    /// values are ignored so the title falls back to the tool name.
+    pub fn set_target(&mut self, target: Option<String>) {
+        self.target = target.filter(|s| !s.trim().is_empty());
+    }
+
+    /// What the "Allow …?" title names: the concrete target when the backend
+    /// supplied one, otherwise the bare tool name.
+    pub fn display_label(&self) -> &str {
+        match self.target.as_deref() {
+            Some(t) => t,
+            None => &self.tool_name,
+        }
     }
 
     /// Attach a diff for display in the viewport.
@@ -259,7 +279,7 @@ impl Permissions {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
-                Span::styled(self.tool_name.clone(), theme.tool_name()),
+                Span::styled(self.display_label().to_string(), theme.tool_name()),
                 Span::styled("?  ", Style::default().fg(theme.colors.muted)),
                 Span::styled("y/s/a/n", Style::default().fg(theme.colors.dim)),
             ]);
@@ -285,7 +305,7 @@ impl Permissions {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
-                Span::styled(self.tool_name.clone(), theme.tool_name()),
+                Span::styled(self.display_label().to_string(), theme.tool_name()),
                 Span::styled("?", Style::default().fg(theme.colors.muted)),
             ]);
             frame.render_widget(
@@ -448,5 +468,38 @@ impl Permissions {
 impl Default for Permissions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_label_prefers_target_over_tool_name() {
+        let mut d = Permissions::new();
+        d.set_tool("use_skill".into(), "lavish".into(), "req_1".into());
+        // No target yet → falls back to the tool name.
+        assert_eq!(d.display_label(), "use_skill");
+        // Backend supplies the concrete target → title names it.
+        d.set_target(Some("skill: lavish".into()));
+        assert_eq!(d.display_label(), "skill: lavish");
+    }
+
+    #[test]
+    fn blank_target_is_ignored() {
+        let mut d = Permissions::new();
+        d.set_tool("shell_execute".into(), "npm test".into(), "req_2".into());
+        d.set_target(Some("   ".into()));
+        assert_eq!(d.display_label(), "shell_execute");
+    }
+
+    #[test]
+    fn set_tool_resets_stale_target() {
+        let mut d = Permissions::new();
+        d.set_target(Some("skill: lavish".into()));
+        // A new request must not inherit the previous call's target.
+        d.set_tool("file_edit".into(), "lib/foo.ex".into(), "req_3".into());
+        assert_eq!(d.display_label(), "file_edit");
     }
 }

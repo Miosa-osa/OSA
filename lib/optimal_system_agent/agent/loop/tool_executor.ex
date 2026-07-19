@@ -272,9 +272,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           permission_tier_allows?(state.permission_tier, tool_call.name) ->
         safety_prompt(tool_call, safety_ask)
 
-      # Overdrive / bypass (full auto): everything past the circuit-breaker runs.
+      # Overdrive / bypass (full auto): everything past the circuit-breaker runs
+      # — EXCEPT a subagent's structural tool restrictions. A subagent inherits
+      # overdrive from its parent (so it can actually work on its :internal,
+      # non-interactive channel), but the subagent tool boundary (no recursion
+      # via delegate/create_agent, no user-facing tools, per-agent denylist) is a
+      # safety structure, not a permission prompt — it must hold even in
+      # overdrive. Enforced here so overdrive never opens a hole the tier gate
+      # would otherwise close.
       mode in [:overdrive, :bypass] ->
-        :allow
+        if state.permission_tier == :subagent and
+             not subagent_tool_allowed?(tool_call.name, state) do
+          {:blocked, "Blocked: this agent role does not have access to #{tool_call.name}"}
+        else
+          :allow
+        end
 
       # Plan mode: read-only. Any tool that is not in the read-only set would
       # change state, so it is denied while planning.
@@ -484,6 +496,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     %{
       tool: tool_call.name,
       args: tool_call_hint(args),
+      # Human-facing target: the ACTUAL thing this call acts on (the skill name,
+      # the shell command, the file path, the delegate task) so the dialog can
+      # say "Allow skill: lavish?" instead of the generic "Allow use_skill?".
+      # nil falls back to the bare tool name in the UI.
+      target: permission_target(tool_call.name, args),
       kind: kind,
       old_content: old_content,
       new_content: new_content,
@@ -492,6 +509,59 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       suggestions: permission_suggestions(tool_call.name, args)
     }
   end
+
+  # The meaningful, human-facing target of a permission request, per tool. Keeps
+  # a nil fallback (the dialog shows the tool name) for tools with no obvious
+  # single target. Shell/skill/path/delegate are surfaced verbatim (trimmed).
+  @target_limit 80
+  defp permission_target(name, args) do
+    cond do
+      name == "use_skill" ->
+        label_for(args["skill_name"] || args["skill"], "skill: ")
+
+      name in OptimalSystemAgent.Agent.Safety.DangerousCommands.shell_tools() ->
+        clip(args["command"] || args["code"])
+
+      name in ["file_edit", "multi_file_edit"] ->
+        label_for(file_target(args), "edit ")
+
+      name in ["file_write", "file_create"] ->
+        label_for(file_target(args), "write ")
+
+      name in ["file_delete"] ->
+        label_for(file_target(args), "delete ")
+
+      name in ["file_move"] ->
+        label_for(file_target(args), "move ")
+
+      name in ["delegate", "create_agent"] ->
+        label_for(args["task"] || args["agent"] || args["subagent"] || args["role"], "task: ")
+
+      true ->
+        nil
+    end
+  end
+
+  defp file_target(args), do: args["path"] || args["file_path"] || args["target"]
+
+  defp label_for(value, prefix) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> prefix <> clip(trimmed)
+    end
+  end
+
+  defp label_for(_, _), do: nil
+
+  defp clip(value) when is_binary(value) do
+    case value |> String.trim() |> String.replace(~r/\s+/, " ") do
+      "" -> nil
+      s when byte_size(s) > @target_limit -> binary_part(s, 0, @target_limit) <> "…"
+      s -> s
+    end
+  end
+
+  defp clip(_), do: nil
 
   defp permission_kind(name) do
     cond do
@@ -621,6 +691,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       request_id: request_id,
       tool: tool_call.name,
       args: Map.get(summary, :args, ""),
+      target: Map.get(summary, :target),
       kind: Map.get(summary, :kind, "other"),
       old_content: Map.get(summary, :old_content),
       new_content: Map.get(summary, :new_content),
@@ -963,6 +1034,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp tool_call_hint(%{"command" => cmd}), do: String.slice(cmd, 0, 60)
   defp tool_call_hint(%{"path" => p}), do: p
   defp tool_call_hint(%{"query" => q}), do: String.slice(q, 0, 60)
+  # use_skill: surface the skill name (not the arg keys) so the live activity
+  # feed and permission dialog show which skill is running.
+  defp tool_call_hint(%{"skill_name" => s}) when is_binary(s), do: s
 
   defp tool_call_hint(args) when is_map(args) and map_size(args) > 0 do
     args |> Map.keys() |> Enum.take(2) |> Enum.join(", ")

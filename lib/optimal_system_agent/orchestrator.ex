@@ -308,6 +308,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       user_id: "subagent",
       channel: :internal,
       permission_tier: Map.get(config, :permission_tier, :subagent),
+      # Inherit the parent's full-auto mode so a subagent spawned under an
+      # overdrive parent runs unattended on its non-interactive :internal
+      # channel instead of failing closed on every mutating call. An explicit
+      # config[:permission_mode] wins; otherwise overdrive is inherited when the
+      # parent is in overdrive/bypass; else nil lets Loop.init pick the default.
+      # Subagent structural tool restrictions still hold under overdrive (see
+      # ToolExecutor.approve_tool_call/2).
+      permission_mode: inherited_permission_mode(config, parent_id),
       model: model,
       provider: provider,
       parent_session_id: parent_id,
@@ -1133,6 +1141,31 @@ defmodule OptimalSystemAgent.Orchestrator do
       :exit, _ -> :ok
     end
   end
+
+  # Resolve the permission mode a spawning subagent should start in. An explicit
+  # config value wins; otherwise inherit the parent's full-auto mode when the
+  # parent is in overdrive/bypass (checked against the live loop first, then the
+  # sticky store as a fallback); else nil, letting Loop.init use its default.
+  defp inherited_permission_mode(config, parent_id) do
+    cond do
+      mode = Map.get(config, :permission_mode) -> mode
+      parent_overdrive?(parent_id) -> :overdrive
+      true -> nil
+    end
+  end
+
+  defp parent_overdrive?(parent_id) when is_binary(parent_id) do
+    live =
+      case Loop.get_permission_mode(parent_id) do
+        {:ok, m} -> m
+        _ -> nil
+      end
+
+    live in [:overdrive, :bypass] or
+      OptimalSystemAgent.Agent.PermissionMode.overdrive?(parent_id)
+  end
+
+  defp parent_overdrive?(_), do: false
 
   defp emit_event(parent_session_id, event_data) do
     event_name = Map.get(event_data, :event, "unknown")

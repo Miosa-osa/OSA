@@ -1193,6 +1193,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 #[serde(default)]
                 request_id: String,
                 #[serde(default)]
+                target: Option<String>,
+                #[serde(default)]
                 kind: Option<String>,
                 #[serde(default)]
                 old_content: Option<String>,
@@ -1220,6 +1222,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tool: ev.tool,
                 args,
                 request_id: ev.request_id,
+                target: ev.target.filter(|s| !s.trim().is_empty()),
                 kind: ev.kind.unwrap_or_default(),
                 old_content: ev.old_content,
                 new_content: ev.new_content,
