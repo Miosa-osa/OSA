@@ -21,6 +21,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
   """
 
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Constants
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard
   alias OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher
   alias OptimalSystemAgent.Tools.FileState
   alias OptimalSystemAgent.Tools.UseContext
@@ -98,9 +99,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
         # Read-before-edit / stale-write guard (P0-1). The file exists and is
         # readable here; reject if the model never read it this session or if it
         # changed on disk since that read (linter/user/sub-agent touched it).
-        case FileState.check_read(session, expanded) do
+        {mtime, size} = stat_or_zero(expanded)
+
+        with :ok <- FileState.check_read(session, expanded),
+             # Hashline-style content-drift guard (P1 #6 / U-A2) — independent,
+             # second layer on top of FileState's mtime/size check. Only fires
+             # inside the exact-{mtime,size}-collision window FileState's own
+             # check can't see; see DriftGuard moduledoc.
+             :ok <- DriftGuard.verify(session, expanded, content, mtime, size) do
+          do_edit_apply(expanded, display_path, old, new, replace_all, content, session)
+        else
           {:error, msg} -> {:error, msg}
-          :ok -> do_edit_apply(expanded, display_path, old, new, replace_all, content, session)
         end
 
       {:error, :enoent} ->
@@ -141,6 +150,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
             # the same turn is not falsely flagged stale (P0-1).
             FileState.record_write(session, expanded)
 
+            # Refresh the drift-guard baseline to the just-written content
+            # (and its fresh mtime/size) so a follow-up edit in the same
+            # session compares against what THIS edit produced (P1 #6 / U-A2).
+            {new_mtime, new_size} = stat_or_zero(expanded)
+            DriftGuard.record(session, expanded, new_content, new_mtime, new_size)
+
             # Post-edit validation hook (P1-4). Run SYNCHRONOUSLY (was
             # fire-and-forget with errors swallowed) so a compile/lint failure on
             # the edited file is surfaced to the model in the SAME observation
@@ -180,6 +195,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
 
   defp session_id(%{session_id: s}), do: s
   defp session_id(_), do: nil
+
+  # POSIX {mtime, size} for DriftGuard (P1 #6 / U-A2). A stat failure between
+  # our own successful File.read/File.write and this call (file vanished, odd
+  # filesystem race) degrades to `{0, 0}` — DriftGuard treats that like any
+  # other non-matching identity and simply defers (see moduledoc), never a
+  # false rejection.
+  defp stat_or_zero(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}
+      _ -> {0, 0}
+    end
+  end
 
   # Run the :file_changed validation hook SYNCHRONOUSLY and turn any reported
   # failure (a compile/lint diagnostic on the edited file) into a note appended
