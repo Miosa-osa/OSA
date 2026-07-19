@@ -148,6 +148,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
             "Fork subagent with full parent conversation context. " <>
               "The child inherits your conversation history for context-aware delegation."
         },
+        "resume_from_agent_id" => %{
+          "type" => "string",
+          "description" =>
+            "Seed this subagent with a PEER agent's accumulated context instead of your " <>
+              "own — sibling handoff for specialist chains (e.g. seed a fixer with a " <>
+              "debugger's findings). Give the agentId of a previously run/backgrounded " <>
+              "sibling (from a prior delegate call or task_wait result). Takes precedence " <>
+              "over 'fork'. If the peer has no saved transcript yet (still running), the " <>
+              "subagent starts fresh instead."
+        },
         "isolation" => %{
           "type" => "string",
           "enum" => ["worktree"],

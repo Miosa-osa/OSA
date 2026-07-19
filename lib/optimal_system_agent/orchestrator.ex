@@ -202,7 +202,11 @@ defmodule OptimalSystemAgent.Orchestrator do
       agent_id: subagent_id,
       parent_session_id: parent_id,
       role: role,
-      task: task
+      task: task,
+      # P6 peer-resume (sibling handoff) — carried through from the delegate
+      # handler when this run was seeded from a peer's saved context rather
+      # than a fresh spawn or a parent-fork.
+      resumed_from: Map.get(config, :resumed_from)
     })
 
     Logger.info(
@@ -356,7 +360,8 @@ defmodule OptimalSystemAgent.Orchestrator do
         result =
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
             display_name: display_name,
-            batch_id: batch_id
+            batch_id: batch_id,
+            resumed_from: Map.get(config, :resumed_from)
           )
 
         # Fire subagent_stop hook (learning capture, telemetry)
@@ -386,6 +391,33 @@ defmodule OptimalSystemAgent.Orchestrator do
         # Cleanup
         stop_event_forwarder(forwarder)
         safely_terminate(pid)
+
+        # P8 — durable-ref snapshot of a COMPLETED child's worktree, taken BEFORE
+        # teardown so a discarded (or merged) worktree's final state is still
+        # inspectable/resumable later via `git show <ref>` / `git worktree add
+        # -b tmp <ref>`, without polluting the parent branch. Config-gated
+        # (off by default) — this is a middle ground between "merge" and
+        # "discard", not a replacement for either.
+        snapshot_ref =
+          if worktree_info && match?({:ok, _}, result) && subagent_worktree_snapshot?() do
+            case OptimalSystemAgent.Workspace.FastWorktree.snapshot_ref(worktree_info.path,
+                   id: subagent_id,
+                   repo_dir: Map.get(worktree_info, :repo_dir)
+                 ) do
+              {:ok, ref} ->
+                Logger.info("[Orchestrator] Worktree snapshot for #{subagent_id}: #{ref}")
+                ref
+
+              {:error, reason} ->
+                Logger.warning(
+                  "[Orchestrator] Worktree snapshot failed for #{subagent_id}: #{inspect(reason)}"
+                )
+
+                nil
+            end
+          end
+
+        if snapshot_ref, do: RunStore.attach_worktree_snapshot(subagent_id, snapshot_ref)
 
         # Worktree cleanup — merge-back is explicit. Dirty worktrees are
         # preserved by default so the parent can inspect/apply changes.
@@ -798,6 +830,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   defp execute_and_collect(subagent_id, task, parent_id, role, _max_iter, worktree_info, opts \\ []) do
     display_name = Keyword.get(opts, :display_name) || role
     batch_id = Keyword.get(opts, :batch_id)
+    resumed_from = Keyword.get(opts, :resumed_from)
     start_time = System.monotonic_time(:millisecond)
 
     result =
@@ -831,7 +864,8 @@ defmodule OptimalSystemAgent.Orchestrator do
       parent_session_id: parent_id,
       task: task,
       role: role,
-      worktree_path: worktree_info && worktree_info.path
+      worktree_path: worktree_info && worktree_info.path,
+      resumed_from: resumed_from
     })
 
     case result do
@@ -848,7 +882,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             tool_count: tool_uses,
             tokens_used: tokens_used,
             duration_ms: duration_ms,
-            worktree: worktree_info
+            worktree: worktree_info,
+            resumed_from: resumed_from
           })
 
         RunStore.complete(subagent_id, structured)
@@ -880,7 +915,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             files_changed: files_changed,
             tool_count: tool_uses,
             tokens_used: tokens_used,
-            worktree: worktree_info
+            worktree: worktree_info,
+            resumed_from: resumed_from
           )
 
         RunStore.complete(subagent_id, structured)
@@ -914,7 +950,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             tool_count: tool_uses,
             tokens_used: tokens_used,
             duration_ms: duration_ms,
-            worktree: worktree_info
+            worktree: worktree_info,
+            resumed_from: resumed_from
           })
 
         RunStore.complete(subagent_id, structured)
@@ -1034,7 +1071,10 @@ defmodule OptimalSystemAgent.Orchestrator do
       errors: Map.get(attrs, :errors, []),
       next_actions: Map.get(attrs, :next_actions, []),
       transcript_path: (run && run.transcript_path) || "unavailable",
-      worktree: Map.get(attrs, :worktree)
+      worktree: Map.get(attrs, :worktree),
+      # P6 peer-resume (sibling handoff) — surfaced in the structured result so
+      # the parent orchestrator's summary/UI can show lineage when relevant.
+      resumed_from: Map.get(attrs, :resumed_from)
     }
   end
 
@@ -1051,7 +1091,8 @@ defmodule OptimalSystemAgent.Orchestrator do
       tokens_used: Keyword.get(opts, :tokens_used, 0),
       duration_ms: Keyword.get(opts, :duration_ms, 0),
       errors: [inspect(reason)],
-      worktree: Keyword.get(opts, :worktree)
+      worktree: Keyword.get(opts, :worktree),
+      resumed_from: Keyword.get(opts, :resumed_from)
     })
   end
 
@@ -1210,6 +1251,15 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp parent_overdrive?(_), do: false
+
+  # P8 — config gate for completed-child worktree durable-ref snapshotting.
+  #   config :optimal_system_agent, :subagent_worktree_snapshot, true
+  # Off by default: snapshotting commits any dirty state into the source
+  # repo's object store (via a ref), which is unwanted overhead for callers
+  # who don't need post-hoc inspection/resume of discarded worktrees.
+  defp subagent_worktree_snapshot? do
+    Application.get_env(:optimal_system_agent, :subagent_worktree_snapshot, false) == true
+  end
 
   defp emit_event(parent_session_id, event_data) do
     event_name = Map.get(event_data, :event, "unknown")

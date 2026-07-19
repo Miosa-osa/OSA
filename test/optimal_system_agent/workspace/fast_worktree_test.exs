@@ -237,6 +237,55 @@ defmodule OptimalSystemAgent.Workspace.FastWorktreeTest do
     end
   end
 
+  # ── P8: durable-ref worktree snapshot ───────────────────────────────────
+
+  describe "snapshot_ref/2" do
+    test "creates a durable ref resolvable from the source repo, capturing dirty changes",
+         %{repo: repo} do
+      {:ok, info} = FastWorktree.create("agent-snap", repo_dir: repo)
+
+      # Simulate a completed child's dirty (uncommitted) work.
+      File.write!(Path.join(info.path, "README.md"), "snapshot me\n")
+      File.write!(Path.join(info.path, "new_file.txt"), "child output\n")
+
+      assert {:ok, ref} = FastWorktree.snapshot_ref(info.path, id: "agent-snap", repo_dir: repo)
+      assert ref =~ "refs/osa/subagent-snapshots/agent-snap"
+
+      # The ref resolves and shows the child's dirty state, from the SOURCE repo.
+      assert {out, 0} = System.cmd("git", ["show", "#{ref}:README.md"], cd: repo)
+      assert out =~ "snapshot me"
+      assert {out2, 0} = System.cmd("git", ["show", "#{ref}:new_file.txt"], cd: repo)
+      assert out2 =~ "child output"
+
+      # Ref survives teardown discarding the worktree entirely — the whole
+      # point of a durable ref vs. merge-or-discard.
+      FastWorktree.teardown(info.path, discard: true, repo_dir: repo)
+      refute File.dir?(info.path)
+      assert {show_out, 0} = System.cmd("git", ["show", "#{ref}:README.md"], cd: repo)
+      assert show_out =~ "snapshot me"
+    end
+
+    test "honors a custom ref_prefix", %{repo: repo} do
+      {:ok, info} = FastWorktree.create("agent-snap-prefix", repo_dir: repo)
+
+      assert {:ok, ref} =
+               FastWorktree.snapshot_ref(info.path,
+                 id: "agent-snap-prefix",
+                 repo_dir: repo,
+                 ref_prefix: "refs/osa/custom-namespace"
+               )
+
+      assert ref =~ "refs/osa/custom-namespace/agent-snap-prefix"
+
+      FastWorktree.teardown(info.path, discard: true, repo_dir: repo)
+    end
+
+    test "errors cleanly when the worktree directory is missing", %{repo: repo} do
+      assert {:error, :worktree_missing} =
+               FastWorktree.snapshot_ref("/nonexistent/path/xyz", repo_dir: repo)
+    end
+  end
+
   # ── fixture ────────────────────────────────────────────────────────────
 
   defp init_git_repo(dir) do

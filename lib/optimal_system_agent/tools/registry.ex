@@ -800,6 +800,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # ── Task management ────────────────────────────────────────────────
       "task_stop" => OptimalSystemAgent.Tools.Builtins.TaskStop.Tool,
       "task_resume" => OptimalSystemAgent.Tools.Builtins.TaskResume.Tool,
+      "task_wait" => OptimalSystemAgent.Tools.Builtins.TaskWait.Tool,
       "task_output" => OptimalSystemAgent.Tools.Builtins.TaskOutput.Tool,
       "bash_output" => OptimalSystemAgent.Tools.Builtins.BashOutput.Tool,
       "session_search" => OptimalSystemAgent.Tools.Builtins.SessionSearch.Tool,

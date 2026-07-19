@@ -254,6 +254,90 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
   end
 
   @doc """
+  P8 — snapshot a worktree's CURRENT state into a durable git ref, so it stays
+  inspectable/resumable after `teardown/2` merges (folds into a real branch)
+  or discards (deletes) the worktree. This is the middle ground between the
+  two: the work is neither merged into the parent branch nor lost.
+
+  Any uncommitted changes (tracked + untracked-non-ignored) are committed to
+  the worktree's own branch first, so the ref captures the FULL working-tree
+  state the child left behind, not just its last real commit. That commit is
+  local to the worktree's branch — it is never merged/rebased onto the
+  caller's branch. The worktree's branch objects live in the shared object
+  database, so the ref remains resolvable (`git show <ref>`, `git worktree add
+  -b tmp <ref>`) from the main repo even after the worktree directory and its
+  branch ref are removed by `teardown/2`.
+
+  Options:
+    * `:repo_dir` — the source repository the ref is written into (default:
+      `Workspace.Cwd.get/0`)
+    * `:id`       — stable identifier used in the ref name (default: the
+      worktree's basename)
+    * `:ref_prefix` — override the ref namespace (default: `refs/osa/subagent-snapshots`,
+      or `config :optimal_system_agent, :subagent_worktree_snapshot_ref_prefix`)
+
+  Returns `{:ok, ref}` (e.g. `"refs/osa/subagent-snapshots/agent-42-1700000000"`)
+  or `{:error, reason}`. Never raises — a snapshot failure should never fail a
+  teardown.
+  """
+  @spec snapshot_ref(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def snapshot_ref(path, opts \\ []) do
+    path = Path.expand(path)
+    repo_dir = Path.expand(opts[:repo_dir] || Cwd.get())
+    id = sanitize(opts[:id] || Path.basename(path))
+    prefix = opts[:ref_prefix] || snapshot_ref_prefix()
+    ref = "#{prefix}/#{id}-#{System.system_time(:second)}"
+
+    cond do
+      not File.dir?(path) ->
+        {:error, :worktree_missing}
+
+      not inside_git_repo?(repo_dir) ->
+        {:error, "#{repo_dir} is not inside a git repository"}
+
+      true ->
+        do_snapshot_ref(path, repo_dir, ref)
+    end
+  rescue
+    e ->
+      Logger.error("[fast_worktree] snapshot_ref crashed: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
+  end
+
+  defp do_snapshot_ref(path, repo_dir, ref) do
+    if worktree_has_changes?(path) do
+      _ = git(["add", "-A"], path)
+      _ = git(["commit", "--no-verify", "-m", "osa: subagent worktree snapshot"], path)
+    end
+
+    with sha when is_binary(sha) and sha != "" <- current_sha(path),
+         {_out, 0} <- git(["update-ref", ref, sha], repo_dir) do
+      Logger.info("[fast_worktree] snapshot ref #{ref} -> #{sha}")
+      {:ok, ref}
+    else
+      {out, _code} -> {:error, {:update_ref_failed, String.trim(out)}}
+      _ -> {:error, :no_commit}
+    end
+  end
+
+  @default_snapshot_ref_prefix "refs/osa/subagent-snapshots"
+
+  defp snapshot_ref_prefix do
+    Application.get_env(
+      :optimal_system_agent,
+      :subagent_worktree_snapshot_ref_prefix,
+      @default_snapshot_ref_prefix
+    )
+  end
+
+  defp current_sha(path) do
+    case git(["rev-parse", "HEAD"], path) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  end
+
+  @doc """
   Crash-recovery sweep. Reclaims orphaned worktrees.
 
   A worktree is an orphan when (default `stale_only: true`):

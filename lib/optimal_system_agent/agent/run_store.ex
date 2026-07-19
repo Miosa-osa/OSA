@@ -31,7 +31,9 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           tokens_used: non_neg_integer(),
           recent_actions: [String.t()],
           result: map() | nil,
-          transcript_path: String.t()
+          transcript_path: String.t(),
+          resumed_from: String.t() | nil,
+          worktree_snapshot_ref: String.t() | nil
         }
 
   @doc "Start or replace a run record."
@@ -57,11 +59,25 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         tokens_used: 0,
         recent_actions: [],
         result: nil,
-        transcript_path: transcript_path
+        transcript_path: transcript_path,
+        # P6 peer-resume (sibling handoff): the agent_id of the sibling/peer run
+        # whose accumulated context seeded this run's initial messages, or nil
+        # for an ordinary fresh spawn / parent-fork. Set by the Orchestrator
+        # when `config[:resumed_from]` is present. Purely informational — never
+        # read for control flow.
+        resumed_from: Map.get(attrs, :resumed_from),
+        worktree_snapshot_ref: nil
       }
 
     :ets.insert(@table, {agent_id, run})
-    append(agent_id, "START role=#{run.role} parent=#{run.parent_session_id}\n\n#{run.task}")
+
+    resumed_note =
+      if run.resumed_from, do: " resumed_from=#{run.resumed_from}", else: ""
+
+    append(
+      agent_id,
+      "START role=#{run.role} parent=#{run.parent_session_id}#{resumed_note}\n\n#{run.task}"
+    )
   end
 
   @doc "Record a progress line for a running agent."
@@ -79,6 +95,20 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     end)
 
     append(agent_id, "PROGRESS tools=#{tool_count}\n\n#{action}")
+  end
+
+  @doc """
+  P8 — attach a durable git-ref worktree snapshot (see
+  `Workspace.FastWorktree.snapshot_ref/2`) to a completed run, so `/runs`,
+  `task_output`, and the transcript record where the child's final worktree
+  state can be inspected/resumed after teardown discarded or merged it.
+  Best-effort; a run row that has already been pruned is a no-op.
+  """
+  @spec attach_worktree_snapshot(String.t(), String.t()) :: :ok
+  def attach_worktree_snapshot(agent_id, ref) when is_binary(agent_id) and is_binary(ref) do
+    update(agent_id, fn run -> Map.put(run, :worktree_snapshot_ref, ref) end)
+    append(agent_id, "WORKTREE_SNAPSHOT ref=#{ref}")
+    :ok
   end
 
   @doc "Mark a run complete and attach the structured result."
@@ -391,7 +421,8 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           tokens_used: 0,
           recent_actions: [],
           result: nil,
-          transcript_path: md_path
+          transcript_path: md_path,
+          resumed_from: Map.get(meta, :resumed_from)
         }
 
         :ets.insert(@table, {agent_id, run})

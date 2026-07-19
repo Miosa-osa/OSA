@@ -109,6 +109,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.DelegateTest do
     test "to_classifier_input/1 returns empty string for missing task" do
       assert Tool.to_classifier_input(%{}) == ""
     end
+
+    # P6 peer-resume (sibling handoff) — schema must expose the seeding param.
+    test "parameters/0 exposes resume_from_agent_id as an optional string" do
+      props = Tool.parameters()["properties"]
+      assert %{"type" => "string"} = props["resume_from_agent_id"]
+      refute "resume_from_agent_id" in Tool.parameters()["required"]
+    end
   end
 
   # ── Prompt ───────────────────────────────────────────────────────────────

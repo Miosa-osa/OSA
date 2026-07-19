@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Orchestrator
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Agent.DelegationPolicy
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
@@ -97,11 +98,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         role = Map.get(args, "role") || Map.get(args, "subagent_type")
         config = build_config(task, role, args, parent_id, parent_depth)
 
+        # P6 peer-resume (sibling handoff) — seeding from a named peer's saved
+        # context takes precedence over an ordinary parent-fork; a caller
+        # asking for both almost certainly wants the peer handoff (e.g. "seed
+        # the fixer from the debugger's findings", not the parent's own turn).
         config =
-          if Map.get(args, "fork") == true do
-            Map.put(config, :fork_messages, fetch_parent_messages(parent_id))
-          else
-            config
+          cond do
+            is_binary(Map.get(args, "resume_from_agent_id")) and
+                String.trim(Map.get(args, "resume_from_agent_id")) != "" ->
+              peer_id = Map.get(args, "resume_from_agent_id")
+
+              config
+              |> Map.put(:fork_messages, fetch_peer_messages(peer_id))
+              |> Map.put(:resumed_from, peer_id)
+
+            Map.get(args, "fork") == true ->
+              Map.put(config, :fork_messages, fetch_parent_messages(parent_id))
+
+            true ->
+              config
           end
 
         if background?(args, config) do
@@ -337,11 +352,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   end
 
   defp dispatch_foreground(config) do
-    note = role_missing_note(config)
+    note = role_missing_note(config) <> resumed_from_note(config)
 
     case Orchestrator.run_subagent(config) do
       {:ok, result} -> {:ok, note <> result}
       {:error, reason} -> {:ok, "Delegation failed: #{inspect(reason)}"}
+    end
+  end
+
+  # P6 peer-resume — non-fatal signal so the model can see (and later refer to)
+  # which peer's context seeded this subagent, and confirm the handoff worked
+  # even when the peer had no saved transcript yet (empty seed, silent no-op).
+  defp resumed_from_note(config) do
+    case Map.get(config, :resumed_from) do
+      peer_id when is_binary(peer_id) ->
+        seeded = length(Map.get(config, :fork_messages, []))
+
+        "[note: seeded from peer agent '#{peer_id}'s context — #{seeded} message(s) carried over]\n\n"
+
+      _ ->
+        ""
     end
   end
 
@@ -449,4 +479,37 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         []
     end
   end
+
+  # P6 peer-resume (sibling handoff) — seed a fresh subagent from a SIBLING's
+  # accumulated context instead of the parent's, e.g. a debugger's findings
+  # seed the fixer. Unlike `fetch_parent_messages/1` (reads a LIVE Loop's
+  # in-memory state), the peer has typically already finished, so this reads
+  # its persisted transcript snapshot from `RunStore.save_messages/3` — the
+  # same durable store `Orchestrator.resume_subagent/2` uses for same-agent
+  # resume. System messages are dropped and unresolved tool_use pairs are
+  # stripped (reusing the exact same filter resume_subagent applies) so the
+  # seeded child never sees a dangling tool call it can't respond to. Returns
+  # `[]` (fresh-context fallback, never raises/errors the delegation) when the
+  # peer has no saved transcript yet (still running) or is unknown.
+  #
+  # Public only for tests (mirrors `Orchestrator.filter_unresolved_tool_uses/1`)
+  # — exercising this end-to-end would require spawning a real subagent Loop.
+  @doc false
+  def fetch_peer_messages(agent_id) when is_binary(agent_id) do
+    case RunStore.load_messages(agent_id) do
+      {:ok, messages, _meta} ->
+        messages
+        |> Enum.reject(fn msg ->
+          role = Map.get(msg, :role) || Map.get(msg, "role")
+          role == "system"
+        end)
+        |> Orchestrator.filter_unresolved_tool_uses()
+
+      _ ->
+        []
+    end
+  end
+
+  @doc false
+  def fetch_peer_messages(_), do: []
 end
