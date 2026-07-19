@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# bin/osa-update — rollback-safe self-update engine for OSA (source checkouts).
+#
+# Steal-list #15 (grok/codex parity): dual-symlink atomic swap self-update.
+#
+# Layout under $OSA_HOME (default: $HOME/.osa):
+#
+#   versions/<rev>/     a fully staged + built checkout at git commit <rev>
+#   current             symlink -> versions/<rev>   (the live version)
+#   previous            symlink -> versions/<rev>   (the version before the last swap)
+#
+# Update flow (stage -> health-check -> atomic swap):
+#
+#   1. `git worktree add` a fresh, detached checkout of the target ref into
+#      versions/<rev>. This does NOT touch --root's working tree or index, so it's
+#      safe even if --root has local uncommitted changes or is mid-rebase.
+#   2. Build it there (mix deps.get && mix compile, plus `cargo build --release`
+#      for the TUI when present). This is gate #1 — a compile failure aborts.
+#   3. Boot-probe it: start the built app briefly on an ephemeral port and poll its
+#      /health endpoint. This is gate #2 — a boot failure aborts.
+#   4. Only if 2+3 both succeed: atomically repoint `current` at the new version
+#      using a temp-symlink-then-rename (`ln -sfn` + `mv -T`), so the swap is a
+#      single filesystem rename — it is never observable as a half-updated tree.
+#      The version `current` pointed at before the swap becomes `previous`,
+#      which is what makes `osa update --rollback` possible.
+#   5. If 2 or 3 fail: abort. `current` (and thus the running install) is left
+#      completely untouched. The failed stage directory is left on disk for
+#      inspection unless --keep pruning removes it on a later successful run.
+#
+# After the swap we re-verify health against `current` itself (belt-and-braces —
+# catches swap-time surprises, e.g. a symlink race). If that fails we automatically
+# roll back to `previous` so a bad swap can never be the last thing that happened.
+#
+# Rollback (`osa-update rollback`) swaps `current` back to whatever `previous`
+# points at (and the old `current` becomes the new `previous`, so you can toggle
+# back and forth). It re-verifies health after rolling back and reports failure
+# (without further mutation) if even the previous version won't boot.
+#
+# This script is a pure filesystem + git tool: it only touches --root (read-only:
+# fetch + worktree add) and --home (versions/current/previous). It never reads or
+# writes any of OSA's own OSA_HOME runtime state (logs/run/backend.pid/etc), so it
+# is safe to exercise end-to-end against a throwaway --home in tests — see
+# test/shell/self_update_test.sh.
+#
+# Caveat (intentionally not implemented): this does not verify a checksum or
+# signature on the fetched commit/tag — same caveat steal-list #15 calls out for
+# grok/codex's `--version`-only self-update. Fine for a trusted git remote over
+# HTTPS; would need a signature check before ever being used against a hostile
+# network.
+
+set -euo pipefail
+
+# ── Colors (only when attached to a tty; identical palette to bin/osa) ────────
+if [ -t 1 ]; then
+  BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+  RED='\033[0;31m'; CYAN='\033[0;36m'; RESET='\033[0m'
+else
+  BOLD='' DIM='' GREEN='' YELLOW='' RED='' CYAN='' RESET=''
+fi
+info()  { echo -e "${CYAN}→${RESET} $*"; }
+ok()    { echo -e "${GREEN}✓${RESET} $*"; }
+warn()  { echo -e "${YELLOW}⚠${RESET} $*" >&2; }
+err()   { echo -e "${RED}✗${RESET} $*" >&2; }
+abort() { err "$*"; exit 1; }
+
+# ── HTTP probe helper (curl -> wget fallback, mirrors bin/osa's _http_ok) ─────
+_http_ok() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -sf "$1" >/dev/null 2>&1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO /dev/null "$1" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+osa-update — rollback-safe self-update engine for OSA source checkouts
+
+Usage:
+  osa-update update   --root <git-checkout> [--home <osa-home>] [--ref <git-ref>]
+                       [--keep <n>] [--dry-run]
+  osa-update rollback [--home <osa-home>] [--dry-run]
+  osa-update status   [--home <osa-home>]
+
+Options:
+  --root <path>    Git checkout to fetch the update from (required for `update`)
+  --home <path>    OSA home holding versions/current/previous (default: $HOME/.osa)
+  --ref <ref>      Git ref to update to (default: origin/main)
+  --keep <n>       Number of old staged versions to retain (default: 3)
+  --dry-run        Print the planned steps; never mutate any filesystem state
+
+Environment overrides (mainly for tests — see test/shell/self_update_test.sh):
+  OSA_UPDATE_BUILD_CMD   Shell command run inside the staged checkout to build it.
+                         Receives $STAGE_DIR as cwd. Default: mix deps.get && mix
+                         compile (+ cargo build --release for the TUI if present).
+  OSA_UPDATE_HEALTH_CMD  Shell command run to boot-probe a staged/current checkout.
+                         Receives $STAGE_DIR (cwd) and $PROBE_PORT (env). Default:
+                         a short-lived `mix osa.serve` polled against /health.
+EOF
+}
+
+SUBCMD="${1:-}"; shift || true
+[ -n "$SUBCMD" ] || { usage; exit 2; }
+
+ROOT=""
+OSA_HOME_ARG="${HOME:-}/.osa"
+REF="origin/main"
+KEEP=3
+DRY_RUN=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT="$2"; shift 2 ;;
+    --home) OSA_HOME_ARG="$2"; shift 2 ;;
+    --ref) REF="$2"; shift 2 ;;
+    --keep) KEEP="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) abort "unknown flag: $1 (see --help)" ;;
+  esac
+done
+
+OSA_HOME="$OSA_HOME_ARG"
+VERSIONS_DIR="$OSA_HOME/versions"
+CURRENT_LINK="$OSA_HOME/current"
+PREVIOUS_LINK="$OSA_HOME/previous"
+
+# ── Atomic symlink swap: temp symlink + rename (never a half-updated tree) ────
+atomic_symlink() {
+  local target="$1" linkpath="$2" tmp
+  tmp="${linkpath}.tmp.$$"
+  ln -sfn "$target" "$tmp"
+  if mv -T "$tmp" "$linkpath" 2>/dev/null; then
+    return 0
+  fi
+  # Non-GNU mv (e.g. BSD/macOS) has no -T; a plain `mv src dst` where dst exists
+  # as a symlink (not a directory) still does an atomic rename — mv only follows
+  # dst into a directory when dst itself resolves to a directory, and dst here is
+  # always a symlink node (even when its target is a dir), so this path is safe.
+  mv -f "$tmp" "$linkpath"
+}
+
+# ── Build (gate #1) ────────────────────────────────────────────────────────
+run_build() {
+  local stage="$1"
+  if [ -n "${OSA_UPDATE_BUILD_CMD:-}" ]; then
+    ( cd "$stage" && STAGE_DIR="$stage" bash -c "$OSA_UPDATE_BUILD_CMD" )
+    return $?
+  fi
+  (
+    cd "$stage"
+    mix local.hex --force --if-missing >/dev/null 2>&1 || true
+    mix local.rebar --force --if-missing >/dev/null 2>&1 || true
+    mix deps.get
+    mix compile
+    if [ -f "priv/rust/tui/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+      ( cd priv/rust/tui && cargo build --release )
+    fi
+  )
+}
+
+# ── Boot probe (gate #2) ───────────────────────────────────────────────────
+run_health_check() {
+  local stage="$1" port="$2"
+  if [ -n "${OSA_UPDATE_HEALTH_CMD:-}" ]; then
+    ( cd "$stage" && STAGE_DIR="$stage" PROBE_PORT="$port" bash -c "$OSA_UPDATE_HEALTH_CMD" )
+    return $?
+  fi
+  local pid rc=1 i
+  (
+    cd "$stage"
+    OSA_PORT="$port" MIX_ENV="${MIX_ENV:-prod}" timeout 40 mix osa.serve \
+      >"$stage/.osa-update-probe.log" 2>&1 &
+    echo $! > "$stage/.osa-update-probe.pid"
+  )
+  pid="$(cat "$stage/.osa-update-probe.pid" 2>/dev/null || true)"
+  for i in $(seq 1 25); do
+    if _http_ok "http://localhost:${port}/health"; then rc=0; break; fi
+    sleep 1
+  done
+  [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+  rm -f "$stage/.osa-update-probe.pid"
+  return $rc
+}
+
+pick_probe_port() {
+  # Ephemeral, unlikely to collide with a live daemon (default 9089 / 19001).
+  echo $(( 40000 + (RANDOM % 20000) ))
+}
+
+cleanup_stage() {
+  local root="$1" stage="$2"
+  ( git -C "$root" worktree remove --force "$stage" 2>/dev/null ) || rm -rf "$stage"
+}
+
+prune_old_versions() {
+  [ -d "$VERSIONS_DIR" ] || return 0
+  local keep_cur keep_prev d dirs mtime_sorted n=0
+  keep_cur="$( [ -L "$CURRENT_LINK" ] && readlink "$CURRENT_LINK" || true )"
+  keep_prev="$( [ -L "$PREVIOUS_LINK" ] && readlink "$PREVIOUS_LINK" || true )"
+  mtime_sorted="$(find "$VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | awk '{print $2}')"
+  [ -n "$mtime_sorted" ] || return 0
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    if [ "$d" = "$keep_cur" ] || [ "$d" = "$keep_prev" ]; then continue; fi
+    n=$((n + 1))
+    if [ "$n" -gt "$KEEP" ]; then
+      rm -rf "$d" 2>/dev/null || true
+    fi
+  done <<< "$mtime_sorted"
+}
+
+# ── status ──────────────────────────────────────────────────────────────────
+cmd_status() {
+  echo "OSA_HOME: $OSA_HOME"
+  if [ -L "$CURRENT_LINK" ]; then
+    echo "current:  $(readlink "$CURRENT_LINK")"
+  else
+    echo "current:  (not staged — using in-place source checkout)"
+  fi
+  if [ -L "$PREVIOUS_LINK" ]; then
+    echo "previous: $(readlink "$PREVIOUS_LINK")"
+  else
+    echo "previous: (none)"
+  fi
+  if [ -d "$VERSIONS_DIR" ]; then
+    echo "versions:"
+    find "$VERSIONS_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sed 's/^/  - /'
+  fi
+}
+
+# ── update ──────────────────────────────────────────────────────────────────
+cmd_update() {
+  [ -n "$ROOT" ] || abort "update requires --root <git-checkout>"
+  [ -d "$ROOT/.git" ] || abort "--root '$ROOT' is not a git checkout — staged update needs git"
+  command -v git >/dev/null 2>&1 || abort "git is required for staged updates"
+
+  local old_target="" cur_rev="none"
+  if [ -L "$CURRENT_LINK" ]; then
+    old_target="$(readlink "$CURRENT_LINK")"
+    cur_rev="$(basename "$old_target")"
+  fi
+
+  info "Fetching latest ($REF)…"
+  git -C "$ROOT" fetch --quiet --tags origin >/dev/null 2>&1 || warn "fetch failed — resolving '$REF' from local refs"
+
+  local target_rev
+  target_rev="$(git -C "$ROOT" rev-parse --short=12 "$REF" 2>/dev/null)" \
+    || abort "could not resolve ref '$REF' in '$ROOT'"
+
+  if [ "$target_rev" = "$cur_rev" ]; then
+    ok "Already up to date ($target_rev)"
+    exit 0
+  fi
+
+  local stage port
+  stage="$VERSIONS_DIR/$target_rev"
+  port="$(pick_probe_port)"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    echo -e "${BOLD}Planned staged update (dry-run — nothing will be changed)${RESET}"
+    echo "  1. stage:  git -C '$ROOT' worktree add --detach '$stage' '$target_rev'"
+    echo "  2. build:  (in '$stage') mix deps.get && mix compile [+ cargo build --release]"
+    echo "  3. health: boot-probe '$stage' on 127.0.0.1:$port, poll /health"
+    echo "  4. swap:   atomic_symlink '$stage' -> '$CURRENT_LINK'"
+    echo "             atomic_symlink '${old_target:-<bootstrap:$ROOT>}' -> '$PREVIOUS_LINK'"
+    echo "  5. prune:  keep newest $KEEP staged versions (plus current/previous)"
+    echo "  from: $cur_rev  to: $target_rev"
+    exit 0
+  fi
+
+  mkdir -p "$VERSIONS_DIR"
+  rm -rf "$stage" 2>/dev/null || true
+  info "Staging $target_rev into $stage …"
+  git -C "$ROOT" worktree add --detach "$stage" "$target_rev" >/dev/null \
+    || abort "git worktree add failed — aborting (current install untouched)"
+
+  info "Building staged version…"
+  if ! run_build "$stage"; then
+    err "Build failed for $target_rev — aborting (current install untouched)"
+    cleanup_stage "$ROOT" "$stage"
+    exit 1
+  fi
+
+  info "Boot-probing staged version on :$port…"
+  if ! run_health_check "$stage" "$port"; then
+    err "Health check failed for $target_rev — aborting (current install untouched)"
+    cleanup_stage "$ROOT" "$stage"
+    exit 1
+  fi
+  ok "Staged $target_rev builds and boots cleanly"
+
+  info "Swapping current -> $target_rev (atomic)…"
+  atomic_symlink "$stage" "$CURRENT_LINK"
+  if [ -n "$old_target" ]; then
+    atomic_symlink "$old_target" "$PREVIOUS_LINK"
+  else
+    # First staged update on a previously in-place install: remember the
+    # original checkout itself as the rollback target.
+    local bootstrap_link
+    bootstrap_link="$VERSIONS_DIR/bootstrap-$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo root)"
+    [ -e "$bootstrap_link" ] || ln -s "$ROOT" "$bootstrap_link"
+    atomic_symlink "$bootstrap_link" "$PREVIOUS_LINK"
+  fi
+
+  info "Verifying swapped-in current still boots…"
+  if ! run_health_check "$CURRENT_LINK" "$(pick_probe_port)"; then
+    err "Post-swap health check failed — automatically rolling back to $cur_rev"
+    do_rollback_swap
+    prune_old_versions
+    exit 1
+  fi
+
+  prune_old_versions
+  ok "Updated ${cur_rev} -> ${target_rev}"
+}
+
+# ── rollback ────────────────────────────────────────────────────────────────
+do_rollback_swap() {
+  local prev_target cur_target
+  [ -L "$PREVIOUS_LINK" ] || abort "no 'previous' version recorded — nothing to roll back to"
+  prev_target="$(readlink "$PREVIOUS_LINK")"
+  cur_target="$( [ -L "$CURRENT_LINK" ] && readlink "$CURRENT_LINK" || true )"
+  atomic_symlink "$prev_target" "$CURRENT_LINK"
+  [ -n "$cur_target" ] && atomic_symlink "$cur_target" "$PREVIOUS_LINK"
+}
+
+cmd_rollback() {
+  [ -L "$PREVIOUS_LINK" ] || abort "no 'previous' version recorded under $OSA_HOME — nothing to roll back to"
+  local prev_target
+  prev_target="$(readlink "$PREVIOUS_LINK")"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    echo -e "${BOLD}Planned rollback (dry-run — nothing will be changed)${RESET}"
+    echo "  current -> $prev_target"
+    echo "  previous -> $( [ -L "$CURRENT_LINK" ] && readlink "$CURRENT_LINK" || echo '(none)')"
+    exit 0
+  fi
+
+  info "Rolling back current -> $(basename "$prev_target")…"
+  do_rollback_swap
+
+  local port
+  port="$(pick_probe_port)"
+  if run_health_check "$CURRENT_LINK" "$port"; then
+    ok "Rolled back to $(basename "$prev_target") — verified healthy"
+  else
+    err "Rolled back to $(basename "$prev_target") but it failed its own health check — install may be broken; inspect $CURRENT_LINK manually"
+    exit 1
+  fi
+}
+
+case "$SUBCMD" in
+  update)   cmd_update ;;
+  rollback) cmd_rollback ;;
+  status)   cmd_status ;;
+  -h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

@@ -13,6 +13,10 @@
 #   osa stop               Stop the background backend daemon
 #   osa setup              Run the setup wizard
 #   osa update             Update in place, show what's new, then launch
+#   osa update --staged    Rollback-safe update: stage+build+boot-probe, then
+#                          atomic-swap $OSA_HOME/current (see bin/osa-update)
+#   osa update --rollback  Swap $OSA_HOME/current back to the previous version
+#   osa update --dry-run   Print the staged-update plan; change nothing
 #   osa doctor             Run backend health checks
 #   osa serve              Run the backend in the foreground (headless API)
 #   osa version            Print version
@@ -112,8 +116,22 @@ if [ -L "$SCRIPT" ]; then
 fi
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
 
+# OSA_HOME only depends on $HOME, so resolve it before ROOT: a staged,
+# rollback-safe update (see `osa update`, bin/osa-update) repoints
+# $OSA_HOME/current at a new build via an atomic symlink swap, and — when
+# present — that symlink is what `osa` follows on every subsequent launch.
+OSA_HOME="${OSA_HOME:-${HOME}/.osa}"
+
+# Direct invocation of a source checkout (`./bin/osa` from a dev tree, or an
+# entrypoint symlink resolved via readlink -f to such a tree) always wins: a
+# developer iterating on their own checkout must never be silently redirected
+# elsewhere. Next preference is a staged/managed install that has completed at
+# least one `osa update` ($OSA_HOME/current, kept in sync by bin/osa-update).
+# Last is the legacy project_root file written by the source installer.
 if [ -f "$SCRIPT_DIR/../mix.exs" ]; then
   ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+elif [ -L "$OSA_HOME/current" ] && [ -f "$OSA_HOME/current/mix.exs" ]; then
+  ROOT="$OSA_HOME/current"
 elif [ -f "${HOME}/.osa/project_root" ]; then
   ROOT="$(cat "${HOME}/.osa/project_root")"
 else
@@ -124,7 +142,6 @@ fi
 
 TUI_DIR="$ROOT/priv/rust/tui"
 TUI_BIN="$TUI_DIR/target/release/osagent"
-OSA_HOME="${OSA_HOME:-${HOME}/.osa}"
 LOG_DIR="$OSA_HOME/logs"
 RUN_DIR="$OSA_HOME/run"
 PID_FILE="$RUN_DIR/backend.pid"
@@ -284,6 +301,8 @@ print_help() {
   echo -e "    ${CYAN}osa stop${RESET}             Stop the background backend daemon"
   echo -e "    ${CYAN}osa setup${RESET}            Run the setup wizard ${DIM}(provider / API keys)${RESET}"
   echo -e "    ${CYAN}osa update${RESET}           Update in place, show what's new, then launch"
+  echo -e "    ${CYAN}osa update --staged${RESET}  ${DIM}Rollback-safe: stage, build, boot-probe, atomic-swap${RESET}"
+  echo -e "    ${CYAN}osa update --rollback${RESET} ${DIM}Swap back to the previous staged version${RESET}"
   echo -e "    ${CYAN}osa doctor${RESET}           Run backend health checks"
   echo -e "    ${CYAN}osa serve${RESET}            Run the backend in the foreground ${DIM}(headless API)${RESET}"
   echo -e "    ${CYAN}osa version${RESET}          Print version"
@@ -308,7 +327,14 @@ warn_overdrive() {
   echo -e "${DIM}    Only use this in a directory you trust. Confirm inside the TUI to proceed.${RESET}" >&2
 }
 
-# ── Update (source checkout): git pull + rebuild, show what's new ─
+# ── Update (source checkout, in place): git pull + rebuild, show what's new ─
+# NOT rollback-safe: if the pulled tree fails to compile/boot, this leaves the
+# install broken until fixed manually. This stays the *default* for `osa update`
+# — additive/conservative: zero behavior change for existing users/scripts.
+# For the new rollback-safe path (stage in $OSA_HOME/versions/<rev>, build,
+# boot-probe, then atomic symlink swap — see bin/osa-update for the full design),
+# use `osa update --staged`, or `osa update --rollback` / `osa update --dry-run`
+# (which imply --staged, since neither makes sense against the in-place flow).
 do_update_source() {
   echo -e "${CYAN}→${RESET} Updating OSA ${DIM}(source checkout: $ROOT)${RESET}"
   local old_ver new_ver
@@ -357,6 +383,37 @@ do_update_source() {
     printf "  %bPress Enter to launch OSA…%b " "$DIM" "$RESET" >&2
     read -r _ || true
   fi
+}
+
+# ── Update (rollback-safe): stage -> health-check -> atomic symlink swap ──
+# Delegates to bin/osa-update, which does the actual git-worktree staging,
+# build, boot-probe and atomic `$OSA_HOME/current` swap (see that script's
+# header for the full design + why it's safe to test in isolation). This
+# function only handles the CLI/UX wrapper: locating the helper, forwarding
+# flags, and — on success — falling through to the normal launch path so
+# `osa update --staged` still ends with "then launch" like plain `osa update`.
+#
+# UPDATER: bin/osa-update lives next to this script for a direct/dev checkout,
+# but once $OSA_HOME/current exists this script itself may be running FROM
+# inside a staged version dir — always resolve the helper relative to the
+# currently-resolved $ROOT (which points at the exact same checkout this
+# launcher is running from) rather than SCRIPT_DIR, so an old cached helper
+# in a stale versions/<rev> dir is never used by mistake.
+do_update_staged() {
+  local updater="$ROOT/bin/osa-update"
+  [ -x "$updater" ] || updater="$SCRIPT_DIR/osa-update"
+  if [ ! -x "$updater" ]; then
+    echo -e "${RED}✗${RESET} bin/osa-update not found — cannot do a staged update." >&2
+    return 1
+  fi
+
+  if [ "${1:-}" = "--rollback" ]; then
+    shift
+    "$updater" rollback --home "$OSA_HOME" "$@"
+    return $?
+  fi
+
+  "$updater" update --root "$ROOT" --home "$OSA_HOME" "$@"
 }
 
 # Print the first version section of the bundled CHANGELOG (capped), so an
@@ -451,7 +508,35 @@ case "${1:-}" in
 
   update)
     shift || true
-    do_update_source
+    # `--rollback` / `--dry-run` only make sense against the new rollback-safe
+    # staged flow, so either one implies `--staged`. Plain `osa update` keeps
+    # today's simple in-place git-pull-and-rebuild — no behavior change.
+    _update_staged=0
+    _update_args=()
+    for _a in "$@"; do
+      case "$_a" in
+        --staged) _update_staged=1 ;;
+        --rollback|--dry-run) _update_staged=1; _update_args+=("$_a") ;;
+        --ref) _update_staged=1; _update_args+=("$_a") ;;
+        *) _update_args+=("$_a") ;;
+      esac
+    done
+    if [ "$_update_staged" = 1 ]; then
+      if do_update_staged "${_update_args[@]}"; then
+        # A successful --dry-run or --rollback already printed everything it
+        # needs to; a real staged update prints its own success line. Either
+        # way, fall through to the normal launch below — except --dry-run,
+        # which by definition changed nothing worth relaunching for.
+        case " ${_update_args[*]} " in
+          *" --dry-run "*) exit 0 ;;
+        esac
+      else
+        echo -e "${RED}✗${RESET} Staged update failed — current install left untouched." >&2
+        exit 1
+      fi
+    else
+      do_update_source
+    fi
     # fall through to the default launch
     ;;
 
