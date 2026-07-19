@@ -56,6 +56,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.PromptLoader
+  alias OptimalSystemAgent.Agent.CompactionSafety
 
   defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
   defp tier1_threshold, do: Application.get_env(:optimal_system_agent, :compaction_warn, 0.85)
@@ -356,6 +357,21 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         restore_msg -> final_messages ++ [restore_msg]
       end
 
+    # Post-compact active-agent reminder (grok reminder.rs parity): when a step
+    # dropped or summarized the working tail, the model can lose awareness of
+    # work still in flight. Re-inject a <system-reminder> listing still-running
+    # background tasks, sub-agents, and the live TODO list so it keeps tracking
+    # them across the compaction boundary.
+    final_messages =
+      if last_step in [:summarize_warm, :compress_cold, :emergency_truncate] do
+        case CompactionSafety.build_reminder_message(session_id) do
+          nil -> final_messages
+          reminder_msg -> final_messages ++ [reminder_msg]
+        end
+      else
+        final_messages
+      end
+
     tokens_after = estimate_tokens(final_messages)
     saved = tokens_before - tokens_after
 
@@ -520,6 +536,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     if cold_end <= 0 do
       {annotated, system_msgs, :compress_cold}
     else
+      # Tool-pair safety (grok select.rs): snap the cold/warm boundary FORWARD
+      # past any contiguous tool-result run so `rest` never begins with an orphan
+      # tool result (a tool result whose originating assistant call was folded
+      # into the cold summary → provider 400). Fall back to the raw boundary if
+      # snapping would consume everything.
+      msgs = strip_annotations(annotated)
+      snapped = CompactionSafety.safe_split_index(msgs, cold_end)
+      cold_end = if snapped >= total, do: cold_end, else: snapped
+
       cold = Enum.slice(annotated, 0, cold_end)
       rest = Enum.slice(annotated, cold_end, total - cold_end)
 
@@ -545,8 +570,18 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     if total <= @hot_zone_size do
       {annotated, system_msgs, :emergency_truncate}
     else
-      dropped = Enum.slice(annotated, 0, total - @hot_zone_size)
-      kept = Enum.slice(annotated, total - @hot_zone_size, @hot_zone_size)
+      # Tool-pair safety (grok select.rs): the naive boundary keeps the last
+      # @hot_zone_size messages, but if it lands mid tool-pair the kept tail
+      # starts with an orphan tool result. Snap the drop point FORWARD past the
+      # tool-result run. If snapping would leave nothing to keep, fall back to
+      # the naive boundary (never worse than before).
+      candidate = total - @hot_zone_size
+      msgs = strip_annotations(annotated)
+      snapped = CompactionSafety.safe_split_index(msgs, candidate)
+      split = if snapped >= total, do: candidate, else: snapped
+
+      dropped = Enum.slice(annotated, 0, split)
+      kept = Enum.slice(annotated, split, total - split)
 
       topic_notice = %{
         role: "system",
@@ -750,21 +785,33 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       prompt = append_compact_instructions(prompt)
 
-      try do
-        Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
-        |> case do
-          {:ok, %{content: content}} when is_binary(content) and content != "" ->
-            {:ok, content}
+      # Degenerate-summary retry (grok sampler.rs). Warm-group summaries are
+      # legitimately terser than the cold key-facts summary, so use a lighter
+      # floor — this only catches truly-empty/refusal outputs ("Done.", a lone
+      # header), not concise-but-valid summaries.
+      sampler = fn ->
+        try do
+          Providers.chat([%{role: "user", content: prompt}], temperature: 0.2, max_tokens: 400)
+          |> case do
+            {:ok, %{content: content}} when is_binary(content) and content != "" ->
+              {:ok, content}
 
-          {:ok, %{content: content}} ->
-            {:error, "Empty summary: #{inspect(content)}"}
+            {:ok, %{content: content}} ->
+              {:error, "Empty summary: #{inspect(content)}"}
 
-          {:error, reason} ->
-            {:error, reason}
+            {:error, reason} ->
+              {:error, reason}
+          end
+        rescue
+          e ->
+            {:error, "LLM call exception: #{Exception.message(e)}"}
         end
-      rescue
-        e ->
-          {:error, "LLM call exception: #{Exception.message(e)}"}
+      end
+
+      case CompactionSafety.sample_with_retry(sampler, max_attempts: 2, min_chars: 80) do
+        {:ok, content} -> {:ok, content}
+        {:error, {:degenerate_summary, _last}} -> {:error, :degenerate_summary}
+        {:error, reason} -> {:error, reason}
       end
     end
   end
@@ -844,23 +891,41 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # PreCompact hook are appended to the key-facts prompt as well.
       prompt = append_compact_instructions(prompt)
 
-      try do
-        Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
-        |> case do
-          {:ok, %{content: content}} when is_binary(content) and content != "" ->
-            # Store the structured summary for future compressions
-            store_previous_summary(content)
-            {:ok, content}
+      # Degenerate-summary retry (grok sampler.rs): the cold zone is being
+      # replaced wholesale by this summary, so a near-empty or truncated
+      # response is catastrophic — the detail is gone. Reject summaries under
+      # ~500 chars and retry the sampler before accepting one.
+      sampler = fn ->
+        try do
+          Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 1024)
+          |> case do
+            {:ok, %{content: content}} when is_binary(content) and content != "" ->
+              {:ok, content}
 
-          {:ok, %{content: content}} ->
-            {:error, "Empty key-facts response: #{inspect(content)}"}
+            {:ok, %{content: content}} ->
+              {:error, "Empty key-facts response: #{inspect(content)}"}
 
-          {:error, reason} ->
-            {:error, reason}
+            {:error, reason} ->
+              {:error, reason}
+          end
+        rescue
+          e ->
+            {:error, "LLM call exception: #{Exception.message(e)}"}
         end
-      rescue
-        e ->
-          {:error, "LLM call exception: #{Exception.message(e)}"}
+      end
+
+      case CompactionSafety.sample_with_retry(sampler, max_attempts: 2) do
+        {:ok, content} ->
+          # Store the structured summary for future compressions
+          store_previous_summary(content)
+          {:ok, content}
+
+        {:error, {:degenerate_summary, _last}} = err ->
+          Logger.warning("Compactor: cold-zone summary was degenerate after retries")
+          err
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end

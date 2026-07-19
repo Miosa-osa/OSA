@@ -161,6 +161,13 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         model: model_name,
         context_window: context_window,
         effort: effort,
+        # TUI presentation config from ~/.osa/config.toml [tui] (theme/verbosity).
+        # This is the backend config surface the TUI reads at startup; the getters
+        # fall back to the documented defaults ("dark" / "normal") when unset.
+        tui: %{
+          theme: OptimalSystemAgent.ConfigFile.tui_theme(),
+          verbosity: OptimalSystemAgent.ConfigFile.tui_verbosity()
+        },
         billing: billing
       })
 

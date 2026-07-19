@@ -22,18 +22,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
   be unique (returns `{:error, :ambiguous, count}` otherwise); `replace_all: true`
   replaces every non-overlapping match.
 
+  When those three stages all miss, control passes to
+  `FuzzyMatcher` (P0 #3) — the nine-strategy opencode cascade (block-anchor
+  Levenshtein, whitespace/indent/escape normalization, trimmed-boundary,
+  context-aware, multi-occurrence) plus the disproportionate-match guard. Exact
+  still wins first: this module's fast path is unchanged, and the cascade is only
+  ever a fallback after an exact substring miss.
+
   ## Return
-    * `{:ok, new_content, count, stage}` — `stage` is `:exact | :line_endings | :whitespace`
+    * `{:ok, new_content, count, stage}` — `stage` is `:exact | :line_endings |
+      :whitespace` for the local stages, or a `FuzzyMatcher` strategy atom
+      (`:block_anchor`, `:context_aware`, …) when the deeper cascade matched.
     * `{:error, :not_found}`
     * `{:error, :ambiguous, count}`
+    * `{:error, :disproportionate}` — a fuzzy candidate matched a span far larger
+      than `old_string`; refuse rather than clobber (from `FuzzyMatcher`).
   """
 
-  @type stage :: :exact | :line_endings | :whitespace
+  alias OptimalSystemAgent.Tools.Builtins.FileEdit.FuzzyMatcher
+
+  @type stage :: :exact | :line_endings | :whitespace | FuzzyMatcher.strategy()
 
   @spec replace(String.t(), String.t(), String.t(), boolean()) ::
           {:ok, String.t(), non_neg_integer(), stage()}
           | {:error, :not_found}
           | {:error, :ambiguous, non_neg_integer()}
+          | {:error, :disproportionate}
   def replace(content, old, new, replace_all) do
     if String.contains?(content, old) do
       count = count_occurrences(content, old)
@@ -55,7 +69,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
     old_lines = String.split(old, "\n")
     new_lines = String.split(new, "\n")
 
-    Enum.reduce_while([:line_endings, :whitespace], {:error, :not_found}, fn stage, acc ->
+    [:line_endings, :whitespace]
+    |> Enum.reduce_while({:error, :not_found}, fn stage, acc ->
       norm = normalizer(stage)
       starts = match_starts(content_lines, old_lines, norm)
 
@@ -74,6 +89,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Matcher do
           end
       end
     end)
+    |> case do
+      # Local line-endings/whitespace stages found nothing: hand off to the
+      # deeper nine-strategy cascade (P0 #3). Its result — including the
+      # disproportionate-match refusal and its own ambiguity check — is returned
+      # verbatim.
+      {:error, :not_found} -> FuzzyMatcher.replace(content, old, new, replace_all)
+      other -> other
+    end
   end
 
   # Normalisation applied to each line before comparison, per stage.

@@ -104,13 +104,31 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // Shift+Enter is a reliable newline chord (kitty terminals) or collapses to a
     // bare Enter (Apple Terminal / VS Code / tmux / SSH). Threaded into App::new so
     // the composer's newline hint matches reality without a re-probe syscall.
-    let kbd_enhanced = matches!(supports_keyboard_enhancement(), Ok(true));
+    // The single `supports_keyboard_enhancement()` probe races OSA's busy startup
+    // (bracketed-paste enable + the cursor-position priming burst below) and can
+    // flake to `false` on the first try even on terminals that DO support the
+    // kitty keyboard protocol — which then silently breaks Shift+Enter (it
+    // collapses to a bare Enter and submits). Two hardening steps:
+    //   1. Retry the probe a few times before giving up.
+    //   2. Trust terminals we KNOW implement the protocol (Ghostty/Kitty/WezTerm/
+    //      foot) even if the probe never answers — pushing the flag is harmless on
+    //      any terminal (unsupported ones ignore the CSI sequence).
+    let kbd_enhanced = {
+        let probed = (0..5).any(|i| {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            matches!(supports_keyboard_enhancement(), Ok(true))
+        });
+        probed || terminal_known_kitty_protocol()
+    };
     if kbd_enhanced {
         let _ = execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
+    tracing::info!(kbd_enhanced, "keyboard enhancement (Shift+Enter newline) status");
 
     // ratatui's Viewport::Inline queries the terminal for the cursor position at
     // construction (a DSR request). Some terminals/launch contexts drop the very
@@ -175,6 +193,26 @@ fn run(cli: config::cli::Cli) -> Result<()> {
         let mut app = app::App::new(cfg, cli, kbd_enhanced).await?;
         app.run(terminal, viewport_h).await
     })
+}
+
+/// Terminals known to implement the kitty keyboard protocol (so Shift+Enter is
+/// reported as a distinct key). Detected from `$TERM` / `$TERM_PROGRAM` / their
+/// marker env vars, so a flaky runtime probe can't strand a capable terminal
+/// without the protocol enabled.
+fn terminal_known_kitty_protocol() -> bool {
+    use std::env::var;
+    let term = var("TERM").unwrap_or_default().to_ascii_lowercase();
+    let prog = var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
+    term.contains("ghostty")
+        || term.contains("kitty")
+        || term.contains("foot")
+        || term.contains("wezterm")
+        || prog.contains("ghostty")
+        || prog.contains("kitty")
+        || prog.contains("wezterm")
+        || var("KITTY_WINDOW_ID").is_ok()
+        || var("GHOSTTY_RESOURCES_DIR").is_ok()
+        || var("WEZTERM_PANE").is_ok()
 }
 
 fn restore_terminal() -> Result<()> {

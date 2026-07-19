@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   require Logger
 
   alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Sandbox
   alias OptimalSystemAgent.Shell.BackgroundManager
@@ -303,16 +304,83 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
            "If this is genuinely intended, run it yourself."}
 
       # Operator `[permissions].allow` — downgrade an otherwise-risky command to
-      # :allow (but never a catastrophic/denied one, handled above).
+      # :allow (but never a catastrophic/denied one, handled above). Checked
+      # BEFORE the structured scan so an explicit operator allow is never
+      # re-escalated by external-directory analysis.
       allowed?(command) ->
         :allow
 
-      risky?(command) ->
-        {:ask, "This command is powerful (#{risk_label(command)}) — approve to run it?"}
-
+      # ── Structured (opencode-style) analysis layer ──────────────────────
+      # Tokenize the command, resolve its touched file paths, and compute the
+      # arity prefix, THEN fold that into the three-tier decision:
+      #   * risky command      → :ask, reason enriched with external dirs +
+      #                          "always allow <prefix> *" hint
+      #   * file mutation that  → :ask (external_directory), even if the base
+      #     escapes the cwd       command would otherwise be safe
+      #   * everything else     → :allow (unchanged)
       true ->
-        :allow
+        scan = safe_scan(command)
+
+        cond do
+          risky?(command) ->
+            {:ask, ask_reason(command, scan)}
+
+          scan.external_dirs != [] ->
+            {:ask, external_reason(scan)}
+
+          true ->
+            :allow
+        end
     end
+  end
+
+  # Run the structured scan defensively — a malformed command must never crash
+  # the permission gate. On any failure fall back to an empty scan (which leaves
+  # the base three-tier decision untouched).
+  defp safe_scan(command) do
+    Parser.scan(command, current_cwd())
+  rescue
+    _ -> %{segments: [], external_dirs: [], always: [], paths: []}
+  catch
+    _, _ -> %{segments: [], external_dirs: [], always: [], paths: []}
+  end
+
+  defp current_cwd do
+    case OptimalSystemAgent.Workspace.Cwd.get() do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> "."
+    end
+  rescue
+    _ -> "."
+  catch
+    _, _ -> "."
+  end
+
+  # Reason for a risky (:ask-tier) command, enriched with the structured scan:
+  # any external directories it writes to, plus the "always allow" arity pattern
+  # so approving grants a scoped prefix rule rather than pinning the exact string.
+  defp ask_reason(command, scan) do
+    "This command is powerful (#{risk_label(command)}) — approve to run it?" <>
+      external_clause(scan) <> always_clause(scan)
+  end
+
+  # Reason for a command escalated purely because it touches a path outside the
+  # working directory (e.g. `cp build.txt /etc/x`).
+  defp external_reason(scan) do
+    "This command writes to a directory outside the working directory " <>
+      "(#{Enum.join(scan.external_dirs, ", ")}) — approve to run it?" <> always_clause(scan)
+  end
+
+  defp external_clause(%{external_dirs: []}), do: ""
+
+  defp external_clause(%{external_dirs: dirs}) do
+    " It also touches paths outside the working directory: #{Enum.join(dirs, ", ")}."
+  end
+
+  defp always_clause(%{always: []}), do: ""
+
+  defp always_clause(%{always: patterns}) do
+    " (Approving always-allows: #{Enum.join(patterns, ", ")}.)"
   end
 
   # First word (command name) of each pipe/;/&&/|| segment, with leading

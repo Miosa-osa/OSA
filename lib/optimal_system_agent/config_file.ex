@@ -239,6 +239,24 @@ defmodule OptimalSystemAgent.ConfigFile do
   @spec model_section() :: map()
   def model_section, do: get(["model"], %{}) || %{}
 
+  @doc """
+  The `[model]` table as defined in `config.toml` **only** — no `config.json`
+  overlay and no built-in defaults.
+
+  Boot-time provider resolution uses this (rather than the json-merged
+  `provider/0`) so that a `config.toml` `[model].provider` takes top precedence,
+  while an ABSENT one lets the existing `OSA_DEFAULT_PROVIDER` env / app-default
+  chain resolve exactly as before. `config.json`'s legacy `provider` field must
+  not silently jump ahead of an explicit env override.
+  """
+  @spec toml_model_section() :: map()
+  def toml_model_section do
+    case Map.get(toml_overlay(), "model") do
+      %{} = m -> m
+      _ -> %{}
+    end
+  end
+
   @spec provider() :: String.t() | nil
   def provider, do: get(["model", "provider"])
 

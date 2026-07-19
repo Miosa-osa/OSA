@@ -120,6 +120,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec chat(list(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def chat(messages, opts \\ []) do
+    opts = sanitize_tool_schemas(opts)
     provider = Keyword.get(opts, :provider) || default_provider()
     opts_without_provider = Keyword.delete(opts, :provider)
 
@@ -200,6 +201,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec chat_stream(list(), function(), keyword()) :: :ok | {:error, String.t()}
   def chat_stream(messages, callback, opts \\ []) do
+    opts = sanitize_tool_schemas(opts)
     provider = Keyword.get(opts, :provider) || default_provider()
     opts_without_provider = Keyword.delete(opts, :provider)
 
@@ -319,6 +321,22 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   # --- Private ---
+
+  # The single provider-boundary sanitization point. Every provider module
+  # (Anthropic, Google, Cohere, OpenAI-compatible, Ollama, …) reads
+  # `opts[:tools]` and emits each tool's `:parameters` verbatim into its
+  # request. Normalizing the schemas here — once, before dispatch/fallback —
+  # guarantees no `anyOf`/`oneOf`/`additionalProperties: true`/raw `format`/
+  # unbounded-integer/local-`$ref` construct ever reaches the wire, fixing the
+  # google-antigravity `Type.Union` rejection regardless of which provider
+  # serves the turn. Idempotent, so re-entry through the fallback chain is safe.
+  defp sanitize_tool_schemas(opts) do
+    case Keyword.get(opts, :tools) do
+      nil -> opts
+      [] -> opts
+      tools -> Keyword.put(opts, :tools, OptimalSystemAgent.Tools.SchemaNormalizer.normalize_tools(tools))
+    end
+  end
 
   defp call_with_fallback(provider, module, messages, opts) do
     # Same-provider retry (backoff, retry-after aware) runs *before* any

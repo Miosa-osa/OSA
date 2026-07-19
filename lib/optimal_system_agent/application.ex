@@ -47,12 +47,29 @@ defmodule OptimalSystemAgent.Application do
     # Surface settings schema/parse issues (with fix tips) once at boot.
     OptimalSystemAgent.Settings.Schema.validate_and_log()
 
-    # Read provider from environment — OSA_DEFAULT_PROVIDER takes effect at startup
+    # Warm the ConfigFile cache (~/.osa/config.toml over config.json over defaults)
+    # so its :persistent_term cache is populated and any TOML parse error surfaces
+    # ONCE, early, at boot. Never crash boot on a bad config — ConfigFile already
+    # logs and falls back to defaults on a parse failure; this is belt-and-braces.
+    warm_config_file()
+
+    # Read the config.toml [model] table (config.toml ONLY — see toml_model_section/0)
+    # so a config.toml provider/effort/params can override the env/default chain
+    # below while leaving that chain untouched when config.toml has no [model].
+    toml_model = OptimalSystemAgent.ConfigFile.toml_model_section()
+
+    # Provider resolution (precedence high → low):
+    #   config.toml [model].provider  >  OSA_DEFAULT_PROVIDER env  >  app default
+    # config.toml wins per the documented precedence (defaults < config.json <
+    # config.toml). config.json's legacy provider is intentionally NOT consulted
+    # here so that when config.toml is absent the result is byte-for-byte what the
+    # old `env || default` logic produced.
     provider =
-      case System.get_env("OSA_DEFAULT_PROVIDER") do
-        nil -> Application.get_env(:optimal_system_agent, :default_provider, :ollama)
-        p -> String.to_atom(p)
-      end
+      resolve_provider(
+        toml_model,
+        System.get_env("OSA_DEFAULT_PROVIDER"),
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+      )
 
     Application.put_env(:optimal_system_agent, :default_provider, provider)
 
@@ -64,13 +81,15 @@ defmodule OptimalSystemAgent.Application do
     # config.json model lands only on :ollama_model while :default_model stays
     # nil, so Ollama.auto_detect_model probes and silently overwrites a
     # configured model (including :cloud models) with a local one.
-    # Precedence: OLLAMA_MODEL env > ~/.osa/config.json "model" > already-loaded.
-    # config.json is the user's PERSISTED selection — onboarding and the in-TUI
-    # /switch both write it — so it wins over a possibly-stale OLLAMA_MODEL env
-    # var (e.g. a leftover project-root .env that config/runtime.exs loads first).
-    # Order: config.json > OLLAMA_MODEL env > already-loaded provider/default key.
+    # Precedence: config.toml [model].model > config.json "model" > OLLAMA_MODEL
+    # env > already-loaded. `ConfigFile.model_name/0` returns the config.toml model
+    # if set, else the legacy config.json model — so when config.toml has no
+    # [model].model this is EXACTLY the old `config_json_model()` top of the chain,
+    # and when it does, config.toml wins (documented defaults < config.json < toml).
+    # config.json remains the user's PERSISTED selection (onboarding + in-TUI
+    # /switch write it) so it still beats a possibly-stale OLLAMA_MODEL env var.
     resolved_model =
-      config_json_model() ||
+      OptimalSystemAgent.ConfigFile.model_name() ||
         System.get_env("OLLAMA_MODEL") ||
         Application.get_env(:optimal_system_agent, :"#{provider}_model") ||
         Application.get_env(:optimal_system_agent, :default_model)
@@ -78,6 +97,28 @@ defmodule OptimalSystemAgent.Application do
     if is_binary(resolved_model) and resolved_model != "" do
       Application.put_env(:optimal_system_agent, :default_model, resolved_model)
       Application.put_env(:optimal_system_agent, :"#{provider}_model", resolved_model)
+    end
+
+    # config.toml [model].effort → default reasoning-effort level. `Effort.level/0`
+    # reads Settings.get(:effort_level) (session/settings cascade) FIRST and this
+    # app-env key second, so config.toml sets the DEFAULT while a settings.json or
+    # session override still wins — matching "defaults < config.toml".
+    case resolve_effort(OptimalSystemAgent.ConfigFile.effort()) do
+      nil ->
+        :ok
+
+      level ->
+        Application.put_env(:optimal_system_agent, :effort_level, level)
+    end
+
+    # config.toml [model.params] → free-form generation params, stashed in app env
+    # for providers to read. No-op when unset so behavior is unchanged by default.
+    case OptimalSystemAgent.ConfigFile.model_params() do
+      %{} = params when map_size(params) > 0 ->
+        Application.put_env(:optimal_system_agent, :model_params, params)
+
+      _ ->
+        :ok
     end
 
     # ── Phase 1: Soul & Prompts (before anything needs the system prompt) ──
@@ -288,24 +329,56 @@ defmodule OptimalSystemAgent.Application do
     ip_tuple
   end
 
-  # Load ~/.osa/.env file if it exists (key=value pairs)
-  # Read the "model" field from ~/.osa/config.json (written by onboarding), if any.
-  # Respects :bootstrap_dir so tests/isolated runs don't read the real home config.
-  defp config_json_model do
-    base =
-      Application.get_env(:optimal_system_agent, :bootstrap_dir) ||
-        Path.join(System.user_home!() || ".", ".osa")
+  # Warm OptimalSystemAgent.ConfigFile at boot so its :persistent_term cache is
+  # populated and a bad ~/.osa/config.toml surfaces a single warning early rather
+  # than on first lazy access. Never allowed to crash boot.
+  defp warm_config_file do
+    OptimalSystemAgent.ConfigFile.load()
+    :ok
+  rescue
+    e ->
+      Logger.warning("[ConfigFile] boot load failed, using defaults: #{Exception.message(e)}")
+      :ok
+  catch
+    _, reason ->
+      Logger.warning("[ConfigFile] boot load failed, using defaults: #{inspect(reason)}")
+      :ok
+  end
 
-    path = Path.join(base, "config.json")
+  @doc false
+  # Pure provider resolution — testable without booting the app.
+  #   config.toml [model].provider  >  OSA_DEFAULT_PROVIDER env  >  app default
+  @spec resolve_provider(map(), String.t() | nil, atom()) :: atom()
+  def resolve_provider(toml_model, env_provider, app_default) do
+    case Map.get(toml_model, "provider") do
+      p when is_binary(p) and p != "" ->
+        String.to_atom(p)
 
-    with true <- File.exists?(path),
-         {:ok, body} <- File.read(path),
-         {:ok, %{"model" => m}} when is_binary(m) and m != "" <- Jason.decode(body) do
-      m
-    else
-      _ -> nil
+      _ ->
+        case env_provider do
+          nil -> app_default
+          "" -> app_default
+          p -> String.to_atom(p)
+        end
     end
   end
+
+  @doc false
+  # Pure effort resolution — normalizes a config.toml [model].effort string to a
+  # known level atom (:low | :medium | :high | :max), or nil for absent/invalid.
+  @spec resolve_effort(term()) :: :low | :medium | :high | :max | nil
+  def resolve_effort(effort) when is_binary(effort) do
+    e = effort |> String.trim() |> String.downcase()
+
+    if e in ~w(low medium high max) do
+      String.to_atom(e)
+    else
+      Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
+      nil
+    end
+  end
+
+  def resolve_effort(_), do: nil
 
   defp load_dotenv do
     env_file = Path.expand("~/.osa/.env")

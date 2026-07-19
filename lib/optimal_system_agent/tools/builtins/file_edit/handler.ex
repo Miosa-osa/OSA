@@ -123,6 +123,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
         {:error,
          "old_string found #{count} times — must be unique. Add more surrounding context or use replace_all."}
 
+      {:error, :disproportionate} ->
+        {:error,
+         "Refusing edit in #{display_path}: the fuzzy-matched region is much larger than old_string. " <>
+           "Re-read the file and provide the exact text to replace."}
+
       {:ok, new_content, occurrences, stage} ->
         # Non-bang write with clean error reporting (mirrors file_write). A
         # read-only file / read-only mount / ENOSPC otherwise raises File.Error

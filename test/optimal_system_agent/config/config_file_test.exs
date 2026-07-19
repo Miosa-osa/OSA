@@ -129,6 +129,70 @@ defmodule OptimalSystemAgent.ConfigFileTest do
     end
   end
 
+  describe "boot resolution routing (config.toml [model])" do
+    alias OptimalSystemAgent.Application, as: App
+
+    test "toml_model_section reads config.toml ONLY (no config.json overlay)", %{tmp: tmp} do
+      write_json(tmp, ~s({"model":"legacy-model","provider":"ollama"}))
+      # no config.toml yet → toml-only section is empty even though json has provider
+      assert ConfigFile.toml_model_section() == %{}
+
+      write_toml(tmp, """
+      [model]
+      provider = "openai"
+      """)
+
+      section = ConfigFile.toml_model_section()
+      assert section["provider"] == "openai"
+      # config.json's model must NOT leak into the toml-only section
+      refute Map.has_key?(section, "model")
+    end
+
+    test "config.toml [model].provider/model override config.json", %{tmp: tmp} do
+      write_json(tmp, ~s({"model":"json-model","provider":"ollama"}))
+
+      write_toml(tmp, """
+      [model]
+      provider = "openai"
+      model = "gpt-x"
+      """)
+
+      # provider resolves from config.toml, beating both env and json
+      assert App.resolve_provider(ConfigFile.toml_model_section(), "anthropic", :ollama) ==
+               :openai
+
+      # model resolves from config.toml (ConfigFile.model_name/0 is the chain top)
+      assert ConfigFile.model_name() == "gpt-x"
+    end
+
+    test "absent/empty [model] preserves config.json + env/default resolution", %{tmp: tmp} do
+      write_json(tmp, ~s({"model":"json-model","provider":"ollama"}))
+      # no config.toml written
+
+      # model falls back to the config.json selection, exactly as before
+      assert ConfigFile.model_name() == "json-model"
+
+      toml_model = ConfigFile.toml_model_section()
+      # env override still wins when config.toml sets no provider
+      assert App.resolve_provider(toml_model, "anthropic", :ollama) == :anthropic
+      # and with neither toml nor env, the app default is used
+      assert App.resolve_provider(toml_model, nil, :ollama) == :ollama
+    end
+
+    test "effort override resolves; invalid/absent effort is ignored", %{tmp: tmp} do
+      write_toml(tmp, """
+      [model]
+      effort = "high"
+      """)
+
+      assert ConfigFile.effort() == "high"
+      assert App.resolve_effort(ConfigFile.effort()) == :high
+
+      assert App.resolve_effort("bogus") == nil
+      assert App.resolve_effort(nil) == nil
+    end
+  end
+
   describe "permission lists merge with Constants defaults" do
     test "ask_commands extend the built-in defaults", %{tmp: tmp} do
       write_toml(tmp, """

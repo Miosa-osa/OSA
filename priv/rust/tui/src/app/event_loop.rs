@@ -406,6 +406,12 @@ impl App {
                         editor.draw(frame, area);
                     } else if let Some(ref picker) = self.file_picker {
                         picker.draw(frame, area);
+                    } else if let Some(ref sel) = self.reasoning_selector {
+                        // `/reasoning` (no arg) sets this Option-overlay and its key
+                        // handler is wired (update.rs), but the draw was missing —
+                        // so it opened an INVISIBLE modal that swallowed keystrokes.
+                        // Draw it here alongside the other Option-overlays.
+                        sel.draw(frame, area);
                     } else {
                         match self.state {
                             AppState::Quit => self.quit_dialog.draw(frame, area),
