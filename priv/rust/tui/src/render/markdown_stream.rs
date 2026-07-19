@@ -443,6 +443,45 @@ Final paragraph, no trailing newline.";
         assert_stream_matches_full(COMPREHENSIVE, &cuts);
     }
 
+    /// Exercises the newer markdown sub-layers (setext headings, `***bold
+    /// italic***`, inline `$…$` LaTeX, nested blockquotes, table-cell inline
+    /// markdown, and multi-line soft-break paragraphs) under the char-by-char
+    /// streaming invariant: the frozen-prefix + tail view must stay byte-identical
+    /// to a full one-shot render at every prefix length.
+    const NEW_LAYERS: &str = "\
+Intro line one
+that soft-wraps into a single paragraph.
+
+Setext Title
+============
+
+A line with ***bold italic*** and $x^2$ math.
+
+> outer quote
+>> nested quote
+
+| Name | Note |
+|---|---|
+| **b** | `c` |
+
+Wrap up.";
+
+    #[test]
+    fn new_layers_char_by_char_matches_full() {
+        let cuts: Vec<usize> = (0..=NEW_LAYERS.len()).collect();
+        assert_stream_matches_full(NEW_LAYERS, &cuts);
+    }
+
+    #[test]
+    fn new_layers_finish_matches_one_shot() {
+        let mut r = StreamingRenderer::new(W);
+        for cut in [12usize, 40, 70, 110, NEW_LAYERS.len()] {
+            r.update(&NEW_LAYERS[..cut.min(NEW_LAYERS.len())]);
+        }
+        assert_eq!(flat(&r.finish()), full_plain(NEW_LAYERS));
+        assert_eq!(flat(&r.body()), full_plain(NEW_LAYERS));
+    }
+
     #[test]
     fn code_block_then_paragraph_matches_full() {
         assert_stream_matches_full(

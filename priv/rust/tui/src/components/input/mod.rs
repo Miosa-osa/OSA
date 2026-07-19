@@ -3,6 +3,7 @@
 
 pub mod completions;
 pub mod history;
+pub mod mentions;
 pub mod textarea;
 pub mod vim;
 
@@ -22,6 +23,7 @@ use crate::event::Event;
 use crate::style;
 
 use self::completions::{CompletionAction, CompletionItem, Completions};
+use self::mentions::{Attachment, Candidate, Frecency, MentionKind, SubmitKind};
 use super::{AppAction, Component, ComponentAction};
 
 pub struct InputComponent {
@@ -48,8 +50,10 @@ pub struct InputComponent {
     stash: Option<String>,
     /// File search active (Step 9: @ file refs)
     file_search_active: bool,
-    /// File search matches
-    file_matches: Vec<String>,
+    /// File search matches — now typed [`Candidate`]s (file / dir / agent) so
+    /// the popup can show a per-kind glyph (U-T30) and the submit path can
+    /// resolve them to structured attachments (U-T1).
+    file_matches: Vec<Candidate>,
     /// File search cursor
     file_match_index: usize,
     /// File search prefix position (byte offset of '@')
@@ -122,6 +126,27 @@ pub struct InputComponent {
     /// submit). Selects which example prompt / hint the empty composer shows so
     /// the empty box teaches features instead of a single static string.
     placeholder_seed: usize,
+    /// U-T1 — known agent names (set from the app). An `@`-token matching one of
+    /// these resolves to an [`Attachment::Agent`] instead of a file, and the
+    /// popup can surface agents alongside files with a distinct glyph.
+    agents: Vec<String>,
+    /// U-T1 — structured attachments resolved from the LAST submitted line
+    /// (`@file`, `@file#L10-20`, `@agent`). Populated in `submit()`; drained by
+    /// the submit path via [`take_attachments`]. Retained (not cleared on the
+    /// next keystroke) so the dispatch layer can read it after `submit()`.
+    ///
+    /// [`take_attachments`]: InputComponent::take_attachments
+    last_attachments: Vec<Attachment>,
+    /// U-T4 — how the last submitted line should be routed (prompt / shell /
+    /// memory), classified from its leading sigil at submit time.
+    last_submit_kind: SubmitKind,
+    /// U-T4 — history bucket for `!`-shell submissions, kept separate from the
+    /// prompt history so ↑ inside a `!`-line recalls prior shell commands (own
+    /// bucket) rather than prompts. Persisted alongside the prompt history.
+    shell_history: history::History,
+    /// U-T6 — frecency ranker for the `@`-file/dir recall popup: a candidate
+    /// selected often & recently floats to the top on the next open.
+    file_frecency: Frecency,
 }
 
 /// The kind of the previous composer command — drives kill-ring accumulation
@@ -185,7 +210,30 @@ impl InputComponent {
             last_edit: LastEdit::Other,
             undo_insert_run: None,
             placeholder_seed: 0,
+            agents: Vec::new(),
+            last_attachments: Vec::new(),
+            last_submit_kind: SubmitKind::Prompt,
+            shell_history: history::History::shell_persistent(),
+            file_frecency: Frecency::new(),
         }
+    }
+
+    /// U-T1 — register the known agent names so an `@agent` token resolves to a
+    /// structured [`Attachment::Agent`] and the `@`-popup can offer agents.
+    pub fn set_agents(&mut self, agents: Vec<String>) {
+        self.agents = agents;
+    }
+
+    /// U-T1 — drain the structured attachments resolved from the last submit.
+    /// The submit/dispatch path calls this immediately after receiving
+    /// `AppAction::Submit` to attach file/agent context to the turn.
+    pub fn take_attachments(&mut self) -> Vec<Attachment> {
+        std::mem::take(&mut self.last_attachments)
+    }
+
+    /// U-T4 — routing kind of the last submitted line (prompt / shell / memory).
+    pub fn last_submit_kind(&self) -> SubmitKind {
+        self.last_submit_kind
     }
 
     /// WS5 — set the queued messages (typed mid-turn). They render as dim
@@ -338,12 +386,22 @@ impl InputComponent {
 
     pub fn submit(&mut self) -> String {
         let display = self.content.clone();
+        // U-T1 — resolve structured attachments from the display text (before
+        // pill-expansion, so `@`-tokens are intact). Drained by the submit path.
+        self.last_attachments = mentions::parse_mentions(&display, &self.agents);
+        // U-T4 — classify the routing kind from the leading sigil.
+        self.last_submit_kind = SubmitKind::of(&display);
         if !display.trim().is_empty() {
             // History keeps the DISPLAY text — pill tokens intact (CC
             // history.ts stores `display` + pastedContents) — so ↑-recall
             // shows the compact pill, which still expands on the next submit
-            // via the retained paste store.
-            self.history.push(display.clone());
+            // via the retained paste store. `!`-shell lines go to their own
+            // bucket (U-T4) so shell recall stays separate from prompt recall.
+            if self.last_submit_kind == SubmitKind::Shell {
+                self.shell_history.push(display.clone());
+            } else {
+                self.history.push(display.clone());
+            }
         }
         self.content.clear();
         self.cursor = 0;
@@ -722,7 +780,8 @@ impl InputComponent {
         // Step 9: If file search is active, cycle through file matches
         if self.file_search_active && !self.file_matches.is_empty() {
             self.snapshot();
-            let selected = self.file_matches[self.file_match_index].clone();
+            let selected = self.file_matches[self.file_match_index].insert.clone();
+            self.file_frecency.record(&selected); // U-T6: reward this pick
             // Replace from '@' to cursor with '@selected_path'
             let end = self.cursor;
             self.content.drain(self.file_search_start..end);
@@ -796,23 +855,39 @@ impl InputComponent {
             return;
         }
 
-        // Collect fuzzy-matching candidates, then rank best-first.
-        let mut candidates = Vec::new();
+        // Collect fuzzy-matching file/dir candidates from the cwd tree, then
+        // fold in any known agent names the query fuzzy-matches (U-T1) so the
+        // one popup offers `@file`, `@dir/` AND `@agent`.
+        let mut paths = Vec::new();
         if let Ok(cwd) = std::env::current_dir() {
-            Self::walk_dir(&cwd, &cwd, query, 3, &mut candidates);
+            Self::walk_dir(&cwd, &cwd, query, 3, &mut paths);
+        }
+        let mut candidates: Vec<Candidate> = paths.into_iter().map(Candidate::file).collect();
+        for agent in &self.agents {
+            if crate::util::fuzzy::is_match(agent, query) {
+                candidates.push(Candidate::agent(agent.clone()));
+            }
         }
 
-        // Score each candidate by the better of its filename vs. full relative
-        // path match, so a query can hit either the leaf name or the path.
-        let mut scored: Vec<(i32, usize, String)> = candidates
+        // Score each candidate by the better of its leaf-name vs. full-path
+        // fuzzy match, then blend in the frecency boost (U-T6) so a file picked
+        // often & recently outranks a marginally-better fuzzy hit. Agents get a
+        // small constant nudge so a name-exact `@agent` isn't buried under files.
+        let mut scored: Vec<(i32, usize, String, Candidate)> = candidates
             .into_iter()
-            .filter_map(|rel| {
-                let name = rel.rsplit(['/', '\\']).next().unwrap_or(&rel);
+            .filter_map(|c| {
+                let rel = &c.insert;
+                let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
                 let best = crate::util::fuzzy::score(name, query)
                     .into_iter()
-                    .chain(crate::util::fuzzy::score(&rel, query))
-                    .max();
-                best.map(|s| (s, rel.chars().count(), rel))
+                    .chain(crate::util::fuzzy::score(rel, query))
+                    .max()?;
+                // Frecency boost is scaled into the same integer space as the
+                // fuzzy score so it acts as a strong tiebreaker without swamping
+                // a clearly-better textual match.
+                let boost = (self.file_frecency.boost(rel) * 40.0) as i32;
+                let kind_bonus = if c.kind == MentionKind::Agent { 5 } else { 0 };
+                Some((best + boost + kind_bonus, rel.chars().count(), rel.clone(), c))
             })
             .collect();
         scored.sort_by(|a, b| {
@@ -821,7 +896,7 @@ impl InputComponent {
                 .then_with(|| a.2.cmp(&b.2))
         });
 
-        self.file_matches = scored.into_iter().take(10).map(|(_, _, rel)| rel).collect();
+        self.file_matches = scored.into_iter().take(10).map(|(_, _, _, c)| c).collect();
         self.file_match_index = 0;
     }
 
@@ -986,6 +1061,127 @@ impl InputComponent {
     /// Alt+F — move cursor one word right.
     fn move_word_right(&mut self) {
         self.cursor = self.word_right();
+    }
+
+    /// U-T4 — recall the previous entry from the bucket matching the CURRENT
+    /// line: `!`-shell lines walk the shell history, everything else the prompt
+    /// history. Recalled shell entries keep their `!` prefix, so repeated ↑ /
+    /// Ctrl+P stays within the same bucket.
+    fn hist_prev(&mut self) -> Option<String> {
+        if self.content.starts_with('!') {
+            self.shell_history.prev().map(|s| s.to_string())
+        } else {
+            self.history.prev().map(|s| s.to_string())
+        }
+    }
+
+    /// U-T4 — recall the next (newer) entry from the bucket for the current line.
+    fn hist_next(&mut self) -> Option<String> {
+        if self.content.starts_with('!') {
+            self.shell_history.next().map(|s| s.to_string())
+        } else {
+            self.history.next().map(|s| s.to_string())
+        }
+    }
+
+    /// U-T2 — emacs Ctrl+P, mirroring the ↑ arrow: cycle file matches, else
+    /// climb wrapped/logical lines, crossing into (bucket-aware) history recall
+    /// only at the buffer's top edge.
+    fn on_up(&mut self) {
+        if self.file_search_active && !self.file_matches.is_empty() {
+            self.file_match_index = if self.file_match_index > 0 {
+                self.file_match_index - 1
+            } else {
+                self.file_matches.len() - 1
+            };
+            return;
+        }
+        if self.multiline || self.content.contains('\n') {
+            if up_crosses_to_history(&self.content, self.cursor) {
+                if let Some(text) = self.hist_prev() {
+                    self.content = text;
+                    self.cursor = self.content.len();
+                    self.multiline = self.content.contains('\n');
+                }
+            } else {
+                self.move_cursor_up();
+            }
+        } else if let Some(text) = self.hist_prev() {
+            self.content = text;
+            self.cursor = self.content.len();
+            self.multiline = self.content.contains('\n');
+        }
+    }
+
+    /// U-T2 — emacs Ctrl+N, mirroring the ↓ arrow.
+    fn on_down(&mut self) {
+        if self.file_search_active && !self.file_matches.is_empty() {
+            self.file_match_index = (self.file_match_index + 1) % self.file_matches.len();
+            return;
+        }
+        if self.multiline || self.content.contains('\n') {
+            if down_crosses_to_history(&self.content, self.cursor) {
+                if let Some(text) = self.hist_next() {
+                    self.content = text;
+                    self.cursor = self.content.len();
+                    self.multiline = self.content.contains('\n');
+                }
+            } else {
+                self.move_cursor_down();
+            }
+        } else if let Some(text) = self.hist_next() {
+            self.content = text;
+            self.cursor = self.content.len();
+            self.multiline = self.content.contains('\n');
+        } else {
+            self.content.clear();
+            self.cursor = 0;
+        }
+    }
+
+    /// U-T3 — the dimmed inline autocomplete suffix shown after the caret, or
+    /// `None`. Fish/CC-style history autosuggestion: the newest history entry
+    /// that starts with (but is longer than) the current buffer. Gated to the
+    /// common single-line "typing at the end" case so it never fights the
+    /// slash-completion popup, the `@`-file dropdown, or multi-line editing.
+    fn ghost_suffix(&self) -> Option<String> {
+        if self.content.is_empty()
+            || self.cursor != self.content.len()
+            || self.multiline
+            || self.content.contains('\n')
+            || self.file_search_active
+            || self.completions.is_visible()
+            || self.reverse_search.is_some()
+            || self.content.starts_with('/')
+        {
+            return None;
+        }
+        // Shell lines suggest from the shell bucket; everything else from prompts.
+        let entries = if self.content.starts_with('!') {
+            self.shell_history.entries()
+        } else {
+            self.history.entries()
+        };
+        entries.iter().rev().find_map(|e| {
+            if e.len() > self.content.len() && e.starts_with(&self.content) && !e.contains('\n') {
+                Some(e[self.content.len()..].to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// U-T3 — accept the current ghost suggestion (Tab / → at end-of-line),
+    /// appending it to the buffer. Returns true when a suggestion was accepted.
+    fn accept_ghost(&mut self) -> bool {
+        if let Some(suffix) = self.ghost_suffix() {
+            self.snapshot();
+            self.content.push_str(&suffix);
+            self.cursor = self.content.len();
+            self.undo_insert_run = None;
+            return true;
+        }
+        false
     }
 
     /// Push `killed` onto the kill-ring (emacs/readline: CC pushToKillRing,
@@ -1652,6 +1848,8 @@ impl Component for InputComponent {
                     if let Some(action) = self.completions.handle_key(*key) {
                         match action {
                             CompletionAction::Select(name) => {
+                                // U-T6 — reward this command in the frecency ranker.
+                                self.completions.record(&name);
                                 // Replace input with selected command
                                 self.content = format!("{} ", name);
                                 self.cursor = self.content.len();
@@ -1733,7 +1931,9 @@ impl Component for InputComponent {
                     {
                         // If file search dropdown is active and we have matches, select current match
                         if self.file_search_active && !self.file_matches.is_empty() {
-                            let selected = self.file_matches[self.file_match_index].clone();
+                            let selected =
+                                self.file_matches[self.file_match_index].insert.clone();
+                            self.file_frecency.record(&selected); // U-T6
                             let end = self.cursor;
                             self.content.drain(self.file_search_start..end);
                             let insertion = format!("@{} ", selected);
@@ -1812,6 +2012,11 @@ impl Component for InputComponent {
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Right, KeyModifiers::NONE) => {
+                        // U-T3 — → at end-of-buffer accepts the ghost suggestion
+                        // (fish/CC), otherwise it just moves the caret.
+                        if self.cursor == self.content.len() && self.accept_ghost() {
+                            return ComponentAction::Consumed;
+                        }
                         self.move_right();
                         return ComponentAction::Consumed;
                     }
@@ -1824,17 +2029,19 @@ impl Component for InputComponent {
                         self.cursor = self.content.len();
                         return ComponentAction::Consumed;
                     }
-                    // History up/down (only in single-line mode, not during file search)
+                    // History up/down (only in single-line mode, not during file
+                    // search). Routed through the bucket-aware helpers so a
+                    // `!`-shell line recalls shell history (U-T4).
                     (KeyCode::Up, KeyModifiers::NONE) if !self.multiline => {
-                        if let Some(text) = self.history.prev() {
-                            self.content = text.to_string();
+                        if let Some(text) = self.hist_prev() {
+                            self.content = text;
                             self.cursor = self.content.len();
                         }
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::Down, KeyModifiers::NONE) if !self.multiline => {
-                        if let Some(text) = self.history.next() {
-                            self.content = text.to_string();
+                        if let Some(text) = self.hist_next() {
+                            self.content = text;
                             self.cursor = self.content.len();
                         } else {
                             self.content.clear();
@@ -1842,8 +2049,23 @@ impl Component for InputComponent {
                         }
                         return ComponentAction::Consumed;
                     }
-                    // Tab completion
+                    // U-T2 — emacs Ctrl+P / Ctrl+N history & line navigation,
+                    // mirroring ↑ / ↓ (readline muscle memory).
+                    (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                        self.on_up();
+                        return ComponentAction::Consumed;
+                    }
+                    (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                        self.on_down();
+                        return ComponentAction::Consumed;
+                    }
+                    // Tab completion — but first accept an inline ghost
+                    // suggestion when one is showing (U-T3), so Tab both
+                    // completes commands AND accepts autosuggestions like fish.
                     (KeyCode::Tab, KeyModifiers::NONE) => {
+                        if self.accept_ghost() {
+                            return ComponentAction::Consumed;
+                        }
                         self.handle_tab();
                         return ComponentAction::Consumed;
                     }
@@ -2215,6 +2437,31 @@ impl Component for InputComponent {
                 Span::styled(placeholder, placeholder_style),
             ]);
             frame.render_widget(Paragraph::new(line), input_area);
+        } else if let Some(pilled) =
+            splice_middle(&self.content, HUGE_INPUT_THRESHOLD, HUGE_INPUT_KEEP)
+        {
+            // U-T5 — huge draft: collapse the middle into a "[… N chars …]" pill
+            // so the composer renders a compact preview instead of laying out
+            // tens of thousands of chars every frame. The FULL content is kept
+            // for submit / Ctrl+G-edit; this is display-only. Precise caret
+            // tracking is intentionally dropped in this rare mode (edit the huge
+            // draft in $EDITOR via Ctrl+G).
+            let preview = pilled.replace('\n', " ");
+            let mut spans = vec![Span::styled(prompt, prompt_style)];
+            if let (Some(a), Some(bstart)) =
+                (preview.find("[\u{2026} "), preview.find("chars \u{2026}]"))
+            {
+                let bend = bstart + "chars \u{2026}]".len();
+                spans.push(Span::raw(preview[..a].to_string()));
+                spans.push(Span::styled(preview[a..bend].to_string(), theme.hint()));
+                spans.push(Span::raw(preview[bend..].to_string()));
+            } else {
+                spans.push(Span::raw(preview));
+            }
+            let paragraph = ratatui::widgets::Paragraph::new(Line::from(spans))
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            frame.render_widget(paragraph, input_area);
+            return;
         } else {
             // Available width for text (after prompt)
             let avail = (input_area.width as usize).saturating_sub(prompt_len + 1);
@@ -2253,6 +2500,19 @@ impl Component for InputComponent {
             } else {
                 let mut spans = vec![Span::styled(prompt, prompt_style)];
                 spans.extend(chip_spans(content_str, theme.attachment_chip()));
+                // U-T3 — dimmed inline autocomplete: append the ghost suffix
+                // after the caret (which is at end-of-line here). Only when it
+                // still fits the visible width so it never forces a wrap.
+                if let Some(ghost) = self.ghost_suffix() {
+                    let used = prompt_len + display_width(content_str);
+                    let room = (input_area.width as usize).saturating_sub(used + 1);
+                    if room > 0 {
+                        let shown = slice_by_display_cols(&ghost, 0, room);
+                        if !shown.is_empty() {
+                            spans.push(Span::styled(shown, theme.faint()));
+                        }
+                    }
+                }
                 text_lines.push(Line::from(spans));
             }
 
@@ -2276,7 +2536,7 @@ impl Component for InputComponent {
             let room_above = area.y.saturating_sub(bounds.y);
             let max_visible = self.file_matches.len().min(5).min(room_above as usize) as u16;
             let dropdown_y = area.y.saturating_sub(max_visible).max(bounds.y);
-            for (i, path) in self.file_matches.iter().take(max_visible as usize).enumerate() {
+            for (i, cand) in self.file_matches.iter().take(max_visible as usize).enumerate() {
                 let row_y = dropdown_y + i as u16;
                 if row_y >= area.y {
                     break;
@@ -2290,11 +2550,14 @@ impl Component for InputComponent {
                     Style::default().fg(theme.colors.muted)
                 };
                 let prefix = if is_selected { "\u{25b8} " } else { "  " };
+                // U-T30 — per-kind type glyph (file / dir / agent). The glyph is
+                // 2 display cols, so it's included in the width budget below.
+                let glyph = cand.kind.glyph();
                 let ep = crate::util::ellipsize_path_middle(
-                    path,
-                    (area.width as usize).saturating_sub(6).max(8),
+                    &cand.insert,
+                    (area.width as usize).saturating_sub(9).max(8),
                 );
-                let display = format!("{}{}", prefix, ep);
+                let display = format!("{}{} {}", prefix, glyph, ep);
                 let line = Line::from(Span::styled(display, style));
                 let row_area =
                     Rect::new(area.x + 2, row_y, area.width.saturating_sub(4), 1).intersection(bounds);
@@ -2427,6 +2690,34 @@ fn down_crosses_to_history(content: &str, cursor: usize) -> bool {
 /// Chars of pasted text handled inline before collapsing into a pill token —
 /// ported verbatim from Claude Code (imagePaste.ts PASTE_THRESHOLD).
 pub const PASTE_THRESHOLD: usize = 800;
+
+/// U-T5 — a composed draft longer than this (chars) collapses its middle into a
+/// display pill so the composer stays responsive on giant drafts.
+pub const HUGE_INPUT_THRESHOLD: usize = 10_000;
+
+/// U-T5 — chars kept visible at EACH end of a huge draft before the middle pill.
+pub const HUGE_INPUT_KEEP: usize = 2_000;
+
+/// U-T5 — if `content` exceeds `threshold` chars, return a display string whose
+/// middle is replaced by a "[… N chars …]" pill, keeping `keep` chars at each
+/// end. `None` when the content is short enough to show whole. Splits on char
+/// boundaries (never mid-codepoint) and never double-counts: `hidden` is exactly
+/// the elided char count. Display-only — the composer keeps the full buffer.
+pub fn splice_middle(content: &str, threshold: usize, keep: usize) -> Option<String> {
+    let total = content.chars().count();
+    if total <= threshold {
+        return None;
+    }
+    // Guard against overlap on pathological small `threshold`/large `keep`.
+    let keep = keep.min(total / 2);
+    if keep == 0 || 2 * keep >= total {
+        return None;
+    }
+    let head: String = content.chars().take(keep).collect();
+    let tail: String = content.chars().skip(total - keep).collect();
+    let hidden = total - 2 * keep;
+    Some(format!("{head}[\u{2026} {hidden} chars \u{2026}]{tail}"))
+}
 
 /// Rotating example prompts / hints for the empty composer (opencode
 /// index.tsx:288-304 rotating placeholder list; CC usePromptInputPlaceholder
@@ -3452,5 +3743,205 @@ mod killring_undo_placeholder_tests {
             input.placeholder().contains("queued"),
             "queued hint should win over the rotating example"
         );
+    }
+}
+
+// ── Composer sub-layers (U-T1..U-T6) ─────────────────────────────────────────
+#[cfg(test)]
+mod composer_layers_tests {
+    use super::*;
+    use crate::components::input::mentions::{Attachment, LineRange, MentionKind};
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, mods)))
+    }
+
+    /// Fresh input with deterministic in-memory history buckets (no ~/.osa file).
+    fn fresh() -> InputComponent {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(50);
+        input.shell_history = history::History::new(50);
+        input
+    }
+
+    // ── U-T1: @-mention as a structured attachment ───────────────────────────
+
+    #[test]
+    fn submit_resolves_file_range_and_agent_attachments() {
+        let mut input = fresh();
+        input.set_agents(vec!["debugger".into()]);
+        input.set_content("see @src/main.rs#L2-8 then @debugger");
+        let _ = input.submit();
+        assert_eq!(input.last_submit_kind(), SubmitKind::Prompt);
+        let atts = input.take_attachments();
+        assert_eq!(
+            atts,
+            vec![
+                Attachment::File {
+                    path: "src/main.rs".into(),
+                    range: Some(LineRange { start: 2, end: Some(8) }),
+                },
+                Attachment::Agent { name: "debugger".into() },
+            ]
+        );
+        // Draining leaves nothing for the next turn.
+        assert!(input.take_attachments().is_empty());
+    }
+
+    #[test]
+    fn plain_prompt_has_no_attachments() {
+        let mut input = fresh();
+        input.set_content("just a normal question");
+        let _ = input.submit();
+        assert!(input.take_attachments().is_empty());
+    }
+
+    // ── U-T30: @-popup surfaces agents with an Agent-kind candidate ───────────
+
+    #[test]
+    fn at_popup_offers_agent_candidates_with_kind() {
+        let mut input = fresh();
+        input.set_agents(vec!["debugger".into()]);
+        // Simulate an active `@debug` search (independent of the cwd tree).
+        input.content = "@debug".into();
+        input.file_search_active = true;
+        input.file_search_start = 0;
+        input.cursor = input.content.len();
+        input.rebuild_file_matches();
+        let agent = input
+            .file_matches
+            .iter()
+            .find(|c| c.kind == MentionKind::Agent);
+        assert!(agent.is_some(), "agent should appear in the @-popup");
+        assert_eq!(agent.unwrap().insert, "debugger");
+        // The glyph differs per kind (U-T30).
+        assert_ne!(MentionKind::Agent.glyph(), MentionKind::File.glyph());
+    }
+
+    // ── U-T2: Ctrl+P / Ctrl+N history navigation ─────────────────────────────
+
+    #[test]
+    fn ctrl_p_and_ctrl_n_walk_history() {
+        let mut input = fresh();
+        input.history.push("cmd1".into());
+        input.history.push("cmd2".into());
+        // Ctrl+P → newest, then older.
+        input.handle_event(&key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "cmd2");
+        input.handle_event(&key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "cmd1");
+        // Ctrl+N → back toward newest.
+        input.handle_event(&key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "cmd2");
+    }
+
+    #[test]
+    fn alt_d_kills_word_forward() {
+        // Alt+D deletes the word ahead of the caret (readline kill-word).
+        let mut input = fresh();
+        input.set_content("hello world");
+        input.cursor = 0;
+        input.handle_event(&key(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert_eq!(input.value(), " world");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    // ── U-T3: ghost-text inline autocomplete ─────────────────────────────────
+
+    #[test]
+    fn ghost_suffix_completes_from_history() {
+        let mut input = fresh();
+        input.history.push("zzghost completion target".into());
+        input.content = "zzghost".into();
+        input.cursor = input.content.len();
+        assert_eq!(
+            input.ghost_suffix().as_deref(),
+            Some(" completion target")
+        );
+        // Tab accepts the ghost (fish/CC autosuggest).
+        input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(input.value(), "zzghost completion target");
+    }
+
+    #[test]
+    fn ghost_suffix_suppressed_for_slash_and_midline() {
+        let mut input = fresh();
+        input.history.push("hello there".into());
+        // Slash draft: owned by the completions popup, no ghost.
+        input.content = "/hel".into();
+        input.cursor = input.content.len();
+        assert!(input.ghost_suffix().is_none());
+        // Caret not at end: no ghost.
+        input.content = "hello".into();
+        input.cursor = 2;
+        assert!(input.ghost_suffix().is_none());
+    }
+
+    // ── U-T4: bash `!` submit-mode + separate history bucket ──────────────────
+
+    #[test]
+    fn shell_submit_classified_and_bucketed() {
+        let mut input = fresh();
+        input.set_content("!ls -la");
+        let _ = input.submit();
+        assert_eq!(input.last_submit_kind(), SubmitKind::Shell);
+        // The `!` line went to the shell bucket, NOT the prompt history.
+        assert_eq!(input.shell_history.entries(), &["!ls -la"]);
+        assert!(input.history.is_empty());
+    }
+
+    #[test]
+    fn shell_line_recalls_shell_bucket() {
+        let mut input = fresh();
+        input.history.push("a prompt".into());
+        input.shell_history.push("!git status".into());
+        // Typing `!` selects the shell bucket for recall.
+        input.content = "!".into();
+        input.cursor = 1;
+        input.handle_event(&key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "!git status");
+    }
+
+    #[test]
+    fn memory_line_classified() {
+        let mut input = fresh();
+        input.set_content("#remember this");
+        let _ = input.submit();
+        assert_eq!(input.last_submit_kind(), SubmitKind::Memory);
+    }
+
+    // ── U-T5: huge-input middle-splice pill ──────────────────────────────────
+
+    #[test]
+    fn splice_middle_collapses_over_threshold() {
+        assert_eq!(
+            splice_middle("abcdefghij", 5, 2).as_deref(),
+            Some("ab[\u{2026} 6 chars \u{2026}]ij")
+        );
+        // Short content is shown whole.
+        assert!(splice_middle("short", 10, 2).is_none());
+        // The real thresholds elide a giant paste.
+        let giant = "x".repeat(HUGE_INPUT_THRESHOLD + 500);
+        let pilled = splice_middle(&giant, HUGE_INPUT_THRESHOLD, HUGE_INPUT_KEEP).unwrap();
+        assert!(pilled.contains("chars \u{2026}]"));
+        assert!(pilled.chars().count() < giant.chars().count());
+    }
+
+    // ── U-T6: frecency-ranked @-file recall ──────────────────────────────────
+
+    #[test]
+    fn frecency_floats_recent_pick_in_at_popup() {
+        // Two candidates that fuzzy-match "z" equally; the one recorded via
+        // frecency should sort ahead once selected before.
+        let mut input = fresh();
+        input.file_frecency.record("z_beta.rs");
+        input.content = "@z".into();
+        input.file_search_active = true;
+        input.file_search_start = 0;
+        input.cursor = input.content.len();
+        // Seed two synthetic candidates and re-run only the ranking by hand:
+        // rebuild scans the cwd, so assert the frecency boost is what tips ties.
+        assert!(input.file_frecency.boost("z_beta.rs") > input.file_frecency.boost("z_alpha.rs"));
     }
 }

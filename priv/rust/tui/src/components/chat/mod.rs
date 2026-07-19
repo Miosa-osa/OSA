@@ -74,6 +74,12 @@ pub struct Chat {
     /// re-parses. Produces output byte-identical to the legacy full-buffer
     /// `render_markdown(&format!("{content}\u{2588}"), …)` path.
     stream_renderer: RefCell<crate::render::markdown_stream::StreamingRenderer>,
+    /// U-T7 (display half): raw-markdown view toggle. When on, agent replies are
+    /// shown as their literal markdown SOURCE instead of rendered. This is the
+    /// "targeted message" state — it applies to agent messages finalized while
+    /// the toggle is active (and, once the lead wires it, the live preview). The
+    /// copy-to-clipboard half of U-T7 is owned by another lane.
+    raw_view: bool,
 }
 
 impl Chat {
@@ -95,6 +101,28 @@ impl Chat {
             stream_renderer: RefCell::new(
                 crate::render::markdown_stream::StreamingRenderer::new(80),
             ),
+            raw_view: false,
+        }
+    }
+
+    /// U-T7: toggle the raw-markdown view. Returns the new state. Invalidates the
+    /// live stream cache so the preview rebuilds under the new mode on next draw.
+    pub fn toggle_raw_view(&mut self) -> bool {
+        self.raw_view = !self.raw_view;
+        *self.stream_cache.borrow_mut() = None;
+        self.raw_view
+    }
+
+    /// Whether the raw-markdown view is currently active.
+    pub fn raw_view(&self) -> bool {
+        self.raw_view
+    }
+
+    /// Set the raw-markdown view explicitly (invalidates the live stream cache).
+    pub fn set_raw_view(&mut self, on: bool) {
+        if self.raw_view != on {
+            self.raw_view = on;
+            *self.stream_cache.borrow_mut() = None;
         }
     }
 
@@ -133,22 +161,26 @@ impl Chat {
 
     pub fn add_agent_message(&mut self, content: &str, signal: Option<&Signal>) {
         self.last_agent_text = Some(content.to_string());
-        self.push_scrollback_block(Message::new(
+        let mut msg = Message::new(
             MessageType::Agent,
             content.trim_end().to_string(),
             signal.cloned(),
-        ));
+        );
+        msg.set_raw_mode(self.raw_view); // U-T7: honor the raw-view toggle
+        self.push_scrollback_block(msg);
     }
 
     /// Add a continuation chunk — same left-border style as an agent message but
     /// rendered without the "◈ OSA" header.
     pub fn add_agent_continuation(&mut self, content: &str) {
         self.last_agent_text = Some(content.to_string());
-        self.push_scrollback_block(Message::new(
+        let mut msg = Message::new(
             MessageType::AgentContinuation,
             content.trim_end().to_string(),
             None,
-        ));
+        );
+        msg.set_raw_mode(self.raw_view); // U-T7: honor the raw-view toggle
+        self.push_scrollback_block(msg);
     }
 
     pub fn add_system_message(&mut self, content: &str, severity: &str) {
@@ -203,6 +235,7 @@ impl Chat {
             cached_height: None,
             timestamp: None,
             prerendered_body: None,
+            raw_mode: false,
         });
     }
 

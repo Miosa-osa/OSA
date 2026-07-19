@@ -68,6 +68,12 @@ pub struct Message {
     /// Wall-clock time when this message was created (used for timestamp display).
     /// None for tool calls and survey messages where timestamps are not shown.
     pub timestamp: Option<SystemTime>,
+    /// U-T7 (display half): when true, an Agent message renders its RAW markdown
+    /// source (tab-expanded, unstyled) instead of the rendered markdown, so the
+    /// user can read/copy the literal reply. Only meaningful for Agent /
+    /// AgentContinuation messages that carry their own `content` (not the live
+    /// pre-rendered preview, whose raw source lives in `Chat::streaming_content`).
+    pub raw_mode: bool,
 }
 
 impl Message {
@@ -81,6 +87,7 @@ impl Message {
             cached_height: None,
             timestamp: Some(SystemTime::now()),
             prerendered_body: None,
+            raw_mode: false,
         }
     }
 
@@ -95,6 +102,7 @@ impl Message {
             cached_height: None,
             timestamp: None,
             prerendered_body: None,
+            raw_mode: false,
         }
     }
 
@@ -112,11 +120,45 @@ impl Message {
             cached_height: None,
             timestamp: None,
             prerendered_body: Some(body),
+            raw_mode: false,
         }
     }
 
     pub fn invalidate_cache(&mut self) {
         self.cached_height = None;
+    }
+
+    /// U-T7: toggle raw-markdown display for this message. Returns the new state.
+    /// Height depends on `raw_mode`, so the height cache is invalidated.
+    pub fn toggle_raw_mode(&mut self) -> bool {
+        self.raw_mode = !self.raw_mode;
+        self.invalidate_cache();
+        self.raw_mode
+    }
+
+    /// U-T7: set raw-markdown display explicitly (invalidates the height cache).
+    pub fn set_raw_mode(&mut self, on: bool) {
+        if self.raw_mode != on {
+            self.raw_mode = on;
+            self.invalidate_cache();
+        }
+    }
+
+    /// Whether this message is currently showing its raw markdown source.
+    pub fn is_raw_mode(&self) -> bool {
+        self.raw_mode
+    }
+
+    /// True when raw-mode rendering applies: an Agent/AgentContinuation message
+    /// with `raw_mode` set that carries its own source (`content`), i.e. not the
+    /// live pre-rendered preview.
+    fn renders_raw(&self) -> bool {
+        self.raw_mode
+            && self.prerendered_body.is_none()
+            && matches!(
+                self.msg_type,
+                MessageType::Agent | MessageType::AgentContinuation
+            )
     }
 
     pub fn height(&self, width: u16) -> u16 {
@@ -148,6 +190,16 @@ impl Message {
 
         // For agent messages, use the markdown renderer for accurate line count.
         if matches!(self.msg_type, MessageType::Agent | MessageType::AgentContinuation) {
+            // Raw-mode: one row per source line (tab-expanded, no markdown).
+            if self.renders_raw() {
+                let rendered_lines = raw_source_text(&self.content, &style::theme()).lines.len() as u16;
+                let h = if matches!(self.msg_type, MessageType::AgentContinuation) {
+                    rendered_lines.max(1)
+                } else {
+                    rendered_lines.max(1) + 1 // +1 for label
+                };
+                return h.max(1);
+            }
             // Live streaming preview supplies a pre-parsed body (see
             // `Chat::ensure_stream_cache`) so height and draw share ONE markdown
             // parse and can never disagree on line count.
@@ -320,12 +372,16 @@ impl Message {
                 .border_type(BorderType::Thick)
                 .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-            let styled_text = match self.prerendered_body {
-                Some(ref body) => body.clone(),
-                None => crate::render::markdown::render_markdown(
-                    &self.content,
-                    content_area.width.saturating_sub(2),
-                ),
+            let styled_text = if self.renders_raw() {
+                raw_source_text(&self.content, theme)
+            } else {
+                match self.prerendered_body {
+                    Some(ref body) => body.clone(),
+                    None => crate::render::markdown::render_markdown(
+                        &self.content,
+                        content_area.width.saturating_sub(2),
+                    ),
+                }
             };
             let body_scroll = scroll_top.saturating_sub(1); // header was line 0
             let paragraph = Paragraph::new(styled_text)
@@ -346,12 +402,16 @@ impl Message {
             .border_type(BorderType::Thick)
             .border_style(Style::default().fg(theme.colors.msg_border_agent));
 
-        let styled_text = match self.prerendered_body {
-            Some(ref body) => body.clone(),
-            None => crate::render::markdown::render_markdown(
-                &self.content,
-                area.width.saturating_sub(2),
-            ),
+        let styled_text = if self.renders_raw() {
+            raw_source_text(&self.content, theme)
+        } else {
+            match self.prerendered_body {
+                Some(ref body) => body.clone(),
+                None => crate::render::markdown::render_markdown(
+                    &self.content,
+                    area.width.saturating_sub(2),
+                ),
+            }
         };
         // No header on a continuation, so scroll_top applies straight to the body.
         let paragraph = Paragraph::new(styled_text)
@@ -467,6 +527,45 @@ impl Message {
         let paragraph = Paragraph::new(lines);
         paragraph.render(area, buf);
     }
+}
+
+/// U-T7: render a message's RAW markdown source as [`Text`] — one line per
+/// source line, tabs expanded to 4-column stops, styled muted so it reads as a
+/// literal/debug view. No markdown parsing, wrapping, or link handling is done,
+/// so the user sees exactly the characters the model emitted.
+pub(crate) fn raw_source_text(content: &str, theme: &style::Theme) -> Text<'static> {
+    let style = Style::default().fg(theme.colors.muted);
+    let lines: Vec<Line<'static>> = content
+        .lines()
+        .map(|l| Line::from(Span::styled(expand_tabs_4(l), style)))
+        .collect();
+    if lines.is_empty() {
+        Text::from("")
+    } else {
+        Text::from(lines)
+    }
+}
+
+/// Expand tabs to 4-column stops for the raw source view (display-width aware).
+fn expand_tabs_4(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = 4 - (col % 4);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    out
 }
 
 /// Format a `SystemTime` as a human-readable timestamp string.
@@ -701,5 +800,55 @@ mod help_tests {
             HELP_LINE_COUNT,
             lines.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod raw_mode_tests {
+    use super::*;
+
+    fn flat(text: &Text<'_>) -> Vec<String> {
+        text.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn raw_source_text_is_verbatim_with_tabs_expanded() {
+        let theme = crate::style::theme();
+        // Markdown markup is preserved literally (not rendered) and tabs expand.
+        // "- **a**" is 7 cols → next 4-stop is col 8 → exactly one filler space.
+        let t = raw_source_text("# Title\n- **a**\tb", &theme);
+        assert_eq!(flat(&t), vec!["# Title".to_string(), "- **a** b".to_string()]);
+    }
+
+    #[test]
+    fn toggle_flips_and_targets_agent_content() {
+        let mut m = Message::new(MessageType::Agent, "**bold** text".into(), None);
+        assert!(!m.is_raw_mode());
+        assert!(!m.renders_raw());
+        assert!(m.toggle_raw_mode()); // → true
+        assert!(m.is_raw_mode());
+        assert!(m.renders_raw(), "agent message with content renders raw");
+        assert!(!m.toggle_raw_mode()); // → false
+    }
+
+    #[test]
+    fn prerendered_preview_never_renders_raw() {
+        // The live preview carries no source in `content`, so it must not switch
+        // to the raw path even if the flag is set.
+        let mut m = Message::new_agent_prerendered(Text::from("rendered"));
+        m.set_raw_mode(true);
+        assert!(!m.renders_raw());
+    }
+
+    #[test]
+    fn raw_mode_height_counts_source_lines() {
+        let src = "line one\nline two\nline three";
+        let mut m = Message::new(MessageType::Agent, src.into(), None);
+        m.set_raw_mode(true);
+        // 3 source lines + 1 label row for an Agent message.
+        assert_eq!(m.height(80), 4);
     }
 }

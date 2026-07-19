@@ -1,7 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Convert a Markdown string to a ratatui [`Text`] value.
 ///
@@ -34,9 +34,27 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
     let mut in_table = false;
     let mut table_buf: Vec<String> = Vec::new();
 
+    // Paragraph accumulator: consecutive non-blank prose lines are merged into a
+    // single paragraph (Markdown soft-break: a lone `\n` renders as a space). A
+    // line ending in two+ spaces or a trailing backslash is a *hard* break and
+    // keeps the newline. Each stored entry is `(right-trimmed text, hard_break)`.
+    let mut para_buf: Vec<(String, bool)> = Vec::new();
+
+    // Flush the pending paragraph (if any) as wrapped, inline-parsed lines.
+    macro_rules! flush_para {
+        () => {
+            if !para_buf.is_empty() {
+                flush_paragraph(&mut para_buf, &mut lines, width, &theme);
+            }
+        };
+    }
+
     for raw_line in input.lines() {
         // ── Fenced code block boundary ──────────────────────────────────────
         if raw_line.trim_start().starts_with("```") {
+            if !in_code_block {
+                flush_para!(); // a fence right after prose closes the paragraph
+            }
             if in_code_block {
                 // Closing fence: flush accumulated code.
                 in_code_block = false;
@@ -59,6 +77,13 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
 
+        // A source line ending in two+ spaces (or a trailing backslash) is a
+        // Markdown *hard* line break; capture it before we trim/expand.
+        let hard_break = raw_line.ends_with("  ") || raw_line.ends_with('\\');
+        // Expand tabs to 4-column stops so indentation and table columns align.
+        let raw_line = expand_tabs(raw_line, 4);
+        let raw_line = raw_line.as_str();
+
         // ── GFM pipe tables ─────────────────────────────────────────────────
         let trimmed_for_table = raw_line.trim();
         let is_table_line = trimmed_for_table.starts_with('|') && trimmed_for_table.ends_with('|');
@@ -66,6 +91,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 
         if is_table_line || is_separator_line {
             if !in_table {
+                flush_para!(); // a table right after prose closes the paragraph
                 in_table = true;
                 table_buf.clear();
             }
@@ -82,8 +108,36 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             // Fall through to process current line normally
         }
 
+        // ── Setext headings (underline style) ────────────────────────────────
+        // `text\n===` → H1, `text\n---` → H2, but only when a paragraph is
+        // pending; a bare `---` with no preceding prose falls through to the
+        // horizontal-rule branch below.
+        if !para_buf.is_empty() {
+            if let Some(level) = is_setext_underline(raw_line.trim()) {
+                let text: String = para_buf
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                para_buf.clear();
+                let style = if level == 1 {
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD)
+                };
+                lines.push(Line::from(Span::styled(text, style)));
+                lines.push(Line::from(Span::raw("")));
+                continue;
+            }
+        }
+
         // ── Headers ─────────────────────────────────────────────────────────
         if raw_line.starts_with("###### ") {
+            flush_para!();
             let text = &raw_line[7..];
             let spans = parse_inline(text, &theme);
             let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
@@ -93,6 +147,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
         if raw_line.starts_with("##### ") {
+            flush_para!();
             let text = &raw_line[6..];
             let spans = parse_inline(text, &theme);
             let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
@@ -102,6 +157,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
         if raw_line.starts_with("#### ") {
+            flush_para!();
             let text = &raw_line[5..];
             let spans = parse_inline(text, &theme);
             let styled_spans: Vec<Span> = spans.into_iter().map(|s| {
@@ -111,6 +167,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
         if raw_line.starts_with("### ") {
+            flush_para!();
             let text = raw_line[4..].to_owned();
             let style = Style::default()
                 .fg(theme.colors.primary)
@@ -140,28 +197,37 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         // ── Horizontal rules ─────────────────────────────────────────────────
         let trimmed = raw_line.trim();
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            flush_para!();
             let rule = "─".repeat(width.saturating_sub(2) as usize);
             lines.push(Line::from(Span::styled(rule, theme.faint())));
             continue;
         }
 
-        // ── Blockquotes (word-wrapped) ────────────────────────────────────────
-        if raw_line.starts_with("> ") {
-            let content = &raw_line[2..];
+        // ── Blockquotes (nested, word-wrapped) ────────────────────────────────
+        // Supports arbitrary depth via `>>` / `> >` markers; each level adds one
+        // `│ ` gutter. A `>` with no trailing space (`>text`) is still a quote.
+        if trimmed.starts_with('>') {
+            flush_para!();
+            let (depth, content) = parse_quote_depth(trimmed);
             let style = Style::default()
                 .fg(theme.colors.muted)
                 .add_modifier(Modifier::ITALIC);
-            let wrapped = wrap_text(content, width.saturating_sub(4) as usize);
+            let gutter = depth.saturating_mul(2);
+            let wrapped = wrap_text(&content, (width as usize).saturating_sub(gutter + 2));
             for wline in wrapped {
-                let border = Span::styled("│ ".to_owned(), Style::default().fg(theme.colors.dim));
-                let text_span = Span::styled(wline, style);
-                lines.push(Line::from(vec![border, text_span]));
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(depth + 1);
+                for _ in 0..depth {
+                    spans.push(Span::styled("│ ".to_owned(), Style::default().fg(theme.colors.dim)));
+                }
+                spans.push(Span::styled(wline, style));
+                lines.push(Line::from(spans));
             }
             continue;
         }
 
         // ── Task checkboxes ──────────────────────────────────────────────────
         if let Some((checked, text)) = detect_checkbox(trimmed) {
+            flush_para!();
             let indent = raw_line.len() - raw_line.trim_start().len();
             let indent_level = indent / 2;
             let indent_str = "  ".repeat(indent_level);
@@ -188,6 +254,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 
         // ── Unordered lists (indent-aware, word-wrapped) ─────────────────────
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            flush_para!();
             let text = &trimmed[2..];
             let indent = raw_line.len() - raw_line.trim_start().len();
             let indent_level = indent / 2;
@@ -219,6 +286,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
         if let Some(pos) = trimmed.find(". ") {
             let num_part = &trimmed[..pos];
             if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
+                flush_para!();
                 let text = &trimmed[pos + 2..];
                 let indent = raw_line.len() - raw_line.trim_start().len();
                 let indent_level = indent / 2;
@@ -238,17 +306,20 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 
         // ── Empty lines ───────────────────────────────────────────────────────
         if raw_line.trim().is_empty() {
+            flush_para!(); // blank line terminates the current paragraph
             lines.push(Line::from(Span::raw("")));
             continue;
         }
 
-        // ── Plain paragraph / inline formatting (word-wrapped) ─────────────────
-        let wrapped = wrap_text(raw_line, width as usize);
-        for wline in wrapped {
-            let spans = parse_inline(&wline, &theme);
-            lines.push(Line::from(spans));
-        }
+        // ── Plain paragraph line: accumulate for soft-break merging ────────────
+        // The paragraph is flushed by the next block-level construct, a blank
+        // line, or EOF (see `flush_paragraph`).
+        para_buf.push((raw_line.trim_end().to_string(), hard_break));
     }
+
+    // Flush any paragraph still pending at EOF (the common streaming case: the
+    // in-progress reply has no terminating blank line yet).
+    flush_para!();
 
     // If we hit EOF still inside a code block, flush what we have.
     if in_code_block && !code_lines.is_empty() {
@@ -293,6 +364,95 @@ fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>
                     .collect::<Vec<_>>(),
             ));
         }
+    }
+}
+
+// ─── Paragraph / block helpers ───────────────────────────────────────────────
+
+/// Render an accumulated paragraph (`(text, hard_break)` entries) as wrapped,
+/// inline-parsed lines. Consecutive soft-broken lines join with a single space
+/// (Markdown soft break); a hard break starts a fresh wrapped segment.
+fn flush_paragraph(
+    para: &mut Vec<(String, bool)>,
+    out: &mut Vec<Line<'static>>,
+    width: u16,
+    theme: &crate::style::Theme,
+) {
+    if para.is_empty() {
+        return;
+    }
+    let mut segments: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (text, hard) in para.iter() {
+        if cur.is_empty() {
+            cur.push_str(text);
+        } else {
+            cur.push(' ');
+            cur.push_str(text);
+        }
+        if *hard {
+            segments.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        segments.push(cur);
+    }
+    for seg in segments {
+        for wline in wrap_text(&seg, width as usize) {
+            out.push(Line::from(parse_inline(&wline, theme)));
+        }
+    }
+    para.clear();
+}
+
+/// Expand tab characters to spaces on `tabstop`-column stops (display-width
+/// aware, so CJK/emoji before a tab still align).
+fn expand_tabs(line: &str, tabstop: usize) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let stop = tabstop.max(1);
+    let mut out = String::with_capacity(line.len());
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = stop - (col % stop);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    out
+}
+
+/// Parse blockquote nesting depth from a `>`-prefixed line. Handles `>>`,
+/// `> >`, and `> ` forms. Returns `(depth, remaining_content)` with the markers
+/// and their following spaces stripped.
+fn parse_quote_depth(line: &str) -> (usize, String) {
+    let mut depth = 0usize;
+    let mut rest = line.trim_start();
+    while let Some(after) = rest.strip_prefix('>') {
+        depth += 1;
+        rest = after.trim_start();
+    }
+    (depth.max(1), rest.to_string())
+}
+
+/// A setext heading underline: a run of only `=` (level 1) or only `-` (level
+/// 2), non-empty and containing nothing else.
+fn is_setext_underline(line: &str) -> Option<u8> {
+    if line.is_empty() {
+        None
+    } else if line.bytes().all(|b| b == b'=') {
+        Some(1)
+    } else if line.bytes().all(|b| b == b'-') {
+        Some(2)
+    } else {
+        None
     }
 }
 
@@ -344,12 +504,13 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
 
     let num_cols = parsed[0].len();
 
-    // Calculate column widths (max DISPLAY width per column, min 3 — CC parity)
+    // Calculate column widths from each cell's VISIBLE width after inline
+    // markdown markup is stripped (so `**bold**` measures as `bold`), min 3.
     let mut col_widths: Vec<usize> = vec![3; num_cols];
     for row in &parsed {
         for (i, cell) in row.iter().enumerate() {
             if i < num_cols {
-                col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+                col_widths[i] = col_widths[i].max(inline_visible_width(cell, theme));
             }
         }
     }
@@ -369,16 +530,13 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     if let Some(header) = parsed.first() {
         let mut spans = Vec::new();
         spans.push(Span::styled("│ ".to_string(), muted));
+        let header_base = Style::default()
+            .fg(theme.colors.primary)
+            .add_modifier(Modifier::BOLD);
         for (i, cell) in header.iter().enumerate() {
             let w = col_widths.get(i).copied().unwrap_or(10);
             let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
-            let padded = fit_cell(cell, w, align);
-            spans.push(Span::styled(
-                padded,
-                Style::default()
-                    .fg(theme.colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            spans.extend(fit_cell_spans(cell, w, align, header_base, theme));
             if i < header.len() - 1 {
                 spans.push(Span::styled(" │ ".to_string(), muted));
             }
@@ -407,8 +565,7 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         for (i, cell) in row.iter().enumerate() {
             let w = col_widths.get(i).copied().unwrap_or(10);
             let align = alignments.get(i).copied().unwrap_or(ColAlign::Left);
-            let padded = fit_cell(cell, w, align);
-            spans.push(Span::styled(padded, Style::default()));
+            spans.extend(fit_cell_spans(cell, w, align, Style::default(), theme));
             if i < row.len() - 1 {
                 spans.push(Span::styled(" │ ".to_string(), muted));
             }
@@ -428,35 +585,108 @@ enum ColAlign {
     Right,
 }
 
-/// Pad (or grapheme-truncate with `…`) `cell` to exactly `w` display columns,
-/// honoring the column alignment. Display-width aware (CJK/emoji safe).
-fn fit_cell(cell: &str, w: usize, align: ColAlign) -> String {
-    let cw = UnicodeWidthStr::width(cell);
-    if cw > w {
-        let mut out = String::new();
-        let mut used = 0;
-        for g in UnicodeSegmentation::graphemes(cell, true) {
-            let gw = UnicodeWidthStr::width(g);
-            if used + gw > w.saturating_sub(1) {
-                break;
-            }
-            out.push_str(g);
-            used += gw;
+/// Render a table cell's INLINE markdown (bold / code / links) as styled spans,
+/// padded (or truncated with `…`) to exactly `w` display columns per the column
+/// alignment. `base` is the cell's default style, under which each inline span's
+/// own style is patched (so header bold + a code cell both apply).
+///
+/// When the styled content fits, full inline styling is preserved. In the rare
+/// capped-width overflow case the cell degrades to plain truncated text — inline
+/// styling is dropped there rather than mis-measuring escape-laden spans.
+fn fit_cell_spans(
+    cell: &str,
+    w: usize,
+    align: ColAlign,
+    base: Style,
+    theme: &crate::style::Theme,
+) -> Vec<Span<'static>> {
+    let styled: Vec<Span<'static>> = parse_inline(cell, theme)
+        .into_iter()
+        .map(|s| Span::styled(s.content, base.patch(s.style)))
+        .collect();
+    let total: usize = styled.iter().map(|s| visible_width(s.content.as_ref())).sum();
+
+    if total <= w {
+        let pad = w - total;
+        let (left, right) = match align {
+            ColAlign::Left => (0, pad),
+            ColAlign::Right => (pad, 0),
+            ColAlign::Center => (pad / 2, pad - pad / 2),
+        };
+        let mut out: Vec<Span<'static>> = Vec::with_capacity(styled.len() + 2);
+        if left > 0 {
+            out.push(Span::styled(" ".repeat(left), base));
         }
-        out.push('…');
-        let final_w = UnicodeWidthStr::width(out.as_str());
-        out.push_str(&" ".repeat(w.saturating_sub(final_w)));
+        out.extend(styled);
+        if right > 0 {
+            out.push(Span::styled(" ".repeat(right), base));
+        }
         return out;
     }
-    let pad = w - cw;
-    match align {
-        ColAlign::Left => format!("{}{}", cell, " ".repeat(pad)),
-        ColAlign::Right => format!("{}{}", " ".repeat(pad), cell),
-        ColAlign::Center => {
-            let left = pad / 2;
-            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(pad - left))
+
+    // Overflow: grapheme-truncate the plain (markup-stripped) text.
+    let plain: String = styled.iter().map(|s| strip_escapes(s.content.as_ref())).collect();
+    let mut out = String::new();
+    let mut used = 0;
+    for g in UnicodeSegmentation::graphemes(plain.as_str(), true) {
+        let gw = UnicodeWidthStr::width(g);
+        if used + gw > w.saturating_sub(1) {
+            break;
+        }
+        out.push_str(g);
+        used += gw;
+    }
+    out.push('…');
+    let final_w = UnicodeWidthStr::width(out.as_str());
+    if final_w < w {
+        out.push_str(&" ".repeat(w - final_w));
+    }
+    vec![Span::styled(out, base)]
+}
+
+/// Sum of a cell's inline spans' visible widths (markup stripped, escapes
+/// ignored) — used to size table columns.
+fn inline_visible_width(cell: &str, theme: &crate::style::Theme) -> usize {
+    parse_inline(cell, theme)
+        .iter()
+        .map(|s| visible_width(s.content.as_ref()))
+        .sum()
+}
+
+/// Display width of `s` ignoring OSC-8 escape wrappers (`ESC … ST`).
+fn visible_width(s: &str) -> usize {
+    let mut w = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n == '\\' {
+                    break;
+                }
+            }
+        } else {
+            w += UnicodeWidthChar::width(c).unwrap_or(0);
         }
     }
+    w
+}
+
+/// Strip OSC-8 escape wrappers (`ESC … ST`) from `s`, leaving visible text.
+fn strip_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n == '\\' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Depth-styled ordered-list markers (CC `getListNumber` parity):
@@ -629,44 +859,74 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                 }
             }
 
-            // ── Bold / Italic: ** or * ────────────────────────────────────
+            // ── Bold-italic / Bold / Italic: *** / ** / * ──────────────────
             '*' => {
                 chars.next(); // consume first `*`
                 if chars.peek() == Some(&'*') {
-                    // Possible **bold**
                     chars.next(); // consume second `*`
-                    let mut content = String::new();
-                    let mut closed = false;
-                    // Collect until closing `**`. Use `while let` so that the
-                    // mutable borrow from `.next()` is released between
-                    // iterations, allowing `.peek()` on the next iteration.
-                    while let Some(&nc) = chars.peek() {
-                        if nc == '*' {
-                            chars.next(); // consume this `*`
-                            // Check the character after it.
-                            if chars.peek() == Some(&'*') {
-                                chars.next(); // consume second closing `*`
-                                closed = true;
-                                break;
+                    if chars.peek() == Some(&'*') {
+                        // ── ***bold italic*** — collect until a closing `***` ──
+                        chars.next(); // consume third `*`
+                        let mut content = String::new();
+                        let mut closed = false;
+                        while let Some(&nc) = chars.peek() {
+                            if nc == '*' {
+                                chars.next(); // first closing `*`
+                                if chars.peek() == Some(&'*') {
+                                    chars.next(); // second
+                                    if chars.peek() == Some(&'*') {
+                                        chars.next(); // third → closed
+                                        closed = true;
+                                        break;
+                                    }
+                                    content.push_str("**");
+                                } else {
+                                    content.push('*');
+                                }
+                            } else {
+                                chars.next();
+                                content.push(nc);
                             }
-                            // Single `*` inside bold — treat as literal.
-                            content.push('*');
+                        }
+                        if closed && !content.is_empty() {
+                            flush_plain!();
+                            let style = Style::default()
+                                .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+                            spans.push(Span::styled(content, style));
                         } else {
-                            chars.next();
-                            content.push(nc);
+                            plain.push_str("***");
+                            plain.push_str(&content);
+                        }
+                    } else {
+                        // ── **bold** — collect until a closing `**` ──
+                        let mut content = String::new();
+                        let mut closed = false;
+                        while let Some(&nc) = chars.peek() {
+                            if nc == '*' {
+                                chars.next(); // consume this `*`
+                                if chars.peek() == Some(&'*') {
+                                    chars.next(); // consume second closing `*`
+                                    closed = true;
+                                    break;
+                                }
+                                // Single `*` inside bold — treat as literal.
+                                content.push('*');
+                            } else {
+                                chars.next();
+                                content.push(nc);
+                            }
+                        }
+                        if closed && !content.is_empty() {
+                            flush_plain!();
+                            let style = Style::default().add_modifier(Modifier::BOLD);
+                            spans.push(Span::styled(content, style));
+                        } else {
+                            plain.push_str("**");
+                            plain.push_str(&content);
                         }
                     }
-                    if closed && !content.is_empty() {
-                        flush_plain!();
-                        let style = Style::default().add_modifier(Modifier::BOLD);
-                        spans.push(Span::styled(content, style));
-                    } else {
-                        // Not a valid bold span — emit literally.
-                        plain.push_str("**");
-                        plain.push_str(&content);
-                    }
                 } else {
-                    // Possible *italic*
+                    // ── *italic* ──
                     let mut content = String::new();
                     let mut closed = false;
                     for c in chars.by_ref() {
@@ -683,6 +943,69 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                     } else {
                         plain.push('*');
                         plain.push_str(&content);
+                    }
+                }
+            }
+
+            // ── Inline LaTeX math: $…$ / $$…$$ → Unicode ──────────────────
+            '$' => {
+                chars.next(); // consume `$`
+                if chars.peek() == Some(&'$') {
+                    // Display math `$$…$$`.
+                    chars.next(); // consume second `$`
+                    let mut content = String::new();
+                    let mut closed = false;
+                    while let Some(&nc) = chars.peek() {
+                        if nc == '$' {
+                            chars.next();
+                            if chars.peek() == Some(&'$') {
+                                chars.next();
+                                closed = true;
+                                break;
+                            }
+                            content.push('$');
+                        } else {
+                            chars.next();
+                            content.push(nc);
+                        }
+                    }
+                    if closed && !content.is_empty() {
+                        flush_plain!();
+                        spans.push(Span::raw(crate::render::latex::render_math(content.trim())));
+                    } else {
+                        plain.push_str("$$");
+                        plain.push_str(&content);
+                    }
+                } else {
+                    // Inline math `$…$`, with a KaTeX-style currency guard: a `$`
+                    // directly followed by whitespace or a digit (`$5`, `$ x`) is
+                    // a literal dollar sign, not a math opener.
+                    match chars.peek().copied() {
+                        Some(c) if c.is_whitespace() || c.is_ascii_digit() => {
+                            plain.push('$');
+                        }
+                        None => plain.push('$'),
+                        Some(_) => {
+                            let mut content = String::new();
+                            let mut closed = false;
+                            let mut prev = '\0';
+                            for c in chars.by_ref() {
+                                // A closing `$` must not be preceded by whitespace.
+                                if c == '$' && !prev.is_whitespace() {
+                                    closed = true;
+                                    break;
+                                }
+                                content.push(c);
+                                prev = c;
+                            }
+                            if closed && !content.is_empty() {
+                                flush_plain!();
+                                spans.push(Span::raw(crate::render::latex::render_math(&content)));
+                            } else {
+                                plain.push('$');
+                                plain.push_str(&content);
+                            }
+                        }
                     }
                 }
             }
@@ -895,9 +1218,19 @@ fn parse_chip_index(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_list_number, next_bare_url, parse_chip_index, parse_inline, trim_url_trailing,
-        wrap_text,
+        expand_tabs, format_list_number, is_setext_underline, next_bare_url, parse_chip_index,
+        parse_inline, parse_quote_depth, render_markdown, trim_url_trailing, wrap_text,
     };
+    use ratatui::style::Modifier;
+
+    /// Flatten a full render to per-line visible strings (OSC-8 stripped).
+    fn render_lines(src: &str, width: u16) -> Vec<String> {
+        render_markdown(src, width)
+            .lines
+            .iter()
+            .map(|l| strip_osc8(&l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()))
+            .collect()
+    }
 
     /// Strip OSC 8 wrappers so assertions test the *visible* text regardless of
     /// whether the test host's terminal enabled hyperlinks.
@@ -1021,5 +1354,110 @@ mod tests {
         let lines = super::render_table(&rows, 80, &theme);
         let data_row: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(data_row.contains("  x"), "{:?}", data_row);
+    }
+
+    // ── U-T31: combined bold-italic + setext headings ───────────────────────
+
+    #[test]
+    fn triple_star_is_bold_italic() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("say ***loud*** now", &theme);
+        assert_eq!(flat(&spans), "say loud now");
+        let strong = spans.iter().find(|s| s.content == "loud").expect("bold-italic span");
+        assert!(strong.style.add_modifier.contains(Modifier::BOLD));
+        assert!(strong.style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn triple_star_unclosed_is_literal() {
+        let theme = crate::style::theme();
+        let spans = parse_inline("***oops", &theme);
+        assert_eq!(flat(&spans), "***oops");
+    }
+
+    #[test]
+    fn setext_underline_detection() {
+        assert_eq!(is_setext_underline("==="), Some(1));
+        assert_eq!(is_setext_underline("---"), Some(2));
+        assert_eq!(is_setext_underline("=-="), None);
+        assert_eq!(is_setext_underline(""), None);
+    }
+
+    #[test]
+    fn setext_h1_and_h2_render() {
+        // "Title\n===" → one H1 line "Title" (+ a breathing-room blank).
+        let l = render_lines("Title\n===\n", 40);
+        assert_eq!(l[0], "Title");
+        // A dash underline after prose is H2, NOT a horizontal rule.
+        let l2 = render_lines("Subhead\n---\n", 40);
+        assert_eq!(l2[0], "Subhead");
+        assert!(!l2[0].contains('─'), "must not render as a horizontal rule");
+    }
+
+    #[test]
+    fn bare_dash_rule_still_works_without_preceding_prose() {
+        // No pending paragraph → `---` is a horizontal rule, not setext.
+        let l = render_lines("\n---\n", 20);
+        assert!(l.iter().any(|s| s.contains('─')), "{:?}", l);
+    }
+
+    // ── U-T8: inline LaTeX → Unicode ────────────────────────────────────────
+
+    #[test]
+    fn inline_math_converts_to_unicode() {
+        let theme = crate::style::theme();
+        assert_eq!(flat(&parse_inline("energy $E = mc^2$ here", &theme)), "energy E = mc² here");
+        assert_eq!(flat(&parse_inline("$\\alpha + \\beta$", &theme)), "α + β");
+        assert_eq!(flat(&parse_inline("water $H_2O$", &theme)), "water H₂O");
+    }
+
+    #[test]
+    fn dollar_currency_stays_literal() {
+        let theme = crate::style::theme();
+        // A `$` followed by a digit/space is not a math opener.
+        assert_eq!(flat(&parse_inline("it costs $5 and $10", &theme)), "it costs $5 and $10");
+    }
+
+    // ── U-T10: table-cell inline markdown, nested quotes, tabs, soft-breaks ──
+
+    #[test]
+    fn table_cell_inline_markdown_renders() {
+        let l = render_lines("| Name | Note |\n|---|---|\n| **bold** | `code` |\n", 60);
+        let body = l.join("\n");
+        assert!(body.contains("bold"), "{:?}", l);
+        assert!(!body.contains("**bold**"), "asterisks must be consumed: {:?}", l);
+        assert!(body.contains("code"), "{:?}", l);
+    }
+
+    #[test]
+    fn nested_blockquote_depth_and_gutters() {
+        assert_eq!(parse_quote_depth("> a"), (1, "a".to_string()));
+        assert_eq!(parse_quote_depth(">> b"), (2, "b".to_string()));
+        assert_eq!(parse_quote_depth("> > c"), (2, "c".to_string()));
+        // Two gutters for a depth-2 quote.
+        let l = render_lines(">> deep\n", 40);
+        assert_eq!(l[0].matches("│ ").count(), 2, "{:?}", l);
+    }
+
+    #[test]
+    fn tabs_expand_to_stops() {
+        assert_eq!(expand_tabs("a\tb", 4), "a   b");
+        assert_eq!(expand_tabs("ab\tc", 4), "ab  c");
+        assert_eq!(expand_tabs("abcd\te", 4), "abcd    e");
+        assert_eq!(expand_tabs("no tabs", 4), "no tabs");
+    }
+
+    #[test]
+    fn soft_break_merges_consecutive_prose_lines() {
+        // Two consecutive non-blank prose lines → one wrapped paragraph.
+        let l = render_lines("line one\nline two\n", 80);
+        assert_eq!(l, vec!["line one line two".to_string()]);
+    }
+
+    #[test]
+    fn hard_break_keeps_the_line_split() {
+        // Trailing two spaces force a hard break → two output lines.
+        let l = render_lines("line one  \nline two\n", 80);
+        assert_eq!(l, vec!["line one".to_string(), "line two".to_string()]);
     }
 }

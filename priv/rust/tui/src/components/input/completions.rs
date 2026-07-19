@@ -13,6 +13,9 @@ pub struct Completions {
     filter: String,
     max_visible: usize,
     scroll_offset: usize,
+    /// U-T6 — frecency ranker for the `/`-command popup. When the query is empty
+    /// (just typed `/`), recently & frequently used commands float to the top.
+    frecency: super::mentions::Frecency,
 }
 
 pub struct CompletionItem {
@@ -36,7 +39,14 @@ impl Completions {
             filter: String::new(),
             max_visible: 8,
             scroll_offset: 0,
+            frecency: super::mentions::Frecency::new(),
         }
+    }
+
+    /// U-T6 — record that `name` was chosen, so it ranks higher next time the
+    /// popup opens with an empty filter.
+    pub fn record(&mut self, name: &str) {
+        self.frecency.record(name);
     }
 
     pub fn set_items(&mut self, items: Vec<CompletionItem>) {
@@ -338,6 +348,20 @@ impl Completions {
         self.filtered = crate::util::fuzzy::rank(&self.items, &self.filter, |item| {
             item.name.strip_prefix('/').unwrap_or(&item.name)
         });
+        // U-T6 — with no filter yet (bare `/`), the fuzzy rank is just source
+        // order, so re-order the full list by frecency: the commands the user
+        // reaches for most often & most recently come first (CC recents-first).
+        // A non-empty query keeps the relevance-first fuzzy order untouched.
+        if self.filter.is_empty() && !self.filtered.is_empty() {
+            self.filtered.sort_by(|&a, &b| {
+                let (ka, kb) = (self.items[a].name.as_str(), self.items[b].name.as_str());
+                self.frecency
+                    .boost(kb)
+                    .partial_cmp(&self.frecency.boost(ka))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            });
+        }
         self.selected = 0;
         self.scroll_offset = 0;
     }

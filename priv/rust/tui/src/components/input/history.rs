@@ -19,6 +19,15 @@ pub struct History {
 }
 
 fn history_path() -> Option<PathBuf> {
+    named_history_path("tui_history")
+}
+
+/// U-T4 — separate on-disk bucket for `!`-shell submissions.
+fn shell_history_path() -> Option<PathBuf> {
+    named_history_path("tui_shell_history")
+}
+
+fn named_history_path(name: &str) -> Option<PathBuf> {
     // Cross-platform home resolution (see config/mod.rs::home_dir). BaseDirs
     // honors USERPROFILE on Windows, where HOME is normally unset — otherwise
     // command history is never loaded/persisted and up-arrow recall silently
@@ -26,7 +35,7 @@ fn history_path() -> Option<PathBuf> {
     let home = directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
         .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))?;
-    Some(home.join(".osa").join("tui_history"))
+    Some(home.join(".osa").join(name))
 }
 
 /// Encode a (possibly multi-line) entry into a single storage line.
@@ -79,8 +88,17 @@ impl History {
     /// Persistent history backed by `~/.osa/tui_history`, loading any existing
     /// entries. Falls back to in-memory if the home dir can't be resolved.
     pub fn persistent() -> Self {
+        Self::load_from(history_path())
+    }
+
+    /// U-T4 — persistent `!`-shell-command history (`~/.osa/tui_shell_history`),
+    /// a bucket separate from the prompt history.
+    pub fn shell_persistent() -> Self {
+        Self::load_from(shell_history_path())
+    }
+
+    fn load_from(path: Option<PathBuf>) -> Self {
         let max_size = DEFAULT_MAX;
-        let path = history_path();
         let entries = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
