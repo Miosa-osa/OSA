@@ -97,8 +97,12 @@ impl SseClient {
                     });
                     return;
                 }
-                Err(SseError::Disconnected(e)) => {
-                    attempt += 1;
+                Err(SseError::Disconnected { err: e, connected }) => {
+                    // D5: a drop that occurred AFTER the stream attached resets
+                    // the budget (a recovered blip must not accumulate toward
+                    // exhaustion); only genuine back-to-back connect FAILURES
+                    // that never reached the body burn it.
+                    attempt = next_reconnect_attempt(attempt, connected);
                     if attempt > MAX_RECONNECTS {
                         error!(
                             "SSE reconnect failed after {} attempts: {:?}",
@@ -156,7 +160,7 @@ impl SseClient {
         // Omitting .timeout() leaves reqwest at its default (no timeout).
         let http = HttpClient::builder()
             .build()
-            .map_err(|e| SseError::Disconnected(e.into()))?;
+            .map_err(|e| SseError::Disconnected { err: e.into(), connected: false })?;
 
         let mut req = http
             .get(&url)
@@ -170,7 +174,7 @@ impl SseClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| SseError::Disconnected(e.into()))?;
+            .map_err(|e| SseError::Disconnected { err: e.into(), connected: false })?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED
@@ -179,10 +183,10 @@ impl SseClient {
             return Err(SseError::AuthFailed);
         }
         if !status.is_success() {
-            return Err(SseError::Disconnected(anyhow::anyhow!(
-                "SSE stream returned {}",
-                status
-            )));
+            return Err(SseError::Disconnected {
+                err: anyhow::anyhow!("SSE stream returned {}", status),
+                connected: false,
+            });
         }
 
         // Signal connected
@@ -230,7 +234,9 @@ impl SseClient {
                             return Ok(());
                         }
                         Err(e) => {
-                            return Err(SseError::Disconnected(e.into()));
+                            // Read failure AFTER the body attached — a mid-stream
+                            // drop that the reconnect loop can recover cheaply.
+                            return Err(SseError::Disconnected { err: e.into(), connected: true });
                         }
                     }
                 }
@@ -239,11 +245,30 @@ impl SseClient {
     }
 }
 
+/// Next reconnect-attempt counter after a stream failure. A failure that
+/// happened after the body attached (`connected`) restarts the budget at 1 so a
+/// recovered mid-stream blip never accumulates toward "exhausted"; a pre-attach
+/// connect failure increments the running count. Pure + unit-testable.
+fn next_reconnect_attempt(attempt: u32, connected: bool) -> u32 {
+    if connected {
+        1
+    } else {
+        attempt + 1
+    }
+}
+
 #[derive(Debug)]
 enum SseError {
     AuthFailed,
     Cancelled,
-    Disconnected(anyhow::Error),
+    /// A network/stream failure. `connected` is true when the failure happened
+    /// AFTER the stream body was successfully attached (a mid-stream drop), so
+    /// the reconnect loop can reset its backoff budget for a recovered blip
+    /// rather than counting it toward permanent exhaustion.
+    Disconnected {
+        err: anyhow::Error,
+        connected: bool,
+    },
 }
 
 // =============================================================================
@@ -1379,6 +1404,23 @@ fn parse_warning(event_type: &str, err: serde_json::Error) -> BackendEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnect_budget_resets_after_a_recovered_blip() {
+        // A mid-stream drop (connected=true) restarts the budget at 1 so many
+        // recovered blips never trip "exhausted".
+        assert_eq!(next_reconnect_attempt(7, true), 1);
+        assert_eq!(next_reconnect_attempt(0, true), 1);
+        // A pre-attach connect failure (never reached the body) counts up.
+        assert_eq!(next_reconnect_attempt(0, false), 1);
+        assert_eq!(next_reconnect_attempt(3, false), 4);
+        // Repeated connect failures eventually exceed the budget.
+        let mut attempt = 0;
+        for _ in 0..(MAX_RECONNECTS + 1) {
+            attempt = next_reconnect_attempt(attempt, false);
+        }
+        assert!(attempt > MAX_RECONNECTS);
+    }
 
     #[test]
     fn parses_provider_retry() {

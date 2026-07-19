@@ -54,4 +54,38 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "API Error"
     end
   end
+
+  describe "missing API key (no-key handling)" do
+    test "classifies our own pre-flight not-configured errors as missing_api_key" do
+      assert Catalog.classify("ANTHROPIC_API_KEY not configured") == :missing_api_key
+      assert Catalog.classify("OPENAI_API_KEY not configured") == :missing_api_key
+      assert Catalog.classify("API key not configured") == :missing_api_key
+      assert Catalog.classify("No API key provided") == :missing_api_key
+      assert Catalog.classify("api key is required") == :missing_api_key
+    end
+
+    test "missing-key is distinct from an invalid-key 401" do
+      # A rejected key (401) still routes to invalid_api_key / auth, not
+      # missing_api_key; the guidance differs (re-auth vs add a key).
+      assert Catalog.classify("Anthropic returned 401: invalid x-api-key") == :invalid_api_key
+      refute Catalog.classify("Anthropic returned 401: invalid x-api-key") == :missing_api_key
+    end
+
+    test "message names the exact env var and provider, and every fix path" do
+      msg = Catalog.user_message("ANTHROPIC_API_KEY not configured")
+      assert msg =~ "Anthropic"
+      assert msg =~ "ANTHROPIC_API_KEY"
+      assert msg =~ "osa setup"
+      assert msg =~ "/login"
+      # Must NOT tell the user to "try again" as if it were transient, and must
+      # not misfile a no-key error under a generic retry hint.
+      refute msg =~ "switch models"
+    end
+
+    test "message falls back to generic guidance when no env var is present" do
+      msg = Catalog.user_message("API key not configured")
+      assert msg =~ "osa setup"
+      assert msg =~ "No API key configured"
+    end
+  end
 end

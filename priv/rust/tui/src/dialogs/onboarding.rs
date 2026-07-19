@@ -458,6 +458,21 @@ impl OnboardingWizard {
         self.identity_focus
     }
 
+    /// The provider id the user selected (e.g. "anthropic"). Used as a
+    /// post-setup display fallback so the header/status never render a
+    /// placeholder like "configured" when the backend echo is empty.
+    pub fn selected_provider_id(&self) -> Option<String> {
+        self.current_provider().map(|p| p.id.clone())
+    }
+
+    /// The model id the user chose (or the provider default), so the header
+    /// never renders a placeholder like "default". Empty resolves to None.
+    pub fn selected_model_id(&self) -> Option<String> {
+        self.build_result()
+            .map(|r| r.model)
+            .filter(|m| !m.is_empty())
+    }
+
     pub fn flow_channel_list() -> &'static [(&'static str, &'static str, &'static str)] {
         CHANNELS
     }
@@ -1720,6 +1735,36 @@ mod onboarding_tests {
         // Navigate the list too.
         let _ = wizard.handle_key(key(KeyCode::Down));
         draw_at_all_sizes(&wizard);
+    }
+
+    #[test]
+    fn selected_provider_and_model_are_real_values_not_placeholders() {
+        // Post-setup display must resolve to the user's actual choices, never a
+        // "configured" / "default" placeholder. With a static model list, the
+        // model id resolves even before the model step is reached (via the
+        // provider default), and the provider id is always the selected one.
+        let mut wizard = wizard_with(vec![serde_json::from_value(serde_json::json!({
+            "id": "anthropic", "name": "Anthropic", "requires_key": true,
+            "default_model": "claude-sonnet-4-6",
+            "models": [
+                { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "ctx": 1000000, "tools": true }
+            ]
+        }))
+        .unwrap()]);
+
+        assert_eq!(
+            wizard.selected_provider_id().as_deref(),
+            Some("anthropic"),
+            "provider id must be the real selection, not a placeholder"
+        );
+
+        // Walk to the model step and select the listed model.
+        let _ = wizard.handle_key(key(KeyCode::Enter)); // -> details
+        let _ = wizard.handle_key(key(KeyCode::Enter)); // -> model
+        let model = wizard.selected_model_id();
+        assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_ne!(model.as_deref(), Some("default"));
+        assert_ne!(model.as_deref(), Some(""));
     }
 
     #[test]

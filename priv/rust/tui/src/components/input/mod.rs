@@ -267,6 +267,28 @@ impl InputComponent {
         self.file_search_active
     }
 
+    /// True when the stored `@`-search anchor is still coherent with the live
+    /// cursor: the cursor sits strictly AFTER the anchor and the anchor byte is
+    /// still an '@'. Caret motions and edits don't cancel the search, so this
+    /// is the single guard the query/drain/submit paths use before slicing
+    /// `content[anchor+1..cursor]` (start > end / mid-codepoint would panic).
+    fn file_search_is_valid(&self) -> bool {
+        self.file_search_active
+            && self.cursor > self.file_search_start
+            && self.content.as_bytes().get(self.file_search_start) == Some(&b'@')
+    }
+
+    /// Cancel the `@`-search when a caret motion has moved the cursor out of the
+    /// active token (to/before the anchor) or otherwise invalidated it. Called
+    /// after every cursor-only move so the dropdown closes the instant the caret
+    /// leaves the mention, matching how the completions popup dismisses.
+    fn revalidate_file_search(&mut self) {
+        if self.file_search_active && !self.file_search_is_valid() {
+            self.file_search_active = false;
+            self.file_matches.clear();
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.content.trim().is_empty()
     }
@@ -493,7 +515,7 @@ impl InputComponent {
 
         // Slash command completions popup
         if self.content.starts_with('/') && !self.file_search_active {
-            let filter = &self.content[1..self.cursor]; // text after '/'
+            let filter = safe_str_range(&self.content, 1, self.cursor); // text after '/'
             self.completions.show(filter);
         } else {
             self.completions.hide();
@@ -609,7 +631,7 @@ impl InputComponent {
 
             // Update completions popup filter
             if self.content.starts_with('/') && !self.file_search_active {
-                let filter = &self.content[1..self.cursor];
+                let filter = safe_str_range(&self.content, 1, self.cursor);
                 self.completions.update_filter(filter);
             } else {
                 self.completions.hide();
@@ -643,6 +665,7 @@ impl InputComponent {
                 self.cursor = s;
             }
         }
+        self.revalidate_file_search();
     }
 
     fn move_right(&mut self) {
@@ -661,6 +684,7 @@ impl InputComponent {
                 self.cursor = e;
             }
         }
+        self.revalidate_file_search();
     }
 
     /// Current cursor column, measured in DISPLAY columns from the start of its
@@ -777,8 +801,10 @@ impl InputComponent {
     }
 
     fn handle_tab(&mut self) -> bool {
-        // Step 9: If file search is active, cycle through file matches
-        if self.file_search_active && !self.file_matches.is_empty() {
+        // Step 9: If file search is active, cycle through file matches.
+        // `file_search_is_valid` gates the drain: a stale anchor (caret moved
+        // before '@') would make `drain(anchor..cursor)` panic with start > end.
+        if self.file_search_is_valid() && !self.file_matches.is_empty() {
             self.snapshot();
             let selected = self.file_matches[self.file_match_index].insert.clone();
             self.file_frecency.record(&selected); // U-T6: reward this pick
@@ -843,15 +869,28 @@ impl InputComponent {
 
     /// Step 9: Rebuild file matches from cwd
     fn rebuild_file_matches(&mut self) {
-        // Extract the search query after '@'
-        let query_start = self.file_search_start + 1; // skip '@'
-        if query_start > self.content.len() {
+        // Caret motions (Home / Ctrl+A / Left / vim moves) can drag the cursor
+        // to or before the stored '@' anchor without cancelling the search, and
+        // an edit before the anchor can leave it no longer pointing at an '@'.
+        // A stale anchor here would slice `content[anchor+1..cursor]` with
+        // start > end (or off a codepoint) and abort the whole TUI, so
+        // revalidate first and bail cleanly.
+        if !self.file_search_is_valid() {
+            self.file_search_active = false;
             self.file_matches.clear();
             return;
         }
-        let query = &self.content[query_start..self.cursor];
+        // Extract the search query after '@'
+        let query_start = self.file_search_start + 1; // skip '@'
+        let query = safe_str_range(&self.content, query_start, self.cursor).to_string();
+        let query = query.as_str();
         if query.is_empty() {
-            self.file_matches.clear();
+            // Bare `@` (no query typed yet): show the workspace's top-level
+            // files & dirs, frecency-ranked, so the picker is populated
+            // immediately (CC/opencode show recent/root entries before any
+            // filter) instead of a blank dropdown.
+            self.file_matches = self.top_level_candidates();
+            self.file_match_index = 0;
             return;
         }
 
@@ -898,6 +937,43 @@ impl InputComponent {
 
         self.file_matches = scored.into_iter().take(10).map(|(_, _, _, c)| c).collect();
         self.file_match_index = 0;
+    }
+
+    /// The workspace's top-level (depth-1) files and dirs as mention
+    /// candidates, frecency-ranked then name-sorted, capped at 10. Feeds the
+    /// bare-`@` picker so it is never empty. Hidden and noise dirs
+    /// (node_modules/target/_build/deps) are skipped, matching `walk_dir`.
+    fn top_level_candidates(&self) -> Vec<Candidate> {
+        let mut cands: Vec<Candidate> = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(entries) = std::fs::read_dir(&cwd) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if name == "node_modules"
+                        || name == "target"
+                        || name == "_build"
+                        || name == "deps"
+                    {
+                        continue;
+                    }
+                    let is_dir = entry.path().is_dir();
+                    let rel = if is_dir { format!("{}/", name) } else { name };
+                    cands.push(Candidate::file(rel));
+                }
+            }
+        }
+        cands.sort_by(|a, b| {
+            self.file_frecency
+                .boost(&b.insert)
+                .partial_cmp(&self.file_frecency.boost(&a.insert))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.insert.cmp(&b.insert))
+        });
+        cands.truncate(10);
+        cands
     }
 
     fn walk_dir(
@@ -1367,7 +1443,7 @@ impl InputComponent {
             self.multiline = false;
         }
         if self.content.starts_with('/') && !self.file_search_active {
-            let filter = &self.content[1..self.cursor.min(self.content.len())];
+            let filter = safe_str_range(&self.content, 1, self.cursor);
             self.completions.update_filter(filter);
         } else {
             self.completions.hide();
@@ -1929,8 +2005,10 @@ impl Component for InputComponent {
                     // is accepted too for muscle-memory / terminals that map it.)
                     _ if crate::app::key_normalize::is_submit(key) =>
                     {
-                        // If file search dropdown is active and we have matches, select current match
-                        if self.file_search_active && !self.file_matches.is_empty() {
+                        // If file search dropdown is active and we have matches, select current match.
+                        // `file_search_is_valid` gates the drain against a stale
+                        // anchor (caret moved before '@' → start > end panic).
+                        if self.file_search_is_valid() && !self.file_matches.is_empty() {
                             let selected =
                                 self.file_matches[self.file_match_index].insert.clone();
                             self.file_frecency.record(&selected); // U-T6
@@ -2023,10 +2101,12 @@ impl Component for InputComponent {
                     // Home/End within input
                     (KeyCode::Home, KeyModifiers::NONE) => {
                         self.cursor = 0;
+                        self.revalidate_file_search();
                         return ComponentAction::Consumed;
                     }
                     (KeyCode::End, KeyModifiers::NONE) => {
                         self.cursor = self.content.len();
+                        self.revalidate_file_search();
                         return ComponentAction::Consumed;
                     }
                     // History up/down (only in single-line mode, not during file
@@ -2081,11 +2161,13 @@ impl Component for InputComponent {
                     // Ctrl+A: move to start
                     (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
                         self.cursor = 0;
+                        self.revalidate_file_search();
                         return ComponentAction::Consumed;
                     }
                     // Ctrl+E: move to end
                     (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
                         self.cursor = self.content.len();
+                        self.revalidate_file_search();
                         return ComponentAction::Consumed;
                     }
                     // Ctrl+K: kill from cursor to end of line (into the kill-ring)
@@ -2654,6 +2736,34 @@ impl Component for InputComponent {
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
     }
+}
+
+/// Panic-proof substring by byte range. Clamps both ends to `[0, len]`, treats
+/// an inverted range (`start >= end`, e.g. a stale `@`-anchor or a leading-`/`
+/// filter with the caret at 0) as empty, and snaps the ends INWARD to char
+/// boundaries so a multibyte codepoint can never split. Every composer slice
+/// that mixes a stored byte anchor with the live cursor MUST go through this —
+/// a raw `&content[a..b]` there aborts the whole TUI (start > end or a
+/// mid-codepoint index both panic).
+fn safe_str_range(s: &str, start: usize, end: usize) -> &str {
+    let len = s.len();
+    let start = start.min(len);
+    let end = end.min(len);
+    if start >= end {
+        return "";
+    }
+    let mut lo = start;
+    while lo < end && !s.is_char_boundary(lo) {
+        lo += 1;
+    }
+    let mut hi = end;
+    while hi > lo && !s.is_char_boundary(hi) {
+        hi -= 1;
+    }
+    if lo >= hi {
+        return "";
+    }
+    &s[lo..hi]
 }
 
 /// True when the cursor sits on the FIRST visual line of `content` (no newline
@@ -3520,6 +3630,115 @@ mod ws9_composer_tests {
         input.handle_event(&key(KeyCode::Down));
         // Last visual row → next logical line "zz", vcol clamped to its end.
         assert_eq!(input.cursor(), 41 + 2);
+    }
+
+    // ── Composer slice-safety: @-mention & leading-'/' panics (C1/C2) ────────
+
+    fn kev(code: KeyCode, mods: KeyModifiers) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, mods)))
+    }
+
+    fn type_chars(input: &mut InputComponent, s: &str) {
+        for c in s.chars() {
+            input.handle_event(&kev(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn safe_str_range_handles_inverted_clamped_and_multibyte() {
+        assert_eq!(safe_str_range("hello", 3, 1), ""); // start > end (would panic raw)
+        assert_eq!(safe_str_range("hello", 1, 3), "el");
+        assert_eq!(safe_str_range("hello", 2, 99), "llo"); // clamp upper
+        assert_eq!(safe_str_range("hello", 99, 100), ""); // clamp both
+        // "é" occupies bytes [0,2); a mid-codepoint index snaps INWARD so a
+        // raw slice's "byte index is not a char boundary" panic can't happen.
+        let s = "é";
+        assert_eq!(safe_str_range(s, 0, 1), ""); // hi snaps down to 0
+        assert_eq!(safe_str_range(s, 1, 2), ""); // lo snaps up to 2
+        assert_eq!(safe_str_range(s, 0, 2), "é");
+    }
+
+    #[test]
+    fn at_mention_home_then_type_does_not_panic() {
+        // C1 repro: `x@y`, Home, type → the stale '@' anchor once sliced
+        // content[3..1] (start > end) and aborted the whole TUI.
+        let mut input = fresh();
+        type_chars(&mut input, "x@y");
+        assert!(input.file_search_active());
+        input.handle_event(&kev(KeyCode::Home, KeyModifiers::NONE));
+        // Caret moved before the anchor → the @-search cancels.
+        assert!(!input.file_search_active());
+        type_chars(&mut input, "z"); // must NOT panic
+        assert_eq!(input.value(), "zx@y");
+    }
+
+    #[test]
+    fn at_mention_ctrl_a_then_multibyte_does_not_panic() {
+        // Ctrl+A (home) + a multibyte insert before the anchor: once a
+        // "byte index is not a char boundary" panic.
+        let mut input = fresh();
+        type_chars(&mut input, "x@y");
+        input.handle_event(&kev(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!input.file_search_active());
+        type_chars(&mut input, "é"); // must NOT panic
+        assert_eq!(input.value(), "éx@y");
+    }
+
+    #[test]
+    fn at_mention_stale_anchor_tab_and_enter_do_not_panic() {
+        // The Tab (handle_tab) and Enter (submit) drains of
+        // content[anchor..cursor] must not panic with a stale anchor.
+        let mut input = fresh();
+        type_chars(&mut input, "x@y");
+        input.handle_event(&kev(KeyCode::Home, KeyModifiers::NONE));
+        input.handle_event(&kev(KeyCode::Tab, KeyModifiers::NONE)); // no panic
+        input.handle_event(&kev(KeyCode::Enter, KeyModifiers::NONE)); // no panic
+    }
+
+    #[test]
+    fn slash_left_backspace_does_not_underflow() {
+        // C2 repro: `//`, Left, Backspace leaves "/" with cursor 0 →
+        // content[1..0] (range 1..0) once panicked.
+        let mut input = fresh();
+        type_chars(&mut input, "//");
+        input.handle_event(&kev(KeyCode::Left, KeyModifiers::NONE));
+        input.handle_event(&kev(KeyCode::Backspace, KeyModifiers::NONE)); // no panic
+        assert_eq!(input.value(), "/");
+        assert_eq!(input.cursor(), 0);
+        // A further backspace at cursor 0 is a no-op, still no panic.
+        input.handle_event(&kev(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(input.value(), "/");
+    }
+
+    #[test]
+    fn at_mention_selection_resolves_to_file_attachment() {
+        // End-to-end (no fs): `@Cargo.toml` submits as a File attachment that
+        // the submit path can carry as a context_ref.
+        use super::mentions::Attachment;
+        let mut input = fresh();
+        type_chars(&mut input, "see @Cargo.toml please");
+        let _ = input.submit();
+        let atts = input.take_attachments();
+        assert_eq!(
+            atts,
+            vec![Attachment::File { path: "Cargo.toml".into(), range: None }]
+        );
+    }
+
+    #[test]
+    fn at_mention_line_range_resolves_with_range() {
+        use super::mentions::{Attachment, LineRange};
+        let mut input = fresh();
+        type_chars(&mut input, "@src/main.rs#L10-20");
+        let _ = input.submit();
+        let atts = input.take_attachments();
+        assert_eq!(
+            atts,
+            vec![Attachment::File {
+                path: "src/main.rs".into(),
+                range: Some(LineRange { start: 10, end: Some(20) }),
+            }]
+        );
     }
 }
 

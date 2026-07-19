@@ -187,11 +187,35 @@ pub fn welcome_lines(
         Style::default().fg(border_color),
     )));
 
+    // First-run guidance: when no provider/key is configured, the single most
+    // important thing a brand-new user needs is how to add one. Show a clear,
+    // actionable line naming every fix path (parity with CC's "Please run
+    // /login" and opencode's "Run /connect to add an AI provider"). This takes
+    // priority over the generic tips below.
+    let w = width as usize;
+    let has_provider = provider
+        .map(|p| !p.is_empty() && p != "not configured")
+        .unwrap_or(false);
+    if !has_provider {
+        lines.push(Line::from(""));
+        let guide = if w >= 60 {
+            "  No provider configured  \u{00b7}  run /setup or /login to add an API key, then /model to pick a model"
+        } else {
+            "  No provider  \u{00b7}  run /setup to add a key"
+        };
+        lines.push(Line::from(Span::styled(
+            guide,
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD),
+        )));
+        return lines;
+    }
+
     // One calm, short hint line below the box — the essentials only. The old
     // wall of tips + resume affordances + a two-line first-run cheatsheet made
     // the first screen overwhelming (and overflowed the inline viewport); it's
     // collapsed to a single responsive line here. Kept in OSA blue.
-    let w = width as usize;
     lines.push(Line::from(""));
     let tip = if w >= 70 {
         "  /help for commands  \u{00b7}  @ to add files  \u{00b7}  Ctrl+K palette  \u{00b7}  Shift+Tab cycles modes"
@@ -271,6 +295,40 @@ mod welcome_tests {
             .take_while(|l| !l.spans.is_empty())
             .count();
         assert!(narrow_tail <= 1, "narrow tail too busy: {narrow_tail}");
+    }
+
+    #[test]
+    fn no_provider_shows_actionable_guidance() {
+        // A brand-new user with no provider/key configured must be told exactly
+        // what to do, not left with a bare "not configured" banner.
+        let lines = welcome_lines(92, 0, None, None, None);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("/setup") || text.contains("/login"),
+            "no-provider welcome must point at /setup or /login, got: {text}"
+        );
+
+        // "not configured" (the literal fallback) must also trigger the guidance.
+        let lines2 = welcome_lines(92, 0, Some("not configured"), None, None);
+        let text2: String = lines2
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text2.contains("/setup") || text2.contains("/login"));
+
+        // A configured provider shows the normal tips, NOT the no-provider line.
+        let lines3 = welcome_lines(92, 12, Some("anthropic"), Some("claude-sonnet-4-6"), None);
+        let text3: String = lines3
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!text3.contains("No provider configured"));
     }
 
     #[test]

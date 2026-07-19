@@ -72,6 +72,12 @@ impl App {
                     }
                     Some("auth_failed") => {
                         warn!("SSE auth failed after refresh attempt");
+                        // Auth failure is terminal (the client does NOT reconnect
+                        // on AuthFailed), so a live turn would spin forever. End it
+                        // cleanly before surfacing the error.
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                        }
                         self.toasts.push(
                             "SSE auth failed. Try /login to re-authenticate.".into(),
                             crate::components::toast::ToastLevel::Error,
@@ -118,10 +124,30 @@ impl App {
                         );
                     }
                     Some(err) => {
+                        // Unclassified disconnect. Never leave a live turn's
+                        // spinner stuck: finalize it and tell the user, then let
+                        // the internal backoff loop keep trying to re-attach.
                         warn!("SSE disconnected: {}", err);
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                            self.toasts.push(
+                                "Backend disconnected — turn ended. Reconnecting…".into(),
+                                crate::components::toast::ToastLevel::Warning,
+                            );
+                        }
                         self.sse_reconnecting = true;
                     }
                     None => {
+                        // Silent disconnect (no reason). Same rule: finalize a
+                        // live turn rather than freezing the spinner with no toast.
+                        warn!("SSE disconnected (no reason given)");
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                            self.toasts.push(
+                                "Backend disconnected — turn ended. Reconnecting…".into(),
+                                crate::components::toast::ToastLevel::Warning,
+                            );
+                        }
                         self.sse_reconnecting = true;
                     }
                 }
@@ -129,6 +155,21 @@ impl App {
             BackendEvent::SseReconnecting { attempt } => {
                 debug!("SSE reconnecting (attempt {})", attempt);
                 self.sse_reconnecting = true;
+                // D1: a mid-stream blip reconnects with a FRESH GET /stream/{id}
+                // carrying no Last-Event-ID, so the turn's finalizing
+                // AgentResponse emitted during the gap is lost and the spinner
+                // would spin forever. Finalize the in-flight turn on the FIRST
+                // reconnect attempt (like opencode finalizing the in-flight part
+                // on a stream error) instead of waiting for a completion frame
+                // that will never arrive. Gated on attempt == 1 so multiple
+                // backoff attempts don't re-toast or re-finalize.
+                if attempt == 1 && self.turn_is_active() {
+                    self.end_active_turn_on_disconnect();
+                    self.toasts.push(
+                        "Connection interrupted — turn ended. Reconnecting…".into(),
+                        crate::components::toast::ToastLevel::Warning,
+                    );
+                }
             }
             BackendEvent::StreamingToken { text, .. } => {
                 // Gate on the whole turn, not just `Processing`: ~20 overlays can
@@ -279,12 +320,18 @@ impl App {
 
                 // Build rich styled tool summary for the chat — pop the OLDEST
                 // pending args for this tool name (FIFO), matching call order.
-                let args = self
+                // `pending` is `None` when NO matching ToolCallStart was seen
+                // (out-of-order / duplicated / reconnect-replayed end frame): we
+                // have no args, so rendering would leave a permanent Read/Edit
+                // line with an EMPTY filename. Treat that as an orphan and skip
+                // building any scrollback line.
+                let pending = self
                     .pending_tool_args
                     .get_mut(&name)
                     .filter(|q| !q.is_empty())
-                    .map(|q| q.remove(0))
-                    .unwrap_or_default();
+                    .map(|q| q.remove(0));
+                let orphan = is_orphan_tool_end(pending.is_some());
+                let args = pending.unwrap_or_default();
                 // A foreground shell command just ended — it's no longer
                 // detachable. (A run_in_background shell was never counted here.)
                 if is_shell_tool(&name)
@@ -302,7 +349,15 @@ impl App {
                 // non-collapsible path does; collapsible runs fold into a summary
                 // with no per-call result slot.
                 let mut built_tool_message = false;
-                if kind.is_collapsible() {
+                if orphan {
+                    // No matching ToolCallStart: render nothing (an empty-args
+                    // tool line is worse than no line). Fall through to drain any
+                    // stashed ToolResult below so the map never leaks.
+                    debug!(
+                        "Orphan tool_call end with no matching start: {} ({}ms)",
+                        name, duration_ms
+                    );
+                } else if kind.is_collapsible() {
                     // A different collapsible kind breaks the run.
                     if !self.collapse.is_empty() && !self.collapse.family_matches(&kind) {
                         self.flush_collapse();
@@ -1889,11 +1944,33 @@ impl App {
                         "Setup complete!".into(),
                         crate::components::toast::ToastLevel::Success,
                     );
-                    let prov = resp.provider.as_deref().unwrap_or("configured");
-                    let mdl = resp.model.as_deref().unwrap_or("default");
-                    self.header.set_provider_info(prov, mdl);
-                    self.status.set_provider_info(prov, mdl);
-                    self.sidebar.set_provider_info(prov, mdl);
+                    // Prefer the backend's echoed provider/model; fall back to the
+                    // wizard's actual selection so the header/status/sidebar never
+                    // render a placeholder ("configured" / "default"). Only if both
+                    // are somehow absent do we show a neutral label.
+                    let wiz_prov = self
+                        .onboarding
+                        .as_ref()
+                        .and_then(|w| w.selected_provider_id());
+                    let wiz_model = self
+                        .onboarding
+                        .as_ref()
+                        .and_then(|w| w.selected_model_id());
+                    let prov = resp
+                        .provider
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or(wiz_prov)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let mdl = resp
+                        .model
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or(wiz_model)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    self.header.set_provider_info(&prov, &mdl);
+                    self.status.set_provider_info(&prov, &mdl);
+                    self.sidebar.set_provider_info(&prov, &mdl);
                     self.onboarding = None;
                     if self.state == AppState::Onboarding {
                         self.discard_overlay_return();
@@ -1973,17 +2050,9 @@ impl App {
                 // force the UI back to idle so the user isn't stuck.
                 if self.cancelled && self.state.is_processing() {
                     info!("Cancel timeout — forcing UI back to Idle");
-                    self.chat.clear_streaming();
-                    // Commit any completed-but-unflushed tool calls; drop the
-                    // partial streaming text deliberately.
-                    self.chat.flush_pending_tools();
-                    self.flush_collapse();
-                    self.stream_buf.clear();
-                    self.thinking_buf.clear();
-                    self.agent_header_sent = false;
-                    self.activity.stop();
-                    self.status.set_active(false);
-                    self.agents.task_completed(); // Clear agents panel
+                    // Shared teardown: flush finished tools, drop partial text,
+                    // reset per-turn buffers/spinner/status/agents.
+                    self.finalize_turn_state();
                     self.cancelled = false;
                     self.transition(AppState::Idle);
                     self.recompute_layout();
@@ -2084,6 +2153,14 @@ fn bg_shell_signature(name: &str, args: &str) -> String {
 /// in that window the result has nothing to attach to and must be held.
 fn tool_result_should_stash(call_args_still_queued: bool) -> bool {
     call_args_still_queued
+}
+
+/// D4 — a ToolCallEnd whose matching ToolCallStart never queued its args (an
+/// out-of-order / duplicated / reconnect-replayed end frame) is an ORPHAN.
+/// Rendering it would build a permanent Read/Edit scrollback line with an empty
+/// filename, so the handler suppresses the line for an orphan. Pure predicate.
+fn is_orphan_tool_end(had_pending_args: bool) -> bool {
+    !had_pending_args
 }
 
 /// Write a completion ping to the terminal via the channel-selected notifier
@@ -2204,5 +2281,13 @@ mod handle_backend_tests {
             !tool_result_should_stash(false),
             "result arriving after ToolCallEnd attaches directly"
         );
+    }
+
+    #[test]
+    fn orphan_tool_end_when_no_args_were_queued() {
+        // No matching start queued args → orphan → suppress the empty-args line.
+        assert!(is_orphan_tool_end(false));
+        // A real start queued args → render the tool line as usual.
+        assert!(!is_orphan_tool_end(true));
     }
 }

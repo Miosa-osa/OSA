@@ -658,12 +658,32 @@ impl App {
         )
     }
 
-    /// End the in-flight turn after a passive backend disconnect: stop the
-    /// activity spinner and return to `Idle`. If the turn is parked under an
-    /// open overlay, rewrite the parked `Processing` so closing the overlay
-    /// lands on `Idle` instead of a dead, frozen spinner.
-    pub(crate) fn end_active_turn_on_disconnect(&mut self) {
+    /// Shared per-turn teardown: commit completed-but-unflushed tool calls into
+    /// scrollback, drop the partial streaming text, and reset every per-turn
+    /// accumulator (stream/thinking buffers, header flag, collapse run, spinner,
+    /// status, agents panel). Extracted so the CancelTimeout path and the
+    /// disconnect path finalize identically and can never drift apart.
+    pub(crate) fn finalize_turn_state(&mut self) {
+        self.chat.clear_streaming();
+        // Commit any completed-but-unflushed tool calls; drop the partial
+        // streaming text deliberately.
+        self.chat.flush_pending_tools();
+        self.flush_collapse();
+        self.stream_buf.clear();
+        self.thinking_buf.clear();
+        self.agent_header_sent = false;
         self.activity.stop();
+        self.status.set_active(false);
+        self.agents.task_completed();
+    }
+
+    /// End the in-flight turn after a passive backend disconnect: finalize the
+    /// half-rendered message and pending tools (mirroring the CancelTimeout
+    /// path), then return to `Idle`. If the turn is parked under an open
+    /// overlay, rewrite the parked `Processing` so closing the overlay lands on
+    /// `Idle` instead of a dead, frozen spinner with a dangling bubble.
+    pub(crate) fn end_active_turn_on_disconnect(&mut self) {
+        self.finalize_turn_state();
         if self.state.is_processing() {
             self.transition(AppState::Idle);
         } else {
@@ -673,6 +693,7 @@ impl App {
                 }
             }
         }
+        self.recompute_layout();
     }
 
     /// Enter an overlay, remembering the caller on the return stack so closing

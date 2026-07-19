@@ -27,6 +27,8 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       "Prompt is too long · Run /compact to free context, or break the request into smaller parts.",
     credit_balance:
       "Credit balance is too low · Top up your provider account, or run /model to switch to a different provider.",
+    missing_api_key:
+      "No API key configured · Run `osa setup` (or /login) to add a provider key, then try again.",
     invalid_api_key:
       "Invalid or missing API key · Run /login to re-authenticate, or update the provider key in your settings.",
     token_revoked: "OAuth token revoked · Run /login to re-authenticate.",
@@ -107,6 +109,9 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       :rate_limit ->
         user_message({:rate_limited, nil})
 
+      :missing_api_key ->
+        missing_api_key_message(reason)
+
       :unknown ->
         "#{@api_error_prefix}: #{truncate(to_string_reason(reason), 300)} · Try again, or run /model to switch models."
 
@@ -161,6 +166,14 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
 
       String.contains?(down, "credit balance is too low") ->
         :credit_balance
+
+      # No key configured locally (our own pre-flight error, e.g.
+      # "ANTHROPIC_API_KEY not configured" / "API key not configured" /
+      # "no api key"). Distinct from a 401 invalid-key: retrying will not help;
+      # the user must add a key. Checked before the auth/invalid-key branches so
+      # the message points at `osa setup` instead of "re-authenticate".
+      missing_api_key?(down) ->
+        :missing_api_key
 
       String.contains?(down, "oauth token has been revoked") ->
         :token_revoked
@@ -241,6 +254,47 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         :unknown
     end
   end
+
+  # True when the reason describes a key that was never configured (as opposed
+  # to a key the provider rejected). Matches our own pre-flight strings and the
+  # common provider-agnostic phrasings.
+  defp missing_api_key?(down) do
+    String.contains?(down, "not configured") or String.contains?(down, "no api key") or
+      String.contains?(down, "api key not set") or String.contains?(down, "api key is required") or
+      String.contains?(down, "api key is missing") or String.contains?(down, "missing api key") or
+      String.contains?(down, "api_key not configured")
+  end
+
+  # Actionable, source-aware message for a missing key. Names the exact env var
+  # and provider when they can be recovered from the reason (e.g.
+  # "ANTHROPIC_API_KEY not configured"), so the guidance is copy-pasteable,
+  # matching the CC/grok pattern of listing every fix path.
+  defp missing_api_key_message(reason) do
+    text = to_string_reason(reason)
+
+    case Regex.run(~r/([A-Z][A-Z0-9]*_API_KEY)/, text) do
+      [_, env_var] ->
+        provider = env_var |> String.replace_suffix("_API_KEY", "") |> humanize_provider()
+
+        "#{@api_error_prefix}: No API key configured for #{provider} · Run `osa setup` " <>
+          "(or /login), or set #{env_var}=…, then try again."
+
+      _ ->
+        "#{@api_error_prefix}: #{Map.fetch!(@messages, :missing_api_key)}"
+    end
+  end
+
+  defp humanize_provider("ANTHROPIC"), do: "Anthropic"
+  defp humanize_provider("OPENAI"), do: "OpenAI"
+  defp humanize_provider("OPENROUTER"), do: "OpenRouter"
+  defp humanize_provider("OLLAMA"), do: "Ollama"
+  defp humanize_provider("MIOSA"), do: "MIOSA"
+  defp humanize_provider("GROQ"), do: "Groq"
+  defp humanize_provider("DEEPSEEK"), do: "DeepSeek"
+  defp humanize_provider("GOOGLE"), do: "Google"
+  defp humanize_provider("COHERE"), do: "Cohere"
+  defp humanize_provider("MISTRAL"), do: "Mistral"
+  defp humanize_provider(other), do: other |> String.downcase() |> String.capitalize()
 
   defp context_overflow?(down) do
     String.contains?(down, "prompt is too long") or String.contains?(down, "context_length") or
