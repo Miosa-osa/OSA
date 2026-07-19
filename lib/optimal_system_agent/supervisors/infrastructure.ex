@@ -87,6 +87,15 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       {DynamicSupervisor,
        name: OptimalSystemAgent.Monitor.WatchSupervisor, strategy: :one_for_one},
 
+      # Interactive PTY mechanism — Registry for session-id/name → worker lookup
+      # + DynamicSupervisor for per-session supervised PtySessions. This is the
+      # complement to shell_execute (which redirects stdin from /dev/null): it
+      # drives programs that REQUIRE a real tty (vim, REPLs, installer prompts).
+      # The `pty_*` builtin tools operate through Shell.Pty.Manager.
+      {Registry, keys: :unique, name: OptimalSystemAgent.Shell.Pty.Registry},
+      {DynamicSupervisor,
+       name: OptimalSystemAgent.Shell.Pty.Supervisor, strategy: :one_for_one},
+
       # OS template discovery and connection
       OptimalSystemAgent.OS.Registry,
 
