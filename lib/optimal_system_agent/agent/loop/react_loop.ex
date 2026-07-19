@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Limits
   alias OptimalSystemAgent.Agent.Loop.VerificationGate
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
+  alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
@@ -124,6 +125,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         {"Paused at iteration #{iter}. The agent stopped cooperatively; resume it or send a new message to continue.",
          state}
 
+      # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
+      # (identical gap fingerprints) or the run cap — stop burning budget on a
+      # goal that isn't making measurable progress instead of looping forever.
+      GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
+        snap = GoalTracker.snapshot(sid)
+        reason = Map.get(snap || %{}, :pause_reason, :no_progress)
+        Logger.info("[loop] Goal auto-paused (#{reason}) at iteration #{iter}")
+
+        Bus.emit(:system_event, %{
+          event: :goal_auto_paused,
+          session_id: sid,
+          iteration: iter,
+          reason: reason
+        })
+
+        {"Goal auto-paused (#{reason}): no measurable progress across turns. " <>
+           "Review the goal and resume, refine it, or send a new instruction.", state}
+
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
       # `max_budget_usd`; default nil = OFF, so long runs are never killed.
@@ -196,8 +215,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             ProactiveCompaction.should_compact?(state, cw) ->
               before_count = length(state.messages)
               compacted = ProactiveCompaction.compact(state.messages, state.session_id)
+              changed? = length(compacted) != before_count
 
-              if length(compacted) != before_count do
+              if changed? do
                 Observability.compaction(state, %{
                   strategy: :proactive,
                   messages_before: before_count,
@@ -206,7 +226,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
                 })
               end
 
+              # Flag a real compaction boundary so the terminal handler can inject a
+              # post-compaction continuation (cleared when the model continues with a
+              # tool call — see the tool-calls branch). Map.put, since the loop state
+              # is a plain map that may not have this key at every entry point.
               %{state | messages: compacted}
+              |> Map.put(:just_compacted, changed?)
+              |> Map.put(:just_compacted_overflow, false)
 
             ProactiveCompaction.should_microcompact?(state, cw) ->
               # Warning band: cheap standalone microcompact pass (truncate
@@ -228,6 +254,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Start async prefetches while we build context. In fast mode this also
     # grabs cheap workspace/git hints so the first model call is less blind.
     fast_prefetch_task = FastPath.prefetch_async(state)
+
+    # Advance the cross-turn goal tracker once per new top-level turn (iteration 0)
+    # so its reverify cadence + stall detection track real turn progress.
+    if state.iteration == 0, do: GoalTracker.tick_turn(state.session_id)
 
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
@@ -692,9 +722,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # `needs_verification?/1` self-gates on accumulated work + a run cap + a
       # stall early-exit, so it never fires on read-only turns. :gate injects the
       # panel's directive and loops; :pass falls through to the terminal finish.
-      goal_verifier_enabled?(state) and GoalVerifier.needs_verification?(state) ->
-        case GoalVerifier.check(state) do
-          {:gate, directive, state} ->
+      goal_verifier_enabled?(state) and GoalVerifier.needs_verification?(state) and
+          GoalTracker.reverify_due?(state.session_id) ->
+        # Run the skeptic panel, advance the cross-turn goal tracker with its
+        # verdict (which queues re-plan / keep-going Steer nudges and trips the
+        # stall + run-cap auto-pause internally), then gate or finish on the result.
+        {result, state} = GoalVerifier.verify(state)
+        GoalTracker.advance(state.session_id, result)
+
+        case result.verdict do
+          :complete ->
+            finish_turn(content, state)
+
+          _ ->
+            {directive, state} = GoalVerifier.build_directive(result, state)
+
             state = %{
               state
               | messages: state.messages ++ [%{role: "assistant", content: content}, directive],
@@ -702,9 +744,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             }
 
             run(state)
-
-          {:pass, state} ->
-            finish_turn(content, state)
         end
 
       # CC token-budget "work to target": when an explicit output-token target is
@@ -728,12 +767,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               "verification; do not stop early. If the task is genuinely complete, say so explicitly.]"
         }
 
-        state = %{
-          state
-          | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
-            iteration: state.iteration + 1,
-            target_continues: Map.get(state, :target_continues, 0) + 1
-        }
+        state =
+          %{state | messages: state.messages ++ [%{role: "assistant", content: content}, nudge], iteration: state.iteration + 1}
+          |> Map.put(:target_continues, Map.get(state, :target_continues, 0) + 1)
+
+        run(state)
+
+      # Post-compaction auto-continue (opencode parity): a turn that just crossed a
+      # compaction boundary and then produced no tool calls gets one synthetic
+      # "continue or ask" turn so a long task doesn't stall at the boundary. The
+      # flag is cleared here so it fires exactly once.
+      just_compacted?(state) and ProactiveCompaction.continuation_enabled?() ->
+        cont =
+          ProactiveCompaction.continuation_message(
+            overflow: Map.get(state, :just_compacted_overflow, false)
+          )
+
+        state =
+          %{state | messages: state.messages ++ [%{role: "assistant", content: content}, cont], iteration: state.iteration + 1}
+          |> Map.put(:just_compacted, false)
+          |> Map.put(:just_compacted_overflow, false)
 
         run(state)
 
@@ -832,6 +885,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       Application.get_env(:optimal_system_agent, :target_output_tokens)
   end
 
+  defp just_compacted?(state), do: Map.get(state, :just_compacted, false) == true
+
   # Forced model-authored wrap-up at the iteration cap. One tools-disabled model
   # turn so the user gets a real state summary + handoff instead of a canned
   # line. Fully guarded (try/rescue/catch + static fallback) so hitting the cap
@@ -902,9 +957,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     # Forward progress: a tool call resets the reasoning-only spin streak (the
     # reasoning-only doom-loop backstop counts only wasted, tool-less, empty
-    # generations — see the no-tool-call clause above). Map.put (not struct
-    # update) mirrors the ReasoningOnly detector's own state access.
-    state = Map.put(%{state | iteration: state.iteration + 1}, :reasoning_only_streak, 0)
+    # generations — see the no-tool-call clause above) AND clears the
+    # just-compacted flag (the model continued on its own, so no post-compaction
+    # continuation is needed). Map.put mirrors the detectors' own state access.
+    state =
+      %{state | iteration: state.iteration + 1}
+      |> Map.put(:reasoning_only_streak, 0)
+      |> Map.put(:just_compacted, false)
 
     content =
       if Scratchpad.inject?(state.provider) do
@@ -1132,11 +1191,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # image/video/audio/file blocks in the history to "[Attached <type>]" text
       # placeholders before retrying. Idempotent (placeholders are plain text) and
       # a no-op when there is no media.
-      state = %{
-        state
-        | messages: strip_media_from_messages(collapsed_messages),
-          overflow_retries: retry_num
-      }
+      state =
+        %{state | messages: strip_media_from_messages(collapsed_messages), overflow_retries: retry_num}
+        |> Map.put(:just_compacted, true)
+        |> Map.put(:just_compacted_overflow, true)
 
       run(state)
     else

@@ -596,6 +596,91 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # returns false for that session until a summarization succeeds, so an
   # irrecoverably-over-limit context can't burn an LLM call every iteration.
 
+  # ---------------------------------------------------------------------------
+  # Post-compaction auto-continue (opencode compaction.ts:472-502 parity)
+  # ---------------------------------------------------------------------------
+  #
+  # A folded `compact_boundary_content/1` message already tells the model to
+  # "resume directly" — but that instruction only reaches the model on the
+  # *same* LLM call that immediately follows compaction (OSA's proactive
+  # path runs compact/3 mid-turn, inside `do_iteration`, right before the
+  # request is built — there's no idle gap there for the loop to stall in).
+  #
+  # The genuine stall boundary is different: it's whichever point *hands
+  # control back* (the loop is about to return to the caller / go idle)
+  # immediately after a compaction happened in that turn. At that boundary a
+  # freshly-compacted, terser context can make the model produce a premature
+  # "wrap-up" reply and stop a multi-step task early — exactly what opencode's
+  # auto-continue turn exists to prevent. This function builds that synthetic
+  # continuation turn; it does NOT decide *whether* to inject it (see
+  # `continuation_enabled?/0` and the react_loop hook description below) —
+  # the caller must only splice it in at a genuine stall boundary, not on
+  # every compaction.
+
+  @continue_text "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+
+  @overflow_prefix "The previous request exceeded the provider's context window. The conversation was compacted (older messages summarized, and any large media attachments were removed) to free up space. If you were in the middle of a multi-step task, resume it using the summary above; if the user was asking about attachments that are no longer in view, explain that they were too large and ask them to resend if still needed.\n\n"
+
+  @doc """
+  Build the synthetic post-compaction continuation turn (opencode
+  `session/compaction.ts:472-502`, overflow variant at `:481`).
+
+  Returns a `role: "user"` message map with `synthetic: true` and a
+  `metadata.compaction_continue` marker (mirrors opencode's internal marker)
+  so downstream consumers — providers, telemetry, transcript rendering — can
+  distinguish this from a real user prompt.
+
+  ## Options
+
+    * `:overflow` (boolean, default `false`) — when `true`, prepends the
+      overflow-specific preamble explaining that context was compacted (and
+      media stripped) because the request exceeded the provider's size
+      limit. Mirrors opencode's `input.overflow` branch at `:481`. Use this
+      variant for the reactive `ContextCollapse` / media-overflow recovery
+      path; use the plain variant for the proactive threshold-crossing path.
+
+  This composes with — does NOT replace — `CompactionSafety.build_reminder_message/1`.
+  The reminder is a `role: "system"` message describing *what* is still
+  active (background tasks, TODOs, subagents); this is a `role: "user"`
+  message telling the model *to act* on that state. When both fire for the
+  same compaction, append the reminder first, then this continuation turn.
+  """
+  @spec continuation_message(keyword()) :: map()
+  def continuation_message(opts \\ []) when is_list(opts) do
+    overflow? = Keyword.get(opts, :overflow, false)
+
+    text =
+      if overflow? do
+        @overflow_prefix <> @continue_text
+      else
+        @continue_text
+      end
+
+    %{
+      role: "user",
+      content: text,
+      synthetic: true,
+      metadata: %{compaction_continue: true, overflow: overflow?}
+    }
+  end
+
+  @doc """
+  Whether the post-compaction auto-continue turn should be built/injected at
+  all. Config-gated separately from `enabled?/0` (proactive compaction can
+  stay on while auto-continue is off, e.g. for callers that want the context
+  savings but not the extra synthetic turn / LLM round trip).
+
+      config :optimal_system_agent, proactive_compaction_auto_continue: true
+
+  Defaults to `true`. The caller (react_loop) is still responsible for only
+  invoking `continuation_message/1` at a genuine stall boundary — this flag
+  is a global kill switch, not a per-call stall detector.
+  """
+  @spec continuation_enabled? :: boolean()
+  def continuation_enabled? do
+    Application.get_env(:optimal_system_agent, :proactive_compaction_auto_continue, true) == true
+  end
+
   @doc false
   def breaker_open?(session_id),
     do: failure_count(session_id) >= @max_consecutive_failures

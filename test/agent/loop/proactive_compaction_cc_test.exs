@@ -93,4 +93,55 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompactionCCTest do
 
     File.rm(path)
   end
+
+  describe "continuation_message/1 (post-compaction auto-continue)" do
+    test "normal case: plain continue turn, synthetic + marked" do
+      msg = ProactiveCompaction.continuation_message()
+
+      assert msg.role == "user"
+      assert msg.synthetic == true
+      assert msg.metadata == %{compaction_continue: true, overflow: false}
+      assert msg.content =~ "Continue if you have next steps"
+      refute msg.content =~ "exceeded the provider's context window"
+    end
+
+    test "overflow case: prepends media/overflow explanation before the continue text" do
+      msg = ProactiveCompaction.continuation_message(overflow: true)
+
+      assert msg.role == "user"
+      assert msg.synthetic == true
+      assert msg.metadata == %{compaction_continue: true, overflow: true}
+      assert msg.content =~ "exceeded the provider's context window"
+      assert msg.content =~ "media attachments were removed"
+      assert msg.content =~ "Continue if you have next steps"
+
+      # overflow explanation must come BEFORE the generic continue text
+      overflow_pos = :binary.match(msg.content, "context window") |> elem(0)
+      continue_pos = :binary.match(msg.content, "Continue if you have next steps") |> elem(0)
+      assert overflow_pos < continue_pos
+    end
+
+    test "continuation_enabled?/0 defaults to true and respects config override" do
+      assert ProactiveCompaction.continuation_enabled?() == true
+
+      Application.put_env(:optimal_system_agent, :proactive_compaction_auto_continue, false)
+      refute ProactiveCompaction.continuation_enabled?()
+    after
+      Application.delete_env(:optimal_system_agent, :proactive_compaction_auto_continue)
+    end
+
+    test "composes with (does not replace) the active-agent reminder: reminder is role:system, continuation is role:user" do
+      sid = "compose-#{System.unique_integer([:positive])}"
+
+      reminder = OptimalSystemAgent.Agent.CompactionSafety.build_reminder_message(sid)
+      continuation = ProactiveCompaction.continuation_message()
+
+      # No active background tasks/todos/subagents for a fresh session id -> nil,
+      # proving the reminder and continuation are independent, separately-gated
+      # pieces rather than one replacing the other.
+      assert reminder == nil
+      assert continuation.role == "user"
+      assert continuation.metadata.compaction_continue == true
+    end
+  end
 end
