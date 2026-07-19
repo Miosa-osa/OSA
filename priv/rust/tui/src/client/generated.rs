@@ -62,6 +62,23 @@ pub struct HealthBilling {
     pub usd_pricing: bool,
 }
 
+/// A structured `@`-mention carried onto the turn (composer `mentions::Attachment`
+/// minus IMAGE, which already rides `images`). `type` is "file" or "agent".
+/// For "file": `path` is set, `range` is an optional "start" or "start-end"
+/// line range (`#L10-20`). For "agent": `name` is set, `path`/`range` are omitted.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextRef {
+    /// "file" | "agent".
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 // === Orchestrate — POST /api/v1/orchestrate ===
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +97,12 @@ pub struct OrchestrateRequest {
     /// Attachments for vision-capable models: file paths or base64-encoded images.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
+    /// Non-image `@file` / `@agent` composer mentions, carried as structured
+    /// refs instead of only inline prompt text. Absent/empty is today's behavior
+    /// (unchanged) — the backend resolves each ref into a context block appended
+    /// to the prompt before the turn reaches the agent loop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_refs: Option<Vec<ContextRef>>,
 }
 
 /// 202 Accepted — the full reply arrives over the SSE stream.

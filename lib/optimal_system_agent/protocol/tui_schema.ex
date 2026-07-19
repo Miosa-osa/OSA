@@ -119,6 +119,18 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
 
       # === Orchestrate (POST /api/v1/orchestrate) ===
       %{
+        name: "ContextRef",
+        derive: :serialize,
+        doc:
+          "A structured `@`-mention carried onto the turn (composer `mentions::Attachment`\nminus IMAGE, which already rides `images`). `type` is \"file\" or \"agent\".\nFor \"file\": `path` is set, `range` is an optional \"start\" or \"start-end\"\nline range (`#L10-20`). For \"agent\": `name` is set, `path`/`range` are omitted.",
+        fields: [
+          f("kind", :string, rename: "type", doc: ~s{"file" | "agent".}),
+          f("path", {:option, :string}, skip_none: true),
+          f("range", {:option, :string}, skip_none: true),
+          f("name", {:option, :string}, skip_none: true)
+        ]
+      },
+      %{
         name: "OrchestrateRequest",
         derive: :serialize,
         section: "Orchestrate — POST /api/v1/orchestrate",
@@ -132,6 +144,11 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
           f("images", {:option, {:vec, :string}},
             skip_none: true,
             doc: "Attachments for vision-capable models: file paths or base64-encoded images."
+          ),
+          f("context_refs", {:option, {:vec, {:struct, "ContextRef"}}},
+            skip_none: true,
+            doc:
+              "Non-image `@file` / `@agent` composer mentions, carried as structured\nrefs instead of only inline prompt text. Absent/empty is today's behavior\n(unchanged) — the backend resolves each ref into a context block appended\nto the prompt before the turn reaches the agent loop."
           )
         ]
       },

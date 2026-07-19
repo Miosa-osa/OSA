@@ -77,6 +77,47 @@ pub fn mention_image_paths(atts: &[crate::components::input::mentions::Attachmen
         .collect()
 }
 
+/// The non-image `@file` (with optional `#L` range) and `@agent` mentions
+/// among composer attachments, converted into wire [`ContextRef`]s so the
+/// backend resolves them into real context instead of relying on the
+/// mention's inline text alone. IMAGE file mentions are excluded — those
+/// already ride `OrchestrateRequest.images` via [`mention_image_paths`].
+///
+/// [`ContextRef`]: crate::client::types::ContextRef
+pub fn mention_context_refs(
+    atts: &[crate::components::input::mentions::Attachment],
+) -> Vec<crate::client::types::ContextRef> {
+    use crate::client::types::ContextRef;
+    use crate::components::input::mentions::Attachment as M;
+
+    atts.iter()
+        .filter_map(|a| match a {
+            M::File { path, .. } if is_image_path(path) => None,
+            M::File { path, range } => Some(ContextRef {
+                kind: "file".to_string(),
+                path: Some(path.clone()),
+                range: range.as_ref().map(range_to_wire),
+                name: None,
+            }),
+            M::Agent { name } => Some(ContextRef {
+                kind: "agent".to_string(),
+                path: None,
+                range: None,
+                name: Some(name.clone()),
+            }),
+        })
+        .collect()
+}
+
+/// Render a [`LineRange`](crate::components::input::mentions::LineRange) as
+/// the wire's `"start"` / `"start-end"` string form.
+fn range_to_wire(range: &crate::components::input::mentions::LineRange) -> String {
+    match range.end {
+        Some(end) => format!("{}-{}", range.start, end),
+        None => range.start.to_string(),
+    }
+}
+
 /// Strip a single matching pair of surrounding quotes.
 fn unquote(s: &str) -> String {
     let s = s.trim();
@@ -258,6 +299,42 @@ mod prune_tests {
             mention_image_paths(&atts),
             vec!["docs/diagram.PNG".to_string(), "shot.jpeg".to_string()]
         );
+    }
+
+    #[test]
+    fn mention_context_refs_carries_non_image_file_and_agent() {
+        use crate::components::input::mentions::{Attachment as M, LineRange};
+        let atts = vec![
+            M::File { path: "docs/diagram.PNG".into(), range: None },
+            M::File {
+                path: "src/main.rs".into(),
+                range: Some(LineRange { start: 10, end: Some(20) }),
+            },
+            M::File { path: "README.md".into(), range: Some(LineRange { start: 5, end: None }) },
+            M::Agent { name: "debugger".into() },
+        ];
+        let refs = mention_context_refs(&atts);
+        // The image mention is excluded (it rides `images` instead).
+        assert_eq!(refs.len(), 3);
+
+        assert_eq!(refs[0].kind, "file");
+        assert_eq!(refs[0].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(refs[0].range.as_deref(), Some("10-20"));
+        assert_eq!(refs[0].name, None);
+
+        assert_eq!(refs[1].kind, "file");
+        assert_eq!(refs[1].path.as_deref(), Some("README.md"));
+        assert_eq!(refs[1].range.as_deref(), Some("5"));
+
+        assert_eq!(refs[2].kind, "agent");
+        assert_eq!(refs[2].name.as_deref(), Some("debugger"));
+        assert_eq!(refs[2].path, None);
+        assert_eq!(refs[2].range, None);
+    }
+
+    #[test]
+    fn mention_context_refs_empty_when_no_mentions() {
+        assert!(mention_context_refs(&[]).is_empty());
     }
 
     #[test]

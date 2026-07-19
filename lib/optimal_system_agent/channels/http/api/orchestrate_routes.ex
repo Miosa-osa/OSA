@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Protocol.ContextRefs
   alias OptimalSystemAgent.Runtime.SessionManager
 
   plug(:match)
@@ -62,13 +63,22 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
   # POST /api/v1/orchestrate — direct agent loop invocation
   post "/" do
-    input = conn.body_params["input"] || ""
+    raw_input = conn.body_params["input"] || ""
     session_id = conn.body_params["session_id"] || "session-#{System.unique_integer([:positive])}"
     user_id = conn.assigns[:user_id] || "anonymous"
     working_dir = conn.body_params["working_dir"]
     images = conn.body_params["images"] || []
+    context_refs = conn.body_params["context_refs"]
 
-    if input == "" do
+    # Deferred composer @-mentions piece: non-image `@file`/`@agent` refs
+    # arrive as structured `context_refs` (image refs already ride `images`).
+    # Resolve them into a context block appended to the prompt here, at the
+    # request/prompt-assembly boundary — Agent.Loop / ReactLoop only ever see
+    # the resulting plain string, so this is purely additive: an absent or
+    # empty `context_refs` leaves `input` byte-for-byte unchanged.
+    input = ContextRefs.inject(raw_input, context_refs, working_dir)
+
+    if raw_input == "" do
       conn
       |> put_resp_content_type("application/json")
       |> send_resp(

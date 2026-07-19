@@ -562,9 +562,10 @@ impl App {
         // inline text. `last_submit_kind` is consulted for logging only: SHELL
         // lines (`!cmd`) are already routed to the shell tool by `submit_input`
         // before this path, and MEMORY lines (`#note`) are intercepted at the
-        // key layer — so here the kind is always Prompt. Non-image file mentions
-        // and `@agent` mentions stay inline prompt text (carrying those as
-        // structured backend refs needs an OrchestrateRequest field — deferred).
+        // key layer — so here the kind is always Prompt. Non-image `@file`
+        // (with optional `#L` range) and `@agent` mentions carry as structured
+        // `context_refs` — the backend resolves each into a real context block
+        // instead of relying on the mention's inline text alone.
         let mention_atts = self.input.take_attachments();
         let submit_kind = self.input.last_submit_kind();
         for p in crate::app::attachment::mention_image_paths(&mention_atts) {
@@ -572,10 +573,12 @@ impl App {
                 wire_images.push(p);
             }
         }
+        let context_refs = crate::app::attachment::mention_context_refs(&mention_atts);
         if !mention_atts.is_empty() {
             tracing::debug!(
                 kind = ?submit_kind,
                 mentions = mention_atts.len(),
+                context_refs = context_refs.len(),
                 "consumed composer submit metadata"
             );
         }
@@ -583,6 +586,11 @@ impl App {
             None
         } else {
             Some(wire_images)
+        };
+        let context_refs = if context_refs.is_empty() {
+            None
+        } else {
+            Some(context_refs)
         };
 
         tokio::spawn(async move {
@@ -594,6 +602,7 @@ impl App {
                 skip_plan: None,
                 working_dir,
                 images,
+                context_refs,
             };
             let result = client.orchestrate(&req).await;
             let event = match result {
