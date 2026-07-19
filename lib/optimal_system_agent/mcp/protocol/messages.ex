@@ -48,31 +48,93 @@ defmodule OptimalSystemAgent.MCP.Protocol.Messages do
     JSONRPC.notification("notifications/initialized", %{})
   end
 
-  @doc "Build a `tools/list` request."
-  @spec list_tools(integer() | nil) :: map()
-  def list_tools(id \\ nil) do
-    JSONRPC.request("tools/list", %{}, id)
+  @doc """
+  Build a `tools/list` request, optionally continuing a page with `cursor`.
+
+  A `nil`/empty cursor requests the first page; a non-empty cursor is echoed
+  back verbatim to fetch the next page of a paginated listing.
+  """
+  @spec list_tools(integer() | nil, String.t() | nil) :: map()
+  def list_tools(id \\ nil, cursor \\ nil) do
+    params =
+      case cursor do
+        c when is_binary(c) and c != "" -> %{"cursor" => c}
+        _ -> %{}
+      end
+
+    JSONRPC.request("tools/list", params, id)
   end
 
-  @doc "Build a `tools/call` request for `name` with `arguments`."
-  @spec call_tool(String.t(), map(), integer() | nil) :: map()
-  def call_tool(name, arguments, id \\ nil) do
-    JSONRPC.request(
-      "tools/call",
-      %{"name" => name, "arguments" => arguments || %{}},
-      id
-    )
+  @doc """
+  Build a `tools/call` request for `name` with `arguments`.
+
+  When `progress_token` is given it is attached as `params._meta.progressToken`
+  so the server MAY emit `notifications/progress` for a long-running call; the
+  client uses those to reset its per-call timeout (see `ServerSession`).
+  """
+  @spec call_tool(String.t(), map(), integer() | nil, term()) :: map()
+  def call_tool(name, arguments, id \\ nil, progress_token \\ nil) do
+    params = %{"name" => name, "arguments" => arguments || %{}}
+
+    params =
+      if is_nil(progress_token),
+        do: params,
+        else: Map.put(params, "_meta", %{"progressToken" => progress_token})
+
+    JSONRPC.request("tools/call", params, id)
   end
+
+  @doc """
+  Extract the opaque pagination cursor from a `tools/list` result, or `nil`.
+
+  A present, non-empty `nextCursor` means more pages remain.
+  """
+  @spec next_cursor(map()) :: String.t() | nil
+  def next_cursor(%{"nextCursor" => c}) when is_binary(c) and c != "", do: c
+  def next_cursor(_), do: nil
 
   @doc """
   Extract the tool list from a `tools/list` result.
 
   Returns a list of raw MCP tool schema maps (each with `"name"`,
-  `"description"`, `"inputSchema"`).
+  `"description"`, `"inputSchema"`). Each tool is passed through
+  `sanitize_tool/1` so a server that ships a malformed `outputSchema` (an
+  unresolvable `$ref`, a non-object, etc.) doesn't take the whole listing
+  down — mirrors opencode's schema-tolerant `tools/list` retry.
   """
   @spec parse_tool_list(map()) :: [map()]
-  def parse_tool_list(%{"tools" => tools}) when is_list(tools), do: tools
+  def parse_tool_list(%{"tools" => tools}) when is_list(tools) do
+    tools
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(&sanitize_tool/1)
+  end
+
   def parse_tool_list(_), do: []
+
+  @doc """
+  Defensively sanitize one raw MCP tool schema map.
+
+  Drops an `outputSchema` that is broken — not a JSON-Schema object, or one
+  carrying an unresolvable `$ref` — rather than rejecting the tool. `inputSchema`
+  is what OSA feeds to the provider, so it is preserved as-is; only the
+  optional, frequently-broken `outputSchema` is stripped when unusable.
+  """
+  @spec sanitize_tool(map()) :: map()
+  def sanitize_tool(%{"outputSchema" => schema} = tool) do
+    if valid_output_schema?(schema), do: tool, else: Map.delete(tool, "outputSchema")
+  end
+
+  def sanitize_tool(tool), do: tool
+
+  # An outputSchema is usable only when it is a JSON-Schema object map. A bare
+  # top-level `$ref` (or any `$ref` we can't guarantee resolves) is the classic
+  # trigger for provider-side "can't resolve reference" rejections, so treat a
+  # top-level `$ref` object as broken and strip it.
+  defp valid_output_schema?(schema) when is_map(schema) do
+    not Map.has_key?(schema, "$ref")
+  end
+
+  defp valid_output_schema?(_), do: false
 
   @doc """
   Normalize an MCP `tools/call` result map into OSA's tool-result shape.

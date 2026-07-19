@@ -13,6 +13,20 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   On owner death or port exit the port is closed and `{:mcp_closed, ref, _}`
   is delivered. The GenServer traps exits so it can `Port.close/1` cleanly.
 
+  ## Descendant-process reaping
+
+  A plain `Port.close/1` sends `SIGKILL` only to the *direct* child. Real MCP
+  servers are usually launched via a wrapper (`npx` → `node`, `uvx` → `python`,
+  a shell one-liner…), so the direct child forks grandchildren that a bare
+  close orphans — they leak, keep ports open, and pin memory. Following grok's
+  `SafeTokioChildProcess`, we launch the child under `setsid -w` so it becomes
+  a session/process-group **leader** in its own group, then on teardown
+  `killpg` (`kill -KILL -<pgid>`) the whole group so grandchildren die with it.
+  `setsid -w` keeps the wrapper alive (it waits on the child), which lets us
+  resolve the child's stable pgid deterministically. When `setsid` is
+  unavailable (e.g. a bare macOS box) we degrade gracefully to a plain spawn
+  with direct-child-only cleanup.
+
   Implements `OptimalSystemAgent.MCP.Transport`.
   """
 
@@ -27,7 +41,11 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   # accumulated buffer with no newline exceeds this, we drop the oversized frame.
   @max_frame_bytes 16 * 1024 * 1024
 
-  defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil]
+  # Delay before probing for the child's pgid. `setsid -w` forks the real child
+  # a beat after spawn; a short probe lets that settle before we cache the group.
+  @pgid_probe_ms 200
+
+  defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil, reap: false, pgid: nil]
 
   # ── Transport API ─────────────────────────────────────────────────────
 
@@ -61,19 +79,26 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
         port_env =
           Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
+        # Wrap the child under `setsid -w` so it leads its own process group and
+        # the whole tree can be reaped on teardown. Falls back to a direct spawn
+        # when setsid is missing.
+        {spawn_exe, spawn_args, reap?} = maybe_wrap_setsid(exe, args)
+
         port =
           Port.open(
-            {:spawn_executable, exe},
+            {:spawn_executable, spawn_exe},
             [
               :binary,
               :exit_status,
               :hide,
-              {:args, args},
+              {:args, spawn_args},
               {:env, port_env}
             ]
           )
 
-        {:ok, %__MODULE__{port: port, owner: owner, ref: ref, name: name, exe: exe}}
+        if reap?, do: Process.send_after(self(), :cache_pgid, @pgid_probe_ms)
+
+        {:ok, %__MODULE__{port: port, owner: owner, ref: ref, name: name, exe: exe, reap: reap?}}
 
       {:error, reason} ->
         {:stop, {:executable_not_found, command, reason}}
@@ -98,6 +123,10 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
 
   @impl GenServer
   def handle_info({port, {:data, data}}, %{port: port} = state) do
+    # Opportunistically cache the pgid on first traffic — by the time a server
+    # speaks, `setsid -w` has certainly forked the real child.
+    state = ensure_pgid(state)
+
     {lines, buffer} = split_lines(state.buffer <> data)
     Enum.each(lines, &deliver_line(&1, state))
 
@@ -119,8 +148,15 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   end
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
+    # The wrapper (and thus the leader) has exited; reap any lingering
+    # grandchildren via the cached group before we forget it.
+    reap_group(state)
     notify_closed(state, {:exit_status, status})
     {:stop, :normal, %{state | port: nil}}
+  end
+
+  def handle_info(:cache_pgid, state) do
+    {:noreply, ensure_pgid(state)}
   end
 
   # Owner or a linked process died — shut down and close the port.
@@ -131,7 +167,12 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl GenServer
-  def terminate(_reason, %{port: port}) when is_port(port) do
+  def terminate(_reason, %{port: port} = state) when is_port(port) do
+    # Reap the whole process group FIRST (while the leader is still alive to
+    # anchor the pgid), then close the port. Resolve lazily here as a fallback
+    # in case first-traffic caching never happened.
+    state |> ensure_pgid() |> reap_group()
+
     try do
       Port.close(port)
     catch
@@ -141,7 +182,10 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
     :ok
   end
 
-  def terminate(_reason, _state), do: :ok
+  def terminate(_reason, state) do
+    reap_group(state)
+    :ok
+  end
 
   # ── Private ───────────────────────────────────────────────────────────
 
@@ -176,6 +220,95 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
       [last | rev_complete] -> {Enum.reverse(rev_complete), last}
       [] -> {[], ""}
     end
+  end
+
+  # ── Process-group reaping ─────────────────────────────────────────────
+
+  # Wrap the resolved executable under `setsid -w <exe> <args...>` so the child
+  # leads its own process group. Returns {spawn_exe, spawn_args, reap?}. When
+  # setsid isn't installed we spawn directly and skip reaping (best-effort).
+  defp maybe_wrap_setsid(exe, args) do
+    case System.find_executable("setsid") do
+      nil -> {exe, args, false}
+      setsid -> {setsid, ["-w", exe | args], true}
+    end
+  end
+
+  # Resolve and cache the child's process-group id once, from the (still alive)
+  # `setsid -w` wrapper's os_pid. No-op when reaping is off or already cached.
+  defp ensure_pgid(%{reap: false} = state), do: state
+  defp ensure_pgid(%{pgid: pgid} = state) when is_integer(pgid), do: state
+
+  defp ensure_pgid(%{port: port} = state) when is_port(port) do
+    with {:os_pid, os_pid} <- Port.info(port, :os_pid),
+         pgid when is_integer(pgid) <- resolve_pgid(os_pid) do
+      %{state | pgid: pgid}
+    else
+      _ -> state
+    end
+  end
+
+  defp ensure_pgid(state), do: state
+
+  # The wrapper's sole child is the group leader; its pid == its pgid.
+  defp resolve_pgid(os_pid) do
+    with [child | _] <- pgrep_children(os_pid),
+         {out, 0} <- System.cmd("ps", ["-o", "pgid=", "-p", child], stderr_to_stdout: true),
+         {pgid, _} <- Integer.parse(String.trim(out)) do
+      pgid
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp pgrep_children(os_pid) do
+    case System.cmd("pgrep", ["-P", Integer.to_string(os_pid)], stderr_to_stdout: true) do
+      {out, 0} -> out |> String.split() |> Enum.reject(&(&1 == ""))
+      _ -> []
+    end
+  rescue
+    _ -> []
+  end
+
+  # SIGKILL the whole process group (leader + grandchildren). `kill -KILL -<pgid>`
+  # targets a group; guarded so a degenerate pgid can never signal init or this
+  # very node's own group.
+  defp reap_group(%{pgid: pgid}) when is_integer(pgid) and pgid > 1 do
+    if killpg_safe?(pgid) do
+      _ = System.cmd("kill", ["-s", "KILL", "--", "-#{pgid}"], stderr_to_stdout: true)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp reap_group(_state), do: :ok
+
+  # Never killpg our own group (would SIGKILL the BEAM) or a group id ≤ 1.
+  defp killpg_safe?(pgid) do
+    pgid > 1 and pgid != own_pgid()
+  end
+
+  defp own_pgid do
+    self_pid = :os.getpid() |> List.to_string()
+
+    case System.cmd("ps", ["-o", "pgid=", "-p", self_pid], stderr_to_stdout: true) do
+      {out, 0} ->
+        case Integer.parse(String.trim(out)) do
+          {pgid, _} -> pgid
+          _ -> -1
+        end
+
+      _ ->
+        -1
+    end
+  rescue
+    _ -> -1
   end
 
   # Resolve a command to an absolute executable path. Absolute/relative paths

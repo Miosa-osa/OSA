@@ -85,18 +85,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
-      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :anthropic)
+      |> apply_image_budget(opts)
 
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing output
     timeout = if thinking, do: 600_000, else: 120_000
 
     try do
-      case Req.post("#{base_url}/messages",
-             json: body,
-             headers: headers,
-             receive_timeout: timeout
-           ) do
+      case Req.post("#{base_url}/messages", req_opts(body, headers, timeout, opts)) do
         {:ok, %{status: 200, body: resp}} ->
           content = extract_content(resp)
           tool_calls = extract_tool_calls(resp)
@@ -160,19 +156,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
-      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :anthropic)
+      |> apply_image_budget(opts)
 
     headers = build_headers(auth, thinking, model)
     # Extended thinking can take 300+ s before producing the first token
     timeout = if thinking, do: 600_000, else: 120_000
 
     try do
-      case Req.post("#{base_url}/messages",
-             json: body,
-             headers: headers,
-             receive_timeout: timeout,
-             into: :self
-           ) do
+      case Req.post("#{base_url}/messages", req_opts(body, headers, timeout, opts) ++ [into: :self]) do
         {:ok, %{status: 200} = resp} ->
           collect_stream(resp, callback, %{
             content: "",
@@ -506,6 +497,34 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       String.contains?(m, "sonnet-4") or String.contains?(m, "opus-4") -> 32_000
       String.contains?(m, "claude-3") -> 8_192
       true -> 32_000
+    end
+  end
+
+  # Apply the image byte-budget. Normally eviction is gated at the provider cap;
+  # when a header-aware retry decision asked for a 413 image-strip
+  # (`opts[:strip_images]`), force a full strip (cap 0) so *all* inline images
+  # are replaced with the honest placeholder before the retry.
+  defp apply_image_budget(body, opts) do
+    if Keyword.get(opts, :strip_images, false) do
+      OptimalSystemAgent.Providers.ImageBudget.apply(body,
+        provider: :anthropic,
+        cap_bytes: 0,
+        headroom_bytes: 0
+      )
+    else
+      OptimalSystemAgent.Providers.ImageBudget.apply(body, provider: :anthropic)
+    end
+  end
+
+  # Build the Req.post options keyword, honoring `:force_http1` (HTTP/1.1
+  # client rebuild to escape a poisoned HTTP/2 pool on the first 5xx retry).
+  defp req_opts(body, headers, timeout, opts) do
+    base = [json: body, headers: headers, receive_timeout: timeout]
+
+    if Keyword.get(opts, :force_http1, false) do
+      Keyword.put(base, :connect_options, protocols: [:http1])
+    else
+      base
     end
   end
 

@@ -344,7 +344,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # drop to the configured fallback chain below.
     retried =
       Resilience.with_retry(
-        fn -> apply_provider(module, messages, opts) end,
+        fn ctx -> apply_provider(module, messages, merge_retry_ctx(opts, ctx)) end,
         retry_opts(provider)
       )
 
@@ -435,7 +435,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     primary_result =
       if stream_capable?(module) do
         Resilience.with_retry(
-          fn -> native_stream(module, messages, callback, opts) end,
+          fn ctx -> native_stream(module, messages, callback, merge_retry_ctx(opts, ctx)) end,
           retry_opts(provider, on_retry)
         )
       else
@@ -651,6 +651,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # registry composes it: `Resilience.with_retry/2` retries the same provider
   # on transient failures, and only when those are exhausted do the fallback
   # helpers below drop to an alternate model/provider.
+
+  # Fold the per-attempt retry context (from Resilience.with_retry's classifier)
+  # into the provider opts so the request call-site can honor a header-aware
+  # decision: `:force_http1` (HTTP/1.1 client rebuild to escape a poisoned
+  # HTTP/2 pool on the first 5xx) and `:strip_images` (413 recovery).
+  defp merge_retry_ctx(opts, ctx) when is_map(ctx) do
+    opts
+    |> Keyword.put(:force_http1, Map.get(ctx, :force_http1, false))
+    |> Keyword.put(:strip_images, Map.get(ctx, :strip_images, false))
+  end
+
+  defp merge_retry_ctx(opts, _ctx), do: opts
 
   defp apply_provider({:compat, provider}, messages, opts) do
     try do

@@ -68,6 +68,12 @@ pub struct Chat {
     /// mutability lets the `&self` render paths populate it lazily, which also
     /// coalesces multiple tokens arriving between two frames into a single parse.
     stream_cache: RefCell<Option<StreamCache>>,
+    /// Frozen-tail incremental markdown renderer backing the live preview. Keeps
+    /// completed depth-0 blocks rendered-once and re-parses only the streaming
+    /// tail, so growing a long reply is ~O(N) instead of O(N²) full-buffer
+    /// re-parses. Produces output byte-identical to the legacy full-buffer
+    /// `render_markdown(&format!("{content}\u{2588}"), …)` path.
+    stream_renderer: RefCell<crate::render::markdown_stream::StreamingRenderer>,
 }
 
 impl Chat {
@@ -86,6 +92,9 @@ impl Chat {
             last_user_text: None,
             scrollback_started: false,
             stream_cache: RefCell::new(None),
+            stream_renderer: RefCell::new(
+                crate::render::markdown_stream::StreamingRenderer::new(80),
+            ),
         }
     }
 
@@ -305,6 +314,7 @@ impl Chat {
     pub fn clear_streaming(&mut self) {
         self.streaming_content = None;
         *self.stream_cache.borrow_mut() = None;
+        self.stream_renderer.borrow_mut().reset();
     }
 
     /// Parse the live streaming markdown at most once per (content length, width),
@@ -329,11 +339,17 @@ impl Chat {
             }
         }
 
-        // Cache miss: re-parse once. Match `draw_agent`'s body width (width − 2)
-        // and append the block cursor exactly as the old direct path did.
-        let with_cursor = format!("{}\u{2588}", content);
-        let body =
-            crate::render::markdown::render_markdown(&with_cursor, width.saturating_sub(2));
+        // Cache miss: refresh the frozen-tail renderer. It freezes completed
+        // depth-0 blocks and re-parses only the streaming tail (with the block
+        // cursor appended), so this is ~O(tail) rather than an O(N) full-buffer
+        // re-parse each time content grows. Match `draw_agent`'s body width
+        // (width − 2). Output is byte-identical to the legacy full-buffer path.
+        let body = {
+            let mut r = self.stream_renderer.borrow_mut();
+            r.set_width(width.saturating_sub(2));
+            r.update(content);
+            r.body_with_cursor()
+        };
         let height = (body.lines.len() as u16).max(1) + 1; // +1 for the "◈ OSA" label
 
         *self.stream_cache.borrow_mut() = Some(StreamCache {
@@ -360,6 +376,7 @@ impl Chat {
         self.has_messages = false;
         self.streaming_content = None;
         *self.stream_cache.borrow_mut() = None;
+        self.stream_renderer.borrow_mut().reset();
         self.last_agent_text = None;
         self.last_user_text = None;
         self.scrollback_started = false;

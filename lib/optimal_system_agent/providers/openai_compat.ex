@@ -53,7 +53,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     body =
       %{
         model: model,
-        messages: format_messages(messages)
+        messages: format_messages(messages) |> maybe_strip_images(opts)
       }
       |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
@@ -73,7 +73,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     timeout = Keyword.get(opts, :receive_timeout, 120_000)
 
     try do
-      case Req.post(url, json: body, headers: headers, receive_timeout: timeout) do
+      case Req.post(url, req_opts(body, headers, timeout, opts)) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} = choice | _]} = resp}} ->
           raw_content = msg["content"] || ""
           tool_calls = parse_tool_calls(msg, model)
@@ -121,7 +121,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     body =
       %{
         model: model,
-        messages: format_messages(messages),
+        messages: format_messages(messages) |> maybe_strip_images(opts),
         stream: true
       }
       |> maybe_add_temperature(model, opts)
@@ -152,18 +152,15 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       finish_reason: nil
     })
 
+    into = fn {:data, data}, {req, resp} ->
+      acc = Process.get(stream_key)
+      acc = handle_sse_chunk(data, callback, acc)
+      Process.put(stream_key, acc)
+      {:cont, {req, resp}}
+    end
+
     try do
-      case Req.post(url,
-             json: body,
-             headers: headers,
-             receive_timeout: timeout,
-             into: fn {:data, data}, {req, resp} ->
-               acc = Process.get(stream_key)
-               acc = handle_sse_chunk(data, callback, acc)
-               Process.put(stream_key, acc)
-               {:cont, {req, resp}}
-             end
-           ) do
+      case Req.post(url, req_opts(body, headers, timeout, opts) ++ [into: into]) do
         {:ok, %{status: status} = resp} when status != 200 ->
           # Non-200: Req still returns {:ok, _} and the error JSON body was fed
           # to the `into` callback (no `data:` prefix, so no SSE events emitted).
@@ -373,6 +370,45 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     callback.({:done, result})
     :ok
   end
+
+  # Build the Req.post options keyword, honoring a header-aware retry decision:
+  # `:force_http1` forces the request onto HTTP/1.1 (via Mint's `:protocols`)
+  # to escape a poisoned HTTP/2 connection pool on the first 5xx retry.
+  defp req_opts(body, headers, timeout, opts) do
+    base = [json: body, headers: headers, receive_timeout: timeout]
+
+    if Keyword.get(opts, :force_http1, false) do
+      Keyword.put(base, :connect_options, protocols: [:http1])
+    else
+      base
+    end
+  end
+
+  # Strip inline images from already-wire-formatted messages (413 recovery).
+  # Replaces each `image_url` content part with an honest text placeholder so
+  # the model does not hallucinate the removed image's contents.
+  defp maybe_strip_images(wire_messages, opts) do
+    if Keyword.get(opts, :strip_images, false) do
+      Enum.map(wire_messages, &strip_message_images/1)
+    else
+      wire_messages
+    end
+  end
+
+  @image_placeholder "[An image was removed to keep the request within its size limit. Do not describe or reason about its contents; ask the user to re-share it if needed.]"
+
+  defp strip_message_images(%{"content" => content} = msg) when is_list(content) do
+    new_content =
+      Enum.map(content, fn
+        %{"type" => "image_url"} -> %{"type" => "text", "text" => @image_placeholder}
+        %{type: "image_url"} -> %{"type" => "text", "text" => @image_placeholder}
+        other -> other
+      end)
+
+    Map.put(msg, "content", new_content)
+  end
+
+  defp strip_message_images(msg), do: msg
 
   @doc "Format messages into the OpenAI wire format."
   def format_messages(messages) do

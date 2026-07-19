@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   require Logger
 
   alias OptimalSystemAgent.Agent.Context.Budget
+  alias OptimalSystemAgent.Agent.Context.PromptTemplate
   alias OptimalSystemAgent.Agent.ProjectInstructions
   alias OptimalSystemAgent.Agent.Scratchpad
   alias OptimalSystemAgent.Agent.Tasks
@@ -830,33 +831,114 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp plan_mode_block(_), do: nil
 
+  # Logical tool key → candidate registered names, most-preferred first.
+  #
+  # The prompt refers to tools by these STABLE logical keys; the renderer
+  # resolves each to the FIRST candidate that is actually active in the live
+  # registry and injects that real name (grok's `tools.by_kind.X` idea). A
+  # rename / namespace / virtualization change is handled by adding the new
+  # name as a candidate — the prose then follows the live toolset. For OSA the
+  # canonical name usually IS the registered name, so most lists are singletons;
+  # `tool_search` carries grok's `search_tool` alias as an example of surviving
+  # a rename.
+  @prompt_tool_candidates %{
+    "ask_user" => ["ask_user"],
+    "task_write" => ["task_write"],
+    "file_read" => ["file_read"],
+    "file_write" => ["file_write"],
+    "file_edit" => ["file_edit"],
+    "file_grep" => ["file_grep"],
+    "file_glob" => ["file_glob"],
+    "dir_list" => ["dir_list"],
+    "web_fetch" => ["web_fetch"],
+    "shell_execute" => ["shell_execute"],
+    "codebase_explore" => ["codebase_explore"],
+    "delegate" => ["delegate"],
+    "mixture_of_agents" => ["mixture_of_agents"],
+    "tool_search" => ["tool_search", "search_tool"],
+    "use_tool" => ["use_tool"]
+  }
+
   defp tool_process_block(state) do
     cwd = Map.get(state, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
+    tools = resolve_prompt_tools(state)
 
-    """
+    template = """
     ## Act — don't just chat
     You are OSA, an agent, not a chatbot. When the user asks for anything that touches this machine or its code — read, find, write, edit, run, check, fix, verify — DO IT with your tools in THIS turn. Do not describe what you would do, do not ask permission to begin, do not hand back a plan when action was requested. Investigate by reading real files and running real commands instead of guessing or answering from memory. Interpret unclear or generic instructions in the context of the current working directory and the task at hand: if the user says rename `methodName` to snake_case, don't just reply `method_name` — find it in the code and change it. The user's UI shows every tool call, so narration is noise: fire the tools, then report the result.
 
-    When to just answer (no tools): greetings, opinions, and questions you can fully answer from knowledge already in context. When to ACT: anything that depends on real files, real state, or real command output — default to acting. You are highly capable; take on ambitious multi-step work rather than pushing it back to the user. When genuinely blocked after investigating — ambiguous requirements or a decision only the user can make — ask ONE crisp question with ask_user. If an approach fails, diagnose why before switching tactics: read the error, check your assumptions, try a focused fix. Don't retry the identical failing action blindly, and don't abandon a viable approach after one failure. Every response either makes progress with tool calls or delivers the finished result — never a bare description of intent.
+    When to just answer (no tools): greetings, opinions, and questions you can fully answer from knowledge already in context. When to ACT: anything that depends on real files, real state, or real command output — default to acting. You are highly capable; take on ambitious multi-step work rather than pushing it back to the user. When genuinely blocked after investigating — ambiguous requirements or a decision only the user can make — ask ONE crisp question with ${{ tools.ask_user }}. If an approach fails, diagnose why before switching tactics: read the error, check your assumptions, try a focused fix. Don't retry the identical failing action blindly, and don't abandon a viable approach after one failure. Every response either makes progress with tool calls or delivers the finished result — never a bare description of intent.
 
     ## Act with care — reversibility and blast radius
-    Local, reversible actions (reading files, editing code, running tests/builds/lints) — just do them, no permission needed. But before actions that are hard to reverse, affect shared state beyond this machine, or could destroy work, stop and confirm with the user first: deleting files/branches, `rm -rf`, dropping DB tables, force-pushing, `git reset --hard`, removing dependencies, pushing code, opening/commenting on PRs, sending messages, or posting to external services. A user approving such an action once does not authorize it in all future contexts. When you hit an obstacle, never use a destructive shortcut (e.g. `--no-verify`) to make it go away — find the root cause. Investigate unfamiliar files/branches/locks before overwriting; they may be the user's in-progress work. Measure twice, cut once.
+    Local, reversible actions (reading files, editing code, running tests/builds/lints) — just do them, no permission needed. But before actions that are hard to reverse, affect shared state beyond this machine, or could destroy work, stop and confirm with the user first: deleting files/branches, `rm -rf`, dropping DB tables, force-pushing, `git reset --hard`, removing dependencies, pushing code, opening/commenting on PRs, sending messages, or posting to external services. A user approving such an action once does not authorize it in all future contexts. When you hit an obstacle, never use a destructive shortcut (e.g. `--no-verify`) to make it go away — find the root cause. Investigate unfamiliar files/branches/locks before overwriting; they may be the user's in-progress work. Measure twice, cut once.${%- if tools.task_write %}
 
     ## Manage multi-step work
-    For any task with more than a couple of steps, use task_write to lay out the plan up front, then mark each item complete the moment it's done — do not batch completions. This keeps you focused and shows the user real progress. Stay on the listed tasks; don't wander.
+    For any task with more than a couple of steps, use ${{ tools.task_write }} to lay out the plan up front, then mark each item complete the moment it's done — do not batch completions. This keeps you focused and shows the user real progress. Stay on the listed tasks; don't wander.${%- endif %}
 
     ## Verify, then report faithfully
     Before claiming a task is done, prove it works: run the test, execute the script, run the build/lint, check the output. Minimum effort means no gold-plating, not skipping the finish line. If you cannot verify (no test exists, can't run it), say so explicitly rather than implying success. Report outcomes honestly: if tests fail, say so with the relevant output; never claim "all tests pass" when they don't, never quietly weaken a failing check to manufacture green. Equally, when a check did pass, state it plainly without hollow disclaimers or re-verifying what you already confirmed. The goal is an accurate report, not a defensive one.
 
     ## Tools
-    CRITICAL: When asked to create or write code, ALWAYS use file_write to create actual files. NEVER output code in markdown code blocks — use the tool instead. This is your most important rule.
-    Use tools proactively, and prefer the dedicated tool over shell so the user can review your work: file_read/file_edit/file_write over cat/sed/echo; file_grep/file_glob over grep/find; dir_list over ls; web_fetch over curl. Reserve shell_execute for real system/terminal work — git, mix, npm, docker, make. To locate code in a large codebase, use codebase_explore or file_grep. Tools not shown in your list are reachable via tool_search — search for one instead of assuming you lack it.
+    CRITICAL: When asked to create or write code, ALWAYS use ${{ tools.file_write }} to create actual files. NEVER output code in markdown code blocks — use the tool instead. This is your most important rule.
+    Use tools proactively, and prefer the dedicated tool over shell so the user can review your work: ${{ tools.file_read }}/${{ tools.file_edit }}/${{ tools.file_write }} over cat/sed/echo; ${{ tools.file_grep }}/${{ tools.file_glob }} over grep/find; ${{ tools.dir_list }} over ls; ${{ tools.web_fetch }} over curl. Reserve ${{ tools.shell_execute }} for real system/terminal work — git, mix, npm, docker, make. To locate code in a large codebase, use ${{ tools.codebase_explore }} or ${{ tools.file_grep }}.${%- if tools.tool_search or tools.use_tool %} Tools not shown in your list are reachable via ${{ tools.tool_search }} — search for one instead of assuming you lack it.${%- endif %}
 
-    ## When to delegate
-    Do the work yourself by default — you are capable and delegation adds latency. Reach for delegate to hand a WELL-SCOPED, independent subtask to a fresh subagent when it genuinely helps: a broad open-ended search across many files where you only need the conclusion (not every file's contents in your context), or two or more independent pieces of work that can run in parallel. Give the subagent a crisp, self-contained brief and a clear definition of done — it does not share your context. Use mixture_of_agents when you want several independent perspectives on one hard question, then synthesize. Do NOT delegate a task you can finish faster directly, and never delegate the final decision or the user-facing report — that is yours.
-    You can call multiple tools in one response. When several calls are independent (reading three files, grepping several patterns), fire them in PARALLEL in a single turn for speed. Only sequence calls when a later one depends on an earlier one's result.
-    Rules: read a file before editing it, and don't propose changes to code you haven't read; file_edit for surgical changes, file_write for new files/full rewrites; absolute paths (cwd: #{cwd}); prefer editing an existing file over creating a new one — don't create files unless necessary for the goal; answer concisely, lead with the action or result; don't add features, refactors, comments, or abstractions beyond what was asked.
+    ${%- if tools.delegate %}## When to delegate
+    Do the work yourself by default — you are capable and delegation adds latency. Reach for ${{ tools.delegate }} to hand a WELL-SCOPED, independent subtask to a fresh subagent when it genuinely helps: a broad open-ended search across many files where you only need the conclusion (not every file's contents in your context), or two or more independent pieces of work that can run in parallel. Give the subagent a crisp, self-contained brief and a clear definition of done — it does not share your context.${%- if tools.mixture_of_agents %} Use ${{ tools.mixture_of_agents }} when you want several independent perspectives on one hard question, then synthesize.${%- endif %} Do NOT delegate a task you can finish faster directly, and never delegate the final decision or the user-facing report — that is yours.
+    ${%- endif %}You can call multiple tools in one response. When several calls are independent (reading three files, grepping several patterns), fire them in PARALLEL in a single turn for speed. Only sequence calls when a later one depends on an earlier one's result.
+    Rules: read a file before editing it, and don't propose changes to code you haven't read; ${{ tools.file_edit }} for surgical changes, ${{ tools.file_write }} for new files/full rewrites; absolute paths (cwd: #{cwd}); prefer editing an existing file over creating a new one — don't create files unless necessary for the goal; answer concisely, lead with the action or result; don't add features, refactors, comments, or abstractions beyond what was asked.
     """
+
+    PromptTemplate.render(template, tools)
+  end
+
+  # Build the logical-key → live-name map for the prompt template from the live
+  # registry (or a `state[:active_tool_names]` override in tests). Only PRESENT
+  # tools land in the map, so `${%- if tools.KEY %}` sections gate correctly and
+  # `${{ tools.KEY }}` injects the real registered name.
+  #
+  # When the active set is unknown (registry not yet populated, e.g. in unit
+  # tests that build a bare state), we fall back to the full canonical set so
+  # the prompt renders exactly as before — no regression.
+  defp resolve_prompt_tools(state) do
+    case active_tool_set(state) do
+      :all ->
+        Map.new(@prompt_tool_candidates, fn {key, [primary | _]} -> {key, primary} end)
+
+      %MapSet{} = active ->
+        @prompt_tool_candidates
+        |> Enum.flat_map(fn {key, candidates} ->
+          case Enum.find(candidates, &MapSet.member?(active, &1)) do
+            nil -> []
+            name -> [{key, name}]
+          end
+        end)
+        |> Map.new()
+    end
+  end
+
+  defp active_tool_set(state) do
+    case Map.get(state, :active_tool_names) do
+      names when is_list(names) and names != [] ->
+        MapSet.new(names)
+
+      %MapSet{} = set ->
+        if MapSet.size(set) == 0, do: :all, else: set
+
+      _ ->
+        case safe_list_active_names() do
+          [] -> :all
+          names -> MapSet.new(names)
+        end
+    end
+  end
+
+  defp safe_list_active_names do
+    OptimalSystemAgent.Tools.Registry.list_active()
+    |> Enum.map(& &1.name)
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp environment_block(state) do

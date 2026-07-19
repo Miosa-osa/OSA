@@ -170,7 +170,23 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       assert Agent.get(counter, & &1) == 1
     end
 
-    test "respects a custom :max_attempts" do
+    test "respects a custom :max_attempts for generic retryable errors" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      Resilience.with_retry(
+        fn ->
+          Agent.update(counter, &(&1 + 1))
+          {:error, {:http_error, 500, "server"}}
+        end,
+        sleep: no_sleep(),
+        max_attempts: 5
+      )
+
+      # 1 initial + 4 retries = 5 total calls (server errors use the full budget).
+      assert Agent.get(counter, & &1) == 5
+    end
+
+    test "rate-limits (429) are capped at ~2 retries regardless of max_attempts" do
       {:ok, counter} = Agent.start_link(fn -> 0 end)
 
       Resilience.with_retry(
@@ -179,10 +195,13 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
           {:error, {:rate_limited, nil}}
         end,
         sleep: no_sleep(),
-        max_attempts: 5
+        max_attempts: 10
       )
 
-      assert Agent.get(counter, & &1) == 5
+      # Rate-limit waits are long; the classifier caps consecutive 429 retries at
+      # the rate-limit threshold (2) instead of burning the full budget: the fun
+      # is called only twice (1 initial + 1 capped retry) before falling back.
+      assert Agent.get(counter, & &1) == 2
     end
   end
 
@@ -200,8 +219,9 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
       )
 
       captured = Agent.get(events, & &1) |> Enum.reverse()
-      # 2 retries → 2 notifications.
-      assert length(captured) == 2
+      # 429s are capped at the rate-limit threshold (2) → a single capped retry
+      # notification before the classifier declares the 429 fatal.
+      assert length(captured) == 1
 
       first = hd(captured)
       assert first.attempt == 1

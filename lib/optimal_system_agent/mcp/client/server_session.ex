@@ -23,7 +23,7 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   alias OptimalSystemAgent.MCP.Config.Server
   alias OptimalSystemAgent.MCP.Protocol.{JSONRPC, Messages}
-  alias OptimalSystemAgent.MCP.Transport.Stdio
+  alias OptimalSystemAgent.MCP.Transport.{Http, SSEBackoff, Stdio}
 
   @registry OptimalSystemAgent.MCP.Registry
 
@@ -33,17 +33,35 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   # A stdio server whose transport opens but never replies to `initialize`
   # would otherwise sit in :connecting forever. Bound the handshake.
   @handshake_timeout_ms 30_000
+  # A connection must survive this long after a completed handshake before it
+  # counts as "stable" and resets the reconnect backoff. A stream that dies
+  # sooner is a rapid death and keeps the backoff escalating (grok's SSE
+  # 2s `STABLE_STREAM_THRESHOLD`). Prevents a flapping server from hot-looping.
+  @stable_after_ms 2_000
+  # Guard against a server that paginates its tool list forever (or loops on a
+  # repeated cursor); bound total pages defensively.
+  @max_list_pages 1_000
 
   defstruct [
     :server,
     :transport_mod,
     :transport,
     :ref,
+    :throttle,
     status: :connecting,
     tools: [],
     pending: %{},
     init_id: nil,
     list_id: nil,
+    # Pagination accumulator for a multi-page tools/list.
+    tools_acc: [],
+    list_cursors: nil,
+    list_pages: 0,
+    # Reconnect-stability tracking. `stable_ref` is the timer that, once fired,
+    # marks the current connection healthy; `conn_gen` invalidates stale timers.
+    stable_ref: nil,
+    conn_gen: 0,
+    stable?: false,
     backoff: @initial_backoff_ms
   ]
 
@@ -104,7 +122,13 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   @impl true
   def init(%Server{} = server) do
-    state = %__MODULE__{server: server, transport_mod: transport_mod(server)}
+    state = %__MODULE__{
+      server: server,
+      transport_mod: transport_mod(server),
+      throttle: SSEBackoff.new(base_ms: @initial_backoff_ms, max_ms: @max_backoff_ms),
+      list_cursors: MapSet.new()
+    }
+
     {:ok, state, {:continue, :connect}}
   end
 
@@ -126,13 +150,20 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
         {:reply, {:error, :no_transport}, state}
 
       true ->
-        msg = Messages.call_tool(tool, arguments)
+        # Attach a progressToken (the request id) so the server MAY emit
+        # `notifications/progress` for a long-running call; each such
+        # notification RESETS this call's timeout, so a tool that keeps
+        # reporting progress never trips the request timeout (opencode's
+        # `resetTimeoutOnProgress`).
+        msg = Messages.call_tool(tool, arguments, nil, nil)
         id = msg["id"]
+        msg = put_progress_token(msg, id)
 
         case send_msg(state, msg) do
           :ok ->
             timer = Process.send_after(self(), {:call_timeout, id}, timeout)
-            pending = Map.put(state.pending, id, {from, timer})
+            # Store the timeout so a progress notification can re-arm the timer.
+            pending = Map.put(state.pending, id, {from, timer, timeout})
             {:noreply, %{state | pending: pending}}
 
           {:error, reason} ->
@@ -160,11 +191,20 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
       {nil, _} ->
         {:noreply, state}
 
-      {{from, _timer}, pending} ->
+      {{from, _timer, _timeout}, pending} ->
         GenServer.reply(from, {:error, :timeout})
         {:noreply, %{state | pending: pending}}
     end
   end
+
+  # A stability timer fired: if it belongs to the CURRENT connection generation
+  # and the connection is still up, the stream has survived the stability window
+  # — mark it healthy and reset the reconnect backoff.
+  def handle_info({:mark_stable, gen}, %{conn_gen: gen, status: :ready} = state) do
+    {:noreply, %{state | stable?: true, throttle: SSEBackoff.mark_stable(state.throttle)}}
+  end
+
+  def handle_info({:mark_stable, _gen}, state), do: {:noreply, state}
 
   def handle_info({:handshake_timeout, id}, %{init_id: id} = state) when not is_nil(id) do
     # initialize is still pending after the deadline — the server started but
@@ -182,16 +222,40 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   # ── Connection ────────────────────────────────────────────────────────
 
-  defp connect(%{server: %Server{transport: :http_sse}} = state) do
-    # Phase 1 supports stdio only; HTTP/SSE is a Phase 2 transport.
-    Logger.info("[MCP:#{state.server.name}] http_sse transport not yet supported; skipping")
-    %{state | status: :failed}
-  end
-
   defp connect(%{server: server} = state) do
     ref = make_ref()
+    # New connection generation invalidates any stale stability timer and marks
+    # the connection not-yet-stable until it survives the stability window.
+    state = %{state | conn_gen: state.conn_gen + 1, stable?: false, stable_ref: nil}
+    mod = transport_mod(server)
+    opts = transport_opts(server, ref)
 
-    opts = [
+    case mod.start_link(opts) do
+      {:ok, transport} ->
+        Logger.info("[MCP:#{server.name}] #{server.transport} transport started, initializing")
+        state = %{state | transport_mod: mod, transport: transport, ref: ref, status: :connecting}
+        start_handshake(state)
+
+      {:error, reason} ->
+        Logger.warning("[MCP:#{server.name}] transport failed to start: #{inspect(reason)}")
+        schedule_reconnect(%{state | transport: nil, status: :failed})
+    end
+  end
+
+  # Build transport-specific start options. Stdio needs the subprocess spec;
+  # HTTP/SSE needs the URL + headers.
+  defp transport_opts(%Server{transport: :http_sse} = server, ref) do
+    [
+      owner: self(),
+      ref: ref,
+      name: server.name,
+      url: server.url,
+      headers: server.headers
+    ]
+  end
+
+  defp transport_opts(%Server{} = server, ref) do
+    [
       owner: self(),
       ref: ref,
       name: server.name,
@@ -199,17 +263,6 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
       args: server.args,
       env: server.env
     ]
-
-    case state.transport_mod.start_link(opts) do
-      {:ok, transport} ->
-        Logger.info("[MCP:#{server.name}] transport started, initializing")
-        state = %{state | transport: transport, ref: ref, status: :connecting}
-        start_handshake(state)
-
-      {:error, reason} ->
-        Logger.warning("[MCP:#{server.name}] transport failed to start: #{inspect(reason)}")
-        schedule_reconnect(%{state | transport: nil, status: :failed})
-    end
   end
 
   defp start_handshake(state) do
@@ -234,7 +287,7 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     case JSONRPC.decode(bin) do
       {:ok, {:response, id, result}} -> handle_response(id, result, state)
       {:ok, {:error, id, err}} -> handle_error(id, err, state)
-      {:ok, {:notification, _method, _params}} -> state
+      {:ok, {:notification, method, params}} -> handle_notification(method, params, state)
       {:ok, {:request, _id, _method, _params}} -> state
       {:error, reason} ->
         Logger.debug("[MCP:#{state.server.name}] decode failed: #{inspect(reason)}")
@@ -242,25 +295,94 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     end
   end
 
+  # A progress notification for an in-flight tool call: re-arm that call's
+  # timeout so a long-running tool that keeps reporting progress doesn't trip
+  # the request timeout. The progressToken is the request id we attached.
+  defp handle_notification("notifications/progress", %{"progressToken" => token}, state) do
+    case Map.get(state.pending, token) do
+      {from, timer, timeout} ->
+        cancel_timer(timer)
+        new_timer = Process.send_after(self(), {:call_timeout, token}, timeout)
+        %{state | pending: Map.put(state.pending, token, {from, new_timer, timeout})}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_notification(_method, _params, state), do: state
+
   defp handle_response(id, _result, %{init_id: id} = state) do
-    # initialize succeeded → send `initialized`, then request the tool list.
+    # initialize succeeded → send `initialized`, then request the first tool
+    # page. Don't reset the backoff yet: the connection must survive the
+    # stability window first (see `:mark_stable`), so a server that handshakes
+    # then dies instantly still escalates its reconnect delay.
     _ = send_msg(state, Messages.initialized())
-    list = Messages.list_tools()
+    list = Messages.list_tools(nil, nil)
+
+    state =
+      %{
+        state
+        | status: :ready,
+          init_id: nil,
+          tools_acc: [],
+          list_cursors: MapSet.new(),
+          list_pages: 0
+      }
+      |> arm_stability_timer()
 
     case send_msg(state, list) do
-      :ok ->
-        %{state | status: :ready, init_id: nil, list_id: list["id"], backoff: @initial_backoff_ms}
-
-      {:error, _reason} ->
-        %{state | status: :ready, init_id: nil, backoff: @initial_backoff_ms}
+      :ok -> %{state | list_id: list["id"]}
+      {:error, _reason} -> state
     end
   end
 
   defp handle_response(id, result, %{list_id: id} = state) do
-    tools = Messages.parse_tool_list(result)
-    Logger.info("[MCP:#{state.server.name}] discovered #{length(tools)} tools")
-    report_tools(state.server.name, tools)
-    %{state | tools: tools, list_id: nil}
+    page_tools = Messages.parse_tool_list(result)
+    acc = state.tools_acc ++ page_tools
+    cursor = Messages.next_cursor(result)
+    pages = state.list_pages + 1
+
+    cond do
+      # No more pages — finalize the aggregated tool list.
+      is_nil(cursor) ->
+        finalize_tools(acc, state)
+
+      # Defensive bounds: a repeated cursor is a server paginating in a loop;
+      # too many pages is a runaway. Stop and use what we have.
+      MapSet.member?(state.list_cursors, cursor) ->
+        Logger.warning(
+          "[MCP:#{state.server.name}] tools/list returned duplicate cursor; stopping pagination"
+        )
+
+        finalize_tools(acc, state)
+
+      pages >= @max_list_pages ->
+        Logger.warning(
+          "[MCP:#{state.server.name}] tools/list exceeded #{@max_list_pages} pages; stopping"
+        )
+
+        finalize_tools(acc, state)
+
+      # Fetch the next page.
+      true ->
+        next = Messages.list_tools(nil, cursor)
+
+        case send_msg(state, next) do
+          :ok ->
+            %{
+              state
+              | tools_acc: acc,
+                list_id: next["id"],
+                list_cursors: MapSet.put(state.list_cursors, cursor),
+                list_pages: pages
+            }
+
+          {:error, _reason} ->
+            # Can't fetch the next page — finalize with what we have.
+            finalize_tools(acc, state)
+        end
+    end
   end
 
   defp handle_response(id, result, state) do
@@ -268,7 +390,7 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
       {nil, _} ->
         state
 
-      {{from, timer}, pending} ->
+      {{from, timer, _timeout}, pending} ->
         cancel_timer(timer)
         GenServer.reply(from, {:ok, result})
         %{state | pending: pending}
@@ -282,7 +404,8 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   defp handle_error(id, err, %{list_id: id} = state) do
     Logger.warning("[MCP:#{state.server.name}] tools/list error: #{inspect(err)}")
-    %{state | list_id: nil}
+    # Finalize with whatever pages we accumulated before the error.
+    finalize_tools(state.tools_acc, state)
   end
 
   defp handle_error(id, err, state) do
@@ -290,7 +413,7 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
       {nil, _} ->
         state
 
-      {{from, timer}, pending} ->
+      {{from, timer, _timeout}, pending} ->
         cancel_timer(timer)
         GenServer.reply(from, {:error, {:mcp_error, err}})
         %{state | pending: pending}
@@ -299,15 +422,43 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   # ── Reconnect / cleanup ───────────────────────────────────────────────
 
+  # Rapid-death-aware reconnect backoff (grok's SSE throttle). A connection that
+  # reached the stability window (`stable?`) resets the delay; a rapid death, or
+  # a server that never connects, escalates it geometrically toward the cap.
   defp schedule_reconnect(state) do
-    backoff = state.backoff
-    Process.send_after(self(), :reconnect, backoff)
-    next = min(backoff * 2, @max_backoff_ms)
-    %{state | transport: nil, ref: nil, backoff: next}
+    {delay, throttle} = SSEBackoff.observe_death(state.throttle, state.stable?)
+    Process.send_after(self(), :reconnect, delay)
+
+    %{state | transport: nil, ref: nil, throttle: throttle, stable?: false, stable_ref: nil}
   end
 
+  # Arm a one-shot timer that, once elapsed, marks the CURRENT connection stable
+  # (resetting the backoff). A close before it fires leaves the backoff escalated.
+  defp arm_stability_timer(state) do
+    ref = Process.send_after(self(), {:mark_stable, state.conn_gen}, @stable_after_ms)
+    %{state | stable_ref: ref}
+  end
+
+  # Finalize a (possibly paginated) tools/list: publish the aggregated tools and
+  # clear pagination state.
+  defp finalize_tools(tools, state) do
+    Logger.info("[MCP:#{state.server.name}] discovered #{length(tools)} tools")
+    report_tools(state.server.name, tools)
+
+    %{state | tools: tools, list_id: nil, tools_acc: [], list_cursors: MapSet.new(), list_pages: 0}
+  end
+
+  # Attach a `_meta.progressToken` to an outbound tools/call so the server may
+  # emit progress notifications that reset the call timeout.
+  defp put_progress_token(%{"params" => params} = msg, token) do
+    meta = Map.get(params, "_meta", %{}) |> Map.put("progressToken", token)
+    %{msg | "params" => Map.put(params, "_meta", meta)}
+  end
+
+  defp put_progress_token(msg, _token), do: msg
+
   defp fail_pending(state, reason) do
-    Enum.each(state.pending, fn {_id, {from, timer}} ->
+    Enum.each(state.pending, fn {_id, {from, timer, _timeout}} ->
       cancel_timer(timer)
       GenServer.reply(from, {:error, reason})
     end)

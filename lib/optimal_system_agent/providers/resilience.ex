@@ -31,6 +31,11 @@ defmodule OptimalSystemAgent.Providers.Resilience do
 
   require Logger
 
+  alias OptimalSystemAgent.Providers.RetryClassifier
+
+  # Rate-limit retry cap shared with the classifier (grok RATE_LIMIT_RETRY_THRESHOLD).
+  @rate_limit_threshold 2
+
   @retryable_statuses [408, 409, 429, 500, 502, 503, 504, 529]
   @non_retryable_statuses [400, 401, 403, 404]
 
@@ -187,11 +192,18 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   @doc """
   Run `fun` and retry the **same** provider on retryable failures.
 
-  `fun` is a 0-arity function returning `{:ok, term}` | `:ok` (streaming) |
-  `{:error, reason}`. Successful and non-retryable results are returned
-  immediately. Retryable errors are retried with backoff until
-  `:max_attempts` is reached, after which the last error is returned so the
-  caller can fall back to an alternate provider.
+  `fun` is a function returning `{:ok, term}` | `:ok` (streaming) |
+  `{:error, reason}`. It may be **0-arity** (legacy) or **1-arity**, in which
+  case it receives a per-attempt context map
+  `%{attempt: n, force_http1: bool, strip_images: bool}` so the provider can
+  honor a header-aware retry decision (HTTP/1.1 client rebuild, image strip).
+  A 0-arity fun ignores those flags and simply degrades to a plain retry.
+
+  Classification is delegated to
+  `OptimalSystemAgent.Providers.RetryClassifier`, which honors `Retry-After`,
+  uses jittered exponential backoff (2s→30s ±20%), strips images on 413,
+  rebuilds the client on HTTP/1.1 for the first 5xx, caps rate-limit retries,
+  and keeps context-overflow fatal (surfaced up to the compaction path).
 
   ## Options
 
@@ -203,14 +215,17 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     * `:sleep`        — `fn ms -> any end` sleep function (default
       `Process.sleep/1`); injectable for tests.
   """
-  @spec with_retry((-> term()), keyword()) :: term()
-  def with_retry(fun, opts \\ []) when is_function(fun, 0) do
+  @spec with_retry((-> term()) | (map() -> term()), keyword()) :: term()
+  def with_retry(fun, opts \\ []) when is_function(fun, 0) or is_function(fun, 1) do
     max_attempts = Keyword.get_lazy(opts, :max_attempts, &max_attempts/0)
-    do_retry(fun, 1, max_attempts, opts, 0)
+    ctx = %{attempt: 1, force_http1: false, strip_images: false}
+    do_retry(fun, 1, max_attempts, opts, 0, false, ctx)
   end
 
-  defp do_retry(fun, attempt, max_attempts, opts, overloaded_count) do
-    result = fun.()
+  # `stripped?` guards against an image-strip loop: images are stripped once;
+  # a second 413 after stripping means there is nothing left to strip → fatal.
+  defp do_retry(fun, attempt, max_attempts, opts, overloaded_count, stripped?, ctx) do
+    result = invoke(fun, ctx)
 
     case result do
       {:error, reason} when attempt < max_attempts ->
@@ -227,22 +242,93 @@ defmodule OptimalSystemAgent.Providers.Resilience do
 
           result
         else
-          case classify(reason) do
-            {:retry, retry_after} ->
-              delay = backoff_ms(attempt, retry_after)
-              notify_retry(opts, attempt, max_attempts, delay, reason)
-              sleep_fn = Keyword.get(opts, :sleep, &Process.sleep/1)
-              sleep_fn.(delay)
-              do_retry(fun, attempt + 1, max_attempts, opts, overloaded_count)
+          # retry_count = retries already performed (attempt-1). max_retries is
+          # passed as max_attempts so the classifier's own budget guard never
+          # preempts the outer `attempt < max_attempts` loop bound for generic
+          # retryable errors — only the 429 rate-limit cap (min(_, threshold))
+          # tightens the budget. The outer guard owns overall termination.
+          decision =
+            RetryClassifier.classify(reason, attempt - 1, max_attempts,
+              rate_limit_threshold: @rate_limit_threshold
+            )
 
-            :no_retry ->
-              result
-          end
+          act_on(decision, result, reason, fun, attempt, max_attempts, opts, overloaded_count, stripped?)
         end
 
       _ ->
         result
     end
+  end
+
+  # Invoke a context-aware (arity-1) or legacy (arity-0) retried function.
+  defp invoke(fun, ctx) when is_function(fun, 1), do: fun.(ctx)
+  defp invoke(fun, _ctx) when is_function(fun, 0), do: fun.()
+
+  # ── Decision dispatch ─────────────────────────────────────────────────────
+
+  defp act_on({:retry, delay}, _result, reason, fun, attempt, max, opts, oc, stripped?) do
+    backoff_and_recurse(delay, false, false, reason, fun, attempt, max, opts, oc, stripped?)
+  end
+
+  defp act_on({:retry_with_backoff, delay, _rl?}, _result, reason, fun, attempt, max, opts, oc, stripped?) do
+    backoff_and_recurse(delay, false, false, reason, fun, attempt, max, opts, oc, stripped?)
+  end
+
+  defp act_on({:retry_with_client_rebuild, delay}, _result, reason, fun, attempt, max, opts, oc, stripped?) do
+    # First 5xx / transport failure: retry forcing HTTP/1.1 to escape a
+    # poisoned HTTP/2 pool. HTTP/1.1 is a best-effort optimization — a 0-arity
+    # (legacy) closure that can't honor the flag simply retries over the normal
+    # transport, a fine fallback, so this degrades silently (no warning).
+    force = is_function(fun, 1)
+    backoff_and_recurse(delay, force, false, reason, fun, attempt, max, opts, oc, stripped?)
+  end
+
+  defp act_on(:retry_with_image_strip, result, reason, fun, attempt, max, opts, oc, stripped?) do
+    cond do
+      stripped? ->
+        # Already stripped once and still 413 → nothing left to strip. Fatal.
+        Logger.warning("[resilience] 413 persists after image strip — giving up")
+        result
+
+      not is_function(fun, 1) ->
+        # Legacy fun can't strip images; degrade to fatal (a plain retry of the
+        # same oversized payload would just 413 again).
+        log_degrade("image strip", reason)
+        result
+
+      true ->
+        # Not counted against the retry budget: retry immediately with images
+        # dropped, WITHOUT advancing `attempt`.
+        notify_retry(opts, attempt, max, 0, reason)
+        ctx = %{attempt: attempt, force_http1: false, strip_images: true}
+        do_retry(fun, attempt, max, opts, oc, true, ctx)
+    end
+  end
+
+  defp act_on({:emit_to_session, _reason}, result, _reason, _fun, _attempt, _max, _opts, _oc, _stripped?) do
+    # Auth / credential errors: not a same-provider retry. Surface up so the
+    # caller can re-auth or fall back.
+    result
+  end
+
+  defp act_on({:fatal, _reason}, result, _reason, _fun, _attempt, _max, _opts, _oc, _stripped?) do
+    result
+  end
+
+  defp backoff_and_recurse(delay, force_http1?, strip?, reason, fun, attempt, max, opts, oc, stripped?) do
+    notify_retry(opts, attempt, max, delay, reason)
+    sleep_fn = Keyword.get(opts, :sleep, &Process.sleep/1)
+    sleep_fn.(delay)
+    next = attempt + 1
+    ctx = %{attempt: next, force_http1: force_http1?, strip_images: strip?}
+    do_retry(fun, next, max, opts, oc, stripped? or strip?, ctx)
+  end
+
+  defp log_degrade(what, reason) do
+    Logger.warning(
+      "[resilience] retry decision wanted #{what} but the request closure is not " <>
+        "context-aware (0-arity) — degrading to a plain outcome for: #{reason_to_string(reason)}"
+    )
   end
 
   defp notify_retry(opts, attempt, max_attempts, delay_ms, reason) do
