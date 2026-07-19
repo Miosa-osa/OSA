@@ -559,6 +559,11 @@ impl App {
             || self.transcript.is_some()
             || self.config_editor.is_some()
             || self.overdrive_confirm.is_some()
+            // Without this, /reasoning (no-arg) sets `reasoning_selector` but draw()
+            // takes the inline branch, leaving the selector's draw arm unreachable —
+            // an invisible modal that captures keystrokes. It must claim the full
+            // viewport like every other Option-overlay.
+            || self.reasoning_selector.is_some()
     }
 
     pub fn recompute_layout(&mut self) {

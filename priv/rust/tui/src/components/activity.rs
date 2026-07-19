@@ -23,6 +23,79 @@ pub enum ProcessingPhase {
     Synthesizing,
 }
 
+/// Why the turn is currently *blocked*, so the spinner can name the wait
+/// instead of showing a random flavor verb during a multi-minute stall (grok
+/// `WaitingReason::label()`, `acp/tracker.rs:124`). Set from the backend
+/// phase signal; `None` ⇒ fall back to the flavor verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingReason {
+    /// Waiting for the model to (re)start streaming (first token / post-tool gap).
+    Model,
+    /// Blocked on a running foreground subagent (`delegate` / `Task`).
+    Subagent,
+    /// Blocked polling/awaiting a background task's output.
+    TaskOutput,
+    /// Blocked until one or more background tasks finish.
+    Tasks,
+    /// Explicit sleep / await.
+    Sleeping,
+    /// Context auto-compaction in progress.
+    Compacting,
+    /// Verifying / finishing the response.
+    Verifying,
+}
+
+impl WaitingReason {
+    /// Human label for the spinner verb slot. No trailing ellipsis — the
+    /// spinner row appends `…` itself.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Model => "Waiting for response",
+            Self::Subagent => "Waiting on subagent",
+            Self::TaskOutput => "Waiting on task output",
+            Self::Tasks => "Waiting on tasks",
+            Self::Sleeping => "Sleeping",
+            Self::Compacting => "Compacting",
+            Self::Verifying => "Verifying",
+        }
+    }
+}
+
+/// Live retry / rate-limit state held on the spinner row during a mid-turn
+/// stall (grok `turn_status.rs:647`, opencode `prompt/index.tsx:1564`). OSA
+/// already receives `BackendEvent::ProviderRetry`; this lets the spinner label
+/// itself become `Retrying (attempt N/M)…` in warning-yellow with a live
+/// countdown, instead of cheerfully showing a flavor verb during the drop.
+#[derive(Debug, Clone)]
+pub struct RetryState {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    /// Provider-supplied reason (may be empty).
+    pub reason: String,
+    /// When the backend expects to resume (`now + delay_ms`); drives the
+    /// live "retrying in Ns" countdown.
+    pub resume_at: std::time::Instant,
+}
+
+/// Position of the moving shimmer/glimmer highlight sweeping across a verb of
+/// `len` chars at animation `tick` (CC `SpinnerAnimationRow` `glimmerIndex`).
+/// Sweeps left→right with a short tail gap so the glimmer visibly re-enters
+/// from the left rather than jumping. Returns an index; `>= len` means the
+/// highlight is currently in the off-screen tail (nothing lit).
+fn shimmer_index(tick: u32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let span = len + 3; // verb width + tail gap
+    (tick as usize) % span
+}
+
+/// Whether the pending-user pulse is in its bright phase at `tick` (grok's
+/// pulsing `◆`). Alternates every few ticks so the diamond breathes.
+fn pulse_bright(tick: u32) -> bool {
+    (tick / 3) % 2 == 0
+}
+
 /// Format large counts compactly (e.g. 1234 → "1.2k")
 fn format_count(n: usize) -> String {
     if n >= 1000 {
@@ -127,6 +200,13 @@ pub struct Activity {
     last_tool_name: String,
     input_tokens: u64,
     output_tokens: u64,
+    /// Reasoning tokens for the latest iteration (item 4). Included in the true
+    /// context total; not summed across iterations.
+    reasoning_tokens: u64,
+    /// Prompt-cache read tokens (item 4) — the cheap, already-cached context.
+    cache_read_tokens: u64,
+    /// Prompt-cache write tokens (item 4) — freshly cached this iteration.
+    cache_write_tokens: u64,
     /// Cumulative OUTPUT tokens across ALL LLM iterations this turn. `set_tokens`
     /// reports the CURRENT iteration's absolute count (which resets to a small
     /// number each new iteration), so the live "↓ N tokens" must sum them here
@@ -161,6 +241,19 @@ pub struct Activity {
     /// the concrete current step (e.g. "Wiring the checklist…") instead of a
     /// random flavor word. Cleared when no task is in progress.
     active_verb: Option<String>,
+    /// Live retry/rate-limit state (item 1). `Some` while the backend is
+    /// retrying a failed provider call; cleared the moment the turn resumes
+    /// (tokens/stream/non-Waiting phase).
+    retry: Option<RetryState>,
+    /// Named blocking reason (item 3). When the phase is `Waiting`, this
+    /// replaces the flavor verb with e.g. "Waiting on subagent…".
+    waiting_reason: Option<WaitingReason>,
+    /// Whether the turn is parked on the USER (permission prompt / question /
+    /// plan approval). Drives the pulsing ◆ "you're the blocker" cue (item 5).
+    pending_user: bool,
+    /// Reduced-motion flag (a11y): when true the shimmer sweep is disabled and
+    /// the verb renders in a single flat color.
+    reduced_motion: bool,
     pub verbosity: Verbosity,
     /// Screen-reader / plain-text mode. When true, `draw` emits a single static
     /// plain-language status line (no spinner, braille bars, or boxed chrome)
@@ -220,6 +313,9 @@ impl Activity {
             last_tool_name: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             turn_output_tokens: 0,
             last_iter_output: 0,
             stream_chars: 0,
@@ -234,9 +330,65 @@ impl Activity {
             thinking_since: None,
             thought_for: None,
             active_verb: None,
+            retry: None,
+            waiting_reason: None,
+            pending_user: false,
+            reduced_motion: false,
             verbosity: Verbosity::All,
             a11y: false,
         }
+    }
+
+    /// Enable/disable the shimmer sweep (reduced-motion a11y). When enabled the
+    /// verb renders flat; the discrete frame spinner is unaffected.
+    pub fn set_reduced_motion(&mut self, on: bool) {
+        self.reduced_motion = on;
+    }
+
+    /// Item 1 — begin/refresh the live retry indicator. Pass `None` to clear it
+    /// explicitly (e.g. on a fatal error path).
+    pub fn set_retry(&mut self, retry: Option<RetryState>) {
+        self.retry = retry;
+    }
+
+    /// Whether a retry indicator is currently held on the spinner row.
+    pub fn is_retrying(&self) -> bool {
+        self.retry.is_some()
+    }
+
+    /// Clear the retry indicator because the turn resumed. Called from every
+    /// "work is flowing again" path (tokens, stream/thinking chars, and any
+    /// non-Waiting phase transition).
+    fn clear_retry(&mut self) {
+        self.retry = None;
+    }
+
+    /// Item 3 — name the current blocking reason (or `None` to fall back to the
+    /// flavor verb). Only surfaced while the phase is `Waiting`.
+    pub fn set_waiting_reason(&mut self, reason: Option<WaitingReason>) {
+        self.waiting_reason = reason;
+    }
+
+    /// Item 5 — mark/unmark the turn as blocked on the USER (permission prompt,
+    /// question, or plan approval), driving the pulsing ◆ cue.
+    pub fn set_pending_user(&mut self, pending: bool) {
+        self.pending_user = pending;
+    }
+
+    /// Whether the turn is currently parked on the user.
+    pub fn pending_user(&self) -> bool {
+        self.pending_user
+    }
+
+    /// Item 4 — the true context-window token number: input + output(turn) +
+    /// reasoning + cache-read + cache-write (opencode `prompt/index.tsx:271`).
+    /// The output component is the turn-cumulative count the spinner shows.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.turn_output_tokens
+            + self.reasoning_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
     }
 
     /// Enable/disable screen-reader (plain-text) mode.
@@ -253,6 +405,19 @@ impl Activity {
     /// A running tool takes precedence (announces the concrete action); otherwise
     /// falls back to the active task step, then the processing-phase label.
     fn a11y_status(&self) -> String {
+        // Blocking states take precedence so a screen reader announces WHY the
+        // turn is stalled, not a flavor verb.
+        if self.pending_user {
+            return "waiting for your input".to_string();
+        }
+        if let Some(r) = self.retry.as_ref() {
+            return format!("retrying, attempt {} of {}", r.attempt, r.max_attempts);
+        }
+        if self.phase == ProcessingPhase::Waiting {
+            if let Some(reason) = self.waiting_reason {
+                return reason.label().to_lowercase();
+            }
+        }
         if let Some(entry) = self.tool_feed.iter().rev().find(|e| e.duration_ms.is_none()) {
             if entry.detail.is_empty() {
                 return format!("{} ({})", entry.verb, entry.name);
@@ -272,6 +437,9 @@ impl Activity {
         self.last_tool_name.clear();
         self.input_tokens = 0;
         self.output_tokens = 0;
+        self.reasoning_tokens = 0;
+        self.cache_read_tokens = 0;
+        self.cache_write_tokens = 0;
         self.turn_output_tokens = 0;
         self.last_iter_output = 0;
         self.stream_chars = 0;
@@ -284,6 +452,9 @@ impl Activity {
         self.start_time = Some(std::time::Instant::now());
         self.thinking_since = None;
         self.thought_for = None;
+        self.retry = None;
+        self.waiting_reason = None;
+        self.pending_user = false;
     }
 
     pub fn stop(&mut self) {
@@ -293,6 +464,9 @@ impl Activity {
         self.active_verb = None;
         self.thinking_since = None;
         self.thought_for = None;
+        self.retry = None;
+        self.waiting_reason = None;
+        self.pending_user = false;
     }
 
     /// Seconds since the spinner clock started (`start()`), if running. This is
@@ -334,6 +508,16 @@ impl Activity {
             self.thought_for = Some((secs, std::time::Instant::now()));
         }
         self.phase = phase;
+        // Any non-Waiting phase means the turn is producing work again, so a
+        // held retry indicator and a stale "waiting on X" reason are cleared
+        // (item 1/3: "clear on resume").
+        if phase != ProcessingPhase::Waiting {
+            self.clear_retry();
+            self.waiting_reason = None;
+            // The user's decision unblocked the turn (work is happening again),
+            // so the "you're the blocker" pulse is stale (item 5).
+            self.pending_user = false;
+        }
         if !self.active {
             self.active = true;
             self.start_time = Some(std::time::Instant::now());
@@ -358,10 +542,17 @@ impl Activity {
 
     pub fn add_stream_chars(&mut self, n: usize) {
         self.stream_chars += n;
+        // Output is flowing again → the turn resumed; drop any retry label.
+        if n > 0 {
+            self.clear_retry();
+        }
     }
 
     pub fn add_thinking_chars(&mut self, n: usize) {
         self.thinking_chars += n;
+        if n > 0 {
+            self.clear_retry();
+        }
     }
 
     pub fn set_model_name(&mut self, name: &str) {
@@ -438,6 +629,67 @@ impl Activity {
         };
         self.turn_output_tokens += delta;
         self.last_iter_output = output;
+        // A usage report means the provider call succeeded → the turn resumed;
+        // any retry indicator is now stale (item 1).
+        self.clear_retry();
+    }
+
+    /// Item 4 — richer usage report including the input, reasoning, and prompt-
+    /// cache (read/write) breakdown, so the live count reflects the true
+    /// context-window number instead of output-only. `input`/`output` are
+    /// threaded through `set_tokens` (which keeps the turn-cumulative output
+    /// monotonic); the cache/reasoning figures are the latest iteration's
+    /// absolute values.
+    pub fn set_tokens_detailed(
+        &mut self,
+        input: u64,
+        output: u64,
+        reasoning: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) {
+        self.reasoning_tokens = reasoning;
+        self.cache_read_tokens = cache_read;
+        self.cache_write_tokens = cache_write;
+        self.set_tokens(input, output);
+    }
+
+    /// Item 2 — render the verb with a moving shimmer/glimmer sweep (CC
+    /// `SpinnerAnimationRow` glimmerIndex). A bright highlight travels across
+    /// the glyphs, interpolating each char's color between the base spinner
+    /// tint and near-white by its distance from the highlight, giving the
+    /// "alive, streaming" feel. Under reduced-motion the verb is a single flat
+    /// span. The trailing `…` is appended by the caller path via this fn so the
+    /// ellipsis rides along uncolored-bright.
+    fn shimmer_verb_spans(&self, word: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> {
+        let base = Color::Rgb(147, 165, 255); // theme.spinner_verb() tint
+        if self.reduced_motion {
+            return vec![Span::styled(
+                format!("{}\u{2026}", word),
+                theme.spinner_verb(),
+            )];
+        }
+        let bright = Color::Rgb(232, 240, 255);
+        let chars: Vec<char> = word.chars().collect();
+        let len = chars.len();
+        let pos = shimmer_index(self.phrase_tick, len) as isize;
+        let radius = 2.0_f64; // highlight half-width in chars
+        let mut spans: Vec<Span<'static>> = chars
+            .into_iter()
+            .enumerate()
+            .map(|(i, ch)| {
+                let dist = (i as isize - pos).abs() as f64;
+                // 0 at the highlight, 1 at/beyond the radius.
+                let t = (1.0 - (dist / radius)).clamp(0.0, 1.0);
+                let color = crate::style::gradient::lerp_color(base, bright, t);
+                Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect();
+        spans.push(Span::styled("\u{2026}".to_string(), theme.spinner_verb()));
+        spans
     }
 
     /// Advance spinner animation on each tick
@@ -525,12 +777,6 @@ impl Component for Activity {
                               "\u{273d}", "\u{273b}", "\u{2736}", "\u{2733}", "\u{2722}", "\u{00b7}"];
         let spinner_char = spinner_frames[(self.phrase_tick as usize) % spinner_frames.len()];
 
-        // When a task is in progress, show its concrete active step (Claude Code's
-        // activeForm). Otherwise ONE flavor verb per turn (CC parity): each
-        // request seeds a different verb and keeps it for the whole turn instead
-        // of cycling every ~2s — see spinner_verb().
-        let word: &str = self.spinner_verb();
-
         // Output-token count for the "↓ N tokens" suffix. Use the turn-cumulative
         // count (summed across iterations), and fall back to / floor with a
         // char-based estimate (~4 chars/token) while streaming before the backend
@@ -551,6 +797,22 @@ impl Component for Activity {
         // all joined with " · " inside one dim paren group:
         //   ✳ Pondering… (esc to interrupt · 12s · ↓ 1.2k tokens · thinking)
         let mut parts: Vec<String> = vec!["esc to interrupt".to_string(), elapsed_str];
+
+        // Item 1 — live retry countdown, right after the timer so the stall is
+        // the most prominent status after "esc to interrupt · Ns".
+        if let Some(r) = self.retry.as_ref() {
+            let remaining = r
+                .resume_at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+            if remaining > 0 {
+                parts.push(format!("retrying in {}s", remaining));
+            }
+            if !r.reason.trim().is_empty() {
+                parts.push(r.reason.clone());
+            }
+        }
+
         // Show the live token count as soon as tokens actually flow — no 30s
         // gate. On a long in-depth turn the user needs to SEE tokens ticking to
         // trust that work is happening; hiding the count for 30s read as "frozen".
@@ -562,6 +824,16 @@ impl Component for Activity {
             };
             parts.push(format!("{} {} tokens", arrow, format_count(tokens)));
         }
+        // Item 4 — surface the input + cache breakdown so the count reflects the
+        // true context-window number, not output-only. Input is already tracked
+        // but was never shown; cache read+write is folded into one "⚡ cached".
+        if self.input_tokens > 0 {
+            parts.push(format!("\u{2191} {} in", format_count(self.input_tokens as usize)));
+        }
+        let cached = self.cache_read_tokens + self.cache_write_tokens;
+        if cached > 0 {
+            parts.push(format!("\u{26A1} {} cached", format_count(cached as usize)));
+        }
         // "thinking" while reasoning deltas stream; "thought for Ns" lingers
         // 2s after the stretch ends (CC's minimum-display window), expiring by
         // age — draw never mutates.
@@ -572,11 +844,64 @@ impl Component for Activity {
                 parts.push(format!("thought for {}s", secs));
             }
         }
-        let mut spinner_spans: Vec<Span<'_>> = vec![
-            Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
-            Span::styled(format!("{}\u{2026}", word), theme.spinner_verb()),
-            Span::styled(format!(" ({})", parts.join(" \u{00b7} ")), theme.faint()),
-        ];
+
+        // ── Spinner glyph + verb selection ──────────────────────────────
+        // Priority of what the spinner row telegraphs:
+        //   1. pending-user  → pulsing ◆ "Waiting for your input" (you're the blocker, item 5)
+        //   2. retry/stall   → warning "Retrying (attempt N/M)…" (item 1)
+        //   3. waiting-reason→ named "Waiting on subagent…" (item 3)
+        //   4. normal        → shimmer spinner + flavor/activeForm verb (item 2)
+        let (glyph_span, verb_spans): (Span<'_>, Vec<Span<'_>>) = if self.pending_user {
+            // Pulsing ◆ in the accent color — one consistent "your turn" cue.
+            let color = if pulse_bright(self.phrase_tick) {
+                theme.colors.primary
+            } else {
+                theme.colors.muted
+            };
+            (
+                Span::styled(
+                    "\u{25C6} ".to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                vec![Span::styled(
+                    "Waiting for your input\u{2026}".to_string(),
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            )
+        } else if let Some(r) = self.retry.as_ref() {
+            let warn = Style::default().fg(theme.colors.warning);
+            (
+                Span::styled(format!("{} ", spinner_char), warn),
+                vec![Span::styled(
+                    format!("Retrying (attempt {}/{})\u{2026}", r.attempt, r.max_attempts),
+                    warn.add_modifier(Modifier::BOLD),
+                )],
+            )
+        } else if self.phase == ProcessingPhase::Waiting && self.waiting_reason.is_some() {
+            let label = self.waiting_reason.unwrap().label();
+            (
+                Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
+                vec![Span::styled(format!("{}\u{2026}", label), theme.spinner_verb())],
+            )
+        } else {
+            // When a task is in progress, show its concrete active step (Claude
+            // Code's activeForm). Otherwise ONE flavor verb per turn (CC parity).
+            let word = self.spinner_verb().to_string();
+            (
+                Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
+                self.shimmer_verb_spans(&word, &theme),
+            )
+        };
+
+        let mut spinner_spans: Vec<Span<'_>> = Vec::with_capacity(verb_spans.len() + 3);
+        spinner_spans.push(glyph_span);
+        spinner_spans.extend(verb_spans);
+        spinner_spans.push(Span::styled(
+            format!(" ({})", parts.join(" \u{00b7} ")),
+            theme.faint(),
+        ));
 
         // Model name prefix (e.g. "qwen3-coder:480b ∙ ")
         if !self.model_name.is_empty() {
@@ -731,5 +1056,168 @@ mod activity_tests {
         assert_eq!(act.spinner_verb(), "Wiring the checklist");
         act.set_active_verb(None);
         assert_eq!(act.spinner_verb(), v1);
+    }
+
+    /// Render the active spinner row for `act` and flatten its cells to a single
+    /// string (parity with status_bar's buffer-content harness).
+    fn render_activity_text(act: &Activity) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn retry_label_renders_from_provider_retry() {
+        // Item 1 — a held RetryState makes the spinner label become the retry
+        // notice (with a live countdown), not a flavor verb.
+        let mut act = Activity::new();
+        act.start();
+        assert!(!act.is_retrying());
+        act.set_retry(Some(RetryState {
+            attempt: 2,
+            max_attempts: 5,
+            reason: "rate limited".to_string(),
+            resume_at: std::time::Instant::now() + std::time::Duration::from_secs(8),
+        }));
+        assert!(act.is_retrying());
+        let text = render_activity_text(&act);
+        assert!(
+            text.contains("Retrying (attempt 2/5)"),
+            "retry verb must render, got: {text:?}"
+        );
+        assert!(text.contains("retrying in"), "countdown part must render");
+        assert!(text.contains("rate limited"), "reason must render");
+
+        // Resuming the turn (a usage report / streamed tokens) clears it.
+        act.set_tokens(10, 20);
+        assert!(!act.is_retrying(), "retry clears on token report");
+        // Streaming chars also clear it.
+        act.set_retry(Some(RetryState {
+            attempt: 1,
+            max_attempts: 3,
+            reason: String::new(),
+            resume_at: std::time::Instant::now(),
+        }));
+        act.add_stream_chars(4);
+        assert!(!act.is_retrying(), "retry clears on stream resume");
+    }
+
+    #[test]
+    fn shimmer_index_advances_and_wraps() {
+        // Item 2 — the glimmer highlight moves with the tick and wraps within
+        // the verb+tail span (deterministic, so the sweep is verifiable).
+        let len = 6usize;
+        let span = len + 3;
+        let p0 = shimmer_index(0, len);
+        let p1 = shimmer_index(1, len);
+        let p2 = shimmer_index(2, len);
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 2);
+        assert_ne!(p0, p1, "shimmer index must advance with tick");
+        // Wraps at the span boundary.
+        assert_eq!(shimmer_index(span as u32, len), 0);
+        // Empty verb is safe.
+        assert_eq!(shimmer_index(5, 0), 0);
+        // Reduced-motion renders a flat verb (single styled span, no per-char).
+        let act = {
+            let mut a = Activity::new();
+            a.start();
+            a.set_reduced_motion(true);
+            a
+        };
+        let theme = crate::style::theme();
+        assert_eq!(
+            act.shimmer_verb_spans("Working", &theme).len(),
+            1,
+            "reduced-motion verb is one flat span"
+        );
+        // Animated verb is per-char (+1 for the trailing ellipsis span).
+        let mut anim = Activity::new();
+        anim.start();
+        assert_eq!(
+            anim.shimmer_verb_spans("Working", &theme).len(),
+            "Working".chars().count() + 1
+        );
+    }
+
+    #[test]
+    fn waiting_reason_label_maps() {
+        // Item 3 — every reason maps to a distinct, human label.
+        assert_eq!(WaitingReason::Model.label(), "Waiting for response");
+        assert_eq!(WaitingReason::Subagent.label(), "Waiting on subagent");
+        assert_eq!(WaitingReason::TaskOutput.label(), "Waiting on task output");
+        assert_eq!(WaitingReason::Tasks.label(), "Waiting on tasks");
+        assert_eq!(WaitingReason::Sleeping.label(), "Sleeping");
+        assert_eq!(WaitingReason::Compacting.label(), "Compacting");
+        assert_eq!(WaitingReason::Verifying.label(), "Verifying");
+
+        // When set during the Waiting phase, the reason replaces the flavor verb.
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Waiting);
+        act.set_waiting_reason(Some(WaitingReason::Subagent));
+        let text = render_activity_text(&act);
+        assert!(
+            text.contains("Waiting on subagent"),
+            "waiting reason must render on the spinner, got: {text:?}"
+        );
+        // Leaving Waiting clears the reason (turn resumed).
+        act.set_phase(ProcessingPhase::Streaming);
+        assert!(!render_activity_text(&act).contains("Waiting on subagent"));
+    }
+
+    #[test]
+    fn token_sum_includes_input_and_cache() {
+        // Item 4 — the true total sums input + output + reasoning + cache r/w,
+        // not output-only, and the input/cache figures surface on the row.
+        let mut act = Activity::new();
+        act.start();
+        act.set_tokens_detailed(1000, 200, 50, 4000, 100);
+        // total = input(1000) + turn_output(200) + reasoning(50)
+        //         + cache_read(4000) + cache_write(100) = 5350
+        assert_eq!(act.total_tokens(), 5350);
+        assert!(
+            act.total_tokens() > act.turn_output_tokens,
+            "true total must exceed output-only"
+        );
+        let text = render_activity_text(&act);
+        assert!(text.contains("in"), "input tokens must surface, got: {text:?}");
+        assert!(text.contains("cached"), "cache tokens must surface");
+    }
+
+    #[test]
+    fn pending_user_pulse_toggles() {
+        // Item 5 — the pulse alternates bright/dim over ticks, and the flag
+        // swaps the spinner to the ◆ "your turn" cue.
+        assert!(pulse_bright(0));
+        assert!(pulse_bright(2));
+        assert!(!pulse_bright(3));
+        assert!(!pulse_bright(5));
+        assert!(pulse_bright(6));
+        // The bright phase must actually alternate across a sweep of ticks.
+        let phases: Vec<bool> = (0..12).map(pulse_bright).collect();
+        assert!(phases.iter().any(|&b| b) && phases.iter().any(|&b| !b));
+
+        let mut act = Activity::new();
+        act.start();
+        assert!(!act.pending_user());
+        act.set_pending_user(true);
+        assert!(act.pending_user());
+        let text = render_activity_text(&act);
+        assert!(
+            text.contains('\u{25C6}'),
+            "pending-user renders the pulsing ◆, got: {text:?}"
+        );
+        assert!(text.contains("Waiting for your input"));
+        // A resuming phase clears the pending cue.
+        act.set_phase(ProcessingPhase::ToolCall);
+        assert!(!act.pending_user());
     }
 }

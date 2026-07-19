@@ -1,3 +1,4 @@
+pub mod colors;
 pub mod markdown;
 pub mod markdown_stream;
 pub mod syntax;

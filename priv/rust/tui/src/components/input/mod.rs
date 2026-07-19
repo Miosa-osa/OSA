@@ -100,6 +100,47 @@ pub struct InputComponent {
     /// Current vim modal state (normal/insert + pending operator). Only
     /// consulted while `vim_enabled`.
     vim: vim::VimState,
+    /// Emacs/readline kill-ring (CC useTextInput pushToKillRing / grok
+    /// textarea.rs kill_buffer). `Ctrl+K`/`Ctrl+U`/`Ctrl+W`/`Alt+D` push here;
+    /// `Ctrl+Y` yanks the most recent (last) entry, `Alt+Y` yank-pops (rotates).
+    /// The most-recent kill is the LAST element. Capped so a long session can't
+    /// grow it without bound.
+    kill_ring: Vec<String>,
+    /// Rotation cursor for yank-pop — index into `kill_ring` of the entry the
+    /// last yank / yank-pop inserted. `Alt+Y` decrements it (wrapping) and swaps
+    /// the yanked text for the earlier entry (readline yank-pop).
+    kill_ring_index: usize,
+    /// Byte range `[start, end)` of the text the last `Ctrl+Y`/`Alt+Y`
+    /// inserted. `Some` only immediately after a yank / yank-pop; any other
+    /// command clears it, which is what gates `Alt+Y` (yank-pop is a no-op
+    /// unless it directly follows a yank). CC `recordYank` / `yankPop`.
+    yank_anchor: Option<(usize, usize)>,
+    /// The kind of the previous composer command, for kill accumulation and
+    /// yank-pop gating. Successive kills append/prepend into the same ring
+    /// entry (readline behaviour); a non-kill command breaks the run.
+    last_edit: LastEdit,
+    /// Undo-coalescing anchor (grok begin/end_undo_group, textarea.rs:2415).
+    /// While `Some(cursor_after_last_insert)`, a further contiguous non-space
+    /// `insert_char` coalesces into the SAME undo step instead of snapshotting,
+    /// so one undo removes a whole typed word rather than a single character.
+    /// Cleared by `snapshot()` (every non-coalescing edit) and by
+    /// `restore_state`, and never matches after a cursor move, so any boundary
+    /// breaks the run.
+    undo_insert_run: Option<usize>,
+    /// Rotating-placeholder seed (opencode index.tsx randomIndex, re-rolled on
+    /// submit). Selects which example prompt / hint the empty composer shows so
+    /// the empty box teaches features instead of a single static string.
+    placeholder_seed: usize,
+}
+
+/// The kind of the previous composer command — drives kill-ring accumulation
+/// (successive kills merge) and yank-pop gating (`Alt+Y` only right after a
+/// yank). Anything that isn't a kill or a yank is `Other` and breaks both runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastEdit {
+    Other,
+    Kill,
+    Yank,
 }
 
 /// Ctrl+R reverse-incremental history search over persisted input history.
@@ -150,6 +191,12 @@ impl InputComponent {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             vim: vim::VimState::default(),
+            kill_ring: Vec::new(),
+            kill_ring_index: 0,
+            yank_anchor: None,
+            last_edit: LastEdit::Other,
+            undo_insert_run: None,
+            placeholder_seed: 0,
         }
     }
 
@@ -186,6 +233,20 @@ impl InputComponent {
 
     pub fn is_empty(&self) -> bool {
         self.content.trim().is_empty()
+    }
+
+    /// The placeholder shown on an EMPTY composer. Contextual first (a queued-
+    /// message hint when messages are waiting — CC usePromptInputPlaceholder's
+    /// cascade), otherwise a rotating example prompt / tip keyed on
+    /// `placeholder_seed` (re-rolled each submit — opencode index.tsx
+    /// randomIndex). Turns the empty box from wasted space into feature
+    /// discovery. The recording state is handled separately in `draw` (it needs
+    /// its own red styling).
+    fn placeholder(&self) -> &'static str {
+        if !self.queued_items.is_empty() {
+            return "Press \u{2191} to edit queued messages\u{2026}";
+        }
+        PLACEHOLDERS[self.placeholder_seed % PLACEHOLDERS.len()]
     }
 
     pub fn set_width(&mut self, width: u16) {
@@ -308,6 +369,10 @@ impl InputComponent {
         self.file_search_active = false;
         self.file_matches.clear();
         self.completions.hide();
+        // Re-roll the rotating placeholder so the next empty composer shows a
+        // fresh example prompt / hint (opencode index.tsx randomIndex, re-rolled
+        // on submit).
+        self.placeholder_seed = self.placeholder_seed.wrapping_add(1);
         // WS9 — expand "[Pasted text #N ...]" pills into their full stored
         // content so the model receives the real text (CC expandPastedTextRefs
         // in processUserInput). Attachment chips ([Image #N]) pass through
@@ -367,9 +432,22 @@ impl InputComponent {
     }
 
     fn insert_char(&mut self, ch: char) {
-        self.snapshot();
+        // Undo coalescing (grok begin/end_undo_group): a run of contiguous
+        // non-space keystrokes collapses into ONE undo step. Snapshot only when
+        // the run breaks — i.e. this is the first char of a word (no open run),
+        // the caret moved since the last insert (`undo_insert_run` no longer
+        // equals the cursor), or the char is whitespace (a word/line boundary
+        // that both ends the current run and starts its own step). Otherwise
+        // skip the snapshot so `hello` is one undo, not five.
+        let coalesce = !ch.is_whitespace() && self.undo_insert_run == Some(self.cursor);
+        if !coalesce {
+            self.snapshot();
+        }
         self.content.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
+        // Keep the run open only across contiguous non-space chars; whitespace
+        // closes it so the next word begins a fresh undo step.
+        self.undo_insert_run = if ch.is_whitespace() { None } else { Some(self.cursor) };
         self.tab_matches.clear();
 
         // Slash command completions popup
@@ -822,12 +900,16 @@ impl InputComponent {
     // ── Composer power-features: word motions, kill-line, undo/redo ──────────
 
     /// Push the current (content, cursor) onto the undo ring and clear redo.
+    /// Also ends any open insert-coalescing run: a snapshot is, by definition,
+    /// a new undo boundary, so the next `insert_char` starts a fresh group
+    /// (it re-opens the run itself after inserting).
     fn snapshot(&mut self) {
         self.undo_stack.push((self.content.clone(), self.cursor));
         if self.undo_stack.len() > 100 {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+        self.undo_insert_run = None;
     }
 
     /// Restore editing state after an undo/redo hop.
@@ -839,6 +921,10 @@ impl InputComponent {
         self.file_search_active = false;
         self.file_matches.clear();
         self.completions.hide();
+        // An undo/redo is a hard boundary: don't coalesce a following insert
+        // into the step we just restored, and invalidate any yank region.
+        self.undo_insert_run = None;
+        self.yank_anchor = None;
     }
 
     fn undo(&mut self) -> bool {
@@ -919,13 +1005,127 @@ impl InputComponent {
         self.cursor = self.word_right();
     }
 
-    /// Ctrl+W — delete the word before the cursor.
-    fn delete_word_back(&mut self) {
+    /// Push `killed` onto the kill-ring (emacs/readline: CC pushToKillRing,
+    /// grok kill_buffer). Successive kills accumulate into the SAME (most
+    /// recent, last) entry — forward kills (`Ctrl+K`, `Alt+D`) append, backward
+    /// kills (`Ctrl+W`, `Ctrl+U`) prepend — so `Ctrl+K Ctrl+K` then `Ctrl+Y`
+    /// yanks the whole run. A non-kill command in between starts a new entry.
+    /// The most-recent entry is the LAST element; `Ctrl+Y` yanks it.
+    fn push_kill(&mut self, killed: &str, forward: bool, accumulate: bool) {
+        if killed.is_empty() {
+            return;
+        }
+        let accumulate = accumulate && !self.kill_ring.is_empty();
+        if accumulate {
+            if let Some(top) = self.kill_ring.last_mut() {
+                if forward {
+                    top.push_str(killed);
+                } else {
+                    top.insert_str(0, killed);
+                }
+            }
+        } else {
+            self.kill_ring.push(killed.to_string());
+            // Bound the ring so a long session can't grow it without limit.
+            if self.kill_ring.len() > 60 {
+                self.kill_ring.remove(0);
+            }
+        }
+        self.last_edit = LastEdit::Kill;
+        self.kill_ring_index = self.kill_ring.len().saturating_sub(1);
+        // A kill invalidates any pending yank region (Alt+Y needs a fresh yank).
+        self.yank_anchor = None;
+    }
+
+    /// Ctrl+Y — yank (insert) the most recent kill at the caret and remember the
+    /// inserted range so a following `Alt+Y` can yank-pop it. No-op on an empty
+    /// ring. CC `yank` / `recordYank`; grok `textarea.rs:2592 yank()`.
+    fn yank(&mut self) -> bool {
+        if self.kill_ring.is_empty() {
+            return false;
+        }
+        self.snapshot();
+        self.kill_ring_index = self.kill_ring.len() - 1;
+        let text = self.kill_ring[self.kill_ring_index].clone();
+        let start = self.cursor;
+        self.content.insert_str(start, &text);
+        self.cursor = start + text.len();
+        self.yank_anchor = Some((start, self.cursor));
+        self.after_edit();
+        self.multiline = self.content.contains('\n');
+        // after_edit / mutations don't touch last_edit; set the Yank marker so
+        // the very next Alt+Y is recognised as a yank-pop.
+        self.last_edit = LastEdit::Yank;
+        true
+    }
+
+    /// Alt+Y — yank-pop: replace the text the last yank / yank-pop inserted with
+    /// the previous kill-ring entry, rotating backward through the ring. Only
+    /// valid immediately after a yank (guarded by `yank_anchor` + the `Yank`
+    /// last-edit marker). CC `handleYankPop` / `yankPop`.
+    fn yank_pop(&mut self) -> bool {
+        let Some((start, end)) = self.yank_anchor else {
+            return false;
+        };
+        let n = self.kill_ring.len();
+        if n == 0 {
+            return false;
+        }
+        // Rotate to the previous (older) entry, wrapping around the ring.
+        self.kill_ring_index = (self.kill_ring_index + n - 1) % n;
+        let text = self.kill_ring[self.kill_ring_index].clone();
+        // Swap in place — no new snapshot, so the whole yank+pops collapse to a
+        // single undo step that removes all of the yanked text at once.
+        self.content.replace_range(start..end, &text);
+        self.cursor = start + text.len();
+        self.yank_anchor = Some((start, self.cursor));
+        self.multiline = self.content.contains('\n');
+        self.undo_insert_run = None;
+        self.last_edit = LastEdit::Yank;
+        true
+    }
+
+    /// Ctrl+W — delete (kill) the word before the cursor into the kill-ring.
+    /// `accumulate` (the previous command was also a kill) merges into the same
+    /// ring entry.
+    fn delete_word_back(&mut self, accumulate: bool) {
         let start = self.word_left();
         if start < self.cursor {
+            let killed = self.content[start..self.cursor].to_string();
             self.snapshot();
             self.content.drain(start..self.cursor);
             self.cursor = start;
+            self.push_kill(&killed, false, accumulate); // backward kill → prepend
+            self.after_edit();
+        }
+    }
+
+    /// Alt+D — delete (kill) the word forward from the cursor into the ring.
+    fn kill_word_forward(&mut self, accumulate: bool) {
+        let end = self.word_right();
+        if end > self.cursor {
+            let killed = self.content[self.cursor..end].to_string();
+            self.snapshot();
+            self.content.drain(self.cursor..end);
+            self.push_kill(&killed, true, accumulate); // forward kill → append
+            self.after_edit();
+        }
+    }
+
+    /// Ctrl+U — kill from the cursor to the START of the current line into the
+    /// ring (readline `unix-line-discard` / CC `killToLineStart`). Replaces the
+    /// old "wipe the whole buffer" behaviour, which discarded the text.
+    fn kill_to_line_start(&mut self, accumulate: bool) {
+        let line_start = self.content[..self.cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        if line_start < self.cursor {
+            let killed = self.content[line_start..self.cursor].to_string();
+            self.snapshot();
+            self.content.drain(line_start..self.cursor);
+            self.cursor = line_start;
+            self.push_kill(&killed, false, accumulate); // backward kill → prepend
             self.after_edit();
         }
     }
@@ -965,7 +1165,7 @@ impl InputComponent {
 
     /// Ctrl+K — kill from the cursor to the end of the current line. If the
     /// cursor sits on a newline, kill just that newline.
-    fn kill_to_line_end(&mut self) {
+    fn kill_to_line_end(&mut self, accumulate: bool) {
         let rest = &self.content[self.cursor..];
         let end = match rest.find('\n') {
             Some(0) => self.cursor + 1,          // on a newline: remove it
@@ -973,8 +1173,10 @@ impl InputComponent {
             None => self.content.len(),          // last line: to end of buffer
         };
         if end > self.cursor {
+            let killed = self.content[self.cursor..end].to_string();
             self.snapshot();
             self.content.drain(self.cursor..end);
+            self.push_kill(&killed, true, accumulate); // forward kill → append
             self.after_edit();
         }
     }
@@ -1485,6 +1687,14 @@ impl Component for InputComponent {
                     }
                 }
 
+                // Kill-ring run tracking (readline): remember the previous
+                // command's kind, then default THIS command to "Other". The
+                // kill / yank arms below re-mark themselves (Kill / Yank), so
+                // any other key breaks kill accumulation and ends a yank-pop run
+                // — exactly emacs's "last command" gate.
+                let prev_edit = self.last_edit;
+                self.last_edit = LastEdit::Other;
+
                 match (key.code, key.modifiers) {
                     // Insert a newline (enters multiline mode) rather than submit.
                     // Shift+Enter / Alt+Enter / Ctrl+J all mean "newline, don't
@@ -1654,12 +1864,13 @@ impl Component for InputComponent {
                         self.handle_tab();
                         return ComponentAction::Consumed;
                     }
-                    // Ctrl+U: clear
+                    // Ctrl+U: kill from the cursor to the start of the line into
+                    // the kill-ring (readline unix-line-discard / CC
+                    // killToLineStart). This used to wipe the WHOLE buffer and
+                    // discard the text; now it's a proper backward kill whose
+                    // text Ctrl+Y can bring back.
                     (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                        if !self.content.is_empty() {
-                            self.snapshot();
-                        }
-                        self.reset();
+                        self.kill_to_line_start(prev_edit == LastEdit::Kill);
                         return ComponentAction::Consumed;
                     }
                     // Ctrl+A: move to start
@@ -1672,14 +1883,19 @@ impl Component for InputComponent {
                         self.cursor = self.content.len();
                         return ComponentAction::Consumed;
                     }
-                    // Ctrl+K: kill from cursor to end of line
+                    // Ctrl+K: kill from cursor to end of line (into the kill-ring)
                     (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                        self.kill_to_line_end();
+                        self.kill_to_line_end(prev_edit == LastEdit::Kill);
                         return ComponentAction::Consumed;
                     }
-                    // Ctrl+W: delete word before cursor
+                    // Ctrl+W: kill the word before cursor (into the kill-ring)
                     (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-                        self.delete_word_back();
+                        self.delete_word_back(prev_edit == LastEdit::Kill);
+                        return ComponentAction::Consumed;
+                    }
+                    // Alt+D: kill the word forward from the cursor (into the ring)
+                    (KeyCode::Char('d'), KeyModifiers::ALT) => {
+                        self.kill_word_forward(prev_edit == LastEdit::Kill);
                         return ComponentAction::Consumed;
                     }
                     // Ctrl+D: delete the char under the cursor (readline
@@ -1706,14 +1922,38 @@ impl Component for InputComponent {
                     // since '_' is shifted '-'); Ctrl+'-' is accepted for CC
                     // parity. `contains` tolerates stray protocol bits.
                     (KeyCode::Char('_') | KeyCode::Char('7') | KeyCode::Char('-'), m)
-                        if m.contains(KeyModifiers::CONTROL) =>
+                        if m.contains(KeyModifiers::CONTROL)
+                            && !m.contains(KeyModifiers::ALT) =>
                     {
                         self.undo();
                         return ComponentAction::Consumed;
                     }
-                    // Ctrl+Y: redo
-                    (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                    // Alt+_ / Alt+- : redo. Ctrl+Y is now the readline YANK
+                    // (below), so redo moved off it onto the Alt-mirror of the
+                    // Ctrl+_ undo chord — a non-conflicting home that mirrors
+                    // undo's key. Encodings mirror the undo arm.
+                    (KeyCode::Char('_') | KeyCode::Char('7') | KeyCode::Char('-'), m)
+                        if m.contains(KeyModifiers::ALT) =>
+                    {
                         self.redo();
+                        return ComponentAction::Consumed;
+                    }
+                    // Ctrl+Y: YANK the most recent kill at the caret (readline;
+                    // CC useTextInput yank). This replaces the old redo binding —
+                    // every emacs/bash user expects Ctrl+K then Ctrl+Y to move
+                    // text, and the killed text was previously discarded.
+                    (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                        self.yank();
+                        return ComponentAction::Consumed;
+                    }
+                    // Alt+Y: YANK-POP — rotate the ring, swapping the just-yanked
+                    // text for the previous entry. Only meaningful directly after
+                    // a yank / yank-pop (gated on the previous command); otherwise
+                    // a harmless no-op.
+                    (KeyCode::Char('y'), KeyModifiers::ALT) => {
+                        if prev_edit == LastEdit::Yank {
+                            self.yank_pop();
+                        }
                         return ComponentAction::Consumed;
                     }
                     // Ctrl+G: open the current buffer in $EDITOR
@@ -1984,7 +2224,7 @@ impl Component for InputComponent {
             let placeholder = if self.recording {
                 "\u{25C9} Recording... press Enter to stop, Esc to cancel"
             } else {
-                "Ask OSA anything\u{2026}"
+                self.placeholder()
             };
             let placeholder_style = if self.recording {
                 Style::default().fg(Color::Red)
@@ -2295,6 +2535,21 @@ fn down_crosses_to_history(content: &str, cursor: usize) -> bool {
 /// ported verbatim from Claude Code (imagePaste.ts PASTE_THRESHOLD).
 pub const PASTE_THRESHOLD: usize = 800;
 
+/// Rotating example prompts / hints for the empty composer (opencode
+/// index.tsx:288-304 rotating placeholder list; CC usePromptInputPlaceholder
+/// example-command cascade). Index 0 is the classic default so the composer
+/// still greets identically on first launch; the rest rotate on each submit to
+/// surface `/`, `@`, and `#` affordances.
+const PLACEHOLDERS: &[&str] = &[
+    "Ask OSA anything\u{2026}",
+    "Type / for commands \u{00b7} @ to add a file",
+    "Describe a task and OSA will get to work\u{2026}",
+    "Paste an error and ask OSA to fix it\u{2026}",
+    "@ a file to pull it in as context\u{2026}",
+    "Start a line with # to save a note to memory\u{2026}",
+    "Ask OSA to explain, refactor, or debug\u{2026}",
+];
+
 /// Display width (terminal columns) of `s`, honoring CJK/emoji wide chars and
 /// zero-width combining marks — matches `render/markdown.rs` + `message.rs`
 /// so the composer measures text the same way the transcript does.
@@ -2491,11 +2746,17 @@ mod input_edit_tests {
     // ── Ctrl+U / Ctrl+K / Ctrl+W kill operations ────────────────────────────
 
     #[test]
-    fn ctrl_u_clears_whole_buffer() {
-        let mut input = at("hello world", 11);
+    fn ctrl_u_kills_to_line_start_not_whole_buffer() {
+        // On a single line with the caret at the end, kill-to-line-start clears
+        // the line (same visible result as before) — but on a MULTILINE buffer
+        // it only kills the current line, and the killed text is now yankable.
+        let mut input = at("abc\ndef", 7); // caret at end of "def"
         input.handle_event(&key(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        assert_eq!(input.value(), "");
-        assert_eq!(input.cursor(), 0);
+        assert_eq!(input.value(), "abc\n"); // only "def" killed, first line intact
+        assert_eq!(input.cursor(), 4);
+        // The killed text went to the ring — Ctrl+Y brings it back.
+        input.handle_event(&key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "abc\ndef");
     }
 
     #[test]
@@ -3049,5 +3310,228 @@ mod ws9_composer_tests {
         input.handle_event(&key(KeyCode::Down));
         // Last visual row → next logical line "zz", vcol clamped to its end.
         assert_eq!(input.cursor(), 41 + 2);
+    }
+}
+
+#[cfg(test)]
+mod killring_undo_placeholder_tests {
+    use super::*;
+    use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn kv(code: KeyCode, mods: KeyModifiers) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, mods)))
+    }
+    fn ch(c: char) -> Event {
+        kv(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn at(content: &str, cursor: usize) -> InputComponent {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.content = content.to_string();
+        input.cursor = cursor.min(input.content.len());
+        input.multiline = input.content.contains('\n');
+        input
+    }
+
+    // ── P1: kill-ring + yank round-trips ────────────────────────────────────
+
+    #[test]
+    fn ctrl_k_then_ctrl_y_moves_text() {
+        // The canonical readline reflex: kill to EOL, then yank it back.
+        let mut input = at("hello world", 6); // caret after "hello "
+        input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello ");
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "hello world");
+    }
+
+    #[test]
+    fn ctrl_w_kill_word_is_yankable() {
+        let mut input = at("foo bar", 7);
+        input.handle_event(&kv(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "foo ");
+        // Move to start, yank the killed "bar" there.
+        input.handle_event(&kv(KeyCode::Char('a'), KeyModifiers::CONTROL)); // home
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "barfoo ");
+    }
+
+    #[test]
+    fn alt_d_kills_word_forward_into_ring() {
+        let mut input = at("foo bar", 0);
+        input.handle_event(&kv(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert_eq!(input.value(), " bar"); // "foo" killed forward
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "foo bar"); // yanked back at the caret (offset 0)
+    }
+
+    #[test]
+    fn successive_kills_accumulate_into_one_ring_entry() {
+        // Two Ctrl+K in a row append into the SAME entry (readline), so a single
+        // Ctrl+Y restores the whole run.
+        let mut input = at("abcdef", 0);
+        input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill "abcdef"
+        // Nothing left to kill on this line; type + kill again to prove append.
+        let mut input = at("ab\ncd", 0);
+        input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill "ab"
+        input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill the '\n' (accumulates)
+        assert_eq!(input.value(), "cd");
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        // One yank restores "ab\n" (both kills merged) ahead of "cd".
+        assert_eq!(input.value(), "ab\ncd");
+    }
+
+    // ── P1: ring rotation via yank-pop ──────────────────────────────────────
+
+    #[test]
+    fn alt_y_yank_pop_rotates_the_ring() {
+        // Build a ring with two SEPARATE entries: kill "first", type, kill
+        // "second". A non-kill command between them breaks accumulation.
+        let mut input = at("first", 5);
+        input.handle_event(&kv(KeyCode::Char('u'), KeyModifiers::CONTROL)); // ring=["first"]
+        for c in "second".chars() {
+            input.handle_event(&ch(c));
+        }
+        input.handle_event(&kv(KeyCode::Char('u'), KeyModifiers::CONTROL)); // ring=["first","second"]
+        assert_eq!(input.value(), "");
+        // Yank inserts the most-recent kill…
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "second");
+        // …and Alt+Y rotates back to the older entry, replacing it in place.
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::ALT));
+        assert_eq!(input.value(), "first");
+    }
+
+    #[test]
+    fn alt_y_without_preceding_yank_is_noop() {
+        let mut input = at("hi", 0); // caret at start so Ctrl+K kills "hi"
+        input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // ring=["hi"]
+        assert_eq!(input.value(), "");
+        // Alt+Y not immediately after a yank → no-op (buffer stays empty).
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::ALT));
+        assert_eq!(input.value(), "");
+    }
+
+    // ── P1 CRITICAL: Ctrl+Y is YANK, not redo ───────────────────────────────
+
+    #[test]
+    fn ctrl_y_is_yank_not_redo() {
+        let mut input = at("", 0);
+        for c in "ab".chars() {
+            input.handle_event(&ch(c));
+        }
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL)); // undo → ""
+        assert_eq!(input.value(), "");
+        // If Ctrl+Y were still redo, this would restore "ab". As yank on an
+        // empty ring it must be a no-op.
+        input.handle_event(&kv(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "");
+        // Redo now lives on Alt+_ and DOES restore the undone text.
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::ALT));
+        assert_eq!(input.value(), "ab");
+    }
+
+    // ── P2: undo coalescing ─────────────────────────────────────────────────
+
+    #[test]
+    fn undo_coalesces_a_typed_word_into_one_step() {
+        let mut input = at("", 0);
+        for c in "hello".chars() {
+            input.handle_event(&ch(c));
+        }
+        assert_eq!(input.value(), "hello");
+        // ONE undo removes the whole word, not a single character.
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "");
+    }
+
+    #[test]
+    fn undo_group_breaks_on_word_boundary() {
+        let mut input = at("", 0);
+        for c in "foo bar".chars() {
+            input.handle_event(&ch(c));
+        }
+        // First undo drops "bar" (its own group after the space boundary).
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "foo ");
+        // Next undo drops the boundary space; the third drops "foo".
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "foo");
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "");
+    }
+
+    #[test]
+    fn cursor_move_breaks_the_insert_group() {
+        // Typing, moving the caret, then typing again must be TWO undo steps.
+        let mut input = at("", 0);
+        for c in "abc".chars() {
+            input.handle_event(&ch(c));
+        }
+        input.handle_event(&kv(KeyCode::Left, KeyModifiers::NONE)); // move breaks run
+        input.handle_event(&ch('X')); // "abXc"
+        assert_eq!(input.value(), "abXc");
+        input.handle_event(&kv(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.value(), "abc"); // only the post-move insert undone
+    }
+
+    // ── P4: vim mode badge renders when enabled ─────────────────────────────
+
+    fn render_text(input: &InputComponent) -> String {
+        let mut term = Terminal::new(TestBackend::new(80, 6)).unwrap();
+        term.draw(|f| input.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn vim_badge_renders_normal_and_insert_when_enabled() {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.vim_enabled = true;
+        input.vim = vim::VimState { mode: vim::VimMode::Normal, pending: None };
+        assert!(render_text(&input).contains("NORMAL"), "NORMAL badge missing");
+        input.vim.mode = vim::VimMode::Insert;
+        assert!(render_text(&input).contains("INSERT"), "INSERT badge missing");
+    }
+
+    #[test]
+    fn vim_badge_absent_when_disabled() {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.vim_enabled = false;
+        let text = render_text(&input);
+        assert!(!text.contains("NORMAL"));
+        assert!(!text.contains("INSERT"));
+    }
+
+    // ── P3: rotating / contextual placeholder ───────────────────────────────
+
+    #[test]
+    fn placeholder_rotates_on_submit() {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        let first = input.placeholder();
+        assert_eq!(first, PLACEHOLDERS[0]); // classic greeting on first launch
+        input.set_content("do a thing");
+        let _ = input.submit(); // re-rolls the seed
+        assert_ne!(input.placeholder(), first, "placeholder should rotate on submit");
+    }
+
+    #[test]
+    fn placeholder_is_contextual_when_messages_queued() {
+        let mut input = InputComponent::new();
+        input.history = history::History::new(10);
+        input.set_queued_items(vec!["queued msg".into()]);
+        assert!(
+            input.placeholder().contains("queued"),
+            "queued hint should win over the rotating example"
+        );
     }
 }

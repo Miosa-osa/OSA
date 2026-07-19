@@ -209,6 +209,10 @@ impl App {
             } => {
                 self.activity.tool_end(&name, duration_ms, success);
                 self.activity.set_phase(ProcessingPhase::Waiting);
+                // Item 3 — after a tool completes we're blocked on the model to
+                // resume streaming; name that wait instead of a flavor verb.
+                self.activity
+                    .set_waiting_reason(Some(crate::components::activity::WaitingReason::Model));
 
                 // Build rich styled tool summary for the chat — pop the OLDEST
                 // pending args for this tool name (FIFO), matching call order.
@@ -1397,6 +1401,19 @@ impl App {
                     )
                 };
                 self.chat.add_system_message(&note, "warning");
+                // Item 1 — also hold the retry state LIVE on the spinner row so
+                // the stall is visible on the status line (with a countdown),
+                // not just as a one-shot scrollback note. Cleared automatically
+                // when the turn resumes (tokens/stream/non-Waiting phase).
+                self.activity.set_retry(Some(
+                    crate::components::activity::RetryState {
+                        attempt,
+                        max_attempts,
+                        reason: reason.clone(),
+                        resume_at: std::time::Instant::now()
+                            + std::time::Duration::from_millis(delay_ms),
+                    },
+                ));
             }
             BackendEvent::TurnError { kind, reason } => {
                 // Red error line for turn-fatal failures (llm_error /
@@ -1816,6 +1833,9 @@ impl App {
                 }
                 dialog.set_meta(warning, reason);
                 self.permissions = Some(dialog);
+                // Item 5 — the turn is now blocked on YOU: pulse the ◆ cue so
+                // the spinner telegraphs "you're the blocker". Cleared on resume.
+                self.activity.set_pending_user(true);
                 if self.state.can_transition_to(AppState::Permissions) {
                     self.enter_overlay(AppState::Permissions);
                 }
@@ -1825,6 +1845,8 @@ impl App {
                 let mut review = crate::dialogs::plan_review::PlanReview::new();
                 review.set_plan(plan);
                 self.plan_review = Some(review);
+                // Item 5 — parked on user approval → pulse the pending cue.
+                self.activity.set_pending_user(true);
                 if self.state.can_transition_to(AppState::PlanReview) {
                     self.enter_overlay(AppState::PlanReview);
                 }
@@ -1870,6 +1892,8 @@ impl App {
                     }
                 }).collect();
                 self.survey = Some(SurveyDialog::new(survey_id, qs, skippable));
+                // Item 5 — waiting on the user's answer → pulse the pending cue.
+                self.activity.set_pending_user(true);
                 if self.state.can_transition_to(AppState::Survey) {
                     self.enter_overlay(AppState::Survey);
                 }
