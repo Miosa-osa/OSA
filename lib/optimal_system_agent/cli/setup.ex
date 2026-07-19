@@ -14,7 +14,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
   alias OptimalSystemAgent.CLI.Prompt
   alias OptimalSystemAgent.Onboarding
 
-  @osa_dir Path.join(System.user_home!(), ".osa")
+  defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   @providers [
     %{value: :ollama, label: "Ollama (Local)", hint: "Free, runs on your machine"},
@@ -335,8 +335,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # ── Config Writing ──────────────────────────────────────────────
 
   defp write_config(provider, api_key) do
-    File.mkdir_p!(@osa_dir)
-    env_path = Path.join(@osa_dir, ".env")
+    File.mkdir_p!(osa_dir())
+    env_path = Path.join(osa_dir(), ".env")
 
     lines = [
       "OSA_DEFAULT_PROVIDER=#{provider}"
@@ -390,8 +390,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   defp save_env(key, value) do
-    env_path = Path.join(@osa_dir, ".env")
-    File.mkdir_p!(@osa_dir)
+    env_path = Path.join(osa_dir(), ".env")
+    File.mkdir_p!(osa_dir())
 
     existing =
       case File.read(env_path) do

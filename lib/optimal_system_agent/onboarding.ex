@@ -18,7 +18,7 @@ defmodule OptimalSystemAgent.Onboarding do
 
   require Logger
 
-  @osa_dir Path.join(System.user_home!(), ".osa")
+  defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
   @workspace_templates ~w(BOOTSTRAP.md IDENTITY.md USER.md SOUL.md HEARTBEAT.md)
 
@@ -51,7 +51,7 @@ defmodule OptimalSystemAgent.Onboarding do
   exists in the environment (user may have exported it in .zshrc).
   """
   def first_run? do
-    env_file = Path.join(@osa_dir, ".env")
+    env_file = Path.join(osa_dir(), ".env")
 
     # Simple: if ~/.osa/.env exists with a valid provider, onboarding is done.
     # Even if the user has API keys in their shell, they still need to go
@@ -593,7 +593,7 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec write_setup(map()) :: :ok | {:error, String.t()}
   def write_setup(%{} = params) do
-    File.mkdir_p!(@osa_dir)
+    File.mkdir_p!(osa_dir())
 
     provider = Map.get(params, :provider) || Map.get(params, "provider", "ollama")
     model = Map.get(params, :model) || Map.get(params, "model")
@@ -604,7 +604,7 @@ defmodule OptimalSystemAgent.Onboarding do
     user_name = Map.get(params, :user_name) || Map.get(params, "user_name")
     agent_name = Map.get(params, :agent_name) || Map.get(params, "agent_name")
 
-    env_path = Path.join(@osa_dir, ".env")
+    env_path = Path.join(osa_dir(), ".env")
 
     # MERGE, don't clobber. Parse the existing .env, overlay the selected
     # provider's canonical vars (preserving every other provider's *_API_KEY),
@@ -674,7 +674,7 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec upsert_provider_key(map()) :: :ok | {:error, String.t()}
   def upsert_provider_key(%{} = params) do
-    File.mkdir_p!(@osa_dir)
+    File.mkdir_p!(osa_dir())
 
     provider = Map.get(params, :provider) || Map.get(params, "provider")
     api_key = Map.get(params, :api_key) || Map.get(params, "api_key")
@@ -682,7 +682,7 @@ defmodule OptimalSystemAgent.Onboarding do
     model = Map.get(params, :model) || Map.get(params, "model")
     set_active = Map.get(params, :set_active, Map.get(params, "set_active", true))
 
-    env_path = Path.join(@osa_dir, ".env")
+    env_path = Path.join(osa_dir(), ".env")
     existing = parse_env_file(env_path)
 
     merged =
@@ -764,13 +764,13 @@ defmodule OptimalSystemAgent.Onboarding do
   Only copies files that don't already exist — never overwrites user data.
   """
   def seed_workspace do
-    File.mkdir_p!(@osa_dir)
+    File.mkdir_p!(osa_dir())
     priv_dir = :code.priv_dir(:optimal_system_agent) |> to_string()
     prompts_dir = Path.join(priv_dir, "prompts")
 
     Enum.each(@workspace_templates, fn filename ->
       source = Path.join(prompts_dir, filename)
-      dest = Path.join(@osa_dir, filename)
+      dest = Path.join(osa_dir(), filename)
 
       if File.exists?(source) and not File.exists?(dest) do
         File.cp!(source, dest)
@@ -792,7 +792,7 @@ defmodule OptimalSystemAgent.Onboarding do
     checks = []
 
     # Check .env exists
-    env_path = Path.join(@osa_dir, ".env")
+    env_path = Path.join(osa_dir(), ".env")
 
     checks =
       if File.exists?(env_path) do
@@ -804,7 +804,7 @@ defmodule OptimalSystemAgent.Onboarding do
     # Check workspace files
     missing =
       @workspace_templates
-      |> Enum.reject(&File.exists?(Path.join(@osa_dir, &1)))
+      |> Enum.reject(&File.exists?(Path.join(osa_dir(), &1)))
 
     checks =
       if missing == [] do
@@ -856,7 +856,7 @@ defmodule OptimalSystemAgent.Onboarding do
   """
   @spec completed_onboarding_version() :: String.t() | nil
   def completed_onboarding_version do
-    @osa_dir
+    osa_dir()
     |> Path.join(".env")
     |> parse_env_file()
     |> List.keyfind("OSA_ONBOARDING_VERSION", 0)
@@ -1245,7 +1245,7 @@ defmodule OptimalSystemAgent.Onboarding do
   defp prepopulate_user_md(""), do: :ok
 
   defp prepopulate_user_md(name) do
-    path = Path.join(@osa_dir, "USER.md")
+    path = Path.join(osa_dir(), "USER.md")
 
     if File.exists?(path) do
       case File.read(path) do
@@ -1272,7 +1272,7 @@ defmodule OptimalSystemAgent.Onboarding do
   defp prepopulate_identity_md(""), do: :ok
 
   defp prepopulate_identity_md(agent_name) do
-    path = Path.join(@osa_dir, "IDENTITY.md")
+    path = Path.join(osa_dir(), "IDENTITY.md")
 
     if File.exists?(path) do
       case File.read(path) do
