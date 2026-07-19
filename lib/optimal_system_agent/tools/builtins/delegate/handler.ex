@@ -196,7 +196,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       background: (agent_def && agent_def[:background]) || false,
       # Parent's depth — Orchestrator.run_subagent increments this for the child
       # so ToolFilter can strip spawning tools once the max nesting is reached.
-      delegation_depth: parent_depth
+      delegation_depth: parent_depth,
+      # Per-call override for the subagent JOIN timeout (D1). Applies to both
+      # the single-task and fan-out paths; nil lets Orchestrator fall back to
+      # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
+      timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms"))
     }
   end
 
@@ -324,6 +328,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       "Fan-out of #{length(tasks)} subagent#{if length(tasks) == 1, do: "", else: "s"} for: " <>
         String.slice(umbrella_task, 0, 120)
 
+    failed = Enum.count(results, &match?({:error, _}, &1))
+
+    failure_note =
+      if failed > 0,
+        do:
+          "\n\n(⚠ #{failed} of #{length(tasks)} workstream#{if failed == 1, do: "", else: "s"} " <>
+            "FAILED — do not treat their sections below as completed work.)",
+        else: ""
+
     sections =
       tasks
       |> Enum.zip(results)
@@ -331,18 +344,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       |> Enum.map(fn {{task, result}, idx} ->
         label = task.subagent_type || "agent"
 
+        # A crashed/timed-out/cancelled subagent must never read as a normal
+        # completed section (D2) — every failure path is prefixed with a
+        # loud, unambiguous "FAILED" marker distinct from real output.
         text =
           case result do
             {:ok, str} -> str
-            {:error, reason} -> "Failed: #{inspect(reason)}"
-            other -> inspect(other)
+            {:error, reason} -> "**FAILED** — #{failure_reason(reason)}"
+            other -> "**FAILED** — #{inspect(other)}"
           end
 
         "### #{idx}. #{label} — #{String.slice(task.prompt, 0, 80)}\n#{text}"
       end)
 
-    Enum.join([header | sections], "\n\n")
+    Enum.join([header <> failure_note | sections], "\n\n")
   end
+
+  # Human-readable classification mirroring
+  # `Orchestrator.failure_reason_text/1` — the machine-shaped reasons a
+  # subagent join can now fail with (D1/D2: real timeout, cancel-terminated,
+  # crashed) get a clear sentence instead of a bare `inspect/1` atom.
+  defp failure_reason(:timeout),
+    do: "did not finish within its join timeout and was terminated"
+
+  defp failure_reason(:cancelled),
+    do: "was cancelled (interrupt/Esc) and terminated before finishing"
+
+  defp failure_reason({:crashed, reason}), do: "process crashed/exited: #{inspect(reason)}"
+  defp failure_reason(reason), do: inspect(reason)
 
   defp delegation_depth(ctx) do
     case Map.get(ctx, :delegation_depth, 0) do

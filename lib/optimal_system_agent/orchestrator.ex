@@ -19,6 +19,18 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
   alias OptimalSystemAgent.Events.Bus
 
+  # Real, configurable backstop for a subagent JOIN — deliberately NOT
+  # `:infinity`. A stuck child (bad provider, hung tool, nested blocking
+  # join) must eventually surface as a clear timeout instead of hanging the
+  # parent turn forever. 2h is generous enough to not regress a genuinely
+  # long-running teammate; raise `:subagent_join_timeout_ms` /
+  # `:subagent_await_timeout_ms` (or pass `timeout_ms:` / `await_timeout:`
+  # per call) for jobs that legitimately need longer. The PRIMARY unblock
+  # mechanism for an explicit user cancel is `Loop.cancel/1` force-terminating
+  # the child's GenServer (loop.ex) — this timeout is the backstop for the
+  # no-cancel-issued, just-plain-stuck case.
+  @default_subagent_timeout_ms 2 * 60 * 60 * 1000
+
   @doc """
   Run a subagent to completion and return its result.
 
@@ -112,11 +124,20 @@ defmodule OptimalSystemAgent.Orchestrator do
           end)
 
         # Wait for all tasks in this wave. Timeout is configurable and defaults
-        # to `:infinity` so a long-running teammate (e.g. a 2h33m job via
-        # delegate `tasks:[]`) is NOT killed at 10 minutes. Callers that want a
-        # bound pass `await_timeout:`; the recommended path for unknown-horizon
-        # work is run_background/2 (unbounded, re-enters via BackgroundNotifier).
-        await_timeout = Keyword.get(opts, :await_timeout, :infinity)
+        # to a real, finite backstop (`@default_subagent_timeout_ms`, not
+        # `:infinity`) so a genuinely stuck teammate cannot hang the parent
+        # turn forever. A caller that legitimately needs longer (e.g. a
+        # multi-hour job via delegate `tasks:[]`) passes `await_timeout:` or
+        # raises `:subagent_await_timeout_ms`; the recommended path for
+        # unknown-horizon work is still run_background/2 (re-enters via
+        # BackgroundNotifier, no join at all).
+        await_timeout =
+          Keyword.get(opts, :await_timeout) ||
+            Application.get_env(
+              :optimal_system_agent,
+              :subagent_await_timeout_ms,
+              @default_subagent_timeout_ms
+            )
 
         results =
           Enum.map(tasks, fn {original_idx, task} ->
@@ -127,14 +148,20 @@ defmodule OptimalSystemAgent.Orchestrator do
                 :exit, {:timeout, _} ->
                   # Reap the async task instead of orphaning it — the underlying
                   # async_nolink Task keeps running run_subagent with no owner,
-                  # burning tokens. brutal_kill stops the leak. (We still return a
-                  # placeholder so wave ordering is preserved.)
+                  # burning tokens. brutal_kill stops the leak.
+                  #
+                  # Classified as a FAILURE (not laundered into {:ok, ...}) so
+                  # `completed_count` below and `dispatch_fanout`'s reconcile
+                  # gate never treat a timed-out workstream as real completed
+                  # output — the parent model must not build on non-existent
+                  # work (D2 — matches grok/opencode marking a failed subagent
+                  # as failed, not success).
                   Task.shutdown(task, :brutal_kill)
-                  {:ok, "[Agent timed out]"}
+                  {:error, :timeout}
 
                 :exit, reason ->
                   Task.shutdown(task, :brutal_kill)
-                  {:ok, "[Agent crashed: #{inspect(reason)}]"}
+                  {:error, {:crashed, reason}}
               end
 
             {original_idx, result}
@@ -361,7 +388,11 @@ defmodule OptimalSystemAgent.Orchestrator do
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
             display_name: display_name,
             batch_id: batch_id,
-            resumed_from: Map.get(config, :resumed_from)
+            resumed_from: Map.get(config, :resumed_from),
+            # Per-call override (delegate `timeout_ms` arg) wins; otherwise
+            # execute_and_collect falls back to the global config /
+            # @default_subagent_timeout_ms backstop.
+            timeout_ms: Map.get(config, :timeout_ms)
           )
 
         # Fire subagent_stop hook (learning capture, telemetry)
@@ -833,17 +864,60 @@ defmodule OptimalSystemAgent.Orchestrator do
     resumed_from = Keyword.get(opts, :resumed_from)
     start_time = System.monotonic_time(:millisecond)
 
+    # A real, finite, configurable join timeout for THIS specific
+    # `Loop.process_message` call — passed explicitly as `opts[:timeout]`
+    # rather than relying on `Loop.process_message/3`'s own
+    # `:agent_turn_timeout_ms` default (which stays `:infinity` on purpose
+    # for direct top-level user turns; changing that global default here
+    # would regress legitimate hours-long interactive sessions). This is the
+    # D1 fix: the foreground `delegate` path (dispatch_foreground ->
+    # run_subagent -> here) previously had NO bound at all.
+    timeout_ms =
+      Keyword.get(opts, :timeout_ms) ||
+        Application.get_env(
+          :optimal_system_agent,
+          :subagent_join_timeout_ms,
+          @default_subagent_timeout_ms
+        )
+
     result =
       try do
-        Loop.process_message(subagent_id, task)
+        Loop.process_message(subagent_id, task, timeout: timeout_ms)
       rescue
         e ->
           Logger.error("[Orchestrator] Subagent #{subagent_id} crashed: #{Exception.message(e)}")
           {:error, Exception.message(e)}
       catch
+        :exit, {:timeout, _} ->
+          Logger.warning(
+            "[Orchestrator] Subagent #{subagent_id} timed out after #{timeout_ms}ms — terminating"
+          )
+
+          # The GenServer.call timing out does NOT stop the callee — the child
+          # Loop keeps running (and burning tokens) with no one left waiting
+          # on it. Force-terminate it now instead of leaking it (mirrors
+          # run_parallel's Task.shutdown(:brutal_kill) on its own timeout).
+          force_terminate_orphan(subagent_id)
+          {:error, :timeout}
+
+        :exit, {reason, {GenServer, :call, _}}
+        when reason in [:shutdown, :killed, :noproc] ->
+          # The child's GenServer was deliberately terminated mid-call — most
+          # likely `Loop.cancel/1` force-terminating it (explicit user
+          # cancel/Esc reaching a blocked child, loop.ex's
+          # `force_terminate_subagent/1`, which exits its target with
+          # `:shutdown`/escalates to `:killed`) or it was already gone
+          # (`:noproc`) by the time we called. Either way this is a
+          # cancellation, not an organic crash.
+          Logger.warning(
+            "[Orchestrator] Subagent #{subagent_id} was terminated (cancelled) while running"
+          )
+
+          {:error, :cancelled}
+
         :exit, reason ->
           Logger.error("[Orchestrator] Subagent #{subagent_id} exited: #{inspect(reason)}")
-          {:error, inspect(reason)}
+          {:error, {:crashed, reason}}
       end
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
@@ -1084,7 +1158,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       parent_session_id: parent_id,
       role: role,
       status: :failed,
-      summary: "Subagent #{role} failed: #{inspect(reason)}",
+      summary: "Subagent #{role} FAILED: #{failure_reason_text(reason)}",
       files_changed: Keyword.get(opts, :files_changed, []),
       commands_run: [],
       tool_count: Keyword.get(opts, :tool_count, 0),
@@ -1095,6 +1169,21 @@ defmodule OptimalSystemAgent.Orchestrator do
       resumed_from: Keyword.get(opts, :resumed_from)
     })
   end
+
+  # Human-readable classification for a failed subagent — surfaced to the
+  # parent model so it does not mistake a timeout/cancel/crash for real
+  # completed work (D2). Known machine reasons get a clear sentence; anything
+  # else falls back to `inspect/1`.
+  defp failure_reason_text(:timeout),
+    do: "the subagent did not finish within its join timeout and was terminated"
+
+  defp failure_reason_text(:cancelled),
+    do: "the subagent was cancelled (interrupt/Esc) and terminated before finishing"
+
+  defp failure_reason_text({:crashed, reason}),
+    do: "the subagent process crashed/exited: #{inspect(reason)}"
+
+  defp failure_reason_text(reason), do: inspect(reason)
 
   defp changed_files(nil), do: []
 
@@ -1224,6 +1313,17 @@ defmodule OptimalSystemAgent.Orchestrator do
       _ -> :ok
     catch
       :exit, _ -> :ok
+    end
+  end
+
+  # Terminate an orphaned subagent by id (looked up live) after OUR join to it
+  # timed out — the GenServer.call timing out only stops us from waiting, it
+  # never stops the callee, so a stuck child would otherwise keep running
+  # (and burning tokens) unbounded with no one left to collect its result.
+  defp force_terminate_orphan(subagent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, subagent_id) do
+      [{pid, _}] -> safely_terminate(pid)
+      _ -> :ok
     end
   end
 

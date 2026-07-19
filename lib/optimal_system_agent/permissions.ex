@@ -472,13 +472,14 @@ defmodule OptimalSystemAgent.Permissions do
   @doc """
   Returns the offending path when a file-mutating tool targets a path outside
   the workspace scope (cwd + tmp + additionalDirectories), else nil.
+
+  For `multi_file_edit` (no single top-level `path`, an `"edits"` list
+  instead) every target path is checked — the FIRST one out of scope is
+  returned, so a batch that touches even one foreign path is caught.
   """
   def out_of_scope_write(tool_name, args) do
-    path = file_path_of(args)
-
-    if tool_name in @file_mutating_tools and is_binary(path) and path != "" and
-         not path_in_scope?(path) do
-      path
+    if tool_name in @file_mutating_tools do
+      Enum.find(file_paths_of(args), fn path -> not path_in_scope?(path) end)
     end
   end
 
@@ -488,13 +489,13 @@ defmodule OptimalSystemAgent.Permissions do
   Returns a reason string when a file-mutating call targets a path that must
   ALWAYS prompt — in every permission mode, overdrive included: `.git/`
   internals, OSA settings/permission files, and shell startup files.
-  Returns nil otherwise.
+  Returns nil otherwise. Checks every target path for `multi_file_edit`.
   """
   def bypass_immune_ask(tool_name, args) do
-    path = file_path_of(args)
-
-    if tool_name in @file_mutating_tools and is_binary(path) and path != "" do
-      protected_path_reason(path)
+    if tool_name in @file_mutating_tools do
+      args
+      |> file_paths_of()
+      |> Enum.find_value(&protected_path_reason/1)
     end
   end
 
@@ -717,6 +718,27 @@ defmodule OptimalSystemAgent.Permissions do
   end
 
   defp file_path_of(_), do: nil
+
+  # Every target path for a file-mutating call. Single-path tools
+  # (file_write/file_edit/file_create/file_delete/file_move) yield at most
+  # one; `multi_file_edit`'s `%{"edits" => [%{"path" => ...}, ...]}` shape has
+  # no top-level path, so its edit list is walked explicitly — otherwise a
+  # multi-file batch would never be scope/safety checked at all.
+  defp file_paths_of(%{"edits" => edits}) when is_list(edits) do
+    edits
+    |> Enum.map(fn
+      %{"path" => p} when is_binary(p) and p != "" -> p
+      _ -> nil
+    end)
+    |> Enum.filter(&is_binary/1)
+  end
+
+  defp file_paths_of(args) do
+    case file_path_of(args) do
+      p when is_binary(p) and p != "" -> [p]
+      _ -> []
+    end
+  end
 
   # Byte positions of `char` in `bin` preceded by an EVEN number of
   # backslashes (i.e. unescaped). Parens/stars/backslash are all ASCII, so

@@ -208,6 +208,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
     GenServer.call(via(session_id), :get_metadata)
   rescue
     _ -> %{iteration_count: 0, tools_used: []}
+  catch
+    # A subagent already terminated (e.g. `cancel/1` force-terminating it, or
+    # Orchestrator's own join-timeout termination — both now legitimate
+    # post-conditions of a subagent join, not just a rare race) makes this an
+    # ordinary GenServer `:exit`, not a raised exception — `rescue` above
+    # never catches it. Orchestrator.get_subagent_stats/1 calls this
+    # unconditionally right after a subagent finishes (success OR failure),
+    # so this must degrade gracefully instead of crashing the caller.
+    :exit, _ -> %{iteration_count: 0, tools_used: []}
   end
 
   @doc """
@@ -506,11 +515,65 @@ defmodule OptimalSystemAgent.Agent.Loop do
       _ -> :ok
     end
 
+    # Force-terminate every descendant subagent's LIVE GenServer. Setting the
+    # ETS flag alone only unblocks a subagent that is BETWEEN ReactLoop
+    # iterations — a subagent stuck inside ONE long op (a slow provider call,
+    # a long tool, a nested blocking join) never re-checks the flag, so
+    # whoever is joined on it (Orchestrator.execute_and_collect's
+    # `Loop.process_message`, a foreground `delegate`, `task_wait`) hangs
+    # forever regardless of cancel. Killing the child's GenServer makes any
+    # `GenServer.call`/`Task.await` blocked on it fail fast with `:noproc`/
+    # `:killed` (already handled as an error by every known caller) instead of
+    # waiting out a timeout — this is the actual "cancel reaches a blocked
+    # child" fix (opencode `cancelBackgroundJobs`/recursive `remove` parity).
+    #
+    # Deliberately excludes the ROOT `session_id` unless it is ITSELF a known
+    # subagent (has a RunStore `parent_session_id`) — the top-level
+    # interactive session must keep running cooperatively on Esc so its
+    # in-memory state (history, checkpoints) survives; only subagents, whose
+    # sole purpose is answering a join, are safe to hard-kill.
+    terminate_targets =
+      if subagent_run?(session_id), do: [session_id | descendants], else: descendants
+
+    Enum.each(terminate_targets, &force_terminate_subagent/1)
+
     :ok
   rescue
     ArgumentError ->
       Logger.warning("[loop] Cancel table not found — agent may not be running")
       {:error, :not_running}
+  end
+
+  # True when `id` is a spawned subagent (RunStore row with a parent), not a
+  # top-level interactive session. Best-effort — any failure treats `id` as
+  # NOT a subagent so we never accidentally hard-kill an unknown/root session.
+  defp subagent_run?(id) do
+    case OptimalSystemAgent.Agent.RunStore.get(id) do
+      %{parent_session_id: parent} when is_binary(parent) and parent != "" -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp force_terminate_subagent(id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, id) do
+      [{pid, _}] when is_pid(pid) ->
+        Logger.info("[loop] Force-terminating cancelled subagent #{id} to unblock its joiner")
+
+        try do
+          DynamicSupervisor.terminate_child(OptimalSystemAgent.SessionSupervisor, pid)
+        rescue
+          _ -> :ok
+        catch
+          :exit, _ -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   @doc false
@@ -678,7 +741,64 @@ defmodule OptimalSystemAgent.Agent.Loop do
       resumed_steps: durable_steps
     })
 
+    # Sticky overdrive survives a crash / process restart on purpose (see
+    # `PermissionMode` moduledoc — that is what makes it durable). But THIS
+    # process never saw the operator toggle it on: a crash never runs
+    # `terminate/2`, so nothing cleared it, and this `init/1` is picking the
+    # mode back up cold from the on-disk store. Silently auto-running every
+    # mutating tool on a resumed session with no re-confirmation and no
+    # visible signal is the unsafe part — not the stickiness itself. Surface
+    # an un-missable notice on the session's event stream instead of forcing
+    # a re-confirm (which would defeat the durable-overdrive behavior within
+    # a live session that is working as intended).
+    if resumed? and state.permission_mode in [:overdrive, :bypass] do
+      notify_resumed_overdrive(state)
+    end
+
     {:ok, state}
+  end
+
+  # Emits both the internal Bus event (analytics/telemetry) and the
+  # session-scoped PubSub broadcast the TUI/HTTP channels already consume for
+  # every other `:system_event` (see the moduledoc's turn/iteration/budget
+  # taxonomy) — same shape, new `:overdrive_resumed` event name, so any
+  # existing system_event renderer picks it up without new wiring.
+  defp notify_resumed_overdrive(state) do
+    message =
+      "Resuming in overdrive (full auto) — this mode was left on before the process " <>
+        "restarted or crashed; tool calls will run without asking."
+
+    Logger.warning(
+      "[loop] session #{state.session_id} resumed with sticky :overdrive/:bypass active — notifying, not re-prompting"
+    )
+
+    Bus.emit(
+      :system_event,
+      %{
+        event: :overdrive_resumed,
+        session_id: state.session_id,
+        message: message
+      },
+      Observability.annotate(state, source: "agent.loop")
+    )
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :system_event,
+         event: :overdrive_resumed,
+         session_id: state.session_id,
+         message: message
+       }}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # "autonomous" preset (Change H) — one switch that makes an hours-long

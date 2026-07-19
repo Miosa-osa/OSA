@@ -228,7 +228,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   #   2. permission_mode gate (higher-level selector, this commit):
   #        :overdrive    → allow all (full auto), circuit-breaker aside
   #        :plan         → deny mutating tools (read-only planning)
-  #        :accept_edits → auto-allow edit/write tools, else fall to tier+ask
+  #        :accept_edits → auto-allow edit/write tools IN-SCOPE and without an
+  #                        explicit saved ask rule; an out-of-workspace path or
+  #                        an ask rule still prompts (see accept_edits_decision/1);
+  #                        anything outside @edit_tools falls to tier+ask
   #        :ask (default)→ current tier + Guardian, then interactive prompt for
   #                        mutating tools not covered by a saved rule
   #   3. permission tier gate / subagent gate / auto-mode Guardian (unchanged)
@@ -303,13 +306,51 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
          "Blocked: plan mode is read-only — #{tool_call.name} would change state. " <>
            "Switch to auto-edit, ask, or overdrive (full auto) to make changes."}
 
-      # Accept-edits: single-file edit/write tools are auto-approved; anything
-      # else (shell, delete/move, git, risky tools) falls through to tier + ask.
+      # Accept-edits: edit/write tools are auto-approved ONLY within the
+      # workspace scope and only absent an explicit saved `ask` rule for this
+      # call — CC parity (bypassPermissions still respects rule-based checks
+      # and out-of-workspace guards). Anything else (shell, delete/move, git,
+      # risky tools) falls through to tier + ask, unchanged.
       mode == :accept_edits and tool_call.name in @edit_tools ->
-        :allow
+        accept_edits_decision(tool_call)
 
       true ->
         approve_by_tier(tool_call, state)
+    end
+  end
+
+  # accept_edits auto-allow, narrowed: a write/edit targeting a path OUTSIDE
+  # the workspace/allowed scope, or matching an operator-saved `ask` rule,
+  # must still go through the interactive prompt (or fail closed on a
+  # non-interactive channel) instead of being silently allowed. A saved DENY
+  # rule is already handled earlier (step 1b) and never reaches here.
+  defp accept_edits_decision(tool_call) do
+    args = Map.get(tool_call, :arguments) || %{}
+    oos_path = Permissions.out_of_scope_write(tool_call.name, args)
+    {decision, meta} = Permissions.check_detailed(tool_call.name, args)
+    explicit_ask_rule? = decision == :ask and is_binary(meta.rule)
+
+    cond do
+      is_binary(oos_path) ->
+        reason = "path is outside the workspace and allowed directories: #{oos_path}"
+
+        if interactive_permissions?() do
+          {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
+        else
+          non_interactive_decision(tool_call)
+        end
+
+      explicit_ask_rule? ->
+        reason = "an ask rule requires confirmation: #{meta.rule} (#{meta.source} settings)"
+
+        if interactive_permissions?() do
+          {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
+        else
+          non_interactive_decision(tool_call)
+        end
+
+      true ->
+        :allow
     end
   end
 
@@ -530,7 +571,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       name in OptimalSystemAgent.Agent.Safety.DangerousCommands.shell_tools() ->
         clip(args["command"] || args["code"])
 
-      name in ["file_edit", "multi_file_edit"] ->
+      name == "multi_file_edit" ->
+        multi_file_target(args)
+
+      name in ["file_edit"] ->
         label_for(file_target(args), "edit ")
 
       name in ["file_write", "file_create"] ->
@@ -551,6 +595,27 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   end
 
   defp file_target(args), do: args["path"] || args["file_path"] || args["target"]
+
+  # `multi_file_edit`'s args are `%{"edits" => [%{"path" => ...}, ...]}` — no
+  # top-level path, so the dialog must name every file explicitly instead of
+  # falling back to the bare tool name (which left the operator approving a
+  # multi-file mutation blind).
+  defp multi_file_target(%{"edits" => edits}) when is_list(edits) and edits != [] do
+    paths =
+      edits
+      |> Enum.map(fn
+        %{"path" => p} when is_binary(p) and p != "" -> p
+        _ -> nil
+      end)
+      |> Enum.filter(&is_binary/1)
+
+    case paths do
+      [] -> nil
+      _ -> "edit #{length(paths)} file#{if length(paths) == 1, do: "", else: "s"}: " <> clip(Enum.join(paths, ", "))
+    end
+  end
+
+  defp multi_file_target(_), do: nil
 
   defp label_for(value, prefix) when is_binary(value) do
     case String.trim(value) do
@@ -587,8 +652,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # old/new strings; whole-file writes diff against the current disk content.
   @permission_diff_limit 20_000
   defp permission_diff(name, %{"old_string" => old, "new_string" => new})
-       when name in ["file_edit", "multi_file_edit"] and is_binary(old) and is_binary(new) do
+       when name == "file_edit" and is_binary(old) and is_binary(new) do
     {truncate_content(old), truncate_content(new)}
+  end
+
+  # multi_file_edit: no single old/new pair — concatenate each file's
+  # old_string/new_string, headed by its path, so the dialog shows what
+  # changes in EVERY file instead of the previous {nil, nil} (no diff at all).
+  defp permission_diff(name, %{"edits" => edits}) when name == "multi_file_edit" and is_list(edits) do
+    {olds, news} =
+      edits
+      |> Enum.filter(fn
+        %{"path" => p, "old_string" => o, "new_string" => n} ->
+          is_binary(p) and is_binary(o) and is_binary(n)
+
+        _ ->
+          false
+      end)
+      |> Enum.map(fn %{"path" => p, "old_string" => o, "new_string" => n} ->
+        {"--- #{p}\n#{o}", "+++ #{p}\n#{n}"}
+      end)
+      |> Enum.unzip()
+
+    case olds do
+      [] -> {nil, nil}
+      _ -> {truncate_content(Enum.join(olds, "\n\n")), truncate_content(Enum.join(news, "\n\n"))}
+    end
   end
 
   defp permission_diff(name, %{"path" => path, "content" => content})

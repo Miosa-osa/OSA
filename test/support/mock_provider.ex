@@ -33,9 +33,16 @@ defmodule OptimalSystemAgent.Test.MockProvider do
 
   First call (per process): returns a tool_call response.
   Subsequent calls: returns a plain-text final answer.
+
+  When `Application.get_env(:optimal_system_agent, :mock_provider_sleep_ms)`
+  is set, sleeps that long BEFORE responding — used to deterministically
+  simulate a subagent stuck inside one long provider call (delegation
+  timeout/cancel robustness tests) without a real network dependency.
   """
   @impl true
   def chat(_messages, _opts) do
+    maybe_sleep()
+
     case Process.get(:mock_provider_call_count, 0) do
       0 ->
         Process.put(:mock_provider_call_count, 1)
@@ -64,6 +71,8 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   """
   @impl true
   def chat_stream(_messages, callback, _opts) do
+    maybe_sleep()
+
     case Process.get(:mock_provider_call_count, 0) do
       0 ->
         Process.put(:mock_provider_call_count, 1)
@@ -96,5 +105,12 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def reset do
     Process.delete(:mock_provider_call_count)
     :ok
+  end
+
+  defp maybe_sleep do
+    case Application.get_env(:optimal_system_agent, :mock_provider_sleep_ms) do
+      ms when is_integer(ms) and ms > 0 -> Process.sleep(ms)
+      _ -> :ok
+    end
   end
 end

@@ -140,4 +140,128 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
 
     assert Permissions.check("shell_execute", %{"command" => "ls"}) == :ask
   end
+
+  # ── accept_edits: auto-allow is narrowed to in-scope, unruled edits ──
+  #
+  # M1 / finding #5: accept_edits used to auto-allow ANY @edit_tools call —
+  # including a write to an out-of-workspace absolute path, and it never
+  # consulted a saved `ask` rule at all (maybe_ask/2 was never reached). Both
+  # must still prompt; only a genuinely in-scope, unruled edit auto-runs.
+  describe "accept_edits scope + ask-rule guard" do
+    test "auto-allows an in-scope edit with no matching rule" do
+      s = state(permission_mode: :accept_edits)
+
+      assert :allow =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "ws3-in-scope.txt", "content" => "x"}),
+                 s
+               )
+    end
+
+    test "still ASKS (not auto-allow) for a write outside the workspace scope" do
+      enable_interactive()
+      s = state(permission_mode: :accept_edits)
+
+      assert {:ask, _rid, summary} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "/etc/passwd", "content" => "pwned"}),
+                 s
+               )
+
+      assert summary.reason =~ "outside the workspace"
+    end
+
+    test "out-of-scope write fails closed (not silently allowed) when non-interactive and no bypass" do
+      prior_bypass =
+        Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, true)
+
+      Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, false)
+      on_exit(fn -> Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, prior_bypass) end)
+
+      s = state(permission_mode: :accept_edits)
+
+      assert {:blocked, msg} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "/etc/passwd", "content" => "pwned"}),
+                 s
+               )
+
+      assert msg =~ "requires interactive approval"
+    end
+
+    test "still ASKS (not auto-allow) for a path matching a saved ask rule" do
+      enable_interactive()
+      put_flag_permissions(%{"ask" => ["file_write(ws3-secret.txt)"]})
+      s = state(permission_mode: :accept_edits)
+
+      assert {:ask, _rid, summary} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "ws3-secret.txt", "content" => "x"}),
+                 s
+               )
+
+      assert summary.reason =~ "ask rule"
+    end
+
+    test "a saved DENY rule still blocks accept_edits outright" do
+      put_flag_permissions(%{"deny" => ["file_write(ws3-secret.txt)"]})
+      s = state(permission_mode: :accept_edits)
+
+      assert {:blocked, msg} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "ws3-secret.txt", "content" => "x"}),
+                 s
+               )
+
+      assert msg =~ "denied by a saved permission rule"
+    end
+  end
+
+  # ── multi_file_edit: permission prompt must name the files ───────────
+  #
+  # M3 / finding #5: the approval prompt showed neither a target nor a diff
+  # for multi_file_edit (args have no top-level `path`), so the user approved
+  # a multi-file mutation blind.
+  describe "multi_file_edit permission prompt" do
+    test "names every target file and shows a per-file diff" do
+      enable_interactive()
+
+      edits = [
+        %{"path" => "a.ex", "old_string" => "foo", "new_string" => "bar"},
+        %{"path" => "b.ex", "old_string" => "baz", "new_string" => "qux"}
+      ]
+
+      assert {:ask, _rid, summary} =
+               ToolExecutor.approve_tool_call(
+                 tool("multi_file_edit", %{"edits" => edits}),
+                 state(permission_mode: :ask)
+               )
+
+      assert summary.target =~ "a.ex"
+      assert summary.target =~ "b.ex"
+      assert summary.target =~ "2 files"
+      assert summary.old_content =~ "foo"
+      assert summary.old_content =~ "baz"
+      assert summary.new_content =~ "bar"
+      assert summary.new_content =~ "qux"
+    end
+
+    test "out-of-scope multi_file_edit path still prompts even in accept_edits" do
+      enable_interactive()
+      s = state(permission_mode: :accept_edits)
+
+      edits = [
+        %{"path" => "a.ex", "old_string" => "foo", "new_string" => "bar"},
+        %{"path" => "/etc/passwd", "old_string" => "root", "new_string" => "pwned"}
+      ]
+
+      assert {:ask, _rid, summary} =
+               ToolExecutor.approve_tool_call(
+                 tool("multi_file_edit", %{"edits" => edits}),
+                 s
+               )
+
+      assert summary.reason =~ "outside the workspace"
+    end
+  end
 end
