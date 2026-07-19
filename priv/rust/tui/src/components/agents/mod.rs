@@ -185,9 +185,46 @@ impl Agents {
         }
     }
 
-    /// Advance spinner animation frame.
+    /// Advance spinner animation frame + clear dead/stale ghosts so the panel
+    /// never shows a "Running … 14m" row for an agent that actually died.
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
+        self.prune_stale();
+    }
+
+    /// How long a still-"Running" agent may go silent before we treat it as dead.
+    const STALE_SECS: u64 = 90;
+    /// How long a finished (Completed/Failed) row lingers before it's removed so
+    /// the panel doesn't accumulate old rows.
+    const RETAIN_SECS: u64 = 20;
+
+    /// Reconcile the panel with reality: mark silent running agents as Failed
+    /// (they crashed / were rate-limited / the backend dropped their stream), and
+    /// drop finished rows that have lingered past the retain window. Idempotent,
+    /// cheap, safe to call every tick.
+    pub fn prune_stale(&mut self) {
+        // 1. Silent runners → Failed (stops the forever-"Running" ghost).
+        for e in self.entries.iter_mut() {
+            if e.is_stale(Self::STALE_SECS) {
+                e.status = AgentStatus::Failed;
+                if e.current_action.is_empty() || e.current_action == "complete" {
+                    e.current_action = "stalled".into();
+                }
+                e.finished_at.get_or_insert_with(std::time::Instant::now);
+            }
+        }
+        // 2. Old finished rows → removed.
+        self.entries.retain(|e| match e.status {
+            AgentStatus::Completed | AgentStatus::Failed => e
+                .finished_at
+                .map(|t| t.elapsed().as_secs() < Self::RETAIN_SECS)
+                .unwrap_or(true),
+            _ => true,
+        });
+        // Panel goes idle once nothing is left to show.
+        if self.entries.is_empty() {
+            self.active = false;
+        }
     }
 
     // ─── Public mutation API ─────────────────────────────────────────────────
@@ -220,6 +257,7 @@ impl Agents {
                     batch_id: None,
                     started_at: std::time::Instant::now(),
                     finished_at: None,
+                    last_activity: std::time::Instant::now(),
                 });
             }
         }
@@ -250,6 +288,7 @@ impl Agents {
             entry.tokens_used = 0;
             entry.started_at = std::time::Instant::now();
             entry.finished_at = None;
+            entry.last_activity = std::time::Instant::now();
             if batch_id.is_some() {
                 entry.batch_id = batch_id;
             }
@@ -267,6 +306,7 @@ impl Agents {
                 batch_id,
                 started_at: std::time::Instant::now(),
                 finished_at: None,
+                last_activity: std::time::Instant::now(),
             });
         }
         self.active = true;
@@ -283,6 +323,7 @@ impl Agents {
     ) {
         let subject = subject.into();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            entry.last_activity = std::time::Instant::now();
             entry.current_action = action.into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;

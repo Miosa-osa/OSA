@@ -28,6 +28,11 @@ pub struct AgentEntry {
     /// Set when the agent reaches a terminal state (Completed/Failed) so its
     /// elapsed time freezes instead of ticking forever.
     pub finished_at: Option<std::time::Instant>,
+    /// Last time the backend sent ANY signal for this agent (spawn / start /
+    /// progress). If a running agent goes silent (crashed, rate-limited, backend
+    /// dropped it) it stops updating this — so the panel can detect it as stale
+    /// and stop showing a dead "Running … 14m" ghost forever.
+    pub last_activity: std::time::Instant,
 }
 
 impl AgentEntry {
@@ -36,6 +41,13 @@ impl AgentEntry {
     pub fn elapsed_secs(&self) -> u64 {
         let end = self.finished_at.unwrap_or_else(std::time::Instant::now);
         end.saturating_duration_since(self.started_at).as_secs()
+    }
+
+    /// A still-"running" agent that hasn't sent any signal for `secs` seconds —
+    /// almost certainly dead (crash / rate-limit / dropped backend stream).
+    pub fn is_stale(&self, secs: u64) -> bool {
+        matches!(self.status, AgentStatus::Running | AgentStatus::Spawning)
+            && self.last_activity.elapsed().as_secs() >= secs
     }
 }
 
