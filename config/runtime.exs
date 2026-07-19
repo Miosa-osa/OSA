@@ -92,7 +92,15 @@ provider_map = %{
   "hyperbolic" => :hyperbolic,
   "lmstudio" => :lmstudio,
   "llamacpp" => :llamacpp,
-  "miosa" => :miosa
+  "miosa" => :miosa,
+  "replicate" => :replicate,
+  "qwen" => :qwen,
+  "moonshot" => :moonshot,
+  "zhipu" => :zhipu,
+  "glm" => :zhipu,
+  "volcengine" => :volcengine,
+  "baichuan" => :baichuan,
+  "ollama_cloud" => :ollama_cloud
 }
 
 default_provider =
