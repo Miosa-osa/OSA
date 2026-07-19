@@ -338,9 +338,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     achieved. You are READ-ONLY: you may inspect the repository (file_read / grep_search / \
     dir_list / file_glob / code_symbols) but you must NOT and CANNOT modify anything.
 
-    Default to NOT-REFUTED only if you are genuinely confident the goal is met. If you are \
-    uncertain, REFUTE — the cost of a false "not refuted" is much higher than the cost of one \
-    more review round.
+    Default to NOT-REFUTED when uncertain. Only REFUTE when you have found CONCRETE evidence \
+    the goal is unmet (a missing file, a change that contradicts the goal, a test you can see \
+    would fail, an unaddressed requirement stated in the goal). Genuine uncertainty or an \
+    inability to fully verify from what you can see is NOT itself grounds to refute — say so in \
+    "reason" and leave "refuted" false. A false refute costs a full extra review round on work \
+    that was already done; only spend that cost when you can point to a specific gap.
 
     ## Goal
 
@@ -419,18 +422,88 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   defp gap_list(refuters), do: Enum.map(refuters, & &1.reason)
 
   # Stable fingerprint of the CURRENT refuting gaps, used by the stall
-  # early-exit: two consecutive rounds citing the exact same gap set means
-  # further iteration is not making progress.
+  # early-exit: two consecutive rounds citing the SAME underlying gap set
+  # means further iteration is not making progress.
+  #
+  # Hashing the raw free-form `reason` sentence (finding #10 / D3) never
+  # actually trips: skeptics rarely (if ever) produce byte-identical prose
+  # across rounds even when describing the exact same unresolved gap, so the
+  # fingerprint changes every round and the stall early-exit is effectively
+  # dead code — an abandoned goal just re-verifies to the lifetime cap
+  # instead of auto-pausing. Fingerprint on a STABLE signal instead: the
+  # sorted, deduplicated set of concrete gap identifiers (file paths,
+  # module/function names) mentioned across the refuting reasons. The same
+  # unresolved gap tends to cite the same file/symbol round after round even
+  # when the surrounding sentence is reworded.
   defp fingerprint(results) do
     results
     |> Enum.filter(& &1.refuted)
-    |> Enum.map(&normalize_reason(&1.reason))
+    |> Enum.flat_map(&gap_identifiers(&1.reason))
+    |> Enum.uniq()
     |> Enum.sort()
     |> :erlang.phash2()
   end
 
+  # File paths (e.g. `lib/foo/bar.ex`), dotted module names (`Foo.Bar.Baz`),
+  # and snake_case symbols (`goal_verifier_runs`) mentioned in a skeptic's
+  # reason — the concrete, reproducible identifiers of WHICH gap is being
+  # cited, independent of how the surrounding sentence is phrased.
+  @path_re ~r/\b[\w\-]+(?:\/[\w\-]+)+\.\w{1,6}\b/
+  @dotted_module_re ~r/\b[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)+\b/
+  @snake_symbol_re ~r/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/
+
+  defp gap_identifiers(reason) when is_binary(reason) do
+    down = reason
+
+    identifiers =
+      (Regex.scan(@path_re, down) ++
+         Regex.scan(@dotted_module_re, down) ++
+         Regex.scan(@snake_symbol_re, down))
+      |> List.flatten()
+      |> Enum.map(&String.downcase/1)
+      |> Enum.uniq()
+
+    cond do
+      identifiers != [] ->
+        identifiers
+
+      # No concrete identifier cited at all — fall back to a normalized
+      # bag-of-significant-words (drops stopwords/short filler) so gaps
+      # described only in prose still have a reasonably stable signal
+      # instead of collapsing every round to a distinct hash.
+      significant_words(down) != [] ->
+        significant_words(down)
+
+      true ->
+        # Short/terse reason with no extractable identifier AND no word long
+        # enough to survive the stopword/length filter (e.g. "gap A" vs
+        # "gap B"). Falling through to an empty list here would collapse
+        # every such reason to the SAME fingerprint, hiding genuinely
+        # different gaps behind a false stall. Last-resort: the normalized
+        # whole string, so distinct short reasons still compare distinct.
+        [normalize_reason(down)]
+    end
+  end
+
+  defp gap_identifiers(_), do: []
+
   defp normalize_reason(reason) when is_binary(reason), do: String.downcase(String.trim(reason))
   defp normalize_reason(_), do: ""
+
+  @stopwords ~w(the a an is are was were be been being this that these those
+    and or but not with without from into onto over under for to of in on at
+    it its as by has have had does do did goal fully still needs need missing
+    unclear cannot doesnt didnt hasnt havent isnt wasnt)
+
+  defp significant_words(text) do
+    text
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, " ")
+    |> String.split()
+    |> Enum.filter(&(String.length(&1) > 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
 
   # `count` tracks consecutive occurrences (in a row) of the CURRENT gap
   # fingerprint, starting at 1 the first time it's seen. Stall trips once

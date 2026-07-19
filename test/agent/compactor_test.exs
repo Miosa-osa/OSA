@@ -807,4 +807,154 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       clear_severity_env()
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Finding #7 (K1 + K2) — summarize_warm chronology + tool-pair safety
+  # ---------------------------------------------------------------------------
+
+  describe "summarize_warm chronology (K1)" do
+    test "restores warm-zone survivors in ORIGINAL chronological order relative to summaries" do
+      # Five short messages (alternating role so `merge_consecutive` — an
+      # earlier pipeline step — never folds any of them into a neighbor)
+      # with minimal length bonus, all far lower importance than the heavy
+      # filler turns below. They form exactly ONE full chunk-of-5 by
+      # themselves (chunking runs over importance-sorted UNITS), so that
+      # group stays well under the 200-token summarization floor and
+      # survives verbatim while everything chronologically AFTER it (all
+      # much higher importance/token filler) gets summarized.
+      survivor = user("SURVIVOR_MARKER")
+      light_padding = [asst("sep1"), user("sep2"), asst("sep3"), user("sep4")]
+
+      filler = String.duplicate("filler word ", 40)
+
+      turns =
+        for i <- 1..8 do
+          [
+            user("Turn #{i} question, marker T#{i}U #{filler}"),
+            asst("Turn #{i} answer, marker T#{i}A #{filler}")
+          ]
+        end
+
+      # The survivor is the OLDEST message in the conversation —
+      # chronologically BEFORE every big turn that will be summarized.
+      messages = [survivor | light_padding] ++ List.flatten(turns)
+
+      last_two = turns |> Enum.slice(-2, 2) |> List.flatten()
+      budget = Compactor.estimate_tokens(last_two) + 5
+      Application.put_env(:optimal_system_agent, :compaction_preserve_recent_tokens, budget)
+
+      # Pin severity to "background" (usage ratio just above 1.0, safely
+      # under the 1.1 aggressive/emergency cutoff below) — the emergency tier
+      # runs the FULL pipeline down to a much lower target (0.50 * max) and
+      # would truncate the survivor outright instead of exercising
+      # summarize_warm's own restore-order logic in isolation.
+      Application.put_env(:optimal_system_agent, :compaction_warn, 0.0)
+      Application.put_env(:optimal_system_agent, :compaction_aggressive, 1.1)
+      Application.put_env(:optimal_system_agent, :compaction_emergency, 1.1)
+      total_tokens = Compactor.estimate_tokens(messages)
+      Application.put_env(:optimal_system_agent, :max_context_tokens, round(total_tokens / 1.02))
+
+      result = Compactor.maybe_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      survivor_position = Enum.find_index(contents, &String.contains?(&1, "SURVIVOR_MARKER"))
+
+      assert survivor_position,
+             "the survivor marker should have survived verbatim (lowest-importance, low-token group)"
+
+      summary_positions =
+        contents
+        |> Enum.with_index()
+        |> Enum.filter(fn {c, _i} -> String.contains?(c, "[Warm Summary]") end)
+        |> Enum.map(fn {_c, i} -> i end)
+
+      assert summary_positions != [],
+             "expected at least one warm-zone group to actually be summarized"
+
+      # The surviving marker (chronologically FIRST) must be restored BEFORE
+      # every summary block (derived from LATER messages). The old
+      # dead-sort-clause bug collapsed every surviving message to a single
+      # shared sort key (999_999), flinging it after every summary block
+      # regardless of true chronological position.
+      assert survivor_position < Enum.min(summary_positions),
+             "survivor must be restored before summaries derived from later messages, " <>
+               "survivor_position=#{survivor_position} summary_positions=#{inspect(summary_positions)}"
+    after
+      Application.delete_env(:optimal_system_agent, :compaction_preserve_recent_tokens)
+      clear_severity_env()
+    end
+  end
+
+  describe "summarize_warm tool-pair safety (K2) — build_pair_safe_units/1" do
+    test "bundles an assistant tool_calls message with its immediately-following tool result" do
+      call_msg = %{
+        role: "assistant",
+        content: "",
+        tool_calls: [%{id: "t1", name: "shell", arguments: %{"cmd" => "ls"}}]
+      }
+
+      result_msg = tool_msg("shell", "file1\nfile2", "t1")
+
+      indexed_warm = [
+        {{user("before"), 1.0}, 0},
+        {{call_msg, 0.8}, 1},
+        {{result_msg, 0.6}, 2},
+        {{asst("after"), 1.0}, 3}
+      ]
+
+      units = Compactor.build_pair_safe_units(indexed_warm)
+
+      assert length(units) == 3, "the call+result pair must collapse into ONE unit"
+
+      pair_unit = Enum.find(units, &(&1.order == 1))
+      assert pair_unit
+      assert length(pair_unit.items) == 2
+      assert pair_unit.importance == 0.6, "unit importance is the MIN of its members"
+
+      item_msgs = Enum.map(pair_unit.items, fn {{msg, _imp}, _idx} -> msg end)
+      assert call_msg in item_msgs
+      assert result_msg in item_msgs
+    end
+
+    test "bundles multiple contiguous tool results with their originating call" do
+      call_msg = %{
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          %{id: "t1", name: "shell", arguments: %{}},
+          %{id: "t2", name: "shell", arguments: %{}}
+        ]
+      }
+
+      result_1 = tool_msg("shell", "out1", "t1")
+      result_2 = tool_msg("shell", "out2", "t2")
+
+      indexed_warm = [
+        {{call_msg, 0.9}, 0},
+        {{result_1, 0.5}, 1},
+        {{result_2, 0.4}, 2},
+        {{user("next"), 1.0}, 3}
+      ]
+
+      units = Compactor.build_pair_safe_units(indexed_warm)
+
+      assert length(units) == 2
+      pair_unit = Enum.find(units, &(&1.order == 0))
+      assert length(pair_unit.items) == 3
+      assert pair_unit.importance == 0.4
+    end
+
+    test "messages with no tool_calls are singleton units" do
+      indexed_warm = [
+        {{user("a"), 1.0}, 0},
+        {{asst("b"), 1.1}, 1}
+      ]
+
+      units = Compactor.build_pair_safe_units(indexed_warm)
+
+      assert length(units) == 2
+      assert Enum.map(units, & &1.order) == [0, 1]
+      assert Enum.all?(units, &(length(&1.items) == 1))
+    end
+  end
 end

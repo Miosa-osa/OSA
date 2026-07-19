@@ -602,6 +602,25 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   end
 
   # Step 3: Summarize warm-zone messages in groups of 5
+  #
+  # Two correctness fixes (finding #7 / K1+K2):
+  #
+  #   1. The cold/warm boundary is snapped through `CompactionSafety.
+  #      safe_split_index/2` (same primitive `compress_cold` already uses),
+  #      so the warm zone never starts on an orphaned `role: "tool"` result
+  #      whose originating assistant call was left behind in the untouched
+  #      cold zone.
+  #   2. Before importance-sorting/chunking for summarization, warm-zone
+  #      messages are grouped into pair-safe UNITS — an assistant message
+  #      carrying `tool_calls` plus the `role: "tool"` results that satisfy
+  #      it are bundled into a single atomic unit. Units, not raw messages,
+  #      are what gets sorted/chunked/summarized, so a tool call and its
+  #      result can never land in different groups (one surviving, one
+  #      summarized away) and never get orphaned across the boundary.
+  #   3. Final ordering is restored purely from each item's ORIGINAL index
+  #      (threaded through as a plain integer the whole way), not the old
+  #      dead-clause sort that collapsed every surviving message to a single
+  #      shared key and destroyed chronology.
   defp apply_step(:summarize_warm, annotated, system_msgs, _target) do
     total = length(annotated)
 
@@ -612,34 +631,78 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # Token-budgeted tail selection kept everything hot — nothing to summarize
       {annotated, system_msgs, :summarize_warm}
     else
-      warm_start = max(total - @warm_zone_end, 0) |> min(hot_start)
+      raw_warm_start = max(total - @warm_zone_end, 0) |> min(hot_start)
+      warm_start = CompactionSafety.safe_split_index(msgs, raw_warm_start) |> min(hot_start)
 
       cold = Enum.slice(annotated, 0, warm_start)
       warm = Enum.slice(annotated, warm_start, hot_start - warm_start)
       hot = Enum.slice(annotated, hot_start, total - hot_start)
 
-      # Sort warm by importance — summarize the least important first
-      sorted_warm =
-        warm
-        |> Enum.with_index()
-        |> Enum.sort_by(fn {{_msg, importance}, _idx} -> importance end, :asc)
+      # Index the warm zone with its ORIGINAL (chronological) position before
+      # any reordering, then fold it into pair-safe units.
+      indexed_warm = Enum.with_index(warm)
+      units = build_pair_safe_units(indexed_warm)
 
-      # Summarize in groups of 5, starting with least important
-      summarized_warm = summarize_in_groups(sorted_warm, 5)
+      # Sort units by importance — summarize the least important first. A
+      # unit's importance is the MIN of its members, so a tool-call/result
+      # pair is only ever as "important" as its least important half —
+      # matching the intent of the original per-message sort while keeping
+      # the pair atomic.
+      sorted_units = Enum.sort_by(units, & &1.importance, :asc)
 
-      # Restore original order for the surviving messages
+      # Summarize in groups of 5 units, starting with least important
+      summarized_items = summarize_units_in_groups(sorted_units, 5)
+
+      # Restore original chronological order purely by the threaded index —
+      # every item (summary or survivor) carries one.
       restored_warm =
-        summarized_warm
-        |> Enum.sort_by(fn
-          {{_msg, _imp}, idx} -> idx
-          {msg, _imp} -> Map.get(msg, :__order, 999_999)
-        end)
-        |> Enum.map(fn
-          {{msg, imp}, _idx} -> {msg, imp}
-          {msg, imp} -> {msg, imp}
-        end)
+        summarized_items
+        |> Enum.sort_by(fn {_msg, _imp, idx} -> idx end)
+        |> Enum.map(fn {msg, imp, _idx} -> {msg, imp} end)
 
       {cold ++ restored_warm ++ hot, system_msgs, :summarize_warm}
+    end
+  end
+
+  # Fold a chronologically-ordered, indexed warm-zone slice into pair-safe
+  # units: an assistant message with non-empty `:tool_calls` plus every
+  # immediately-following `role: "tool"` result becomes one unit; every other
+  # message is its own singleton unit. Mirrors `CompactionSafety.tool_result?/1`
+  # so both live behind the same tool-pair definition.
+  #
+  # Public (not `defp`) + `@doc false` so the pair-grouping invariant itself
+  # (finding #7 / K2) is directly unit-testable without spinning up the full
+  # progressive-compression pipeline.
+  @doc false
+  @spec build_pair_safe_units([{{map(), number()}, non_neg_integer()}]) :: [map()]
+  def build_pair_safe_units(indexed_warm) do
+    do_build_units(indexed_warm, [])
+  end
+
+  defp do_build_units([], acc), do: Enum.reverse(acc)
+
+  defp do_build_units([{{msg, imp}, idx} = head | rest], acc) do
+    if has_tool_calls?(msg) do
+      {pair_items, remaining} =
+        Enum.split_while(rest, fn {{m, _imp}, _idx} -> CompactionSafety.tool_result?(m) end)
+
+      items = [{{msg, imp}, idx} | pair_items]
+      unit = %{items: items, importance: min_importance(items), order: idx}
+      do_build_units(remaining, [unit | acc])
+    else
+      unit = %{items: [head], importance: imp, order: idx}
+      do_build_units(rest, [unit | acc])
+    end
+  end
+
+  defp min_importance(items) do
+    items |> Enum.map(fn {{_msg, imp}, _idx} -> imp end) |> Enum.min()
+  end
+
+  defp has_tool_calls?(msg) do
+    case Map.get(msg, :tool_calls) do
+      calls when is_list(calls) -> calls != []
+      _ -> false
     end
   end
 
@@ -861,34 +924,41 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
-  defp summarize_in_groups(indexed_annotated, group_size) do
-    # indexed_annotated is [{msg_with_importance, original_index}, ...]
-    # Group and summarize the lowest-importance ones
-    groups = Enum.chunk_every(indexed_annotated, group_size)
+  # units is a list of pair-safe unit maps: %{items: [{{msg,imp},idx}, ...],
+  # importance: float, order: integer} sorted least-important first. Groups
+  # `group_size` UNITS at a time (never splitting a unit) and summarizes each
+  # group as a whole. Returns a flat list of `{msg, imp, idx}` triples ready
+  # for the final chronological restore.
+  defp summarize_units_in_groups(units, group_size) do
+    groups = Enum.chunk_every(units, group_size)
 
     Enum.flat_map(groups, fn group ->
-      messages = Enum.map(group, fn {{msg, _imp}, _idx} -> msg end)
+      all_items = Enum.flat_map(group, & &1.items)
+      messages = Enum.map(all_items, fn {{msg, _imp}, _idx} -> msg end)
       group_tokens = estimate_tokens(messages)
 
       # Only summarize if the group is substantial enough to benefit
       if group_tokens > 200 do
         case call_summary_llm(messages) do
           {:ok, summary} ->
-            # Replace the group with a single summary message
+            # Replace the whole group (every unit's messages, pairs intact)
+            # with a single summary message, ordered at the earliest original
+            # position in the group so chronology is preserved on restore.
+            min_order = group |> Enum.map(& &1.order) |> Enum.min()
+
             summary_msg = %{
               role: "system",
-              content: "[Warm Summary]\n#{summary}",
-              __order: elem(List.first(group), 1)
+              content: "[Warm Summary]\n#{summary}"
             }
 
-            [{summary_msg, 1.5}]
+            [{summary_msg, 1.5, min_order}]
 
           {:error, _reason} ->
-            # Keep originals on LLM failure
-            Enum.map(group, fn {{msg, imp}, _idx} -> {msg, imp} end)
+            # Keep originals (with their pairs intact) on LLM failure
+            Enum.map(all_items, fn {{msg, imp}, idx} -> {msg, imp, idx} end)
         end
       else
-        Enum.map(group, fn {{msg, imp}, _idx} -> {msg, imp} end)
+        Enum.map(all_items, fn {{msg, imp}, idx} -> {msg, imp, idx} end)
       end
     end)
   end

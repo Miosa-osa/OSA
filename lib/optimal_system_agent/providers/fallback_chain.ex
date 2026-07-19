@@ -157,6 +157,15 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       RetryClassifier.context_overflow?(reason) ->
         false
 
+      # A 404 / model-not-found is a CLEAR config error (bad /model pick),
+      # not a transient fault — falling back to another provider silently
+      # answers from a different model instead of surfacing the mistake.
+      # Mirrors RetryClassifier's own `@fatal_categories` treatment of
+      # :model_not_found; FallbackChain used to disagree via the substring
+      # matcher below (finding #9).
+      ErrorCatalog.classify(reason) == :model_not_found ->
+        false
+
       ErrorCatalog.classify(reason) in @always_retryable_categories ->
         true
 
@@ -191,14 +200,13 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         "timeout",
         "connection",
         "unavailable",
-        "capacity",
-        # Model/endpoint-not-found on one provider → fall back to another that
-        # has the model, instead of dead-ending on a single-provider 404.
-        "404",
-        "not found",
-        "no such model",
-        "unknown model",
-        "does not exist"
+        "capacity"
+        # Deliberately NOT retryable: "404" / "not found" / "no such model" /
+        # "unknown model" / "does not exist". A model-not-found is a clear
+        # config error (bad /model pick) that will fail identically on every
+        # other provider (or worse, silently answer from a different model)
+        # — see the ErrorCatalog.classify == :model_not_found gate above,
+        # which is now the authoritative check for this case (finding #9).
       ],
       fn pattern -> String.contains?(reason_down, pattern) end
     )

@@ -356,5 +356,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerTest do
       Application.put_env(:optimal_system_agent, :goal_tracker_enabled, true)
       assert GoalTracker.enabled?(%{})
     end
+
+    # Finding #4 (mirrors ReactLoop.goal_verifier_enabled?/1): this used to
+    # also auto-enable under an autonomous permission mode (overdrive/
+    # bypass) — the operator's PRIMARY mode, not an edge case — contradicting
+    # "off by default". Config opt-in only now.
+    test "stays false under overdrive mode with no explicit config", %{session_id: sid} do
+      OptimalSystemAgent.Agent.PermissionMode.put(sid, :overdrive)
+      refute GoalTracker.enabled?(%{session_id: sid})
+      OptimalSystemAgent.Agent.PermissionMode.clear(sid)
+    end
+
+    test "stays false under bypass mode with no explicit config", %{session_id: sid} do
+      OptimalSystemAgent.Agent.PermissionMode.put(sid, :bypass)
+      refute GoalTracker.enabled?(%{session_id: sid})
+      OptimalSystemAgent.Agent.PermissionMode.clear(sid)
+    end
   end
 end

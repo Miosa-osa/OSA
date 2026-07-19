@@ -146,25 +146,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   @doc """
   `true` when cross-turn goal orchestration should run for this session:
-  the explicit config flag, OR the session is in an autonomous posture
-  (overdrive/bypass) — mirrors `ReactLoop.goal_verifier_enabled?/1`.
+  the explicit config flag ONLY — mirrors `ReactLoop.goal_verifier_enabled?/1`.
+
+  Previously also auto-enabled under an autonomous posture (overdrive/
+  bypass), same regression as `ReactLoop.goal_verifier_enabled?/1` (finding
+  #4): overdrive is the operator's PRIMARY mode, not an edge case, so
+  auto-flipping this on there contradicts "off by default" and would have
+  the auto-pause path (see `enabled?/1` caller) evaluating `paused?/1`
+  against a tracker that was never actually opted into for the session.
   """
   @spec enabled?(map()) :: boolean()
   def enabled?(state) when is_map(state) do
-    Application.get_env(:optimal_system_agent, :goal_tracker_enabled, false) or
-      autonomous_mode?(state)
+    Application.get_env(:optimal_system_agent, :goal_tracker_enabled, false)
   end
 
   def enabled?(_), do: false
-
-  defp autonomous_mode?(state) do
-    case Map.get(state, :session_id) do
-      nil -> false
-      sid -> OptimalSystemAgent.Agent.PermissionMode.get(sid) in [:overdrive, :bypass]
-    end
-  rescue
-    _ -> false
-  end
 
   # ---------------------------------------------------------------------------
   # Lifecycle
@@ -534,17 +530,76 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   # ---------------------------------------------------------------------------
   # Gap fingerprint (independent re-implementation of GoalVerifier's private
-  # `fingerprint/1` — same normalize/sort/hash algorithm, exposed publicly so
-  # this module has no coupling to GoalVerifier internals and callers can
+  # `fingerprint/1` — same identifier-extraction algorithm, exposed publicly
+  # so this module has no coupling to GoalVerifier internals and callers can
   # inspect/test fingerprints directly).
+  #
+  # Hashing raw normalized `reason` strings (the old algorithm) never
+  # actually trips the stall detector: two consecutive rounds citing the
+  # exact same underlying gap essentially never produce byte-identical LLM
+  # prose, so the fingerprint changes every round and stall/no-progress
+  # auto-pause was effectively dead (finding #10 / D3). Fingerprint on a
+  # STABLE signal instead — the sorted, deduplicated set of concrete gap
+  # identifiers (file paths, module names, snake_case symbols) mentioned in
+  # each gap, falling back to a normalized significant-word bag when no
+  # identifier is present.
   # ---------------------------------------------------------------------------
 
   @spec gap_fingerprint([String.t()]) :: integer()
   def gap_fingerprint(gaps) when is_list(gaps) do
     gaps
-    |> Enum.map(&normalize_gap/1)
+    |> Enum.flat_map(&gap_identifiers/1)
+    |> Enum.uniq()
     |> Enum.sort()
     |> :erlang.phash2()
+  end
+
+  @path_re ~r/\b[\w\-]+(?:\/[\w\-]+)+\.\w{1,6}\b/
+  @dotted_module_re ~r/\b[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)+\b/
+  @snake_symbol_re ~r/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/
+
+  defp gap_identifiers(gap) when is_binary(gap) do
+    identifiers =
+      (Regex.scan(@path_re, gap) ++
+         Regex.scan(@dotted_module_re, gap) ++
+         Regex.scan(@snake_symbol_re, gap))
+      |> List.flatten()
+      |> Enum.map(&String.downcase/1)
+      |> Enum.uniq()
+
+    cond do
+      identifiers != [] ->
+        identifiers
+
+      significant_words(gap) != [] ->
+        significant_words(gap)
+
+      true ->
+        # Short/terse gap with no extractable identifier AND no word long
+        # enough to survive the stopword/length filter (e.g. "gap A" vs
+        # "gap B"). Falling through to an empty list here would collapse
+        # every such gap to the SAME fingerprint, hiding genuinely different
+        # gaps behind a false stall. Last-resort: the normalized whole
+        # string, so distinct short gaps still compare distinct.
+        [normalize_gap(gap)]
+    end
+  end
+
+  defp gap_identifiers(_), do: []
+
+  @stopwords ~w(the a an is are was were be been being this that these those
+    and or but not with without from into onto over under for to of in on at
+    it its as by has have had does do did goal fully still needs need missing
+    unclear cannot doesnt didnt hasnt havent isnt wasnt)
+
+  defp significant_words(text) do
+    text
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9\s]/, " ")
+    |> String.split()
+    |> Enum.filter(&(String.length(&1) > 3 and &1 not in @stopwords))
+    |> Enum.uniq()
+    |> Enum.sort()
   end
 
   defp normalize_gap(gap) when is_binary(gap), do: String.downcase(String.trim(gap))

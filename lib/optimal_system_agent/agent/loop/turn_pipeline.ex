@@ -218,18 +218,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     state = %{state | signal_weight: signal_weight, turn_id: Observability.new_turn_id()}
     Observability.turn_start(state)
 
-    # Compact message history if needed. Feed the last response's REAL provider-
-    # reported input-token count (recorded by the budget/accounting stage) into
-    # the compaction decision instead of the char-heuristic estimate; falls back
-    # to the estimate on the first turn when no real count exists yet.
-    compacted =
-      Compactor.maybe_compact(
-        state.messages,
-        Map.get(state, :last_input_tokens, 0),
-        state.session_id
-      ) || state.messages
-
-    state = %{state | messages: compacted}
+    # Compact message history if needed, then refresh the token-count signal
+    # so a second compactor later in the SAME iteration doesn't redo the work
+    # off a stale count (finding #8).
+    state = compact_and_refresh_tokens(state)
 
     # Build decorated message list (nudges + pre-directives + user message).
     # Thread any pasted/attached images so vision requests reach the model as
@@ -237,15 +229,62 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     images = Keyword.get(opts, :images, [])
     messages_to_append = MessageHandler.build_messages(message, state, images)
 
-    %{
+    %{state | messages: state.messages ++ messages_to_append, current_input: message}
+    |> reset_per_turn_fields()
+  end
+
+  # Run `Compactor.maybe_compact/3` against `state.messages` and, when it
+  # actually shrank history, immediately refresh `:last_input_tokens` to
+  # match.
+  #
+  # `last_input_tokens` is otherwise only written by `Loop.Accounting` AFTER
+  # a provider round-trip. Left stale, `ReactLoop.do_iteration/1`'s own
+  # `ProactiveCompaction.should_compact?/2` check — which runs later in the
+  # SAME iteration (iteration 0 of a turn) and reads the same field — sees
+  # the identical pre-compaction count and fires a SECOND LLM summarization
+  # round-trip back to back with this one (finding #8). Re-estimating here
+  # from the now-shrunk history lets that second check correctly skip.
+  #
+  # Public (not `defp`) + `@doc false` so this dedup is directly
+  # unit-testable.
+  @doc false
+  @spec compact_and_refresh_tokens(map()) :: map()
+  def compact_and_refresh_tokens(state) do
+    original_messages = state.messages
+
+    compacted =
+      Compactor.maybe_compact(
+        original_messages,
+        Map.get(state, :last_input_tokens, 0),
+        state.session_id
+      ) || original_messages
+
+    state =
+      if compacted != original_messages do
+        %{state | last_input_tokens: Compactor.estimate_tokens(compacted)}
+      else
+        state
+      end
+
+    %{state | messages: compacted}
+  end
+
+  @doc """
+  Zero out every counter/flag that is per-turn in intent so it cannot leak
+  from one user turn into the next.
+
+  Split out from `prepare_turn/3` as its own function so the reset list is
+  independently testable — the fields below have historically been added to
+  the loop without a matching entry here, causing state to silently bleed
+  across turns (cross-turn doom-loop false halts, a self-disabling goal
+  verifier, leaked token-target continues). When adding a new per-turn
+  counter anywhere in the loop, add its reset here too.
+  """
+  @spec reset_per_turn_fields(map()) :: map()
+  def reset_per_turn_fields(state) do
+    state = %{
       state
-      | messages: state.messages ++ messages_to_append,
-        # Raw user input for this turn — read by Loop.run_and_reply when it
-        # builds the :post_response payload, replacing the old (wrong)
-        # derivation from List.last(state.messages) which returned the
-        # just-appended assistant reply instead of the user's prompt.
-        current_input: message,
-        iteration: 0,
+      | iteration: 0,
         overflow_retries: 0,
         auto_continues: 0,
         status: :thinking,
@@ -257,6 +296,34 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
         # a per-message process-dict delete in clear_message_caches).
         doom_recovery_count: 0
     }
+
+    # `Map.merge/2`, NOT the `%{state | ...}` struct-update syntax, for these
+    # four: they are lazily `Map.put` onto the loop state the first time
+    # each feature actually runs (goal_verifier.ex, doom_loop/reasoning_only.ex,
+    # react_loop.ex's token-target nudge) rather than being declared
+    # `Loop` defstruct fields with a default. A turn that never exercised one
+    # of these features yet genuinely does not have the key on its state map,
+    # and `%{state | key: val}` raises `KeyError`/`BadKeyError` for a key that
+    # isn't already present — `Map.merge/2` sets it either way.
+    Map.merge(state, %{
+      # Reset the reasoning-only doom-loop streak each new user turn — a
+      # turn that ended with 1-2 trailing empty/reasoning-only generations
+      # must not carry that streak into the NEXT turn's threshold check
+      # (false "reasoning-only spin" halt on a fresh turn's first empty
+      # generation). See doom_loop/reasoning_only.ex.
+      reasoning_only_streak: 0,
+      # Reset goal-verifier per-turn counters each new user turn. Both are
+      # gated against per-session maxes (goal_verifier.ex `max_runs/0`,
+      # `stall_threshold/0`); leaving them un-reset self-disables the
+      # verifier for every subsequent turn in the session once turn 1
+      # exhausts its runs.
+      goal_verifier_runs: 0,
+      goal_verifier_stall_count: 0,
+      # Reset the token-target "work to target" continue counter each new
+      # user turn — otherwise it leaks across turns and the feature dies
+      # after the first turn that used it up.
+      target_continues: 0
+    })
   end
 
   @doc """

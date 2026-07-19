@@ -43,6 +43,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   require Logger
 
   alias OptimalSystemAgent.Providers
+  alias OptimalSystemAgent.Providers.FallbackChain
   alias OptimalSystemAgent.Providers.HealthChecker
   alias OptimalSystemAgent.Providers.Resilience
 
@@ -106,6 +107,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
   end
+
+  @doc """
+  `true` when a same-provider error on the SYNC path (`chat/2`) warrants
+  re-sending to the next provider in the fallback chain.
+
+  Delegates to `FallbackChain.retryable_error?/1` — the single source of
+  truth for this decision, shared with the streaming fallback path — so the
+  sync path can never disagree with it again (finding #9 / #P4: this used to
+  have NO gate at all and re-sent on every error, including context-overflow,
+  missing/invalid API key, and model-not-found).
+  """
+  @spec should_fallback?(term()) :: boolean()
+  def should_fallback?(reason), do: FallbackChain.retryable_error?(reason)
 
   @doc """
   Send a chat completion request to the configured LLM provider.
@@ -359,28 +373,43 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
       {:error, reason} = err ->
         HealthChecker.record_failure(provider, reason)
-        fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
 
-        remaining_chain =
-          fallback_chain
-          |> Enum.drop_while(&(&1 == provider))
-          |> then(fn
-            chain when chain == fallback_chain -> chain
-            [_ | rest] -> rest
-            [] -> []
-          end)
-          |> filter_boot_excluded_providers()
-          |> Enum.filter(&HealthChecker.is_available?/1)
+        # Only genuinely transient/overload errors warrant a cross-provider
+        # re-send on the sync path. Context-overflow, missing/invalid API
+        # key, auth, and model-not-found are NOT provider-specific — resending
+        # to the next provider either fails identically (oversized prompt) or
+        # silently answers from a different provider/model while masking the
+        # real config error (finding #9 / #P4).
+        if should_fallback?(reason) do
+          fallback_chain = Application.get_env(:optimal_system_agent, :fallback_chain, [])
 
-        if remaining_chain == [] do
-          Logger.error("Provider #{provider} failed, no fallback configured: #{reason}")
-          err
+          remaining_chain =
+            fallback_chain
+            |> Enum.drop_while(&(&1 == provider))
+            |> then(fn
+              chain when chain == fallback_chain -> chain
+              [_ | rest] -> rest
+              [] -> []
+            end)
+            |> filter_boot_excluded_providers()
+            |> Enum.filter(&HealthChecker.is_available?/1)
+
+          if remaining_chain == [] do
+            Logger.error("Provider #{provider} failed, no fallback configured: #{reason}")
+            err
+          else
+            Logger.warning(
+              "Provider #{provider} failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}"
+            )
+
+            chat_with_fallback(messages, remaining_chain, opts)
+          end
         else
-          Logger.warning(
-            "Provider #{provider} failed: #{reason}. Trying fallback chain: #{inspect(remaining_chain)}"
+          Logger.error(
+            "Provider #{provider} failed with a non-retryable error, not falling back: #{inspect(reason)}"
           )
 
-          chat_with_fallback(messages, remaining_chain, opts)
+          err
         end
     end
   end

@@ -51,6 +51,29 @@ defmodule OptimalSystemAgent.Providers.FallbackChainTest do
     end
   end
 
+  describe "retryable_error?/1 — model-not-found (404) is a CLEAR non-retryable config error (finding #9)" do
+    test "structured 404 http_error → false (never falls back to another provider)" do
+      err = {:http_error, 404, "not_found_error: model: claude-bogus-9 not found"}
+      refute FC.retryable_error?(err)
+    end
+
+    test "plain-string Anthropic-style 404 message → false" do
+      refute FC.retryable_error?("Anthropic returned 404: not_found_error: model not found")
+    end
+
+    test "'unknown model' phrasing → false (previously silently fell back cross-provider)" do
+      refute FC.retryable_error?("unknown model requested")
+    end
+
+    test "'no such model' phrasing → false" do
+      refute FC.retryable_error?("no such model: gpt-99")
+    end
+
+    test "'does not exist' phrasing → false" do
+      refute FC.retryable_error?("model claude-bogus does not exist")
+    end
+  end
+
   describe "retryable_error?/1 — structured-but-unrecognized reasons no longer default to true" do
     test "an auth error (structured) is not retried across providers" do
       refute FC.retryable_error?({:http_error, 401, "invalid x-api-key"})

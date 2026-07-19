@@ -112,6 +112,9 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       :missing_api_key ->
         missing_api_key_message(reason)
 
+      :model_not_found ->
+        model_not_found_message(reason)
+
       :unknown ->
         "#{@api_error_prefix}: #{truncate(to_string_reason(reason), 300)} · Try again, or run /model to switch models."
 
@@ -281,6 +284,29 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
 
       _ ->
         "#{@api_error_prefix}: #{Map.fetch!(@messages, :missing_api_key)}"
+    end
+  end
+
+  # Actionable, source-aware message for a model-not-found (404) error. Names
+  # the offending provider when it can be recovered from the reason (e.g.
+  # "Anthropic returned 404: ..."), so the user knows exactly which /model
+  # pick was invalid instead of a generic 404 buried in an "All providers
+  # failed" aggregate. Mirrors `missing_api_key_message/1`.
+  defp model_not_found_message(reason) do
+    text = to_string_reason(reason)
+
+    provider =
+      case Regex.run(~r/^(Anthropic|OpenAI|Groq|Ollama|DeepSeek|OpenRouter|Miosa|Google|Cohere|Mistral)\b/i, text) do
+        [_, name] -> String.capitalize(name)
+        nil -> nil
+      end
+
+    case provider do
+      nil ->
+        "#{@api_error_prefix}: #{Map.fetch!(@messages, :model_not_found)}"
+
+      p ->
+        "#{@api_error_prefix}: Model not found for #{p} (404) · Run /model to pick a valid model."
     end
   end
 

@@ -818,22 +818,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-  # Goal-level verifier gate: the explicit config flag, OR the session is in an
-  # autonomous posture (overdrive/bypass) where the extra grounding is worth the
-  # per-turn cost. Interactive modes (ask/accept_edits/plan) stay off so quick
-  # edits aren't slowed by a skeptic panel.
-  defp goal_verifier_enabled?(state) do
-    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false) or
-      autonomous_mode?(state)
-  end
-
-  defp autonomous_mode?(state) do
-    case Map.get(state, :session_id) do
-      nil -> false
-      sid -> OptimalSystemAgent.Agent.PermissionMode.get(sid) in [:overdrive, :bypass]
-    end
-  rescue
-    _ -> false
+  # Goal-level verifier gate: config-opt-in ONLY. `overdrive`/`bypass` is the
+  # operator's PRIMARY autonomous mode (not a rare edge case), so silently
+  # flipping this on there contradicts the "off by default" moduledoc above:
+  # every write-completion would spawn N subagent skeptics for up to
+  # `max_runs()` rounds, each re-running the full turn, on the operator's main
+  # path. Enable explicitly via
+  # `config :optimal_system_agent, goal_verifier_enabled: true` (finding #4).
+  #
+  # Public (not `defp`) so this decision is directly unit-testable without
+  # spinning up a full loop/session — `@doc false` keeps it out of the
+  # module's public docs.
+  @doc false
+  @spec goal_verifier_enabled?(map()) :: boolean()
+  def goal_verifier_enabled?(_state) do
+    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false)
   end
 
   # Rewrite image/video/audio/file content blocks to "[Attached <type>]" text

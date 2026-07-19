@@ -30,6 +30,33 @@ defmodule OptimalSystemAgent.Providers.RegistryTest do
   end
 
   # ---------------------------------------------------------------------------
+  # should_fallback?/1 — sync-path fallback gate (finding #9 / #P4)
+  # ---------------------------------------------------------------------------
+
+  describe "should_fallback?/1" do
+    test "genuinely transient errors warrant a cross-provider re-send" do
+      assert Registry.should_fallback?({:http_error, 503, "service unavailable"})
+      assert Registry.should_fallback?({:http_error, 500, "internal server error"})
+      assert Registry.should_fallback?({:rate_limited, 10})
+    end
+
+    test "model-not-found (404) does NOT warrant a re-send — it's a config error" do
+      refute Registry.should_fallback?({:http_error, 404, "not_found_error"})
+      refute Registry.should_fallback?("Anthropic returned 404: not_found_error")
+    end
+
+    test "context-overflow does NOT warrant a re-send — identical failure on every provider" do
+      refute Registry.should_fallback?("prompt is too long for this model")
+    end
+
+    test "missing/invalid API key and auth errors do NOT warrant a re-send" do
+      refute Registry.should_fallback?("ANTHROPIC_API_KEY not configured")
+      refute Registry.should_fallback?({:http_error, 401, "invalid x-api-key"})
+      refute Registry.should_fallback?({:http_error, 403, "forbidden"})
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # list_providers/0 smoke tests
   # ---------------------------------------------------------------------------
 

@@ -50,6 +50,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
     Application.put_env(:optimal_system_agent, :goal_verifier_panel_runner, fun)
   end
 
+  # An isolated, empty git repo — used where a test needs to assert on the
+  # exact prompt text and must NOT be polluted by `git diff HEAD` of this
+  # very (dirty, work-in-progress) development checkout.
+  defp isolated_clean_repo do
+    dir = Path.join(System.tmp_dir!(), "goal-verifier-clean-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    {_, 0} = System.cmd("git", ["init", "-q"], cd: dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
   # ── Gating ──────────────────────────────────────────────────────────────
 
   describe "needs_verification?/1" do
@@ -334,6 +345,103 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert {:gate, directive, _state} = GoalVerifier.check(base_state(sid))
       assert directive.content =~ "OFF-TRACK"
       assert directive.content =~ "materially different approach"
+    end
+  end
+
+  # ── Skeptic prompt bias (finding #4) ────────────────────────────────────
+  # The panel prompt used to say "if uncertain, REFUTE", biasing the skeptic
+  # to keep the goal "not done" on mere uncertainty. It must now default to
+  # NOT-REFUTED on uncertainty and only refute on concrete evidence.
+
+  describe "skeptic prompt bias" do
+    test "does not instruct the skeptic to refute on uncertainty", %{session_id: sid} do
+      mark_write(sid)
+      test_pid = self()
+
+      stub_runner(fn _sid, configs ->
+        send(test_pid, {:configs, configs})
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      state = base_state(sid) |> Map.put(:working_dir, isolated_clean_repo())
+      GoalVerifier.verify(state)
+
+      assert_received {:configs, configs}
+      assert [%{task: prompt} | _] = configs
+
+      refute prompt =~ ~r/uncertain,?\s+REFUTE/i
+      assert prompt =~ "Default to NOT-REFUTED when uncertain"
+      assert prompt =~ "CONCRETE evidence"
+    end
+  end
+
+  # ── Stall fingerprint stability (finding #10) ───────────────────────────
+  # The old fingerprint hashed raw free-form LLM prose, so two rounds citing
+  # the SAME underlying gap almost never trip stall detection because the
+  # sentences are reworded. The new fingerprint is stable across paraphrased
+  # reasons that cite the same concrete file/identifier.
+
+  describe "stall fingerprint stability across paraphrased reasons (finding #10)" do
+    test "two DIFFERENTLY WORDED reasons citing the same file trip the stall detector", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+      Application.put_env(:optimal_system_agent, :goal_verifier_stall_threshold, 2)
+
+      state = base_state(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "lib/foo/bar.ex is missing the new function entirely"),
+          json_result(true, reason: "lib/foo/bar.ex is missing the new function entirely"),
+          json_result(false)
+        ]
+      end)
+
+      {result1, state} = GoalVerifier.verify(state)
+      assert result1.verdict == :incomplete
+      refute GoalVerifier.stalled?(state)
+
+      # Same underlying gap (same file), completely reworded sentence — the
+      # OLD prose-hash fingerprint would treat this as a brand new gap and
+      # never trip stall. The new identifier-based fingerprint recognizes
+      # the same file being cited and trips on round 2.
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "still nothing was done about lib/foo/bar.ex, check again"),
+          json_result(true, reason: "still nothing was done about lib/foo/bar.ex, check again"),
+          json_result(false)
+        ]
+      end)
+
+      {result2, state} = GoalVerifier.verify(state)
+      assert result2.verdict == :incomplete
+      assert GoalVerifier.stalled?(state)
+    end
+
+    test "reasons citing genuinely DIFFERENT files do not trip the stall detector", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+      Application.put_env(:optimal_system_agent, :goal_verifier_stall_threshold, 2)
+
+      state = base_state(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(true, reason: "lib/foo/bar.ex is missing the new function"),
+         json_result(true, reason: "lib/foo/bar.ex is missing the new function"), json_result(false)]
+      end)
+
+      {_result1, state} = GoalVerifier.verify(state)
+      refute GoalVerifier.stalled?(state)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"),
+         json_result(true, reason: "lib/baz/qux.ex has an unrelated separate gap"), json_result(false)]
+      end)
+
+      {_result2, state} = GoalVerifier.verify(state)
+      refute GoalVerifier.stalled?(state)
     end
   end
 end

@@ -88,4 +88,25 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "No API key configured"
     end
   end
+
+  describe "model-not-found (404) is a CLEAR, actionable, non-retryable error (finding #9)" do
+    test "classifies as :model_not_found for the common phrasings" do
+      assert Catalog.classify("Anthropic returned 404: not_found_error") == :model_not_found
+      assert Catalog.classify({:http_error, 404, "model not found"}) == :model_not_found
+      assert Catalog.classify("invalid model name: gpt-99") == :model_not_found
+    end
+
+    test "message names the offending provider when recoverable from the reason" do
+      msg = Catalog.user_message("Anthropic returned 404: not_found_error: model: bogus")
+      assert msg =~ "Anthropic"
+      assert msg =~ "/model"
+      assert msg =~ "404"
+    end
+
+    test "message falls back to generic guidance when no provider prefix is present" do
+      msg = Catalog.user_message({:http_error, 404, "model not found"})
+      assert msg =~ "/model"
+      assert msg =~ "API Error"
+    end
+  end
 end
