@@ -17,7 +17,6 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use std::cell::Cell;
 
 use crate::event::Event;
 use crate::style;
@@ -57,11 +56,6 @@ pub struct InputComponent {
     file_search_start: usize,
     /// Completions popup for slash commands
     completions: Completions,
-    /// Mic button area for click detection
-    mic_area: Cell<Option<Rect>>,
-    /// Text/editing area of the composer (the row(s) between the dividers),
-    /// captured on draw for click-to-focus / click-to-position-caret.
-    text_area: Cell<Option<Rect>>,
     /// Voice recording active
     recording: bool,
     /// Undo ring — snapshots of (content, cursor) before edits
@@ -89,9 +83,6 @@ pub struct InputComponent {
     paste_store: std::collections::HashMap<usize, String>,
     /// Next pill id — auto-incrementing, session-scoped (CC nextPasteIdRef).
     next_paste_id: usize,
-    /// Whether voice input is currently usable (local engine present/
-    /// provisionable, or a cloud API key configured). Greys the mic when false.
-    voice_available: bool,
     /// Whether the optional vim modal-editing layer is active. Off by default;
     /// enabled via the `OSA_TUI_VIM` env flag or the `/vim` toggle
     /// (`toggle_vim`). When false, the vim layer is bypassed entirely so it
@@ -170,8 +161,6 @@ impl InputComponent {
             file_match_index: 0,
             file_search_start: 0,
             completions: Completions::new(),
-            mic_area: Cell::new(None),
-            text_area: Cell::new(None),
             recording: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -184,7 +173,6 @@ impl InputComponent {
             kbd_enhanced: false,
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
-            voice_available: true,
             // Opt-in via env; default off. A `/vim` command can flip it at
             // runtime through `toggle_vim`.
             vim_enabled: std::env::var("OSA_TUI_VIM")
@@ -346,11 +334,6 @@ impl InputComponent {
     /// Set voice recording state — changes placeholder text
     pub fn set_recording(&mut self, active: bool) {
         self.recording = active;
-    }
-
-    /// Set whether voice input is available; greys the mic button when false.
-    pub fn set_voice_available(&mut self, available: bool) {
-        self.voice_available = available;
     }
 
     pub fn submit(&mut self) -> String {
@@ -2154,9 +2137,6 @@ impl Component for InputComponent {
             area.height - 1
         };
         let input_area = Rect::new(area.x, area.y + 1, area.width, input_h);
-        // Remember where the editable text sits so a mouse click can focus the
-        // composer and position the caret (see `handle_click`).
-        self.text_area.set(Some(input_area));
 
         // Vertical scroll: once the input has grown to its cap, keep the cursor's
         // line visible by scrolling within the box (so Shift+Enter keeps working
@@ -2216,7 +2196,6 @@ impl Component for InputComponent {
                     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
                 }
             }
-            self.mic_area.set(None);
             return;
         }
 
@@ -2344,40 +2323,10 @@ impl Component for InputComponent {
             }
         }
 
-        // Mic button — an idle affordance, shown only on an EMPTY composer.
-        // While the user is typing it must NOT render: it drew OVER the last
-        // cells of a full-width line (obscuring the text under a yellow glyph),
-        // and because `handle_mouse` tests the mic rect BEFORE the caret, a
-        // click near the right edge meant to place the caret at end-of-line
-        // toggled voice recording instead.
-        // Also suppress the mic when a stash-restore hint is showing: both
-        // draw at the composer's right edge on an empty composer and the mic
-        // (drawn last) clobbered the tail of "[Ctrl+S to restore stash]". The
-        // stash affordance wins while a stash exists.
-        if !self.processing
-            && self.content.is_empty()
-            && self.stash.is_none()
-            && input_area.width > 10
-        {
-            let btn = " \u{25C9} ";
-            let btn_width = 4u16;
-            let mic_rect = Rect::new(
-                input_area.x + input_area.width - btn_width,
-                input_area.y,
-                btn_width,
-                1,
-            );
-            self.mic_area.set(Some(mic_rect));
-            // Grey the mic when voice input is unavailable (no local engine and no
-            // cloud key) so the affordance honestly reflects capability.
-            let mic_color = if self.voice_available { Color::Yellow } else { Color::DarkGray };
-            frame.render_widget(
-                Paragraph::new(Span::styled(btn, Style::default().fg(mic_color))),
-                mic_rect,
-            );
-        } else {
-            self.mic_area.set(None);
-        }
+        // NOTE: the old clickable mic button was removed with the mouse layer —
+        // OSA does not capture the mouse (native scroll is preserved; see main.rs
+        // and app/update.rs), so a drawn mic button could not be clicked and only
+        // looked clickable. Voice input is toggled with Alt+V.
 
         // Message-queue indicator ("N queued") — shown while messages wait for
         // the current turn to finish. During processing the mic button is
@@ -2441,62 +2390,6 @@ impl Component for InputComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
-    }
-}
-
-impl InputComponent {
-    /// Returns the rect of the mic button if it was drawn, for click detection
-    pub fn mic_area(&self) -> Option<Rect> {
-        self.mic_area.get()
-    }
-
-    /// Handle a left-click at terminal cell `(col, row)`. When the click lands in
-    /// the composer's text area, focus the composer and move the caret to the
-    /// clicked column (best-effort: single-line / first-line accuracy; multiline
-    /// clicks land on the first line, which is still an improvement over no
-    /// mouse support). Returns true when the click was inside the composer.
-    pub fn handle_click(&mut self, col: u16, row: u16) -> bool {
-        let Some(area) = self.text_area.get() else {
-            return false;
-        };
-        if col < area.x
-            || col >= area.x.saturating_add(area.width)
-            || row < area.y
-            || row >= area.y.saturating_add(area.height)
-        {
-            return false;
-        }
-        self.focused = true;
-        if self.content.is_empty() {
-            self.cursor = 0;
-            return true;
-        }
-        // Only reposition within the first visual line — the prompt (`❯ ` /
-        // `◈ ❯ `) offsets the text there. Deeper lines keep the current caret.
-        let prompt_len = if self.processing { 4u16 } else { 2 };
-        if row == area.y {
-            let rel = col
-                .saturating_sub(area.x)
-                .saturating_sub(prompt_len) as usize;
-            // A long single line is horizontally scrolled at draw time to keep
-            // the caret in view, so the leftmost VISIBLE char is `scroll_start`
-            // chars into the content (same formula the draw path uses). Without
-            // adding it back, a click lands `scroll_start` chars too early —
-            // typically snapping the caret to the very start of the line.
-            let avail = (area.width as usize).saturating_sub(prompt_len as usize + 1);
-            let scroll_start = if !self.multiline
-                && !self.content.contains('\n')
-                && avail > 0
-            {
-                let cur = display_width(&self.content[..self.cursor.min(self.content.len())]);
-                if cur >= avail { cur - avail + 1 } else { 0 }
-            } else {
-                0
-            };
-            let target = (scroll_start + rel).min(u16::MAX as usize) as u16;
-            self.set_cursor_col(target);
-        }
-        true
     }
 }
 
@@ -3140,6 +3033,32 @@ mod vim_and_memory_tests {
         // A plain motion key IS claimed.
         let h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         assert!(input.vim_wants_key(&h));
+    }
+
+    #[test]
+    fn vim_normal_claims_backtab_so_app_must_exclude_permission_cycle() {
+        // In Normal mode `vim_wants_key` claims EVERY NONE/SHIFT key, including
+        // Shift+Tab (BackTab). If `handle_idle_key` gave vim first refusal
+        // unconditionally, BackTab would be swallowed by the Normal-mode `_ => {}`
+        // and the permission-mode cycle would be unreachable in vim. Guard: the
+        // app checks `vim_wants_key(&k) && !is_permission_cycle(&k)`, so a
+        // permission-cycle key falls through even in vim Normal mode.
+        let input = vim_input("x", vim::VimMode::Normal);
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        assert!(
+            input.vim_wants_key(&backtab),
+            "vim Normal claims BackTab (this is why the app must exclude it)"
+        );
+        assert!(
+            crate::app::key_normalize::is_permission_cycle(&backtab),
+            "BackTab is the permission-mode cycle key"
+        );
+        // The app's combined guard yields false → BackTab reaches the mode cycle.
+        assert!(
+            !(input.vim_wants_key(&backtab)
+                && !crate::app::key_normalize::is_permission_cycle(&backtab)),
+            "app guard must let BackTab fall through to cycle_permission_mode"
+        );
     }
 }
 

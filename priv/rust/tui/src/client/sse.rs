@@ -75,8 +75,14 @@ impl SseClient {
 
             match self.connect_once().await {
                 Ok(()) => {
-                    // Clean disconnect (server closed or cancelled)
-                    let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                    // Clean/graceful close: the server closed the stream body
+                    // (EOF) or restarted. This is DISTINCT from a user cancel —
+                    // the client should re-attach a fresh stream. Tag it "closed"
+                    // so the handler reconnects instead of wedging on a permanent
+                    // "Reconnecting…" banner.
+                    let _ = self.send(BackendEvent::SseDisconnected {
+                        error: Some("closed".to_string()),
+                    });
                     return;
                 }
                 Err(SseError::AuthFailed) => {
@@ -84,7 +90,11 @@ impl SseClient {
                     return;
                 }
                 Err(SseError::Cancelled) => {
-                    let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                    // Client-initiated cancel (shutdown / session switch). Do NOT
+                    // reconnect — tag it "cancelled" so the handler stays quiet.
+                    let _ = self.send(BackendEvent::SseDisconnected {
+                        error: Some("cancelled".to_string()),
+                    });
                     return;
                 }
                 Err(SseError::Disconnected(e)) => {
@@ -94,7 +104,12 @@ impl SseClient {
                             "SSE reconnect failed after {} attempts: {:?}",
                             MAX_RECONNECTS, e
                         );
-                        let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                        // Reconnect budget exhausted — surface an honest terminal
+                        // error ("exhausted") so the UI can stop the spinner and
+                        // tell the user, rather than a silent forever-"Reconnecting".
+                        let _ = self.send(BackendEvent::SseDisconnected {
+                            error: Some("exhausted".to_string()),
+                        });
                         return;
                     }
 
@@ -116,7 +131,9 @@ impl SseClient {
                     tokio::select! {
                         _ = tokio::time::sleep(backoff) => {}
                         _ = self.cancel.cancelled() => {
-                            let _ = self.send(BackendEvent::SseDisconnected { error: None });
+                            let _ = self.send(BackendEvent::SseDisconnected {
+                                error: Some("cancelled".to_string()),
+                            });
                             return;
                         }
                     }

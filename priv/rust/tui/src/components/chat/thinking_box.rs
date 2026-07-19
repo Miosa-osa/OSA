@@ -58,6 +58,16 @@ impl ThinkingBox {
             self.started_at = Some(Instant::now());
             self.running = true;
             self.elapsed = None;
+        } else if !self.running {
+            // A previous run was frozen with `finish()` ("∴ Thought for Ns").
+            // Fresh reasoning content means a NEW reasoning pass (multi-iteration
+            // turn) — restart the run so the header ticks "∴ Thinking…" again
+            // rather than appending under a stale done-state.
+            self.content.clear();
+            self.reasoning_title = None;
+            self.started_at = Some(Instant::now());
+            self.running = true;
+            self.elapsed = None;
         }
         self.content.push_str(text);
         self.reasoning_title = split_title_body(&self.content).0;
@@ -311,6 +321,30 @@ mod tests {
 
         let done = compose_header(false, Some(Duration::from_millis(3400)), None);
         assert_eq!(done, "\u{2234} Thought for 3.4s");
+    }
+
+    #[test]
+    fn new_delta_after_finish_starts_a_fresh_run() {
+        // Reasoning→answer edge freezes the box with finish(). A LATER reasoning
+        // delta (multi-iteration turn) must restart the run — ticking
+        // "∴ Thinking…" again over fresh content — not append under the stale
+        // "∴ Thought for Ns" done-state.
+        let mut tb = ThinkingBox::new();
+        tb.update("first pass reasoning");
+        tb.finish();
+        assert!(!tb.running, "frozen after finish");
+        assert!(tb.header_text().starts_with("\u{2234} Thought for"));
+
+        tb.update("second pass reasoning");
+        assert!(tb.running, "a new delta restarts the run");
+        assert!(
+            tb.header_text().starts_with("\u{2234} Thinking\u{2026}"),
+            "restarted header is the running state: {}",
+            tb.header_text()
+        );
+        // Stale first-pass content is dropped; only the new pass remains.
+        assert!(!tb.content.contains("first pass"), "old content cleared");
+        assert!(tb.content.contains("second pass"));
     }
 
     #[test]

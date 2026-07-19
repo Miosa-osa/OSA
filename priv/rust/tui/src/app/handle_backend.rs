@@ -57,6 +57,19 @@ impl App {
                 self.load_tools();
                 // Reconcile the workspace name/title with the backend's real cwd.
                 self.load_workspace_identity();
+                // Re-assert the current permission mode to the (possibly
+                // restarted) backend session. The mode is otherwise pushed ONLY
+                // when the user changes it (cycle_permission_mode / enter_overdrive
+                // / the config editor), so after a daemon restart the fresh session
+                // reverts to its default gate while the status bar still shows
+                // overdrive/accept-edits/plan — a security-adjacent lie about the
+                // effective gate. Re-push mode + dangerous_mode so they survive the
+                // restart, mirroring the same commands enter_overdrive sends.
+                let mode = self.status.permission_mode();
+                self.spawn_backend_command("permission_mode", mode.backend_token());
+                let dangerous =
+                    matches!(mode, crate::components::status_bar::PermissionMode::BypassPermissions);
+                self.spawn_backend_command("dangerous_mode", if dangerous { "on" } else { "off" });
             }
             BackendEvent::SseDisconnected { error } => {
                 match error.as_deref() {
@@ -76,6 +89,45 @@ impl App {
                         );
                         self.sse_reconnecting = true;
                     }
+                    Some("closed") => {
+                        // Graceful/backend-initiated close (e.g. daemon restart).
+                        // The in-flight turn's stream is gone — there is no
+                        // Last-Event-ID replay — so end it cleanly instead of
+                        // freezing the spinner forever, then re-attach a fresh
+                        // stream for subsequent turns (the internal backoff loop
+                        // handles a backend that is still coming back up).
+                        info!("SSE stream closed by backend; re-attaching");
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                            self.toasts.push(
+                                "Backend connection reset — turn ended. Reconnecting…".into(),
+                                crate::components::toast::ToastLevel::Warning,
+                            );
+                        }
+                        self.sse_reconnecting = true;
+                        self.start_sse();
+                    }
+                    Some("cancelled") => {
+                        // Client-initiated cancel (shutdown / session switch): no
+                        // reconnect, no error, just clear any stale banner.
+                        debug!("SSE cancelled by client");
+                        self.sse_reconnecting = false;
+                    }
+                    Some("exhausted") => {
+                        // Reconnect budget exhausted — honest terminal error.
+                        // Stop the spinner, drop out of Processing, and tell the
+                        // user how to recover rather than looping "Reconnecting…".
+                        error!("SSE reconnect budget exhausted");
+                        if self.turn_is_active() {
+                            self.end_active_turn_on_disconnect();
+                        }
+                        self.sse_reconnecting = false;
+                        self.toasts.push(
+                            "Disconnected from backend. Restart OSA or run /login to reconnect."
+                                .into(),
+                            crate::components::toast::ToastLevel::Error,
+                        );
+                    }
                     Some(err) => {
                         warn!("SSE disconnected: {}", err);
                         self.sse_reconnecting = true;
@@ -90,17 +142,22 @@ impl App {
                 self.sse_reconnecting = true;
             }
             BackendEvent::StreamingToken { text, .. } => {
-                if self.state.is_processing() {
-                    // Reasoning is over once real tokens stream: collapse the
-                    // thinking box so the elapsed-timer spinner row returns for
-                    // the rest of the turn. Without this the box (which REPLACES
-                    // the activity row in draw_inline) froze at "▶ Thinking…"
-                    // until agent_response, hiding the timer the recap must
-                    // agree with. A later ThinkingDelta (multi-iteration turn)
-                    // repopulates it; thinking_buf is kept — it is the
-                    // transcript accumulator, not the live box.
+                // Gate on the whole turn, not just `Processing`: ~20 overlays can
+                // open FROM Processing (/context, /cost, /tools, …), which parks
+                // the live turn on the return stack and flips `is_processing()`
+                // false. The old `is_processing()` gate silently DROPPED every
+                // token streamed while such an overlay was up, so closing it lost
+                // a chunk of the answer. `turn_is_active()` keeps `stream_buf`
+                // accumulating so the text is intact when the overlay closes.
+                if self.turn_is_active() {
+                    // Reasoning is over once real tokens stream. Freeze the
+                    // thinking box to its done state ("∴ Thought for Ns") instead
+                    // of clearing it, so the reasoning summary persists rather
+                    // than vanishing. `finish()` is idempotent, and a later
+                    // ThinkingDelta (multi-iteration turn) starts a fresh run.
+                    // thinking_buf is kept — it is the transcript accumulator.
                     if !self.thinking_box.is_empty() {
-                        self.thinking_box.clear();
+                        self.thinking_box.finish();
                     }
                     self.stream_buf.push_str(&text);
                     self.chat.update_streaming(&self.stream_buf);
@@ -175,8 +232,11 @@ impl App {
                 // stay up and hide the live tool feed for the rest of the turn.
                 // Clear it here (StreamingToken already does the same) so each
                 // running tool is visible with its name + status + spinner.
+                // Freeze to the done state ("∴ Thought for Ns") rather than
+                // clearing so the reasoning summary persists across the
+                // reasoning→tool edge instead of silently vanishing.
                 if !self.thinking_box.is_empty() {
-                    self.thinking_box.clear();
+                    self.thinking_box.finish();
                 }
 
                 if !self.activity.is_active() {
@@ -1064,6 +1124,10 @@ impl App {
             BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, .. } => {
                 self.agents.agent_completed(&agent_name, tool_uses, tokens_used);
                 self.sidebar.set_current_agent("");
+                // Clear the stale "@agent: subject" spinner label set on every
+                // progress tick — otherwise the leader spinner keeps naming a
+                // finished sub-agent until some unrelated event overwrites it.
+                self.activity.set_active_verb(None);
             }
             BackendEvent::OrchestratorAgentFailed { agent_name, error, tool_uses, tokens_used } => {
                 self.agents.agent_failed(&agent_name, &error, tool_uses, tokens_used);
@@ -1079,6 +1143,9 @@ impl App {
             }
             BackendEvent::OrchestratorTaskCompleted { .. } => {
                 self.agents.task_completed();
+                // Orchestration is over — drop any lingering "@agent: subject"
+                // label so the leader spinner doesn't keep a dead sub-agent name.
+                self.activity.set_active_verb(None);
                 self.recompute_layout();
             }
 

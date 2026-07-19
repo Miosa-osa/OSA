@@ -1,6 +1,5 @@
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers,
 };
 use tracing::warn;
 
@@ -8,15 +7,6 @@ use super::App;
 use crate::app::state::AppState;
 use crate::components::{AppAction, Component, ComponentAction};
 use crate::event::Event;
-
-/// Consecutive wheel-up ticks (on an empty composer) required before the
-/// transcript reader opens. A single tick must never yank the user into it.
-const SCROLL_OPEN_THRESHOLD: u8 = 3;
-/// Visual lines the open reader scrolls per mouse-wheel tick.
-const SCROLL_WHEEL_LINES: isize = 3;
-/// Max gap between wheel-up ticks for them to count as one deliberate gesture;
-/// a slower wheel-up restarts the count instead of accumulating stale ticks.
-const SCROLL_GESTURE_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// Max whitespace-separated tokens `paste_is_file_paths` will stat before
 /// giving up and treating the paste as ordinary text. Bounds UI-thread disk I/O
@@ -138,10 +128,17 @@ impl App {
                 self.handle_key(key)
             }
             Event::Terminal(CrosstermEvent::Key(_)) => false, // ignore Release/Repeat
-            Event::Terminal(CrosstermEvent::Mouse(me)) => {
-                self.handle_mouse(me);
-                false
-            }
+            // Mouse capture is intentionally NOT enabled (see main.rs): OSA leaves
+            // the wheel to the terminal so scroll-up/down drives native scrollback,
+            // matching Claude Code. crossterm's EnableMouseCapture is all-or-nothing
+            // — it steals the wheel too, and the app cannot drive the terminal's
+            // native scrollback, so there is no clean "click positions the caret
+            // while the wheel still scrolls the terminal" with crossterm. We chose
+            // native scroll; the caret is positioned with keys, voice with Alt+V,
+            // and finalized history is re-read with the Ctrl+O transcript reader.
+            // No mouse events are delivered here, but keep an explicit no-op arm so
+            // a stray report (e.g. if a terminal sends one unsolicited) is dropped.
+            Event::Terminal(CrosstermEvent::Mouse(_)) => false,
             Event::Terminal(CrosstermEvent::Paste(text)) => {
                 // Route paste to onboarding wizard if active
                 if self.state == AppState::Onboarding {
@@ -197,121 +194,6 @@ impl App {
         let capped = crate::util::truncate_str(&normalized, super::MAX_MESSAGE_SIZE);
         self.input.insert_paste(capped);
         self.recompute_layout();
-    }
-
-    /// Handle a mouse event. Behaviour is deliberately conservative so a normal
-    /// wheel gesture never hijacks the session:
-    ///
-    /// * When the transcript reader is open, the wheel scrolls WITHIN it; a
-    ///   wheel-down while already parked at the newest line dismisses it cleanly
-    ///   (so scrolling out the bottom — then scrolling again — can't re-pop it).
-    /// * On the plain inline surface a single wheel-up does nothing. Only a
-    ///   sustained wheel-up gesture (SCROLL_OPEN_THRESHOLD consecutive ticks
-    ///   within SCROLL_GESTURE_WINDOW) on an EMPTY composer opens the reader —
-    ///   history lives in native scrollback the app can't scroll once
-    ///   mouse-captured, so the reader is the in-app way back through it.
-    /// * Left-click focuses the composer / positions the caret (or toggles mic).
-    fn handle_mouse(&mut self, me: MouseEvent) {
-        // ── Reader is open: the wheel drives it, nothing else. ────────────
-        if self.transcript.is_some() {
-            // Disjoint field borrows: entry source (shared) + `transcript` (mut).
-            let entries: &[crate::dialogs::transcript_viewer::TranscriptEntry] =
-                if let Some(ref o) = self.transcript_override {
-                    o
-                } else {
-                    &self.transcript_log
-                };
-            let dismiss = match me.kind {
-                MouseEventKind::ScrollUp => {
-                    if let Some(ref mut tv) = self.transcript {
-                        tv.scroll_by(-SCROLL_WHEEL_LINES, entries);
-                    }
-                    false
-                }
-                MouseEventKind::ScrollDown => match self.transcript {
-                    Some(ref mut tv) => tv.scroll_by(SCROLL_WHEEL_LINES, entries),
-                    None => false,
-                },
-                _ => false,
-            };
-            if dismiss {
-                self.transcript = None;
-                self.transcript_override = None;
-            }
-            return;
-        }
-
-        // Any OTHER full-screen view / overlay keeps keyboard-only control (its
-        // geometry doesn't match the inline composer coordinates).
-        if self.wants_full_viewport() {
-            return;
-        }
-
-        match me.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                // A click ends any pending wheel-up gesture.
-                self.scroll_up_ticks = 0;
-                self.last_scroll_up = None;
-                if !self.state.allows_input() {
-                    return;
-                }
-                // Mic button click toggles voice recording.
-                if let Some(mic) = self.input.mic_area() {
-                    if me.column >= mic.x
-                        && me.column < mic.x.saturating_add(mic.width)
-                        && me.row >= mic.y
-                        && me.row < mic.y.saturating_add(mic.height)
-                    {
-                        if self.voice.recording {
-                            self.stop_recording();
-                        } else {
-                            self.start_recording();
-                        }
-                        return;
-                    }
-                }
-                // Otherwise focus the composer / position the caret.
-                self.input.handle_click(me.column, me.row);
-            }
-            // Wheel-up: accumulate a deliberate gesture. A single tick is a
-            // no-op; only SCROLL_OPEN_THRESHOLD consecutive ticks within the
-            // gesture window, on an empty composer, open the reader — so an
-            // ordinary scroll (or a wheel-up the instant after closing the
-            // reader) never yanks the user into the overlay.
-            MouseEventKind::ScrollUp => {
-                if !(self.transcript_can_open() && self.input.is_empty()) {
-                    self.scroll_up_ticks = 0;
-                    self.last_scroll_up = None;
-                    return;
-                }
-                let now = std::time::Instant::now();
-                let continued = self
-                    .last_scroll_up
-                    .map(|t| now.duration_since(t) <= SCROLL_GESTURE_WINDOW)
-                    .unwrap_or(false);
-                self.scroll_up_ticks = if continued {
-                    self.scroll_up_ticks.saturating_add(1)
-                } else {
-                    1
-                };
-                self.last_scroll_up = Some(now);
-                if self.scroll_up_ticks >= SCROLL_OPEN_THRESHOLD {
-                    self.scroll_up_ticks = 0;
-                    self.last_scroll_up = None;
-                    self.transcript =
-                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
-                            &self.transcript_log,
-                        ));
-                }
-            }
-            // Wheel-down on the inline surface abandons a partial open gesture
-            // (native scrollback owns actual down-scroll of finalized history).
-            MouseEventKind::ScrollDown => {
-                self.scroll_up_ticks = 0;
-                self.last_scroll_up = None;
-            }
-            _ => {}
-        }
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -584,7 +466,6 @@ impl App {
     /// `/context` breakdown: read-only. Only Esc or an unmodified 'q' dismiss it
     /// — Enter, Space, and every other key are swallowed so a stray keypress (or
     /// key noise from a click when mouse capture is degraded) can never close it.
-    /// Proper mouse events are already dropped by `handle_mouse` for overlays.
     fn handle_context_breakdown_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         if is_overlay_dismiss(key) {
             self.context_stats = None;
@@ -767,8 +648,7 @@ impl App {
     pub(crate) fn suspend_to_shell(&mut self) {
         use crossterm::event::{
             DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-            EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-            PushKeyboardEnhancementFlags,
+            KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
         };
         use crossterm::execute;
         use crossterm::terminal::{
@@ -866,7 +746,13 @@ impl App {
         // Vim modal layer gets first refusal on keys when enabled, so Esc and
         // Normal-mode motions aren't stolen by the app-level Esc chord. A no-op
         // when vim is disabled (never interferes with the default bindings).
-        if self.input.vim_wants_key(&key) {
+        //
+        // EXCEPTION: Shift+Tab (BackTab) is the permission-mode cycle, not a vim
+        // motion. In Normal mode `vim_wants_key` claims every NONE/SHIFT key, so
+        // it would swallow BackTab into `handle_vim_normal_key`'s `_ => {}` and
+        // the mode cycle became unreachable in vim. Let it fall through to the
+        // cycle check below.
+        if self.input.vim_wants_key(&key) && !crate::app::keys::is_permission_cycle(&key) {
             return self.route_composer_key(key);
         }
 

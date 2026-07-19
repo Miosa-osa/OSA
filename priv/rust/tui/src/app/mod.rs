@@ -285,13 +285,6 @@ pub struct App {
     /// `transcript_log` — used for nested subagent transcripts fetched from the
     /// backend (dashboard "view"). Cleared when the overlay closes.
     pub transcript_override: Option<Vec<crate::dialogs::transcript_viewer::TranscriptEntry>>,
-    /// Consecutive mouse wheel-up ticks accumulated on the inline surface; the
-    /// reader only opens once this crosses SCROLL_OPEN_THRESHOLD, so a single
-    /// tick can never slam it open. Reset by any wheel-down / click / timeout.
-    pub scroll_up_ticks: u8,
-    /// Timestamp of the last wheel-up tick, used to time-gate the gesture so
-    /// stray ticks spread across a session never accumulate into an open.
-    pub last_scroll_up: Option<Instant>,
 
     // Completion notification: bell / OSC 9 when a turn ends while the user is
     // likely away. `notify_on_complete` toggles it (off via OSA_NO_NOTIFY);
@@ -532,8 +525,6 @@ impl App {
             transcript_log: Vec::new(),
             transcript: None,
             transcript_override: None,
-            scroll_up_ticks: 0,
-            last_scroll_up: None,
             notify_on_complete: std::env::var("OSA_NO_NOTIFY").is_err(),
             last_user_input: None,
             chrome_title: crate::components::title::TitleState::new(),
@@ -581,7 +572,6 @@ impl App {
         self.chat
             .set_size(self.layout.chat_width, self.layout.chat_height);
         self.input.set_width(self.layout.chat_width);
-        self.input.set_voice_available(self.voice.available);
         self.status.set_width(self.width);
     }
 
@@ -608,6 +598,32 @@ impl App {
         // Reset quit dialog focus to Cancel (safe default) each time the dialog opens.
         if target == AppState::Quit {
             self.quit_dialog.reset();
+        }
+    }
+
+    /// Whether a turn is currently in flight — either the app is directly in
+    /// `Processing`, or an overlay was opened *from* `Processing` (so the live
+    /// turn is parked on the return stack). Used to keep streaming/thinking
+    /// buffers accumulating and the spinner accountable even while an overlay
+    /// (e.g. `/context`) is drawn over an active turn.
+    pub(crate) fn turn_is_active(&self) -> bool {
+        turn_active(self.state, &self.return_stack)
+    }
+
+    /// End the in-flight turn after a passive backend disconnect: stop the
+    /// activity spinner and return to `Idle`. If the turn is parked under an
+    /// open overlay, rewrite the parked `Processing` so closing the overlay
+    /// lands on `Idle` instead of a dead, frozen spinner.
+    pub(crate) fn end_active_turn_on_disconnect(&mut self) {
+        self.activity.stop();
+        if self.state.is_processing() {
+            self.transition(AppState::Idle);
+        } else {
+            for s in self.return_stack.iter_mut() {
+                if *s == AppState::Processing {
+                    *s = AppState::Idle;
+                }
+            }
         }
     }
 
@@ -710,4 +726,47 @@ pub(super) fn generate_session_id() -> String {
     std::process::id().hash(&mut hasher);
     let random = hasher.finish() as u32;
     format!("tui_{}_{:08x}", nanos, random)
+}
+
+/// Whether a turn is in flight: either the app is directly `Processing`, or a
+/// turn was parked on the return stack when an overlay opened from `Processing`.
+/// Pure over its inputs so the streaming/thinking buffer gate is unit-testable.
+fn turn_active(state: AppState, return_stack: &[AppState]) -> bool {
+    state.is_processing() || return_stack.contains(&AppState::Processing)
+}
+
+#[cfg(test)]
+mod turn_active_tests {
+    use super::turn_active;
+    use crate::app::state::AppState;
+
+    #[test]
+    fn processing_is_active() {
+        assert!(turn_active(AppState::Processing, &[]));
+    }
+
+    #[test]
+    fn idle_is_not_active() {
+        assert!(!turn_active(AppState::Idle, &[]));
+    }
+
+    #[test]
+    fn overlay_parked_over_processing_is_active() {
+        // /context (ContextBreakdown) opened mid-turn: state is the overlay, the
+        // live turn is parked on the return stack. StreamingToken must still be
+        // buffered here — this is the exact case the old `is_processing()` gate
+        // dropped, losing streamed text while the overlay was up.
+        assert!(turn_active(
+            AppState::ContextBreakdown,
+            &[AppState::Idle, AppState::Processing]
+        ));
+    }
+
+    #[test]
+    fn overlay_over_idle_is_not_active() {
+        assert!(!turn_active(
+            AppState::ContextBreakdown,
+            &[AppState::Idle]
+        ));
+    }
 }

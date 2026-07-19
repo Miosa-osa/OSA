@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -123,12 +123,22 @@ fn run(cli: config::cli::Cli) -> Result<()> {
         "batched startup terminal probe completed"
     );
 
-    // Trust the probe's answer, and keep the env-based fallback for terminals we
-    // KNOW implement the kitty protocol (Ghostty/Kitty/WezTerm/foot) even if the
-    // probe never answered — pushing the flag is harmless on any terminal
-    // (unsupported ones ignore the CSI sequence).
-    let kbd_enhanced =
-        probe.keyboard_enhancement_supported.unwrap_or(false) || terminal_known_kitty_protocol();
+    // Trust the probe's answer, and use the env-based fallback ONLY when the
+    // probe was inconclusive. The probe distinguishes three states:
+    //   Some(true)  — kitty flags seen: supported.
+    //   Some(false) — DA1 answered but no kitty flags: DEFINITIVELY unsupported
+    //                 (e.g. a kitty-family terminal reached through tmux/SSH that
+    //                 does not forward the protocol).
+    //   None        — nothing answered: unknown.
+    // The old `unwrap_or(false) || env` collapsed Some(false) and None together,
+    // so the env guess overrode a definitive "unsupported" — the composer then
+    // advertised "shift+⏎ newline" while Shift+Enter actually collapsed to a bare
+    // Enter and SUBMITTED. Trust Some(false); only guess from env on None. The
+    // composer's newline hint derives from this same value, so it can't lie.
+    let kbd_enhanced = match probe.keyboard_enhancement_supported {
+        Some(supported) => supported,
+        None => terminal_known_kitty_protocol(),
+    };
     if kbd_enhanced {
         let _ = execute!(
             io::stdout(),
