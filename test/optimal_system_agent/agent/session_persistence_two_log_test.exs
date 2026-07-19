@@ -230,6 +230,50 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceTwoLogTest do
     end
   end
 
+  describe "load/1 amnesia recovery (S2 fix): torn .json falls back to .updates.jsonl" do
+    test "a truncated/corrupt <id>.json rebuilds messages from the intact jsonl log", %{id: id} do
+      convo = [
+        %{role: "user", content: "will it survive"},
+        %{role: "assistant", content: "yes, from the jsonl"}
+      ]
+
+      assert :ok = SessionPersistence.save(id, convo)
+      assert File.exists?(updates_file(id))
+
+      # Simulate a torn write: <id>.json truncated to garbage mid-write
+      # (ENOSPC / kill / manual edit), while .updates.jsonl stays intact.
+      File.write!(session_file(id), "{\"session_id\":\"#{id}\",\"mess")
+
+      # Old (broken) behavior: {:error, "JSON decode failed: ..."} — permanent
+      # amnesia. Fixed behavior: reconstruct from the immutable event log.
+      assert {:ok, restored} = SessionPersistence.load(id)
+      assert length(restored) == 2
+      contents = Enum.map(restored, &(&1[:content] || &1["content"]))
+      assert contents == ["will it survive", "yes, from the jsonl"]
+    end
+
+    test "<id>.json missing entirely also falls back to the jsonl log", %{id: id} do
+      convo = [%{role: "user", content: "rebuilt from nothing but the log"}]
+
+      assert :ok = SessionPersistence.save(id, convo)
+      assert File.exists?(session_file(id))
+
+      File.rm!(session_file(id))
+
+      assert {:ok, [restored]} = SessionPersistence.load(id)
+      assert (restored[:content] || restored["content"]) == "rebuilt from nothing but the log"
+    end
+
+    test "a session that truly never existed (no .json, no .jsonl) still returns :not_found", %{
+      id: id
+    } do
+      refute File.exists?(session_file(id))
+      refute File.exists?(updates_file(id))
+
+      assert {:error, :not_found} = SessionPersistence.load(id)
+    end
+  end
+
   describe "delete/1 removes both logs" do
     test "delete cleans the mutable transcript and the immutable log + sidecars", %{id: id} do
       SessionPersistence.save(id, [%{role: "user", content: "x"}])

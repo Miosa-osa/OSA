@@ -84,7 +84,15 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       {:error, Exception.message(e)}
   end
 
-  @doc "Load session state from disk."
+  @doc """
+  Load session state from disk.
+
+  If `<id>.json` (the mutable transcript) is missing or corrupt, this falls
+  back to rebuilding from `<id>.updates.jsonl` (the immutable, append-only
+  event log via `load_events/1`) before giving up. The jsonl log is
+  corruption-tolerant (torn lines are skipped, not fatal), so a torn `.json`
+  next to an intact `.updates.jsonl` no longer means permanent amnesia.
+  """
   def load(session_id) do
     path = session_path(session_id)
 
@@ -108,17 +116,47 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
             {:ok, []}
 
           {:error, reason} ->
-            {:error, "JSON decode failed: #{inspect(reason)}"}
+            load_from_events_or(session_id, {:error, "JSON decode failed: #{inspect(reason)}"})
         end
 
       {:error, :enoent} ->
-        {:error, :not_found}
+        load_from_events_or(session_id, {:error, :not_found})
 
       {:error, reason} ->
-        {:error, reason}
+        load_from_events_or(session_id, {:error, reason})
     end
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # Fallback used by load/1 when `<id>.json` is missing or unreadable/corrupt:
+  # rebuild the transcript from the immutable `<id>.updates.jsonl` event log
+  # instead of surrendering to `fallback` (the original error). Returns the
+  # rebuilt messages (possibly []) when the event log has anything to offer,
+  # otherwise the original error so callers can't mistake "never saved" for
+  # "recovered empty".
+  defp load_from_events_or(session_id, fallback) do
+    case Jsonl.read(updates_path(session_id)) do
+      {:ok, [], 0} ->
+        fallback
+
+      {:ok, _events, _skipped} ->
+        restored =
+          session_id
+          |> load_events()
+          |> Enum.filter(&is_map/1)
+          |> Enum.map(fn m -> Map.new(m, fn {k, v} -> {safe_key(k), v} end) end)
+
+        Logger.warning(
+          "[session_persist] #{session_id}: <id>.json missing/corrupt, rebuilt " <>
+            "#{length(restored)} message(s) from <id>.updates.jsonl"
+        )
+
+        {:ok, restored}
+
+      _ ->
+        fallback
+    end
   end
 
   @doc """

@@ -95,21 +95,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
              working_dir: working_dir
            ) do
         :ok ->
-          # Register Bus handlers that bridge events to PubSub for SSE delivery.
-          # The SSE stream (agent_routes.ex) listens on "osa:session:{id}" for {:osa_event, event}.
-          for event_type <- [:agent_response, :system_event, :llm_response, :tool_call] do
-            Bus.register_handler(event_type, fn event ->
-              if Map.get(event, :session_id) == session_id do
-                Phoenix.PubSub.broadcast(
-                  OptimalSystemAgent.PubSub,
-                  "osa:session:#{session_id}",
-                  {:osa_event, event}
-                )
-              end
-            end)
-          end
+          # NOTE: this route used to register a per-request Bus -> PubSub bridge
+          # here for [:agent_response, :system_event, :llm_response, :tool_call].
+          # It was redundant and harmful: those events are already broadcast
+          # directly onto "osa:session:{id}" by their producers (agent_response
+          # in loop.ex, llm_response in llm_client.ex, tool_call in
+          # tool_executor.ex) and Bus-only :system_event sub-events already reach
+          # the TUI via the supervised, allowlisted, dedup'd
+          # OptimalSystemAgent.Events.TuiForwarder. Re-registering it every POST
+          # double-delivered the assistant response/token counts/tool cards on
+          # the first turn, was never unregistered (leaking handlers on a `:bag`
+          # table across a keep-alive connection), and monitored the ephemeral
+          # request process — so it could vanish mid-turn depending on
+          # connection lifecycle. The SSE stream (agent_routes.ex) still gets
+          # everything via the direct broadcasts + TuiForwarder.
 
-          # Process the message asynchronously through the agent loop
+          # Process the message asynchronously through the agent loop.
+          #
+          # R2 fix: `rescue` alone does NOT catch `:exit` — and
+          # `SessionManager.process_message/3` is a `GenServer.call(..., :infinity)`,
+          # so if the Loop crashes inside `handle_call` (e.g. TurnPipeline.run
+          # raises before it gets a chance to broadcast anything), the caller
+          # here receives an `:exit` signal, not a rescuable exception. Left
+          # uncaught, that killed this Task silently: no `agent_response`/`done`
+          # ever reached the SSE topic, so the TUI's SSE loop just kept sending
+          # `: keepalive` forever and the spinner never resolved. We now `catch`
+          # both `:error`/raised exceptions (via `rescue`) and `:exit`, and in
+          # every failure path broadcast a terminal SSE frame directly (mirroring
+          # the normal-completion shape: an `agent_response` with the error text
+          # followed by `done`) so the turn always ends client-side.
           Task.Supervisor.async_nolink(OptimalSystemAgent.Events.TaskSupervisor, fn ->
             try do
               result =
@@ -130,12 +144,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
 
                 {:error, reason} ->
                   Logger.warning("[OrchestrateRoutes] Agent loop error: #{inspect(reason)}")
-
-                  Bus.emit(:system_event, %{
-                    type: :cli_agent_response_ready,
-                    session_id: session_id,
-                    response: "Error: #{inspect(reason)}"
-                  })
+                  emit_terminal_error(session_id, "Error: #{inspect(reason)}")
 
                 other ->
                   Logger.info("[OrchestrateRoutes] Agent loop returned: #{inspect(other)}")
@@ -143,12 +152,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
             rescue
               e ->
                 Logger.error("[OrchestrateRoutes] Agent loop crashed: #{Exception.message(e)}")
+                emit_terminal_error(session_id, "Agent error: #{Exception.message(e)}")
+            catch
+              :exit, reason ->
+                Logger.error(
+                  "[OrchestrateRoutes] Agent loop exited: #{inspect(reason)}"
+                )
 
-                Bus.emit(:system_event, %{
-                  type: :cli_agent_response_ready,
-                  session_id: session_id,
-                  response: "Agent error: #{Exception.message(e)}"
-                })
+                emit_terminal_error(session_id, "Agent error: the agent loop crashed")
             end
           end)
 
@@ -212,6 +223,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
                   Logger.error(
                     "[OrchestrateRoutes] Complex task crashed: #{Exception.message(e)}"
                   )
+
+                  emit_terminal_error(session_id, "Agent error: #{Exception.message(e)}")
+              catch
+                :exit, reason ->
+                  Logger.error("[OrchestrateRoutes] Complex task exited: #{inspect(reason)}")
+                  emit_terminal_error(session_id, "Agent error: the agent loop crashed")
               end
             end)
 
@@ -431,6 +448,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.OrchestrateRoutes do
   end
 
   # ── Private helpers ────────────────────────────────────────────────────
+
+  # R2 fix: always emit a terminal SSE frame when the async agent task fails
+  # (whether via a raised exception or an `:exit`, e.g. the Loop GenServer
+  # crashing inside `handle_call`), so the SSE loop's receive in
+  # agent_routes.ex gets a message instead of looping on keepalives forever.
+  # Broadcasts directly onto the session's PubSub topic — the same shape a
+  # normal turn ends with (`agent_response` then `done`) — so the TUI both
+  # shows the error and resolves its spinner.
+  defp emit_terminal_error(session_id, message) do
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event,
+       %{
+         type: :agent_response,
+         session_id: session_id,
+         response: message,
+         response_type: "agent"
+       }}
+    )
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :done, session_id: session_id}}
+    )
+  rescue
+    _ -> :ok
+  end
 
   # Validate a swarm pattern parameter.
   #

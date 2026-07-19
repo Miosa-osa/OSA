@@ -218,6 +218,19 @@ defmodule OptimalSystemAgent.CLI.Setup do
       :ok ->
         Prompt.completed("Connection", "Verified ✓")
 
+      # F4 fix: `test_provider/2` used to fall back to a blanket `:ok` for any
+      # provider it had no real health-check for (groq/openrouter/deepseek),
+      # so this branch reported "Verified ✓" without ever making a network
+      # call. A user who fat-fingered a groq/openrouter/deepseek key saw a
+      # false-positive "Verified" here and only found out on their first real
+      # turn (401). Providers we can't/don't actually probe now return
+      # `:unverified` explicitly and get an honest "saved, not verified"
+      # message instead.
+      :unverified ->
+        Prompt.completed("Connection", "Saved (not verified)")
+        IO.puts("\e[2m│  Couldn't test this provider automatically — if the key is\e[0m")
+        IO.puts("\e[2m│  wrong you'll see an error on your first message.\e[0m")
+
       {:error, reason} ->
         IO.puts("\e[33m│  ⚠ Connection test failed: #{reason}\e[0m")
         IO.puts("\e[2m│  You can continue — the key will be saved.\e[0m")
@@ -226,7 +239,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   defp validate_provider(_, _), do: :ok
 
-  defp test_provider(:anthropic, key) do
+  @doc false
+  # Public so F4's "actually probe the provider" behavior is directly
+  # unit-testable; still internal API (not meant for external callers).
+  def test_provider(:anthropic, key) do
     case Req.post("https://api.anthropic.com/v1/messages",
            json: %{
              model: "claude-haiku-4-5",
@@ -247,7 +263,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
     end
   end
 
-  defp test_provider(:openai, key) do
+  def test_provider(:openai, key) do
     case Req.get("https://api.openai.com/v1/models",
            headers: [{"authorization", "Bearer #{key}"}],
            receive_timeout: 10_000
@@ -259,7 +275,48 @@ defmodule OptimalSystemAgent.CLI.Setup do
     end
   end
 
-  defp test_provider(_, _key), do: :ok
+  def test_provider(:groq, key) do
+    case Req.get("https://api.groq.com/openai/v1/models",
+           headers: [{"authorization", "Bearer #{key}"}],
+           receive_timeout: 10_000
+         ) do
+      {:ok, %{status: 200}} -> :ok
+      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
+      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  def test_provider(:openrouter, key) do
+    # OpenRouter's documented key-introspection endpoint — returns key/credit
+    # info on a valid key, 401 on a bad one.
+    case Req.get("https://openrouter.ai/api/v1/key",
+           headers: [{"authorization", "Bearer #{key}"}],
+           receive_timeout: 10_000
+         ) do
+      {:ok, %{status: 200}} -> :ok
+      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
+      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  def test_provider(:deepseek, key) do
+    # DeepSeek's balance endpoint doubles as a cheap, no-token-cost key check.
+    case Req.get("https://api.deepseek.com/user/balance",
+           headers: [{"authorization", "Bearer #{key}"}],
+           receive_timeout: 10_000
+         ) do
+      {:ok, %{status: 200}} -> :ok
+      {:ok, %{status: 401}} -> {:error, "Invalid API key"}
+      {:ok, %{status: s}} -> {:error, "HTTP #{s}"}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  # No real health-check for this provider — say so rather than claiming
+  # "Verified ✓" for a key we never actually tested.
+  def test_provider(_, _key), do: :unverified
 
   # ── Channel Setup ───────────────────────────────────────────────
 
@@ -334,51 +391,36 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   # ── Config Writing ──────────────────────────────────────────────
 
-  defp write_config(provider, api_key) do
+  # F3 fix: re-running `/setup` to switch provider must actually take effect.
+  # The previous version only ever APPENDED `OSA_DEFAULT_PROVIDER=...` and
+  # skipped it whenever the key already existed in `.env` — so switching from
+  # Ollama to Anthropic left `OSA_DEFAULT_PROVIDER=ollama` on disk untouched
+  # and the new provider was silently dropped. This now upserts
+  # (replace-in-place, like `Onboarding.write_setup`'s `keyreplace` merge):
+  # existing keys are updated, new keys are appended, unrelated lines
+  # (comments, other providers' keys) are preserved.
+  @doc false
+  # Public (not `defp`) so the upsert behavior (F3) is directly unit-testable
+  # without driving the interactive prompt flow; still internal API.
+  def write_config(provider, api_key) do
     File.mkdir_p!(@osa_dir)
     env_path = Path.join(@osa_dir, ".env")
 
-    lines = [
-      "OSA_DEFAULT_PROVIDER=#{provider}"
-    ]
+    pairs =
+      [{"OSA_DEFAULT_PROVIDER", to_string(provider)}] ++
+        if api_key, do: [{provider_env_key(provider), api_key}], else: []
 
-    lines =
-      if api_key do
-        env_key = provider_env_key(provider)
-        lines ++ ["#{env_key}=#{api_key}"]
-      else
-        lines
-      end
-
-    # Read existing .env and merge (don't overwrite other keys)
     existing =
       case File.read(env_path) do
         {:ok, content} -> content
         _ -> ""
       end
 
-    existing_keys =
-      existing
-      |> String.split("\n")
-      |> Enum.map(fn line -> line |> String.split("=", parts: 2) |> List.first() end)
-      |> MapSet.new()
+    content = upsert_env(existing, pairs)
 
-    new_lines =
-      Enum.reject(lines, fn line ->
-        key = line |> String.split("=", parts: 2) |> List.first()
-        MapSet.member?(existing_keys, key)
-      end)
-
-    if new_lines != [] do
-      content =
-        if existing == "",
-          do: Enum.join(new_lines, "\n"),
-          else: existing <> "\n" <> Enum.join(new_lines, "\n")
-
-      File.write!(env_path, content <> "\n")
-      # Restrict permissions — file contains API keys
-      File.chmod!(env_path, 0o600)
-    end
+    File.write!(env_path, content)
+    # Restrict permissions — file contains API keys
+    File.chmod!(env_path, 0o600)
 
     # Also set in runtime
     Application.put_env(:optimal_system_agent, :default_provider, provider)
@@ -387,6 +429,34 @@ defmodule OptimalSystemAgent.CLI.Setup do
       config_key = provider_config_key(provider)
       Application.put_env(:optimal_system_agent, config_key, api_key)
     end
+  end
+
+  # Upsert `pairs` (a list of `{KEY, value}`) into raw `.env` text: an existing
+  # `KEY=...` line is replaced in place; a key not yet present is appended.
+  # Every other line (other providers' keys, comments, blanks) is left alone.
+  defp upsert_env(existing, pairs) do
+    lines =
+      existing
+      |> String.split("\n", trim: true)
+
+    {updated_lines, remaining_pairs} =
+      Enum.map_reduce(lines, pairs, fn line, pending ->
+        key = line |> String.split("=", parts: 2) |> List.first()
+
+        case Enum.find(pending, fn {k, _v} -> k == key end) do
+          {^key, value} ->
+            {"#{key}=#{value}", Enum.reject(pending, fn {k, _v} -> k == key end)}
+
+          nil ->
+            {line, pending}
+        end
+      end)
+
+    appended = Enum.map(remaining_pairs, fn {k, v} -> "#{k}=#{v}" end)
+
+    (updated_lines ++ appended)
+    |> Enum.join("\n")
+    |> Kernel.<>("\n")
   end
 
   defp save_env(key, value) do

@@ -438,14 +438,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     # Cancel active loop if running (ignore if already stopped)
     SessionManager.cancel(session_id)
 
-    # Remove the session JSONL file from disk
-    sessions_dir =
-      Application.get_env(:optimal_system_agent, :sessions_dir, "~/.osa/sessions")
-      |> Path.expand()
-
-    session_file = Path.join(sessions_dir, "#{session_id}.jsonl")
-
-    case File.rm(session_file) do
+    # Remove the session's real on-disk files: the mutable transcript
+    # (`<id>.json`) plus the immutable event log and its lock/quarantine
+    # sidecars (`<id>.updates.jsonl`, `.lock`, `.corrupt`). Persistence never
+    # writes a bare `<id>.jsonl`, so deleting that path always 404'd and the
+    # session reappeared on next list/resume.
+    case OptimalSystemAgent.Agent.SessionPersistence.delete(session_id) do
       :ok ->
         body = Jason.encode!(%{status: "deleted", session_id: session_id})
 

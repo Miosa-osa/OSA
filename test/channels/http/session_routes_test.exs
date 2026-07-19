@@ -493,6 +493,50 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionRoutesTest do
     end
   end
 
+  # ── DELETE /sessions/:id ────────────────────────────────────────────
+
+  defp json_delete(path) do
+    conn(:delete, path) |> call_routes()
+  end
+
+  describe "DELETE /sessions/:id" do
+    test "removes the real on-disk files (S1 fix: not the nonexistent <id>.jsonl)" do
+      post_conn = json_post("/")
+      session_id = decode_body(post_conn)["id"]
+
+      # Persist something so <id>.json + <id>.updates.jsonl actually exist —
+      # the same files a live session's turns are saved to.
+      :ok = OptimalSystemAgent.Agent.SessionPersistence.save(session_id, [%{role: "user", content: "hi"}])
+
+      sessions_dir = Path.expand("~/.osa/sessions")
+      json_path = Path.join(sessions_dir, "#{session_id}.json")
+      updates_path = Path.join(sessions_dir, "#{session_id}.updates.jsonl")
+
+      assert File.exists?(json_path)
+      assert File.exists?(updates_path)
+
+      conn = json_delete("/#{session_id}")
+
+      assert conn.status == 200
+      body = decode_body(conn)
+      assert body["status"] == "deleted"
+      assert body["session_id"] == session_id
+
+      refute File.exists?(json_path)
+      refute File.exists?(updates_path)
+    end
+
+    test "returns 404 for a session with no saved files at all" do
+      fake_id = "no-such-session-#{System.unique_integer([:positive])}"
+
+      conn = json_delete("/#{fake_id}")
+
+      assert conn.status == 404
+      body = decode_body(conn)
+      assert body["error"] == "session_not_found"
+    end
+  end
+
   # ── Unknown endpoint ──────────────────────────────────────────────────
 
   describe "unknown session endpoint" do
