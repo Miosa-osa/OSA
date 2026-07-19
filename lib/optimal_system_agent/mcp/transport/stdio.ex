@@ -159,10 +159,17 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
     {:noreply, ensure_pgid(state)}
   end
 
-  # Owner or a linked process died — shut down and close the port.
-  def handle_info({:EXIT, _pid, reason}, state) do
+  # The OWNER (the process that started us, and the one we deliver to) died —
+  # shut down and close the port. We must match on the owner specifically: this
+  # GenServer traps exits and shells out via `System.cmd` (pgrep/ps for pgid
+  # resolution), whose transient ports emit `{:EXIT, port, :normal}` when they
+  # finish — those are NOT our owner dying and must be ignored, or a routine
+  # pgid probe would tear the transport down (and reap the live child).
+  def handle_info({:EXIT, owner, reason}, %{owner: owner} = state) do
     {:stop, reason, state}
   end
+
+  def handle_info({:EXIT, _other, _reason}, state), do: {:noreply, state}
 
   def handle_info(_msg, state), do: {:noreply, state}
 
