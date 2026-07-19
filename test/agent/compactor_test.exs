@@ -31,6 +31,30 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
   defp user(content), do: msg("user", content)
   defp asst(content), do: msg("assistant", content)
 
+  # Force the pipeline into the deterministic "background" severity tier
+  # (compaction_warn=0.0 guarantees it always fires; aggressive/emergency are
+  # pushed above 1.0 so a large single-run heuristic-token ratio never
+  # escalates past background) and pick `max_context_tokens` so the
+  # per-step target (0.70 * max) sits just above `target_tokens` — i.e. the
+  # pipeline compacts down to roughly `target_tokens` and then STOPS,
+  # without cascading into later steps (compress_cold / emergency_truncate)
+  # that this test isn't exercising. Computed from real
+  # `Compactor.estimate_tokens/1` measurements so it never depends on the
+  # internal token-estimation heuristic's exact constants.
+  defp force_background_stop_at(target_tokens) do
+    Application.put_env(:optimal_system_agent, :compaction_warn, 0.0)
+    Application.put_env(:optimal_system_agent, :compaction_aggressive, 1.1)
+    Application.put_env(:optimal_system_agent, :compaction_emergency, 1.1)
+    Application.put_env(:optimal_system_agent, :max_context_tokens, round(target_tokens / 0.70))
+  end
+
+  defp clear_severity_env do
+    Application.delete_env(:optimal_system_agent, :compaction_warn)
+    Application.delete_env(:optimal_system_agent, :compaction_aggressive)
+    Application.delete_env(:optimal_system_agent, :compaction_emergency)
+    Application.delete_env(:optimal_system_agent, :max_context_tokens)
+  end
+
   # Build N user+assistant message pairs (2N messages total)
   defp build_conversation(n, word_count \\ 10) do
     words = String.duplicate("word ", word_count)
@@ -392,6 +416,226 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       Application.delete_env(:optimal_system_agent, :max_context_tokens)
       Application.delete_env(:optimal_system_agent, :compaction_warn)
       Application.delete_env(:optimal_system_agent, :compaction_emergency)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # P3 — Verbatim latest user-query preservation (grok summary.rs wrap_user_query)
+  # ---------------------------------------------------------------------------
+
+  describe "P3 — verbatim latest user-query preservation" do
+    test "prepends the raw latest user message in <user_query> tags, untouched by the LLM" do
+      marker = "LATEST_QUERY_MARKER_#{System.unique_integer([:positive])}"
+      latest_content = "Please continue: #{marker}"
+      # 71 messages so the cold zone (total - 50 > 0) actually triggers.
+      messages = build_conversation(35, 5) ++ [user(latest_content)]
+
+      # Stop right after compress_cold — the "rest" (verbatim) tail is the
+      # last 50 messages. Target the midpoint between `rest_tokens` (post
+      # cold-zone-compression size) and the pre-compaction total, so the
+      # pipeline is guaranteed to both (a) need compression at all and (b)
+      # stop once the cold zone has collapsed, without cascading into
+      # emergency_truncate and risking dropping the freshly-created
+      # (non-turn-anchored) summary message.
+      rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
+      total_tokens = Compactor.estimate_tokens(messages)
+      assert rest_tokens < total_tokens, "test fixture must actually require cold-zone compression"
+      target = rest_tokens + div(total_tokens - rest_tokens, 2)
+      force_background_stop_at(target)
+
+      result = Compactor.maybe_compact(messages)
+
+      summary_msg =
+        Enum.find(result, fn m ->
+          String.contains?(Map.get(m, :content, ""), "[Context Summary]")
+        end)
+
+      assert summary_msg, "expected a [Context Summary] system message after compaction"
+      content = Map.get(summary_msg, :content)
+
+      assert String.contains?(content, "<user_query>\n#{latest_content}\n</user_query>"),
+             "expected the latest user message wrapped verbatim in <user_query> tags"
+
+      # It must be PREPENDED (structurally separate from, and before) the
+      # LLM-produced body — not interleaved into the paraphrased section.
+      [before_tag, after_tag] = String.split(content, "</user_query>", parts: 2)
+      assert String.trim(after_tag) != "", "expected an LLM-produced body after the user_query block"
+      assert String.starts_with?(String.trim(before_tag), "[Context Summary]\n<user_query>")
+
+      # The raw text must appear exactly once — it was excluded from the
+      # summarized span, so nothing downstream duplicated/paraphrased it.
+      assert content |> String.split(marker) |> length() == 2
+
+      # The latest message itself must also still be present verbatim in the
+      # preserved (hot) tail — compaction never removes the true latest turn.
+      assert Enum.any?(result, fn m -> Map.get(m, :content) == latest_content end)
+    after
+      clear_severity_env()
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # P4 — Token-budgeted, turn-aware tail selection
+  # (opencode compaction.ts select/splitTurn; grok select.rs select_tail)
+  # ---------------------------------------------------------------------------
+
+  describe "P4 — token-budgeted, turn-aware tail selection" do
+    test "keeps whole recent turns verbatim when they fit within the token budget" do
+      # Substantial filler per message: the warm-zone group-summarization
+      # step only fires when a group's tokens exceed a 200-token floor (see
+      # `summarize_in_groups/2`) — tiny messages would just pass through
+      # verbatim, silently defeating this test's assertions.
+      filler = String.duplicate("filler word ", 40)
+
+      turns =
+        for i <- 1..8 do
+          [
+            user("Turn #{i} question, marker T#{i}U #{filler}"),
+            asst("Turn #{i} answer, marker T#{i}A #{filler}")
+          ]
+        end
+
+      messages = List.flatten(turns)
+
+      last_three = turns |> Enum.slice(-3, 3) |> List.flatten()
+      last_four = turns |> Enum.slice(-4, 4) |> List.flatten()
+
+      # Budget fits exactly the last 3 whole turns but not a 4th.
+      budget = Compactor.estimate_tokens(last_three) + 5
+      assert budget < Compactor.estimate_tokens(last_four),
+             "test fixture must make the 4th-from-last turn genuinely not fit"
+
+      Application.put_env(:optimal_system_agent, :compaction_preserve_recent_tokens, budget)
+
+      # Stop right after summarize_warm — target a bit above the expected
+      # post-summarization size (kept turns + a handful of short
+      # "[Warm Summary]" stub entries) so the pipeline doesn't cascade into
+      # emergency_truncate afterward.
+      force_background_stop_at(Compactor.estimate_tokens(last_three) + 300)
+
+      result = Compactor.maybe_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      for i <- 6..8 do
+        assert Enum.any?(contents, &String.contains?(&1, "T#{i}U")),
+               "turn #{i} user message should survive verbatim"
+
+        assert Enum.any?(contents, &String.contains?(&1, "T#{i}A")),
+               "turn #{i} assistant message should survive verbatim"
+      end
+
+      refute Enum.any?(contents, &String.contains?(&1, "T1U")),
+             "the oldest turn should not survive verbatim"
+    after
+      Application.delete_env(:optimal_system_agent, :compaction_preserve_recent_tokens)
+      clear_severity_env()
+    end
+
+    test "splits an oversized turn to fit the budget, keeping only the newest-fitting suffix" do
+      small_turns =
+        for i <- 1..6, do: [user("small turn #{i}"), asst("small reply #{i}")]
+
+      filler = String.duplicate("word ", 300)
+
+      tool_call_1 = %{role: "assistant", content: "", tool_calls: [%{name: "shell", arguments: "call1"}]}
+      tool_result_1 = %{role: "tool", content: filler <> " TOOL1_MARKER", tool_call_id: "t1", name: "shell"}
+      tool_call_2 = %{role: "assistant", content: "", tool_calls: [%{name: "shell", arguments: "call2"}]}
+      tool_result_2 = %{role: "tool", content: filler <> " TOOL2_MARKER", tool_call_id: "t2", name: "shell"}
+      final_reply = asst("FINAL_TAIL_MARKER short reply")
+
+      oversized_turn = [
+        user("Oversized turn start"),
+        tool_call_1,
+        tool_result_1,
+        tool_call_2,
+        tool_result_2,
+        final_reply
+      ]
+
+      messages = List.flatten(small_turns) ++ oversized_turn
+
+      final_only_tokens = Compactor.estimate_tokens([final_reply])
+      whole_turn_tokens = Compactor.estimate_tokens(oversized_turn)
+      budget = final_only_tokens + 20
+
+      assert budget < whole_turn_tokens,
+             "test fixture must make the newest turn genuinely oversized for its budget"
+
+      Application.put_env(:optimal_system_agent, :compaction_preserve_recent_tokens, budget)
+      force_background_stop_at(final_only_tokens + 300)
+
+      result = Compactor.maybe_compact(messages)
+      contents = Enum.map(result, &Map.get(&1, :content, ""))
+
+      assert Enum.any?(contents, &String.contains?(&1, "FINAL_TAIL_MARKER")),
+             "the newest message of the oversized turn must survive verbatim"
+
+      refute Enum.any?(contents, &String.contains?(&1, "TOOL1_MARKER")),
+             "an early message of the oversized turn should have been dropped/summarized, not kept verbatim"
+    after
+      Application.delete_env(:optimal_system_agent, :compaction_preserve_recent_tokens)
+      clear_severity_env()
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # P7 — Divide-and-conquer chunked cold-zone summarization + validation
+  # (grok inter_compaction + history/validate.rs)
+  # ---------------------------------------------------------------------------
+
+  describe "P7 — divide-and-conquer chunked cold-zone summarization" do
+    test "chunks a large cold zone into balanced <chunk_summary> blocks" do
+      Application.put_env(:optimal_system_agent, :compaction_chunk_token_limit, 30)
+
+      # 70 messages: cold_end = total - 50 = 20 (well above the 30-token chunk limit)
+      messages = build_conversation(35, 8)
+
+      rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
+      total_tokens = Compactor.estimate_tokens(messages)
+      force_background_stop_at(rest_tokens + div(total_tokens - rest_tokens, 2))
+
+      result = Compactor.maybe_compact(messages)
+
+      summary_msg =
+        Enum.find(result, fn m ->
+          String.contains?(Map.get(m, :content, ""), "[Context Summary]")
+        end)
+
+      assert summary_msg
+      content = Map.get(summary_msg, :content)
+
+      open = (content |> String.split("<chunk_summary") |> length()) - 1
+      close = (content |> String.split("</chunk_summary>") |> length()) - 1
+
+      assert open > 1,
+             "expected the cold zone to be chunked into more than one <chunk_summary> block"
+
+      assert open == close, "<chunk_summary> tags must be balanced (open=#{open}, close=#{close})"
+    after
+      clear_severity_env()
+      Application.delete_env(:optimal_system_agent, :compaction_chunk_token_limit)
+    end
+
+    test "falls back to the single-call path when the cold zone fits in one chunk" do
+      # default chunk limit (3_000 tokens) — this cold zone easily fits in one chunk
+      messages = build_conversation(35, 8)
+
+      rest_tokens = messages |> Enum.take(-50) |> Compactor.estimate_tokens()
+      total_tokens = Compactor.estimate_tokens(messages)
+      force_background_stop_at(rest_tokens + div(total_tokens - rest_tokens, 2))
+
+      result = Compactor.maybe_compact(messages)
+
+      summary_msg =
+        Enum.find(result, fn m ->
+          String.contains?(Map.get(m, :content, ""), "[Context Summary]")
+        end)
+
+      assert summary_msg
+      refute String.contains?(Map.get(summary_msg, :content), "<chunk_summary"),
+             "a short cold zone should use the single-call path, not divide-and-conquer"
+    after
+      clear_severity_env()
     end
   end
 end

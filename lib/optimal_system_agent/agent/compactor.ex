@@ -67,9 +67,27 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp tier3_threshold,
     do: Application.get_env(:optimal_system_agent, :compaction_emergency, 0.95)
 
-  # Zone boundaries (counted from the end of the non-system message list)
+  # Zone boundaries (counted from the end of the non-system message list).
+  # @hot_zone_size is now only a FALLBACK for the token-budgeted tail
+  # selector (see `compute_hot_start/1`) — used when no user-delimited turn
+  # structure can be found in the message list at all.
   @hot_zone_size 20
   @warm_zone_end 50
+
+  # ---------------------------------------------------------------------------
+  # P4: token-budgeted, turn-aware tail selection (opencode compaction.ts
+  # select/splitTurn; grok select.rs select_tail).
+  #
+  # `preserve_recent_budget/0` mirrors opencode's `preserveRecentBudget`:
+  # 25% of the usable context window, clamped to [2_000, 8_000] tokens, with
+  # an operator override via config.
+  # ---------------------------------------------------------------------------
+  @min_preserve_recent_tokens 2_000
+  @max_preserve_recent_tokens 8_000
+
+  # Divide-and-conquer chunk token limit for cold-zone summarization (P7,
+  # grok inter_compaction `dnc_chunk_token_limit`).
+  @dnc_chunk_token_limit_default 3_000
 
   # Acknowledgment patterns — these get compressed first
   @ack_patterns ~r/\A\s*(ok|okay|sure|thanks|thank you|got it|yes|no|yep|nope|k|kk|alright|cool|nice|great|perfect|noted|ack|roger|👍|👌)\s*[\.\!\?]?\s*\z/iu
@@ -492,16 +510,18 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp apply_step(:summarize_warm, annotated, system_msgs, _target) do
     total = length(annotated)
 
-    if total <= @hot_zone_size do
-      # Everything is hot — nothing to summarize
+    msgs = strip_annotations(annotated)
+    hot_start = compute_hot_start(msgs)
+
+    if hot_start >= total do
+      # Token-budgeted tail selection kept everything hot — nothing to summarize
       {annotated, system_msgs, :summarize_warm}
     else
-      hot_start = max(total - @hot_zone_size, 0)
-      warm_start = max(total - @warm_zone_end, 0)
+      warm_start = max(total - @warm_zone_end, 0) |> min(hot_start)
 
       cold = Enum.slice(annotated, 0, warm_start)
       warm = Enum.slice(annotated, warm_start, hot_start - warm_start)
-      hot = Enum.slice(annotated, hot_start, @hot_zone_size)
+      hot = Enum.slice(annotated, hot_start, total - hot_start)
 
       # Sort warm by importance — summarize the least important first
       sorted_warm =
@@ -550,10 +570,37 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       cold_messages = strip_annotations(cold)
 
-      case call_key_facts_llm(cold_messages) do
-        {:ok, summary} ->
-          summary_entry = {%{role: "system", content: "[Context Summary]\n#{summary}"}, 2.0}
-          {[summary_entry | rest], system_msgs, :compress_cold}
+      # P3 (grok summary.rs:143 wrap_user_query): find the most recent user
+      # message across the WHOLE conversation. It normally already lives in
+      # `rest` (the verbatim tail) and is never handed to the LLM, but we also
+      # defensively strip any copy of it out of the summarized span so it can
+      # never be paraphrased, then wrap it verbatim and prepend it to
+      # whatever summary text is produced below — untouched by the LLM.
+      latest_query = latest_user_query(strip_annotations(annotated))
+      cold_messages_for_llm = exclude_message(cold_messages, latest_query)
+
+      # P7 (grok inter_compaction + history/validate.rs): chunk the cold span
+      # into token-bounded segments when it's large enough to warrant
+      # divide-and-conquer, summarize each chunk independently, assemble, and
+      # validate the assembled text before it replaces real history. Falls
+      # back to the original single-call path automatically when the cold
+      # span is short enough to fit one chunk.
+      case call_cold_summary(cold_messages_for_llm) do
+        {:ok, summary, strategy} ->
+          case validate_cold_summary(summary, strategy) do
+            :ok ->
+              store_previous_summary(summary)
+              wrapped = prepend_user_query(summary, latest_query)
+              summary_entry = {%{role: "system", content: "[Context Summary]\n#{wrapped}"}, 2.0}
+              {[summary_entry | rest], system_msgs, :compress_cold}
+
+            {:error, reason} ->
+              Logger.warning(
+                "Compactor cold-zone summary failed validation: #{inspect(reason)} — keeping original messages"
+              )
+
+              {annotated, system_msgs, :compress_cold}
+          end
 
         {:error, reason} ->
           Logger.warning("Compactor cold-zone LLM summarization failed: #{inspect(reason)}")
@@ -566,17 +613,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Step 5: Emergency truncate — no LLM call
   defp apply_step(:emergency_truncate, annotated, system_msgs, _target) do
     total = length(annotated)
+    msgs = strip_annotations(annotated)
 
     if total <= @hot_zone_size do
       {annotated, system_msgs, :emergency_truncate}
     else
-      # Tool-pair safety (grok select.rs): the naive boundary keeps the last
-      # @hot_zone_size messages, but if it lands mid tool-pair the kept tail
-      # starts with an orphan tool result. Snap the drop point FORWARD past the
-      # tool-result run. If snapping would leave nothing to keep, fall back to
-      # the naive boundary (never worse than before).
-      candidate = total - @hot_zone_size
-      msgs = strip_annotations(annotated)
+      # P4: token-budgeted, turn-aware tail selection replaces the fixed
+      # @hot_zone_size message-count boundary. `compute_hot_start/1` already
+      # applies tool-pair-safe snapping internally, but we re-snap the final
+      # candidate here too — defensive, since this is the "no LLM, no
+      # further correction" last-resort step.
+      candidate = compute_hot_start(msgs)
       snapped = CompactionSafety.safe_split_index(msgs, candidate)
       split = if snapped >= total, do: candidate, else: snapped
 
@@ -916,8 +963,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       case CompactionSafety.sample_with_retry(sampler, max_attempts: 2) do
         {:ok, content} ->
-          # Store the structured summary for future compressions
-          store_previous_summary(content)
+          # NOTE: persistence for iterative merge (`store_previous_summary/1`)
+          # now happens once, centrally, in `apply_step(:compress_cold, ...)`
+          # after the assembled cold-zone summary (chunked or single-call)
+          # passes validation — see P7.
           {:ok, content}
 
         {:error, {:degenerate_summary, _last}} = err ->
@@ -929,6 +978,358 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       end
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # P7: Divide-and-conquer chunked cold-zone summarization + validation
+  # (grok inter_compaction/compact.rs, history/validate.rs)
+  # ---------------------------------------------------------------------------
+
+  @chunk_summary_prompt_fallback """
+  Summarize the following conversation excerpt concisely and terse, preserving:
+  - All file paths and line numbers mentioned
+  - All error messages and their causes
+  - All decisions made and their reasoning
+  - All specific values, variable names, and config settings
+  - Tool names used and their key results
+  Output ONLY the summary body — bullet points, no preamble, no headers.
+
+  %MESSAGES%
+  """
+
+  # Dispatches between the original single-call cold-zone summary and the
+  # divide-and-conquer chunked path. Falls back to the single-call path
+  # automatically when the cold span is short enough to fit in one chunk.
+  # Returns `{:ok, summary_text, strategy}` where `strategy` is `:basic` or
+  # `:divide_and_conquer` (fed to `validate_cold_summary/2`).
+  @doc false
+  defp call_cold_summary(cold_messages) do
+    chunks = chunk_messages_by_tokens(cold_messages, dnc_chunk_token_limit())
+
+    if length(chunks) <= 1 do
+      case call_key_facts_llm(cold_messages) do
+        {:ok, summary} -> {:ok, summary, :basic}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      case call_key_facts_llm_chunked(chunks) do
+        {:ok, summary} -> {:ok, summary, :divide_and_conquer}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # Greedily packs messages into token-bounded chunks. A single message
+  # larger than `limit` becomes its own (oversized) chunk rather than being
+  # split mid-message.
+  @doc false
+  defp chunk_messages_by_tokens(messages, limit) do
+    {chunks, current} =
+      Enum.reduce(messages, {[], []}, fn msg, {chunks, current} ->
+        msg_tokens = estimate_tokens([msg])
+
+        cond do
+          current == [] ->
+            {chunks, [msg]}
+
+          estimate_tokens(Enum.reverse(current)) + msg_tokens > limit ->
+            {[Enum.reverse(current) | chunks], [msg]}
+
+          true ->
+            {chunks, [msg | current]}
+        end
+      end)
+
+    chunks =
+      case current do
+        [] -> chunks
+        _ -> [Enum.reverse(current) | chunks]
+      end
+
+    Enum.reverse(chunks)
+  end
+
+  # Summarizes each chunk into a `<chunk_summary index="N">...</chunk_summary>`
+  # block, then assembles them (plus a verbatim `index="prev"` block carrying
+  # the previous structured summary, when one exists, preserving iterative
+  # merge across compactions) into one text blob for validation/persistence.
+  @doc false
+  defp call_key_facts_llm_chunked(chunks) do
+    chunk_results =
+      chunks
+      |> Enum.with_index()
+      |> Enum.map(fn {chunk_msgs, idx} -> summarize_chunk(chunk_msgs, idx) end)
+
+    case Enum.find(chunk_results, &match?({:error, _}, &1)) do
+      {:error, _} = err ->
+        err
+
+      nil ->
+        prev_block =
+          case get_previous_summary() do
+            nil -> nil
+            previous -> "<chunk_summary index=\"prev\">\n#{previous}\n</chunk_summary>"
+          end
+
+        body =
+          [prev_block | Enum.map(chunk_results, fn {:ok, tag} -> tag end)]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join("\n\n")
+
+        {:ok, body}
+    end
+  end
+
+  @doc false
+  defp summarize_chunk(chunk_msgs, idx) do
+    if not compactor_llm_enabled?() do
+      {:ok,
+       "<chunk_summary index=\"#{idx}\">\n[Key facts from #{length(chunk_msgs)} messages]\n</chunk_summary>"}
+    else
+      template = PromptLoader.get(:compactor_summary, @chunk_summary_prompt_fallback)
+      formatted = format_for_summary(chunk_msgs)
+
+      prompt =
+        if String.contains?(template, "%MESSAGES%") do
+          String.replace(template, "%MESSAGES%", formatted)
+        else
+          template <> "\n\n" <> formatted
+        end
+
+      prompt = append_compact_instructions(prompt)
+
+      sampler = fn ->
+        try do
+          Providers.chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 600)
+          |> case do
+            {:ok, %{content: content}} when is_binary(content) and content != "" ->
+              {:ok, content}
+
+            {:ok, %{content: content}} ->
+              {:error, "Empty chunk-summary response: #{inspect(content)}"}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+        rescue
+          e ->
+            {:error, "LLM call exception: #{Exception.message(e)}"}
+        end
+      end
+
+      case CompactionSafety.sample_with_retry(sampler, max_attempts: 2, min_chars: 80) do
+        {:ok, content} ->
+          {:ok, "<chunk_summary index=\"#{idx}\">\n#{content}\n</chunk_summary>"}
+
+        {:error, {:degenerate_summary, _last}} ->
+          {:error, :degenerate_chunk_summary}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # Structural validation before a summary replaces real history (grok
+  # history/validate.rs). Mirrors `validate_compaction_text`:
+  #   1. Non-empty text content
+  #   2. For :divide_and_conquer — balanced `<chunk_summary>` tags
+  @doc false
+  defp validate_cold_summary(text, strategy) do
+    cond do
+      not is_binary(text) or String.trim(text) == "" ->
+        {:error, :empty_content}
+
+      strategy == :divide_and_conquer ->
+        open = count_occurrences(text, "<chunk_summary")
+        close = count_occurrences(text, "</chunk_summary>")
+
+        if open == close do
+          :ok
+        else
+          {:error, {:unbalanced_chunk_tags, open, close}}
+        end
+
+      true ->
+        :ok
+    end
+  end
+
+  defp count_occurrences(text, substr) do
+    (text |> String.split(substr) |> length()) - 1
+  end
+
+  defp dnc_chunk_token_limit,
+    do:
+      Application.get_env(
+        :optimal_system_agent,
+        :compaction_chunk_token_limit,
+        @dnc_chunk_token_limit_default
+      )
+
+  # ---------------------------------------------------------------------------
+  # P3: Verbatim latest user-query preservation (grok summary.rs:143
+  # wrap_user_query)
+  # ---------------------------------------------------------------------------
+
+  # Most recent `role: "user"` message across the given messages, or nil.
+  @doc false
+  defp latest_user_query(messages) do
+    messages
+    |> Enum.filter(fn m -> safe_to_string(Map.get(m, :role)) == "user" end)
+    |> List.last()
+  end
+
+  # Removes an exact copy of `target` from `messages` if present. `target` may
+  # be nil (no-op).
+  @doc false
+  defp exclude_message(messages, nil), do: messages
+
+  defp exclude_message(messages, target) do
+    Enum.reject(messages, &(&1 == target))
+  end
+
+  # Wraps `msg`'s raw content in `<user_query>` tags and prepends it —
+  # untouched by any LLM — to `summary`. No-op when there is no message to
+  # wrap or it has no content.
+  @doc false
+  defp prepend_user_query(summary, nil), do: summary
+
+  defp prepend_user_query(summary, msg) do
+    content = safe_to_string(Map.get(msg, :content))
+
+    if String.trim(content) == "" do
+      summary
+    else
+      wrap_user_query(content) <> "\n\n" <> summary
+    end
+  end
+
+  defp wrap_user_query(text), do: "<user_query>\n#{text}\n</user_query>"
+
+  # ---------------------------------------------------------------------------
+  # P4: token-budgeted, turn-aware tail selection helpers
+  # (opencode compaction.ts select/splitTurn; grok select.rs select_tail)
+  # ---------------------------------------------------------------------------
+
+  # 25% of the usable context window, clamped to [2_000, 8_000] tokens.
+  # Operator-overridable via :compaction_preserve_recent_tokens.
+  @doc false
+  defp preserve_recent_budget do
+    case Application.get_env(:optimal_system_agent, :compaction_preserve_recent_tokens) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        max_tokens()
+        |> Kernel.*(0.25)
+        |> trunc()
+        |> max(@min_preserve_recent_tokens)
+        |> min(@max_preserve_recent_tokens)
+    end
+  end
+
+  # Groups a (stripped) message list into "turns": a turn starts at a
+  # `role: "user"` message and runs up to (but not including) the next user
+  # message, or the end of the list for the last turn.
+  #
+  # Messages BEFORE the first `role: "user"` message (if any) — e.g. a
+  # `[Context Summary]` message compress_cold just inserted at index 0, or an
+  # active-agent `<system-reminder>` — are not owned by any real turn, but
+  # must still be given the same fitted-or-split treatment as everything
+  # else. Without this they'd have no representative in `turns_desc` at all,
+  # so `select_turn_tail/3` would never even consider them and any later
+  # step (emergency_truncate) reusing this same `compute_hot_start/1` would
+  # silently truncate them away regardless of budget. They're modeled as a
+  # synthetic OLDEST turn spanning `[0, first_user_index)`.
+  @doc false
+  defp build_turns(messages) do
+    total = length(messages)
+
+    starts =
+      messages
+      |> Enum.with_index()
+      |> Enum.filter(fn {msg, _i} -> safe_to_string(Map.get(msg, :role)) == "user" end)
+      |> Enum.map(fn {_msg, i} -> i end)
+
+    real_turns =
+      starts
+      |> Enum.with_index()
+      |> Enum.map(fn {start, idx} ->
+        finish =
+          case Enum.at(starts, idx + 1) do
+            nil -> total
+            next_start -> next_start
+          end
+
+        %{start: start, finish: finish}
+      end)
+
+    case starts do
+      [first | _] when first > 0 -> [%{start: 0, finish: first} | real_turns]
+      _ -> real_turns
+    end
+  end
+
+  # Computes the index (in `messages`) where the token-budgeted, turn-aware
+  # "hot" tail begins — everything from this index to the end is kept
+  # verbatim. Walks whole recent turns backward, keeping each in full while
+  # it fits the remaining budget; when a turn would overflow the budget, it
+  # is SPLIT to fit using `CompactionSafety.select_tail/3` (already a
+  # tool-pair-safe backward token-accumulation port of grok's select.rs)
+  # applied to just that turn's message slice. Always preserves at least the
+  # single most-recent turn, so this never keeps strictly less than the
+  # user's latest message. Falls back to the old fixed `@hot_zone_size`
+  # message-count boundary when no turn structure can be found at all (e.g.
+  # a pure tool/system message stream with no `role: "user"` messages).
+  @doc false
+  defp compute_hot_start(messages) do
+    total = length(messages)
+
+    case build_turns(messages) do
+      [] ->
+        max(total - @hot_zone_size, 0)
+
+      turns ->
+        budget = preserve_recent_budget()
+
+        case select_turn_tail(messages, Enum.reverse(turns), budget) do
+          nil -> max(total - @hot_zone_size, 0)
+          hot_start -> CompactionSafety.safe_split_index(messages, hot_start)
+        end
+    end
+  end
+
+  defp select_turn_tail(messages, turns_desc, budget) do
+    {_tokens, kept} =
+      Enum.reduce_while(turns_desc, {0, nil}, fn turn, {acc_tokens, kept} ->
+        turn_slice = Enum.slice(messages, turn.start, turn.finish - turn.start)
+        size = estimate_tokens(turn_slice)
+
+        cond do
+          acc_tokens + size <= budget ->
+            {:cont, {acc_tokens + size, turn.start}}
+
+          true ->
+            remaining = budget - acc_tokens
+
+            case CompactionSafety.select_tail(turn_slice, remaining, &single_msg_tokens/1) do
+              {:ok, split_in_turn} ->
+                {:halt, {acc_tokens, turn.start + split_in_turn}}
+
+              :none ->
+                # Never keep strictly nothing: if nothing has been kept yet
+                # (this IS the most-recent turn), preserve it whole even if
+                # it exceeds budget — a single oversized latest turn must
+                # still survive verbatim.
+                {:halt, {acc_tokens, kept || turn.start}}
+            end
+        end
+      end)
+
+    kept
+  end
+
+  defp single_msg_tokens(msg), do: estimate_tokens([msg])
 
   # ── Structured Summary Persistence (ETS) ─────────────────────────────
 
