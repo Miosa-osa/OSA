@@ -191,7 +191,14 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         "timeout",
         "connection",
         "unavailable",
-        "capacity"
+        "capacity",
+        # Model/endpoint-not-found on one provider → fall back to another that
+        # has the model, instead of dead-ending on a single-provider 404.
+        "404",
+        "not found",
+        "no such model",
+        "unknown model",
+        "does not exist"
       ],
       fn pattern -> String.contains?(reason_down, pattern) end
     )

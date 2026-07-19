@@ -456,24 +456,23 @@ impl StatusBar {
     /// there's no billing data.
     fn billing_label(&self) -> Option<String> {
         let b = self.billing.as_ref()?;
+        // Opt-in only. Provider pricing varies wildly — glm/Ollama have no USD
+        // cost at all, and token counts aren't reported by every provider — so a
+        // default spend/usage chip is meaningless and produced a broken
+        // "0 tok today". Show the chip ONLY when the user has explicitly set a
+        // daily USD budget, and only on a USD-priced provider where spend is
+        // real. No budget configured → no chip.
+        let limit = b.daily_limit_usd?;
         if !b.usd_pricing {
-            // Non-USD provider: never show a `$` figure — show token usage.
-            return Some(format!("{} tok today", Self::format_tokens(b.daily_tokens)));
+            return None;
         }
         let spent = Self::format_usd(b.daily_spent_usd);
-        let label = match b.daily_limit_usd {
-            // U-T25 — surface plan usage-% against the daily cap, e.g.
-            // "$8/$10 today (80%)", so the user sees how close they are.
-            Some(limit) => {
-                let base = format!("{}/{} today", spent, Self::format_usd(limit));
-                match usage_pct(b.daily_spent_usd, Some(limit)) {
-                    Some(pct) => format!("{} ({}%)", base, pct),
-                    None => base,
-                }
-            }
-            None => format!("{} today", spent),
-        };
-        Some(label)
+        let base = format!("{}/{} today", spent, Self::format_usd(limit));
+        // U-T25 — surface usage-% against the cap, e.g. "$8/$10 today (80%)".
+        Some(match usage_pct(b.daily_spent_usd, Some(limit)) {
+            Some(pct) => format!("{} ({}%)", base, pct),
+            None => base,
+        })
     }
 
     /// U-T25 — whether the daily spend has crossed the low-balance threshold
@@ -974,7 +973,8 @@ mod status_bar_tests {
         }));
         assert_eq!(sb.billing_label().as_deref(), Some("$8/$10 today (80%)"));
         assert!(sb.billing_low_balance(), "80% of cap is low balance");
-        // Uncapped: no %, never low.
+        // Opt-in: no budget configured → the chip is HIDDEN entirely. Provider
+        // pricing varies too much for a default spend figure to mean anything.
         sb.set_billing(Some(HealthBilling {
             daily_spent_usd: 3.0,
             daily_limit_usd: None,
@@ -985,8 +985,21 @@ mod status_bar_tests {
             daily_tokens: 0,
             usd_pricing: true,
         }));
-        assert_eq!(sb.billing_label().as_deref(), Some("$3 today"));
+        assert_eq!(sb.billing_label(), None, "no budget set → no chip");
         assert!(!sb.billing_low_balance());
+        // Non-USD provider (glm/Ollama): no USD cost → no chip, even if a limit
+        // leaked through. This is the fix for the broken "0 tok today".
+        sb.set_billing(Some(HealthBilling {
+            daily_spent_usd: 0.0,
+            daily_limit_usd: Some(10.0),
+            monthly_spent_usd: 0.0,
+            monthly_limit_usd: None,
+            currency: "".into(),
+            subscription: None,
+            daily_tokens: 5000,
+            usd_pricing: false,
+        }));
+        assert_eq!(sb.billing_label(), None, "non-USD provider → no chip");
     }
 
     /// Flatten a fully-configured StatusBar's cells to one string.

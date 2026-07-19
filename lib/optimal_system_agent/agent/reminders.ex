@@ -78,6 +78,13 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   # for a skills/ dir (defends against a path far outside the workspace).
   @max_walk_depth 40
 
+  # Cap how many skill hints a single filesystem tool-call may announce. A
+  # skills dir holding dozens of SKILL.md files (e.g. a shared .claude/skills/)
+  # would otherwise flood the context with reminders on first touch — the model
+  # can still discover the rest on demand via find_skill. Closest-dir skills win
+  # (discover_skill_files returns direct + nearest-ancestor first).
+  @max_skill_reminders 5
+
   # Cap a subagent result preview so a chatty agent can't blow up the reminder.
   @subagent_preview_bytes 600
 
@@ -242,6 +249,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
       abs
       |> discover_skill_files(root)
       |> Enum.filter(fn skill_path -> claim(session_id, {:skill, skill_path}) end)
+      |> Enum.take(@max_skill_reminders)
       |> Enum.map(&format_skill_reminder/1)
     else
       _ -> []
