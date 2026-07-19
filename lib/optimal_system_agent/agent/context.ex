@@ -664,37 +664,26 @@ defmodule OptimalSystemAgent.Agent.Context do
     end)
   end
 
-  # Real keyword recall against the store (never the empty string), re-scored
-  # with Memory.Scoring (category weight + Jaccard keyword overlap + recency),
-  # entries below min_score DROPPED (not truncated), count capped, then the
-  # rendered block hard-truncated to the token cap.
-  defp recall_scored(query, query_keywords) do
+  # Hybrid recall: FTS5/BM25 + vector-KNN semantic similarity + temporal/
+  # category weighting, MMR-reranked for diversity (Memory.recall_hybrid).
+  # Degrades to keyword-only recall when no embedding provider is configured.
+  # recall_hybrid already filters below min_score and caps the count; the
+  # already-ranked block is then hard-truncated to the token cap. No re-sort
+  # here — that would undo the MMR diversity rerank.
+  defp recall_scored(query, _query_keywords) do
     max_results = Budget.memory_recall_max_results()
     min_score = Budget.memory_recall_min_score()
 
-    case OptimalSystemAgent.Memory.recall(query, limit: max_results, min_score: min_score) do
+    case OptimalSystemAgent.Memory.recall_hybrid(query, limit: max_results, min_score: min_score) do
       {:ok, entries} when is_list(entries) and entries != [] ->
-        survivors =
-          entries
-          |> Enum.map(fn entry -> {Scoring.score(entry, query_keywords), entry} end)
-          |> Enum.filter(fn {score, _entry} -> score >= min_score end)
-          |> Enum.sort_by(&elem(&1, 0), :desc)
-          |> Enum.take(max_results)
-
-        case survivors do
-          [] ->
-            nil
-
-          scored ->
-            scored
-            |> Enum.map(fn {_score, entry} ->
-              cat = Map.get(entry, :category, "general")
-              content = Map.get(entry, :content, "")
-              "## #{cat}\n#{content}"
-            end)
-            |> Enum.join("\n\n")
-            |> truncate_to_tokens(Budget.memory_context_token_cap())
-        end
+        entries
+        |> Enum.map(fn entry ->
+          cat = Map.get(entry, :category, "general")
+          content = Map.get(entry, :content, "")
+          "## #{cat}\n#{content}"
+        end)
+        |> Enum.join("\n\n")
+        |> truncate_to_tokens(Budget.memory_context_token_cap())
 
       _ ->
         nil
@@ -800,14 +789,37 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp task_suffix(%{status: :failed, reason: reason}), do: "  [failed: #{reason}]"
   defp task_suffix(_), do: ""
 
-  defp plan_mode_block(%{plan_mode: true}) do
+  # Investigative plan mode (CC-parity): read-only tools remain AVAILABLE —
+  # the permission layer (`ToolExecutor.approve_tool_call/2`, `mode == :plan`)
+  # blocks anything mutating, so the model can freely call file_read /
+  # file_grep / file_glob / dir_list / codebase_explore / web_fetch / etc. to
+  # investigate before it commits to a plan. Matches CC's ExitPlanMode prompt
+  # guidance ("For research tasks that involve reading files... do NOT
+  # exit/finish planning") — a plan produced without grounding is a guess.
+  defp plan_mode_block(%{plan_mode: true} = state) do
+    existing_draft = existing_plan_draft(Map.get(state, :session_id))
+
     """
-    ## PLAN MODE — ACTIVE
+    ## PLAN MODE — ACTIVE (investigative)
 
-    You are in PLAN MODE. Do NOT execute any actions or call any tools.
-    Instead, produce a structured implementation plan.
+    You are in PLAN MODE. Read-only tools (file_read, file_grep, file_glob,
+    dir_list, codebase_explore, web_fetch, web_search, and similar) are
+    AVAILABLE — use them to investigate the codebase and ground your plan in
+    what the code actually does. Write, edit, delete, and shell/exec tools are
+    BLOCKED at the permission layer while plan mode is active; calling one
+    returns a blocked-tool message instead of executing.
 
-    Your plan MUST follow this format:
+    For research tasks that involve reading files, searching, or exploring
+    the codebase to understand the current state before proposing changes:
+    keep investigating with read-only tools. Do NOT stop investigating and
+    write your final plan until you have grounded it in the real code — an
+    ungrounded guess produces a mis-scoped plan that wastes execution steps
+    later.
+
+    Once you have enough grounding, respond with your final answer as plain
+    text (no tool call) in this exact structure. That text becomes your
+    answer for this turn and is written to the session's durable plan file
+    for the user to review:
 
     ### Goal
     One sentence: what will be accomplished.
@@ -826,10 +838,38 @@ defmodule OptimalSystemAgent.Agent.Context do
     Rough scope: trivial / small / medium / large
 
     Be concise. The user will approve, reject, or request changes before you execute.
+    #{existing_draft}
     """
   end
 
   defp plan_mode_block(_), do: nil
+
+  # Surface a previously written (but not yet approved) plan file so a
+  # resumed / re-invoked plan-mode turn can incrementally revise it instead
+  # of starting from a blank page — the plan file is the durable source of
+  # truth and survives context resets, session restarts, and the plan_edit
+  # round-trip (`Agent.PlanMode.edit/2`).
+  defp existing_plan_draft(session_id) when is_binary(session_id) do
+    case OptimalSystemAgent.Agent.PlanStore.read_plan_file(session_id) do
+      {:ok, contents} ->
+        trimmed = String.trim(contents)
+
+        if trimmed == "" do
+          ""
+        else
+          "\n### Existing draft plan (resumed from disk — revise or continue investigating as needed)\n\n#{trimmed}\n"
+        end
+
+      _ ->
+        ""
+    end
+  rescue
+    _ -> ""
+  catch
+    :exit, _ -> ""
+  end
+
+  defp existing_plan_draft(_), do: ""
 
   # Logical tool key → candidate registered names, most-preferred first.
   #

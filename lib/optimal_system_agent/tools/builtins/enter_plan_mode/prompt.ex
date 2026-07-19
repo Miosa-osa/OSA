@@ -13,8 +13,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Prompt do
     - Read-only tools (file_read, grep, web_fetch, etc.) remain available.
     - You can still reason freely and call read-only tools to gather context.
 
-    When your plan is complete and you are ready to execute, call `exit_plan_mode`
-    with a summary of the plan. Execution tools are restored at that point.
+    When your plan is complete and you are ready for the user to approve it, call
+    `exit_plan_mode` with the full plan text in its `plan` argument — this writes
+    the plan to the session's durable plan file and opens the same
+    approve/reject/edit round-trip a `/plan`-toggled turn uses. Execution tools
+    are restored once `exit_plan_mode` runs, but execution itself waits for the
+    user's approval.
 
     Use this when:
     - A task has 3+ steps or involves architectural decisions.

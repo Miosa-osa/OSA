@@ -5,16 +5,17 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   Handles the preprocessing phase of `handle_call({:process, ...})`:
   - Memory nudge injection (every N turns)
   - Pre-directive injection (explore-first, delegation enforcement)
-  - Plan mode execution (single LLM call with no tools)
+  - Plan mode execution — the INVESTIGATIVE agent loop (read-only tools ON,
+    mutating tools blocked at the permission layer), not a single no-tools
+    LLM call. See `run_plan_mode/1`.
 
   These concerns were extracted from the main loop to keep `Loop` focused on
   GenServer callbacks and the ReAct iteration, not message decoration.
   """
   require Logger
 
-  alias OptimalSystemAgent.Agent.Context
   alias OptimalSystemAgent.Agent.Loop.Guardrails
-  alias OptimalSystemAgent.Agent.Loop.LLMClient
+  alias OptimalSystemAgent.Agent.Loop.ReactLoop
   alias OptimalSystemAgent.Events.Bus
 
   @doc """
@@ -93,47 +94,60 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   end
 
   @doc """
-  Execute the plan mode branch: single LLM call with no tools.
+  Execute the plan mode branch: the INVESTIGATIVE agent loop.
 
-  Returns `{:reply_tuple, state}` where `:reply_tuple` is either
-  `{:plan, plan_text}` (success) or delegates to the caller on failure.
+  Runs the real `ReactLoop` (multi-step, streaming, same as a normal turn) but
+  temporarily forces `permission_mode: :plan` so the tool-execution gate
+  (`ToolExecutor.approve_tool_call/2`) allows read-only tools (file_read,
+  file_grep, file_glob, dir_list, codebase_explore, web_fetch, ...) while
+  blocking anything mutating. `Context.plan_mode_block/1` instructs the model
+  to investigate first and only then produce its final plain-text answer —
+  that final answer (no further tool call) is the plan text, exactly as the
+  old single-call plan mode returned, so downstream consumers (`PlanStore`,
+  the TUI's `plan_review` dialog, `plan_proposed` event) are unchanged.
+
+  This replaces the old "single LLM call with no tools" implementation (OSA
+  used to plan blind); see `docs/decisions/` / the plan-mode audit for why
+  ungrounded plans are a failure mode CC's ExitPlanMode prompt warns against.
+
+  Returns `{:ok, plan_text, state}` on success or `{:error, reason, state}` on
+  failure. In both cases `plan_mode` is cleared and `permission_mode` is
+  restored to whatever it was before entering plan mode.
   """
   @spec run_plan_mode(map()) ::
           {:ok, String.t(), map()}
           | {:error, term(), map()}
   def run_plan_mode(state) do
-    context = Context.build(state)
+    original_permission_mode = Map.get(state, :permission_mode, :ask)
+    investigative_state = %{state | permission_mode: :plan}
 
-    Bus.emit(:llm_request, %{session_id: state.session_id, iteration: 0, agent: state.session_id})
-    start_time = System.monotonic_time(:millisecond)
+    {response, ran_state} =
+      try do
+        ReactLoop.run(investigative_state)
+      rescue
+        e ->
+          Logger.error(
+            "[plan_mode] CRASH in investigative ReactLoop: #{Exception.message(e)}\n" <>
+              Exception.format_stacktrace(__STACKTRACE__)
+          )
 
-    result = LLMClient.llm_chat(state, context.messages, tools: [], temperature: 0.3)
-
-    duration_ms = System.monotonic_time(:millisecond) - start_time
-
-    usage =
-      case result do
-        {:ok, resp} -> Map.get(resp, :usage, %{})
-        _ -> %{}
+          {nil, investigative_state}
+      catch
+        :exit, reason ->
+          Logger.error("[plan_mode] EXIT in investigative ReactLoop: #{inspect(reason)}")
+          {nil, investigative_state}
       end
 
-    Bus.emit(:llm_response, %{
-      session_id: state.session_id,
-      provider: state.provider,
-      duration_ms: duration_ms,
-      usage: usage,
-      agent: state.session_id
-    })
+    cond do
+      # A cancelled/paused turn returns one of ReactLoop's typed interrupt
+      # markers instead of real plan prose — never stash that as a plan.
+      is_binary(response) and response in ReactLoop.interrupt_markers() ->
+        state = %{ran_state | plan_mode: false, permission_mode: original_permission_mode}
+        {:error, :interrupted, state}
 
-    case result do
-      {:ok, %{content: plan_text}} ->
-        plan_input_tokens = Map.get(usage, :input_tokens, 0)
-        state = %{state | plan_mode: false}
-
-        state =
-          if plan_input_tokens > 0,
-            do: %{state | last_input_tokens: plan_input_tokens},
-            else: state
+      is_binary(response) and response != "" ->
+        plan_text = response
+        state = %{ran_state | plan_mode: false, permission_mode: original_permission_mode}
 
         Bus.emit(:agent_response, %{
           session_id: state.session_id,
@@ -157,7 +171,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
         # Stash the plan + original user input so the plan_approve / plan_edit
         # commands can resume execution without the client echoing the plan
         # back, then emit the dedicated `plan_proposed` event the TUI parses to
-        # open its plan_review dialog (a plain agent_response does not).
+        # open its plan_review dialog (a plain agent_response does not). Also
+        # writes the durable plan file (source of truth — see `PlanStore`).
         original_input = original_user_input(state.messages)
         OptimalSystemAgent.Agent.PlanStore.put(state.session_id, plan_text, original_input)
 
@@ -175,13 +190,13 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
         {:ok, plan_text, state}
 
-      {:error, reason} ->
+      true ->
         Logger.warning(
-          "Plan mode LLM call failed (#{inspect(reason)}), falling back to normal execution"
+          "Plan mode investigative loop produced no response, falling back to normal execution"
         )
 
-        state = %{state | plan_mode: false}
-        {:error, reason, state}
+        state = %{ran_state | plan_mode: false, permission_mode: original_permission_mode}
+        {:error, :empty_plan_response, state}
     end
   end
 

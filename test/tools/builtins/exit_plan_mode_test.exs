@@ -1,10 +1,12 @@
 defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanModeTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Tools.Builtins.ExitPlanMode.{Handler, Tool}
   alias OptimalSystemAgent.Tools.UseContext
+  alias OptimalSystemAgent.Agent.PlanStore
 
   setup do
+    on_exit(fn -> File.rm(PlanStore.plan_file_path("test")) end)
     {:ok, ctx: UseContext.empty()}
   end
 
@@ -122,6 +124,49 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanModeTest do
         |> Enum.map(& &1.name)
 
       assert "exit_plan_mode" in names
+    end
+  end
+
+  # ── Model-invoked plan transitions route into the PlanStore approval
+  #    round-trip (gap #3) ───────────────────────────────────────────────
+  describe "execute/2 with a plan — routes into the PlanStore approval round-trip" do
+    setup do
+      session_id = "exit-plan-mode-test-#{System.unique_integer([:positive, :monotonic])}"
+      on_exit(fn -> File.rm(PlanStore.plan_file_path(session_id)) end)
+      {:ok, ctx: %{UseContext.empty() | session_id: session_id}, session_id: session_id}
+    end
+
+    test "writes the plan to the durable plan file", %{ctx: ctx, session_id: session_id} do
+      plan = "### Goal\nRefactor the widget factory.\n"
+      assert {:ok, _msg} = Handler.execute(%{"plan" => plan}, ctx)
+
+      assert {:ok, ^plan} = PlanStore.read_plan_file(session_id)
+    end
+
+    test "indexes a pending approval readable via PlanStore.get/1", %{
+      ctx: ctx,
+      session_id: session_id
+    } do
+      plan = "### Goal\nAdd rate limiting.\n"
+      Handler.execute(%{"plan" => plan}, ctx)
+
+      assert %{plan: ^plan} = PlanStore.get(session_id)
+    end
+
+    test "calling exit_plan_mode WITHOUT a plan does not stash anything in PlanStore", %{
+      ctx: ctx,
+      session_id: session_id
+    } do
+      Handler.execute(%{}, ctx)
+
+      assert PlanStore.get(session_id) == nil
+      assert PlanStore.read_plan_file(session_id) == {:error, :not_found}
+    end
+
+    test "confirmation message mentions approval, not immediate execution", %{ctx: ctx} do
+      plan = "### Goal\nDo it.\n"
+      assert {:ok, msg} = Handler.execute(%{"plan" => plan}, ctx)
+      assert msg =~ ~r/approv/i
     end
   end
 end

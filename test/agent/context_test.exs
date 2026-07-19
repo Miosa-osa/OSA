@@ -129,7 +129,6 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
       prompt_text = extract_system_text(system_msg)
       assert String.contains?(prompt_text, "PLAN MODE")
-      assert String.contains?(prompt_text, "Do NOT execute any actions")
     end
 
     test "plan_mode: false does NOT inject PLAN MODE section" do
@@ -138,6 +137,57 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
       prompt_text = extract_system_text(system_msg)
       refute String.contains?(prompt_text, "PLAN MODE")
+    end
+
+    # Investigative plan mode (read tools stay ON — see PlanStore/ToolExecutor
+    # mode == :plan gate): the prompt must NOT tell the model to avoid tools
+    # entirely, it must tell it to investigate with read-only tools first.
+    test "plan mode block is investigative — mentions read-only tools are available" do
+      state = base_state(%{plan_mode: true})
+      %{messages: [system_msg | _]} = Context.build(state)
+
+      prompt_text = extract_system_text(system_msg)
+      refute String.contains?(prompt_text, "Do NOT execute any actions or call any tools")
+      assert String.contains?(prompt_text, "Read-only tools")
+      assert String.contains?(prompt_text, "AVAILABLE")
+      assert String.contains?(prompt_text, "investigat")
+    end
+
+    test "plan mode block still specifies the structured plan format" do
+      state = base_state(%{plan_mode: true})
+      %{messages: [system_msg | _]} = Context.build(state)
+
+      prompt_text = extract_system_text(system_msg)
+      assert String.contains?(prompt_text, "### Goal")
+      assert String.contains?(prompt_text, "### Steps")
+      assert String.contains?(prompt_text, "### Files")
+      assert String.contains?(prompt_text, "### Risks")
+      assert String.contains?(prompt_text, "### Estimate")
+    end
+
+    test "plan mode block surfaces an existing durable draft plan for the session" do
+      session_id = "ctx-plan-draft-#{:erlang.unique_integer([:positive])}"
+      on_exit(fn -> File.rm(OptimalSystemAgent.Agent.PlanStore.plan_file_path(session_id)) end)
+
+      OptimalSystemAgent.Agent.PlanStore.write_plan_file(
+        session_id,
+        "### Goal\nRefactor the frobnicator.\n"
+      )
+
+      state = base_state(%{plan_mode: true, session_id: session_id})
+      %{messages: [system_msg | _]} = Context.build(state)
+
+      prompt_text = extract_system_text(system_msg)
+      assert String.contains?(prompt_text, "Existing draft plan")
+      assert String.contains?(prompt_text, "Refactor the frobnicator.")
+    end
+
+    test "plan mode block has no existing-draft section when no plan file exists yet" do
+      state = base_state(%{plan_mode: true})
+      %{messages: [system_msg | _]} = Context.build(state)
+
+      prompt_text = extract_system_text(system_msg)
+      refute String.contains?(prompt_text, "Existing draft plan")
     end
   end
 
