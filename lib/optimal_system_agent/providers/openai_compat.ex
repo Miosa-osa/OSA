@@ -118,17 +118,33 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # ── Streaming implementation ───────────────────────────────────────────
 
+  @doc """
+  Build the streaming request body. Public (not just `defp`) so tests can
+  assert the request actually asks for usage on the stream — the P2 fix:
+  without `stream_options.include_usage`, OpenAI-compatible backends omit
+  `usage` from every streamed response and Accounting.record always sees 0
+  tokens.
+  """
+  def build_stream_body(model, messages, opts) do
+    %{
+      model: model,
+      messages: format_messages(messages) |> maybe_strip_images(opts),
+      stream: true,
+      # Ask OpenAI-compatible backends to emit a final `usage` chunk on the
+      # stream (off by default per the OpenAI streaming API). Without this,
+      # `usage` never arrives and Accounting.record sees 0 tokens for every
+      # streamed turn. Servers that ignore the flag (some Ollama/local
+      # builds) fall back to the char/token estimate in finalize_sse_stream/4.
+      stream_options: %{include_usage: true}
+    }
+    |> maybe_add_temperature(model, opts)
+    |> maybe_add_tools(opts)
+    |> maybe_add_max_tokens(model, opts)
+    |> maybe_add_reasoning(model, opts)
+  end
+
   defp do_chat_stream(base_url, api_key, model, messages, callback, opts) do
-    body =
-      %{
-        model: model,
-        messages: format_messages(messages) |> maybe_strip_images(opts),
-        stream: true
-      }
-      |> maybe_add_temperature(model, opts)
-      |> maybe_add_tools(opts)
-      |> maybe_add_max_tokens(model, opts)
-      |> maybe_add_reasoning(model, opts)
+    body = build_stream_body(model, messages, opts)
 
     extra_headers = Keyword.get(opts, :extra_headers, [])
 
@@ -183,7 +199,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         {:ok, _resp} ->
           acc = Process.get(stream_key)
           Process.delete(stream_key)
-          finalize_sse_stream(acc, callback, model)
+          finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->
           Process.delete(stream_key)
@@ -195,6 +211,37 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         Process.delete(stream_key)
         Logger.error("OpenAI-compat stream error: #{Exception.message(e)}")
         {:error, "Stream error: #{Exception.message(e)}"}
+    end
+  end
+
+  @doc """
+  Test seam: drive the exact same SSE-chunk handling and finalization used by
+  `do_chat_stream/6` from a list of raw `data: {...}` text chunks, without a
+  live HTTP connection. Returns the finalized `{:done, result}` payload.
+  Lets tests exercise the real usage-parsing (`stream_options.include_usage`
+  response) and the estimate-fallback path.
+  """
+  def stream_from_sse_chunks(data_chunks, model \\ "gpt-4o", messages \\ [])
+      when is_list(data_chunks) do
+    test_pid = self()
+    callback = fn msg -> send(test_pid, {:sse_test_callback, msg}) end
+
+    init_acc = %{
+      buffer: "",
+      content: "",
+      tool_calls: %{},
+      usage: %{},
+      finish_reason: nil,
+      think: ThinkStreamParser.new()
+    }
+
+    acc = Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
+    finalize_sse_stream(acc, callback, model, messages)
+
+    receive do
+      {:sse_test_callback, {:done, result}} -> result
+    after
+      1_000 -> raise "stream_from_sse_chunks/3: no :done callback received"
     end
   end
 
@@ -332,7 +379,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp maybe_append_args(tc, _), do: tc
 
-  defp finalize_sse_stream(acc, callback, model) do
+  defp finalize_sse_stream(acc, callback, model, orig_messages) do
     # Drain any tag tail the streaming splitter was holding back, so the live
     # display never loses trailing characters at end-of-stream.
     case Map.get(acc, :think) do
@@ -384,15 +431,45 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         end
       end
 
+    # Some OpenAI-compatible backends (certain Ollama/local builds) ignore
+    # `stream_options.include_usage` and never send a usage chunk, leaving
+    # acc.usage == %{}. Rather than record a flat 0 (the bug this fixes),
+    # fall back to the same char/token heuristic the rest of the codebase
+    # already uses for budgeting (Agent.Context.estimate_tokens*).
+    usage = estimate_usage_fallback(acc.usage, orig_messages, content)
+
     result = %{
       content: content,
       tool_calls: tool_calls,
-      usage: acc.usage,
+      usage: usage,
       stop_reason: Map.get(acc, :finish_reason)
     }
 
     callback.({:done, result})
     :ok
+  end
+
+  defp estimate_usage_fallback(usage, messages, content) when is_map(usage) do
+    input = Map.get(usage, :input_tokens, 0)
+    output = Map.get(usage, :output_tokens, 0)
+
+    if input > 0 or output > 0 do
+      usage
+    else
+      %{
+        input_tokens: OptimalSystemAgent.Agent.Context.estimate_tokens_messages(messages),
+        output_tokens: OptimalSystemAgent.Agent.Context.estimate_tokens(content),
+        estimated: true
+      }
+    end
+  end
+
+  defp estimate_usage_fallback(_usage, messages, content) do
+    %{
+      input_tokens: OptimalSystemAgent.Agent.Context.estimate_tokens_messages(messages),
+      output_tokens: OptimalSystemAgent.Agent.Context.estimate_tokens(content),
+      estimated: true
+    }
   end
 
   # Build the Req.post options keyword, honoring a header-aware retry decision:

@@ -324,4 +324,108 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
       assert result.thinking.budget_tokens == 10_000
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # accumulate_stream_events/1 — the C1/P1 fix: streamed usage must be
+  # accumulated from message_start (input + cache tokens) and message_delta
+  # (output tokens), and surfaced on the finalized :done result. Before the
+  # fix these events were discarded and the streamed result had no :usage key
+  # at all, so Accounting.record always saw 0 tokens.
+  # ---------------------------------------------------------------------------
+
+  describe "accumulate_stream_events/1" do
+    test "accumulates real input+output usage from message_start + message_delta" do
+      events = [
+        %{
+          "type" => "message_start",
+          "message" => %{
+            "id" => "msg_1",
+            "usage" => %{
+              "input_tokens" => 1234,
+              "cache_creation_input_tokens" => 56,
+              "cache_read_input_tokens" => 78,
+              "output_tokens" => 1
+            }
+          }
+        },
+        %{
+          "type" => "content_block_start",
+          "content_block" => %{"type" => "text"}
+        },
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "text_delta", "text" => "Hello"}
+        },
+        %{"type" => "content_block_stop"},
+        %{
+          "type" => "message_delta",
+          "delta" => %{"stop_reason" => "end_turn"},
+          "usage" => %{"output_tokens" => 42}
+        },
+        %{"type" => "message_stop"}
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      assert result.content == "Hello"
+      assert result.stop_reason == "end_turn"
+      # This is the crux of the bug fix: real, non-zero usage on the
+      # streamed :done result instead of no :usage key at all.
+      assert result.usage.input_tokens == 1234
+      assert result.usage.output_tokens == 42
+      assert result.usage.cache_creation_input_tokens == 56
+      assert result.usage.cache_read_input_tokens == 78
+    end
+
+    test "message_delta usage without stop_reason still updates output_tokens" do
+      events = [
+        %{
+          "type" => "message_start",
+          "message" => %{"usage" => %{"input_tokens" => 500, "output_tokens" => 0}}
+        },
+        %{"type" => "message_delta", "delta" => %{}, "usage" => %{"output_tokens" => 17}}
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+      assert result.usage.input_tokens == 500
+      assert result.usage.output_tokens == 17
+    end
+
+    test "no usage events leaves usage at zeroed defaults, not a missing key" do
+      events = [
+        %{"type" => "content_block_start", "content_block" => %{"type" => "text"}},
+        %{"type" => "content_block_delta", "delta" => %{"type" => "text_delta", "text" => "hi"}},
+        %{"type" => "content_block_stop"}
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+      assert result.usage.input_tokens == 0
+      assert result.usage.output_tokens == 0
+    end
+
+    test "tool_use streaming still works alongside usage accumulation" do
+      events = [
+        %{
+          "type" => "message_start",
+          "message" => %{"usage" => %{"input_tokens" => 300, "output_tokens" => 0}}
+        },
+        %{
+          "type" => "content_block_start",
+          "content_block" => %{"type" => "tool_use", "id" => "tc_1", "name" => "file_read"}
+        },
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "input_json_delta", "partial_json" => "{\"path\":\"/tmp/x\"}"}
+        },
+        %{"type" => "content_block_stop"},
+        %{"type" => "message_delta", "delta" => %{"stop_reason" => "tool_use"}, "usage" => %{"output_tokens" => 8}}
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+      assert result.stop_reason == "tool_use"
+      assert [%{id: "tc_1", name: "file_read", arguments: %{"path" => "/tmp/x"}}] = result.tool_calls
+      assert result.usage.input_tokens == 300
+      assert result.usage.output_tokens == 8
+    end
+  end
 end

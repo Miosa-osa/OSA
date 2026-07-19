@@ -719,4 +719,98 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert tc.arguments == %{"flag" => true}
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # stream_from_sse_chunks/3 — the P2 fix: streaming requests
+  # `stream_options.include_usage`, and when the server honors it and sends a
+  # final usage chunk, that usage is parsed onto the :done result instead of
+  # staying empty. When the server never sends usage (ignores the flag), the
+  # char/token estimate fallback kicks in so it's never a flat 0.
+  # ---------------------------------------------------------------------------
+
+  describe "stream_from_sse_chunks/3 — usage parsing" do
+    defp sse(payload), do: "data: #{Jason.encode!(payload)}\n\n"
+
+    test "parses a usage chunk attached to the final choices delta" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "Hello"}}]}),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "stop"}]}),
+        sse(%{
+          "choices" => [%{"delta" => %{}, "finish_reason" => "stop"}],
+          "usage" => %{"prompt_tokens" => 321, "completion_tokens" => 12}
+        }),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      assert result.content == "Hello"
+      assert result.stop_reason == "stop"
+      assert result.usage.input_tokens == 321
+      assert result.usage.output_tokens == 12
+      refute Map.get(result.usage, :estimated)
+    end
+
+    test "parses a standalone final usage-only chunk (no choices)" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "Hi there"}}]}),
+        sse(%{"usage" => %{"prompt_tokens" => 50, "completion_tokens" => 9}}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+      assert result.usage.input_tokens == 50
+      assert result.usage.output_tokens == 9
+    end
+
+    test "falls back to a non-zero char/token estimate when the server never sends usage" do
+      messages = [%{role: "user", content: "Tell me a very long story about dragons and castles"}]
+
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "Once upon a time"}}]}),
+        sse(%{"choices" => [%{"delta" => %{"content" => " there was a dragon."}}]}),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "stop"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", messages)
+
+      # The critical assertion: never a flat 0/0 even though the server sent
+      # no usage object at all.
+      assert result.usage.input_tokens > 0
+      assert result.usage.output_tokens > 0
+      assert result.usage.estimated == true
+    end
+
+    test "estimate fallback with empty content/messages still returns a map with zero, not a crash" do
+      chunks = ["data: [DONE]\n\n"]
+      result = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", [])
+      assert result.usage.input_tokens == 0
+      assert result.usage.output_tokens == 0
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # build_stream_body/3 — asserts the actual wire request asks the backend
+  # for usage on the stream (the P2 fix). Without this, the server never
+  # sends a usage object regardless of how well the client parses one.
+  # ---------------------------------------------------------------------------
+
+  describe "build_stream_body/3" do
+    test "requests stream_options.include_usage" do
+      body = OpenAICompat.build_stream_body("gpt-4o", [%{role: "user", content: "hi"}], [])
+      assert body.stream_options == %{include_usage: true}
+      assert body.stream == true
+    end
+
+    test "include_usage flag is present regardless of other opts" do
+      body =
+        OpenAICompat.build_stream_body("llama3", [%{role: "user", content: "hi"}],
+          temperature: 0.2,
+          max_tokens: 100
+        )
+
+      assert body.stream_options == %{include_usage: true}
+    end
+  end
 end

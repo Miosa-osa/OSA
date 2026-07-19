@@ -173,7 +173,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             thinking: [],
             current_thinking: nil,
             stream_error: nil,
-            stop_reason: nil
+            stop_reason: nil,
+            usage: %{
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0
+            }
           })
 
         {:ok, %{status: 429} = resp} ->
@@ -198,6 +204,50 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
         Logger.error("Anthropic stream unexpected error: #{Exception.message(e)}")
         fallback_to_sync(base_url, auth, model, messages, callback, opts)
     end
+  end
+
+  @doc """
+  Test seam: fold a list of already-decoded Anthropic SSE event maps (the
+  shape produced by `parse_sse_chunk/1` after `Jason.decode`) through the
+  exact same `process_stream_event/3` clauses the live stream uses, then
+  finalize exactly as `collect_stream/3` does on `:done`. Lets tests exercise
+  the real usage-accumulation logic (message_start/message_delta) without a
+  live HTTP connection.
+  """
+  def accumulate_stream_events(events) when is_list(events) do
+    init_acc = %{
+      content: "",
+      tool_calls: [],
+      current_tool: nil,
+      buffer: "",
+      thinking: [],
+      current_thinking: nil,
+      stream_error: nil,
+      stop_reason: nil,
+      usage: %{
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      }
+    }
+
+    noop_callback = fn _ -> :ok end
+
+    acc =
+      Enum.reduce(events, init_acc, fn event, a ->
+        process_stream_event(event, noop_callback, a)
+      end)
+
+    acc = finalize_current_tool(acc)
+    acc = finalize_current_thinking(acc)
+
+    %{
+      content: acc.content,
+      tool_calls: Enum.reverse(acc.tool_calls),
+      stop_reason: acc.stop_reason,
+      usage: Map.get(acc, :usage, %{})
+    }
   end
 
   defp collect_stream(resp, callback, acc) do
@@ -245,7 +295,8 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                 result = %{
                   content: acc.content,
                   tool_calls: Enum.reverse(acc.tool_calls),
-                  stop_reason: acc.stop_reason
+                  stop_reason: acc.stop_reason,
+                  usage: Map.get(acc, :usage, %{})
                 }
 
                 result =
@@ -403,21 +454,50 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
-  defp process_stream_event(%{"type" => "message_start"}, _callback, acc), do: acc
 
-  # The final `message_delta` carries the terminal stop_reason (e.g.
-  # "max_tokens" when the response was truncated by the token limit). Capture
-  # it so the loop's TRUNCATED-MESSAGE guard can refuse partial tool calls.
+  # `message_start` carries the initial usage snapshot: input_tokens plus any
+  # prompt-cache creation/read counts (output_tokens is 0/near-0 at this
+  # point). Without this, streamed turns never see input/cache token counts
+  # and Accounting.record always sees 0 (the "budget 0" root cause).
   defp process_stream_event(
-         %{"type" => "message_delta", "delta" => %{"stop_reason" => stop_reason}},
+         %{"type" => "message_start", "message" => %{"usage" => usage}},
          _callback,
          acc
        )
-       when is_binary(stop_reason) do
-    if Map.has_key?(acc, :stop_reason), do: %{acc | stop_reason: stop_reason}, else: acc
+       when is_map(usage) do
+    if Map.has_key?(acc, :usage), do: %{acc | usage: merge_stream_usage(acc.usage, usage)}, else: acc
   end
 
-  defp process_stream_event(%{"type" => "message_delta"}, _callback, acc), do: acc
+  defp process_stream_event(%{"type" => "message_start"}, _callback, acc), do: acc
+
+  # The final `message_delta` carries the terminal stop_reason (e.g.
+  # "max_tokens" when the response was truncated by the token limit) AND the
+  # authoritative output_tokens count (top-level `usage`, not under `delta`).
+  # Capture both so the loop's TRUNCATED-MESSAGE guard works and streamed
+  # turns record real output token usage instead of 0.
+  defp process_stream_event(
+         %{"type" => "message_delta"} = event,
+         _callback,
+         acc
+       ) do
+    acc =
+      case event["delta"] do
+        %{"stop_reason" => stop_reason} when is_binary(stop_reason) ->
+          if Map.has_key?(acc, :stop_reason), do: %{acc | stop_reason: stop_reason}, else: acc
+
+        _ ->
+          acc
+      end
+
+    case event["usage"] do
+      usage when is_map(usage) ->
+        if Map.has_key?(acc, :usage), do: %{acc | usage: merge_stream_usage(acc.usage, usage)}, else: acc
+
+      _ ->
+        acc
+    end
+  end
+
   defp process_stream_event(%{"type" => "ping"}, _callback, acc), do: acc
 
   # Mid-stream error event. The SSE stream opened 200 OK, then the server
@@ -903,6 +983,23 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   end
 
   def extract_usage(_), do: %{}
+
+  # Merge a raw Anthropic SSE `usage` object (string keys, only the fields
+  # present on that particular event) into the running stream accumulator
+  # (atom keys). Anthropic sends each field's authoritative total (not a
+  # delta to add), so a present key overwrites; an absent key keeps the
+  # prior value. `message_start` supplies input/cache tokens up front,
+  # `message_delta` supplies the final output_tokens.
+  defp merge_stream_usage(acc_usage, usage) when is_map(usage) do
+    %{
+      input_tokens: usage["input_tokens"] || acc_usage.input_tokens,
+      output_tokens: usage["output_tokens"] || acc_usage.output_tokens,
+      cache_creation_input_tokens:
+        usage["cache_creation_input_tokens"] || acc_usage.cache_creation_input_tokens,
+      cache_read_input_tokens:
+        usage["cache_read_input_tokens"] || acc_usage.cache_read_input_tokens
+    }
+  end
 
   defp extract_error(%{"error" => %{"message" => msg}}), do: msg
   defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg
