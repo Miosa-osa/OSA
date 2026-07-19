@@ -11,6 +11,35 @@ Effort: S = <1 day, M = a few days, L = 1–2 weeks.
 
 ---
 
+## ✅ SHIPPED (local, v1.0.9 held, ~17 commits, not pushed)
+
+P0: compaction tool-pair-safe split + active-agent reminder + degenerate-retry ·
+tree-sitter-analog structured shell-command scanning + arity table · 9-strategy
+fuzzy edit cascade · LLM-safe JSON-Schema normalizer.
+P1: fast-worktree CoW isolation (capability detection + tiered ladder + teardown +
+crash-recovery, wired into sub-agent isolation) · tool virtualization (search_tool/
+use_tool) · lazy AGENTS.md injection · streaming frozen-tail markdown render (wired,
+byte-identical) · two-log session persistence · image-budget eviction · skills
+progressive disclosure · PTY emulator (pty_start/send/read/wait/stop) · session
+resume+replay · OSC-8 links.
+P2: <system-reminder> pipeline · doom-loop resample · header-aware retry classifier +
+HTTP/1.1 rebuild · conditional tool-name-injected prompt template · MCP robustness
+(SSE fallback / pagination / onprogress reset / process-group reaping / backoff) ·
+batched startup terminal-probe · auto-permission classifier · composer (width/#/vim) ·
+dream-memory · session titling · config.toml (model/tui/permissions).
+TUI hardening: ghost-agent prune · Shift+Enter (Ghostty) · /reasoning modal fix · 304
+TUI unit tests green.
+
+## ⏸ DEFERRED (heavy infra, low value for OSA's local/trusted/single-operator use)
+- **Session sharing** — needs a hosting server (Cloudflare Worker/Durable Object). Only
+  useful for publishing a run to the web. Not core.
+- **Network-proxy egress sandbox** — TLS-MITM + credential broker for UNTRUSTED/sandboxed
+  runs. OSA runs as the trusted operator locally; large surface area for little gain.
+- **Provider-plugin registry + models.dev** — in progress (the useful part: auto model
+  metadata catalog).
+
+---
+
 ## P0 — highest value, clear wins
 
 1. **Compaction: tool-pair-safe split + active-agent reminder** (grok `xai-grok-compaction`). When trimming context, never orphan a tool result from its call (orphans → provider 400); and after a full-replace compaction, re-inject running sub-agents / TODOs / background-task IDs so the model doesn't lose in-flight work. Also: degenerate-summary rejection (retry if summary suspiciously short), context-overflow "input ladder" (compaction itself can overflow → rebuild smaller), prior-user-query preservation across re-compactions. → OSA `lib/optimal_system_agent/agent/loop/` compaction path. **M**, and the single biggest long-task correctness upgrade.
