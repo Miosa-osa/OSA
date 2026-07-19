@@ -19,7 +19,7 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.MCP.{Config, ProjectApproval}
+  alias OptimalSystemAgent.MCP.{Config, ProjectApproval, Virtualization}
   alias OptimalSystemAgent.MCP.Client.{ServerSession, ToolBridge}
 
   @supervisor OptimalSystemAgent.MCP.Supervisor
@@ -240,12 +240,20 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   # Each server's configured `tool_filter` allowlist is enforced here, so a
   # server that discovers more tools than it is permitted to expose is trimmed
   # to its allowlist before any tool reaches the agent.
+  #
+  # Tool virtualization (steal-list 11g): after aggregating every server's
+  # tools, `Virtualization.apply_decision/1` stamps a uniform `:should_defer?`
+  # based on the TOTAL count. Above the configured threshold the whole MCP
+  # toolset is deferred (discovered via `tool_search`, invoked via `use_tool`);
+  # at/below it the tools inject directly, keeping small-toolset prompts
+  # unchanged.
   defp republish(state) do
     aggregate =
       Enum.reduce(state.tools_by_server, %{}, fn {name, schemas}, acc ->
         tool_filter = state.servers |> Map.get(name) |> server_tool_filter()
         Map.merge(acc, ToolBridge.build_tools(name, schemas, tool_filter))
       end)
+      |> Virtualization.apply_decision()
 
     :persistent_term.put(@pt_key, aggregate)
     :ok

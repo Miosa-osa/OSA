@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   require Logger
 
   alias OptimalSystemAgent.Agent.Context.Budget
+  alias OptimalSystemAgent.Agent.ProjectInstructions
   alias OptimalSystemAgent.Agent.Scratchpad
   alias OptimalSystemAgent.Agent.Tasks
   alias OptimalSystemAgent.Agent.Memory.Episodic
@@ -205,7 +206,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   # from the full dynamic budget. Everything else (memory, episodic, project
   # context, skills, learned skills, agent roles) is RECALL and competes within
   # a bounded sub-budget capped to a fraction of the REAL window.
-  @essential_labels ~w(bootstrap personality tool_process runtime environment plan_mode task_state workflow scratchpad)
+  @essential_labels ~w(bootstrap personality tool_process runtime environment plan_mode task_state workflow scratchpad project_instructions)
 
   defp assemble_dynamic_context(state, budget, effective_window) do
     blocks = gather_dynamic_blocks(state)
@@ -271,6 +272,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       {environment_block(state), 1, "environment"},
       {commands_block(state), 2, "commands"},
       {project_context_block(state), 1, "project_context"},
+      {project_instructions_block(state), 1, "project_instructions"},
       {plan_mode_block(state), 1, "plan_mode"},
       {memory_block_relevant(state), 1, "memory"},
       {episodic_block(state), 1, "episodic"},
@@ -328,6 +330,117 @@ defmodule OptimalSystemAgent.Agent.Context do
     catch
       :exit, _ -> nil
     end
+  end
+
+  # Directory-scoped LAZY instruction injection (opencode `instruction.ts`).
+  #
+  # `project_context_block/1` above front-loads the TOP-LEVEL AGENTS.md/CLAUDE.md
+  # once. THIS block adds the nested twist: when the agent has read/edited files
+  # in subdirectories, inject the nearest ancestor instruction file for each of
+  # those subtrees — deduped so the same guidance never lands twice. Claims are
+  # tracked per session in ETS, so a nested AGENTS.md injected on turn 3 is not
+  # re-injected on turns 4+ (token savings). The top-level file is excluded via
+  # ProjectInstructions' system_paths so we never double-inject what
+  # project_context already carries.
+  @claims_table :osa_project_instructions_claims
+
+  defp project_instructions_block(state) do
+    read_paths = extract_read_paths(Map.get(state, :messages))
+
+    if read_paths == [] do
+      nil
+    else
+      working_dir = Map.get(state, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
+      session_id = Map.get(state, :session_id, "default")
+      claimed = get_claims(session_id)
+
+      {results, new_claimed} =
+        ProjectInstructions.resolve(read_paths, working_dir: working_dir, claimed: claimed)
+
+      put_claims(session_id, new_claimed)
+      ProjectInstructions.render(results)
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Pull every file path the agent has read/edited from assistant tool calls.
+  # Covers file_read/file_edit/file_write/notebook_edit — all keyed by "path".
+  # Arguments may be a decoded map or a raw JSON string, with string or atom keys.
+  @file_touching_tools ~w(file_read file_edit file_write notebook_edit)
+
+  defp extract_read_paths(nil), do: []
+  defp extract_read_paths([]), do: []
+
+  defp extract_read_paths(messages) when is_list(messages) do
+    messages
+    |> Enum.flat_map(fn msg ->
+      case Map.get(msg, :tool_calls) do
+        calls when is_list(calls) -> calls
+        _ -> []
+      end
+    end)
+    |> Enum.flat_map(&tool_call_path/1)
+    |> Enum.uniq()
+  end
+
+  defp extract_read_paths(_), do: []
+
+  defp tool_call_path(tc) when is_map(tc) do
+    name = safe_to_string(Map.get(tc, :name) || Map.get(tc, "name"))
+
+    if name in @file_touching_tools do
+      case path_from_args(Map.get(tc, :arguments) || Map.get(tc, "arguments")) do
+        p when is_binary(p) and p != "" -> [p]
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp tool_call_path(_), do: []
+
+  defp path_from_args(args) when is_map(args), do: Map.get(args, "path") || Map.get(args, :path)
+
+  defp path_from_args(args) when is_binary(args) do
+    case Jason.decode(args) do
+      {:ok, map} when is_map(map) -> Map.get(map, "path")
+      _ -> nil
+    end
+  end
+
+  defp path_from_args(_), do: nil
+
+  # Per-session claims: which nested instruction files have already been injected.
+  defp get_claims(session_id) do
+    ensure_claims_table()
+
+    case :ets.lookup(@claims_table, session_id) do
+      [{^session_id, set}] -> set
+      _ -> MapSet.new()
+    end
+  rescue
+    _ -> MapSet.new()
+  end
+
+  defp put_claims(session_id, set) do
+    ensure_claims_table()
+    :ets.insert(@claims_table, {session_id, set})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp ensure_claims_table do
+    case :ets.whereis(@claims_table) do
+      :undefined -> :ets.new(@claims_table, [:named_table, :public, :set])
+      _ -> @claims_table
+    end
+  rescue
+    ArgumentError -> @claims_table
   end
 
   # Inject available agent roles for delegation — only for :full tier (parent agents).

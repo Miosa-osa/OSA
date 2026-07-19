@@ -163,7 +163,13 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
 
   @invisible_chars ~r/[\x{200B}\x{200C}\x{200D}\x{200E}\x{200F}\x{FEFF}\x{00AD}\x{2060}\x{2061}\x{2062}\x{2063}\x{2064}]/u
 
-  defp scan_for_injection(content) do
+  @doc """
+  Scan instruction-file content for prompt-injection before loading it into the
+  system prompt. Returns `:clean` or `{:blocked, reason}`. Public so the
+  directory-scoped lazy injector (`ProjectInstructions`) reuses the same gate.
+  """
+  @spec scan_for_injection(String.t()) :: :clean | {:blocked, String.t()}
+  def scan_for_injection(content) do
     has_invisible = Regex.match?(@invisible_chars, content)
 
     if has_invisible do

@@ -1,4 +1,5 @@
 pub mod markdown;
+pub mod markdown_stream;
 pub mod syntax;
 pub mod diff;
 // Phase 6:

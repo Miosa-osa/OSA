@@ -33,7 +33,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool do
   def name, do: Constants.tool_name()
 
   @impl true
-  def aliases, do: ["search_tools", "find_tool"]
+  def aliases, do: ["search_tool", "search_tools", "find_tool"]
 
   @impl true
   def search_hint, do: "discover and load deferred tools by keyword or exact name"

@@ -701,6 +701,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "web_fetch" => OptimalSystemAgent.Tools.Builtins.WebFetch.Tool,
       "web_search" => OptimalSystemAgent.Tools.Builtins.WebSearch.Tool,
       "tool_search" => OptimalSystemAgent.Tools.Builtins.ToolSearch.Tool,
+      "use_tool" => OptimalSystemAgent.Tools.Builtins.UseTool.Tool,
       "cron" => OptimalSystemAgent.Tools.Builtins.Cron.Tool,
       "enter_plan_mode" => OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Tool,
       "exit_plan_mode" => OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Tool,
