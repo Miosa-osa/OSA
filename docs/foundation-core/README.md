@@ -1,6 +1,6 @@
 # Foundation Core — OSA Documentation
 
-> **OSA v1.0.002** — Optimal System Agent
+> **OSA v1.0.010** — Optimal System Agent
 > Elixir/OTP + Rust TUI + Tauri/SvelteKit. Signal Theory-based AI agent orchestration.
 > 154,000 lines. 18 LLM providers. 12 chat channels. Runs locally. Apache 2.0.
 

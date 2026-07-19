@@ -204,6 +204,33 @@ Each loop has a `permission_tier` that controls which tools are executable:
 
 ---
 
+## Output-Shorten-to-File (Tool Result Persistence)
+
+**Module:** `OptimalSystemAgent.Agent.Loop.ToolResultStorage`
+
+Applied at the tool boundary before a result is appended to the message
+history. A result is offloaded to disk when it exceeds EITHER limit:
+
+| Config Key | Default | Trigger |
+|---|---|---|
+| `max_tool_output_bytes` | `51_200` (50KB) | Byte-size cap |
+| `max_tool_output_lines` | `2_000` | Line-count cap — catches a huge number of short lines (e.g. `grep -r` across a big tree) even under the byte cap |
+
+An offloaded result is persisted to `~/.osa/tool-results/<id>.txt` and the
+inline content is replaced with a head+tail preview
+(`tool_output_preview_head_lines`, default `40`; `tool_output_preview_tail_lines`,
+default `20`) plus a reference to the full file — so the model sees both
+"what this command started doing" and "how it ended" without paying context
+budget for the middle. Result files older than 7 days are swept as orphans.
+The verbose setting (`Settings.get("verbose", false)`) bypasses the budget
+entirely and returns the full result unshortened.
+
+See [Configuration → Agent Behavior → Tool output](../../getting-started/configuration.md#agent-behavior-wave-2b2c)
+for the full key list, and [goal-orchestration.md](goal-orchestration.md) for
+the other Wave 2b/2c loop-discipline additions this cycle.
+
+---
+
 ## Public API
 
 ```elixir

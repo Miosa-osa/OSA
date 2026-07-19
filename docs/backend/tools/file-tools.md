@@ -126,6 +126,43 @@ Make a surgical string replacement in a file.
 | `old_string and new_string are identical` | No-op detected |
 | `old_string cannot be empty` | Empty pattern rejected |
 
+### Hashline Drift-Guard (Content-Hash Edit Verification)
+
+**Module:** `OptimalSystemAgent.Tools.Builtins.FileEdit.DriftGuard`
+
+`Tools.FileState` already rejects an edit when the target file's on-disk
+`{mtime, size}` differs from what was recorded at the model's last
+`file_read` — the primary read-before-edit / stale-write guard. `DriftGuard`
+adds a second, independent **content-hash** guard on top of it, scoped to
+`file_edit`, closing the one blind spot an `{mtime, size}` identity check
+can't see: two different files (or two different revisions of the same file)
+that land on the exact same size in the exact same wall-clock second — mtime
+is second-resolution, so a hook, a linter-on-save, or a concurrent sub-agent
+rewrite that reproduces both by coincidence sails straight through the
+mtime/size check.
+
+After every successful `file_edit` write, `record/5` stores the resulting
+file's `{mtime, size}` together with a normalized content fingerprint, keyed
+by `{session, canonical_path}`. Before the *next* edit to that path in the
+same session, `verify/5`:
+
+- finds no baseline → **defer** (bootstrap, nothing to compare)
+- finds a baseline whose `{mtime, size}` differs from current → **defer**
+  (the file's identity has genuinely moved on — a fresh `file_read` + retry,
+  or `FileState` already gated the transition)
+- finds a baseline whose `{mtime, size}` matches current → cross-check the
+  content fingerprint; if it matches too, allow; if it doesn't, **reject**
+  with a re-read-and-retry instruction — the exact aliasing collision
+  `FileState`'s coarser check can't see
+
+The fingerprint normalizes CRLF/CR to LF and strips trailing whitespace per
+line, so a pure formatting pass never spuriously trips the guard. DriftGuard
+can only ever be *stricter* than `FileState` within that narrow collision
+window — it never blocks an edit that `FileState` alone would allow through a
+real, distinguishable state transition. Storage is a self-owned,
+unsupervised ETS table (`:osa_file_edit_drift_guard`); the `nil`/`"test"`
+sentinel sessions are exempt, matching `FileState`'s own scope.
+
 ---
 
 ## `multi_file_edit`

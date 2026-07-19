@@ -147,4 +147,68 @@ Compactor.stats()
 # Returns compaction metrics map.
 ```
 
-See also: [loop.md](loop.md), [context.md](context.md)
+---
+
+## This-Cycle Additions (Wave 2b/2c)
+
+The pipeline above is the original 3-zone/5-step design. This cycle added a
+grok/opencode-parity layer of quality and continuation improvements on top of
+it — see `docs/BACKLOG.md` for commit references. Config keys below are
+Elixir application env; see
+[Configuration → Agent Behavior](../../getting-started/configuration.md#compaction).
+
+**Verbatim latest-user-query preservation** — the most recent `role: "user"`
+message across the full history is wrapped in `<user_query>...</user_query>`
+tags and prepended to any LLM-generated summary, completely untouched by the
+summarizing model — mirrors grok `summary.rs:143 wrap_user_query`. This
+guarantees the user's actual last ask is never paraphrased away by a
+compaction pass.
+
+**Token-budgeted, turn-aware tail selection** — `preserve_recent_budget/0`
+replaces a fixed message-count tail with a token budget: 25% of the usable
+context window, clamped to `[2_000, 8_000]` tokens by default, or an explicit
+positive-integer override via `compaction_preserve_recent_tokens`. Mirrors
+opencode's `compaction.ts select`/`splitTurn` and grok's `select.rs
+select_tail`.
+
+**Prune tier** (non-LLM, opencode `PRUNE_PROTECT`/`PRUNE_MINIMUM`/
+`PRUNE_PROTECTED_TOOLS` parity) — walks tool-result messages newest-first,
+accumulating a running token estimate of their still-intact output.
+Everything within `compaction_prune_protect_tokens` (default `40_000`) stays
+untouched; once that budget is crossed, every OLDER tool result's output is
+erased outright (replaced with a short "N tokens reclaimed" marker) rather
+than summarized. Protected tool names (`compaction_prune_protected_tools`,
+default `["skill", "use_skill", "find_skill", "save_skill", "create_skill",
+"list_skills", "task_write", "exit_plan_mode", "enter_plan_mode"]`) are never
+counted against the budget and never erased. The tier only mutates anything
+when the reclaimable total exceeds `compaction_prune_minimum_tokens`
+(default `20_000`) — a partial win below that isn't worth a compaction pass.
+
+**Media-strip + overflow replay** — on a context-overflow LLM error, media
+(image) blocks are stripped from messages (`strip_media_from_messages/1`)
+before the request is retried, up to the existing 3-overflow-retry cap. This
+is a cheap, high-signal reclaim step that runs before falling through to
+heavier compaction.
+
+**Divide-and-conquer chunk summarization** — oversized zones are chunked at
+`compaction_chunk_token_limit` (default `3_000` tokens) per chunk for
+summarization, instead of one unbounded LLM call over the whole zone.
+
+---
+
+## Post-Compaction Auto-Continue
+
+**Module:** `OptimalSystemAgent.Agent.Loop.ProactiveCompaction` (gate),
+wired in `react_loop.ex`
+
+When a compaction pass actually changes the message list mid-turn, the loop
+sets `state.just_compacted` (and `state.just_compacted_overflow` when the
+compaction was triggered by a context-overflow error rather than a proactive
+threshold). If `ProactiveCompaction.continuation_enabled?/0` is true, the
+loop auto-continues the turn on the freshly-compacted context instead of
+silently returning a (possibly truncated) response — the model gets to
+finish what it was doing with a smaller but still-coherent context, rather
+than the compaction pass being the last thing that happens in the turn. The
+flags are cleared as soon as the model continues on its own.
+
+See also: [loop.md](loop.md), [context.md](context.md), [goal-orchestration.md](goal-orchestration.md)

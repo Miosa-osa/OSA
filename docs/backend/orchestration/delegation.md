@@ -145,8 +145,85 @@ The Orchestrator's `AgentRunner.spawn_agent/5` spawns sub-agents differently fro
 
 ---
 
+## Transitive Cascading Cancel
+
+`Loop.cancel/1` no longer stops at the session it's called on. It BFS-walks
+the parent/child session tree (`descendant_session_ids/1`, guarded against
+cycles) and propagates the cancel flag to every descendant sub-agent in the
+subtree, then batch-kills their background shell commands in a single pass
+via `Shell.BackgroundManager.cancel_for_sessions/1` (same shape as
+`kill_for_session/1` but across the whole cancelled-session subtree at once).
+Cancelling a top-level orchestrated turn now reliably tears down everything
+it spawned, instead of leaving orphaned sub-agents or background shells
+running.
+
+---
+
+## `task_wait` Join-Barrier Depth Ceiling
+
+**Module:** `OptimalSystemAgent.Tools.Builtins.TaskWait.Depth`
+**Config:** `max_blocking_wait_depth` (default `3`)
+
+A blocking `task_wait` call — an agent waiting on other agents' completion —
+can no longer nest arbitrarily deep. Mirrors grok-build's
+`parent_blocking_wait_depth` Arc ceiling: a chain of mutually-waiting agents
+is capped, making that class of deadlock/starvation structurally impossible.
+
+Every `task_wait` call registers its own agent id as "actively blocked" for
+the duration of the wait (`enter/1` .. `exit_wait/1`) in a self-contained ETS
+registry. `current_depth/1` walks the caller's ancestor chain
+(`RunStore.get(id).parent_session_id`, repeated) and counts how many
+ancestors are ALSO currently registered as blocked. Adding 1 for the call
+about to happen is compared against `max_depth/0` **before** the wait starts
+— a request that would exceed the ceiling is denied outright rather than
+blocking and later failing.
+
+---
+
+## Peer-Resume (Sibling Handoff)
+
+A sub-agent run can be seeded from a sibling/peer's accumulated context
+(`resumed_from`) instead of always starting fresh or forking from the
+parent. `Orchestrator` sets `config[:resumed_from]` when seeding a run this
+way; it's carried through into `RunStore`'s run record and surfaced in the
+structured result (`resumed_from`) so a parent orchestrator's summary/UI can
+show lineage — purely informational, never used to gate behavior.
+
+---
+
+## Worktree Durable Snapshot
+
+**Module:** `OptimalSystemAgent.Workspace.FastWorktree.snapshot_ref/2`
+**Config:** `subagent_worktree_snapshot` (default `false`),
+`subagent_worktree_snapshot_ref_prefix` (default
+`"refs/osa/subagent-snapshots"`)
+
+The middle ground between merging a sub-agent's worktree into the parent
+branch and discarding it entirely: `snapshot_ref/2` captures the worktree's
+CURRENT state into a durable git ref before `teardown/2` runs, so the work
+stays inspectable/resumable (`git show <ref>`, `git worktree add -b tmp
+<ref>`) even after the worktree directory itself is removed.
+
+Any uncommitted changes (tracked + untracked-non-ignored) are committed to
+the worktree's own branch first, so the ref captures the full working-tree
+state — not just the last real commit. That commit is local to the
+worktree's branch; it is never merged/rebased onto the caller's branch. The
+worktree's branch objects live in the shared object database, so the ref
+remains resolvable from the main repo after the worktree and its branch ref
+are removed.
+
+When `subagent_worktree_snapshot` is enabled, the orchestrator calls
+`snapshot_ref/2` before teardown for a completed sub-agent run
+(`orchestrator.ex` `subagent_worktree_snapshot?/0` gate). A snapshot failure
+never fails the teardown itself — `snapshot_ref/2` rescues and returns
+`{:error, reason}`.
+
+---
+
 ## See Also
 
 - [Orchestrator](./orchestrator.md)
 - [Agents and Roster](./agents.md)
 - [Tools Overview](../tools/overview.md)
+- [Goal Orchestration](../agent-loop/goal-orchestration.md)
+- [Configuration → Agent Behavior → Delegation / orchestration](../../getting-started/configuration.md#agent-behavior-wave-2b2c)

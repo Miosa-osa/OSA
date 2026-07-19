@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.003-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.010-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-60-blue.svg)](#built-in-tools)
@@ -48,7 +48,7 @@ setup wizard — pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.002` (`$env:OSA_VERSION = "v1.0.002"` on
+specific release with `OSA_VERSION=v1.0.010` (`$env:OSA_VERSION = "v1.0.010"` on
 Windows).
 
 ```
@@ -181,9 +181,13 @@ down on demand.
 
 `osa update` downloads the latest prebuilt release + TUI, verifies its checksum,
 swaps them in atomically under `~/.osa`, prints the version delta and release
-notes, and relaunches. `osa doctor` runs real health checks — provider
-reachability, port binding, config sanity, workspace layout. `osa help` prints
-the complete command and flag reference.
+notes, and relaunches. The swap is **rollback-safe**: a fresh version is staged
+and built, boot-probed against `/health`, and only then atomically repointed —
+`osa update --staged --rollback` reverts to the previous version if a new one
+misbehaves, and `--dry-run` prints the plan without touching anything.
+`osa doctor` runs real health checks — provider reachability, port binding,
+config sanity, workspace layout. `osa help` prints the complete command and
+flag reference.
 
 ### Slash commands
 
@@ -256,7 +260,22 @@ isolated git worktree — in parallel, each with the right model for its step.
 They share a task list and talk over ETS-backed mailboxes. Watch them live in
 the agent tree, and **steer** a running agent mid-turn: send a new directive
 into an in-flight turn and it adapts without being cancelled and restarted.
-Stop or interrupt any agent from the same view.
+Stop or interrupt any agent from the same view. Cancelling an agent cascades
+transitively to every sub-agent it spawned; a sibling can hand its context to
+another via peer-resume, and worktree work is snapshotted to a durable git ref
+before teardown so it stays inspectable even when discarded.
+
+### Plan mode, goal tracking, and rewind
+
+`/plan` (or **Esc Esc**) puts OSA into investigative plan mode: read-only until
+you approve, with the plan itself written to a durable file so it survives a
+context reset or restart. For long autonomous runs, an independent read-only
+goal verifier periodically checks whether your actual *goal* was met — not
+just whether a file compiled — and a cross-turn goal tracker auto-pauses on a
+stall instead of spinning forever. **Esc Esc** also drives the unified
+`/rewind`: jump back to any previous turn (code + conversation, or either
+alone), see a diff of what's about to change, and undo the rewind itself if
+you change your mind.
 
 ---
 
@@ -538,7 +557,9 @@ until needed, discoverable via `tool_search`):
 | **Config / meta** | `config`, `cron`, `tool_search`, `budget_status`, `wallet_ops`, `ask_user` |
 
 Large tool results are auto-persisted to disk and referenced by handle, so a
-big grep never blows the context window.
+big grep never blows the context window. `file_edit` carries a second,
+content-hash drift guard on top of the mtime/size check, so a same-second
+collision between two edits can never silently corrupt a file.
 
 ### Identity and Memory
 
@@ -565,7 +586,7 @@ automatically.
 ```
 CRITICAL  (unlimited)  — System identity, active tool schemas
 HIGH      (40%)        — Recent conversation turns, current task state
-MEDIUM    (30%)        — Relevant memories (keyword-searched from SQLite/ETS)
+MEDIUM    (30%)        — Relevant memories (hybrid RAG recall — see below)
 LOW       (remaining)  — Workflow context, environmental metadata
 ```
 
@@ -573,6 +594,15 @@ LOW       (remaining)  — Workflow context, environmental metadata
 - **HOT** — last 10 messages, full fidelity
 - **WARM** — older turns, progressively summarized
 - **COLD** — oldest content reduced to key facts only
+
+Compaction preserves the most recent user message verbatim (never summarized),
+sizes the preserved tail to a token budget instead of a fixed message count,
+and prunes stale tool-result output outright once it ages out of that budget.
+On context overflow, media blocks are stripped and the request replayed before
+falling back further. Recall itself is **hybrid**: vector KNN over a persisted
+embedding store, fused with MMR re-ranking (so results aren't three near-dupes
+of the same fact) and lightweight query expansion — degrading gracefully to
+keyword-only search when no embedding provider is configured.
 
 ### Computer Use
 
@@ -592,7 +622,7 @@ interact with any GUI application.
 
 | Channel | Notes |
 |---|---|
-| **Rust TUI** | Primary terminal UI — onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions |
+| **Rust TUI** | Primary terminal UI — onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions with frecency ranking + ghost-text, LaTeX/table rendering, desktop notifications, and a fixed-height streaming viewport |
 | **Elixir CLI** | REPL — streaming, task display, diff view, Ctrl+R search, multi-line input |
 | **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
 | **Telegram** | Long-polling, typing indicators, markdown conversion |

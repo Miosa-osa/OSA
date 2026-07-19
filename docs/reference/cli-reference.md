@@ -45,6 +45,7 @@ osagent version      # Print version
 | `/history` | View current session history |
 | `/history search <query>` | Search across session history |
 | `/clear` | Clear current display |
+| `/rewind` | Jump back to a previous turn (code, conversation, or both) with a diff of what's about to change; **Esc Esc** in the TUI triggers the same flow. Unrevert (undo the rewind) is available immediately after. |
 | `/exit` or `/quit` | Exit OSA |
 
 ## Memory

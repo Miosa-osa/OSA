@@ -134,6 +134,89 @@ Default models:
 
 ---
 
+## Agent Behavior (Wave 2b/2c)
+
+These knobs are Elixir application env — set them in `config/config.exs` /
+`config/runtime.exs` as `config :optimal_system_agent, key: value` (not
+`~/.osa/config.toml`; see [Configuration](../configuration.md) for the
+user-facing TOML file). Every one of these defaults to the value shown below
+when unset — verified against source, not guessed.
+
+### Goal verification and tracking
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `goal_verifier_enabled` | `false` | Enables the goal-level verifier — an independent read-only skeptic panel that judges whether the user's *goal* (not just "did it compile") was met at turn end. |
+| `goal_verifier_skeptic_count` | `3` (clamped to `1..5`) | Number of read-only skeptic subagents spawned per verification round. |
+| `goal_verifier_max_runs` | `3` | Per-turn cap on verification rounds before the gate steps aside and lets the agent finish. |
+| `goal_verifier_stall_threshold` | `2` | Consecutive rounds citing the identical gap fingerprint before the gate stops re-prompting. |
+| `goal_tracker_enabled` | `false` | Enables the cross-turn goal tracker — a persistent `:active/:paused/:completed/:off_track` status machine keyed by session id, for long autonomous runs. |
+| `goal_tracker_max_runs` | `12` | Lifetime verification-round cap across the WHOLE goal (not just one turn) before auto-pausing (`:paused`, reason `:run_cap`). |
+| `goal_tracker_reverify_after` | `8` | Turn cadence — the (expensive) skeptic panel is only spawned once every N turns, not every turn. |
+| `goal_tracker_stall_threshold` | `2` | Consecutive cross-turn verification rounds with the same gap fingerprint before auto-pausing (`:paused`, reason `:no_progress`). |
+
+### Token-budget and doomloop
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `target_output_tokens` | `nil` (off) | Per-session or app-wide output-token target. When set (and > 0), the loop auto-continues instead of stopping until the target is met, capped at a small number of continues. Also settable per-session via `state.target_output_tokens`. |
+| `doom_loop_resample: [reasoning_only_threshold: N]` | `3` | Consecutive reasoning-only (zero tool calls) or turn-errored generations before the reasoning-only doomloop detector halts the turn. Nested under the `:doom_loop_resample` keyword list, shared with the resample remedy's own settings. |
+
+### Compaction
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `compaction_prune_protect_tokens` | `40_000` | Newest-first token budget of tool-result output that stays completely untouched by the prune tier (opencode's `PRUNE_PROTECT`). |
+| `compaction_prune_minimum_tokens` | `20_000` | Minimum tokens reclaimable by erasure before the prune tier bothers mutating anything (opencode's `PRUNE_MINIMUM`). |
+| `compaction_prune_protected_tools` | `["skill", "use_skill", "find_skill", "save_skill", "create_skill", "list_skills", "task_write", "exit_plan_mode", "enter_plan_mode"]` | Tool names whose output is never counted against the prune budget and never erased. |
+| `compaction_preserve_recent_tokens` | unset — falls back to 25% of `max_tokens()`, clamped to `[2_000, 8_000]` | Token-budgeted tail size for the turn-aware "preserve recent" selection. Set an explicit positive integer to override the 25%-of-context default. |
+| `compaction_chunk_token_limit` | `3_000` | Per-chunk token limit for divide-and-conquer summarization of oversized zones. |
+
+### Tool output
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `max_tool_output_bytes` | `51_200` (50KB) | Byte-size cap; a tool result over this is offloaded to `~/.osa/tool-results/<id>.txt` and replaced inline with a preview + reference. |
+| `max_tool_output_lines` | `2_000` | Line-count cap — triggers offload even under the byte cap (e.g. a `grep -r` with many short lines). |
+| `tool_output_preview_head_lines` | `40` | Lines shown from the start of an offloaded result's inline preview. |
+| `tool_output_preview_tail_lines` | `20` | Lines shown from the end of an offloaded result's inline preview. |
+
+Note: `OptimalSystemAgent.Agent.Loop.ToolExecutor` separately reads
+`max_tool_output_bytes` with its own local fallback default of `10_240` for a
+narrower truncation path — the `ToolResultStorage` offload-to-disk path
+(the one described above) is what actually governs the 50KB/2,000-line
+persist-and-reference behavior.
+
+### Memory / embeddings
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `embedding_provider` | `:ollama` | Embedding backend for hybrid RAG recall's vector-KNN half. Set to `:none` (or `false`/`nil`) to disable embeddings entirely and fall back to keyword-only recall. |
+| `embedding_model` | `"nomic-embed-text"` | Model name passed to the embedding provider's `/api/embeddings` call. Must be pulled locally in Ollama. |
+
+### Delegation / orchestration
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `subagent_worktree_snapshot` | `false` | When `true`, a sub-agent's isolated git worktree is snapshotted to a durable git ref before teardown (merge or discard), instead of only merging or discarding. |
+| `subagent_worktree_snapshot_ref_prefix` | `"refs/osa/subagent-snapshots"` | Git ref namespace the snapshot is written under. |
+| `max_blocking_wait_depth` | `3` | Maximum nesting depth for `task_wait` join-barrier calls — an agent blocking on other agents that are themselves blocking cannot nest deeper than this before the wait is denied outright. |
+
+---
+
+## TUI Environment Variables
+
+These are read directly by the Rust TUI process (`priv/rust/tui`), not the
+Elixir engine — set them in your shell or `~/.osa/.env`.
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `OSA_NOTIFY_CHANNEL` | terminal-detected | Selects the desktop-notification channel (e.g. terminal escape sequence vs OS notifier). Unknown/unset values fall back to auto-detection. |
+| `OSA_NO_NOTIFY` | unset (notifications on) | Set to any value to disable completion notifications entirely — checked via `var_os`, so an empty value still disables. |
+| `OSA_COLOR_LEVEL` | auto-detected | Overrides terminal color-capability detection. Takes precedence over `NO_COLOR` and a `TERM=dumb` check. |
+
+---
+
 ## Channel Credentials
 
 ### Telegram

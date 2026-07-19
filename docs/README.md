@@ -1,6 +1,6 @@
 # OSA Documentation
 
-> **OSA v1.0.002** — Optimal System Agent
+> **OSA v1.0.010** — Optimal System Agent
 > Elixir/OTP + Rust TUI + Tauri/SvelteKit. Signal Theory-based AI agent orchestration.
 > 154,000 lines · 287 modules · 18 LLM providers · 12 chat channels · Apache 2.0
 
@@ -113,6 +113,7 @@ The Tauri 2 + SvelteKit 5 desktop application.
 | [Tasks](features/tasks.md) | Task tracking, queue management |
 | [Computer Use](features/computer-use.md) | Screen interaction capabilities |
 | [Orchestration](features/orchestration.md) | Multi-agent feature overview |
+| [TUI](features/tui.md) | Composer (@-mentions, ghost-text, bash-mode), rendering (LaTeX, tables), notifications, status cues, streaming viewport |
 
 ---
 
@@ -142,8 +143,11 @@ The Tauri 2 + SvelteKit 5 desktop application.
 | Doc | What It Covers |
 |---|---|
 | [Deployment](operations/deployment.md) | Docker, systemd, Nginx, production checklist |
+| [Self-Update](operations/self-update.md) | Rollback-safe `osa update` — stage/build/boot-probe/atomic-swap, rollback, dry-run |
 | [Debugging](operations/debugging.md) | Log queries, ETS inspection, failure patterns |
 | [Changelog](operations/changelog.md) | Release history |
+
+See also the repo-root [CHANGELOG.md](../CHANGELOG.md) for this cycle's changes.
 
 ---
 
@@ -216,11 +220,11 @@ docs/
 │   └── diagrams/              Visual architecture diagrams (5 docs)
 │
 ├── backend/                   Deep subsystem docs
-│   ├── agent-loop/            Core reasoning engine (6 docs)
+│   ├── agent-loop/            Core reasoning engine (7 docs)
 │   ├── providers/             18 LLM providers (16 docs)
 │   ├── tools/                 32 built-in tools (6 docs)
 │   ├── channels/              12 chat channels (12 docs)
-│   ├── memory/                5-layer memory system (7 docs)
+│   ├── memory/                5-layer memory system (8 docs)
 │   ├── orchestration/         Multi-agent coordination (5 docs)
 │   ├── events/                Event bus, protocol, telemetry (3 docs)
 │   ├── infrastructure/        Sandbox, MCP, scheduler (6 docs)
@@ -228,9 +232,9 @@ docs/
 │   └── signal-theory.md       5-tuple classification
 │
 ├── desktop/                   Tauri Command Center (6 docs)
-├── features/                  Hooks, recipes, skills, voice (8 docs)
+├── features/                  Hooks, recipes, skills, voice, TUI (9 docs)
 ├── reference/                 HTTP API, CLI, SDK (4 docs)
-├── operations/                Deployment, debugging, changelog (3 docs)
+├── operations/                Deployment, self-update, debugging, changelog (4 docs)
 │
 └── archive/                   Historical docs (preserved)
 ```

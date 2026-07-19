@@ -1,6 +1,6 @@
 # Known Issues
 
-> **OSA v1.0.002** · Last updated: 2026-03-14
+> **OSA v1.0.010** · Last updated: 2026-03-14
 > 18 open issues · 4 fixed · 3 critical · 4 high · 6 medium · 5 UX
 
 ---

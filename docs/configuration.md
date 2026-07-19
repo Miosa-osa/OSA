@@ -154,6 +154,19 @@ built-in baseline unchanged.
 
 ---
 
+## Agent Behavior Tuning (App Env, Not config.toml)
+
+The knobs above cover `~/.osa/config.toml` — the user-editable runtime file.
+A separate set of agent-behavior knobs added this cycle (goal verification,
+goal tracking, compaction pruning, tool-output budgets, embeddings, worktree
+snapshots, blocking-wait depth) are Elixir **application env** — set via
+`config :optimal_system_agent, key: value` in `config/config.exs` /
+`config/runtime.exs`, not this file. See
+[Getting Started → Configuration → Agent Behavior](getting-started/configuration.md#agent-behavior-wave-2b2c)
+for the full list of keys, defaults, and effects.
+
+---
+
 ## Robustness
 
 - A malformed `config.toml` logs a warning and falls back to defaults; it never

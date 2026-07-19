@@ -1,6 +1,6 @@
 # Supervision Tree
 
-Full OTP supervision tree for OSA v1.0.002. Every named supervisor, every child,
+Full OTP supervision tree for OSA v1.0.010. Every named supervisor, every child,
 and the restart strategy at each level.
 
 Source of truth: `lib/optimal_system_agent/application.ex` and
