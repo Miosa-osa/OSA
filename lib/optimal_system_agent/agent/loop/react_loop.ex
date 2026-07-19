@@ -44,6 +44,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   @cancel_table :osa_cancel_flags
 
+  # Max auto-continues when a token-budget output target is set (token_target_unmet?/1).
+  @max_target_continues 5
+
   defp max_iterations do
     # Explicit config wins; otherwise fall back to the effort ceiling. Effort
     # should RAISE the ceiling for effort-driven callers, never clamp an
@@ -689,7 +692,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # `needs_verification?/1` self-gates on accumulated work + a run cap + a
       # stall early-exit, so it never fires on read-only turns. :gate injects the
       # panel's directive and loops; :pass falls through to the terminal finish.
-      goal_verifier_enabled?() and GoalVerifier.needs_verification?(state) ->
+      goal_verifier_enabled?(state) and GoalVerifier.needs_verification?(state) ->
         case GoalVerifier.check(state) do
           {:gate, directive, state} ->
             state = %{
@@ -703,6 +706,36 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           {:pass, state} ->
             finish_turn(content, state)
         end
+
+      # CC token-budget "work to target": when an explicit output-token target is
+      # set and the accumulated output is under it, auto-continue instead of
+      # stopping early. Default OFF (no target → never fires). Bounded by
+      # @max_target_continues and the iteration cap.
+      token_target_unmet?(state) ->
+        target = target_output_tokens(state)
+
+        Logger.info(
+          "[loop] Token-budget continue: output " <>
+            "#{Map.get(state, :session_output_tokens, 0)}/#{target} " <>
+            "(nudge #{Map.get(state, :target_continues, 0) + 1}/#{@max_target_continues})"
+        )
+
+        nudge = %{
+          role: "system",
+          content:
+            "[System: You have an output-token target of #{target} tokens for this task and are " <>
+              "under it. Keep working toward it — continue with the next concrete step or add depth/" <>
+              "verification; do not stop early. If the task is genuinely complete, say so explicitly.]"
+        }
+
+        state = %{
+          state
+          | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+            iteration: state.iteration + 1,
+            target_continues: Map.get(state, :target_continues, 0) + 1
+        }
+
+        run(state)
 
       true ->
         finish_turn(content, state)
@@ -732,9 +765,71 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-  # Goal-level verifier feature flag (default off — see the clause above).
-  defp goal_verifier_enabled? do
-    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false)
+  # Goal-level verifier gate: the explicit config flag, OR the session is in an
+  # autonomous posture (overdrive/bypass) where the extra grounding is worth the
+  # per-turn cost. Interactive modes (ask/accept_edits/plan) stay off so quick
+  # edits aren't slowed by a skeptic panel.
+  defp goal_verifier_enabled?(state) do
+    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false) or
+      autonomous_mode?(state)
+  end
+
+  defp autonomous_mode?(state) do
+    case Map.get(state, :session_id) do
+      nil -> false
+      sid -> OptimalSystemAgent.Agent.PermissionMode.get(sid) in [:overdrive, :bypass]
+    end
+  rescue
+    _ -> false
+  end
+
+  # Rewrite image/video/audio/file content blocks to "[Attached <type>]" text
+  # placeholders so a media-heavy history can be retried after a media-driven
+  # overflow instead of dead-ending. Matches the compactor's summary-call strip
+  # shape so the model sees an identical marker from either path. No-op for
+  # plain-string content or non-media blocks.
+  @media_block_types ~w(image video audio file)
+
+  defp strip_media_from_messages(messages) when is_list(messages) do
+    Enum.map(messages, fn msg ->
+      case Map.get(msg, :content) do
+        blocks when is_list(blocks) ->
+          Map.put(msg, :content, Enum.map(blocks, &strip_media_block/1))
+
+        _ ->
+          msg
+      end
+    end)
+  end
+
+  defp strip_media_from_messages(messages), do: messages
+
+  defp strip_media_block(%{"type" => t}) when t in @media_block_types do
+    %{"type" => "text", "text" => "[Attached #{t}]"}
+  end
+
+  defp strip_media_block(%{type: t}) when t in @media_block_types do
+    %{"type" => "text", "text" => "[Attached #{t}]"}
+  end
+
+  defp strip_media_block(block), do: block
+
+  # CC token-budget "work to target". `target_output_tokens` comes from the state
+  # (a caller can set it per-session) or the app env; nil/0 = off (never fires).
+  defp token_target_unmet?(state) do
+    case target_output_tokens(state) do
+      target when is_integer(target) and target > 0 ->
+        Map.get(state, :target_continues, 0) < @max_target_continues and
+          Map.get(state, :session_output_tokens, 0) < target
+
+      _ ->
+        false
+    end
+  end
+
+  defp target_output_tokens(state) do
+    Map.get(state, :target_output_tokens) ||
+      Application.get_env(:optimal_system_agent, :target_output_tokens)
   end
 
   # Forced model-authored wrap-up at the iteration cap. One tools-disabled model
@@ -1032,7 +1127,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             )
         end
 
-      state = %{state | messages: collapsed_messages, overflow_retries: retry_num}
+      # Media-strip replay (opencode compaction.ts replay parity): a media-driven
+      # overflow won't shrink from tool-result collapse alone, so rewrite any
+      # image/video/audio/file blocks in the history to "[Attached <type>]" text
+      # placeholders before retrying. Idempotent (placeholders are plain text) and
+      # a no-op when there is no media.
+      state = %{
+        state
+        | messages: strip_media_from_messages(collapsed_messages),
+          overflow_retries: retry_num
+      }
+
       run(state)
     else
       if context_overflow?(reason_str) do
