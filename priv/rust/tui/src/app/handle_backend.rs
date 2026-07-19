@@ -168,10 +168,18 @@ impl App {
                 }
             }
             BackendEvent::ThinkingDelta { text } => {
-                self.thinking_buf.push_str(&text);
-                self.thinking_box.update(&text);
-                self.activity.add_thinking_chars(text.chars().count());
-                self.activity.set_phase(ProcessingPhase::Thinking);
+                // U-B4 — gate on the active turn, mirroring `StreamingToken`.
+                // A stray reasoning frame arriving while Idle (e.g. a late
+                // event after the turn ended, or replayed post-disconnect)
+                // used to pop a ghost "Thinking…" box and re-activate the
+                // spinner with no turn behind it. Dropping it when no turn is
+                // live keeps the reasoning box tied to a real turn.
+                if self.turn_is_active() {
+                    self.thinking_buf.push_str(&text);
+                    self.thinking_box.update(&text);
+                    self.activity.add_thinking_chars(text.chars().count());
+                    self.activity.set_phase(ProcessingPhase::Thinking);
+                }
             }
             BackendEvent::AgentResponse {
                 response,
@@ -250,8 +258,14 @@ impl App {
                 // detach to the background mid-run.
                 if is_shell_tool(&name) {
                     if is_run_in_background(&args) {
-                        self.bg_shell_count += 1;
-                        self.refresh_bg_indicators();
+                        // U-B6 — count a live background job at most once. On an
+                        // SSE reconnect/replay the same ToolCallStart can arrive
+                        // twice; without this guard `bg_shell_count` drifted up
+                        // (one completion event can only decrement it once).
+                        if self.counted_bg_shells.insert(bg_shell_signature(&name, &args)) {
+                            self.bg_shell_count += 1;
+                            self.refresh_bg_indicators();
+                        }
                     } else {
                         self.active_fg_shell_count += 1;
                     }
@@ -294,6 +308,11 @@ impl App {
                 // line ("Read N files", "Ran N shell commands", …). Only
                 // NonCollapsible tools (edit/write/web/…) keep full rendering.
                 let kind = crate::tools::collapse::classify(&name, &args);
+                // U-B6 — did this ToolCallEnd build a rich scrollback message a
+                // stashed (early) ToolResult can attach to? Only the
+                // non-collapsible path does; collapsible runs fold into a summary
+                // with no per-call result slot.
+                let mut built_tool_message = false;
                 if kind.is_collapsible() {
                     // A different collapsible kind breaks the run.
                     if !self.collapse.is_empty() && !self.collapse.family_matches(&kind) {
@@ -334,23 +353,61 @@ impl App {
                             expanded: false,
                             lines,
                         });
+                        built_tool_message = true;
                     }
                     debug!(
                         "Tool call end: {} ({}ms, success={})",
                         name, duration_ms, success
                     );
                 }
+                // U-B6 — a ToolResult that arrived BEFORE this ToolCallEnd was
+                // stashed (there was no message to attach it to yet). Now that the
+                // message exists, drain the stash: attach the result to the fresh
+                // message and finalize it into scrollback. For a collapsible run
+                // (no per-call message) the stashed result is simply discarded so
+                // the map never leaks.
+                if let Some(mut results) = self.pending_tool_results.remove(&name) {
+                    if !results.is_empty() {
+                        let (res, _succ) = results.remove(0);
+                        if built_tool_message && !res.is_empty() {
+                            self.chat.update_last_tool_result(&name, &res);
+                        }
+                        self.chat.finalize_tool(&name);
+                    }
+                    // Requeue any further out-of-order results for later calls.
+                    if !results.is_empty() {
+                        self.pending_tool_results.insert(name.clone(), results);
+                    }
+                }
             }
             BackendEvent::ToolResult {
                 name, result, success,
             } => {
-                // Attach result to last matching tool message for expand support,
-                // then finalize the tool into native scrollback. Scrolled-back
-                // tool calls become static (lose Ctrl+O), matching Claude Code.
-                if !result.is_empty() {
-                    self.chat.update_last_tool_result(&name, &result);
+                // U-B6 — ToolResult can arrive BEFORE its ToolCallEnd on an
+                // out-of-order stream. ToolCallEnd is what builds the scrollback
+                // message, so attaching now would find nothing and DROP the
+                // output. The call is "still pending" while its args remain queued
+                // in `pending_tool_args` (pushed on start, popped on end); in that
+                // window stash the result for ToolCallEnd to attach. Otherwise the
+                // message already exists → attach + finalize now (unchanged path).
+                let call_args_still_queued = self
+                    .pending_tool_args
+                    .get(&name)
+                    .map_or(false, |q| !q.is_empty());
+                if tool_result_should_stash(call_args_still_queued) {
+                    self.pending_tool_results
+                        .entry(name.clone())
+                        .or_default()
+                        .push((result, success));
+                } else {
+                    // Attach result to last matching tool message for expand
+                    // support, then finalize into native scrollback. Scrolled-back
+                    // tool calls become static (lose Ctrl+O), matching Claude Code.
+                    if !result.is_empty() {
+                        self.chat.update_last_tool_result(&name, &result);
+                    }
+                    self.chat.finalize_tool(&name);
                 }
-                self.chat.finalize_tool(&name);
                 debug!("Tool result: {} (success={})", name, success);
             }
             BackendEvent::LlmRequest { iteration, max_iterations } => {
@@ -625,6 +682,11 @@ impl App {
             },
             BackendEvent::McpServersLoaded(result) => match result {
                 Ok(resp) => {
+                    // U-T26 — surface a persistent "N MCP" status-bar chip from
+                    // the count of connected (enabled) servers. (OSA has no LSP
+                    // concept, so no "N LSP" half is shown.)
+                    let enabled = resp.servers.iter().filter(|s| s.enabled).count();
+                    self.status.set_mcp(enabled, false);
                     let servers = resp
                         .servers
                         .into_iter()
@@ -1276,6 +1338,12 @@ impl App {
                 if self.bg_shell_count > 0 {
                     self.bg_shell_count -= 1;
                 }
+                // U-B6 — with no live background jobs left, forget the counted
+                // signatures so a later identical command counts fresh (and the
+                // set can't grow without bound).
+                if self.bg_shell_count == 0 {
+                    self.counted_bg_shells.clear();
+                }
                 self.refresh_bg_indicators();
                 // The backend labels the job by id (`background_id`); fall back to
                 // it when the command text is empty so the toast is never a blank
@@ -1571,15 +1639,22 @@ impl App {
             // === Swarm Intelligence events ===
             BackendEvent::SwarmIntelligenceStarted { swarm_id, intelligence_type, .. } => {
                 self.agents.swarm_started(&swarm_id, &intelligence_type, 0);
+                // U-B5 — drive the live status-bar swarm chip.
+                self.status.set_swarm(Some(intelligence_type.clone()));
                 self.toasts.push(
                     format!("SI started: {}", intelligence_type),
                     crate::components::toast::ToastLevel::Info,
                 );
             }
             BackendEvent::SwarmIntelligenceRound { swarm_id, round } => {
+                // U-B5 — previously a dead debug-only handler. Surface each
+                // round on the status-bar swarm chip so the swarm's progress is
+                // actually visible ("✻ swarm · round N").
                 debug!("SI round {}: {}", round, swarm_id);
+                self.status.set_swarm(Some(format!("swarm \u{00b7} round {}", round)));
             }
             BackendEvent::SwarmIntelligenceConverged { round, .. } => {
+                self.status.set_swarm(None);
                 self.toasts.push(
                     format!("SI converged (round {})", round),
                     crate::components::toast::ToastLevel::Success,
@@ -1587,21 +1662,13 @@ impl App {
             }
             BackendEvent::SwarmIntelligenceCompleted { swarm_id, .. } => {
                 self.agents.swarm_completed(&swarm_id);
+                self.status.set_swarm(None);
                 self.recompute_layout();
             }
 
             // === Phase 2+ HTTP Response Results ===
-            BackendEvent::SkillsLoaded(result) => match result {
-                Ok(skills) => {
-                    debug!("Skills loaded: {} skills", skills.len());
-                }
-                Err(e) => {
-                    self.toasts.push(
-                        format!("Failed to load skills: {}", e),
-                        crate::components::toast::ToastLevel::Error,
-                    );
-                }
-            },
+            // (U-B5: the dead `SkillsLoaded` handler was removed — it only
+            // logged. The skills browser is driven by `SkillsBrowserLoaded`.)
             BackendEvent::SkillCreated(result) => match result {
                 Ok(_resp) => {
                     self.toasts.push(
@@ -2013,6 +2080,23 @@ fn is_run_in_background(args: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// U-B6 — de-dup key for a background shell job. The stream carries no per-call
+/// id on `ToolCallStart`, so a replayed start is only recognisable by its
+/// (name, args) pair. Same command text ⇒ same signature ⇒ counted once. Two
+/// genuinely-distinct jobs with identical args collapse to one count (a rare,
+/// bounded under-count) — strictly better than the previous unbounded drift.
+fn bg_shell_signature(name: &str, args: &str) -> String {
+    format!("{name}\u{0000}{args}")
+}
+
+/// U-B6 — decide, at `ToolResult` time, whether the result must be stashed for a
+/// not-yet-built scrollback message. The call's `ToolCallEnd` (which builds the
+/// message) has not run while its args are still queued in `pending_tool_args`;
+/// in that window the result has nothing to attach to and must be held.
+fn tool_result_should_stash(call_args_still_queued: bool) -> bool {
+    call_args_still_queued
+}
+
 /// Write a completion ping to the terminal via the channel-selected notifier
 /// (ghostty OSC 777 / kitty OSC 99 / OSC 9 fallback, tmux-wrapped, plus a BEL
 /// for terminals with no notification support). Control sequences the terminal
@@ -2085,4 +2169,55 @@ pub(crate) fn builtin_command_entries() -> Vec<crate::client::types::CommandEntr
     let mut v = Vec::new();
     merge_tui_native_commands(&mut v);
     v
+}
+
+#[cfg(test)]
+mod handle_backend_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn bg_shell_signature_is_stable_and_dedups_replay() {
+        // U-B6 — replayed identical ToolCallStart must count the job once.
+        let mut counted: HashSet<String> = HashSet::new();
+        let mut count = 0usize;
+        let (n, a) = ("bash", r#"{"command":"sleep 9","run_in_background":true}"#);
+
+        // First start counts.
+        if counted.insert(bg_shell_signature(n, a)) {
+            count += 1;
+        }
+        // Replay of the SAME start does NOT count again.
+        if counted.insert(bg_shell_signature(n, a)) {
+            count += 1;
+        }
+        assert_eq!(count, 1, "replayed background start must not double-count");
+
+        // A different command IS a distinct job.
+        let a2 = r#"{"command":"sleep 5","run_in_background":true}"#;
+        if counted.insert(bg_shell_signature(n, a2)) {
+            count += 1;
+        }
+        assert_eq!(count, 2);
+
+        // On completion → zero, the set clears so an identical command later
+        // counts fresh (mirrors the handler's clear-at-zero).
+        count = 0;
+        counted.clear();
+        assert!(counted.insert(bg_shell_signature(n, a)));
+    }
+
+    #[test]
+    fn tool_result_stashes_only_while_call_pending() {
+        // U-B6 — ordering oracle: stash iff the ToolCallEnd hasn't built the
+        // message yet (its args are still queued).
+        assert!(
+            tool_result_should_stash(true),
+            "result arriving before ToolCallEnd must be stashed"
+        );
+        assert!(
+            !tool_result_should_stash(false),
+            "result arriving after ToolCallEnd attaches directly"
+        );
+    }
 }

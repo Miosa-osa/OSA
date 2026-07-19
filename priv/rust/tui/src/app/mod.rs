@@ -216,6 +216,21 @@ pub struct App {
     /// overwrite each other's args — which showed up as tool lines with no path.
     pub pending_tool_args: HashMap<String, Vec<String>>,
 
+    /// U-B6 — per-tool-name FIFO queue of tool results that arrived BEFORE their
+    /// `ToolCallEnd` (out-of-order stream). `ToolCallEnd` creates the scrollback
+    /// message, so a `ToolResult` seen first has nothing to attach to and the
+    /// output was silently dropped. Stashed here while the call is still pending
+    /// (its args are still in `pending_tool_args`), then drained onto the message
+    /// the instant `ToolCallEnd` builds it.
+    pub pending_tool_results: HashMap<String, Vec<(String, bool)>>,
+
+    /// U-B6 — signatures of background shell calls already counted in
+    /// `bg_shell_count`, so a `ToolCallStart` re-emitted on an SSE reconnect/replay
+    /// does not double-count the same live background job. Cleared whenever
+    /// `bg_shell_count` returns to zero (no live jobs ⇒ safe to forget), which
+    /// also lets a genuinely new identical command count again later.
+    pub counted_bg_shells: std::collections::HashSet<String>,
+
     /// Accumulator for collapsing consecutive same-kind tool calls into one
     /// scrollback summary line ("Read N files", "Ran N shell commands", …).
     pub collapse: crate::tools::collapse::Accumulator,
@@ -496,6 +511,8 @@ impl App {
             sse_reconnecting: false,
 
             pending_tool_args: HashMap::new(),
+            pending_tool_results: HashMap::new(),
+            counted_bg_shells: std::collections::HashSet::new(),
             collapse: crate::tools::collapse::Accumulator::default(),
             agent_header_sent: false,
 
@@ -708,6 +725,19 @@ impl App {
         let busy = self.state == AppState::Processing;
         let title = crate::components::title::compose(busy, &basename);
         self.chrome_title.update(&title);
+
+        // U-T24 — keep the spinner's "N queued" hint in sync with the live WS5
+        // message queue every frame (cheap; the writer only re-renders on change).
+        self.activity.set_queued(self.message_queue.len());
+
+        // U-T28 — feed the compact sub-agent footer cue (count + est. cost) from
+        // the agents panel while sub-agents are active; clear it otherwise.
+        if self.agents.is_active() {
+            self.status
+                .set_subagents(self.agents.entry_count(), self.agents.est_cost_usd());
+        } else {
+            self.status.set_subagents(0, None);
+        }
 
         if self.permissions.is_some() {
             let since = *self.permission_wait_since.get_or_insert_with(Instant::now);

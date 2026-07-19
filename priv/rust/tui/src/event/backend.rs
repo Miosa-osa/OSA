@@ -291,7 +291,9 @@ pub enum BackendEvent {
 
     // === Additional HTTP Response Results (Phase 2+) ===
     SessionMessages(Result<Vec<SessionMessage>, String>),
-    SkillsLoaded(Result<Vec<SkillEntry>, String>),
+    // (removed: dead `SkillsLoaded` event — it had no producer (the skills
+    // browser is fed by `SkillsBrowserLoaded`) and its handler only logged.
+    // U-B5: dead feed pruned rather than wired to a second, redundant UI.)
     SkillCreated(Result<SkillCreateResponse, String>),
     ClassifyResult(Result<ClassifyResponse, String>),
     ComplexTaskResult(Result<ComplexTaskResponse, String>),

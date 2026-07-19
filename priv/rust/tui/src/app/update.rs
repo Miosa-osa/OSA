@@ -935,6 +935,14 @@ impl App {
         // (the input component applies its vim layer internally), so vim editing
         // of a queued message keeps working mid-turn.
 
+        // U-T22 — any non-Esc key breaks a pending interrupt double-press so the
+        // first Esc can't pair with a much-later one, and clears the armed
+        // "esc again to interrupt" affordance (mirrors the Idle esc_tracker reset).
+        if key.code != KeyCode::Esc {
+            self.esc_tracker.reset();
+            self.activity.arm_interrupt(false);
+        }
+
         // Shift+Tab cycles the permission mode even mid-turn, matching Claude Code.
         if crate::app::keys::is_permission_cycle(&key) {
             self.cycle_permission_mode();
@@ -952,8 +960,23 @@ impl App {
         }
 
         match (key.code, key.modifiers) {
+            // U-T22 — double-press Esc to interrupt (distinct from the Idle
+            // msg-nav "esc again to clear/edit" chord). The first Esc arms the
+            // affordance + hints; a second Esc within the 800ms window actually
+            // cancels. A single stray Esc can no longer kill a long turn. Ctrl+C
+            // stays a single-press hard interrupt below.
             (KeyCode::Esc, _) => {
-                self.cancel_processing();
+                let now = std::time::Instant::now();
+                if self.esc_tracker.press(now) {
+                    self.activity.arm_interrupt(false);
+                    self.cancel_processing();
+                } else {
+                    self.activity.arm_interrupt(true);
+                    self.toasts.push(
+                        "Press Esc again to interrupt".into(),
+                        crate::components::toast::ToastLevel::Info,
+                    );
+                }
                 false
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {

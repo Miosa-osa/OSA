@@ -1,8 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
@@ -14,10 +15,12 @@ use tracing::error;
 mod a11y;
 mod app;
 mod client;
+mod clipboard;
 mod components;
 mod config;
 mod event;
 mod logging;
+mod notification;
 mod render;
 mod style;
 mod view;
@@ -94,6 +97,14 @@ fn run(cli: config::cli::Cli) -> Result<()> {
     // Claude Code, we leave the mouse to the terminal so scroll-up/down just
     // scrolls the conversation, nothing changes. Bracketed paste stays on.
     execute!(io::stdout(), EnableBracketedPaste)?;
+
+    // U-T11: enable DECSET 1004 focus reporting so the terminal emits
+    // FocusGained/FocusLost (CSI I / CSI O). The `notification::focus` module
+    // folds those into a process-global `is_focused()` flag, replacing the old
+    // 10s last-keypress idle heuristic for the turn-complete notifier. A no-op
+    // on terminals that don't implement 1004 (they just never send the events,
+    // and focus stays reported as `true` — we degrade to always-notify).
+    let _ = execute!(io::stdout(), EnableFocusChange);
 
     // Enable the kitty keyboard protocol's disambiguation so distinct keys like
     // Shift+Enter (insert newline) are reported as Enter+SHIFT instead of collapsing
@@ -235,6 +246,9 @@ fn restore_terminal() -> Result<()> {
     let _ = execute!(stdout, LeaveAlternateScreen);
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     let _ = execute!(stdout, DisableMouseCapture);
+    // U-T11: stop focus reporting (paired with EnableFocusChange in setup) so the
+    // shell never inherits a terminal that keeps emitting CSI I / CSI O.
+    let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(stdout, DisableBracketedPaste);
     disable_raw_mode()?;
     // Land the shell prompt below the inline viewport instead of over it.

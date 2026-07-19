@@ -130,6 +130,52 @@ fn braille_bar(ratio: f64, cells: usize) -> (String, String) {
     (filled, empty)
 }
 
+/// U-T25 — integer percent of a USD daily cap already spent, if a cap exists.
+/// `None` ⇒ uncapped (no usage % to show). Divide-by-zero safe; clamps to 100.
+fn usage_pct(spent: f64, limit: Option<f64>) -> Option<u32> {
+    match limit {
+        Some(l) if l > 0.0 => Some(((spent / l) * 100.0).round().clamp(0.0, 100.0) as u32),
+        _ => None,
+    }
+}
+
+/// U-T25 — the balance is "low" once ≥ 80% of the daily cap is spent, so the
+/// billing chip turns red before the wall is hit.
+fn is_low_balance(pct: u32) -> bool {
+    pct >= 80
+}
+
+/// U-T23 — the idle "watcher" cue. When background work is running while the
+/// agent is otherwise idle, name what it is watching: `monitors` = running
+/// background shell jobs, `loops` = backgrounded turns/loops. `None` ⇒ nothing
+/// to watch ⇒ no cue.
+fn watcher_label(monitors: usize, loops: usize) -> Option<String> {
+    if monitors == 0 && loops == 0 {
+        return None;
+    }
+    let mut s = String::from("watching");
+    if monitors > 0 {
+        s.push_str(&format!(" \u{00b7} {} monitor{}", monitors, if monitors == 1 { "" } else { "s" }));
+    }
+    if loops > 0 {
+        s.push_str(&format!(" \u{00b7} {} loop{}", loops, if loops == 1 { "" } else { "s" }));
+    }
+    Some(s)
+}
+
+/// U-T26 — the MCP chip text. Shows a transient "MCP starting…" while the fetch
+/// is in flight, else "N MCP" once servers are known. `None` ⇒ nothing to show.
+/// (LSP is not modelled by the OSA backend, so no "N LSP" half is emitted.)
+fn mcp_label(count: usize, starting: bool) -> Option<String> {
+    if starting {
+        Some("MCP starting\u{2026}".to_string())
+    } else if count > 0 {
+        Some(format!("{} MCP", count))
+    } else {
+        None
+    }
+}
+
 pub struct StatusBar {
     signal: Option<Signal>,
     provider: String,
@@ -167,6 +213,18 @@ pub struct StatusBar {
     /// WS12 — backend crossed the low-context warning threshold
     /// (context_pressure `context_low`); drives the red hint + % styling.
     context_low: bool,
+    /// U-T26 — number of connected MCP servers (from `McpServersLoaded`). 0 ⇒
+    /// no chip. Set once the `/mcp` fetch resolves; `mcp_starting` shows the
+    /// transient "MCP starting…" state while that fetch is in flight.
+    mcp_count: usize,
+    mcp_starting: bool,
+    /// U-B5 — live swarm-intelligence status ("swarm · round N"), driven by the
+    /// SwarmIntelligence* events. None ⇒ no swarm running ⇒ chip omitted.
+    swarm_label: Option<String>,
+    /// U-T28 — active sub-agent count + estimated cost, for the compact
+    /// "⛓ N subagents · $cost · ↓ manage" footer cue. 0 ⇒ omitted.
+    subagent_count: usize,
+    subagent_cost: Option<f64>,
 }
 
 impl StatusBar {
@@ -205,6 +263,11 @@ impl StatusBar {
             billing: None,
             percent_left: None,
             context_low: false,
+            mcp_count: 0,
+            mcp_starting: false,
+            swarm_label: None,
+            subagent_count: 0,
+            subagent_cost: None,
         }
     }
 
@@ -232,6 +295,25 @@ impl StatusBar {
     /// Set (or clear with None) the active-goal indicator, e.g. "goal 3/25".
     pub fn set_goal_label(&mut self, label: Option<String>) {
         self.goal_label = label;
+    }
+
+    /// U-T26 — number of connected MCP servers, and whether the MCP fetch is in
+    /// flight (shows a transient "MCP starting…"). Both feed the row-0 MCP chip.
+    pub fn set_mcp(&mut self, count: usize, starting: bool) {
+        self.mcp_count = count;
+        self.mcp_starting = starting;
+    }
+
+    /// U-B5 — set (or clear with None) the live swarm-intelligence chip.
+    pub fn set_swarm(&mut self, label: Option<String>) {
+        self.swarm_label = label;
+    }
+
+    /// U-T28 — set the active sub-agent count + estimated cost for the footer
+    /// cue. `count == 0` clears it.
+    pub fn set_subagents(&mut self, count: usize, cost: Option<f64>) {
+        self.subagent_count = count;
+        self.subagent_cost = cost;
     }
 
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
@@ -380,10 +462,30 @@ impl StatusBar {
         }
         let spent = Self::format_usd(b.daily_spent_usd);
         let label = match b.daily_limit_usd {
-            Some(limit) => format!("{}/{} today", spent, Self::format_usd(limit)),
+            // U-T25 — surface plan usage-% against the daily cap, e.g.
+            // "$8/$10 today (80%)", so the user sees how close they are.
+            Some(limit) => {
+                let base = format!("{}/{} today", spent, Self::format_usd(limit));
+                match usage_pct(b.daily_spent_usd, Some(limit)) {
+                    Some(pct) => format!("{} ({}%)", base, pct),
+                    None => base,
+                }
+            }
             None => format!("{} today", spent),
         };
         Some(label)
+    }
+
+    /// U-T25 — whether the daily spend has crossed the low-balance threshold
+    /// (≥ 80% of the USD cap), so the billing chip renders as a warning. Always
+    /// false for uncapped or non-USD providers (no cap to be low against).
+    fn billing_low_balance(&self) -> bool {
+        self.billing
+            .as_ref()
+            .filter(|b| b.usd_pricing)
+            .and_then(|b| usage_pct(b.daily_spent_usd, b.daily_limit_usd))
+            .map(is_low_balance)
+            .unwrap_or(false)
     }
 
     /// Push signal mode pill + genre label into a span list.
@@ -604,10 +706,47 @@ impl Component for StatusBar {
             spans.push(Span::styled(format!("effort:{}", effort), style));
         }
 
-        // Billing chip (`$0.42/$10 today`). Omitted when billing is absent.
-        if let Some(billing_label) = self.billing_label() {
+        // MCP chip (`3 MCP` / `MCP starting…`). U-T26. Omitted when no servers.
+        if let Some(mcp) = mcp_label(self.mcp_count, self.mcp_starting) {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            spans.push(Span::styled(billing_label, theme.progress_label()));
+            let style = if self.mcp_starting {
+                theme.faint()
+            } else {
+                Style::default().fg(theme.colors.primary)
+            };
+            spans.push(Span::styled(mcp, style));
+        }
+
+        // Swarm-intelligence chip (`swarm · round 3`). U-B5. Omitted when idle.
+        if let Some(ref swarm) = self.swarm_label {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(
+                format!("\u{273b} {}", swarm),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        // Billing chip (`$0.42/$10 today (80%)`). Omitted when billing is absent.
+        // U-T25 — turns to a warning color + "low balance" hint at ≥ 80% of cap.
+        if let Some(billing_label) = self.billing_label() {
+            let low = self.billing_low_balance();
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            let bill_style = if low {
+                Style::default()
+                    .fg(theme.colors.error)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme.progress_label()
+            };
+            spans.push(Span::styled(billing_label, bill_style));
+            if low {
+                spans.push(Span::styled(
+                    " \u{26A0} low balance",
+                    Style::default()
+                        .fg(theme.colors.error)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
 
             // Subscription/plan tier — only when non-null (always null today,
             // so effectively skipped, but wired for the day a plan exists).
@@ -648,20 +787,51 @@ impl Component for StatusBar {
 
         // Build the trailing "· N shells · N bg" fragment once, reused below.
         let mut extras: Vec<Span<'_>> = Vec::new();
-        if shells > 0 {
-            extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
-            let label = if shells == 1 {
-                "1 shell".to_string()
-            } else {
-                format!("{} shells", shells)
-            };
-            extras.push(Span::styled(label, theme.faint()));
+        // U-T23 — when idle, frame background work as a single "watching" cue
+        // (monitors = running background shells, loops = backgrounded turns)
+        // instead of the raw in-turn shells/bg detail. During a live turn the
+        // raw counts are more useful, so keep them then.
+        if !self.active {
+            if let Some(label) = watcher_label(shells, bg) {
+                extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+                extras.push(Span::styled(format!("\u{2299} {}", label), theme.faint()));
+            }
+        } else {
+            if shells > 0 {
+                extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+                let label = if shells == 1 {
+                    "1 shell".to_string()
+                } else {
+                    format!("{} shells", shells)
+                };
+                extras.push(Span::styled(label, theme.faint()));
+            }
+            if bg > 0 {
+                extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+                extras.push(Span::styled(
+                    format!("{} bg", bg),
+                    Style::default().fg(mode_color),
+                ));
+            }
         }
-        if bg > 0 {
+
+        // U-T28 — compact sub-agent footer cue: count, estimated cost, and the
+        // "↓ manage" nav hint into the existing agents dashboard. Shown whenever
+        // sub-agents are active (idle or mid-turn).
+        if self.subagent_count > 0 {
             extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+            let plural = if self.subagent_count == 1 { "" } else { "s" };
+            let mut label = format!("\u{25C7} {} subagent{}", self.subagent_count, plural);
+            if let Some(cost) = self.subagent_cost.filter(|c| *c > 0.0) {
+                label.push_str(&format!(" \u{00b7} {}", Self::format_usd(cost)));
+            }
             extras.push(Span::styled(
-                format!("{} bg", bg),
-                Style::default().fg(mode_color),
+                label,
+                Style::default().fg(theme.colors.primary),
+            ));
+            extras.push(Span::styled(
+                " \u{00b7} \u{2193} manage",
+                theme.faint(),
             ));
         }
 
@@ -755,6 +925,121 @@ mod status_bar_tests {
         // Default (ask) mode shows no persistent mode banner at all (CC hides it).
         let def = render_status_text(PermissionMode::Default);
         assert!(!def.contains("ask on"), "default mode must not print a mode banner");
+    }
+
+    #[test]
+    fn usage_pct_and_low_balance() {
+        // U-T25 — usage % against the daily cap, divide-by-zero/uncapped safe.
+        assert_eq!(usage_pct(8.0, Some(10.0)), Some(80));
+        assert_eq!(usage_pct(2.5, Some(10.0)), Some(25));
+        assert_eq!(usage_pct(12.0, Some(10.0)), Some(100)); // clamp over-cap
+        assert_eq!(usage_pct(5.0, None), None); // uncapped ⇒ no %
+        assert_eq!(usage_pct(5.0, Some(0.0)), None); // div0 guard
+        assert!(!is_low_balance(79));
+        assert!(is_low_balance(80));
+        assert!(is_low_balance(100));
+    }
+
+    #[test]
+    fn watcher_and_mcp_labels() {
+        // U-T23 — watcher cue names monitors + loops, pluralized; None when idle.
+        assert_eq!(watcher_label(0, 0), None);
+        assert_eq!(watcher_label(1, 0).unwrap(), "watching \u{00b7} 1 monitor");
+        assert_eq!(watcher_label(2, 0).unwrap(), "watching \u{00b7} 2 monitors");
+        assert_eq!(watcher_label(0, 1).unwrap(), "watching \u{00b7} 1 loop");
+        assert_eq!(
+            watcher_label(3, 2).unwrap(),
+            "watching \u{00b7} 3 monitors \u{00b7} 2 loops"
+        );
+        // U-T26 — MCP chip: starting state wins, else count, else nothing.
+        assert_eq!(mcp_label(0, false), None);
+        assert_eq!(mcp_label(3, false).unwrap(), "3 MCP");
+        assert_eq!(mcp_label(3, true).unwrap(), "MCP starting\u{2026}");
+    }
+
+    #[test]
+    fn billing_usage_pct_renders_in_label() {
+        // U-T25 — the daily label carries the usage-% and low-balance state.
+        use crate::client::types::HealthBilling;
+        let mut sb = StatusBar::new();
+        sb.set_billing(Some(HealthBilling {
+            daily_spent_usd: 8.0,
+            daily_limit_usd: Some(10.0),
+            monthly_spent_usd: 0.0,
+            monthly_limit_usd: None,
+            currency: "USD".into(),
+            subscription: None,
+            daily_tokens: 0,
+            usd_pricing: true,
+        }));
+        assert_eq!(sb.billing_label().as_deref(), Some("$8/$10 today (80%)"));
+        assert!(sb.billing_low_balance(), "80% of cap is low balance");
+        // Uncapped: no %, never low.
+        sb.set_billing(Some(HealthBilling {
+            daily_spent_usd: 3.0,
+            daily_limit_usd: None,
+            monthly_spent_usd: 0.0,
+            monthly_limit_usd: None,
+            currency: "USD".into(),
+            subscription: None,
+            daily_tokens: 0,
+            usd_pricing: true,
+        }));
+        assert_eq!(sb.billing_label().as_deref(), Some("$3 today"));
+        assert!(!sb.billing_low_balance());
+    }
+
+    /// Flatten a fully-configured StatusBar's cells to one string.
+    fn render_sb(sb: &StatusBar) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        term.draw(|f| sb.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn watcher_cue_shows_only_when_idle() {
+        // U-T23 — idle + background work ⇒ watcher cue; active ⇒ raw detail.
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_shell_count(2);
+        sb.set_background_count(1);
+        sb.set_active(false);
+        let idle = render_sb(&sb);
+        assert!(idle.contains("watching"), "idle watcher cue must render, got: {idle:?}");
+        assert!(idle.contains("2 monitors") && idle.contains("1 loop"));
+
+        sb.set_active(true);
+        let busy = render_sb(&sb);
+        assert!(!busy.contains("watching"), "no watcher cue during a turn");
+        assert!(busy.contains("2 shells"), "raw shells detail shows mid-turn");
+    }
+
+    #[test]
+    fn subagent_footer_and_mcp_swarm_chips_render() {
+        // U-T28 / U-T26 / U-B5 — chips surface when their state is set.
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_subagents(3, Some(0.42));
+        sb.set_mcp(2, false);
+        sb.set_swarm(Some("swarm \u{00b7} round 4".to_string()));
+        let text = render_sb(&sb);
+        assert!(text.contains("3 subagents"), "subagent footer, got: {text:?}");
+        assert!(text.contains("$0.42"), "subagent cost");
+        assert!(text.contains("manage"), "nav hint");
+        assert!(text.contains("2 MCP"), "MCP chip");
+        assert!(text.contains("round 4"), "swarm chip");
+        // Cleared state drops the chips.
+        sb.set_subagents(0, None);
+        sb.set_mcp(0, false);
+        sb.set_swarm(None);
+        let cleared = render_sb(&sb);
+        assert!(!cleared.contains("subagents") && !cleared.contains("MCP"));
     }
 
     #[test]

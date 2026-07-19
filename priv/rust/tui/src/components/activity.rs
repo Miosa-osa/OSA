@@ -96,6 +96,37 @@ fn pulse_bright(tick: u32) -> bool {
     (tick / 3) % 2 == 0
 }
 
+/// U-T22 — the persistent interrupt affordance shown in the spinner's status
+/// group. After the first in-turn Esc it becomes "esc again to interrupt" so the
+/// user knows a second press ends the turn; a lone Esc never kills it.
+fn interrupt_affordance(armed: bool) -> &'static str {
+    if armed {
+        "esc again to interrupt"
+    } else {
+        "esc to interrupt"
+    }
+}
+
+/// U-T27 — progressive width-gating for the spinner's " (a · b · c)" status
+/// group. Keeps as many LEADING (higher-priority) segments as fit in `budget`
+/// columns and drops trailing ones as the pane narrows, charging the 3-column
+/// " · " join between kept segments. The first segment is always kept so the
+/// row never renders an empty "()".
+fn gate_parts(parts: &[String], budget: usize) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for (i, p) in parts.iter().enumerate() {
+        let cost = p.chars().count() + if i == 0 { 0 } else { 3 };
+        if i == 0 || used + cost <= budget {
+            used += cost;
+            kept.push(p.clone());
+        } else {
+            break;
+        }
+    }
+    kept
+}
+
 /// Format large counts compactly (e.g. 1234 → "1.2k")
 fn format_count(n: usize) -> String {
     if n >= 1000 {
@@ -251,6 +282,14 @@ pub struct Activity {
     /// Whether the turn is parked on the USER (permission prompt / question /
     /// plan approval). Drives the pulsing ◆ "you're the blocker" cue (item 5).
     pending_user: bool,
+    /// U-T22 — the first Esc of an in-turn double-press has been seen, so the
+    /// persistent affordance reads "esc again to interrupt" until the second
+    /// Esc lands (interrupt) or a non-Esc key disarms it. A single stray Esc
+    /// can no longer kill a long turn.
+    interrupt_armed: bool,
+    /// U-T24 — number of messages queued behind the running turn (WS5 message
+    /// queue). Surfaced as an "N queued" segment in the spinner status group.
+    queued: usize,
     /// Reduced-motion flag (a11y): when true the shimmer sweep is disabled and
     /// the verb renders in a single flat color.
     reduced_motion: bool,
@@ -333,6 +372,8 @@ impl Activity {
             retry: None,
             waiting_reason: None,
             pending_user: false,
+            interrupt_armed: false,
+            queued: 0,
             reduced_motion: false,
             verbosity: Verbosity::All,
             a11y: false,
@@ -455,6 +496,8 @@ impl Activity {
         self.retry = None;
         self.waiting_reason = None;
         self.pending_user = false;
+        self.interrupt_armed = false;
+        self.queued = 0;
     }
 
     pub fn stop(&mut self) {
@@ -467,6 +510,25 @@ impl Activity {
         self.retry = None;
         self.waiting_reason = None;
         self.pending_user = false;
+        self.interrupt_armed = false;
+        self.queued = 0;
+    }
+
+    /// U-T22 — arm/disarm the "esc again to interrupt" affordance. Armed by the
+    /// first in-turn Esc; disarmed on the interrupting second Esc or any other
+    /// key. Idempotent.
+    pub fn arm_interrupt(&mut self, armed: bool) {
+        self.interrupt_armed = armed;
+    }
+
+    /// Whether the in-turn interrupt is armed (first Esc seen).
+    pub fn is_interrupt_armed(&self) -> bool {
+        self.interrupt_armed
+    }
+
+    /// U-T24 — set the number of messages queued behind the running turn.
+    pub fn set_queued(&mut self, n: usize) {
+        self.queued = n;
     }
 
     /// Seconds since the spinner clock started (`start()`), if running. This is
@@ -796,7 +858,8 @@ impl Component for Activity {
         // output streams — CC's SpinnerModeGlyph), then the thinking status —
         // all joined with " · " inside one dim paren group:
         //   ✳ Pondering… (esc to interrupt · 12s · ↓ 1.2k tokens · thinking)
-        let mut parts: Vec<String> = vec!["esc to interrupt".to_string(), elapsed_str];
+        let mut parts: Vec<String> =
+            vec![interrupt_affordance(self.interrupt_armed).to_string(), elapsed_str];
 
         // Item 1 — live retry countdown, right after the timer so the stall is
         // the most prominent status after "esc to interrupt · Ns".
@@ -843,6 +906,11 @@ impl Component for Activity {
             if at.elapsed() < std::time::Duration::from_secs(2) {
                 parts.push(format!("thought for {}s", secs));
             }
+        }
+        // U-T24 — messages queued behind the running turn. Low priority, so it
+        // sits near the end and is the first segment width-gating drops.
+        if self.queued > 0 {
+            parts.push(format!("{} queued", self.queued));
         }
 
         // ── Spinner glyph + verb selection ──────────────────────────────
@@ -894,6 +962,19 @@ impl Component for Activity {
                 self.shimmer_verb_spans(&word, &theme),
             )
         };
+
+        // U-T27 — drop trailing status segments as the pane narrows. Budget is
+        // the width left after the model prefix, spinner glyph (2 cols) and the
+        // verb spans, minus the " (" / ")" wrapper.
+        let model_cols = if self.model_name.is_empty() {
+            0
+        } else {
+            self.model_name.chars().count() + 3
+        };
+        let verb_cols: usize =
+            verb_spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + 2;
+        let budget = (area.width as usize).saturating_sub(model_cols + verb_cols + 4);
+        let parts = gate_parts(&parts, budget);
 
         let mut spinner_spans: Vec<Span<'_>> = Vec::with_capacity(verb_spans.len() + 3);
         spinner_spans.push(glyph_span);
@@ -1190,6 +1271,58 @@ mod activity_tests {
         let text = render_activity_text(&act);
         assert!(text.contains("in"), "input tokens must surface, got: {text:?}");
         assert!(text.contains("cached"), "cache tokens must surface");
+    }
+
+    #[test]
+    fn interrupt_affordance_arms_and_renders() {
+        // U-T22 — the affordance text flips on arm, and the spinner shows it.
+        assert_eq!(interrupt_affordance(false), "esc to interrupt");
+        assert_eq!(interrupt_affordance(true), "esc again to interrupt");
+
+        let mut act = Activity::new();
+        act.start();
+        assert!(!act.is_interrupt_armed());
+        assert!(render_activity_text(&act).contains("esc to interrupt"));
+        act.arm_interrupt(true);
+        assert!(act.is_interrupt_armed());
+        let text = render_activity_text(&act);
+        assert!(
+            text.contains("esc again to interrupt"),
+            "armed affordance must render, got: {text:?}"
+        );
+        // A fresh turn disarms it.
+        act.start();
+        assert!(!act.is_interrupt_armed());
+    }
+
+    #[test]
+    fn queued_hint_renders_and_gates_out_first() {
+        // U-T24 — the queued segment surfaces on the spinner.
+        let mut act = Activity::new();
+        act.start();
+        assert!(!render_activity_text(&act).contains("queued"));
+        act.set_queued(3);
+        let text = render_activity_text(&act);
+        assert!(text.contains("3 queued"), "queued hint must render, got: {text:?}");
+
+        // U-T27 — width-gating keeps leading (priority) segments, drops trailing
+        // ones (queued is last), and always keeps at least the first segment.
+        let parts: Vec<String> = ["esc to interrupt", "12s", "\u{2193} 1.2k tokens", "3 queued"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // Ample budget keeps everything.
+        assert_eq!(gate_parts(&parts, 200).len(), 4);
+        // Tight budget keeps only the first, never an empty group.
+        let tight = gate_parts(&parts, 3);
+        assert_eq!(tight.len(), 1);
+        assert_eq!(tight[0], "esc to interrupt");
+        // A middling budget drops the trailing "3 queued" before the tokens.
+        let mid = gate_parts(&parts, "esc to interrupt".len() + 3 + "12s".len());
+        assert!(mid.contains(&"12s".to_string()));
+        assert!(!mid.contains(&"3 queued".to_string()));
+        // Empty input never panics.
+        assert!(gate_parts(&[], 40).is_empty());
     }
 
     #[test]
