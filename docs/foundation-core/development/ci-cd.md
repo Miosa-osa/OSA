@@ -29,8 +29,8 @@ Both are uploaded as GitHub Release assets so `scripts/install.sh` / `scripts/in
 Any push to a tag matching `v*.*.*`:
 
 ```bash
-git tag v1.0.003
-git push origin v1.0.003
+git tag v1.0.010
+git push origin v1.0.010
 ```
 
 ### Environment Versions
@@ -72,8 +72,8 @@ Each build job runs these steps:
 
 The git tag is the single source of truth for the version:
 
-- The **tag itself** (padded display form, e.g. `v1.0.003`) is authoritative for the tag name and the GitHub Release title — those stay padded.
-- For the **build**, the tag is normalized to valid semver (strip a leading zero from the patch: `v1.0.003` → `1.0.3`). semver forbids leading zeros, so `mix`/`cargo` would reject `1.0.003`. The normalized value is exported as `OSA_VERSION`, written into the `VERSION` file that `mix.exs` reads at compile time, and the in-app display re-pads it at render time so the operator still reads the padded form everywhere.
+- The **tag itself** (padded display form, e.g. `v1.0.010`) is authoritative for the tag name and the GitHub Release title — those stay padded.
+- For the **build**, the tag is normalized to valid semver (strip a leading zero from the patch: `v1.0.010` → `1.0.10`). semver forbids leading zeros, so `mix`/`cargo` would reject `1.0.003`. The normalized value is exported as `OSA_VERSION`, written into the `VERSION` file that `mix.exs` reads at compile time, and the in-app display re-pads it at render time so the operator still reads the padded form everywhere.
 
 Any cached, stale `optimal_system_agent.app` is deleted before `mix release` so a restored build cache cannot ship an old `vsn` to `Application.spec/2`.
 
@@ -91,7 +91,7 @@ Assets are attached directly to the GitHub Release. There is no separate artifac
 
 ## Releasing a New Version
 
-1. Update the `VERSION` file (current: `1.0.3`):
+1. Update the `VERSION` file (current: `1.0.10`):
    ```bash
    echo "1.0.3" > VERSION
    git add VERSION
@@ -100,9 +100,9 @@ Assets are attached directly to the GitHub Release. There is no separate artifac
 2. Push the commit to `main`.
 3. Tag (padded display form) and push:
    ```bash
-   git tag v1.0.003
+   git tag v1.0.010
    git push origin main
-   git push origin v1.0.003
+   git push origin v1.0.010
    ```
 4. Watch the `Release` workflow at `github.com/Miosa-osa/OSA/actions`.
 5. When the three build jobs finish, `publish` attaches the assets and creates the Release.

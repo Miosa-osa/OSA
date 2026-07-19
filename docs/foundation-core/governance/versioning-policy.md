@@ -107,7 +107,7 @@ Before tagging a new version:
 - [ ] For breaking changes: ADR written and merged
 - [ ] All tests pass: `mix test`
 - [ ] Release build succeeds: `MIX_ENV=prod mix release osagent`
-- [ ] Git tag created: `git tag v1.0.002`
+- [ ] Git tag created: `git tag v1.0.010`
 
 ---
 
