@@ -14,8 +14,16 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Connector do
 
   @type t :: {Mint.HTTP.t(), reference(), Mint.WebSocket.t()}
 
-  @spec connect(String.t()) :: {:ok, t()} | {:error, term()}
-  def connect(control_url) when is_binary(control_url) do
+  @doc """
+  Connect and upgrade to the control-plane WebSocket.
+
+  The host side uses the default `#{@subprotocol}` subprotocol. The remote
+  CLIENT side passes `subprotocol: "miosa-opencomputers-client-v1"` so it
+  negotiates the #484 client endpoint. All other callers are unchanged.
+  """
+  @spec connect(String.t(), keyword()) :: {:ok, t()} | {:error, term()}
+  def connect(control_url, opts \\ []) when is_binary(control_url) and is_list(opts) do
+    subprotocol = Keyword.get(opts, :subprotocol, @subprotocol)
     uri = URI.parse(control_url)
     scheme = if uri.scheme == "wss", do: :https, else: :http
     ws_scheme = if uri.scheme == "wss", do: :wss, else: :ws
@@ -31,7 +39,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Connector do
            ),
          {:ok, conn, ref} <-
            Mint.WebSocket.upgrade(ws_scheme, conn, path, [
-             {"sec-websocket-protocol", @subprotocol}
+             {"sec-websocket-protocol", subprotocol}
            ]),
          {:ok, conn, websocket} <- await_upgrade(conn, ref) do
       {:ok, {conn, ref, websocket}}

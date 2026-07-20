@@ -1,196 +1,215 @@
 defmodule OptimalSystemAgent.Remote.Frames do
   @moduledoc """
-  Pure frame builders and parsers for the OSA-side remote CLIENT.
+  Pure frame builders and parsers for the OSA-side remote CLIENT, aligned to the
+  MIOSA miosa-compute #484 protocol (`Web.Ws.OpenComputers.RemoteClientSocket`).
 
-  These are the wire terms the client exchanges with the MIOSA control-plane
-  session broker over the client endpoint
-  (`wss://api.miosa.ai/api/v1/opencomputers/clients/ws`). Every term is encoded
-  and decoded with `OptimalSystemAgent.OpenComputers.Session.FrameCodec`
-  (erlang-term codec), exactly as the host side does on `.../hosts/ws`.
+  ## Wire shape
 
-  ## Two frame families
+  The client negotiates the `miosa-opencomputers-client-v1` subprotocol on
+  `wss://api.miosa.ai/api/v1/opencomputers/clients/ws` and exchanges erlang-term
+  binary frames (encoded/decoded with
+  `OptimalSystemAgent.OpenComputers.Session.FrameCodec`, `:safe` on decode).
 
-  ### 1. Control-plane frames (broker interprets these)
+  EVERY message is wrapped in an envelope:
 
-  These are NEW frames that only the broker understands. They do not exist on
-  the host side. The MIOSA server MUST implement handlers for them:
+      {:oc_remote, %{v: 1, request_id: <uuid>, body: <body>}}
 
-    * `{:client_hello, %{account_key, version, role: :client}}` — client auth.
-      Broker replies `{:client_hello_ok, %{account, heartbeat_ms}}` or
-      `{:client_error, %{code, message}}`.
-    * `{:hosts_list_request, %{}}` — broker replies
-      `{:hosts_list, %{hosts: [%{id, alias, online, os, last_seen}]}}`.
-    * `{:session_create_request, %{ref, host, kind, params}}` — broker allocates
-      a `session_id`, verifies the account owns `host`, binds a client<->host
-      route for that `session_id`, and replies
-      `{:session_created, %{ref, host, session_id, kind}}`.
-    * `{:sessions_list_request, %{host}}` — broker replies
-      `{:sessions_list, %{host, sessions: [%{session_id, kind, started_at}]}}`.
-    * `{:session_kill_request, %{host, session_id}}` — broker relays a teardown
-      to the host and replies `{:session_killed, %{host, session_id}}`.
+  `wrap/1` adds the envelope (fresh `request_id` per message); `unwrap/1` peels
+  it back to the inner body. The server does not require the client to correlate
+  on `request_id` for streaming, but the field must be present.
 
-  ### 2. Data-plane frames (broker forwards verbatim to/from the host)
+  ## Client -> server bodies
 
-  These are the EXACT frames the host executors already speak (see
-  `executor/direct/exec.ex`, `.../agent.ex`, `.../pty.ex`). The broker routes
-  them by the `session_id` bound at create time and never interprets them:
+    * `{:remote_hello, %{account_key, client_instance_id}}`
+    * `{:remote_hosts_list, %{}}`
+    * `{:remote_session_open, %{ref, host_id, kind, params}}` where `kind` is
+      `:exec | :agent`. `exec_params/2` and `agent_params/2` build `params`.
+    * `{:remote_session_close, %{session_id}}`
+    * `{:pong, seq}` (reply to a server `{:ping, seq}`)
 
-    * Client -> host: `{:job, %{...}}`, `{:pty_open_request, ...}`,
-      `{:pty_input, ...}`, `{:pty_resize, ...}`, `{:pty_close, ...}`.
-    * Host -> client: `{:job_accept, id, n}`, `{:job_done, id, result}`,
-      `{:job_fail, id, info}`, `{:pty_opened, ...}`, `{:pty_output, ...}`,
-      `{:pty_close, ...}`, `{:pty_error, ...}`.
+  ## Server -> client bodies (parsed here)
 
-  For `exec` and `agent`, the job `id` is set to the broker-allocated
-  `session_id` so the host reply frames (which reference `job.id`) route back to
-  the right client without any host-side change.
+    * `{:remote_hello_ok, %{tenant_id, heartbeat_ms}}`
+    * `{:remote_hosts, %{hosts: [%{id, name, online, os_kind}]}}`
+    * `{:remote_session_opened, %{ref, session_id}}`
+    * `{:remote_session_frame, %{session_id, frame: <inner host frame>}}` — the
+      inner `frame` is raw host output, e.g. `{:job_done, session_id, %{...}}`,
+      `{:job_fail, session_id, reason}`, or `{:exec_chunk, %{...}}`.
+    * `{:remote_session_closed, %{session_id, reason}}`
+    * `{:remote_error, %{ref (optional), reason}}`
+    * `{:ping, seq}`
   """
 
-  @role :client
+  @version 1
 
-  # ── Control-plane builders ───────────────────────────────────────────────────
+  # ── Envelope ─────────────────────────────────────────────────────────────────
 
-  @spec client_hello(String.t()) :: {:client_hello, map()}
-  def client_hello(account_key) when is_binary(account_key) do
-    {:client_hello, %{account_key: account_key, version: osa_version(), role: @role}}
+  @doc "Wrap a body in the versioned `:oc_remote` envelope with a fresh request_id."
+  @spec wrap(term()) :: {:oc_remote, map()}
+  def wrap(body) do
+    {:oc_remote, %{v: @version, request_id: request_id(), body: body}}
   end
 
-  @spec hosts_list_request() :: {:hosts_list_request, map()}
-  def hosts_list_request, do: {:hosts_list_request, %{}}
+  @doc "Unwrap an `:oc_remote` envelope back to its inner body."
+  @spec unwrap(term()) :: {:ok, term()} | :error
+  def unwrap({:oc_remote, %{v: @version, request_id: rid, body: body}}) when is_binary(rid),
+    do: {:ok, body}
 
-  @spec session_create_request(String.t(), String.t(), atom(), map()) ::
-          {:session_create_request, map()}
-  def session_create_request(ref, host, kind, params \\ %{})
-      when is_binary(ref) and is_binary(host) and is_atom(kind) and is_map(params) do
-    {:session_create_request, %{ref: ref, host: host, kind: kind, params: params}}
+  def unwrap(_), do: :error
+
+  @doc "A UUID-v4-like request identifier string."
+  @spec request_id() :: String.t()
+  def request_id do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+    c = c |> Bitwise.band(0x0FFF) |> Bitwise.bor(0x4000)
+    d = d |> Bitwise.band(0x3FFF) |> Bitwise.bor(0x8000)
+
+    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+    |> IO.iodata_to_binary()
   end
 
-  @spec sessions_list_request(String.t()) :: {:sessions_list_request, map()}
-  def sessions_list_request(host) when is_binary(host) do
-    {:sessions_list_request, %{host: host}}
+  # ── Client -> server bodies ──────────────────────────────────────────────────
+
+  @spec remote_hello(String.t(), String.t()) :: {:remote_hello, map()}
+  def remote_hello(account_key, client_instance_id)
+      when is_binary(account_key) and is_binary(client_instance_id) do
+    {:remote_hello, %{account_key: account_key, client_instance_id: client_instance_id}}
   end
 
-  @spec session_kill_request(String.t() | nil, String.t()) :: {:session_kill_request, map()}
-  def session_kill_request(host, session_id) when is_binary(session_id) do
-    {:session_kill_request, %{host: host, session_id: session_id}}
+  @spec remote_hosts_list() :: {:remote_hosts_list, map()}
+  def remote_hosts_list, do: {:remote_hosts_list, %{}}
+
+  @spec remote_session_open(String.t(), String.t(), :exec | :agent, map()) ::
+          {:remote_session_open, map()}
+  def remote_session_open(ref, host_id, kind, params)
+      when is_binary(ref) and is_binary(host_id) and kind in [:exec, :agent] and is_map(params) do
+    {:remote_session_open, %{ref: ref, host_id: host_id, kind: kind, params: params}}
   end
 
-  # ── Data-plane builders (mirror the host executor contract exactly) ──────────
+  @spec remote_session_close(String.t()) :: {:remote_session_close, map()}
+  def remote_session_close(session_id) when is_binary(session_id) do
+    {:remote_session_close, %{session_id: session_id}}
+  end
+
+  @spec pong(term()) :: {:pong, term()}
+  def pong(seq), do: {:pong, seq}
+
+  # ── Session param builders ───────────────────────────────────────────────────
 
   @doc """
-  One-shot shell exec. Mirrors what `Executor.Direct.Exec` reads: `id`, `cmd`,
-  `cwd`, `timeout_ms`, `env`. The `id` is the broker session_id so replies route
-  back.
+  Build `params` for an `:exec` session. `cmd` is required; `:args`, `:cwd`,
+  `:env` (a list of `{k, v}` tuples), and `:timeout_ms` are optional. Omitted
+  keys let the host apply its defaults (`cwd: "~"`, `timeout_ms: 300_000`).
   """
-  @spec exec_job(String.t(), String.t(), keyword()) :: {:job, map()}
-  def exec_job(session_id, cmd, opts \\ []) when is_binary(session_id) and is_binary(cmd) do
-    job =
-      %{id: session_id, kind: :exec_on_host, cmd: cmd}
-      |> maybe_put(:cwd, opts[:cwd])
-      |> maybe_put(:timeout_ms, opts[:timeout_ms])
-      |> maybe_put(:env, opts[:env])
-
-    {:job, job}
+  @spec exec_params(String.t(), keyword()) :: map()
+  def exec_params(cmd, opts \\ []) when is_binary(cmd) do
+    %{cmd: cmd}
+    |> maybe_put(:args, opts[:args])
+    |> maybe_put(:cwd, opts[:cwd])
+    |> maybe_put(:env, opts[:env])
+    |> maybe_put(:timeout_ms, opts[:timeout_ms])
   end
 
   @doc """
-  Agent task dispatch. Mirrors what `Executor.Direct.Agent` reads: `id`,
-  `prompt`, `context` (`working_dir` / `provider` / `model`), `timeout_ms`.
+  Build `params` for an `:agent` session. `prompt` is required; `context` is
+  assembled from `:dir`/`:cwd`, `:model`, and `:provider` (only the #484-allowed
+  keys), and `:timeout_ms` is optional. `context` is omitted entirely when empty.
   """
-  @spec agent_job(String.t(), String.t(), keyword()) :: {:job, map()}
-  def agent_job(session_id, prompt, opts \\ [])
-      when is_binary(session_id) and is_binary(prompt) do
+  @spec agent_params(String.t(), keyword()) :: map()
+  def agent_params(prompt, opts \\ []) when is_binary(prompt) do
     context =
       %{}
-      |> maybe_put(:working_dir, opts[:dir])
-      |> maybe_put(:provider, opts[:provider])
+      |> maybe_put(:cwd, opts[:dir] || opts[:cwd])
       |> maybe_put(:model, opts[:model])
+      |> maybe_put(:provider, opts[:provider])
 
-    job =
-      %{id: session_id, kind: :dispatch_agent, prompt: prompt, context: context}
-      |> maybe_put(:timeout_ms, opts[:timeout_ms])
-
-    {:job, job}
+    %{prompt: prompt}
+    |> then(fn base ->
+      if map_size(context) > 0, do: Map.put(base, :context, context), else: base
+    end)
+    |> maybe_put(:timeout_ms, opts[:timeout_ms])
   end
 
-  @spec pty_open(String.t(), String.t() | nil, pos_integer(), pos_integer(), keyword()) ::
-          {:pty_open_request, map()}
-  def pty_open(session_id, shell, cols, rows, opts \\ []) when is_binary(session_id) do
-    payload =
-      %{session_id: session_id, cols: cols, rows: rows}
-      |> maybe_put(:shell, shell)
-      |> maybe_put(:cwd, opts[:cwd])
-      |> maybe_put(:env, opts[:env])
+  # ── Server -> client parsers ─────────────────────────────────────────────────
 
-    {:pty_open_request, payload}
-  end
+  @doc "Extract the host list from a `{:remote_hosts, _}` body."
+  @spec parse_hosts(term()) :: {:ok, [map()]} | :error
+  def parse_hosts({:remote_hosts, %{hosts: hosts}}) when is_list(hosts), do: {:ok, hosts}
+  def parse_hosts(_), do: :error
 
-  @spec pty_input(String.t(), binary()) :: {:pty_input, map()}
-  def pty_input(session_id, data) when is_binary(session_id) and is_binary(data) do
-    {:pty_input, %{session_id: session_id, data: data}}
-  end
+  @doc "Extract the allocated `session_id` from a `{:remote_session_opened, _}` body."
+  @spec parse_session_opened(term()) :: {:ok, String.t()} | :error
+  def parse_session_opened({:remote_session_opened, %{session_id: sid}}) when is_binary(sid),
+    do: {:ok, sid}
 
-  @spec pty_resize(String.t(), pos_integer(), pos_integer()) :: {:pty_resize, map()}
-  def pty_resize(session_id, cols, rows) when is_binary(session_id) do
-    {:pty_resize, %{session_id: session_id, cols: cols, rows: rows}}
-  end
+  def parse_session_opened(_), do: :error
 
-  @spec pty_close(String.t(), integer()) :: {:pty_close, map()}
-  def pty_close(session_id, exit_code \\ 0) when is_binary(session_id) do
-    {:pty_close, %{session_id: session_id, exit_code: exit_code}}
-  end
+  @doc "Extract `%{session_id, reason}` from a `{:remote_session_closed, _}` body."
+  @spec parse_session_closed(term()) :: {:ok, map()} | :error
+  def parse_session_closed({:remote_session_closed, %{session_id: sid} = info})
+      when is_binary(sid),
+      do: {:ok, info}
 
-  # ── Response parsers ─────────────────────────────────────────────────────────
+  def parse_session_closed(_), do: :error
 
-  @doc "Extract the host list from a `{:hosts_list, _}` frame."
-  @spec parse_hosts_list(term()) :: {:ok, [map()]} | :error
-  def parse_hosts_list({:hosts_list, %{hosts: hosts}}) when is_list(hosts), do: {:ok, hosts}
-  def parse_hosts_list(_), do: :error
-
-  @doc "Extract `{host, session_id}` from a `{:session_created, _}` frame."
-  @spec parse_session_created(term()) :: {:ok, map()} | :error
-  def parse_session_created({:session_created, %{session_id: sid} = info}) when is_binary(sid) do
-    {:ok, info}
-  end
-
-  def parse_session_created(_), do: :error
-
-  @doc "Extract the session list from a `{:sessions_list, _}` frame."
-  @spec parse_sessions_list(term()) :: {:ok, [map()]} | :error
-  def parse_sessions_list({:sessions_list, %{sessions: sessions}}) when is_list(sessions) do
-    {:ok, sessions}
-  end
-
-  def parse_sessions_list(_), do: :error
+  @doc "Extract the `reason` (and optional `ref`) from a `{:remote_error, _}` body."
+  @spec parse_error(term()) :: {:ok, map()} | :error
+  def parse_error({:remote_error, %{reason: _} = info}), do: {:ok, info}
+  def parse_error(_), do: :error
 
   @doc """
-  Human-readable one-line summary of a host->client job result frame.
-  Returns `{:done, text}` / `{:fail, text}` / `:ignore`.
+  Unwrap a `{:remote_session_frame, %{session_id, frame}}` body into
+  `{session_id, inner_frame}`.
   """
-  @spec summarize_job_reply(term()) :: {:done, String.t()} | {:fail, String.t()} | :ignore
-  def summarize_job_reply({:job_done, _id, %{stdout: out, exit_code: code}}) do
+  @spec unwrap_session_frame(term()) :: {:ok, String.t(), term()} | :error
+  def unwrap_session_frame({:remote_session_frame, %{session_id: sid, frame: frame}})
+      when is_binary(sid),
+      do: {:ok, sid, frame}
+
+  def unwrap_session_frame(_), do: :error
+
+  @doc """
+  Human-readable rendering of an inner host frame (as delivered inside a
+  `remote_session_frame`). Returns:
+
+    * `{:chunk, text}` — non-terminal streamed output
+    * `{:done, text}` — terminal success
+    * `{:fail, text}` — terminal failure
+    * `:ignore` — nothing to render
+  """
+  @spec render_session_frame(term()) ::
+          {:chunk, String.t()} | {:done, String.t()} | {:fail, String.t()} | :ignore
+  def render_session_frame({:job_done, _sid, %{exit_code: code, stdout: out}}) do
     {:done, "exit=#{code}\n#{out}"}
   end
 
-  def summarize_job_reply({:job_done, _id, %{result: result}}) do
-    {:done, to_string(result)}
+  def render_session_frame({:job_done, _sid, %{result: result}}), do: {:done, to_string(result)}
+  def render_session_frame({:job_done, _sid, result}), do: {:done, inspect(result)}
+
+  def render_session_frame({:exec_result, %{exit_code: code, stdout: out}}) do
+    {:done, "exit=#{code}\n#{out}"}
   end
 
-  def summarize_job_reply({:job_done, _id, result}), do: {:done, inspect(result)}
+  def render_session_frame({:job_fail, _sid, %{message: msg}}), do: {:fail, to_string(msg)}
+  def render_session_frame({:job_fail, _sid, reason}), do: {:fail, describe_reason(reason)}
 
-  def summarize_job_reply({:job_fail, _id, %{message: msg}}), do: {:fail, to_string(msg)}
-  def summarize_job_reply({:job_fail, _id, info}), do: {:fail, inspect(info)}
-  def summarize_job_reply(_), do: :ignore
+  def render_session_frame({:exec_chunk, %{data: data}}) when is_binary(data), do: {:chunk, data}
+
+  def render_session_frame(_), do: :ignore
+
+  @doc "Is `frame` a terminal inner host frame (`job_done` / `job_fail` / `exec_result`)?"
+  @spec terminal_inner_frame?(term()) :: boolean()
+  def terminal_inner_frame?({:job_done, _sid, _}), do: true
+  def terminal_inner_frame?({:job_fail, _sid, _}), do: true
+  def terminal_inner_frame?({:exec_result, _}), do: true
+  def terminal_inner_frame?(_), do: false
 
   # ── Private ──────────────────────────────────────────────────────────────────
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp osa_version do
-    case Application.spec(:optimal_system_agent, :vsn) do
-      nil -> "dev"
-      vsn -> to_string(vsn)
-    end
-  end
+  defp describe_reason(reason) when is_binary(reason), do: reason
+  defp describe_reason(reason) when is_atom(reason), do: to_string(reason)
+  defp describe_reason(reason), do: inspect(reason)
 end

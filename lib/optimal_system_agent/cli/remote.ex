@@ -1,6 +1,7 @@
 defmodule OptimalSystemAgent.CLI.Remote do
   @moduledoc """
-  CLI handler for `osa remote <verb>` — the CLIENT side of OpenComputers.
+  CLI handler for `osa remote <verb>` — the CLIENT side of OpenComputers,
+  speaking the MIOSA miosa-compute #484 protocol.
 
   Where `osa opencomputers ...` claims THIS machine as a host, `osa remote ...`
   reaches OUT to hosts the account already owns, brokered through the MIOSA
@@ -10,21 +11,21 @@ defmodule OptimalSystemAgent.CLI.Remote do
 
       osa remote hosts                       List your connected machines
       osa remote exec <host> [--] <cmd...>   Run one command on <host>
-      osa remote agent <host> <task...>      Dispatch an agent task to <host>
+      osa remote agent <host> "<prompt>"     Dispatch an agent task to <host>
               [--dir <path>] [--model <m>] [--provider <p>]
-      osa remote shell <host> [--shell <p>]  Interactive PTY on <host>
-      osa remote sessions <host>             List live sessions on <host>
-      osa remote kill [<host>] <session_id>  Tear a session down
+      osa remote sessions                    (not available yet in this release)
+      osa remote kill <session_id>           Close a remote session
+      osa remote shell <host>                (not available yet in this release)
 
-  Every network path degrades gracefully: a missing account credential or an
-  unreachable broker prints a friendly message and exits non-zero, never a
-  stack trace. The client endpoint + session broker this talks to is a MIOSA
-  server dependency that is not implemented yet (see docs/OSA_REMOTE_DESIGN.md
-  section 6), so until the server ships these commands report the broker as
-  unreachable.
+  Every network path degrades gracefully: a missing account credential, an
+  unreachable broker, or a key without the `opencomputers:write` scope prints a
+  friendly message and exits non-zero, never a stack trace.
+
+  Interactive PTY shell is NOT part of the #484 server contract, so `shell` is
+  gated off with a clear message rather than sending frames the server rejects.
   """
 
-  alias OptimalSystemAgent.Remote.{Auth, Client, Frames, PtyBridge}
+  alias OptimalSystemAgent.Remote.{Auth, Client, Frames}
 
   # ── Dispatch ─────────────────────────────────────────────────────────────────
 
@@ -35,8 +36,8 @@ defmodule OptimalSystemAgent.CLI.Remote do
       "hosts" -> cmd_hosts()
       "exec" -> run_parsed(&parse_exec/1, rest, &cmd_exec/1)
       "agent" -> run_parsed(&parse_agent/1, rest, &cmd_agent/1)
-      "shell" -> run_parsed(&parse_shell/1, rest, &cmd_shell/1)
-      "sessions" -> run_parsed(&parse_sessions/1, rest, &cmd_sessions/1)
+      "shell" -> cmd_shell()
+      "sessions" -> cmd_sessions()
       "kill" -> run_parsed(&parse_kill/1, rest, &cmd_kill/1)
       v when v in ["--help", "-h", "help"] -> print_usage()
       _ -> unknown(verb)
@@ -69,15 +70,15 @@ defmodule OptimalSystemAgent.CLI.Remote do
 
     case positional do
       [] ->
-        {:error, "usage: osa remote agent <host> \"<task>\" [--dir <path>] [--model <m>]"}
+        {:error, "usage: osa remote agent <host> \"<prompt>\" [--dir <path>] [--model <m>]"}
 
-      [host | task_parts] ->
-        task = task_parts |> strip_leading_dashdash() |> Enum.join(" ")
+      [host | prompt_parts] ->
+        prompt = prompt_parts |> strip_leading_dashdash() |> Enum.join(" ")
 
-        if task == "" do
-          {:error, "no task given. usage: osa remote agent <host> \"<task>\""}
+        if prompt == "" do
+          {:error, "no prompt given. usage: osa remote agent <host> \"<prompt>\""}
         else
-          {:ok, %{host: host, task: task, opts: opts}}
+          {:ok, %{host: host, prompt: prompt, opts: opts}}
         end
     end
   rescue
@@ -85,28 +86,9 @@ defmodule OptimalSystemAgent.CLI.Remote do
   end
 
   @doc false
-  @spec parse_shell([String.t()]) :: {:ok, map()} | {:error, String.t()}
-  def parse_shell(args) do
-    {opts, positional} = OptionParser.parse!(args, strict: [shell: :string])
-
-    case positional do
-      [host | _] -> {:ok, %{host: host, shell: opts[:shell]}}
-      [] -> {:error, "usage: osa remote shell <host> [--shell <path>]"}
-    end
-  rescue
-    e in OptionParser.ParseError -> {:error, Exception.message(e)}
-  end
-
-  @doc false
-  @spec parse_sessions([String.t()]) :: {:ok, map()} | {:error, String.t()}
-  def parse_sessions([host | _]) when host != "", do: {:ok, %{host: host}}
-  def parse_sessions(_), do: {:error, "usage: osa remote sessions <host>"}
-
-  @doc false
   @spec parse_kill([String.t()]) :: {:ok, map()} | {:error, String.t()}
-  def parse_kill([host, session_id | _]), do: {:ok, %{host: host, session_id: session_id}}
-  def parse_kill([session_id]), do: {:ok, %{host: nil, session_id: session_id}}
-  def parse_kill(_), do: {:error, "usage: osa remote kill [<host>] <session_id>"}
+  def parse_kill([session_id | _]) when session_id != "", do: {:ok, %{session_id: session_id}}
+  def parse_kill(_), do: {:error, "usage: osa remote kill <session_id>"}
 
   @doc false
   @spec usage() :: String.t()
@@ -117,16 +99,17 @@ defmodule OptimalSystemAgent.CLI.Remote do
     Verbs:
       hosts                            List your connected machines + online status
       exec <host> [--] <cmd...>        Run one command on <host>, print stdout/exit
-      agent <host> "<task>"            Dispatch an OSA agent task to <host>
+      agent <host> "<prompt>"          Dispatch an OSA agent task to <host>
             [--dir <path>]             Working directory on the host
             [--model <m>]              Model override
             [--provider <p>]           Provider override
-      shell <host> [--shell <path>]    Interactive PTY on <host>
-      sessions <host>                  List live sessions on <host>
-      kill [<host>] <session_id>       Tear a session down
+      sessions                         (not available yet in this release)
+      kill <session_id>                Close a remote session
+      shell <host>                     (not available yet in this release)
 
     Auth: uses your MIOSA account credential (miosa login / MIOSA_PLATFORM_API_KEY,
-    or OSA_REMOTE_TOKEN to override). Endpoint override: OSA_REMOTE_CONTROL_URL.
+    or OSA_REMOTE_TOKEN to override). A user key needs the opencomputers:write
+    scope. Endpoint override: OSA_REMOTE_CONTROL_URL.
     """
   end
 
@@ -143,8 +126,8 @@ defmodule OptimalSystemAgent.CLI.Remote do
 
   defp cmd_exec(%{host: host, cmd: cmd}) do
     with_client(fn pid ->
-      with {:ok, sid} <- Client.create_session(pid, host, :exec),
-           {:ok, text} <- Client.run_job(pid, Frames.exec_job(sid, cmd)) do
+      with {:ok, sid} <- Client.open_session(pid, host, :exec, Frames.exec_params(cmd)),
+           {:ok, text} <- Client.await_result(pid, sid) do
         IO.puts(text)
       else
         {:error, msg} -> fail(msg)
@@ -152,10 +135,10 @@ defmodule OptimalSystemAgent.CLI.Remote do
     end)
   end
 
-  defp cmd_agent(%{host: host, task: task, opts: opts}) do
+  defp cmd_agent(%{host: host, prompt: prompt, opts: opts}) do
     with_client(fn pid ->
-      with {:ok, sid} <- Client.create_session(pid, host, :agent),
-           {:ok, text} <- Client.run_job(pid, Frames.agent_job(sid, task, opts)) do
+      with {:ok, sid} <- Client.open_session(pid, host, :agent, Frames.agent_params(prompt, opts)),
+           {:ok, text} <- Client.await_result(pid, sid) do
         IO.puts(text)
       else
         {:error, msg} -> fail(msg)
@@ -163,90 +146,38 @@ defmodule OptimalSystemAgent.CLI.Remote do
     end)
   end
 
-  defp cmd_shell(%{host: host, shell: shell}) do
+  defp cmd_kill(%{session_id: session_id}) do
     with_client(fn pid ->
-      case Client.create_session(pid, host, :shell) do
-        {:ok, sid} ->
-          run_interactive_shell(pid, sid, shell)
-
-        {:error, msg} ->
-          fail(msg)
-      end
-    end)
-  end
-
-  defp cmd_sessions(%{host: host}) do
-    with_client(fn pid ->
-      case Client.list_sessions(pid, host) do
-        {:ok, sessions} -> print_sessions(sessions)
+      case Client.close_session(pid, session_id) do
+        :ok -> IO.puts("Session #{session_id} closed.")
         {:error, msg} -> fail(msg)
       end
     end)
   end
 
-  defp cmd_kill(%{host: host, session_id: session_id}) do
-    with_client(fn pid ->
-      case Client.kill_session(pid, host, session_id) do
-        :ok -> IO.puts("Session #{session_id} killed.")
-        {:error, msg} -> fail(msg)
-      end
-    end)
+  @doc false
+  @spec shell_unavailable_message() :: String.t()
+  def shell_unavailable_message do
+    "Interactive remote shell is not available yet in this release " <>
+      "(exec and agent work); coming in a later round."
   end
 
-  # ── Interactive shell wiring (best-effort; needs a live broker) ──────────────
-
-  defp run_interactive_shell(pid, sid, shell) do
-    :ok = Client.stream_to(pid, self())
-    {cols, rows} = terminal_size()
-
-    bridge =
-      PtyBridge.new(sid,
-        send_fn: fn frame -> Client.send_frame(pid, frame) end,
-        cols: cols,
-        rows: rows
-      )
-
-    bridge = PtyBridge.open(bridge, shell)
-
-    _ = :io.setopts(:standard_io, binary: true)
-    parent = self()
-    reader = spawn_link(fn -> stdin_reader(parent) end)
-
-    exit_code = PtyBridge.loop(bridge)
-
-    if Process.alive?(reader), do: Process.exit(reader, :kill)
-    IO.puts("")
-    System.halt(exit_code)
+  @doc false
+  @spec sessions_unavailable_message() :: String.t()
+  def sessions_unavailable_message do
+    "Listing remote sessions is not available yet in this release: sessions are " <>
+      "scoped to the live client connection that opened them, and the broker does " <>
+      "not expose cross-connection enumeration. Coming in a later round."
   end
 
-  defp stdin_reader(parent) do
-    case IO.binread(:stdio, 1) do
-      :eof ->
-        send(parent, :eof)
-
-      {:error, _reason} ->
-        send(parent, :eof)
-
-      data when is_binary(data) ->
-        send(parent, {:stdin, data})
-        stdin_reader(parent)
-    end
+  defp cmd_shell do
+    IO.puts(:stderr, shell_unavailable_message())
+    System.halt(2)
   end
 
-  defp terminal_size do
-    cols =
-      case :io.columns() do
-        {:ok, c} -> c
-        _ -> 80
-      end
-
-    rows =
-      case :io.rows() do
-        {:ok, r} -> r
-        _ -> 24
-      end
-
-    {cols, rows}
+  defp cmd_sessions do
+    IO.puts(:stderr, sessions_unavailable_message())
+    System.halt(2)
   end
 
   # ── Output rendering ─────────────────────────────────────────────────────────
@@ -262,26 +193,10 @@ defmodule OptimalSystemAgent.CLI.Remote do
     IO.puts("────────────────────────────────")
 
     Enum.each(hosts, fn host ->
-      id = host[:alias] || host[:id] || "(unknown)"
+      id = host[:name] || host[:id] || "(unknown)"
       status = if host[:online], do: "online", else: "offline"
-      os = host[:os] || ""
+      os = host[:os_kind] || ""
       IO.puts("  #{id}  [#{status}]  #{os}")
-    end)
-
-    IO.puts("")
-  end
-
-  defp print_sessions([]), do: IO.puts("No live sessions on that host.")
-
-  defp print_sessions(sessions) do
-    IO.puts("")
-    IO.puts("Live sessions")
-    IO.puts("────────────────────────────────")
-
-    Enum.each(sessions, fn session ->
-      sid = session[:session_id] || "(unknown)"
-      kind = session[:kind] || ""
-      IO.puts("  #{sid}  #{kind}")
     end)
 
     IO.puts("")

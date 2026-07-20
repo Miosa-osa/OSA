@@ -24,15 +24,15 @@ defmodule OptimalSystemAgent.CLI.RemoteTest do
   end
 
   describe "parse_agent/1" do
-    test "host + task, options stripped out" do
-      assert {:ok, %{host: "home", task: "fix the failing test", opts: opts}} =
+    test "host + prompt, options stripped out" do
+      assert {:ok, %{host: "home", prompt: "fix the failing test", opts: opts}} =
                Remote.parse_agent(["home", "fix", "the", "failing", "test", "--dir", "/work"])
 
       assert opts[:dir] == "/work"
     end
 
     test "model + provider options parse" do
-      assert {:ok, %{host: "box", task: "do it", opts: opts}} =
+      assert {:ok, %{host: "box", prompt: "do it", opts: opts}} =
                Remote.parse_agent([
                  "box",
                  "do",
@@ -47,9 +47,9 @@ defmodule OptimalSystemAgent.CLI.RemoteTest do
       assert opts[:provider] == "miosa"
     end
 
-    test "missing task is an error" do
+    test "missing prompt is an error" do
       assert {:error, msg} = Remote.parse_agent(["home"])
-      assert msg =~ "no task"
+      assert msg =~ "no prompt"
     end
 
     test "no args is an error" do
@@ -57,35 +57,13 @@ defmodule OptimalSystemAgent.CLI.RemoteTest do
     end
   end
 
-  describe "parse_shell/1" do
-    test "host only" do
-      assert {:ok, %{host: "home", shell: nil}} = Remote.parse_shell(["home"])
-    end
-
-    test "host + --shell" do
-      assert {:ok, %{host: "home", shell: "/bin/zsh"}} =
-               Remote.parse_shell(["home", "--shell", "/bin/zsh"])
-    end
-
-    test "missing host is an error" do
-      assert {:error, _} = Remote.parse_shell([])
-    end
-  end
-
-  describe "parse_sessions/1" do
-    test "host required" do
-      assert {:ok, %{host: "home"}} = Remote.parse_sessions(["home"])
-      assert {:error, _} = Remote.parse_sessions([])
-    end
-  end
-
   describe "parse_kill/1" do
-    test "host + session id" do
-      assert {:ok, %{host: "home", session_id: "sid-1"}} = Remote.parse_kill(["home", "sid-1"])
+    test "session id only (#484 kill takes just a session id)" do
+      assert {:ok, %{session_id: "sid-1"}} = Remote.parse_kill(["sid-1"])
     end
 
-    test "session id only (broker resolves host)" do
-      assert {:ok, %{host: nil, session_id: "sid-1"}} = Remote.parse_kill(["sid-1"])
+    test "extra args after the session id are ignored" do
+      assert {:ok, %{session_id: "sid-1"}} = Remote.parse_kill(["sid-1", "extra"])
     end
 
     test "no args is an error" do
@@ -97,9 +75,13 @@ defmodule OptimalSystemAgent.CLI.RemoteTest do
     test "usage/0 lists every verb" do
       text = Remote.usage()
 
-      for verb <- ["hosts", "exec", "agent", "shell", "sessions", "kill"] do
+      for verb <- ["hosts", "exec", "agent", "sessions", "kill", "shell"] do
         assert text =~ verb
       end
+    end
+
+    test "usage/0 mentions the opencomputers:write scope requirement" do
+      assert Remote.usage() =~ "opencomputers:write"
     end
 
     test "dispatch([--help]) prints usage without error" do
@@ -111,6 +93,19 @@ defmodule OptimalSystemAgent.CLI.RemoteTest do
     test "dispatch([]) prints usage" do
       out = ExUnit.CaptureIO.capture_io(fn -> Remote.dispatch([]) end)
       assert out =~ "Usage: osa remote"
+    end
+  end
+
+  describe "shell / sessions are gated off (not in the #484 contract)" do
+    test "shell_unavailable_message is clear about the release status" do
+      msg = Remote.shell_unavailable_message()
+      assert msg =~ "not available yet"
+      assert msg =~ "exec and agent work"
+    end
+
+    test "sessions_unavailable_message explains the per-connection scoping" do
+      msg = Remote.sessions_unavailable_message()
+      assert msg =~ "not available yet"
     end
   end
 end
