@@ -59,6 +59,12 @@ impl App {
                 let dangerous =
                     matches!(mode, crate::components::status_bar::PermissionMode::BypassPermissions);
                 self.spawn_backend_command("dangerous_mode", if dangerous { "on" } else { "off" });
+                // Coordinator state is backend-authoritative (sticky per-session
+                // store), the opposite direction from permission mode. Query it on
+                // (re)connect so the chip reflects a session that resumed with
+                // coordinator on. The backend echoes a coordinator_mode event,
+                // which drives the chip; "status" reads without mutating.
+                self.spawn_backend_command("coordinator", "status");
             }
             BackendEvent::SseDisconnected { error } => {
                 match error.as_deref() {
@@ -2202,6 +2208,22 @@ impl App {
                     crate::components::toast::ToastLevel::Info,
                 );
                 self.sidebar.set_proactive(enabled);
+            }
+            BackendEvent::CoordinatorMode { active } => {
+                // The backend is authoritative for coordinator state (sticky
+                // per-session store): reflect it on the status-bar chip, toast the
+                // transition, and announce it for screen readers.
+                self.status.set_coordinator(active);
+                let msg = if active {
+                    "Coordinator mode on: delegation and messaging only"
+                } else {
+                    "Coordinator mode off: full tool access"
+                };
+                self.toasts.push(
+                    msg.into(),
+                    crate::components::toast::ToastLevel::Info,
+                );
+                self.announce_a11y(msg);
             }
         }
         false

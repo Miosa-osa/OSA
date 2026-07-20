@@ -123,6 +123,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
         cmd_name in ~w(plan_approve plan_reject plan_edit) ->
           handle_plan_command(conn, cmd_name)
 
+        cmd_name == "coordinator" ->
+          handle_coordinator_command(conn, conn.body_params["arg"] || "")
+
         cmd_name in @blocked_http_commands ->
           body =
             Jason.encode!(%{
@@ -176,6 +179,43 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
     body = Jason.encode!(%{output: output, command: cmd_name})
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  # `/coordinator [on|off|toggle|status]`: the TUI coordinator posture toggle.
+  # Applied IN PLACE on the live loop (no session restart / id churn), recorded
+  # in the sticky `Agent.CoordinatorMode` store, and echoed as a `coordinator_mode`
+  # system_event so the status-bar chip tracks it. `status` reads without changing.
+  defp handle_coordinator_command(conn, arg) do
+    session_id =
+      conn.body_params["session_id"] || "http_#{:erlang.unique_integer([:positive])}"
+
+    verb = arg |> to_string() |> String.trim() |> String.downcase()
+    current = coordinator_active?(session_id)
+
+    desired =
+      case verb do
+        v when v in ~w(on true 1 yes enable) -> true
+        v when v in ~w(off false 0 no disable) -> false
+        v when v in ["status", ""] -> current
+        _ -> not current
+      end
+
+    {:ok, active} = OptimalSystemAgent.Agent.Loop.set_coordinator(session_id, desired)
+
+    output =
+      if active,
+        do: "Coordinator mode ON (delegation and messaging only).",
+        else: "Coordinator mode OFF (full tool access)."
+
+    body = Jason.encode!(%{output: output, command: "coordinator", active: active})
+    conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  defp coordinator_active?(session_id) do
+    case OptimalSystemAgent.Agent.Loop.get_coordinator(session_id) do
+      {:ok, on?} -> on?
+      _ -> false
+    end
   end
 
   # Matches `auto_mode`, `auto_mode on/off`, `set_permission_mode auto|full`,

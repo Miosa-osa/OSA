@@ -407,6 +407,13 @@ pub enum BackendEvent {
         enabled: bool,
     },
 
+    // === Coordinator Mode ===
+    /// The backend coordinator posture changed. When `active` the tool surface is
+    /// restricted to delegation/messaging only. Drives the `⧉ coordinator` chip.
+    CoordinatorMode {
+        active: bool,
+    },
+
     // === Cancel ===
     /// Fired 3s after cancel request if the SSE stream hasn't delivered a response.
     /// Forces the UI back to Idle to prevent getting stuck.

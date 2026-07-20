@@ -130,6 +130,35 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterTest do
     end
   end
 
+  # ── Coordinator posture (delegation/messaging only) ─────────────────────
+
+  describe "filter_for_coordinator/2" do
+    defp mixed_tools do
+      ~w(delegate send_message tool_search memory_recall memory_save file_write
+         shell_execute file_read web_search computer_use)
+      |> Enum.map(&%{name: &1})
+    end
+
+    test "false leaves the full tool list untouched" do
+      tools = mixed_tools()
+      assert ToolFilter.filter_for_coordinator(tools, false) == tools
+    end
+
+    test "true keeps only the coordinator allowlist (execution tools stripped)" do
+      filtered = ToolFilter.filter_for_coordinator(mixed_tools(), true)
+      names = Enum.map(filtered, & &1.name)
+
+      # Delegation / messaging / management survive.
+      assert "delegate" in names
+      assert "send_message" in names
+      assert "memory_recall" in names
+      # Execution tools are gone.
+      refute "file_write" in names
+      refute "shell_execute" in names
+      refute "computer_use" in names
+    end
+  end
+
   defp session_effort_level do
     case :ets.whereis(:osa_settings) do
       :undefined ->

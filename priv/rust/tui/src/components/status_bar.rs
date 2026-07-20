@@ -258,6 +258,9 @@ pub struct StatusBar {
     download_pct: u8,
     hands_free: bool,
     permission_mode: PermissionMode,
+    /// Coordinator posture: when true the backend restricts the tool surface to
+    /// delegation/messaging only; drives the compact `⧉ coordinator` chip.
+    coordinator: bool,
     shell_count: usize,
     cwd_basename: String,
     /// "goal N/max" indicator when a /goal auto-continue loop is active.
@@ -322,6 +325,7 @@ impl StatusBar {
             download_pct: 0,
             hands_free: false,
             permission_mode: PermissionMode::Default,
+            coordinator: false,
             shell_count: 0,
             cwd_basename,
             goal_label: None,
@@ -423,6 +427,16 @@ impl StatusBar {
 
     pub fn permission_mode(&self) -> PermissionMode {
         self.permission_mode
+    }
+
+    /// Set the coordinator posture, driving the `⧉ coordinator` status chip.
+    pub fn set_coordinator(&mut self, on: bool) {
+        self.coordinator = on;
+    }
+
+    /// Whether coordinator mode is currently active.
+    pub fn coordinator(&self) -> bool {
+        self.coordinator
     }
 
     pub fn set_shell_count(&mut self, count: usize) {
@@ -1025,6 +1039,17 @@ impl Component for StatusBar {
 
         // Build the trailing "· N shells · N bg" fragment once, reused below.
         let mut extras: Vec<Span<'_>> = Vec::new();
+        // Coordinator posture chip: a compact, understated `⧉ coordinator` shown
+        // only while active. Distinct glyph from the permission-mode indicator so
+        // the two never collide. Placed first among the extras so it reads next to
+        // the mode label on the ⏵⏵ row.
+        if self.coordinator {
+            extras.push(Span::styled(" \u{00b7} ", theme.status_sep()));
+            extras.push(Span::styled(
+                "\u{29C9} coordinator",
+                Style::default().fg(theme.colors.primary),
+            ));
+        }
         // U-T23 — when idle, frame background work as a single "watching" cue
         // (monitors = running background shells, loops = backgrounded turns)
         // instead of the raw in-turn shells/bg detail. During a live turn the
@@ -1202,6 +1227,46 @@ mod status_bar_tests {
         // Default (ask) mode shows no persistent mode banner at all (CC hides it).
         let def = render_status_text(PermissionMode::Default);
         assert!(!def.contains("ask on"), "default mode must not print a mode banner");
+    }
+
+    /// Render the status bar with a coordinator flag and flatten to a string.
+    fn render_with_coordinator(on: bool) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut sb = StatusBar::new();
+        sb.set_coordinator(on);
+        sb.set_width(120);
+        let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+        term.draw(|f| sb.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn coordinator_chip_renders_only_when_active() {
+        let mut sb = StatusBar::new();
+        assert!(!sb.coordinator());
+        sb.set_coordinator(true);
+        assert!(sb.coordinator());
+
+        // Active: the compact `⧉ coordinator` chip is present.
+        let on = render_with_coordinator(true);
+        assert!(
+            on.contains("coordinator") && on.contains('\u{29C9}'),
+            "coordinator chip must render when active, got: {:?}",
+            on
+        );
+
+        // Inactive: no chip.
+        let off = render_with_coordinator(false);
+        assert!(
+            !off.contains("coordinator"),
+            "coordinator chip must be hidden when inactive, got: {:?}",
+            off
+        );
     }
 
     #[test]

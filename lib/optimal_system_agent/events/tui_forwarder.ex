@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     subscribe_pr_registered
     goal_verifier_round
     scratchpad_activity
+    coordinator_mode
     error
   )a
 

@@ -483,6 +483,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "survey_answered"
         | "proactive_message"
         | "proactive_mode_changed"
+        | "coordinator_mode"
         | "auto_mode_paused" => parse_system_event(data),
 
         // Background (fire-and-forget) subagents. `started` arrives wrapped as a
@@ -1438,6 +1439,19 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "coordinator_mode" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                active: bool,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("coordinator_mode", e)),
+            };
+            Some(BackendEvent::CoordinatorMode { active: ev.active })
+        }
+
         // Multi-agent workflow events may also arrive wrapped as a system_event
         // (with an `event` field). Delegate to the top-level parser, which builds
         // them from the same frame data.
@@ -1565,6 +1579,24 @@ mod tests {
                 assert_eq!(action, "append");
                 assert_eq!(bytes, 42);
             }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_coordinator_mode() {
+        // Delivered wrapped as a system_event by the backend TuiForwarder.
+        let on = br#"{"type":"system_event","event":"coordinator_mode","session_id":"s1","active":true}"#;
+        for frame in ["coordinator_mode", "system_event"] {
+            match parse_sse_event(frame, on) {
+                Some(BackendEvent::CoordinatorMode { active }) => assert!(active),
+                other => panic!("unexpected for {}: {:?}", frame, other),
+            }
+        }
+
+        let off = br#"{"type":"system_event","event":"coordinator_mode","session_id":"s1","active":false}"#;
+        match parse_sse_event("coordinator_mode", off) {
+            Some(BackendEvent::CoordinatorMode { active }) => assert!(!active),
             other => panic!("unexpected: {:?}", other),
         }
     }

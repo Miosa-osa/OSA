@@ -138,6 +138,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     session_cache_read_tokens: 0,
     # Coordinator mode — restricts tools to delegation/messaging/management only
     coordinator: false,
+    # The UNFILTERED base tool list (applicable tools ++ extra_tools) captured at
+    # init. Preserved so the runtime coordinator toggle can restore full tool
+    # access (`tools = filter_for_coordinator(all_tools, coordinator)`) without
+    # restarting the session / churning the session id.
+    all_tools: [],
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
     max_turns: nil,
@@ -433,6 +438,49 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   @doc """
+  Set the coordinator posture for a session IN PLACE, with no session-id change.
+
+  Coordinator mode restricts the live tool list to delegation/messaging/
+  management tools (`ToolFilter.filter_for_coordinator/2`); turning it off
+  restores the unfiltered `all_tools` captured at init. Unlike the old CLI
+  toggle (which restarted the session and churned its id), this re-restricts or
+  restores the running loop's `state.tools` live.
+
+  The choice is recorded in the sticky per-session `Agent.CoordinatorMode` store
+  BEFORE touching the live loop, so it survives (a) a toggle set before the
+  turn's loop exists (`:no_session` race, where `Loop.init/1` seeds from the store)
+  and (b) a loop later (re)created fresh for the session. A `coordinator_mode`
+  system_event is emitted so the TUI indicator tracks the resulting state.
+  """
+  @spec set_coordinator(String.t(), boolean()) :: {:ok, boolean()}
+  def set_coordinator(session_id, on?) when is_boolean(on?) do
+    # Persist first so the choice is sticky even if no live loop picks it up.
+    OptimalSystemAgent.Agent.CoordinatorMode.put(session_id, on?)
+
+    result =
+      try do
+        GenServer.call(via(session_id), {:set_coordinator, on?})
+      catch
+        # No live loop yet: the sticky store seeds it on Loop.init, so treat as
+        # a pending success rather than a lost error (mirrors set_permission_mode).
+        :exit, _ -> {:ok, on?}
+      end
+
+    emit_coordinator_mode(session_id, on?)
+    result
+  end
+
+  @doc "Get the current coordinator posture for a session (sticky-store default)."
+  @spec get_coordinator(String.t()) :: {:ok, boolean()}
+  def get_coordinator(session_id) do
+    try do
+      GenServer.call(via(session_id), {:get_coordinator})
+    catch
+      :exit, _ -> {:ok, OptimalSystemAgent.Agent.CoordinatorMode.get(session_id)}
+    end
+  end
+
+  @doc """
   Cancel a running agent loop for the given session — TRANSITIVELY.
 
   Sets a flag in an ETS table that ReactLoop.run/1 checks at each iteration.
@@ -666,6 +714,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
     plan_mode = Map.get(restored, :plan_mode, false)
     turn_count = Map.get(restored, :turn_count, 0)
 
+    # Coordinator precedence mirrors permission_mode: an explicit opt
+    # (subagent inheritance / CLI --coordinator) wins; then the sticky
+    # per-session store (the TUI's runtime toggle, which survives a fresh/late
+    # loop); then false. The UNFILTERED base list is captured so the runtime
+    # toggle can restore full tool access without a session restart.
+    coordinator? =
+      Keyword.get(opts, :coordinator) ||
+        OptimalSystemAgent.Agent.CoordinatorMode.get(session_id) ||
+        false
+
+    all_tools = Tools.filter_applicable_tools(%{history: []}) ++ extra_tools
+
     state = %__MODULE__{
       session_id: session_id,
       user_id: Keyword.get(opts, :user_id),
@@ -676,12 +736,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
       iteration: iteration,
       plan_mode: plan_mode,
       turn_count: turn_count,
-      tools:
-        ToolFilter.filter_for_coordinator(
-          Tools.filter_applicable_tools(%{history: []}) ++ extra_tools,
-          Keyword.get(opts, :coordinator, false)
-        ),
-      coordinator: Keyword.get(opts, :coordinator, false),
+      tools: ToolFilter.filter_for_coordinator(all_tools, coordinator?),
+      all_tools: all_tools,
+      coordinator: coordinator?,
       max_budget_usd:
         Keyword.get(opts, :max_budget_usd) ||
           Application.get_env(:optimal_system_agent, :max_budget_usd),
@@ -799,6 +856,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Announce a coordinator-mode transition on the Bus. The TuiForwarder bridges
+  # `coordinator_mode` (on its allowlist) to the session PubSub topic the TUI
+  # streams, so the status-bar chip tracks the resulting state. Bus-only (no
+  # direct session broadcast) to avoid the double-emit the forwarder warns about.
+  defp emit_coordinator_mode(session_id, active) do
+    Bus.emit(:system_event, %{
+      event: :coordinator_mode,
+      session_id: session_id,
+      active: active
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # "autonomous" preset (Change H) — one switch that makes an hours-long
@@ -1033,6 +1108,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call({:get_permission_mode}, _from, state) do
     {:reply, {:ok, state.permission_mode}, state}
+  end
+
+  # In-place coordinator toggle: re-restrict (on) or restore (off) the live tool
+  # list from the preserved unfiltered base, no session restart. state.coordinator
+  # is also read by Agent.Context to inject the "Mode: coordinator" system note.
+  def handle_call({:set_coordinator, on?}, _from, state) when is_boolean(on?) do
+    tools = ToolFilter.filter_for_coordinator(state.all_tools, on?)
+    {:reply, {:ok, on?}, %{state | coordinator: on?, tools: tools}}
+  end
+
+  def handle_call({:get_coordinator}, _from, state) do
+    {:reply, {:ok, state.coordinator}, state}
   end
 
   def handle_call({:set_strategy, _strategy_name}, _from, state) do

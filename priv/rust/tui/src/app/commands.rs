@@ -45,6 +45,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("auto", "Toggle the safety-guardian auto mode"),
     ("overdrive", "Toggle overdrive (full auto)"),
     ("yolo", "Toggle overdrive (full auto)"),
+    ("coordinator", "Toggle coordinator mode (delegation only)"),
     ("memory", "Save or recall a memory"),
     ("channels", "Show channel connectivity"),
     ("doctor", "Run backend diagnostics"),
@@ -396,6 +397,20 @@ impl App {
                 });
                 // Notify backend to toggle the auto permission tier.
                 self.execute_backend_command("auto_mode", if turning_on { "on" } else { "off" });
+            }
+            "/coordinator" => {
+                // Toggle the coordinator posture: the backend restricts the tool
+                // surface to delegation and messaging only. Applied in place on
+                // the live session (no restart). An explicit on/off arg is passed
+                // through; otherwise the backend flips the current state. The chip
+                // and toast are driven by the coordinator_mode event the backend
+                // echoes back, so the UI reflects the AUTHORITATIVE server state.
+                let verb = match arg.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" => "on",
+                    "off" | "false" | "0" | "no" => "off",
+                    _ => "toggle",
+                };
+                self.execute_backend_command("coordinator", verb);
             }
             "/tools" => {
                 // Fetch the full tool list and open the searchable browser when
@@ -859,5 +874,18 @@ mod tests {
             "`update` missing from BUILTIN_SLASH_COMMANDS"
         );
         assert_eq!(entry.unwrap().1, "Update OSA to the latest version");
+    }
+
+    #[test]
+    fn coordinator_command_is_registered() {
+        // `/coordinator` must be discoverable in the completions popup / palette.
+        let entry = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "coordinator");
+        assert!(
+            entry.is_some(),
+            "`coordinator` missing from BUILTIN_SLASH_COMMANDS"
+        );
+        assert_eq!(entry.unwrap().1, "Toggle coordinator mode (delegation only)");
     }
 }
