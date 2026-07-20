@@ -550,6 +550,9 @@ impl App {
         // Fresh turn — clear any prior goal-verification indicator so it never
         // lingers into unrelated work.
         self.status.set_goal_verification(None);
+        // Fresh turn — drop any prior fan-out's shared-scratchpad notes so they
+        // never bleed into unrelated work (transient, scoped to the fan-out).
+        self.agents.clear_scratchpad();
         self.processing_start = Some(std::time::Instant::now());
         self.stream_buf.clear();
         self.thinking_buf.clear();

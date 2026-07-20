@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
        as the coordinator that spawned it.
   """
 
+  alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Scratchpad
   alias OptimalSystemAgent.Tools.Builtins.Scratchpad.Constants
   alias OptimalSystemAgent.Tools.UseContext
@@ -67,8 +68,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
     id = scratchpad_id(args, ctx)
 
     case Scratchpad.write(id, name, content) do
-      {:ok, path} -> {:ok, "Wrote #{name} (#{byte_size(content)} bytes) → #{path}"}
-      {:error, reason} -> {:ok, "Rejected: #{reason}"}
+      {:ok, path} ->
+        emit_activity(id, session_id(args, ctx), name, :write, byte_size(content))
+        {:ok, "Wrote #{name} (#{byte_size(content)} bytes) → #{path}"}
+
+      {:error, reason} ->
+        {:ok, "Rejected: #{reason}"}
     end
   end
 
@@ -76,8 +81,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
     id = scratchpad_id(args, ctx)
 
     case Scratchpad.append(id, name, content) do
-      {:ok, path} -> {:ok, "Appended #{byte_size(content)} bytes to #{name} → #{path}"}
-      {:error, reason} -> {:ok, "Rejected: #{reason}"}
+      {:ok, path} ->
+        emit_activity(id, session_id(args, ctx), name, :append, byte_size(content))
+        {:ok, "Appended #{byte_size(content)} bytes to #{name} → #{path}"}
+
+      {:error, reason} ->
+        {:ok, "Rejected: #{reason}"}
     end
   end
 
@@ -143,5 +152,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
     Map.get(args, "__session_id__") ||
       (ctx && Map.get(ctx, :session_id)) ||
       "unknown"
+  end
+
+  # Emit a compact, best-effort activity signal so the TUI agents panel can
+  # surface WHO wrote WHAT to the shared scratchpad during a fan-out. Carries no
+  # file CONTENTS — only writer / entry / action / byte size. The `session_id`
+  # is the shared coordination id (the session root), which is exactly the
+  # `osa:session:<id>` topic the top-level TUI streams, so a worker's write shows
+  # up on the coordinator's panel.
+  #
+  # Failure here must NEVER fail the scratchpad write, so the whole thing is
+  # wrapped and swallowed. The emit fn is an injectable seam (`:scratchpad_emit_fun`)
+  # so a test can force it to raise and confirm the write still succeeds.
+  defp emit_activity(coordination_id, writer, entry, action, bytes) do
+    emit = Application.get_env(:optimal_system_agent, :scratchpad_emit_fun, &Bus.emit/2)
+
+    emit.(:system_event, %{
+      event: :scratchpad_activity,
+      session_id: coordination_id,
+      agent: writer,
+      entry: entry,
+      action: action,
+      bytes: bytes
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 end

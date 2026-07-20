@@ -134,6 +134,63 @@ defmodule OptimalSystemAgent.Tools.Builtins.ScratchpadToolTest do
     end
   end
 
+  describe "scratchpad_activity emission" do
+    setup do
+      # The coordination id for a plain injected session (no RunStore parent) is
+      # the session itself, so that IS the topic the TUI would stream.
+      sid = "activity-sess-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{sid}")
+      {:ok, session_id: sid}
+    end
+
+    test "write emits a compact scratchpad_activity with no file contents", %{session_id: sid} do
+      assert {:ok, msg} =
+               run(%{"action" => "write", "name" => "findings.md", "content" => "hello team"}, sid)
+
+      assert msg =~ "Wrote findings.md"
+
+      # Reaches the TUI session topic via the TuiForwarder allowlist.
+      assert_receive {:osa_event, event}, 2000
+      assert event.event == :scratchpad_activity
+      assert event.agent == sid
+      assert event.entry == "findings.md"
+      assert event.action == :write
+      assert event.bytes == byte_size("hello team")
+      # Payload stays small: who/what/size only, never the file body.
+      refute Map.has_key?(event, :content)
+    end
+
+    test "append emits with the :append action", %{session_id: sid} do
+      run(%{"action" => "write", "name" => "log.md", "content" => "a"}, sid)
+      assert_receive {:osa_event, %{action: :write}}, 2000
+
+      assert {:ok, _} = run(%{"action" => "append", "name" => "log.md", "content" => "bcd"}, sid)
+      assert_receive {:osa_event, %{event: :scratchpad_activity, action: :append, bytes: 3}}, 2000
+    end
+
+    test "a write still succeeds when the emit is stubbed to fail", %{session_id: sid} do
+      prev = Application.get_env(:optimal_system_agent, :scratchpad_emit_fun)
+
+      Application.put_env(:optimal_system_agent, :scratchpad_emit_fun, fn _type, _payload ->
+        raise "boom"
+      end)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :scratchpad_emit_fun, prev),
+          else: Application.delete_env(:optimal_system_agent, :scratchpad_emit_fun)
+      end)
+
+      # The write must complete cleanly despite the raising emitter.
+      assert {:ok, msg} =
+               run(%{"action" => "write", "name" => "robust.md", "content" => "still ok"}, sid)
+
+      assert msg =~ "Wrote robust.md"
+      # And the entry really landed on disk.
+      assert {:ok, "still ok"} = run(%{"action" => "read", "name" => "robust.md"}, sid)
+    end
+  end
+
   describe "tool declarations" do
     test "schema is tight (no Type.Union / anyOf / oneOf / raw format)" do
       schema = Tool.parameters()

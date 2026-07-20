@@ -67,6 +67,24 @@ pub struct BgTerminalRow {
     pub done: bool,
 }
 
+/// One recent write/append to the shared file-based scratchpad during a
+/// fan-out. Rendered as a compact dim line under the agent rows so the user
+/// watches coordination artifacts accumulate. Carries no file contents — only
+/// who/what/size. Transient: the whole list is cleared when the team finishes or
+/// a new top-level turn starts.
+#[derive(Debug, Clone)]
+pub struct ScratchpadNote {
+    /// Writing agent id (a session id like `agent:<parent>:1`, or the
+    /// coordinator's own session for a top-level write).
+    pub agent: String,
+    /// Entry name written, e.g. `findings.md`.
+    pub entry: String,
+    /// Past-tense verb shown to the user: "wrote" (write) or "appended" (append).
+    pub action: &'static str,
+    /// Byte size of the write, formatted compactly (2100 → "2.1k").
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct WaveInfo {
     pub current: u32,

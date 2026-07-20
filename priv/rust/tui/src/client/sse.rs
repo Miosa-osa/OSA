@@ -473,6 +473,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_converged"
         | "swarm_intelligence_completed"
         | "goal_verifier_round"
+        | "scratchpad_activity"
         | "hook_blocked"
         | "budget_warning"
         | "budget_exceeded"
@@ -1172,6 +1173,30 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "scratchpad_activity" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                agent: String,
+                #[serde(default)]
+                entry: String,
+                #[serde(default)]
+                action: String,
+                #[serde(default)]
+                bytes: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("scratchpad_activity", e)),
+            };
+            Some(BackendEvent::ScratchpadActivity {
+                agent: ev.agent,
+                entry: ev.entry,
+                action: ev.action,
+                bytes: ev.bytes,
+            })
+        }
+
         "swarm_intelligence_converged" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -1513,6 +1538,32 @@ mod tests {
             Some(BackendEvent::GoalVerification { phase, verdict, .. }) => {
                 assert_eq!(phase, "done");
                 assert_eq!(verdict, "complete");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_scratchpad_activity() {
+        // The compact fan-out coordination signal: who wrote what, how big — and
+        // crucially NO file contents.
+        let data = br#"{"type":"system_event","event":"scratchpad_activity","session_id":"s1","agent":"agent:s1:2","entry":"findings.md","action":"write","bytes":2100}"#;
+        match parse_sse_event("scratchpad_activity", data) {
+            Some(BackendEvent::ScratchpadActivity { agent, entry, action, bytes }) => {
+                assert_eq!(agent, "agent:s1:2");
+                assert_eq!(entry, "findings.md");
+                assert_eq!(action, "write");
+                assert_eq!(bytes, 2100);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // An append frame with a small size still parses.
+        let appended = br#"{"type":"system_event","event":"scratchpad_activity","session_id":"s1","agent":"lead","entry":"notes.md","action":"append","bytes":42}"#;
+        match parse_sse_event("scratchpad_activity", appended) {
+            Some(BackendEvent::ScratchpadActivity { action, bytes, .. }) => {
+                assert_eq!(action, "append");
+                assert_eq!(bytes, 42);
             }
             other => panic!("unexpected: {:?}", other),
         }

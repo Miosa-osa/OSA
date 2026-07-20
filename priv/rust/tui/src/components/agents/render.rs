@@ -330,6 +330,47 @@ impl Agents {
                     Paragraph::new(swarm_line),
                     Rect::new(area.x, y, area.width, 1),
                 );
+                y += 1;
+            }
+        }
+
+        // ── Shared scratchpad activity ──────────────────────────────────────
+        // A compact, dim section listing the last few writes to the shared
+        // file-based scratchpad so the user watches coordination artifacts
+        // accumulate during a fan-out. Capped by `SCRATCHPAD_CAP`; cleared when
+        // the team finishes or a new turn starts. Never a log, never loud.
+        if !self.scratchpad.is_empty() && y < area.y + area.height {
+            let n = self.scratchpad.len();
+            let header = Line::from(vec![
+                Span::styled("scratchpad", theme.faint()),
+                Span::styled(
+                    format!(" \u{00b7} {} entr{}", n, if n == 1 { "y" } else { "ies" }),
+                    theme.faint(),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(header), Rect::new(area.x, y, area.width, 1));
+            y += 1;
+
+            for note in self.scratchpad.iter() {
+                if y >= area.y + area.height {
+                    break;
+                }
+                // "  ↳ @agent wrote findings.md (2.1k)" — all dim, tucked under
+                // the agent rows.
+                let who = short_agent(&note.agent);
+                let line_text = format!(
+                    "  \u{21b3} @{} {} {} ({})",
+                    who,
+                    note.action,
+                    note.entry,
+                    fmt_bytes(note.bytes),
+                );
+                let truncated = truncate_str(&line_text, (area.width as usize).max(8));
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(truncated, theme.faint()))),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+                y += 1;
             }
         }
     }
@@ -596,6 +637,25 @@ fn fmt_tokens(n: u32) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// Format a byte size compactly: 312 → "312", 2100 → "2.1k", 1_500_000 → "1.5M".
+fn fmt_bytes(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Compact a writer's session id for the scratchpad line. Worker session ids
+/// look like `agent:<parent>:1`; showing the trailing `<parent>:1` keeps the
+/// line short while still distinguishing teammates. Non-worker ids pass through.
+fn short_agent(agent: &str) -> String {
+    let trimmed = agent.strip_prefix("agent:").unwrap_or(agent);
+    truncate_str(trimmed, 18)
 }
 
 /// Shorten model names by stripping the "claude-" prefix.

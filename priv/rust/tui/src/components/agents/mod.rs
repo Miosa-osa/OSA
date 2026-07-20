@@ -7,7 +7,7 @@ use crate::event::Event;
 use crate::event::backend::SpawningAgent;
 
 use super::{Component, ComponentAction};
-use entry::{AgentEntry, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
+use entry::{AgentEntry, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 pub use entry::AgentStatus;
 pub use entry::BgTerminalRow;
 
@@ -39,7 +39,15 @@ pub struct Agents {
     /// only cost signal available; the dashboard surfaces it and notes the
     /// per-agent breakdown is absent (rather than fabricating one from tokens).
     est_cost_usd: Option<f64>,
+    /// Last few writes/appends to the shared file-based scratchpad, NEWEST FIRST.
+    /// Capped at `SCRATCHPAD_CAP` so it never grows unbounded, and cleared when
+    /// the team finishes or a new top-level turn starts — a transient, dim
+    /// coordination surface, never a scrolling log.
+    scratchpad: Vec<ScratchpadNote>,
 }
+
+/// Most recent shared-scratchpad writes retained + rendered under the panel.
+const SCRATCHPAD_CAP: usize = 5;
 
 impl Agents {
     pub fn new() -> Self {
@@ -54,7 +62,32 @@ impl Agents {
             tick: 0,
             bg_summary: 0,
             est_cost_usd: None,
+            scratchpad: Vec::new(),
         }
+    }
+
+    /// Record a shared-scratchpad write/append. Pushed newest-first and capped at
+    /// `SCRATCHPAD_CAP`. Activates the panel so a fan-out that coordinates purely
+    /// through files still surfaces something to watch.
+    pub fn scratchpad_activity(
+        &mut self,
+        agent: impl Into<String>,
+        entry: impl Into<String>,
+        action: &str,
+        bytes: u64,
+    ) {
+        let verb = if action == "append" { "appended" } else { "wrote" };
+        self.scratchpad.insert(
+            0,
+            ScratchpadNote { agent: agent.into(), entry: entry.into(), action: verb, bytes },
+        );
+        self.scratchpad.truncate(SCRATCHPAD_CAP);
+        self.active = true;
+    }
+
+    /// Number of recent shared-scratchpad notes currently retained (test/render aid).
+    pub fn scratchpad_len(&self) -> usize {
+        self.scratchpad.len()
     }
 
     /// Set the combined background-terminals count shown in the summary line.
@@ -163,9 +196,20 @@ impl Agents {
             0
         };
         let swarm_lines = if self.swarm.is_some() { 1u16 } else { 0 };
-        // summary + 1 header + batch headers + agents + synth + swarm
-        let total =
-            summary_line + 1 + batch_header_lines + agent_lines + synth_lines + swarm_lines;
+        // Shared-scratchpad section: 1 header + one line per retained note.
+        let scratchpad_lines = if self.scratchpad.is_empty() {
+            0u16
+        } else {
+            1 + self.scratchpad.len() as u16
+        };
+        // summary + 1 header + batch headers + agents + synth + swarm + scratchpad
+        let total = summary_line
+            + 1
+            + batch_header_lines
+            + agent_lines
+            + synth_lines
+            + swarm_lines
+            + scratchpad_lines;
         total.min(30)
     }
 
@@ -238,6 +282,14 @@ impl Agents {
         self.synthesis = SynthesisState::Idle;
         self.collapsed = false;
         self.est_cost_usd = None;
+        self.scratchpad.clear();
+    }
+
+    /// Drop the transient shared-scratchpad notes (new top-level turn). Kept
+    /// separate from a full `clear` so the caller can reset just this surface
+    /// without tearing down live agent rows.
+    pub fn clear_scratchpad(&mut self) {
+        self.scratchpad.clear();
     }
 
     pub fn on_agents_spawning(&mut self, agents: &[SpawningAgent]) {
@@ -461,6 +513,7 @@ impl Agents {
         self.collapsed = false;
         self.bg_summary = 0;
         self.est_cost_usd = None;
+        self.scratchpad.clear();
     }
 }
 
@@ -476,5 +529,93 @@ impl Component for Agents {
             return;
         }
         self.draw_tree(frame, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Flatten the panel render to a single string so we can assert on visible
+    /// text (mirrors the status-bar / event-loop buffer harness).
+    fn render_text(agents: &Agents, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| agents.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn scratchpad_activity_is_capped_newest_first() {
+        let mut a = Agents::new();
+        for i in 0..(SCRATCHPAD_CAP + 3) {
+            a.scratchpad_activity("agent:s1:1", format!("f{}.md", i), "write", 100 + i as u64);
+        }
+        // Never grows past the cap.
+        assert_eq!(a.scratchpad_len(), SCRATCHPAD_CAP);
+        // Newest write is at the front.
+        assert_eq!(a.scratchpad[0].entry, format!("f{}.md", SCRATCHPAD_CAP + 2));
+    }
+
+    #[test]
+    fn clear_scratchpad_drops_notes_but_keeps_agents() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.scratchpad_activity("agent:s1:1", "findings.md", "write", 2100);
+        assert_eq!(a.scratchpad_len(), 1);
+
+        a.clear_scratchpad();
+        assert_eq!(a.scratchpad_len(), 0);
+        // The live worker row survives a scratchpad-only reset.
+        assert!(a.is_active());
+        assert_eq!(a.entry_count(), 1);
+    }
+
+    #[test]
+    fn task_started_clears_prior_scratchpad() {
+        let mut a = Agents::new();
+        a.scratchpad_activity("agent:s1:1", "old.md", "write", 10);
+        a.task_started("task-2");
+        assert_eq!(a.scratchpad_len(), 0);
+    }
+
+    #[test]
+    fn panel_renders_worker_status_and_scratchpad_line() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.scratchpad_activity("agent:s1:2", "findings.md", "write", 2100);
+
+        let text = render_text(&a, 80, 12);
+        // Worker subject is visible (the running row).
+        assert!(text.contains("scan modules"), "missing worker row: {:?}", text);
+        // The shared-scratchpad section header + the compact write line.
+        assert!(text.contains("scratchpad"), "missing scratchpad section: {:?}", text);
+        assert!(text.contains("findings.md"), "missing entry name: {:?}", text);
+        // Compact byte size (2100 → 2.1k), not raw bytes.
+        assert!(text.contains("2.1k"), "missing compact size: {:?}", text);
+        // Past-tense verb, not the raw action token.
+        assert!(text.contains("wrote"), "missing verb: {:?}", text);
+    }
+
+    #[test]
+    fn append_renders_appended_verb() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "", "", "work", None);
+        a.scratchpad_activity("lead", "notes.md", "append", 300);
+        let text = render_text(&a, 80, 10);
+        assert!(text.contains("appended"), "expected 'appended': {:?}", text);
+    }
+
+    #[test]
+    fn scratchpad_section_absent_when_empty() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "", "", "work", None);
+        let text = render_text(&a, 80, 8);
+        assert!(!text.contains("scratchpad"), "unexpected scratchpad section: {:?}", text);
     }
 }

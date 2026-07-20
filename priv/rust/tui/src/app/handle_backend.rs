@@ -1769,6 +1769,21 @@ impl App {
                 self.status.set_goal_verification(state);
             }
 
+            // === Shared scratchpad activity → Agents panel ===
+            BackendEvent::ScratchpadActivity { agent, entry, action, bytes } => {
+                // Feed the visual panel (dim, capped recent-writes section).
+                self.agents.scratchpad_activity(&agent, &entry, &action, bytes);
+                // Screen-reader path: announce a plain-text note instead of the
+                // glyph-decorated panel line (no-op for sighted users).
+                let verb = if action == "append" { "appended" } else { "wrote" };
+                self.announce_a11y(&format!(
+                    "@{} {} {} to the shared scratchpad ({} bytes)",
+                    agent, verb, entry, bytes
+                ));
+                // The new line changes the panel height — keep layout in sync.
+                self.recompute_layout();
+            }
+
             // === Phase 2+ HTTP Response Results ===
             // (U-B5: the dead `SkillsLoaded` handler was removed — it only
             // logged. The skills browser is driven by `SkillsBrowserLoaded`.)

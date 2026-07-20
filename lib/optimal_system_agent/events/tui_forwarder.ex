@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     push_notification
     subscribe_pr_registered
     goal_verifier_round
+    scratchpad_activity
     error
   )a
 

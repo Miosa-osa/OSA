@@ -238,6 +238,23 @@ pub enum BackendEvent {
         gaps: Vec<String>,
     },
     SwarmIntelligenceConverged { swarm_id: String, round: u32 },
+
+    // === Shared scratchpad (multi-agent coordination surface) ===
+    /// An agent wrote or appended to the shared file-based scratchpad during a
+    /// fan-out. Surfaced as a compact dim line under the agents panel so the
+    /// user watches coordination artifacts accumulate. Carries no file contents
+    /// — only who/what/size. Transient: cleared when the team finishes or a new
+    /// top-level turn starts.
+    ScratchpadActivity {
+        /// Writing agent id (a worker session id or the coordinator's own).
+        agent: String,
+        /// Entry name written, e.g. `findings.md`.
+        entry: String,
+        /// "write" or "append" (mapped to a past-tense verb at render time).
+        action: String,
+        /// Byte size of the write.
+        bytes: u64,
+    },
     SwarmIntelligenceCompleted {
         swarm_id: String,
         converged: bool,
