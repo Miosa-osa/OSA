@@ -485,8 +485,8 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     :exit, _ -> :ok
   end
 
-  defp transport_mod(%Server{transport: :stdio}) do
-    Application.get_env(:optimal_system_agent, :mcp_stdio_transport, Stdio)
+  defp transport_mod(%Server{transport: :http_sse}) do
+    Application.get_env(:optimal_system_agent, :mcp_http_transport, Http)
   end
 
   defp transport_mod(_) do
