@@ -59,6 +59,37 @@ _download() {
   fi
 }
 
+_sha256_of() {
+  # _sha256_of <file> — print the sha256 hex of <file>, or empty if no tool.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    printf ''
+  fi
+}
+
+_verify_asset() {
+  # _verify_asset <file> <sha256_url> <label> — verify <file> against the sha256
+  # sidecar at <sha256_url>. Fails hard on mismatch; warns (non-fatal) when the
+  # sidecar is absent or no hashing tool exists — same policy as the tarball.
+  _vf="$1"; _vurl="$2"; _vlabel="$3"; _vsum="${_vf}.sha256"
+  if _download "$_vurl" "$_vsum" 2>/dev/null; then
+    _vexpected="$(awk '{print $1}' "$_vsum")"
+    _vactual="$(_sha256_of "$_vf")"
+    if [ -z "$_vactual" ]; then
+      warn "No sha256sum/shasum found — skipping ${_vlabel} verification."
+    elif [ "$_vactual" != "$_vexpected" ]; then
+      fail "Checksum mismatch for ${_vlabel} — download may be corrupted. Aborting." 3
+    else
+      ok "Checksum verified (${_vlabel})"
+    fi
+  else
+    warn "No .sha256 sidecar for ${_vlabel} — skipping verification."
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Banner — cyan/blue ASCII logo. Colors auto-disable when stdout is not a TTY
 # (BOLD/CYAN/DIM/RESET are empty in that case), so this degrades to plain text.
@@ -150,6 +181,9 @@ info "Downloading ${TUI_ASSET}..."
 if ! _download "${BASE_URL}/${TUI_ASSET}" "${TMP_DIR}/${TUI_ASSET}"; then
   fail "Download failed for ${TUI_ASSET}." 2
 fi
+# Sanity: the TUI is executed directly, so it must be a non-empty file (a 404 or
+# truncated download would otherwise be copied in and fail later at exec time).
+[ -s "${TMP_DIR}/${TUI_ASSET}" ] || fail "Downloaded ${TUI_ASSET} is empty — aborting." 2
 ok "Downloaded ${TUI_ASSET}"
 
 # ---------------------------------------------------------------------------
@@ -176,6 +210,10 @@ else
   warn "No .sha256 sidecar for this release — skipping verification."
 fi
 
+# Verify the standalone TUI binary too (it is fetched separately from the
+# tarball, so it needs its own checksum — supply-chain hardening, M2).
+_verify_asset "${TMP_DIR}/${TUI_ASSET}" "${BASE_URL}/${TUI_ASSET}.sha256" "${TUI_ASSET}"
+
 # ---------------------------------------------------------------------------
 # Extract OTP release into ~/.osa/release (fresh)
 # ---------------------------------------------------------------------------
@@ -198,6 +236,14 @@ mkdir -p "$BIN_DIR"
 cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN"
 chmod +x "$TUI_BIN"
 ok "TUI installed to ${TUI_BIN}"
+
+# macOS: best-effort clear of the com.apple.quarantine attribute. A curl/wget
+# download does NOT set quarantine (only Finder/browser downloads do), so this
+# is belt-and-suspenders — harmless and instant when the attribute is absent,
+# but it spares anyone who fetched the assets via a GUI from a Gatekeeper prompt.
+if [ "$OS" = "macos" ] && command -v xattr >/dev/null 2>&1; then
+  xattr -dr com.apple.quarantine "$RELEASE_DIR" "$TUI_BIN" 2>/dev/null || true
+fi
 
 # Record install layout so tooling can locate the release, and stamp the
 # installed version so `osa update` can compare against the latest release
@@ -483,6 +529,7 @@ do_update() {
   if ! _download "${base}/${tui_asset}" "${tmp}/${tui_asset}"; then
     rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tui_asset" >&2; return 2
   fi
+  [ -s "${tmp}/${tui_asset}" ] || { rm -rf "$tmp"; printf "  ${RED}✗${RESET} Downloaded %s is empty — aborting update.\n" "$tui_asset" >&2; return 2; }
 
   # Verify the tarball checksum (mandatory when the sidecar exists).
   printf "  ${CYAN}→${RESET} Verifying checksum…\n"
@@ -502,6 +549,25 @@ do_update() {
     [ -n "$actual" ] && printf "  ${GREEN}✓${RESET} Checksum verified\n"
   else
     printf "  ${YELLOW}!${RESET} No .sha256 sidecar — skipping verification.\n" >&2
+  fi
+
+  # Verify the TUI binary checksum too (fetched separately — supply-chain, M2).
+  if _download "${base}/${tui_asset}.sha256" "${tmp}/${tui_asset}.sha256" 2>/dev/null; then
+    texpected="$(awk '{print $1}' "${tmp}/${tui_asset}.sha256")"
+    tactual=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      tactual="$(sha256sum "${tmp}/${tui_asset}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      tactual="$(shasum -a 256 "${tmp}/${tui_asset}" | awk '{print $1}')"
+    fi
+    if [ -n "$tactual" ] && [ "$tactual" != "$texpected" ]; then
+      rm -rf "$tmp"
+      printf "  ${RED}✗${RESET} Checksum mismatch for %s — aborting update.\n" "$tui_asset" >&2
+      return 3
+    fi
+    [ -n "$tactual" ] && printf "  ${GREEN}✓${RESET} Checksum verified (%s)\n" "$tui_asset"
+  else
+    printf "  ${YELLOW}!${RESET} No .sha256 sidecar for %s — skipping verification.\n" "$tui_asset" >&2
   fi
 
   # Extract the new release beside the current one (same filesystem → atomic
@@ -529,6 +595,11 @@ do_update() {
   cp "${tmp}/${tui_asset}" "${TUI_BIN}.new"
   chmod +x "${TUI_BIN}.new"
   mv "${TUI_BIN}.new" "$TUI_BIN"
+
+  # macOS: best-effort quarantine strip on the freshly swapped-in binaries.
+  case "$(uname -s)" in
+    Darwin) command -v xattr >/dev/null 2>&1 && xattr -dr com.apple.quarantine "$OSA_HOME/release" "$TUI_BIN" 2>/dev/null || true ;;
+  esac
 
   printf "%s\n" "$OSA_HOME/release" > "$OSA_HOME/release_root"
   printf "%s\n" "$latest" > "$OSA_HOME/version"

@@ -136,6 +136,12 @@ try {
   Write-Fail "Download failed for $TuiAsset." 2
 }
 
+# Sanity: the TUI is executed directly, so it must be a non-empty file.
+if ((Get-Item -LiteralPath $tuiPath).Length -eq 0) {
+  Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+  Write-Fail "Downloaded $TuiAsset is empty - aborting." 2
+}
+
 # ---------------------------------------------------------------------------
 # Verify checksum (mandatory when the sidecar exists; warn-and-skip if it 404s,
 # mirroring scripts/install.sh).
@@ -158,6 +164,27 @@ if ($haveSidecar) {
   Write-Ok 'Checksum verified'
 } else {
   Write-Warn 'No .sha256 sidecar for this release - skipping verification.'
+}
+
+# Verify the standalone TUI binary too (fetched separately from the zip, so it
+# needs its own checksum - supply-chain hardening, M2).
+$tuiSidecar = Join-Path $Tmp "$TuiAsset.sha256"
+$haveTuiSidecar = $true
+try {
+  Invoke-WebRequest -Uri "$BaseUrl/$TuiAsset.sha256" -OutFile $tuiSidecar -UseBasicParsing
+} catch {
+  $haveTuiSidecar = $false
+}
+if ($haveTuiSidecar) {
+  $tuiExpected = ((Get-Content -Raw -LiteralPath $tuiSidecar).Trim() -split '\s+')[0]
+  $tuiActual   = (Get-FileHash -Algorithm SHA256 -LiteralPath $tuiPath).Hash
+  if ($tuiActual -ine $tuiExpected) {
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    Write-Fail 'Checksum mismatch for the TUI binary - download may be corrupted. Aborting.' 3
+  }
+  Write-Ok 'Checksum verified (TUI)'
+} else {
+  Write-Warn 'No .sha256 sidecar for the TUI binary - skipping verification.'
 }
 
 # ---------------------------------------------------------------------------
@@ -431,6 +458,23 @@ function Update-Osa {
     Write-Host "  [ok] Checksum verified" -ForegroundColor Green
   } else {
     Write-Host "  [!] No .sha256 sidecar - skipping verification." -ForegroundColor Yellow
+  }
+
+  # Verify the TUI binary checksum too (fetched separately - supply-chain, M2).
+  $tuiSidecar = Join-Path $tmp "$tuiAsset.sha256"
+  $haveTuiSidecar = $true
+  try { Invoke-WebRequest -Uri "$base/$tuiAsset.sha256" -OutFile $tuiSidecar -UseBasicParsing } catch { $haveTuiSidecar = $false }
+  if ($haveTuiSidecar) {
+    $tuiExpected = ((Get-Content -Raw -LiteralPath $tuiSidecar).Trim() -split '\s+')[0]
+    $tuiActual   = (Get-FileHash -Algorithm SHA256 -LiteralPath $tuiPath).Hash
+    if ($tuiActual -ine $tuiExpected) {
+      Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+      Write-Host "  [x] Checksum mismatch for $tuiAsset - aborting update." -ForegroundColor Red
+      return 3
+    }
+    Write-Host "  [ok] Checksum verified ($tuiAsset)" -ForegroundColor Green
+  } else {
+    Write-Host "  [!] No .sha256 sidecar for $tuiAsset - skipping verification." -ForegroundColor Yellow
   }
 
   Write-Host "  -> Installing update..." -ForegroundColor Cyan

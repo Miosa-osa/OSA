@@ -320,10 +320,14 @@ jobs:
           # Flatten every artifact dir into release-assets/.
           find artifacts -type f -exec cp {} release-assets/ \;
           cd release-assets
-          # A .sha256 sidecar per archive so install.sh / install.ps1 can verify
-          # integrity. Covers both the *nix tarballs and the Windows zip.
-          for f in *.tar.gz *.zip; do
+          # A .sha256 sidecar per shippable asset so install.sh / install.ps1 can
+          # verify integrity. Covers the *nix tarballs, the Windows zip, AND the
+          # standalone Rust TUI binaries (osagent-tui-*) — the TUI is downloaded
+          # separately from the tarball, so it needs its own checksum to close the
+          # supply-chain gap (M2). Skip any .sha256 we may already have written.
+          for f in *.tar.gz *.zip osagent-tui-*; do
             [ -e "$f" ] || continue
+            case "$f" in *.sha256) continue ;; esac
             sha256sum "$f" > "$f.sha256"
           done
           ls -la
@@ -340,9 +344,12 @@ jobs:
             release-assets/osa-linux-x64.tar.gz
             release-assets/osa-linux-x64.tar.gz.sha256
             release-assets/osagent-tui-linux-x64
+            release-assets/osagent-tui-linux-x64.sha256
             release-assets/osa-macos-arm64.tar.gz
             release-assets/osa-macos-arm64.tar.gz.sha256
             release-assets/osagent-tui-macos-arm64
+            release-assets/osagent-tui-macos-arm64.sha256
             release-assets/osa-windows-x64.zip
             release-assets/osa-windows-x64.zip.sha256
             release-assets/osagent-tui-windows-x64.exe
+            release-assets/osagent-tui-windows-x64.exe.sha256
