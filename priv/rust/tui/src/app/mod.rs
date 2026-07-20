@@ -348,6 +348,16 @@ pub struct App {
     // next draw so every cell repaints.
     pub force_redraw: bool,
 
+    // One-shot "the terminal was resized" request (pane split / drag). Set in
+    // the Resize handler, consumed by the event loop, which then rebuilds the
+    // inline viewport FRESH at the new size and clears the old-width rows.
+    // Unlike the transient height dips handled by the shrink debounce, a resize
+    // is a deliberate size change and is committed immediately — but a burst of
+    // Resize events from a pane-drag is coalesced into ONE rebuild because the
+    // whole event backlog is drained before the loop reads this flag, so it
+    // always reflects the FINAL size.
+    pub resize_dirty: bool,
+
     // WS10 — user-configurable keybindings: compiled defaults overlaid by
     // ~/.osa/keybindings.json, consulted by update.rs before hardcoded arms.
     pub keymap: crate::config::keybindings::Keybindings,
@@ -569,6 +579,7 @@ impl App {
             message_queue: Vec::new(),
             esc_tracker: EscTracker::default(),
             force_redraw: false,
+            resize_dirty: false,
             keymap,
             chord_pending: None,
             kill_agents_armed: None,

@@ -87,6 +87,28 @@ fn parse_level(v: &str) -> Option<ColorLevel> {
     }
 }
 
+/// Quantize `color` to what `level` can render — the single, documented entry
+/// point for color downgrading (truecolor → 256 → 16 → none).
+///
+/// This is a thin, stable alias over [`adapt_color`]: `TrueColor` keeps
+/// `Color::Rgb` as-is, `Ansi256` maps it into the xterm-256 palette, `Ansi16`
+/// maps it to the nearest named ANSI color, and [`ColorLevel::NoColor`] drops
+/// all color to [`Color::Reset`]. Prefer calling this from new code so the
+/// quantization pipeline has one obvious name.
+///
+/// ```ignore
+/// quantize(Color::Rgb(255, 0, 0), ColorLevel::Ansi256) == Color::Indexed(196);
+/// quantize(Color::Rgb(255, 0, 0), ColorLevel::NoColor) == Color::Reset;
+/// ```
+pub fn quantize(color: Color, level: ColorLevel) -> Color {
+    adapt_color(color, level)
+}
+
+/// Quantize `color` for the terminal's detected color level (see [`color_level`]).
+pub fn quantize_for_terminal(color: Color) -> Color {
+    quantize(color, color_level())
+}
+
 /// Downgrade `color` to what `level` can render. Non-`Rgb` colors pass through
 /// unchanged (except under [`ColorLevel::NoColor`], which drops all color).
 pub fn adapt_color(color: Color, level: ColorLevel) -> Color {
@@ -250,6 +272,24 @@ mod tests {
             adapt_color(Color::Rgb(250, 250, 250), ColorLevel::Ansi16),
             Color::White | Color::Gray
         ));
+    }
+
+    #[test]
+    fn quantize_entry_point_maps_across_levels() {
+        // The public entry point walks truecolor -> 256 -> 16 -> none.
+        let red = Color::Rgb(255, 0, 0);
+        assert_eq!(quantize(red, ColorLevel::TrueColor), red);
+        assert_eq!(quantize(red, ColorLevel::Ansi256), Color::Indexed(196));
+        assert!(matches!(
+            quantize(red, ColorLevel::Ansi16),
+            Color::Red | Color::LightRed
+        ));
+        assert_eq!(quantize(red, ColorLevel::NoColor), Color::Reset);
+        // It is a faithful alias of adapt_color.
+        assert_eq!(
+            quantize(red, ColorLevel::Ansi256),
+            adapt_color(red, ColorLevel::Ansi256)
+        );
     }
 
     #[test]

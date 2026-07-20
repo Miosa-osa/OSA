@@ -66,6 +66,44 @@ pub fn highlight(code: &str, language: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// Highlight `code` line by line and return, for each source line, the syntect
+/// foreground runs as `(text, fg)` pairs whose concatenation equals that line
+/// (trailing newline stripped). Returns `None` when highlighting is disabled or
+/// the language / theme is unknown, so the caller can fall back to its plain
+/// rendering unchanged.
+///
+/// State (syntect's `ParseState` / `HighlightState`) is carried across lines, so
+/// multi-line strings and block comments highlight correctly — the whole-snippet
+/// (per-hunk) state Codex keeps for its diffs. Only foreground colors are
+/// returned; the diff renderer supplies its own +/- backgrounds.
+pub fn highlight_line_runs(code: &str, language: &str) -> Option<Vec<Vec<(String, Color)>>> {
+    if highlighting_disabled() {
+        return None;
+    }
+    let ss = syntax_set();
+    let ts = theme_set();
+    let theme = resolve_theme(ts)?;
+    let syntax = resolve_syntax(ss, language)?;
+
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut out: Vec<Vec<(String, Color)>> = Vec::new();
+    for line_str in LinesWithEndings::from(code) {
+        let ranges = highlighter.highlight_line(line_str, ss).ok()?;
+        let runs = ranges
+            .into_iter()
+            .map(|(style, text)| {
+                (
+                    text.trim_end_matches('\n').to_owned(),
+                    syntect_color_to_ratatui(style.foreground),
+                )
+            })
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+        out.push(runs);
+    }
+    Some(out)
+}
+
 // ─── Shared resolvers ────────────────────────────────────────────────────────
 
 /// Resolve the syntect theme that matches the active OSA theme (light OSA

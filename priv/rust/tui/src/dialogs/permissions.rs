@@ -111,6 +111,19 @@ impl Permissions {
         self.target = target.filter(|s| !s.trim().is_empty());
     }
 
+    /// Syntect language token for the diff, derived from the target's file
+    /// extension when the target looks like a path. `None` (extensionless target,
+    /// a command, or a skill name) makes the diff render as plain content.
+    fn diff_language(&self) -> Option<String> {
+        let target = self.target.as_deref()?;
+        let name = target.rsplit(['/', '\\']).next().unwrap_or(target);
+        let (stem, ext) = name.rsplit_once('.')?;
+        if stem.is_empty() || ext.is_empty() {
+            return None;
+        }
+        Some(ext.to_ascii_lowercase())
+    }
+
     /// What the "Allow …?" title names: the concrete target when the backend
     /// supplied one, otherwise the bare tool name.
     pub fn display_label(&self) -> &str {
@@ -246,7 +259,8 @@ impl Permissions {
         h += 1; // separator
         let body: u16 = match (&self.diff_old, &self.diff_new) {
             (Some(old), Some(new)) => {
-                crate::render::diff::render_diff(old, new, width).len() as u16
+                crate::render::diff::render_diff(old, new, width, self.diff_language().as_deref())
+                    .len() as u16
             }
             _ => self.tool_args.lines().count().max(1) as u16,
         };
@@ -377,7 +391,12 @@ impl Permissions {
             match (&self.diff_old, &self.diff_new) {
                 (Some(old), Some(new)) => {
                     // Render colored diff lines.
-                    let diff_lines = crate::render::diff::render_diff(old, new, inner.width);
+                    let diff_lines = crate::render::diff::render_diff(
+                        old,
+                        new,
+                        inner.width,
+                        self.diff_language().as_deref(),
+                    );
                     let total_lines = diff_lines.len() as u16;
                     let scroll_clamped =
                         self.scroll.min(total_lines.saturating_sub(viewport_h));

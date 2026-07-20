@@ -208,6 +208,11 @@ impl ToolRenderer for FileEditRenderer {
         )
         .unwrap_or_else(|| "…".to_string());
 
+        // Derive the syntect language token from the file extension *before* the
+        // path is ellipsized for display. `None` when the file has no extension,
+        // which makes the diff renderer fall back to plain (uncolored) content.
+        let language = language_from_path(&path);
+
         // Pick display name — "Update" for edits (matches the upstream agent CLI style)
         let display_name = match name.to_lowercase().as_str() {
             "download" => "Download",
@@ -237,7 +242,13 @@ impl ToolRenderer for FileEditRenderer {
             // removed M lines` (bold counts) followed by the full hunk diff
             // (context lines + word-level highlights), capped with a ctrl+o hint.
             if let (Some(ref old_text), Some(ref new_text)) = (&old, &new) {
-                let mut body = render_collapsed_diff_preview(old_text, new_text, opts.width, &theme);
+                let mut body = render_collapsed_diff_preview(
+                    old_text,
+                    new_text,
+                    opts.width,
+                    &theme,
+                    language.as_deref(),
+                );
                 body = truncate_lines(body, 20);
                 return render_tool_box(header, body);
             }
@@ -250,7 +261,13 @@ impl ToolRenderer for FileEditRenderer {
 
         match (old, new) {
             (Some(old_text), Some(new_text)) => {
-                body.extend(render_inline_diff(&old_text, &new_text, opts.width, &theme));
+                body.extend(render_inline_diff(
+                    &old_text,
+                    &new_text,
+                    opts.width,
+                    &theme,
+                    language.as_deref(),
+                ));
             }
             _ => {
                 // Fallback: plain result text
@@ -275,6 +292,7 @@ fn render_collapsed_diff_preview(
     new: &str,
     width: u16,
     theme: &crate::style::Theme,
+    language: Option<&str>,
 ) -> Vec<Line<'static>> {
     use similar::{ChangeTag, TextDiff};
 
@@ -317,21 +335,39 @@ fn render_collapsed_diff_preview(
     out.push(Line::from(spans));
 
     // Full hunk diff with context + word-level highlights (StructuredDiffList).
-    out.extend(render_inline_diff(old, new, width, theme));
+    out.extend(render_inline_diff(old, new, width, theme, language));
     out
+}
+
+/// Derive a syntect language token from a file path's extension, e.g.
+/// `src/main.rs` → `Some("rs")`. Returns `None` when there is no extension, so
+/// the diff renderer falls back to plain (uncolored) content. The value is a
+/// bare extension; `render::syntax` normalizes aliases and resolves it against
+/// the syntax set (by token, then by extension).
+fn language_from_path(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    // Require a real extension: a dot that is not the leading char (so dotfiles
+    // like `.gitignore` are treated as extensionless).
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() {
+        return None;
+    }
+    Some(ext.to_ascii_lowercase())
 }
 
 /// Inline unified diff renderer — delegates to the shared CC-style renderer
 /// in `render::diff` (line-number gutter, solid +/- background bars,
 /// bg-only word-level highlights, `…` hunk separators, width-aware wrapping
-/// so nothing clips horizontally).
+/// so nothing clips horizontally). `language` (a file extension / syntect token)
+/// enables syntax highlighting of the code content when known.
 fn render_inline_diff(
     old: &str,
     new: &str,
     width: u16,
     _theme: &crate::style::Theme,
+    language: Option<&str>,
 ) -> Vec<Line<'static>> {
-    crate::render::diff::render_diff_body(old, new, width, 1)
+    crate::render::diff::render_diff_body(old, new, width, 1, language)
 }
 
 #[cfg(test)]
@@ -350,14 +386,14 @@ mod diff_render_tests {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
         let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
         let theme = crate::style::theme();
-        let rendered = text(&render_inline_diff(old, new, 80, &theme));
+        let rendered = text(&render_inline_diff(old, new, 80, &theme, None));
         assert!(rendered.iter().any(|l| l.trim() == "…"), "{:?}", rendered);
     }
 
     #[test]
     fn heavily_rewritten_pair_skips_word_highlights() {
         let theme = crate::style::theme();
-        let lines = render_inline_diff("alpha beta\n", "zq xw yv\n", 80, &theme);
+        let lines = render_inline_diff("alpha beta\n", "zq xw yv\n", 80, &theme, None);
         let has_highlight = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
             s.style.bg == Some(theme.colors.diff_add_highlight_bg)
                 || s.style.bg == Some(theme.colors.diff_del_highlight_bg)
@@ -368,7 +404,7 @@ mod diff_render_tests {
     #[test]
     fn small_change_gets_word_highlights() {
         let theme = crate::style::theme();
-        let lines = render_inline_diff("let count = 1;\n", "let count = 2;\n", 80, &theme);
+        let lines = render_inline_diff("let count = 1;\n", "let count = 2;\n", 80, &theme, None);
         let has_highlight = lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
             s.style.bg == Some(theme.colors.diff_add_highlight_bg)
                 || s.style.bg == Some(theme.colors.diff_del_highlight_bg)
@@ -379,7 +415,7 @@ mod diff_render_tests {
     #[test]
     fn unbalanced_runs_render_all_lines() {
         let theme = crate::style::theme();
-        let lines = render_inline_diff("one\ntwo\nthree\n", "uno\n", 80, &theme);
+        let lines = render_inline_diff("one\ntwo\nthree\n", "uno\n", 80, &theme, None);
         let rendered = text(&lines);
         assert_eq!(rendered.iter().filter(|l| l.contains(" - ")).count(), 3);
         assert_eq!(rendered.iter().filter(|l| l.contains(" + ")).count(), 1);

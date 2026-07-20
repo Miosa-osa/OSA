@@ -132,6 +132,15 @@ impl Chat {
         self.invalidate_cache();
     }
 
+    /// Invalidate every width-keyed render cache (per-message wrapped-height
+    /// cache + the live streaming markdown cache) so nothing re-renders at a
+    /// stale width after a terminal resize. `set_size` already does this, but
+    /// the resize path calls it explicitly so the width-reflow intent does not
+    /// silently depend on `set_size`'s internals.
+    pub fn invalidate_width_caches(&mut self) {
+        self.invalidate_cache();
+    }
+
     // ── Enqueue helpers (all route to native scrollback) ──────────────
 
     /// Queue a finalized block for native scrollback with CC-style spacing:

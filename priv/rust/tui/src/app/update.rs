@@ -103,9 +103,33 @@ impl App {
     pub fn update(&mut self, event: Event) -> bool {
         match event {
             Event::Terminal(CrosstermEvent::Resize(w, h)) => {
+                // A terminal resize (window drag, tmux/terminal pane split)
+                // changes the width and/or height. Store the new dims and fully
+                // re-lay-out: `recompute_layout` re-derives every wrap width and
+                // pushes them into chat/input/status, and `Chat::set_size`
+                // invalidates the width-keyed render caches (per-message wrapped
+                // height + the live streaming markdown cache) so nothing renders
+                // at the stale width. Coalescing is free — a pane-drag emits a
+                // burst of Resize events that the event loop drains before its
+                // next draw, so only the FINAL (w, h) survives here.
+                let width_changed = self.width != w;
                 self.width = w;
                 self.height = h;
                 self.recompute_layout();
+                // A width change additionally forces a defensive re-invalidation
+                // of the width-keyed caches — recompute_layout already did this
+                // via set_size, but keep the intent explicit and independent of
+                // that call's internals so a future refactor can't silently drop
+                // the reflow.
+                if width_changed {
+                    self.chat.invalidate_width_caches();
+                }
+                // Signal the event loop to rebuild the inline viewport fresh at
+                // the new size (see `resize_dirty`). Without this a width-only
+                // resize (height unchanged, e.g. a horizontal split) leaves the
+                // viewport at its old geometry with stale rows, and a height
+                // shrink would be held by the transient-dip debounce for ~0.8s.
+                self.resize_dirty = true;
                 false
             }
             Event::Terminal(CrosstermEvent::Key(key))

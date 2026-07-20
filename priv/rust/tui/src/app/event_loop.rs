@@ -159,6 +159,12 @@ impl App {
             // composer, always clamped to the terminal so it can't overflow).
             let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24);
             let desired_inline_h = self.desired_inline_height(term_rows);
+            // Did a terminal resize (pane split / drag) land since the last
+            // frame? Consumed once here. The whole event backlog is drained by
+            // `dispatch_event` before this runs, so a burst of Resize events from
+            // a drag has already collapsed to the FINAL size in `self.width/height`
+            // — a single rebuild at the settled size, never a per-event thrash.
+            let resized = std::mem::take(&mut self.resize_dirty);
             if want_full != was_full {
                 if want_full {
                     // Full screen (Terminal::new) does NOT query the cursor, so no
@@ -177,15 +183,25 @@ impl App {
                     cur_inline_h = desired_inline_h;
                 }
                 was_full = want_full;
-            } else if !was_full && desired_inline_h != cur_inline_h {
-                // Staying inline, but the wanted height changed. Rebuilding the
-                // inline viewport issues a DSR cursor query that tmux can drop,
-                // so every rebuild risks leaving a stale copy of the composer +
-                // status bar in scrollback. The wanted height oscillates tick to
-                // tick (activity spinner, streaming quantization, transient
-                // notices such as "Reconnecting to backend…" that live in the
-                // fixed hint row), so rebuilding on every change churns the
-                // viewport and stacks duplicate chrome into scrollback.
+                // A mode switch rebuilds the viewport fresh (switch_to_* clear +
+                // reconstruct), so any pending resize is already absorbed.
+            } else if want_full {
+                // Staying full-screen (a dialog / onboarding owns the viewport).
+                // ratatui's autoresize reflows the alt-screen buffer on the next
+                // draw, but a resize can leave stale diff state — clear so every
+                // cell repaints at the new size.
+                if resized {
+                    let _ = terminal.clear();
+                }
+            } else if resized || desired_inline_h != cur_inline_h {
+                // Staying inline, and either a real resize landed or the wanted
+                // height changed. Rebuilding the inline viewport issues a DSR
+                // cursor query that tmux can drop, so every rebuild risks leaving
+                // a stale copy of the composer + status bar in scrollback. The
+                // wanted height oscillates tick to tick (activity spinner,
+                // streaming quantization, transient notices such as "Reconnecting
+                // to backend…" that live in the fixed hint row), so rebuilding on
+                // every change churns the viewport and stacks duplicate chrome.
                 //
                 // Debounce it as a high-water mark. A GROW commits immediately
                 // (the composer must feel responsive and streaming content must
@@ -193,7 +209,18 @@ impl App {
                 // height has been wanted for SHRINK_SETTLE_TICKS consecutive
                 // iterations. A momentary dip that bounces back up to the current
                 // height therefore never triggers a rebuild at all.
-                let commit = if desired_inline_h > cur_inline_h {
+                //
+                // A RESIZE is exempt from the debounce: a pane split / drag is a
+                // deliberate size change, so it commits immediately even when the
+                // height shrinks — and even when the height is UNCHANGED (a
+                // horizontal split changes only the width), so the viewport is
+                // rebuilt fresh and the old-width rows are cleared. This is what
+                // makes the transcript / composer / status bar reflow cleanly to
+                // the new width instead of leaving stale, misaligned rows.
+                let commit = if resized {
+                    shrink_streak = 0;
+                    true
+                } else if desired_inline_h > cur_inline_h {
                     shrink_streak = 0;
                     true
                 } else {
@@ -203,8 +230,9 @@ impl App {
                 if commit {
                     shrink_streak = 0;
                     // Clear first so no stale rows of the previous,
-                    // differently-sized live region are left behind — this is
-                    // what kills the duplicated banners / status lines. Rebuild
+                    // differently-sized (or differently-wrapped) live region are
+                    // left behind — this is what kills the duplicated banners /
+                    // status lines and the misaligned post-split rows. Rebuild
                     // fresh to bypass ratatui's in-place inline-resize (which can
                     // misplace the viewport on a shrink). Pause the reader around
                     // the DSR query, exactly as the full→inline switch does.
@@ -215,10 +243,11 @@ impl App {
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                     cur_inline_h = desired_inline_h;
                 }
-            } else if !was_full {
-                // Wanted height already matches what's built — reset the shrink
-                // debounce so a later transient dip starts its settle window
-                // fresh instead of firing on the first dip.
+            } else {
+                // Staying inline, wanted height already matches what's built, no
+                // resize — reset the shrink debounce so a later transient dip
+                // starts its settle window fresh instead of firing on the first
+                // dip.
                 shrink_streak = 0;
             }
 
@@ -1440,6 +1469,95 @@ mod render_tests {
             // Park the viewport as low as it can sit for this terminal.
             let top = rows.saturating_sub(view_h);
             render_inline(top, w, view_h, &input, &status);
+        }
+    }
+
+    #[test]
+    fn resize_reflows_layout_wrap_widths() {
+        // The transcript, composer, and status bar are all wrapped/sized off the
+        // layout's chat width (and the terminal width for the status bar), so a
+        // resize reflowing cleanly depends on those tracking the new terminal
+        // dims. A width shrink must shrink the wrap width; a width grow must grow
+        // it; a rows shrink must shrink the chat height. Round-tripping back to
+        // the original size must reproduce the original layout exactly (converge
+        // to the final size, no hysteresis).
+        use crate::app::layout::Layout;
+        let wide = Layout::compute(120, 40, false, 0, 0);
+        let narrow = Layout::compute(60, 40, false, 0, 0);
+        assert!(
+            narrow.chat_width < wide.chat_width,
+            "narrower terminal must yield a narrower wrap width: {} !< {}",
+            narrow.chat_width,
+            wide.chat_width,
+        );
+        let short = Layout::compute(120, 12, false, 0, 0);
+        assert!(
+            short.chat_height < wide.chat_height,
+            "fewer rows must yield a shorter chat height: {} !< {}",
+            short.chat_height,
+            wide.chat_height,
+        );
+        let back = Layout::compute(120, 40, false, 0, 0);
+        assert_eq!(back.chat_width, wide.chat_width, "width must converge on round-trip");
+        assert_eq!(back.chat_height, wide.chat_height, "height must converge on round-trip");
+    }
+
+    #[test]
+    fn resize_reflows_chat_wrap_and_drops_width_cache() {
+        // The chat holds the width-keyed render caches (per-message wrapped
+        // height + the live streaming markdown cache). A resize must reflow the
+        // streaming reply to the new width — proving the width cache did NOT pin
+        // the old geometry. This exercises the exact resize path update.rs runs:
+        // recompute_layout -> Chat::set_size, then the explicit
+        // invalidate_width_caches on a width change.
+        use crate::components::chat::Chat;
+        let mut chat = Chat::new();
+        chat.update_streaming(
+            "a fairly long streamed reply that will wrap to a different number of rows at different widths",
+        );
+        let h_wide = chat.streaming_height(120);
+        chat.set_size(24, 10);
+        chat.invalidate_width_caches();
+        let h_narrow = chat.streaming_height(24);
+        assert!(
+            h_narrow > h_wide,
+            "a narrower width must wrap the streaming reply to MORE rows (cache must not pin old width): {h_narrow} !> {h_wide}",
+        );
+    }
+
+    #[test]
+    fn inline_chrome_reflows_to_each_width_on_resize() {
+        // Walk a resize sequence (wide -> narrow -> wide -> tiny) the way a
+        // pane-drag does. At every step the inline chrome must render into a
+        // buffer of EXACTLY the new width, with the composer/status re-laid-out
+        // to fit — proof the live region reflows to the resized width instead of
+        // keeping the old geometry (stale/misaligned rows). Also a panic guard
+        // for the rebuilt-fresh-at-new-size resize path.
+        for &w in &[120u16, 48, 90, 10, 200] {
+            let mut input = InputComponent::new();
+            input.set_width(w);
+            input.set_content("summarize this long instruction that must wrap on narrow panes");
+            let mut status = StatusBar::new();
+            status.set_width(w);
+            status.set_provider_info("openclaw", "glm-5.2:cloud");
+            let view_h = super::live_region_height(input.needed_height(), 40);
+            let total_h = view_h.saturating_add(4).max(1);
+            let mut backend = TestBackend::new(w, total_h);
+            backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+            let mut term = Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(view_h),
+                },
+            )
+            .unwrap();
+            term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+                .unwrap();
+            assert_eq!(
+                term.backend().buffer().area.width,
+                w,
+                "inline chrome must render at the resized width, not the old one",
+            );
         }
     }
 

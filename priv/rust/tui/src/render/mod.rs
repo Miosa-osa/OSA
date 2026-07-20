@@ -1,4 +1,5 @@
 pub mod colors;
+pub mod glyphs;
 pub mod latex;
 pub mod markdown;
 pub mod markdown_stream;
