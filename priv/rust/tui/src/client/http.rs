@@ -708,24 +708,42 @@ impl ApiClient {
     }
 
     /// POST /onboarding/health-check
+    ///
+    /// Read-only probe (no backend state mutation — see
+    /// `Onboarding.health_check/1`), so it is safe to retry on a transient
+    /// transport failure the same way idempotent GETs already are. Without
+    /// this, a one-off stale-socket/ECONNRESET hiccup on the TUI<->local
+    /// backend hop surfaced raw as "error sending request for url" on the
+    /// onboarding "Verifying connection" screen with no retry at all, even
+    /// though every GET on this same client already gets 2 free retries via
+    /// `send_retry`.
     pub async fn onboarding_health_check(
         &self,
         req: &serde_json::Value,
     ) -> Result<OnboardingHealthCheckResponse> {
-        let resp = self.post_no_auth("/onboarding/health-check", req).await?;
+        let url = format!("{}/onboarding/health-check", self.base_url);
+        let resp = self.send_retry_body(self.http.post(&url).json(req)).await?;
         Ok(resp.json().await?)
     }
 
     /// POST /onboarding/health-check WITH auth (post-onboarding candidate-key
     /// verification). The backend only honours caller-supplied api_key/base_url
     /// for authenticated callers once setup is complete.
+    ///
+    /// Same retry rationale as `onboarding_health_check` above — this is the
+    /// in-app "verify key" path (model picker), an equally read-only probe.
     pub async fn onboarding_health_check_auth(
         &self,
         req: &serde_json::Value,
     ) -> Result<OnboardingHealthCheckResponse> {
         // Note: the endpoint returns HTTP 200 even on provider errors, so we
         // must not rely on `post`'s status check — use a raw authenticated POST.
-        let resp = self.post_allow_status("/onboarding/health-check", req).await?;
+        let url = format!("{}/onboarding/health-check", self.base_url);
+        let mut req_builder = self.http.post(&url).json(req);
+        if let Ok(token) = self.auth.read().await.require_token() {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
+        }
+        let resp = self.send_retry_body(req_builder).await?;
         Ok(resp.json().await?)
     }
 
@@ -911,6 +929,48 @@ impl ApiClient {
                         attempt, e
                     );
                     tokio::time::sleep(Duration::from_millis(120 * attempt as u64)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// Same transport-error retry as `send_retry`, but for a request that may
+    /// carry a body (used only for genuinely idempotent, side-effect-free
+    /// POSTs, e.g. the onboarding health-check probe). `.json(&body)` always
+    /// produces a fully-buffered `Bytes` body, so `try_clone()` succeeds; if
+    /// it somehow doesn't (defensive — never observed in practice), fall
+    /// back to a single un-retried send instead of panicking, since a
+    /// missed retry is far preferable to crashing the TUI.
+    async fn send_retry_body(
+        &self,
+        req_builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let mut attempt: u32 = 0;
+        let mut pending = req_builder;
+        loop {
+            // Snapshot a clone to retry with before consuming `pending` in
+            // `.send()`. If the body can't be cloned, send as-is with no
+            // retry rather than panicking.
+            let retry_clone = pending.try_clone();
+            match pending.send().await {
+                Ok(resp) => return Ok(resp),
+                Err(e)
+                    if attempt < 2
+                        && !e.is_timeout()
+                        && (e.is_connect() || e.is_request()) =>
+                {
+                    let Some(next) = retry_clone else {
+                        return Err(e.into());
+                    };
+                    attempt += 1;
+                    debug!(
+                        "transport error on POST (stale socket?), retry {}/2: {}",
+                        attempt, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(120 * attempt as u64)).await;
+                    pending = next;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -1112,5 +1172,158 @@ impl ApiClient {
             anyhow::bail!("HTTP {} from {}: {}", status, path, body);
         }
         Ok(resp)
+    }
+}
+
+#[cfg(test)]
+mod health_check_retry_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn make_client(base_url: String) -> ApiClient {
+        let profile_dir = std::env::temp_dir().join(format!(
+            "osa-tui-test-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        ApiClient::new(base_url, profile_dir).expect("client builds")
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+    }
+
+    const VALID_HEALTH_RESPONSE: &str = "{\"status\":\"ok\",\"latency_ms\":5}";
+
+    fn http_ok_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    /// Regression test for the "error sending request for url" onboarding
+    /// bug: a POST /onboarding/health-check whose FIRST attempt hits a dead
+    /// socket (server accepts the TCP connection then closes it without
+    /// writing anything — the exact "connection closed before message
+    /// completed" transport failure GETs were already immune to via
+    /// `send_retry`) must now be transparently retried and succeed, instead
+    /// of surfacing the raw transport error to the onboarding "Verifying
+    /// connection" screen.
+    #[tokio::test]
+    async fn health_check_retries_past_a_dead_first_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            // Connection #1: accept then drop immediately, no bytes written —
+            // simulates a stale pooled socket the server already tore down.
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+            // Connection #2 (the retry): serve a real 200 with a valid body.
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(http_ok_response(VALID_HEALTH_RESPONSE).as_bytes())
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = make_client(base_url);
+        let result = client
+            .onboarding_health_check(&serde_json::json!({
+                "provider": "custom",
+                "base_url": "http://example.invalid",
+                "api_key": "test"
+            }))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "expected the dead first connection to be retried transparently, got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().status, "ok");
+    }
+
+    /// Same regression coverage for the authenticated verify path used by
+    /// the in-app model picker's "verify key" screen.
+    #[tokio::test]
+    async fn health_check_auth_retries_past_a_dead_first_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(http_ok_response(VALID_HEALTH_RESPONSE).as_bytes())
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = make_client(base_url);
+        let result = client
+            .onboarding_health_check_auth(&serde_json::json!({
+                "provider": "custom",
+                "base_url": "http://example.invalid",
+                "api_key": "test"
+            }))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "expected the dead first connection to be retried transparently, got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().status, "ok");
+    }
+
+    /// Without a healthy connection ever available, the call must still
+    /// fail cleanly (bounded retries, not an infinite loop) with the same
+    /// transport-error shape users saw in production.
+    #[tokio::test]
+    async fn health_check_fails_cleanly_when_every_connection_is_dead() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            // Every connection attempt (initial + both retries) gets dropped.
+            for _ in 0..3 {
+                if let Ok((stream, _)) = listener.accept().await {
+                    drop(stream);
+                } else {
+                    break;
+                }
+            }
+        });
+
+        let client = make_client(base_url);
+        let result = client
+            .onboarding_health_check(&serde_json::json!({
+                "provider": "custom",
+                "base_url": "http://example.invalid",
+                "api_key": "test"
+            }))
+            .await;
+
+        assert!(result.is_err(), "expected a transport error, got Ok");
     }
 }
