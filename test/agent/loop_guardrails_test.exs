@@ -943,4 +943,62 @@ defmodule OptimalSystemAgent.Agent.Loop.GuardrailsTest do
       refute Guardrails.write_without_read?([tool_call("memory_save")])
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # bug_report?/1
+  # ---------------------------------------------------------------------------
+
+  describe "bug_report?/1 — bug-shaped messages" do
+    test "explicit failure phrasing is a bug" do
+      assert Guardrails.bug_report?("the login button is broken")
+      assert Guardrails.bug_report?("fix the crash on submit")
+      assert Guardrails.bug_report?("the app keeps crashing")
+      assert Guardrails.bug_report?("this feature is not working anymore")
+      assert Guardrails.bug_report?("the sidebar doesn't work")
+      assert Guardrails.bug_report?("there is a regression in checkout")
+      assert Guardrails.bug_report?("the parser has a bug")
+      assert Guardrails.bug_report?("the tests are failing")
+      assert Guardrails.bug_report?("the build failed")
+    end
+
+    test "fix/debug paired with a concrete problem noun is a bug" do
+      assert Guardrails.bug_report?("fix the timeout when loading the page")
+      assert Guardrails.bug_report?("debug the null pointer issue")
+      assert Guardrails.bug_report?("troubleshoot the 500 on the API")
+    end
+
+    test "the word error used as a problem is a bug" do
+      assert Guardrails.bug_report?("I'm getting an error when I click save")
+      assert Guardrails.bug_report?("Error: undefined is not a function")
+      assert Guardrails.bug_report?("it throws an exception on startup")
+    end
+
+    test "pasted stack traces and exception signatures are bugs" do
+      assert Guardrails.bug_report?("Traceback (most recent call last):\n  File \"a.py\", line 3")
+      assert Guardrails.bug_report?("** (RuntimeError) no function clause matching")
+      assert Guardrails.bug_report?("TypeError: cannot read properties of undefined")
+      assert Guardrails.bug_report?("Uncaught ReferenceError: x is not defined")
+
+      node_trace = "    at Object.<anonymous> (/app/index.js:10:5)"
+      assert Guardrails.bug_report?(node_trace)
+    end
+  end
+
+  describe "bug_report?/1 — normal feature work is NOT a bug" do
+    test "feature requests do not trip the detector" do
+      refute Guardrails.bug_report?("add a dark mode toggle")
+      refute Guardrails.bug_report?("write a README")
+      refute Guardrails.bug_report?("create a settings page with a profile tab")
+      refute Guardrails.bug_report?("implement error handling for the upload endpoint")
+      refute Guardrails.bug_report?("add an exception message to the validator")
+      refute Guardrails.bug_report?("fix the wording in the onboarding copy")
+      refute Guardrails.bug_report?("refactor the auth module for readability")
+      refute Guardrails.bug_report?("build a dashboard for analytics")
+    end
+
+    test "non-binary input is never a bug" do
+      refute Guardrails.bug_report?(nil)
+      refute Guardrails.bug_report?(%{})
+    end
+  end
 end

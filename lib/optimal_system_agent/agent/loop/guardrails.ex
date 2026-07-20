@@ -145,6 +145,56 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
 
   def complex_coding_task?(_), do: false
 
+  # ── Bug-report intent detection ─────────────────────────────────────────
+  #
+  # Recognises a turn as a *bug report* so the loop can inject a one-shot
+  # systematic-debugging directive (see MessageHandler.build_pre_directives).
+  # Precision is the point: ordinary feature work ("add a dark mode toggle",
+  # "write a README") must NOT trip this. Four signals, any one is enough:
+  #
+  #   1. strong    — unambiguous failure words (broken, crash, traceback,
+  #                  regression, panic, bug, fails/failing, "not working", …).
+  #                  These almost never appear in a feature request.
+  #   2. signature — a pasted stack trace / exception line (Python Traceback,
+  #                  Elixir `** (FooError)`, `SomeError:`, node `at fn (file:line)`,
+  #                  Python `File "x", line N`, Uncaught/Unhandled).
+  #   3. problem-word — "error"/"exception" used as a *problem* ("getting an
+  #                  error", "Error: …") but NOT as a feature noun ("error
+  #                  handling", "exception message", "error boundary/page/…").
+  #   4. fix-verb + problem-context — an explicit "fix"/"debug" paired with a
+  #                  concrete problem noun ("fix the crash", "debug the timeout"),
+  #                  so "fix the typo" / "fix the wording" stay out.
+  @bug_strong_pattern ~r/\b(broke|broken|crash(?:es|ing|ed)?|traceback|stack\s?traces?|stacktraces?|regression|segfault|segmentation fault|panics?|bugs?|fails?|failing|failed|not\s+working|does\s?n'?t\s+work|do\s+not\s+work|is\s?n'?t\s+working|are\s?n'?t\s+working|wo\s?n'?t\s+work|will\s+not\s+work|stopped\s+working)\b/i
+
+  @bug_signature_pattern ~r/Traceback \(most recent call last\)|Exception in thread|\*\* \([A-Z]\w*(?:Error|Exception)|(?<![\w.])[A-Z]\w*(?:Error|Exception)\b:|(?m:^\s*at\s+\S.*:\d+)|(?m:^\s*File ".*", line \d+)|\bUncaught\b|\bUnhandled\b/
+
+  @bug_problem_word_pattern ~r/\b(errors?|exceptions?)\b/i
+  @bug_feature_noun_pattern ~r/\b(error|exception)[ -]?(handling|handler|handlers|message|messages|boundary|boundaries|page|pages|logging|log|logs|state|states|code|codes|response|responses|toast|banner|notification|notifications|ui|component|components|display|screen|dialog|modal|type|types|class|classes|constant|constants|monitoring|reporting|tracking|middleware|wrapper)\b/i
+
+  @bug_fix_verb_pattern ~r/\b(fix|fixes|fixing|debug|debugging|troubleshoot|diagnose)\b/i
+  @bug_problem_context_pattern ~r/\b(bug|error|crash|issue|problem|broken|fail|failing|failure|wrong|unexpected|exception|regression|hang|hangs|hanging|freeze|frozen|stuck|null|nil|undefined|nan|500|404|502|timeout|leak|deadlock|race condition|infinite loop)\b/i
+
+  @doc """
+  Returns true when the user message reads as a bug report — a pasted error /
+  stack trace, or phrasing like fix / broken / not working / crash / failing /
+  regression / bug. Kept precise so normal feature requests do not trip it.
+  """
+  def bug_report?(message) when is_binary(message) do
+    Regex.match?(@bug_strong_pattern, message) or
+      Regex.match?(@bug_signature_pattern, message) or
+      error_problem_signal?(message) or
+      (Regex.match?(@bug_fix_verb_pattern, message) and
+         Regex.match?(@bug_problem_context_pattern, message))
+  end
+
+  def bug_report?(_), do: false
+
+  # "error"/"exception" used as a problem, not as a feature noun.
+  defp error_problem_signal?(message) do
+    Regex.match?(@bug_problem_word_pattern, message) and
+      not Regex.match?(@bug_feature_noun_pattern, message)
+  end
+
   @doc """
   Detect messages that need codebase exploration before action.
 

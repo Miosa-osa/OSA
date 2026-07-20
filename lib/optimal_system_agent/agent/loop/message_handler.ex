@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.ReactLoop
+  alias OptimalSystemAgent.Agent.Reminders
   alias OptimalSystemAgent.Events.Bus
 
   @doc """
@@ -234,6 +235,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     []
     |> maybe_add_task_directive(message)
     |> maybe_add_visual_observation_directive(message)
+    |> maybe_add_debugging_directive(message, state)
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> maybe_add_progress_ledger_directive(state)
@@ -372,6 +374,47 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
 
   defp computer_use_available? do
     Application.get_env(:optimal_system_agent, :computer_use_enabled) === true
+  end
+
+  # Inject a ONE-SHOT systematic-debugging directive when the user's message
+  # reads as a bug report. This is the main-agent analogue of the `debugger`
+  # subagent's method: without it the model tends to symptom-patch a pasted
+  # error instead of root-causing it. Depth when debugging, silence otherwise —
+  # on a non-bug turn nothing is added (zero tokens).
+  #
+  # Dedup reuses the Reminders per-session claim table (`:systematic_debugging`
+  # key), so the directive fires AT MOST ONCE per session: the first bug turn
+  # gets it, later turns (bug-shaped or not) stay silent. The guidance persists
+  # in history, so re-injecting would only spend tokens repeating what the model
+  # already saw — the same exactly-once contract the other reminders follow.
+  defp maybe_add_debugging_directive(acc, message, %{session_id: sid})
+       when is_binary(sid) and is_binary(message) do
+    if Guardrails.bug_report?(message) and claim_debugging(sid) do
+      [%{role: "system", content: debugging_directive()} | acc]
+    else
+      acc
+    end
+  end
+
+  defp maybe_add_debugging_directive(acc, _message, _state), do: acc
+
+  # First bug turn of the session returns true; later turns false. Fail-open
+  # (inject) only if the claim table is somehow unavailable — never crash a turn.
+  defp claim_debugging(sid) do
+    Reminders.claim(sid, :systematic_debugging)
+  rescue
+    _ -> true
+  end
+
+  defp debugging_directive do
+    "[System: This looks like a bug report. Debug it systematically — do NOT symptom-patch:\n" <>
+      "1. REPRODUCE/understand the failure first: read the actual error, stack trace, and the input that triggers it.\n" <>
+      "2. Read the real source AT the failure site AND the related code paths (including relevant dependency source) before concluding. Do not guess.\n" <>
+      "3. Find the true ROOT CAUSE with evidence (git log/diff/bisect if it is a regression). Fix the cause, not the symptom.\n" <>
+      "4. Keep the fix MINIMAL and focused; do not refactor while fixing.\n" <>
+      "5. VERIFY it is actually fixed: run the failing test/command and confirm it now passes with no regressions.\n" <>
+      "6. Add a REGRESSION TEST so it cannot come back.\n" <>
+      "For a hard or multi-file bug, dispatch the debugger agent: delegate(task: \"<the failure>\", role: \"debugger\").]"
   end
 
   defp maybe_add_delegation_directive(acc, message, state) do
