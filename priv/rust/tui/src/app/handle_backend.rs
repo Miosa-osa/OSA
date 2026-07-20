@@ -469,6 +469,13 @@ impl App {
                     .set_stats(input_tokens, output_tokens, duration_ms);
                 self.activity.set_tokens(input_tokens, output_tokens);
                 self.sidebar.set_tokens(input_tokens, output_tokens);
+                // Context meter self-heal: input_tokens is the full prompt that
+                // was actually sent = the context in use. ContextPressure is the
+                // authoritative feed but doesn't fire on every provider/turn, so
+                // without this the meter sticks at 0% mid-turn (glm/openai-compat
+                // streaming path). Derive it from the real request size here.
+                self.status.note_input_tokens(input_tokens);
+                self.sidebar.set_context(self.status.context_ratio());
             }
             BackendEvent::SignalClassified { signal } => {
                 self.status.set_signal(signal);

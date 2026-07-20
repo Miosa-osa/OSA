@@ -151,7 +151,23 @@ impl ToolRenderer for FileWriteRenderer {
                         Style::default().fg(theme.colors.dim),
                     ),
                 ]);
-                return render_tool_box(header, vec![summary]);
+                let mut body = vec![summary];
+                // Show WHAT is being written as an all-additions (green `+`) diff
+                // preview, so a file WRITE ("building something") surfaces its
+                // content in the tool card during the turn instead of only a line
+                // count. Mirrors the edit card's collapsed diff; the full content
+                // is still available on ctrl+o expand.
+                if !content.is_empty() {
+                    let diff_add_style = Style::default().fg(theme.colors.success);
+                    for line in content.lines() {
+                        body.push(Line::from(vec![
+                            Span::styled("+ ".to_string(), diff_add_style),
+                            Span::styled(line.to_string(), diff_add_style),
+                        ]));
+                    }
+                    body = truncate_lines(body, 15);
+                }
+                return render_tool_box(header, body);
             }
             return vec![header];
         }
@@ -367,5 +383,29 @@ mod diff_render_tests {
         let rendered = text(&lines);
         assert_eq!(rendered.iter().filter(|l| l.contains(" - ")).count(), 3);
         assert_eq!(rendered.iter().filter(|l| l.contains(" + ")).count(), 1);
+    }
+
+    #[test]
+    fn file_write_collapsed_shows_content_additions_preview() {
+        // A file WRITE ("building something") must surface WHAT is being written
+        // as a green additions preview in the collapsed card, not just a count.
+        let opts = RenderOpts {
+            status: crate::tools::ToolStatus::Success,
+            width: 80,
+            expanded: false,
+            compact: true,
+            spinner_frame: None,
+            duration_ms: 12,
+            truncated: false,
+        };
+        let args = r#"{"path":"/tmp/new.rs","content":"fn main() {}\nprintln!(\"hi\");"}"#;
+        let lines = FileWriteRenderer.render("file_write", args, "", &opts);
+        let rendered = text(&lines);
+        // The written source shows up as `+ ` additions in the collapsed card.
+        assert!(
+            rendered.iter().any(|l| l.contains("+ fn main() {}")),
+            "collapsed write must preview content additions, got: {:?}",
+            rendered
+        );
     }
 }

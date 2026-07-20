@@ -162,9 +162,12 @@ impl Sidebar {
         // ── Mode indicators (shown first when active) ─────────────────────
         {
             let mut mode_items = Vec::new();
-            if self.yolo_mode {
-                mode_items.push(("yolo".into(), "ON".into()));
-            }
+            // NOTE: overdrive / yolo is intentionally NOT surfaced here. The
+            // permission mode has exactly one home — the status bar's ⏵⏵ line
+            // ("overdrive (full auto) on"). Pushing a "yolo ON" item here as
+            // well showed overdrive twice (status bar + sidebar), the exact
+            // duplication this removes. `yolo_mode` is still tracked for the
+            // section-title accent below.
             if self.proactive {
                 mode_items.push(("proactive".into(), "ON".into()));
             }
@@ -420,5 +423,37 @@ impl Component for Sidebar {
                 y += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+
+    #[test]
+    fn overdrive_not_duplicated_in_sidebar_mode_section() {
+        // Overdrive / yolo must NOT appear in the sidebar — the status bar is
+        // the single canonical mode indicator. Before the fix the sidebar
+        // pushed a "yolo ON" item, showing overdrive twice.
+        let mut s = Sidebar::new();
+        s.set_yolo_mode(true);
+        s.rebuild_sections();
+        let has_yolo = s
+            .sections
+            .iter()
+            .any(|sec| sec.items.iter().any(|(label, _)| label == "yolo"));
+        assert!(!has_yolo, "sidebar must not render a duplicate yolo/overdrive item");
+    }
+
+    #[test]
+    fn proactive_still_shown_in_mode_section() {
+        let mut s = Sidebar::new();
+        s.set_proactive(true);
+        s.rebuild_sections();
+        let has_proactive = s
+            .sections
+            .iter()
+            .any(|sec| sec.items.iter().any(|(label, _)| label == "proactive"));
+        assert!(has_proactive, "proactive mode should still surface in the sidebar");
     }
 }

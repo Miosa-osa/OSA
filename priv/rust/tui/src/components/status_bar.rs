@@ -346,6 +346,33 @@ impl StatusBar {
         self.context_max = max;
     }
 
+    /// Self-heal the context meter from the real last-request size.
+    ///
+    /// `input_tokens` on an LLM response is the full prompt that was sent
+    /// (system + conversation + tool results) = the context actually in use.
+    /// The dedicated `context_pressure` event is the authoritative source, but
+    /// it does not fire on every provider/turn (e.g. streaming glm/openai-compat
+    /// turns) — when it is absent the meter would otherwise stick at 0% while a
+    /// real turn is clearly loaded. Deriving utilization from
+    /// input_tokens/context_max here mirrors how Claude Code computes
+    /// "context used" (the last request's token count over the window) and makes
+    /// the meter self-correcting. No-op until we know the window size, so it can
+    /// never regress a known value to 0.
+    pub fn note_input_tokens(&mut self, input_tokens: u64) {
+        if input_tokens == 0 || self.context_max == 0 {
+            return;
+        }
+        self.context_estimated = input_tokens;
+        self.context_utilization =
+            (input_tokens as f64 / self.context_max as f64).clamp(0.0, 1.0);
+    }
+
+    /// Current context utilization ratio (0.0..=1.0), for mirroring into the
+    /// sidebar meter so both surfaces agree.
+    pub fn context_ratio(&self) -> f64 {
+        self.context_utilization
+    }
+
     /// WS12 — CC TokenWarning parity fields from the backend's context_pressure
     /// event: percent of usable context left before auto-compact, and whether
     /// the low-context warning threshold has been crossed.
@@ -875,6 +902,25 @@ mod status_bar_tests {
         sb.set_context_warning(None, false);
         assert!(!sb.context_low());
         assert_eq!(sb.percent_left(), None);
+    }
+
+    #[test]
+    fn context_meter_self_heals_from_input_tokens() {
+        let mut sb = StatusBar::new();
+        // Window known (e.g. from ModelChanged), but no context_pressure event yet.
+        sb.set_context(0.0, 0, 200_000);
+        assert_eq!(sb.context_ratio(), 0.0);
+        // A real LLM response arrives with the prompt size: meter must reflect it
+        // instead of sticking at 0% (the live bug).
+        sb.note_input_tokens(42_000);
+        assert!((sb.context_ratio() - 0.21).abs() < 0.01);
+        // A zero/unknown input never regresses a known value back to 0.
+        sb.note_input_tokens(0);
+        assert!((sb.context_ratio() - 0.21).abs() < 0.01);
+        // No window size yet -> no-op (avoids divide-by-zero / bogus 100%).
+        let mut fresh = StatusBar::new();
+        fresh.note_input_tokens(5_000);
+        assert_eq!(fresh.context_ratio(), 0.0);
     }
 
     /// Render the two-row status bar for `mode` and flatten its cells to a

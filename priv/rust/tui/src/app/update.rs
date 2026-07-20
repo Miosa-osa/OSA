@@ -13,24 +13,6 @@ use crate::event::Event;
 /// on a large paste and stops a long prose line from being probed word by word.
 const MAX_PATH_TOKENS: usize = 8;
 
-/// Strip one matching pair of surrounding quotes (mirrors attachment.rs so the
-/// path gate and attachment ingestion agree on what a path token is).
-fn unquote_path(s: &str) -> &str {
-    let s = s.trim();
-    for q in ['\'', '"'] {
-        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-            return &s[1..s.len() - 1];
-        }
-    }
-    s
-}
-
-/// Undo the shell-style escaping a terminal applies to dropped paths
-/// ("my\\ file" -> "my file"), mirroring attachment.rs.
-fn unescape_path(s: &str) -> String {
-    s.replace("\\ ", " ").replace("\\\\", "\\")
-}
-
 /// A token is worth stat'ing only when it *looks* like a filesystem path:
 /// absolute (`/…`), explicitly relative (`./`, `../`), home (`~`), a Windows
 /// drive path (`C:\…` / `C:/…`), or a UNC path (`\\…`). A bare word like
@@ -59,11 +41,15 @@ fn looks_like_path(tok: &str) -> bool {
 /// quotes, undo `\\ ` escaping) and return it ONLY when it looks like a path.
 /// Bare words return None so they never trigger a stat.
 fn path_candidate(tok: &str) -> Option<String> {
-    let unq = unquote_path(tok);
-    if !looks_like_path(unq) {
+    // Decode first (strip quotes, a `file://` URI scheme, percent-encoding, and
+    // `\ ` escapes) so a drag-dropped `file:///…%20….png` becomes a real
+    // absolute path BEFORE the looks-like-a-path gate — otherwise Linux drops
+    // (delivered as file:// URIs) never pass the gate and are inserted as text.
+    let decoded = crate::app::attachment::decode_dropped_path(tok);
+    if !looks_like_path(&decoded) {
         return None;
     }
-    Some(unescape_path(unq))
+    Some(decoded)
 }
 
 /// True only when a pasted string is entirely one-or-more existing filesystem

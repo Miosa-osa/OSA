@@ -150,7 +150,25 @@ fn run(cli: config::cli::Cli) -> Result<()> {
         Some(supported) => supported,
         None => terminal_known_kitty_protocol(),
     };
-    if kbd_enhanced {
+    // Reliability vs. honesty are two separate decisions:
+    //   * `kbd_enhanced` (above) drives the composer's newline HINT, so it stays
+    //     conservative — it only claims "shift+⏎" when we KNOW the protocol works.
+    //   * `should_push_enhancement_flags` decides whether to actually PUSH the
+    //     flags, and pushes on an inconclusive probe (`None`) too. The push is a
+    //     harmless no-op on terminals that ignore the kitty protocol (they drop
+    //     the `CSI > u` sequence), so pushing optimistically recovers a reliable
+    //     Shift+Enter newline on capable terminals whose reply the busy startup
+    //     burst missed — WITHOUT ever making the hint lie. The exit pop is
+    //     unconditional, so push/pop stay balanced.
+    //
+    // TERMINAL LIMITATION: genuinely legacy terminals (Apple Terminal, the VS
+    // Code integrated terminal, plain xterm, and most tmux/SSH passthroughs)
+    // cannot report Shift+Enter as a distinct key at all — it collapses to a bare
+    // Enter no matter what flags we push. There Shift+Enter necessarily submits,
+    // and the portable "insert newline" chords are Ctrl+J and the backslash-
+    // continuation (a trailing "\" before Enter); see `app::key_normalize`. The
+    // composer advertises the backslash affordance in that case.
+    if should_push_enhancement_flags(probe.keyboard_enhancement_supported) {
         let _ = execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -235,6 +253,19 @@ fn terminal_known_kitty_protocol() -> bool {
         || var("WEZTERM_PANE").is_ok()
 }
 
+/// Whether to push the kitty keyboard-enhancement flags (DISAMBIGUATE_ESCAPE_CODES)
+/// so Shift+Enter is reported as a distinct `Enter+SHIFT` newline chord.
+///
+/// We push UNLESS the startup probe DEFINITIVELY reported the protocol
+/// unsupported (`Some(false)`). A confirmed `Some(true)` obviously pushes; an
+/// inconclusive `None` also pushes, optimistically, because the push is a
+/// harmless no-op on terminals that ignore the protocol yet recovers Shift+Enter
+/// on capable terminals whose reply the busy startup burst never saw. Kept as a
+/// pure function so the policy is unit-testable without a live terminal.
+fn should_push_enhancement_flags(probe: Option<bool>) -> bool {
+    !matches!(probe, Some(false))
+}
+
 fn restore_terminal() -> Result<()> {
     let mut stdout = io::stdout();
     // Defensive: if a panic unwound between the paired BeginSynchronizedUpdate /
@@ -255,4 +286,28 @@ fn restore_terminal() -> Result<()> {
     let _ = write!(stdout, "\r\n");
     let _ = stdout.flush();
     Ok(())
+}
+
+#[cfg(test)]
+mod keyboard_enhancement_tests {
+    use super::should_push_enhancement_flags;
+
+    #[test]
+    fn pushes_on_confirmed_support() {
+        assert!(should_push_enhancement_flags(Some(true)));
+    }
+
+    #[test]
+    fn pushes_optimistically_on_inconclusive_probe() {
+        // The busy-startup probe can miss the reply on a capable terminal; an
+        // inconclusive None must still push so Shift+Enter is not stranded.
+        assert!(should_push_enhancement_flags(None));
+    }
+
+    #[test]
+    fn does_not_push_when_definitively_unsupported() {
+        // Some(false) is a definitive "no" (e.g. legacy terminal / tmux drop);
+        // pushing is pointless there and we respect the probe.
+        assert!(!should_push_enhancement_flags(Some(false)));
+    }
 }

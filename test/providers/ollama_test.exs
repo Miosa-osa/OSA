@@ -2,6 +2,7 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
   use ExUnit.Case, async: true
 
   alias OptimalSystemAgent.Providers.Ollama
+  alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Utils.Text
 
   # ---------------------------------------------------------------------------
@@ -415,6 +416,68 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
     test "default_model/0 returns a non-empty string" do
       model = Ollama.default_model()
       assert is_binary(model) and model != ""
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # process_ndjson_line/3 — inline <think> reasoning must never leak into the
+  # visible stream (regression: glm-5.2:cloud inlines reasoning as <think>…).
+  # ---------------------------------------------------------------------------
+
+  describe "streaming reasoning-tag stripping" do
+    defp collect(line, acc) do
+      me = self()
+      cb = fn ev -> send(me, ev) end
+      Ollama.process_ndjson_line(line, cb, acc)
+    end
+
+    defp drain do
+      Enum.reduce_while(1..100, {"", ""}, fn _, {vis, think} ->
+        receive do
+          {:text_delta, t} -> {:cont, {vis <> t, think}}
+          {:thinking_delta, t} -> {:cont, {vis, think <> t}}
+        after
+          0 -> {:halt, {vis, think}}
+        end
+      end)
+    end
+
+    test "routes <think> content to thinking channel, keeps visible clean" do
+      acc = %{
+        buffer: "",
+        content: "",
+        tool_calls: [],
+        usage: %{},
+        think: ThinkStreamParser.new()
+      }
+
+      acc = collect(~s({"message":{"content":"<think>reasoning</think>"}}), acc)
+      _acc = collect(~s({"message":{"content":"Hello"}}), acc)
+
+      {visible, thinking} = drain()
+
+      assert visible == "Hello"
+      refute visible =~ "<think>"
+      assert thinking == "reasoning"
+    end
+
+    test "handles a <think> tag split across two chunks" do
+      acc = %{
+        buffer: "",
+        content: "",
+        tool_calls: [],
+        usage: %{},
+        think: ThinkStreamParser.new()
+      }
+
+      acc = collect(~s({"message":{"content":"<thi"}}), acc)
+      _acc = collect(~s({"message":{"content":"nk>secret</think>answer"}}), acc)
+
+      {visible, thinking} = drain()
+
+      assert visible == "answer"
+      refute visible =~ "think"
+      assert thinking == "secret"
     end
   end
 end

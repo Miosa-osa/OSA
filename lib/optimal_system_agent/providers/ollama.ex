@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   require Logger
 
+  alias OptimalSystemAgent.Providers.ThinkStreamParser
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
 
@@ -263,7 +264,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           {:args, curl_args}
         ])
 
-      result = cloud_stream_loop(port, callback, %{content: "", tool_calls: [], usage: %{}})
+      result =
+        cloud_stream_loop(port, callback, %{
+          content: "",
+          tool_calls: [],
+          usage: %{},
+          # Split inline <think>…</think> reasoning out of the live stream so
+          # the tags + reasoning never leak into the visible answer (GLM cloud
+          # models such as glm-5.2:cloud inline reasoning in the content field).
+          think: ThinkStreamParser.new()
+        })
       File.rm(body_file)
       result
     else
@@ -302,6 +312,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
                 do: final_content_from_chunk,
                 else: acc.content
 
+            # Drain any tag tail the splitter was holding so trailing characters
+            # are never lost from the live display at end-of-stream.
+            flush_think(acc, callback)
+
             content = Text.strip_thinking_tokens(accumulated)
 
             Logger.info(
@@ -327,9 +341,18 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             cloud_stream_loop(port, callback, %{acc | tool_calls: acc.tool_calls ++ tool_calls})
 
           {:ok, %{"message" => %{"content" => token}}} when token != "" ->
-            # Streaming token — emit delta
-            callback.({:text_delta, token})
-            cloud_stream_loop(port, callback, %{acc | content: acc.content <> token})
+            # Streaming token — split inline reasoning tags out before emitting.
+            {visible, thinking, think_state} =
+              ThinkStreamParser.feed(acc.think, token)
+
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+
+            cloud_stream_loop(port, callback, %{
+              acc
+              | content: acc.content <> token,
+                think: think_state
+            })
 
           {:ok, %{"error" => error}} ->
             # API returned an error — fail fast instead of looping forever
@@ -356,6 +379,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         # Always call done callback even when content is empty (tool-call-only
         # responses have no text but do have tool_calls; skipping would block
         # the caller indefinitely on its receive loop).
+        flush_think(acc, callback)
         content = Text.strip_thinking_tokens(acc.content)
         callback.({:done, %{content: content, tool_calls: acc.tool_calls, usage: acc.usage}})
         :ok
@@ -393,7 +417,13 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # The callback approach runs directly in the calling process, bypassing all
     # mailbox message format differences between HTTP and HTTPS connections.
     stream_key = {__MODULE__, :stream, make_ref()}
-    Process.put(stream_key, %{buffer: "", content: "", tool_calls: [], usage: %{}})
+    Process.put(stream_key, %{
+      buffer: "",
+      content: "",
+      tool_calls: [],
+      usage: %{},
+      think: ThinkStreamParser.new()
+    })
 
     req_opts =
       [
@@ -725,6 +755,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp finalize_stream(acc, callback) do
+    flush_think(acc, callback)
     content = Text.strip_thinking_tokens(acc.content)
 
     tool_calls =
@@ -736,6 +767,20 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # Keys already normalised to :input_tokens/:output_tokens by process_ndjson_line.
     callback.({:done, %{content: content, tool_calls: tool_calls, usage: acc.usage}})
     :ok
+  end
+
+  # Drain any partial reasoning-tag tail the streaming splitter is holding so
+  # trailing characters are never dropped from the live display.
+  defp flush_think(acc, callback) do
+    case Map.get(acc, :think) do
+      %ThinkStreamParser{} = ts ->
+        {leftover_vis, leftover_think, _} = ThinkStreamParser.flush(ts)
+        if leftover_think != "", do: callback.({:thinking_delta, leftover_think})
+        if leftover_vis != "", do: callback.({:text_delta, leftover_vis})
+
+      _ ->
+        :ok
+    end
   end
 
   # Split buffered data into complete NDJSON lines + partial remainder
@@ -750,8 +795,19 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   def process_ndjson_line(line, callback, acc) do
     case Jason.decode(line) do
       {:ok, %{"message" => %{"content" => text}}} when is_binary(text) and text != "" ->
-        callback.({:text_delta, text})
-        %{acc | content: acc.content <> text}
+        # Split inline <think>…</think> reasoning out before emitting so the
+        # tags + reasoning never leak into the visible answer.
+        case Map.get(acc, :think) do
+          %ThinkStreamParser{} = ts ->
+            {visible, thinking, think_state} = ThinkStreamParser.feed(ts, text)
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+            %{acc | content: acc.content <> text, think: think_state}
+
+          _ ->
+            callback.({:text_delta, text})
+            %{acc | content: acc.content <> text}
+        end
 
       # kimi-k2.5 and other thinking models send a "thinking" field during
       # extended reasoning before producing content or tool calls.

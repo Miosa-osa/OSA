@@ -134,6 +134,73 @@ fn unescape(s: &str) -> String {
     s.replace("\\ ", " ").replace("\\\\", "\\")
 }
 
+/// Decode a single dropped/pasted path token into a real filesystem path:
+/// strip surrounding quotes, strip a `file://` URI scheme (percent-decoding the
+/// remainder), and undo shell-style `\ ` escaping.
+///
+/// This is the load-bearing bit for drag-and-drop on Linux: GTK/Wayland
+/// terminals deliver a dropped file as a percent-encoded `file://` URI
+/// (e.g. `file:///home/me/a%20photo.png`), so without decoding the drop was
+/// inserted as literal URI text instead of being recognised and attached.
+pub fn decode_dropped_path(token: &str) -> String {
+    unescape(&strip_file_uri(&unquote(token)))
+}
+
+/// Strip a `file://` scheme (and an optional `localhost` / host authority) and
+/// percent-decode the path. Non-`file://` input is returned unchanged (aside
+/// from a trim), so plain paths flow through untouched.
+fn strip_file_uri(s: &str) -> String {
+    let s = s.trim();
+    match s.strip_prefix("file://") {
+        None => s.to_string(),
+        Some(rest) => {
+            // `file:///path` (empty host) -> `/path`; `file://localhost/path` and
+            // the rare `file://host/path` -> `/path` (drop the authority).
+            let path = if let Some(after) = rest.strip_prefix("localhost") {
+                after
+            } else if rest.starts_with('/') {
+                rest
+            } else {
+                match rest.find('/') {
+                    Some(i) => &rest[i..],
+                    None => rest,
+                }
+            };
+            percent_decode(path)
+        }
+    }
+}
+
+/// Minimal RFC-3986 percent-decoder (`%20` -> space, etc.). Invalid escapes are
+/// left verbatim. Kept dependency-free and byte-oriented so multi-byte UTF-8
+/// sequences round-trip correctly.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Extract existing file paths from pasted/dropped text. Returns empty when the
 /// text is ordinary prose (so it falls through to normal text insertion).
 pub fn parse_attachment_paths(text: &str) -> Vec<String> {
@@ -142,18 +209,20 @@ pub fn parse_attachment_paths(text: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    // Fast path: the whole payload is a single (possibly quoted) path — handles
-    // paths containing spaces, which the token split below would break apart.
-    let whole = unescape(&unquote(trimmed));
+    // Fast path: the whole payload is a single (possibly quoted / file://) path —
+    // handles paths containing spaces, which the token split below would break
+    // apart.
+    let whole = decode_dropped_path(trimmed);
     if Path::new(&whole).is_file() {
         return vec![whole];
     }
 
-    // Otherwise treat it as one-or-more whitespace/newline separated paths and
-    // keep only the tokens that actually resolve to files on disk.
+    // Otherwise treat it as one-or-more whitespace/newline separated paths (a
+    // multi-file drop) and keep only the tokens that actually resolve to files
+    // on disk. file:// URIs are percent-encoded, so each URI is one token.
     let mut out = Vec::new();
     for token in trimmed.split_whitespace() {
-        let cand = unescape(&unquote(token));
+        let cand = decode_dropped_path(token);
         if Path::new(&cand).is_file() {
             out.push(cand);
         }
@@ -335,6 +404,37 @@ mod prune_tests {
     #[test]
     fn mention_context_refs_empty_when_no_mentions() {
         assert!(mention_context_refs(&[]).is_empty());
+    }
+
+    #[test]
+    fn decode_dropped_path_strips_file_uri_and_percent_encoding() {
+        // The core drag-drop-on-Linux case: file:// URI with a percent-encoded space.
+        assert_eq!(
+            decode_dropped_path("file:///home/me/a%20photo.png"),
+            "/home/me/a photo.png"
+        );
+        // localhost authority is dropped.
+        assert_eq!(
+            decode_dropped_path("file://localhost/tmp/x.png"),
+            "/tmp/x.png"
+        );
+        // Quoted plain path still works (no file:// scheme).
+        assert_eq!(decode_dropped_path("'/tmp/my file.png'"), "/tmp/my file.png");
+        // Shell-escaped plain path still works.
+        assert_eq!(decode_dropped_path("/tmp/my\\ file.png"), "/tmp/my file.png");
+    }
+
+    #[test]
+    fn parse_attachment_paths_accepts_file_uri_drop() {
+        // Create a real temp image so the is_file() gate passes.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("osa_drop_test_{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n").unwrap();
+        let uri = format!("file://{}", path.to_string_lossy());
+        let got = parse_attachment_paths(&uri);
+        assert_eq!(got, vec![path.to_string_lossy().to_string()]);
+        assert!(is_image_path(&got[0]), "dropped .png is recognised as an image");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
