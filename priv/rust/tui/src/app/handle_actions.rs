@@ -547,6 +547,12 @@ impl App {
         self.activity.start();
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);
+        // The turn is committed — drop the live pending-composer overlay so the
+        // meter snaps back to the committed context (the backend now owns the
+        // real size via context_pressure / note_input_tokens). Backstop for
+        // submit paths that don't drain the composer first (commands, queue).
+        self.status.set_pending_input_tokens(0);
+        self.sidebar.set_context(self.status.display_context_ratio());
         // Fresh turn — clear any prior goal-verification indicator so it never
         // lingers into unrelated work.
         self.status.set_goal_verification(None);

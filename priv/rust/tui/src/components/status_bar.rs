@@ -192,6 +192,30 @@ fn mcp_label(count: usize) -> Option<String> {
     }
 }
 
+/// Cheap local token estimate for the composer's pending input, so the context
+/// meter can reflect what the user is about to add before the turn is committed
+/// (CC parity). Char/4 heuristic — the same rough ratio the activity counter
+/// already uses for streamed output (`stream_chars / 4`, activity.rs) — kept as
+/// one small pure function. `ceil` so a single character reads as 1 token, not 0.
+pub(crate) fn estimate_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64).div_ceil(4)
+}
+
+/// Below this many estimated tokens the pending composer input is noise, so the
+/// compact `+~Nk` hint stays hidden (CC only surfaces the size of large pastes).
+/// At or above it the hint appears next to the context readout.
+const PENDING_HINT_MIN_TOKENS: u64 = 1000;
+
+/// Compact `+~Nk` (or `+~N`) pending-size hint text for the composer estimate.
+/// Terse by design so it survives on narrow panes.
+fn pending_hint(tokens: u64) -> String {
+    if tokens >= 1000 {
+        format!("+~{}k", (tokens as f64 / 1000.0).round() as u64)
+    } else {
+        format!("+~{}", tokens)
+    }
+}
+
 /// Transient goal-verification indicator state, tied to the active-goal line.
 /// Set from the backend `goal_verifier_round` event and cleared on a new turn.
 /// Deliberately understated: one compact chip, never a popup.
@@ -214,6 +238,11 @@ pub struct StatusBar {
     context_utilization: f64,
     context_max: u64,
     context_estimated: u64,
+    /// Live estimate of the composer's uncommitted input, char/4 (see
+    /// `estimate_tokens`). Rendered as a transient overlay ON TOP of the
+    /// committed `context_utilization` (never mutating it), and reset to 0 on
+    /// submit / clear. 0 ⇒ nothing pending ⇒ meter shows the committed value.
+    pending_input_tokens: u64,
     input_tokens: u64,
     output_tokens: u64,
     elapsed_ms: u64,
@@ -277,6 +306,7 @@ impl StatusBar {
             context_utilization: 0.0,
             context_max: 0,
             context_estimated: 0,
+            pending_input_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             elapsed_ms: 0,
@@ -436,6 +466,34 @@ impl StatusBar {
     /// sidebar meter so both surfaces agree.
     pub fn context_ratio(&self) -> f64 {
         self.context_utilization
+    }
+
+    /// Set the live pending-input token estimate from the composer buffer. A
+    /// transient overlay on the committed meter (see `display_context_ratio`);
+    /// call with 0 on submit / clear. Never touches `context_utilization`, so
+    /// the committed truth the backend owns is preserved.
+    pub fn set_pending_input_tokens(&mut self, tokens: u64) {
+        self.pending_input_tokens = tokens;
+    }
+
+    /// The current pending-input estimate (composer tokens not yet sent).
+    pub fn pending_input_tokens(&self) -> u64 {
+        self.pending_input_tokens
+    }
+
+    /// The context meter ratio to render: the committed utilization PLUS the
+    /// live pending-input delta (composer tokens / window), clamped to 1.0. The
+    /// delta is a transient overlay only — it never mutates `context_utilization`
+    /// — so the bar grows as the user pastes and shrinks on send/clear while the
+    /// committed value stays intact. No delta when the window is unknown
+    /// (`context_max == 0`), which also avoids a divide-by-zero / fake percent.
+    pub fn display_context_ratio(&self) -> f64 {
+        let pending_ratio = if self.context_max > 0 {
+            self.pending_input_tokens as f64 / self.context_max as f64
+        } else {
+            0.0
+        };
+        (self.context_utilization + pending_ratio).clamp(0.0, 1.0)
     }
 
     /// WS12 — CC TokenWarning parity fields from the backend's context_pressure
@@ -727,7 +785,11 @@ impl Component for StatusBar {
 
         // Braille context-usage bar + percentage.
         spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-        let (bar_filled, bar_empty) = braille_bar(self.context_utilization, 8);
+        // Committed utilization + the live pending-composer delta, so the meter
+        // grows as the user types/pastes and shrinks on send/clear. The pending
+        // overlay never mutates the committed `context_utilization`.
+        let disp_ratio = self.display_context_ratio();
+        let (bar_filled, bar_empty) = braille_bar(disp_ratio, 8);
         // Severity color grades the meter as it approaches the auto-compact
         // threshold (CC parity): primary < 75%, amber >= 75%, red >= 90% OR once
         // the backend flags the low-context warning band (`context_low`, keyed on
@@ -736,7 +798,7 @@ impl Component for StatusBar {
         let ctx_color = if self.context_low {
             theme.colors.error
         } else {
-            theme.context_bar_color(self.context_utilization)
+            theme.context_bar_color(disp_ratio)
         };
         if !bar_filled.is_empty() {
             spans.push(Span::styled(bar_filled, Style::default().fg(ctx_color)));
@@ -744,7 +806,7 @@ impl Component for StatusBar {
         if !bar_empty.is_empty() {
             spans.push(Span::styled(bar_empty, theme.ctx_bar_empty()));
         }
-        let pct = (self.context_utilization * 100.0).round() as u32;
+        let pct = (disp_ratio * 100.0).round() as u32;
         let pct_style = if self.context_low {
             Style::default().fg(ctx_color).add_modifier(Modifier::BOLD)
         } else {
@@ -753,6 +815,19 @@ impl Component for StatusBar {
         // "N% ctx" — labelled like CC's "N% context used" so the number reads as
         // context occupancy (measured against the effective window server-side).
         spans.push(Span::styled(format!(" {}% ctx", pct), pct_style));
+
+        // Large-paste hint: when the pending composer input is big enough to
+        // matter (>= ~1000 tokens), surface its compact size (`+~12k`) in the
+        // faint style so the user sees roughly how much they are about to add.
+        // Below the threshold nothing is shown (no noise for short prompts).
+        // Works even when the window is unknown (context_max == 0): the size
+        // hint shows while the percentage stays honest at the committed value.
+        if self.pending_input_tokens >= PENDING_HINT_MIN_TOKENS {
+            spans.push(Span::styled(
+                format!(" {}", pending_hint(self.pending_input_tokens)),
+                theme.faint(),
+            ));
+        }
 
         // Decorative accent.
         spans.push(Span::styled(" \u{2606}", theme.status_glyph())); // ☆
@@ -1325,6 +1400,94 @@ mod status_bar_tests {
             ],
         }));
         assert!(render_sb(&sb).contains("2 gaps"), "plural gaps");
+    }
+
+    #[test]
+    fn estimate_tokens_char_over_four() {
+        // Empty ⇒ 0 tokens (no pending overlay).
+        assert_eq!(estimate_tokens(""), 0);
+        // ceil(chars/4): 1..=4 chars ⇒ 1 token, 5..=8 ⇒ 2, exact multiples land.
+        assert_eq!(estimate_tokens("a"), 1);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2); // ceil(5/4)
+        assert_eq!(estimate_tokens("abcdefgh"), 2); // exact 8/4
+        // Large paste: 4000 chars ⇒ 1000 tokens (the hint threshold).
+        assert_eq!(estimate_tokens(&"x".repeat(4000)), 1000);
+        // Counts Unicode scalar values, not bytes (a 4-byte emoji is one char).
+        assert_eq!(estimate_tokens("\u{1F600}\u{1F600}\u{1F600}\u{1F600}"), 1);
+    }
+
+    #[test]
+    fn pending_input_overlays_meter_without_corrupting_committed() {
+        let mut sb = StatusBar::new();
+        // Committed 20% of a 200k window; nothing pending yet.
+        sb.set_context(0.20, 40_000, 200_000);
+        assert!((sb.display_context_ratio() - 0.20).abs() < 1e-9);
+
+        // Paste ~40k tokens of pending input: the RENDERED ratio grows by
+        // 40k/200k = 0.20 ⇒ 0.40, but the committed value is untouched.
+        sb.set_pending_input_tokens(40_000);
+        assert!((sb.display_context_ratio() - 0.40).abs() < 1e-9);
+        assert!(
+            (sb.context_ratio() - 0.20).abs() < 1e-9,
+            "committed context_utilization must NOT change"
+        );
+        assert_eq!(sb.context_estimated, 40_000, "committed estimate untouched");
+
+        // The bar visibly grows: rendered percent reflects the overlay.
+        assert!(render_sb(&sb).contains("40% ctx"));
+
+        // Submit/clear resets pending ⇒ meter snaps back to the committed base.
+        sb.set_pending_input_tokens(0);
+        assert!((sb.display_context_ratio() - 0.20).abs() < 1e-9);
+        assert!(render_sb(&sb).contains("20% ctx"));
+
+        // Combined ratio is clamped to 1.0 (never overflows the bar).
+        sb.set_context(0.90, 180_000, 200_000);
+        sb.set_pending_input_tokens(200_000); // +100% pending
+        assert!((sb.display_context_ratio() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pending_hint_shows_only_above_threshold() {
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_context(0.10, 20_000, 200_000);
+
+        // Below threshold: no hint (no noise for short prompts).
+        sb.set_pending_input_tokens(PENDING_HINT_MIN_TOKENS - 1);
+        assert!(!render_sb(&sb).contains("+~"), "no hint below threshold");
+
+        // At/above threshold: compact "+~Nk" hint appears.
+        sb.set_pending_input_tokens(12_000);
+        assert!(render_sb(&sb).contains("+~12k"), "large-paste hint shows");
+
+        // Cleared ⇒ hint gone.
+        sb.set_pending_input_tokens(0);
+        assert!(!render_sb(&sb).contains("+~"));
+    }
+
+    #[test]
+    fn pending_hint_formats_compactly() {
+        assert_eq!(pending_hint(999), "+~999");
+        assert_eq!(pending_hint(1000), "+~1k");
+        assert_eq!(pending_hint(1499), "+~1k"); // rounds down
+        assert_eq!(pending_hint(1500), "+~2k"); // rounds up
+        assert_eq!(pending_hint(12_000), "+~12k");
+    }
+
+    #[test]
+    fn pending_no_percentage_when_window_unknown() {
+        // context_max == 0 (window unknown): the size hint still shows, but the
+        // percentage must stay honest at the committed value (no faked percent),
+        // and rendering must not panic (divide-by-zero guard).
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_pending_input_tokens(8_000);
+        assert!((sb.display_context_ratio() - 0.0).abs() < 1e-9);
+        let text = render_sb(&sb);
+        assert!(text.contains("0% ctx"), "percent stays at committed value");
+        assert!(text.contains("+~8k"), "size hint still surfaces");
     }
 
     #[test]

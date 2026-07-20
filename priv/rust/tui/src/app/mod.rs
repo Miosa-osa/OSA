@@ -644,6 +644,24 @@ impl App {
             .set_size(self.layout.chat_width, self.layout.chat_height);
         self.input.set_width(self.layout.chat_width);
         self.status.set_width(self.width);
+        // Live context-meter overlay: re-estimate the composer's uncommitted
+        // input on every edit (typing/paste/backspace all route through here as
+        // post-edit bookkeeping) so the meter reflects what the user is about to
+        // send, CC-style. Recomputed on change, not on render ticks. On submit
+        // the composer drains its buffer before this runs, so pending falls back
+        // to 0 naturally; submit_prompt also resets it explicitly as a backstop.
+        self.refresh_pending_input_tokens();
+    }
+
+    /// Re-estimate the composer's pending input and push it onto the context
+    /// meter (status bar, mirrored to the sidebar so both surfaces agree). Cheap
+    /// char/4 estimate; never mutates the committed context value.
+    pub(crate) fn refresh_pending_input_tokens(&mut self) {
+        let pending =
+            crate::components::status_bar::estimate_tokens(self.input.value());
+        self.status.set_pending_input_tokens(pending);
+        // Mirror the combined (committed + pending) ratio into the sidebar meter.
+        self.sidebar.set_context(self.status.display_context_ratio());
     }
 
     /// Transition to a new state with validation
