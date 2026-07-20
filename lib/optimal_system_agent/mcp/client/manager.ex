@@ -114,6 +114,7 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
           transport: server.transport,
           enabled: server.enabled,
           status: server_status(server),
+          source: Map.get(server, :source, :osa),
           tool_count: state.tools_by_server |> Map.get(name, []) |> length()
         }
       end)

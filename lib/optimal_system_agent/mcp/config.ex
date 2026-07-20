@@ -34,7 +34,8 @@ defmodule OptimalSystemAgent.MCP.Config do
             oauth: map() | nil,
             enabled: boolean(),
             tool_filter: [String.t()] | nil,
-            scope: :local | :project | :user
+            scope: :local | :project | :user,
+            source: atom()
           }
 
     defstruct name: nil,
@@ -47,7 +48,11 @@ defmodule OptimalSystemAgent.MCP.Config do
               oauth: nil,
               enabled: true,
               tool_filter: nil,
-              scope: :user
+              scope: :user,
+              # Where this server was discovered: `:osa` for native
+              # (~/.osa, .mcp.json, .osa/mcp.local.json), or an external tool
+              # tag (`:codex`, `:claude_code`, `:claude_desktop`, `:cursor`).
+              source: :osa
   end
 
   @doc "Absolute path to the MCP config file (`~/.osa/mcp.json`)."
@@ -111,13 +116,36 @@ defmodule OptimalSystemAgent.MCP.Config do
   """
   @spec load_startup() :: [Server.t()]
   def load_startup do
-    load_all()
-    |> Enum.filter(fn
-      %Server{scope: :project} = s -> OptimalSystemAgent.MCP.ProjectApproval.approved?(s.name)
-      _ -> true
-    end)
+    native =
+      load_all()
+      |> Enum.filter(fn
+        %Server{scope: :project} = s -> OptimalSystemAgent.MCP.ProjectApproval.approved?(s.name)
+        _ -> true
+      end)
+
+    # Auto-discovered servers from other tools (Codex/Claude/Cursor). Native
+    # servers always win on name collision; discovered ones fill the rest and
+    # are enabled by default so they "just appear". Discovery is best-effort
+    # and never raises, but we still guard the whole append.
+    discovered =
+      if discovery_enabled?() do
+        native_names = MapSet.new(native, & &1.name)
+
+        OptimalSystemAgent.MCP.Discovery.discover()
+        |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
+      else
+        []
+      end
+
+    native ++ discovered
   rescue
     _ -> load!()
+  end
+
+  # Whether external-tool MCP discovery runs at boot. Off in tests so the suite
+  # never picks up the operator's real Codex/Claude config from $HOME.
+  defp discovery_enabled? do
+    Application.get_env(:optimal_system_agent, :mcp_discovery_enabled, true)
   end
 
   @doc """

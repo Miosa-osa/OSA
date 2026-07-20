@@ -67,6 +67,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.MCPRoutes do
       transport: stringify(server[:transport]),
       enabled: server[:enabled] == true,
       status: stringify(server[:status]),
+      source: stringify(server[:source] || :osa),
       tool_count: server[:tool_count] || 0
     }
   end

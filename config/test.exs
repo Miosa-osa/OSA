@@ -62,6 +62,11 @@ config :optimal_system_agent, disable_models_fetch: true
 
 config :optimal_system_agent,
   models_cache_path: Path.join(System.tmp_dir!(), "osa-test-no-such-models-cache.json")
+# External-tool MCP discovery (Codex/Claude/Cursor) is OFF in the suite so tests
+# never load the operator's real ~/.codex, ~/.claude, ~/.cursor config from
+# $HOME. The discovery unit test enables it explicitly via a fake home override.
+config :optimal_system_agent, mcp_discovery_enabled: false
+
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false
 # Use a different HTTP port in tests to avoid conflicts
