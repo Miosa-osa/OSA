@@ -914,6 +914,65 @@ impl Activity {
         crate::style::gradient::lerp_color(base, theme.colors.error, stall)
     }
 
+    /// The rail's target accent for the current state (grok state→color map):
+    /// cancelling ⇒ error red, pending-on-user ⇒ primary (its frozen full
+    /// color), retrying ⇒ warning yellow, otherwise working ⇒ success green.
+    fn rail_accent(&self, theme: &crate::style::Theme) -> Color {
+        if self.cancelling {
+            theme.colors.error
+        } else if self.pending_user {
+            theme.colors.primary
+        } else if self.retry.is_some() {
+            theme.colors.warning
+        } else {
+            theme.colors.success
+        }
+    }
+
+    /// Whether the rail is frozen to a solid full-accent column (no traveling
+    /// wave): when the turn is parked on the user, is being cancelled, or
+    /// reduced-motion is set (a11y). Otherwise the wave animates.
+    fn rail_frozen(&self) -> bool {
+        self.cancelling || self.pending_user || self.reduced_motion
+    }
+
+    /// Paint the left luminance-wave accent rail down the live region's left
+    /// edge (grok `wave_brightness`). Each row blends the theme surface toward
+    /// the activity accent by the wave brightness at that (tick, row), so a
+    /// crest travels down while the turn runs. Frozen states and reduced-motion
+    /// paint a solid full-accent rail instead. Uses the caller's `tick` (the
+    /// spinner's `frame_idx`) so it shares the one animation clock. Never called
+    /// in a11y (plain-text) mode.
+    fn draw_rail(
+        &self,
+        frame: &mut Frame,
+        x: u16,
+        y: u16,
+        height: u16,
+        tick: u64,
+        theme: &crate::style::Theme,
+    ) {
+        let glyph = crate::render::glyphs::heavy_rail();
+        let accent = self.rail_accent(theme);
+        let bg = theme.colors.modal_bg;
+        let frozen = self.rail_frozen();
+        for r in 0..height {
+            let brightness = if frozen {
+                1.0
+            } else {
+                crate::render::colors::wave_brightness(tick, r, height)
+            };
+            let color = crate::render::colors::blend_color(bg, accent, brightness);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    glyph.to_string(),
+                    Style::default().fg(color),
+                ))),
+                Rect::new(x, y + r, 1, 1),
+            );
+        }
+    }
+
     pub fn height(&self) -> u16 {
         if !self.active {
             return 0;
@@ -987,6 +1046,21 @@ impl Component for Activity {
 
         let theme = crate::style::theme();
 
+        // ── Left luminance-wave accent rail (grok `wave_brightness`) ─────
+        // A subtle rail down the live region's left edge so the running turn
+        // reads as "alive". Only the live region repaints each frame, so the
+        // wave rides the existing spinner clock at no extra cost. The rail
+        // reserves a 2-col gutter (rail glyph + a space); when the pane is too
+        // narrow to spare it we drop the rail and keep the full width for text.
+        // Never drawn in a11y (plain-text) mode — that path returned above.
+        const RAIL_W: u16 = 2;
+        let rail_on = area.width > RAIL_W + 8;
+        let content = if rail_on {
+            Rect::new(area.x + RAIL_W, area.y, area.width - RAIL_W, area.height)
+        } else {
+            area
+        };
+
         // Stall intensity: seconds since output last flowed → 0..1 red bleed
         // (CC stalledIntensity). Drives both the spinner-glyph/verb color and, if
         // the turn freezes, the whole row reddening.
@@ -1004,6 +1078,12 @@ impl Component for Activity {
             .map(|t| (t.elapsed().as_millis() / 133) as usize)
             .unwrap_or(self.phrase_tick as usize);
         let spinner_char = crate::render::glyphs::spinner_frame(frame_idx);
+
+        // Paint the accent rail using the SAME spinner clock (`frame_idx`), so
+        // the wave advances at the ~7.5fps cadence without a second timer.
+        if rail_on {
+            self.draw_rail(frame, area.x, area.y, area.height, frame_idx as u64, &theme);
+        }
 
         // Live token counter: the EASED on-screen value (glides toward the real
         // count in tick()). Gated like CC — hidden until ~30s in unless the user
@@ -1156,7 +1236,7 @@ impl Component for Activity {
         };
         let verb_cols: usize =
             verb_spans.iter().map(|s| s.content.chars().count()).sum::<usize>() + 2;
-        let budget = (area.width as usize).saturating_sub(model_cols + verb_cols + 4);
+        let budget = (content.width as usize).saturating_sub(model_cols + verb_cols + 4);
         let parts = gate_parts(&parts, budget);
 
         let mut spinner_spans: Vec<Span<'_>> = Vec::with_capacity(verb_spans.len() + 3);
@@ -1203,15 +1283,15 @@ impl Component for Activity {
         let spinner_line = Line::from(spinner_spans);
         frame.render_widget(
             Paragraph::new(spinner_line),
-            Rect::new(area.x, area.y, area.width, 1),
+            Rect::new(content.x, content.y, content.width, 1),
         );
 
-        if self.verbosity == Verbosity::Off || area.height < 2 {
+        if self.verbosity == Verbosity::Off || content.height < 2 {
             return;
         }
 
         // Tool feed lines (Hermes-style: ┊ emoji verb  detail  duration)
-        let max_lines = (area.height - 1) as usize;
+        let max_lines = (content.height - 1) as usize;
         let feed_start = if self.tool_feed.len() > max_lines {
             self.tool_feed.len() - max_lines
         } else {
@@ -1222,8 +1302,8 @@ impl Component for Activity {
             if i >= max_lines {
                 break;
             }
-            let y = area.y + 1 + i as u16;
-            if y >= area.y + area.height {
+            let y = content.y + 1 + i as u16;
+            if y >= content.y + content.height {
                 break;
             }
 
@@ -1265,7 +1345,7 @@ impl Component for Activity {
             let line = Line::from(spans);
             frame.render_widget(
                 Paragraph::new(line),
-                Rect::new(area.x, y, area.width, 1),
+                Rect::new(content.x, y, content.width, 1),
             );
         }
     }
@@ -1659,5 +1739,74 @@ mod activity_tests {
             render_activity_text(&act).contains("4.0k"),
             "verbose shows the token counter immediately"
         );
+    }
+
+    #[test]
+    fn rail_present_while_active_absent_when_idle() {
+        // The left accent rail is painted only while a turn is active; an idle
+        // Activity draws nothing (no distracting rail when nothing is happening).
+        let rail = crate::render::glyphs::heavy_rail();
+        let mut act = Activity::new();
+        assert!(
+            !render_activity_text(&act).contains(rail),
+            "no rail when idle"
+        );
+        act.start();
+        assert!(
+            render_activity_text(&act).contains(rail),
+            "rail must show while active, glyph {rail:?}"
+        );
+    }
+
+    #[test]
+    fn rail_accent_and_freeze_map_states() {
+        // grok state→color map + frozen-vs-wave selection.
+        let theme = crate::style::theme();
+        let mut act = Activity::new();
+        act.start();
+        // Working (default) → success green, animated wave.
+        assert_eq!(act.rail_accent(&theme), theme.colors.success);
+        assert!(!act.rail_frozen());
+        // Retrying → warning yellow, still a wave.
+        act.set_retry(Some(RetryState {
+            attempt: 1,
+            max_attempts: 3,
+            reason: String::new(),
+            resume_at: std::time::Instant::now(),
+        }));
+        assert_eq!(act.rail_accent(&theme), theme.colors.warning);
+        assert!(!act.rail_frozen());
+        act.set_retry(None);
+        // Pending-on-user → primary accent, frozen to solid full color.
+        act.set_pending_user(true);
+        assert_eq!(act.rail_accent(&theme), theme.colors.primary);
+        assert!(act.rail_frozen());
+        act.set_pending_user(false);
+        // Cancelling → error red, frozen (takes precedence over the rest).
+        act.set_cancelling(true);
+        assert_eq!(act.rail_accent(&theme), theme.colors.error);
+        assert!(act.rail_frozen());
+        act.set_cancelling(false);
+        // Reduced-motion freezes the wave to a static rail even while working.
+        act.set_reduced_motion(true);
+        assert_eq!(act.rail_accent(&theme), theme.colors.success);
+        assert!(act.rail_frozen(), "reduced-motion paints a static full rail");
+    }
+
+    #[test]
+    fn rail_never_panics_at_tiny_sizes() {
+        // Height 0/1 and widths too narrow for the gutter must not panic.
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut act = Activity::new();
+        act.start();
+        for (w, h) in [(120u16, 0u16), (120, 1), (120, 3), (4, 2), (1, 1)] {
+            let mut term = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
+            term.draw(|f| {
+                let mut a = f.area();
+                a.height = h; // force the height-0 early-return path too
+                act.draw(f, a);
+            })
+            .unwrap();
+        }
     }
 }

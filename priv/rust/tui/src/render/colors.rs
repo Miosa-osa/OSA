@@ -225,6 +225,71 @@ fn index256_to_rgb(i: u8) -> (u8, u8, u8) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Luminance-wave helpers (grok xai-grok-pager `wave_brightness`)
+//
+// A running activity paints a left rail whose per-row brightness follows a
+// sin^2 wave that travels down the column as the animation tick advances, so
+// the live region reads as "alive". These are pure math + a blend that reuses
+// the same truecolor -> 256 -> 16 -> none quantization pipeline as the rest of
+// this module, so the rail downgrades correctly on limited terminals.
+// ---------------------------------------------------------------------------
+
+/// Per-row brightness in `0.0..=1.0` for a luminance wave that travels down a
+/// rail of `wave_rows` rows at animation `tick` (grok `wave_brightness`).
+///
+/// `brightness = sin^2((row / wave_rows) * 2π + tick * SPEED)`. The spatial term
+/// gives the wave its shape down the column; the temporal `tick * SPEED` term
+/// slides that shape so the crest travels (a fixed row's brightness changes with
+/// the tick). `sin^2` keeps the result in `[0, 1]` with no negative lobe, so it
+/// blends cleanly from background toward the accent.
+pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16) -> f32 {
+    // Radians the wave advances per animation frame. Chosen so the crest travels
+    // roughly one rail-height every couple of seconds at the ~7.5fps spinner
+    // clock: brisk enough to read as alive, slow enough to stay subtle.
+    const SPEED: f32 = 0.35;
+    let rows = wave_rows.max(1) as f32;
+    let phase = (row as f32 / rows) * std::f32::consts::TAU + tick as f32 * SPEED;
+    let s = phase.sin();
+    s * s
+}
+
+/// Temporal-only pulse brightness in `0.0..=1.0` (a non-moving `sin^2` breathe).
+/// Every row shares one value at a given `tick`, so a rail painted with it
+/// pulses in place rather than showing a traveling crest. Kept for callers that
+/// want a "breathing" cue without spatial motion.
+#[allow(dead_code)]
+pub fn pulse_brightness(tick: u64) -> f32 {
+    const SPEED: f32 = 0.35;
+    let s = (tick as f32 * SPEED).sin();
+    s * s
+}
+
+/// Blend `bg` toward `fg` by `t` (`0.0` ⇒ `bg`, `1.0` ⇒ `fg`), interpolating each
+/// RGB channel, then quantize the result for the detected terminal color level
+/// (the same [`quantize_for_terminal`] pipeline every other color takes). Both
+/// endpoints are expected to be [`Color::Rgb`] (theme colors are); a non-Rgb
+/// endpoint falls back to a midpoint pick before quantization.
+pub fn blend_color(bg: Color, fg: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let blended = match (bg, fg) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let lerp = |a: u8, b: u8| -> u8 {
+                (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+            };
+            Color::Rgb(lerp(r1, r2), lerp(g1, g2), lerp(b1, b2))
+        }
+        _ => {
+            if t < 0.5 {
+                bg
+            } else {
+                fg
+            }
+        }
+    };
+    quantize_for_terminal(blended)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +355,73 @@ mod tests {
             quantize(red, ColorLevel::Ansi256),
             adapt_color(red, ColorLevel::Ansi256)
         );
+    }
+
+    #[test]
+    fn wave_brightness_stays_in_unit_range() {
+        // sin^2 is bounded to [0, 1] for every row/tick, so the blend it drives
+        // never over- or under-shoots the bg..fg segment.
+        for tick in 0u64..50 {
+            for row in 0u16..20 {
+                let b = wave_brightness(tick, row, 8);
+                assert!((0.0..=1.0).contains(&b), "brightness {b} out of range");
+            }
+        }
+        // wave_rows == 0 must not divide-by-zero / NaN (clamped to 1).
+        let b = wave_brightness(3, 0, 0);
+        assert!(b.is_finite() && (0.0..=1.0).contains(&b));
+    }
+
+    #[test]
+    fn wave_brightness_is_a_traveling_wave() {
+        // Varies down the column at a fixed tick (spatial shape)...
+        let rows = 8u16;
+        let col: Vec<f32> = (0..rows).map(|r| wave_brightness(0, r, rows)).collect();
+        assert!(
+            col.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-4),
+            "brightness must vary across rows"
+        );
+        // ...and the crest travels: a fixed row's brightness changes with the
+        // tick for some offset k (that is what makes the wave move, not pulse).
+        let row = 2u16;
+        let base = wave_brightness(0, row, rows);
+        assert!(
+            (1..8).any(|k| (wave_brightness(k, row, rows) - base).abs() > 1e-3),
+            "a fixed row must change over ticks (traveling wave)"
+        );
+    }
+
+    #[test]
+    fn pulse_brightness_is_temporal_only() {
+        // Every row shares one value at a tick (no spatial term), and it still
+        // moves over ticks.
+        assert!((0.0..=1.0).contains(&pulse_brightness(0)));
+        let a = pulse_brightness(1);
+        let b = pulse_brightness(4);
+        assert!((a - b).abs() > 1e-3, "pulse must change across ticks");
+    }
+
+    #[test]
+    fn blend_color_hits_endpoints() {
+        // t=0 lands on ~bg, t=1 on ~fg (post-quantize tolerant: on a truecolor
+        // terminal the quantizer is the identity, on a downgraded one both ends
+        // still map through the same pipeline the theme colors take).
+        let bg = Color::Rgb(17, 24, 39); // theme surface (#111827)
+        let fg = Color::Rgb(78, 186, 101); // success green
+        let want_bg = quantize_for_terminal(bg);
+        let want_fg = quantize_for_terminal(fg);
+        assert_eq!(blend_color(bg, fg, 0.0), want_bg, "t=0 returns ~bg");
+        assert_eq!(blend_color(bg, fg, 1.0), want_fg, "t=1 returns ~fg");
+        // A midpoint sits between the two on at least one channel (before
+        // quantization); under truecolor we can read it back directly.
+        if let (Color::Rgb(_, mg, _), Color::Rgb(_, _, _)) =
+            (blend_color(bg, fg, 0.5), fg)
+        {
+            assert!(mg > 24 && mg < 186, "green channel interpolates, got {mg}");
+        }
+        // Clamps out-of-range t without panic.
+        assert_eq!(blend_color(bg, fg, -1.0), want_bg);
+        assert_eq!(blend_color(bg, fg, 2.0), want_fg);
     }
 
     #[test]
