@@ -347,30 +347,68 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerTest do
 
   # ── enabled?/1 config gate ───────────────────────────────────────────────
 
-  describe "enabled?/1" do
-    test "false by default", %{session_id: _sid} do
+  describe "enabled?/1 smart activation" do
+    test "OFF for a short interactive ask-mode turn under :auto", %{session_id: _sid} do
+      Application.put_env(:optimal_system_agent, :goal_tracker_enabled, :auto)
       refute GoalTracker.enabled?(%{})
+      refute GoalTracker.enabled?(%{iteration: 1, permission_mode: :ask})
     end
 
-    test "true when explicitly configured", %{session_id: _sid} do
+    test "true when explicitly configured on, even in ask mode", %{session_id: _sid} do
       Application.put_env(:optimal_system_agent, :goal_tracker_enabled, true)
-      assert GoalTracker.enabled?(%{})
+      assert GoalTracker.enabled?(%{permission_mode: :ask})
     end
 
-    # Finding #4 (mirrors ReactLoop.goal_verifier_enabled?/1): this used to
-    # also auto-enable under an autonomous permission mode (overdrive/
-    # bypass) — the operator's PRIMARY mode, not an edge case — contradicting
-    # "off by default". Config opt-in only now.
-    test "stays false under overdrive mode with no explicit config", %{session_id: sid} do
+    test "explicit false forces OFF even under overdrive", %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_tracker_enabled, false)
       OptimalSystemAgent.Agent.PermissionMode.put(sid, :overdrive)
       refute GoalTracker.enabled?(%{session_id: sid})
       OptimalSystemAgent.Agent.PermissionMode.clear(sid)
     end
 
-    test "stays false under bypass mode with no explicit config", %{session_id: sid} do
-      OptimalSystemAgent.Agent.PermissionMode.put(sid, :bypass)
-      refute GoalTracker.enabled?(%{session_id: sid})
+    # Smart activation: overdrive/bypass is the operator's autonomous mode
+    # where finishing-correctly matters, so under :auto the cross-turn tracker
+    # turns ON (mirrors GoalVerifier.autonomous_posture?/1).
+    test "ON under overdrive mode under :auto", %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_tracker_enabled, :auto)
+      OptimalSystemAgent.Agent.PermissionMode.put(sid, :overdrive)
+      assert GoalTracker.enabled?(%{session_id: sid})
       OptimalSystemAgent.Agent.PermissionMode.clear(sid)
+    end
+
+    test "ON under bypass mode under :auto", %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_tracker_enabled, :auto)
+      OptimalSystemAgent.Agent.PermissionMode.put(sid, :bypass)
+      assert GoalTracker.enabled?(%{session_id: sid})
+      OptimalSystemAgent.Agent.PermissionMode.clear(sid)
+    end
+
+    test "ON when driving an anchored goal loop under :auto", %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_tracker_enabled, :auto)
+      GoalTracker.start(sid, "ship the exporter")
+      assert GoalTracker.enabled?(%{session_id: sid})
+    end
+  end
+
+  describe "goal_loop?/1" do
+    test "false for an untracked session", %{session_id: sid} do
+      refute GoalTracker.goal_loop?(sid)
+    end
+
+    test "false for a bare ensure/1 entry with no goal text", %{session_id: sid} do
+      GoalTracker.ensure(sid)
+      refute GoalTracker.goal_loop?(sid)
+    end
+
+    test "true once a real goal is anchored via start/2", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the exporter")
+      assert GoalTracker.goal_loop?(sid)
+    end
+
+    test "false once the anchored goal is completed", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the exporter")
+      GoalTracker.advance(sid, result(:complete))
+      refute GoalTracker.goal_loop?(sid)
     end
   end
 end

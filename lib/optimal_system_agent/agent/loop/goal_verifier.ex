@@ -67,7 +67,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence
+  alias OptimalSystemAgent.Agent.PermissionMode
   alias OptimalSystemAgent.Agent.ProgressLedger
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Orchestrator
@@ -101,6 +103,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Consecutive identical gap fingerprints that trip the stall early-exit.
   @stall_threshold 2
 
+  # Iteration count past which a single turn is treated as long-running, so
+  # goal verification auto-activates even in ask mode (mirrors config default;
+  # env-overridable). A short two-step edit never reaches this.
+  @default_activate_after_iterations 12
+
   # Byte cap on the embedded diff sent to each skeptic. Past this the diff is
   # truncated with an explicit marker.
   @diff_max_bytes 256 * 1024
@@ -110,6 +117,81 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # `Orchestrator.run_read_only_panel/2`).
   @skeptic_tools ~w(file_read file_glob dir_list file_grep file_search
                     code_symbols grep_search list_dir read_file semantic_search)
+
+  # ---------------------------------------------------------------------------
+  # Smart activation
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Whether the goal-level skeptic panel is active for this turn.
+
+  Resolution precedence (highest first — operator override always wins):
+
+    1. explicit `config :optimal_system_agent, goal_verifier_enabled: true` or
+       `false` — returned verbatim regardless of posture.
+    2. `:auto` (the default) — ON when the turn is autonomous/long-running,
+       per `autonomous_posture?/1`; OFF otherwise (the common short
+       interactive turn).
+
+  This replaces the old blanket off-by-default: finishing-correctly matters
+  for autonomous/long work, so verification turns itself on there, while a
+  cheap two-step interactive edit never pays for a skeptic panel. The
+  reverify-after cadence (`GoalTracker.reverify_due?/1`) and the per-turn run
+  cap / stall early-exit still apply on top of this, so "active" does not mean
+  "runs every iteration".
+  """
+  @spec activated?(map()) :: boolean()
+  def activated?(state) when is_map(state) do
+    case Application.get_env(:optimal_system_agent, :goal_verifier_enabled, :auto) do
+      true -> true
+      false -> false
+      _auto -> autonomous_posture?(state)
+    end
+  end
+
+  def activated?(_), do: false
+
+  @doc """
+  The shared smart-activation predicate: `true` when this turn is autonomous
+  or long-running enough that finishing-correctly is worth a verification
+  round. Shared by `activated?/1` and `GoalTracker.enabled?/1` so both stages
+  auto-activate under exactly the same conditions.
+
+  ON when ANY of:
+
+    * autonomous permission mode — `:overdrive`/`:bypass` on the live state
+      or the sticky `PermissionMode` store for the session;
+    * an anchored goal loop — `GoalTracker.start/2` set a real goal that is
+      still live (`GoalTracker.goal_loop?/1`);
+    * a long turn — the current turn has run at least
+      `goal_verifier_activate_after_iterations` ReAct iterations.
+  """
+  @spec autonomous_posture?(map()) :: boolean()
+  def autonomous_posture?(state) when is_map(state) do
+    autonomous_mode?(state) or goal_loop?(state) or long_turn?(state)
+  end
+
+  def autonomous_posture?(_), do: false
+
+  defp autonomous_mode?(state) do
+    case Map.get(state, :permission_mode) do
+      mode when mode in [:overdrive, :bypass] ->
+        true
+
+      _ ->
+        sid = Map.get(state, :session_id)
+        is_binary(sid) and PermissionMode.overdrive?(sid)
+    end
+  end
+
+  defp goal_loop?(state) do
+    sid = Map.get(state, :session_id)
+    is_binary(sid) and GoalTracker.goal_loop?(sid)
+  end
+
+  defp long_turn?(state) do
+    Map.get(state, :iteration, 0) >= activate_after_iterations()
+  end
 
   # ---------------------------------------------------------------------------
   # Gating
@@ -268,11 +350,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
         _incomplete ->
           "[GOAL VERIFIER — independent skeptic panel #{step}/#{max_runs()}] " <>
             "#{result.refuted_count}/#{result.total} independent read-only reviewers (fresh context, " <>
-            "no access to how this was produced) judged the user's goal NOT yet met:\n" <>
+            "no access to how this was produced), each applying a distinct lens " <>
+            "(correctness / completeness / verifiability), judged the user's goal NOT yet met.\n\n" <>
+            "NOT DONE — address these specific gaps now, then continue:\n" <>
             gaps_block <>
-            "\nA passing build/test is necessary but not sufficient — these reviewers checked the " <>
-            "change against the GOAL, not just whether it compiles. Address the gap(s) above before " <>
-            "declaring the task done."
+            "\n\nA passing build/test is necessary but not sufficient — these reviewers checked the " <>
+            "change against the GOAL, not just whether it compiles. Fix exactly the gap(s) above " <>
+            "before declaring the task done."
       end
 
     directive = %{role: "system", content: content}
@@ -286,15 +370,19 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   defp spawn_panel(session_id, goal, diff, state) do
     n = skeptic_count()
+    lenses = lenses()
     working_dir = Map.get(state, :working_dir)
     delegation_depth = Map.get(state, :delegation_depth, 0)
 
     configs =
       for idx <- 0..(n - 1) do
+        lens = Enum.at(lenses, rem(idx, length(lenses)))
+
         %{
-          task: skeptic_prompt(goal, diff, idx),
+          task: skeptic_prompt(goal, diff, idx, lens),
           role: "goal-verifier-skeptic",
-          name: "goal-skeptic-#{idx}",
+          name: "goal-skeptic-#{idx}-#{lens.key}",
+          lens: lens.key,
           tier: :specialist,
           permission_tier: :read_only,
           tools_allowed: @skeptic_tools,
@@ -305,18 +393,37 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
         }
       end
 
+    lens_keys = Enum.map(configs, & &1.lens)
+
     panel_runner().(session_id, configs)
     |> Enum.map(&parse_skeptic_result/1)
+    |> tag_lenses(lens_keys)
   rescue
     e ->
       Logger.warning("[goal-verifier] panel spawn raised: #{Exception.message(e)}")
       # Fail-closed: a panel that could not run at all is treated as a single
       # synthetic refute so a crashed panel can never silently pass the goal.
-      [%{refuted: true, off_track: false, reason: "panel spawn failed: #{Exception.message(e)}"}]
+      [%{refuted: true, off_track: false, reason: "panel spawn failed: #{Exception.message(e)}", lens: :panel}]
   catch
     :exit, reason ->
       Logger.warning("[goal-verifier] panel spawn exited: #{inspect(reason)}")
-      [%{refuted: true, off_track: false, reason: "panel spawn exited: #{inspect(reason)}"}]
+      [%{refuted: true, off_track: false, reason: "panel spawn exited: #{inspect(reason)}", lens: :panel}]
+  end
+
+  # Attach the lens each skeptic was assigned to its parsed verdict, so a
+  # refute can name WHICH failure mode (correctness / completeness /
+  # verifiability) it came from in the feedback nudge. Only zips when the
+  # runner returned one result per config (the normal 1:1 case); a
+  # short/long/synthetic list is left untagged (`:unknown`) rather than
+  # mis-aligned.
+  defp tag_lenses(results, lens_keys) when length(results) == length(lens_keys) do
+    results
+    |> Enum.zip(lens_keys)
+    |> Enum.map(fn {r, lens} -> Map.put(r, :lens, lens) end)
+  end
+
+  defp tag_lenses(results, _lens_keys) do
+    Enum.map(results, &Map.put_new(&1, :lens, :unknown))
   end
 
   # Injectable for tests: `Application.put_env(:optimal_system_agent,
@@ -331,19 +438,79 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     )
   end
 
-  defp skeptic_prompt(goal, diff, idx) do
+  # ── Perspective-diverse skeptic lenses ───────────────────────────────────
+  #
+  # grok-build runs N IDENTICAL skeptics with the same prompt. We do strictly
+  # better: each skeptic gets a DISTINCT lens, so the panel catches three
+  # different failure modes instead of triangulating on one. Because a
+  # completeness gap and a verifiability gap are independent, a diverse panel
+  # is more discerning than N-identical at the same N.
+  #
+  # The set is a plain data list so it is trivial to extend (add a 4th lens
+  # and bump the skeptic count). It scales gracefully for any skeptic_count:
+  # lenses are assigned by `rem(idx, length(lenses))`, so 1 skeptic gets
+  # correctness, 3 get one each, 5 wrap around (correctness/completeness/
+  # verifiability/correctness/completeness).
+  #
+  # Every lens keeps the SAME anti-over-refusal contract (default NOT-REFUTED
+  # on uncertainty, refute only on CONCRETE evidence) and the SAME JSON output
+  # shape, so aggregation stays a uniform majority-refute / fail-closed vote —
+  # the only thing that differs is WHERE each skeptic is told to look.
+  @lenses [
+    %{
+      key: :correctness,
+      title: "CORRECTNESS",
+      focus:
+        "Focus your scrutiny on CORRECTNESS: does what was produced actually DO what the goal " <>
+          "asked, correctly? Look for logic bugs, wrong behavior, off-by-one / boundary errors, " <>
+          "mishandled edge cases, and changes that compile but do the wrong thing. A change can " <>
+          "be present and still be incorrect — refute only if you can point to a concrete way " <>
+          "the produced behavior diverges from what the goal requires."
+    },
+    %{
+      key: :completeness,
+      title: "COMPLETENESS",
+      focus:
+        "Focus your scrutiny on COMPLETENESS: is EVERY part of the request addressed, with " <>
+          "nothing silently dropped, stubbed, faked, or left as a TODO/placeholder? Enumerate " <>
+          "the distinct requirements implied by the goal and check each one is really " <>
+          "implemented (not just referenced). Refute only if you can name a specific requirement " <>
+          "that is missing, stubbed, or only partially done."
+    },
+    %{
+      key: :verifiability,
+      title: "VERIFIABILITY",
+      focus:
+        "Focus your scrutiny on VERIFIABILITY / EVIDENCE: is there concrete evidence this " <>
+          "actually WORKS, rather than a claim that it works? Would it compile, would the " <>
+          "relevant tests pass, is the new behavior demonstrated (a test, a checked output) " <>
+          "rather than merely asserted in prose? Refute only if success is claimed but " <>
+          "unproven, or you can see a test/build that would fail."
+    }
+  ]
+
+  # The active lens set (data-driven so it is easy to extend/override).
+  defp lenses, do: @lenses
+
+  defp skeptic_prompt(goal, diff, idx, lens) do
     """
-    You are an ADVERSARIAL, INDEPENDENT reviewer (skeptic ##{idx}) with NO access to how this \
-    change was produced. Your job is to try to REFUTE the claim that the goal below was fully \
-    achieved. You are READ-ONLY: you may inspect the repository (file_read / grep_search / \
-    dir_list / file_glob / code_symbols) but you must NOT and CANNOT modify anything.
+    You are an ADVERSARIAL, INDEPENDENT reviewer (skeptic ##{idx}, #{lens.title} lens) with NO \
+    access to how this change was produced. Your job is to try to REFUTE the claim that the goal \
+    below was fully achieved, viewed specifically through the #{lens.title} lens. You are \
+    READ-ONLY: you may inspect the repository (file_read / grep_search / dir_list / file_glob / \
+    code_symbols) but you must NOT and CANNOT modify anything.
+
+    ## Your lens
+
+    #{lens.focus}
 
     Default to NOT-REFUTED when uncertain. Only REFUTE when you have found CONCRETE evidence \
     the goal is unmet (a missing file, a change that contradicts the goal, a test you can see \
     would fail, an unaddressed requirement stated in the goal). Genuine uncertainty or an \
     inability to fully verify from what you can see is NOT itself grounds to refute — say so in \
     "reason" and leave "refuted" false. A false refute costs a full extra review round on work \
-    that was already done; only spend that cost when you can point to a specific gap.
+    that was already done; only spend that cost when you can point to a specific gap through \
+    your lens.
 
     ## Goal
 
@@ -359,10 +526,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
     1. Read the diff. For anything unclear or that needs corroboration, use your read-only tools \
        to inspect the actual repository state (the diff can lie about context; the files cannot).
-    2. Decide: does this diff, as it stands, fully achieve the stated goal? Consider correctness, \
-       completeness (not just "a file changed" — did it change the RIGHT thing, and is anything \
-       obviously still missing?), and whether the goal is even achievable given what you can see \
-       in this repository.
+    2. Judge the goal THROUGH YOUR #{lens.title} LENS specifically — do not try to re-check every \
+       possible angle; other independent reviewers cover the other angles.
     3. Reply with EXACTLY one JSON object on its own line, and nothing else after it:
 
        {"refuted": true|false, "off_track": true|false, "reason": "one sentence, cite a concrete gap or confirmation"}
@@ -419,7 +584,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     "#{refuted_count}/#{total} skeptics refuted goal completion"
   end
 
-  defp gap_list(refuters), do: Enum.map(refuters, & &1.reason)
+  # Each gap is prefixed with the lens that caught it, so the feedback nudge
+  # tells the agent WHICH failure mode is unmet (correctness vs completeness
+  # vs verifiability) — strictly more actionable than a bare reason.
+  defp gap_list(refuters), do: Enum.map(refuters, &lens_prefixed_reason/1)
+
+  defp lens_prefixed_reason(%{lens: lens, reason: reason})
+       when lens in [:correctness, :completeness, :verifiability] do
+    "[#{lens}] #{reason}"
+  end
+
+  defp lens_prefixed_reason(%{reason: reason}), do: reason
 
   # Stable fingerprint of the CURRENT refuting gaps, used by the stall
   # early-exit: two consecutive rounds citing the SAME underlying gap set
@@ -697,6 +872,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   defp stall_threshold do
     Application.get_env(:optimal_system_agent, :goal_verifier_stall_threshold, @stall_threshold)
+  end
+
+  defp activate_after_iterations do
+    Application.get_env(
+      :optimal_system_agent,
+      :goal_verifier_activate_after_iterations,
+      @default_activate_after_iterations
+    )
   end
 
   defp diff_max_bytes do

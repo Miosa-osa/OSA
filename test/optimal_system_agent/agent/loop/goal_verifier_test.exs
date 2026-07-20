@@ -21,6 +21,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       Application.delete_env(:optimal_system_agent, :goal_verifier_max_runs)
       Application.delete_env(:optimal_system_agent, :goal_verifier_stall_threshold)
       Application.delete_env(:optimal_system_agent, :goal_verifier_skeptic_count)
+      Application.delete_env(:optimal_system_agent, :goal_verifier_enabled)
+      Application.delete_env(:optimal_system_agent, :goal_verifier_activate_after_iterations)
     end)
 
     {:ok, session_id: sid}
@@ -48,6 +50,23 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
   defp stub_runner(fun) do
     Application.put_env(:optimal_system_agent, :goal_verifier_panel_runner, fun)
+  end
+
+  # Run a verify/1 round against an isolated clean repo, capturing the exact
+  # skeptic configs (prompts + assigned lenses) the panel was built with.
+  defp capture_prompts(sid, refuted_list) do
+    test_pid = self()
+
+    stub_runner(fn _sid, configs ->
+      send(test_pid, {:configs, configs})
+      Enum.map(refuted_list, &json_result/1)
+    end)
+
+    state = base_state(sid) |> Map.put(:working_dir, isolated_clean_repo())
+    {result, _state} = GoalVerifier.verify(state)
+
+    assert_received {:configs, configs}
+    {configs, result}
   end
 
   # An isolated, empty git repo — used where a test needs to assert on the
@@ -442,6 +461,171 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       {_result2, state} = GoalVerifier.verify(state)
       refute GoalVerifier.stalled?(state)
+    end
+  end
+
+  # ── Smart activation (task 1) ───────────────────────────────────────────
+  # Resolution precedence: explicit config wins; otherwise :auto turns the
+  # panel ON for autonomous/long-running work and OFF for short interactive
+  # turns.
+
+  describe "activated?/1 smart activation" do
+    test "OFF for a short interactive ask-mode turn under :auto", %{session_id: sid} do
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, :auto)
+      refute GoalVerifier.activated?(%{})
+      refute GoalVerifier.activated?(%{session_id: sid, iteration: 2, permission_mode: :ask})
+    end
+
+    test "ON under overdrive on the live state under :auto", %{session_id: _sid} do
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, :auto)
+      assert GoalVerifier.activated?(%{permission_mode: :overdrive})
+      assert GoalVerifier.activated?(%{permission_mode: :bypass})
+    end
+
+    test "ON once a turn passes the activation iteration threshold, even in ask mode" do
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, :auto)
+      Application.put_env(:optimal_system_agent, :goal_verifier_activate_after_iterations, 12)
+
+      refute GoalVerifier.activated?(%{iteration: 11, permission_mode: :ask})
+      assert GoalVerifier.activated?(%{iteration: 12, permission_mode: :ask})
+    end
+
+    test "explicit config override wins both ways" do
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, false)
+      # forced OFF even under overdrive
+      refute GoalVerifier.activated?(%{permission_mode: :overdrive})
+
+      Application.put_env(:optimal_system_agent, :goal_verifier_enabled, true)
+      # forced ON even for a bare short turn
+      assert GoalVerifier.activated?(%{})
+    end
+  end
+
+  # ── Perspective-diverse skeptics (task 3) ───────────────────────────────
+  # grok runs N IDENTICAL skeptics; OSA gives each a DISTINCT lens
+  # (correctness / completeness / verifiability). The set is data-driven and
+  # scales gracefully when skeptic_count != 3.
+
+  describe "perspective-diverse skeptic lenses" do
+    test "the 3-skeptic panel assigns 3 DISTINCT lenses, one prompt each", %{session_id: sid} do
+      mark_write(sid)
+      {configs, _result} = capture_prompts(sid, [false, false, false])
+
+      assert length(configs) == 3
+      titles = Enum.map(configs, & &1.task)
+
+      assert Enum.any?(titles, &(&1 =~ "CORRECTNESS lens"))
+      assert Enum.any?(titles, &(&1 =~ "COMPLETENESS lens"))
+      assert Enum.any?(titles, &(&1 =~ "VERIFIABILITY lens"))
+
+      # Distinct focus text — not the same prompt N times (the grok weakness).
+      assert configs |> Enum.map(& &1.task) |> Enum.uniq() |> length() == 3
+
+      # Every lens keeps the anti-over-refusal contract.
+      for %{task: prompt} <- configs do
+        assert prompt =~ "Default to NOT-REFUTED when uncertain"
+        assert prompt =~ "CONCRETE evidence"
+      end
+
+      # Lens tag threaded onto the subagent name for observability.
+      lens_keys = configs |> Enum.map(& &1.lens) |> Enum.sort()
+      assert lens_keys == [:completeness, :correctness, :verifiability]
+    end
+
+    test "scales gracefully to 5 skeptics by cycling the lens set", %{session_id: sid} do
+      mark_write(sid)
+      Application.put_env(:optimal_system_agent, :goal_verifier_skeptic_count, 5)
+
+      {configs, _result} = capture_prompts(sid, [false, false, false, false, false])
+
+      assert length(configs) == 5
+      # 5 = ceil over 3 lenses -> correctness x2, completeness x2, verifiability x1
+      counts = configs |> Enum.frequencies_by(& &1.lens)
+      assert counts[:correctness] == 2
+      assert counts[:completeness] == 2
+      assert counts[:verifiability] == 1
+    end
+
+    test "scales down to a single correctness skeptic", %{session_id: sid} do
+      mark_write(sid)
+      Application.put_env(:optimal_system_agent, :goal_verifier_skeptic_count, 1)
+
+      {configs, _result} = capture_prompts(sid, [false])
+
+      assert [%{lens: :correctness, task: prompt}] = configs
+      assert prompt =~ "CORRECTNESS lens"
+    end
+  end
+
+  # ── End-to-end: pass a finished goal, refute an unfinished one ───────────
+
+  describe "finished goal passes; unfinished goal refutes with lens-tagged gap feedback" do
+    test "a FINISHED goal (all three lenses not-refuted) -> :complete -> {:pass}", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      # correctness / completeness / verifiability all agree the goal is met.
+      stub_runner(fn _sid, configs ->
+        assert length(configs) == 3
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+      assert result.verdict == :complete
+
+      # The loop is allowed to finish (no false block).
+      assert {:pass, _state} = GoalVerifier.check(base_state(sid))
+    end
+
+    test "an UNFINISHED goal (completeness + verifiability refute) -> :incomplete with lens-tagged gaps fed back",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      # correctness passes, but completeness and verifiability each find a
+      # concrete gap -> majority-refute -> :incomplete.
+      stub_runner(fn _sid, configs ->
+        # lenses are assigned in order: correctness, completeness, verifiability
+        assert Enum.map(configs, & &1.lens) == [:correctness, :completeness, :verifiability]
+
+        [
+          json_result(false, reason: "behavior is correct for the happy path"),
+          json_result(true, reason: "the CSV export path in lib/exporter.ex is only a stub"),
+          json_result(true, reason: "no test proves lib/exporter.ex actually runs")
+        ]
+      end)
+
+      {:gate, directive, state} = GoalVerifier.check(base_state(sid))
+
+      assert directive.role == "system"
+      # gaps fed back to the SAME agent as a concrete, actionable nudge.
+      assert directive.content =~ "NOT DONE"
+      assert directive.content =~ "address these specific gaps"
+      # each gap is attributed to the lens that caught it.
+      assert directive.content =~ "[completeness]"
+      assert directive.content =~ "[verifiability]"
+      assert directive.content =~ "lib/exporter.ex is only a stub"
+      assert state.goal_verifier_prompts == 1
+    end
+
+    test "a malformed verdict still counts as a refute (fail-closed) in a diverse panel", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      # correctness malformed (fail-closed refute) + completeness refute ->
+      # 2/3 refute -> majority -> :incomplete.
+      stub_runner(fn _sid, _configs ->
+        [
+          {:ok, "no structured verdict here at all"},
+          json_result(true, reason: "missing requirement in lib/exporter.ex"),
+          json_result(false)
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+      assert result.verdict == :incomplete
+      assert result.refuted_count == 2
     end
   end
 end

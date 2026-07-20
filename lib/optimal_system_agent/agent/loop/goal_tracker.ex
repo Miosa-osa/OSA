@@ -145,22 +145,54 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   # ---------------------------------------------------------------------------
 
   @doc """
-  `true` when cross-turn goal orchestration should run for this session:
-  the explicit config flag ONLY — mirrors `ReactLoop.goal_verifier_enabled?/1`.
+  `true` when cross-turn goal orchestration should run for this session.
 
-  Previously also auto-enabled under an autonomous posture (overdrive/
-  bypass), same regression as `ReactLoop.goal_verifier_enabled?/1` (finding
-  #4): overdrive is the operator's PRIMARY mode, not an edge case, so
-  auto-flipping this on there contradicts "off by default" and would have
-  the auto-pause path (see `enabled?/1` caller) evaluating `paused?/1`
-  against a tracker that was never actually opted into for the session.
+  Resolution precedence mirrors `GoalVerifier.activated?/1` exactly (so the
+  cross-turn tracker auto-activates under the same conditions as the
+  single-turn panel — otherwise the auto-pause path in `react_loop.ex` would
+  evaluate `paused?/1` against a tracker that was never opted in):
+
+    1. explicit `config :optimal_system_agent, goal_tracker_enabled: true` or
+       `false` — returned verbatim (operator override wins).
+    2. `:auto` (the default) — ON when the turn is autonomous/long-running
+       per the shared `GoalVerifier.autonomous_posture?/1` predicate
+       (overdrive/bypass mode, an anchored goal loop, or a long turn), OFF for
+       ordinary short interactive turns.
   """
   @spec enabled?(map()) :: boolean()
   def enabled?(state) when is_map(state) do
-    Application.get_env(:optimal_system_agent, :goal_tracker_enabled, false)
+    case Application.get_env(:optimal_system_agent, :goal_tracker_enabled, :auto) do
+      true -> true
+      false -> false
+      _auto -> GoalVerifier.autonomous_posture?(state)
+    end
   end
 
   def enabled?(_), do: false
+
+  @doc """
+  `true` when this session is an explicitly-anchored, still-live goal loop —
+  a real goal was set via `start/2` (the snapshot carries non-nil goal text)
+  and it is still `:active`/`:off_track`.
+
+  Distinguished from a bare, lazily-`ensure/1`'d entry (which `tick_turn/1`
+  creates for EVERY session and which has no goal text): only a session
+  actually driving a goal counts as a goal loop for smart-activation
+  purposes. Used by `GoalVerifier.autonomous_posture?/1`.
+  """
+  @spec goal_loop?(String.t()) :: boolean()
+  def goal_loop?(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{goal: goal, status: status}
+      when is_binary(goal) and goal != "" and status in [:active, :off_track] ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  def goal_loop?(_), do: false
 
   # ---------------------------------------------------------------------------
   # Lifecycle

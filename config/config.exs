@@ -34,6 +34,30 @@ config :optimal_system_agent,
   # Agent configuration
   max_iterations: 200,
 
+  # Goal verification — an INDEPENDENT, read-only skeptic panel that judges
+  # whether the user's GOAL was actually met (not just "a file compiles"), plus
+  # a cross-turn goal-status machine. See `Agent.Loop.GoalVerifier` /
+  # `Agent.Loop.GoalTracker`.
+  #
+  # Smart activation (`:auto`, the default) resolves ON automatically for the
+  # work where finishing-correctly matters and OFF for cheap interactive turns.
+  # Precedence, highest first:
+  #   1. explicit `true` / `false` here (operator override — always wins),
+  #   2. otherwise `:auto` -> ON when the turn is autonomous/long-running:
+  #        - overdrive/bypass permission mode, OR
+  #        - a session driving an anchored goal loop (GoalTracker.start/2), OR
+  #        - the current turn has run >= goal_verifier_activate_after_iterations
+  #          ReAct iterations (a genuinely long turn gets verified even in ask
+  #          mode),
+  #      and OFF for ordinary short interactive turns.
+  # Set to `true` to always verify, `false` to hard-disable.
+  goal_verifier_enabled: :auto,
+  goal_tracker_enabled: :auto,
+
+  # Iteration count past which a single turn is treated as long-running and
+  # goal verification auto-activates (even in ask mode) under `:auto`.
+  goal_verifier_activate_after_iterations: 12,
+
   # Doom loop hard cap — absolute total tool calls per session before forced halt.
   # This is a secondary safety net independent of the sliding-window signature check.
   # Raised to 2000: a genuine backstop just above realistic multi-hour volume,

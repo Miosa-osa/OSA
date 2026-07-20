@@ -818,22 +818,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-  # Goal-level verifier gate: config-opt-in ONLY. `overdrive`/`bypass` is the
-  # operator's PRIMARY autonomous mode (not a rare edge case), so silently
-  # flipping this on there contradicts the "off by default" moduledoc above:
-  # every write-completion would spawn N subagent skeptics for up to
-  # `max_runs()` rounds, each re-running the full turn, on the operator's main
-  # path. Enable explicitly via
-  # `config :optimal_system_agent, goal_verifier_enabled: true` (finding #4).
+  # Goal-level verifier gate — smart activation lives in `GoalVerifier` so this
+  # sensitive file stays a thin delegation. Resolution precedence (operator
+  # override wins): explicit `config :optimal_system_agent,
+  # goal_verifier_enabled: true|false` is honored verbatim; otherwise `:auto`
+  # (the default) turns the panel ON for autonomous/long-running work
+  # (overdrive/bypass mode, an anchored goal loop, or a turn past
+  # `goal_verifier_activate_after_iterations`) and OFF for cheap interactive
+  # turns. The per-turn run cap / stall early-exit
+  # (`GoalVerifier.needs_verification?/1`) and the reverify cadence
+  # (`GoalTracker.reverify_due?/1`) still gate on top, so "active" never means
+  # "runs every iteration".
   #
   # Public (not `defp`) so this decision is directly unit-testable without
   # spinning up a full loop/session — `@doc false` keeps it out of the
   # module's public docs.
   @doc false
   @spec goal_verifier_enabled?(map()) :: boolean()
-  def goal_verifier_enabled?(_state) do
-    Application.get_env(:optimal_system_agent, :goal_verifier_enabled, false)
-  end
+  def goal_verifier_enabled?(state), do: GoalVerifier.activated?(state)
 
   # Rewrite image/video/audio/file content blocks to "[Attached <type>]" text
   # placeholders so a media-heavy history can be retried after a media-driven
