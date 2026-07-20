@@ -735,6 +735,15 @@ defmodule OptimalSystemAgent.Memory.Store do
     rescue
       e ->
         Logger.warning("[Memory.Store] failed to load from SQLite: #{Exception.message(e)}")
+    catch
+      # A DBConnection pool worker can be transiently down (:noproc on
+      # checkout) while Infrastructure is still settling under load. That
+      # surfaces as an EXIT signal, not a raised exception, so `rescue`
+      # alone doesn't catch it — letting it crash init/1 here takes down
+      # the whole AgentServices supervisor (and thus the entire app), since
+      # Memory.Store is its first child.
+      :exit, reason ->
+        Logger.warning("[Memory.Store] failed to load from SQLite: #{inspect(reason)}")
     end
   end
 
