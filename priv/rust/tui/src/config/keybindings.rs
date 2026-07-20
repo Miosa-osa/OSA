@@ -346,6 +346,11 @@ impl Keybindings {
             (Context::Global, "shift+tab", Action::CycleMode),
             (Context::Idle, "f1", Action::Help),
             (Context::Idle, "alt+v", Action::Voice),
+            // macOS-friendly alias for voice: on a Mac terminal the Option key
+            // sends composed characters (Option+V = "√"), so alt+v never reaches
+            // the app there. Ctrl passes through cleanly on both macOS and Linux,
+            // so ctrl+g toggles voice too. Both keys are equivalent.
+            (Context::Idle, "ctrl+g", Action::Voice),
             (Context::Idle, "f9", Action::HandsFree),
             (Context::Idle, "ctrl+n", Action::NewSession),
             (Context::Idle, "ctrl+k", Action::Palette),
