@@ -16,14 +16,26 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
 
+  # Item 1 (audit) fix: this used to have NO `ollama_cloud` entry at all, so a
+  # user running `/setup` (or hitting the REPL first-run, which shares this
+  # module — see `Channels.CLI.start/0` and `cmd_setup/2`) could never pick
+  # the recommended provider that the good first-run wizard
+  # (`mix osa.setup.wizard`) leads with. Added here, matching the wizard's
+  # catalog entry (`Onboarding.providers_list/0`).
   @providers [
     %{value: :ollama, label: "Ollama (Local)", hint: "Free, runs on your machine"},
+    %{value: :ollama_cloud, label: "Ollama Cloud", hint: "No GPU needed — recommended"},
     %{value: :anthropic, label: "Anthropic", hint: "Claude models"},
     %{value: :openai, label: "OpenAI", hint: "GPT models"},
     %{value: :groq, label: "Groq", hint: "Fast inference"},
     %{value: :openrouter, label: "OpenRouter", hint: "Multi-model gateway"},
     %{value: :deepseek, label: "DeepSeek", hint: "DeepSeek models"}
   ]
+
+  @doc false
+  # Public so the provider catalog (item 1: ollama_cloud parity) is directly
+  # unit-testable without driving the interactive `Prompt.select/2` (TTY).
+  def providers, do: @providers
 
   @channels [
     %{value: :skip, label: "Skip for now", hint: "Set up channels later with /channels"},
@@ -49,25 +61,34 @@ defmodule OptimalSystemAgent.CLI.Setup do
       Prompt.outro("Setup cancelled")
       :skip
     else
-      # Step 2: Auth
-      api_key = get_auth(provider)
+      # Step 2: Auth — returns {api_key, base_url}. `base_url` is only ever
+      # non-nil for :ollama_cloud (localhost = keyless local daemon route,
+      # https://ollama.com = keyed cloud route — item 1 audit fix, M2 parity
+      # with the good first-run wizard).
+      {api_key, base_url} = get_auth(provider)
 
-      if is_nil(api_key) and provider != :ollama do
+      if is_nil(api_key) and provider not in [:ollama, :ollama_cloud] do
         Prompt.outro("Setup cancelled")
         :skip
       else
         # Step 3: Validate connection
         validate_provider(provider, api_key)
 
-        # Step 4: Channel setup (optional)
+        # Step 4: Model selection (item 1 audit fix — this wizard used to
+        # have NO model-selection step at all; the config it wrote always
+        # fell back to the provider's runtime default with no way to pick a
+        # specific model, e.g. the recommended glm-5.2:cloud on Ollama Cloud).
+        model = select_model(provider, api_key)
+
+        # Step 5: Channel setup (optional)
         channel = Prompt.select("Connect a messaging channel?", @channels)
 
         if channel && channel != :skip do
           setup_channel(channel)
         end
 
-        # Step 5: Write config
-        write_config(provider, api_key)
+        # Step 6: Write config
+        write_config(provider, api_key, model: model, base_url: base_url)
 
         Prompt.note(
           "Make OSA yours — edit files in ~/.osa/:\n" <>
@@ -94,6 +115,10 @@ defmodule OptimalSystemAgent.CLI.Setup do
   end
 
   # ── Provider Auth ────────────────────────────────────────────────
+  #
+  # Every clause returns `{api_key_or_nil, base_url_or_nil}`. `base_url` is
+  # only meaningful for :ollama_cloud (item 1 audit fix); every other
+  # provider always returns `nil` for it.
 
   defp get_auth(:ollama) do
     Prompt.note("Ollama runs locally — no API key needed.", "Local Provider")
@@ -107,7 +132,45 @@ defmodule OptimalSystemAgent.CLI.Setup do
         IO.puts("\e[33m  ⚠ Ollama not detected. Install from https://ollama.com\e[0m")
     end
 
-    nil
+    {nil, nil}
+  end
+
+  # Item 1 audit fix (M2 parity): the good first-run wizard probes the local
+  # Ollama daemon first and offers the keyless "signed-in local Ollama" route
+  # before ever demanding an Ollama Cloud API key — mirrored here via the
+  # shared `Onboarding.ollama_cloud_route/3` decision table so both entry
+  # points make the exact same choice.
+  defp get_auth(:ollama_cloud) do
+    local = Onboarding.probe_ollama_local()
+
+    if local.reachable do
+      choice =
+        Prompt.select("Ollama Cloud connection", [
+          %{
+            value: :local,
+            label: "Use signed-in local Ollama (no key)",
+            hint: "detected at #{local.url} — proxies :cloud models via device identity"
+          },
+          %{
+            value: :key,
+            label: "Enter an Ollama Cloud API key",
+            hint: "for a different account or a headless setup"
+          }
+        ])
+
+      case choice do
+        :local ->
+          Prompt.completed("Credentials", "using signed-in local Ollama (no key)")
+          Onboarding.ollama_cloud_route(true, true, nil)
+
+        _ ->
+          key = ask_ollama_cloud_key()
+          Onboarding.ollama_cloud_route(true, false, key)
+      end
+    else
+      key = ask_ollama_cloud_key()
+      Onboarding.ollama_cloud_route(false, false, key)
+    end
   end
 
   defp get_auth(:anthropic) do
@@ -125,17 +188,20 @@ defmodule OptimalSystemAgent.CLI.Setup do
         }
       ])
 
-    case method do
-      :oauth ->
-        run_oauth_flow()
+    key =
+      case method do
+        :oauth ->
+          run_oauth_flow()
 
-      :api_key ->
-        key = Prompt.text("Anthropic API key", placeholder: "sk-ant-api03-...", mask: true)
-        if key && String.trim(key) != "", do: String.trim(key), else: nil
+        :api_key ->
+          key = Prompt.text("Anthropic API key", placeholder: "sk-ant-api03-...", mask: true)
+          if key && String.trim(key) != "", do: String.trim(key), else: nil
 
-      _ ->
-        nil
-    end
+        _ ->
+          nil
+      end
+
+    {key, nil}
   end
 
   defp get_auth(provider) do
@@ -149,8 +215,52 @@ defmodule OptimalSystemAgent.CLI.Setup do
       end
 
     key = Prompt.text("#{provider_name(provider)} API key", placeholder: placeholder, mask: true)
+    key = if key && String.trim(key) != "", do: String.trim(key), else: nil
+    {key, nil}
+  end
+
+  defp ask_ollama_cloud_key do
+    key = Prompt.text("Ollama Cloud API key", placeholder: "...", mask: true)
     if key && String.trim(key) != "", do: String.trim(key), else: nil
   end
+
+  # ── Model Selection ─────────────────────────────────────────────
+  #
+  # Item 1 audit fix: this wizard previously had no model-selection step at
+  # all. Reuses `Onboarding.model_list/2` (the same catalog the good
+  # first-run wizard reads from) so we don't maintain a second copy of every
+  # provider's model list. Returns `nil` (no explicit model — the provider's
+  # runtime default applies) when there's nothing to pick from, so this never
+  # blocks setup on providers we don't have a catalog for (groq, deepseek).
+  defp select_model(provider, api_key) do
+    onboarding_id = onboarding_provider_id(provider)
+
+    case Onboarding.model_list(onboarding_id, api_key: api_key) do
+      {:ok, []} ->
+        nil
+
+      {:ok, models} ->
+        options =
+          Enum.map(models, fn m ->
+            %{
+              value: Map.get(m, :id),
+              label: Map.get(m, :name) || Map.get(m, :id),
+              hint: Map.get(m, :note, "")
+            }
+          end)
+
+        Prompt.select("Default model", options)
+
+      {:error, _} ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp onboarding_provider_id(:ollama), do: "ollama_local"
+  defp onboarding_provider_id(:ollama_cloud), do: "ollama_cloud"
+  defp onboarding_provider_id(provider), do: to_string(provider)
 
   # ── OAuth ────────────────────────────────────────────────────────
 
@@ -209,9 +319,12 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
   # ── Validation ───────────────────────────────────────────────────
 
-  defp validate_provider(:ollama, _key), do: :ok
+  @doc false
+  # Public so validation (incl. the ollama_cloud keyless route, item 1) is
+  # directly unit-testable without a TTY; still internal API.
+  def validate_provider(:ollama, _key), do: :ok
 
-  defp validate_provider(provider, key) when is_binary(key) do
+  def validate_provider(provider, key) when is_binary(key) do
     IO.puts("\e[2m│  Verifying connection...\e[0m")
 
     case test_provider(provider, key) do
@@ -237,7 +350,7 @@ defmodule OptimalSystemAgent.CLI.Setup do
     end
   end
 
-  defp validate_provider(_, _), do: :ok
+  def validate_provider(_, _), do: :ok
 
   @doc false
   # Public so F4's "actually probe the provider" behavior is directly
@@ -399,16 +512,30 @@ defmodule OptimalSystemAgent.CLI.Setup do
   # (replace-in-place, like `Onboarding.write_setup`'s `keyreplace` merge):
   # existing keys are updated, new keys are appended, unrelated lines
   # (comments, other providers' keys) are preserved.
+  # Item 1 audit fix: `write_config/2` never accepted (or wrote) a model at
+  # all — the wizard's step 5 result was always discarded. Now
+  # `write_config/3` takes `opts` (`:model`, `:base_url`), defaulting to `[]`
+  # so every existing `write_config(provider, api_key)` call (2 arity) keeps
+  # working unchanged. `:ollama_cloud` additionally needs `OLLAMA_URL` (the
+  # keyless-local vs keyed-cloud switch — M2 parity) instead of a normal
+  # `<PROVIDER>_API_KEY` var, and is written to disk as `OSA_DEFAULT_PROVIDER=
+  # ollama` (not the literal "ollama_cloud") to match the runtime provider
+  # atom every other part of OSA resolves (`Onboarding.apply_env_vars/4` does
+  # the same "ollama_cloud" -> :ollama mapping).
   @doc false
-  # Public (not `defp`) so the upsert behavior (F3) is directly unit-testable
-  # without driving the interactive prompt flow; still internal API.
-  def write_config(provider, api_key) do
+  # Public (not `defp`) so the upsert behavior (F3) and model/ollama_cloud
+  # writing (item 1) are directly unit-testable without driving the
+  # interactive prompt flow; still internal API.
+  def write_config(provider, api_key, opts \\ []) do
+    model = Keyword.get(opts, :model)
+    base_url = Keyword.get(opts, :base_url)
+
     File.mkdir_p!(osa_dir())
     env_path = Path.join(osa_dir(), ".env")
 
-    pairs =
-      [{"OSA_DEFAULT_PROVIDER", to_string(provider)}] ++
-        if api_key, do: [{provider_env_key(provider), api_key}], else: []
+    {default_provider, extra_pairs} = provider_pairs(provider, api_key, model, base_url)
+
+    pairs = [{"OSA_DEFAULT_PROVIDER", default_provider} | extra_pairs]
 
     existing =
       case File.read(env_path) do
@@ -429,6 +556,37 @@ defmodule OptimalSystemAgent.CLI.Setup do
       config_key = provider_config_key(provider)
       Application.put_env(:optimal_system_agent, config_key, api_key)
     end
+
+    if model do
+      Application.put_env(:optimal_system_agent, :default_model, model)
+    end
+  end
+
+  # Returns `{osa_default_provider_value, [{env_key, value}]}` for the given
+  # provider selection. `nil` model/api_key are simply omitted (never write a
+  # blank/placeholder value).
+  defp provider_pairs(:ollama_cloud, api_key, model, base_url) do
+    url = base_url || "https://ollama.com"
+
+    pairs =
+      [{"OLLAMA_URL", url}] ++
+        (if api_key, do: [{"OLLAMA_API_KEY", api_key}], else: []) ++
+        (if model, do: [{"OLLAMA_MODEL", model}], else: [])
+
+    {"ollama", pairs}
+  end
+
+  defp provider_pairs(:ollama, _api_key, model, _base_url) do
+    pairs = if model, do: [{"OLLAMA_MODEL", model}], else: []
+    {"ollama", pairs}
+  end
+
+  defp provider_pairs(provider, api_key, model, _base_url) do
+    pairs =
+      (if api_key, do: [{provider_env_key(provider), api_key}], else: []) ++
+        (if model, do: [{"OSA_MODEL", model}], else: [])
+
+    {to_string(provider), pairs}
   end
 
   # Upsert `pairs` (a list of `{KEY, value}`) into raw `.env` text: an existing

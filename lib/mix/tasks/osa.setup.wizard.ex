@@ -317,19 +317,18 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     end
   end
 
-  # Pure decision table for the ollama_cloud credential route (M2). Public
-  # + `@doc false` so it's directly unit-testable without a TTY:
-  #   * signed in locally, chose the keyless route -> localhost, NO key
-  #     (must never fall through to https://ollama.com)
-  #   * key entered (with or without a local daemon) -> ollama.com, WITH key
+  # Pure decision table for the ollama_cloud credential route (M2). Extracted
+  # to `Onboarding.ollama_cloud_route/3` (shared with the in-app `/setup`
+  # command, `OptimalSystemAgent.CLI.Setup`) so both entry points make the
+  # exact same keyless-local-vs-keyed-cloud choice. Kept here too (delegating)
+  # so this stays directly unit-testable without a TTY and existing callers
+  # of `Wizard.ollama_cloud_credentials/3` keep working unchanged.
   @doc false
   @spec ollama_cloud_credentials(boolean(), boolean(), String.t() | nil) ::
           {String.t() | nil, String.t()}
-  def ollama_cloud_credentials(local_reachable, use_local?, key)
-  def ollama_cloud_credentials(true, true, _key), do: {nil, "http://localhost:11434"}
-
-  def ollama_cloud_credentials(_local_reachable, _use_local?, key),
-    do: {key, "https://ollama.com"}
+  defdelegate ollama_cloud_credentials(local_reachable, use_local?, key),
+    to: Onboarding,
+    as: :ollama_cloud_route
 
   # ── Model Selection ───────────────────────────────────────────
 

@@ -223,8 +223,8 @@ defmodule OptimalSystemAgent.CLI.Doctor do
     ollama_url = System.get_env("OLLAMA_HOST") || "http://localhost:11434"
 
     case detect_ollama(ollama_url) do
-      {:ok, model} ->
-        {:pass, "Provider", "Ollama (#{model})"}
+      {:ok, _first_pulled_model} ->
+        {:pass, "Provider", "Ollama (#{configured_model_name(:ollama)})"}
 
       :no_models ->
         {:pass, "Provider", "Ollama (no models pulled)"}
@@ -233,13 +233,13 @@ defmodule OptimalSystemAgent.CLI.Doctor do
         # Check for cloud provider API keys
         cond do
           System.get_env("ANTHROPIC_API_KEY") ->
-            {:pass, "Provider", "Anthropic (API key set)"}
+            {:pass, "Provider", "Anthropic (#{configured_model_name(:anthropic)})"}
 
           System.get_env("OPENAI_API_KEY") ->
-            {:pass, "Provider", "OpenAI (API key set)"}
+            {:pass, "Provider", "OpenAI (#{configured_model_name(:openai)})"}
 
           System.get_env("GROQ_API_KEY") ->
-            {:pass, "Provider", "Groq (API key set)"}
+            {:pass, "Provider", "Groq (#{configured_model_name(:groq)})"}
 
           has_lm_studio?() ->
             {:pass, "Provider", "LM Studio (responding)"}
@@ -247,6 +247,39 @@ defmodule OptimalSystemAgent.CLI.Doctor do
           true ->
             {:fail, "Provider", "no provider detected"}
         end
+    end
+  end
+
+  @doc """
+  Resolve the model OSA is actually configured to use for `fallback_provider`,
+  the SAME way `GET /health` does (`lib/optimal_system_agent/channels/http.ex`
+  ~L92-116): an explicit `default_model` app-env value wins; otherwise fall
+  back to the resolved provider's catalog default model; otherwise the
+  provider name itself. Public so `osa doctor` and `/health` can never
+  silently disagree about which model is configured — this used to print the
+  first model returned by `GET /api/tags` instead, which could be any locally
+  pulled model with no relation to `OSA_MODEL`.
+  """
+  @spec configured_model_name(atom()) :: String.t()
+  def configured_model_name(fallback_provider) do
+    case Application.get_env(:optimal_system_agent, :default_model) do
+      nil ->
+        resolved_provider =
+          Application.get_env(:optimal_system_agent, :default_provider, fallback_provider)
+
+        try do
+          case OptimalSystemAgent.Providers.Registry.provider_info(resolved_provider) do
+            {:ok, info} -> to_string(info.default_model)
+            _ -> to_string(resolved_provider)
+          end
+        rescue
+          _ -> to_string(resolved_provider)
+        catch
+          :exit, _ -> to_string(resolved_provider)
+        end
+
+      m ->
+        to_string(m)
     end
   end
 

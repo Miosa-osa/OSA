@@ -25,9 +25,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.VaultCheckpoint do
     }
   end
 
+  # `OptimalSystemAgent.Vault` does not exist in this build (there is no vault
+  # backend yet — see the `@allowlist` comment in
+  # `test/optimal_system_agent/tools/registry_coverage_test.exs`). This tool
+  # is intentionally NOT wired into `Tools.Registry.load_builtin_tools/0`, so
+  # the model never sees or calls it today. Still, `execute/1` must never
+  # raise `UndefinedFunctionError` if it is ever invoked directly (a future
+  # registration mistake, a direct call from other code, …) — fail with a
+  # normal, honest tool error instead.
   @impl true
-  def execute(%{"session_id" => session_id}) do
-    OptimalSystemAgent.Vault.checkpoint(session_id)
-    {:ok, "Vault checkpoint saved for session #{session_id}."}
+  def execute(%{"session_id" => _session_id}) do
+    {:error, "vault checkpoint is not available in this build"}
   end
 end

@@ -6,6 +6,12 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
       append-only-if-absent).
     * F4 — `test_provider/2` must not report success for a provider it never
       actually probed (groq/openrouter/deepseek).
+    * Item 1 (audit) — `/setup` (and the REPL first-run, which shares this
+      same module) used to be a second, weaker wizard that could not offer
+      Ollama Cloud or any model selection at all — `write_config/2` never
+      wrote a model, and the provider picker had no `ollama_cloud` entry.
+      This left `/setup` unable to reach parity with the good first-run
+      wizard (`mix osa.setup.wizard` / `lib/mix/tasks/osa.setup.wizard.ex`).
   """
   use ExUnit.Case, async: false
 
@@ -82,6 +88,67 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
 
     test "a provider with no health-check returns :unverified, not a false :ok" do
       assert Setup.test_provider(:some_future_provider, "any-key") == :unverified
+    end
+  end
+
+  describe "item 1: /setup reaches parity with the good first-run wizard" do
+    test "the provider picker offers ollama_cloud, the recommended provider" do
+      assert Enum.any?(Setup.providers(), &(&1.value == :ollama_cloud))
+    end
+
+    test "write_config/3 for ollama_cloud (keyed) defaults to the cloud URL and writes key + model" do
+      Setup.write_config(:ollama_cloud, "sk-ollama-test", model: "glm-5.2:cloud")
+
+      content = File.read!(@env_path)
+      # Runtime provider resolution expects "ollama" (not the literal
+      # "ollama_cloud") — OLLAMA_URL is what distinguishes cloud vs local.
+      assert content =~ "OSA_DEFAULT_PROVIDER=ollama\n"
+      assert content =~ "OLLAMA_URL=https://ollama.com"
+      assert content =~ "OLLAMA_API_KEY=sk-ollama-test"
+      assert content =~ "OLLAMA_MODEL=glm-5.2:cloud"
+    end
+
+    test "write_config/3 for ollama_cloud (keyless local route) writes localhost URL, no API key line" do
+      Setup.write_config(:ollama_cloud, nil,
+        model: "glm-5.2:cloud",
+        base_url: "http://localhost:11434"
+      )
+
+      content = File.read!(@env_path)
+      assert content =~ "OSA_DEFAULT_PROVIDER=ollama\n"
+      assert content =~ "OLLAMA_URL=http://localhost:11434"
+      assert content =~ "OLLAMA_MODEL=glm-5.2:cloud"
+      refute content =~ "OLLAMA_API_KEY="
+    end
+
+    test "write_config/3 writes OSA_MODEL for a keyed provider like anthropic (previously never wrote a model)" do
+      Setup.write_config(:anthropic, "sk-ant-test", model: "claude-sonnet-4-6-20260316")
+
+      content = File.read!(@env_path)
+      assert content =~ "ANTHROPIC_API_KEY=sk-ant-test"
+      assert content =~ "OSA_MODEL=claude-sonnet-4-6-20260316"
+    end
+
+    test "write_config/2 (no model) still works exactly as before — arity-2 callers unaffected" do
+      Setup.write_config(:ollama, nil)
+
+      content = File.read!(@env_path)
+      assert content =~ "OSA_DEFAULT_PROVIDER=ollama\n"
+      refute content =~ "OSA_MODEL="
+    end
+
+    test "re-running write_config/3 with a different model upserts (replaces), doesn't duplicate" do
+      Setup.write_config(:anthropic, "sk-ant-1", model: "claude-haiku-4-5-20251001")
+      Setup.write_config(:anthropic, "sk-ant-2", model: "claude-sonnet-4-6-20260316")
+
+      content = File.read!(@env_path)
+      assert content =~ "OSA_MODEL=claude-sonnet-4-6-20260316"
+      refute content =~ "claude-haiku-4-5-20251001"
+      assert content |> String.split("\n") |> Enum.count(&(&1 =~ "OSA_MODEL=")) == 1
+    end
+
+    test "validate_provider/2 does not crash for ollama_cloud (no key required for the local route)" do
+      assert Setup.validate_provider(:ollama_cloud, nil) == :ok
     end
   end
 end

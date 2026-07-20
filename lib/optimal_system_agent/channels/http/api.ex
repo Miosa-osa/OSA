@@ -16,7 +16,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API do
     /swarm       → OrchestrationRoutes  POST /launch, GET /|/:id, DELETE /:id
     /debate      → DebateRoutes       POST / (multi-agent debate + synthesis)
     /stream      → AgentRoutes       GET /tui_output (SSE alias), GET /:session_id  (SSE)
-    /tui         → TuiRoutes         GET /output (SSE), POST /input
     /tools       → ToolRoutes        GET /, POST /:name/execute
     /skills      → ToolRoutes        GET /, POST /create
     /commands    → ToolRoutes        GET /, POST /execute

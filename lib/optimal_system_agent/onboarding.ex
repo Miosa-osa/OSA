@@ -1557,6 +1557,29 @@ defmodule OptimalSystemAgent.Onboarding do
     _ -> %{reachable: false, url: "http://localhost:11434", model_count: 0}
   end
 
+  @doc """
+  Decide the `ollama_cloud` connection route: keyless "signed-in local
+  Ollama" (proxies `:cloud` models via device identity — no key needed) vs.
+  keyed `https://ollama.com` (a different account, or a headless box with no
+  local daemon).
+
+  Pure decision table, shared between the standalone `mix osa.setup.wizard`
+  (`bin/osa`'s first-run wizard) and the in-app `/setup` command
+  (`OptimalSystemAgent.CLI.Setup`) so both entry points offer the exact same
+  choice instead of the in-app wizard silently pinning `OLLAMA_URL=
+  https://ollama.com` and demanding a key even when a local daemon is already
+  signed in.
+
+    * signed in locally, chose the keyless route -> localhost, NO key
+      (must never fall through to https://ollama.com)
+    * key entered (with or without a local daemon) -> ollama.com, WITH key
+  """
+  @spec ollama_cloud_route(boolean(), boolean(), String.t() | nil) ::
+          {String.t() | nil, String.t()}
+  def ollama_cloud_route(local_reachable, use_local?, key)
+  def ollama_cloud_route(true, true, _key), do: {nil, "http://localhost:11434"}
+  def ollama_cloud_route(_local_reachable, _use_local?, key), do: {key, "https://ollama.com"}
+
   defp env_has_provider?(env_path) do
     case File.read(env_path) do
       {:ok, content} ->
