@@ -338,14 +338,27 @@ impl StatusBar {
         }
     }
 
-    /// Override the workspace label with the backend's git-root-aware project
-    /// name (from /workspace/identity), so the status bar shows the dir the
-    /// agent actually operates in — not a raw launch-dir basename. A blank name
-    /// leaves the existing label untouched.
-    pub fn set_workspace_name(&mut self, name: Option<String>) {
-        if let Some(n) = name.filter(|s| !s.trim().is_empty()) {
-            self.cwd_basename = n;
+    /// Set the folder label from the session's real working directory (the same
+    /// source the welcome banner shows), so the status bar can never disagree
+    /// with the banner. Shows the basename, or "~" for the home directory. A
+    /// blank path leaves the label untouched.
+    pub fn set_cwd_path(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
         }
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() && path == home {
+                self.cwd_basename = "~".to_string();
+                return;
+            }
+        }
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| path.to_string());
+        self.cwd_basename = name;
     }
 
     /// Set (or clear with None) the reasoning-effort chip.
@@ -1091,6 +1104,26 @@ impl Component for StatusBar {
 #[cfg(test)]
 mod status_bar_tests {
     use super::*;
+
+    #[test]
+    fn cwd_path_shows_basename_and_home_tilde() {
+        let mut sb = StatusBar::new();
+        sb.set_cwd_path("/home/miosa/projects/osa/OSA");
+        assert_eq!(sb.cwd_basename, "OSA");
+        // A trailing slash still yields the folder name.
+        sb.set_cwd_path("/home/miosa/projects/osa/OSA/");
+        assert_eq!(sb.cwd_basename, "OSA");
+        // A blank path leaves the label untouched.
+        sb.set_cwd_path("   ");
+        assert_eq!(sb.cwd_basename, "OSA");
+        // The home directory collapses to "~".
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                sb.set_cwd_path(&home);
+                assert_eq!(sb.cwd_basename, "~");
+            }
+        }
+    }
 
     #[test]
     fn context_warning_roundtrip() {

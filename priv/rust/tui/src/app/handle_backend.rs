@@ -602,6 +602,10 @@ impl App {
                             Some(self.header.provider().to_string()),
                             Some(self.header.model_name().to_string()),
                         ));
+                        // Keep the status-bar folder label in lockstep with the
+                        // banner: both show the real working dir the agent operates
+                        // in, so the two surfaces can never disagree.
+                        self.status.set_cwd_path(&self.working_dir);
                     }
 
                     // If this fetch was triggered by `/tools`, open the browser now
@@ -636,11 +640,12 @@ impl App {
             },
             BackendEvent::WorkspaceIdentityLoaded(result) => match result {
                 Ok(identity) => {
-                    // Prefer the backend's git-root-aware name over the launch-dir
-                    // basename so a home-dir launch reads as '~'/repo name, and the
-                    // displayed dir is the one tools actually operate in.
+                    // Store the git-root-aware name for the window title (see
+                    // sync_chrome). The STATUS-BAR folder label deliberately tracks
+                    // the real working dir (set at banner time) so it always agrees
+                    // with the welcome banner, rather than showing a git-root name
+                    // that can differ from the folder the user is actually in.
                     self.workspace_name = Some(identity.name.clone());
-                    self.status.set_workspace_name(Some(identity.name.clone()));
                 }
                 Err(e) => {
                     debug!("Failed to load workspace identity: {}", e);
