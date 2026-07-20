@@ -103,8 +103,21 @@ defmodule OptimalSystemAgent.Agent.PermissionMode do
   # ── Disk persistence (~/.osa/permission_mode.json) ─────────────────────
 
   defp disk_path do
-    base = System.get_env("OSA_HOME") || Path.expand("~/.osa")
-    Path.join(base, "permission_mode.json")
+    # An explicit app-env override wins (test isolation — mirrors
+    # :permissions_file / :durable_log_dir). Without it the sticky store lived at
+    # the real ~/.osa/permission_mode.json even under `mix test`, so test session
+    # ids ("mode-38", …) persisted "overdrive" to the SAME file the live daemon
+    # reads, and recycled unique() ids across runs collided into false
+    # non-:ask defaults. Isolating the path keeps test writes out of the real
+    # store entirely.
+    case Application.get_env(:optimal_system_agent, :permission_mode_file) do
+      path when is_binary(path) ->
+        path
+
+      _ ->
+        base = System.get_env("OSA_HOME") || Path.expand("~/.osa")
+        Path.join(base, "permission_mode.json")
+    end
   end
 
   # Dump the whole ETS table to disk atomically (temp + rename). Best-effort:

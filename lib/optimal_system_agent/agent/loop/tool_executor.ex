@@ -256,6 +256,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     safety_ask =
       Permissions.bypass_immune_ask(tool_call.name, Map.get(tool_call, :arguments) || %{})
 
+    # Write-family handler hard path-guard, consulted up front so a write we can
+    # never perform is blocked with its real reason instead of being asked and
+    # then failing at execute (the "I approved but it says Access denied" bug).
+    # Computed once; consumed by step 1b′ below.
+    hard_deny = handler_hard_deny(tool_call)
+
     cond do
       match?({:blocked, _}, circuit_breaker) ->
         {:blocked, reason} = circuit_breaker
@@ -272,6 +278,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       # included. Same message as the maybe_ask/2 deny branch.
       saved_rule_denies?(tool_call) ->
         {:blocked, "Blocked: #{tool_call.name} is denied by a saved permission rule"}
+
+      # Step 1b′ — the write-family handler's own hard path-guard. A HARD deny
+      # (dotfile outside ~/.osa, out-of-allowed-paths, symlink-to-protected)
+      # means the write can never succeed in ANY mode — overdrive included — so
+      # surface the real reason now instead of prompting for a call the handler
+      # will reject. Ordered before the mode short-circuits for exactly that
+      # reason: overdrive must not "allow" a write that then fails at execute.
+      match?({:blocked, _}, hard_deny) ->
+        hard_deny
 
       # Step 1c — bypass-immune safety ask: mutating writes to .git/ internals,
       # OSA settings/permission files, and shell startup files ALWAYS prompt —
@@ -360,6 +375,47 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   defp saved_rule_denies?(tool_call) do
     args = Map.get(tool_call, :arguments) || %{}
     Permissions.check(tool_call.name, args) == :deny
+  end
+
+  # Write-family tools carry their OWN hard path-safety guard inside the handler
+  # (dotfile-outside-~/.osa, out-of-allowed-paths, symlink-to-protected). That
+  # guard is a HARD deny that runs unconditionally at execute time, in every
+  # permission mode. Before this step it was invisible to the approval layer, so
+  # a write to e.g. ~/.lavish was ASKED, the operator said yes, and the handler
+  # then rejected it anyway — "I approved but it says Access denied." Consult the
+  # same guard here, up front, so a write we can never perform is BLOCKED with
+  # the real reason instead of being pointlessly prompted (and so overdrive does
+  # not "allow" a call that immediately fails). Only tools whose handler exports
+  # a pure `check_permissions/2` (the edit family ignores ctx) are consulted; a
+  # `{:deny, msg}` becomes a clean block, everything else falls through.
+  @path_guarded_writes ~w(file_write file_edit multi_file_edit notebook_edit file_create)
+  defp handler_hard_deny(tool_call) do
+    if tool_call.name in @path_guarded_writes do
+      args = Map.get(tool_call, :arguments) || %{}
+
+      with mod when is_atom(mod) and not is_nil(mod) <- Tools.module_for(tool_call.name),
+           true <- function_exported?(mod, :check_permissions, 2),
+           {:deny, msg} <- safe_check_permissions(mod, args) do
+        {:blocked, msg}
+      else
+        _ -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  # The edit handlers' check_permissions/2 only read the path/edits args and
+  # ignore ctx, so a nil ctx is safe. Fail OPEN on any unexpected shape/raise:
+  # this is an early UX guard, not the security boundary — the handler re-runs
+  # the identical guard at execute time (defense in depth), so a miss here can
+  # never let a denied write through, only fall back to the old ask-then-deny.
+  defp safe_check_permissions(mod, args) do
+    mod.check_permissions(args, nil)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # Existing tier + subagent + auto-Guardian gate. Returns `:allow` |

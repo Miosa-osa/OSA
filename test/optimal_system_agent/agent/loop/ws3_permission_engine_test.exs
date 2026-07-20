@@ -162,13 +162,36 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
       enable_interactive()
       s = state(permission_mode: :accept_edits)
 
+      # A legitimately writable but out-of-workspace path (the handler's own
+      # path-guard ALLOWS it — it is not a protected/system location), so the
+      # accept_edits out-of-scope prompt is the real gate. A hard-protected path
+      # like /etc/passwd is exercised separately below (it blocks before asking,
+      # since asking to approve a write the handler will always reject is exactly
+      # the ask-then-deny bug).
       assert {:ask, _rid, summary} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "~/projects/elsewhere/oos.txt", "content" => "x"}),
+                 s
+               )
+
+      assert summary.reason =~ "outside the workspace"
+    end
+
+    test "a hard-protected path BLOCKS before asking, even in accept_edits" do
+      # Regression for the live "I approved but it says Access denied" bug: a
+      # path the handler unconditionally rejects (/etc/passwd, a dotfile, …) must
+      # not be presented as an approvable prompt. It is blocked up front with the
+      # real reason instead.
+      enable_interactive()
+      s = state(permission_mode: :accept_edits)
+
+      assert {:blocked, msg} =
                ToolExecutor.approve_tool_call(
                  tool("file_write", %{"path" => "/etc/passwd", "content" => "pwned"}),
                  s
                )
 
-      assert summary.reason =~ "outside the workspace"
+      assert msg =~ "protected" or msg =~ "outside allowed"
     end
 
     test "out-of-scope write fails closed (not silently allowed) when non-interactive and no bypass" do
@@ -180,9 +203,11 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
 
       s = state(permission_mode: :accept_edits)
 
+      # Benign out-of-scope path (handler allows it), so the block here comes from
+      # the non-interactive out-of-scope fail-closed rule, not the hard path-guard.
       assert {:blocked, msg} =
                ToolExecutor.approve_tool_call(
-                 tool("file_write", %{"path" => "/etc/passwd", "content" => "pwned"}),
+                 tool("file_write", %{"path" => "~/projects/elsewhere/oos.txt", "content" => "x"}),
                  s
                )
 
@@ -252,7 +277,7 @@ defmodule OptimalSystemAgent.Agent.Loop.WS3PermissionEngineTest do
 
       edits = [
         %{"path" => "a.ex", "old_string" => "foo", "new_string" => "bar"},
-        %{"path" => "/etc/passwd", "old_string" => "root", "new_string" => "pwned"}
+        %{"path" => "~/projects/elsewhere/oos.ex", "old_string" => "foo", "new_string" => "bar"}
       ]
 
       assert {:ask, _rid, summary} =

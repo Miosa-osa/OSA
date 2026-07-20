@@ -96,3 +96,10 @@ config :optimal_system_agent, non_interactive_permission_bypass: true
 # real ~/.osa/permissions.json.
 config :optimal_system_agent,
   permissions_file: Path.join(System.tmp_dir!(), "osa-test-permissions.json")
+
+# Isolate the sticky permission-mode store the same way: without this, tests
+# that set :overdrive persisted to the real ~/.osa/permission_mode.json (shared
+# with the live daemon) and recycled session ids collided across runs into false
+# non-:ask defaults.
+config :optimal_system_agent,
+  permission_mode_file: Path.join(System.tmp_dir!(), "osa-test-permission-mode.json")

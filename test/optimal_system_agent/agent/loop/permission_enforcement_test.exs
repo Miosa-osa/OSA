@@ -56,6 +56,36 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
       assert :allow = ToolExecutor.approve_tool_call(tool("file_write", %{"path" => "a.txt"}), s)
     end
 
+    test "a write to a protected dotfile is BLOCKED before asking (never ask-then-deny)" do
+      # Regression: the operator was prompted to approve a write the handler
+      # would unconditionally reject at execute time, so "yes" produced an
+      # "Access denied" — approval was meaningless. The handler hard path-guard
+      # is now consulted up front and blocks with the real reason instead.
+      s = state(permission_mode: :ask)
+
+      assert {:blocked, msg} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "~/.zshrc", "content" => "x"}),
+                 s
+               )
+
+      assert msg =~ "protected dotfile"
+    end
+
+    test "the dotfile hard-deny holds even in :overdrive (never allow-then-fail)" do
+      # Overdrive must not "allow" a write that then fails at execute; the hard
+      # path-guard is ordered before the mode short-circuits for this reason.
+      s = state(permission_mode: :overdrive)
+
+      assert {:blocked, msg} =
+               ToolExecutor.approve_tool_call(
+                 tool("file_write", %{"path" => "~/.zshrc", "content" => "x"}),
+                 s
+               )
+
+      assert msg =~ "protected dotfile"
+    end
+
     test ":plan denies a mutating tool" do
       s = state(permission_mode: :plan)
 
