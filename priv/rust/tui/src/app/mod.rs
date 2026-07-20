@@ -390,6 +390,12 @@ pub struct App {
     pub kill_agents_armed: Option<Instant>,
     // Ctrl+T (chat:todosToggle) — hide/show the floating task checklist.
     pub task_checklist_hidden: bool,
+    /// Ticks remaining before an "Updated plan" snapshot is flushed to
+    /// scrollback. Task events arrive in bursts (the backend emits one
+    /// task_created per item when a whole plan is set), so we debounce the
+    /// snapshot: each task event re-arms this counter, and the snapshot fires
+    /// once it settles, coalescing the burst into a single history cell. 0 = idle.
+    pub plan_snapshot_debounce: u8,
 }
 
 impl App {
@@ -609,6 +615,7 @@ impl App {
             chord_pending: None,
             kill_agents_armed: None,
             task_checklist_hidden: false,
+            plan_snapshot_debounce: 0,
         })
     }
 

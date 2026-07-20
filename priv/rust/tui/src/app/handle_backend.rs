@@ -509,12 +509,10 @@ impl App {
             } => {
                 self.tasks.add(task_id.clone(), subject.clone(), String::new());
                 self.task_checklist.add(task_id, subject, Some(active_form));
-                // Snapshot the plan into scrollback when it meaningfully changes
-                // (dedup guards against no-op churn), so history shows the plan
-                // evolving the way Codex prints "Updated plan" cells.
-                if let Some((body, plain)) = self.task_checklist.snapshot_if_changed() {
-                    self.chat.add_plan_snapshot(body, plain);
-                }
+                // Arm the debounced "Updated plan" snapshot. A plan of N steps
+                // arrives as N task_created events in one burst; re-arming here and
+                // flushing on tick coalesces them into a single history cell.
+                self.plan_snapshot_debounce = 2;
                 self.recompute_layout();
             }
             BackendEvent::TaskUpdated { task_id, status } => {
@@ -531,12 +529,9 @@ impl App {
                 // progress (current_active_form -> None).
                 let verb = self.task_checklist.current_active_form();
                 self.activity.set_active_verb(verb);
-                // Snapshot only when the checklist state actually differs from the
-                // last one in scrollback (a real status transition), not on every
-                // TaskUpdated or spinner tick.
-                if let Some((body, plain)) = self.task_checklist.snapshot_if_changed() {
-                    self.chat.add_plan_snapshot(body, plain);
-                }
+                // Debounced snapshot (dedup in snapshot_if_changed still guards a
+                // no-op update, so an unchanged TaskUpdated flushes to nothing).
+                self.plan_snapshot_debounce = 2;
             }
             BackendEvent::TaskChecklistShow { tasks } => {
                 self.task_checklist.clear();
@@ -553,6 +548,9 @@ impl App {
                 }
                 self.task_checklist.show();
                 self.activity.set_active_verb(self.task_checklist.current_active_form());
+                // One event carries the whole plan; still route through the
+                // debounce so it produces a single "Updated plan" history cell.
+                self.plan_snapshot_debounce = 2;
                 self.recompute_layout();
             }
             BackendEvent::TaskChecklistHide => {
