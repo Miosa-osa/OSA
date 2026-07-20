@@ -2,10 +2,10 @@
 
 <img src="assets/OSAIconLogo.png" alt="OSA" width="128" />
 
-# OSA — the Optimal System Agent
+# OSA: the Optimal System Agent
 
 **OSA finds the signal in your work.** Built on Signal Theory, it classifies
-what you ask, filters the noise, and routes the work to the right model —
+what you ask, filters the noise, and routes the work to the right model,
 proactively, and on your machine.
 
 Across your code, your ops, and the everyday busywork, OSA separates what matters
@@ -13,7 +13,7 @@ from the noise and does the work that counts. One command to install. Runs
 locally. Works with any model.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-v1.0.010-blue.svg)](#)
+[![Version](https://img.shields.io/badge/Version-v1.0.020-blue.svg)](#)
 [![Elixir](https://img.shields.io/badge/Elixir-1.17+-purple.svg)](https://elixir-lang.org)
 [![OTP](https://img.shields.io/badge/OTP-27+-green.svg)](https://www.erlang.org)
 [![Tools](https://img.shields.io/badge/Tools-60-blue.svg)](#built-in-tools)
@@ -25,14 +25,14 @@ locally. Works with any model.
 
 ## Install in one command
 
-**macOS / Linux** — paste this into a terminal:
+**macOS / Linux**, paste this into a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.sh | sh
 osa
 ```
 
-**Windows** — paste this into PowerShell:
+**Windows**, paste this into PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install.ps1 | iex
@@ -44,11 +44,11 @@ OS and CPU, downloads the prebuilt release from GitHub (a self-contained
 Elixir/OTP release that bundles its own runtime, plus the prebuilt Rust TUI),
 verifies its checksum, unpacks everything under `~/.osa` (or `%USERPROFILE%\.osa`),
 and puts the `osa` command on your PATH. The first run drops you into a short
-setup wizard — pick a provider, paste a key or take the local Ollama default,
+setup wizard: pick a provider, paste a key or take the local Ollama default,
 done. After that, type `osa` from anywhere on disk.
 
 Prebuilt targets: **linux-x64**, **macOS arm64**, **windows-x64**. Pin a
-specific release with `OSA_VERSION=v1.0.010` (`$env:OSA_VERSION = "v1.0.010"` on
+specific release with `OSA_VERSION=v1.0.020` (`$env:OSA_VERSION = "v1.0.020"` on
 Windows).
 
 ```
@@ -90,27 +90,45 @@ irm https://raw.githubusercontent.com/Miosa-osa/OSA/main/scripts/install-source.
 
 ---
 
+## New to OSA? Start here
+
+New here? The [Getting Started guide](docs/GETTING_STARTED.md) takes you from install
+to your first real task in a few minutes, with no prior setup knowledge needed.
+
+**Recommended setup (the easy path):** on first run, the wizard asks which provider
+to use. Pick **Ollama Cloud (recommended)** and the model **`glm-5.2:cloud`**. It
+needs no GPU and no large downloads (Ollama offloads the heavy work to its cloud),
+and it gives you a 1,000,000 token context window. Install Ollama from
+[ollama.com](https://ollama.com), sign in (via the Ollama desktop app or
+`ollama signin`, which lets your local Ollama proxy cloud models so OSA needs no
+extra key) or paste a key from [ollama.com/account/keys](https://ollama.com/account/keys),
+then choose that provider and model in the wizard. Prefer a different provider
+(OpenRouter, Anthropic, fully local Ollama, and more)? The
+[Getting Started guide](docs/GETTING_STARTED.md) covers every option.
+
+---
+
 ## How it works
 
 OSA is two programs that cooperate on your machine:
 
-- **The engine** — an Elixir/OTP application. This is the brain: the agent
+- **The engine**: an Elixir/OTP application. This is the brain: the agent
   loop, the tools, the LLM providers, memory, permissions, and persistence.
-  Because it runs on the BEAM, thousands of lightweight processes — turns,
-  sub-agents, hooks, streams — run concurrently and supervise each other, so one
+  Because it runs on the BEAM, thousands of lightweight processes (turns,
+  sub-agents, hooks, streams) run concurrently and supervise each other, so one
   failure never takes the whole agent down.
-- **The interface** — a Rust TUI built on ratatui. This is what you see and type
+- **The interface**: a Rust TUI built on ratatui. This is what you see and type
   into: the composer, the streaming message view, dialogs, the agent tree.
 
 The two halves talk over a small **HTTP + SSE API bound to `127.0.0.1`** (port
-9089 by default). The TUI never reaches the internet directly — it only speaks
+9089 by default). The TUI never reaches the internet directly, it only speaks
 to your local engine, and the engine is the only thing that talks to model
 providers. Nothing leaves your machine unless a tool you approved makes it
 happen.
 
 The single `osa` command ties them together. The first launch starts the engine
 as a **warm background daemon** and attaches the TUI to it. That daemon
-**outlives the TUI**, so every `osa` after the first attaches instantly — no
+**outlives the TUI**, so every `osa` after the first attaches instantly, no
 cold start. `osa stop` shuts it down.
 
 **The life of a turn:**
@@ -126,11 +144,11 @@ ReAct loop:  think → call a tool → observe → repeat
    │         every tool clears a permission check first
    │         (ask · auto-edit · plan · overdrive)
    ▼
-tokens, tool results, and diffs stream back over SSE — live — into the TUI
+tokens, tool results, and diffs stream back over SSE (live) into the TUI
 ```
 
-Everything the agent produces — reasoning, tool calls, file diffs, sub-agent
-activity — is streamed as it happens, so the TUI always mirrors the engine's
+Everything the agent produces (reasoning, tool calls, file diffs, sub-agent
+activity) is streamed as it happens, so the TUI always mirrors the engine's
 real state. For the full pipeline (compaction, fallback chains, hooks,
 guardrails) see [Architecture](#architecture) below.
 
@@ -152,12 +170,12 @@ much rope it gets:
 |---|---|
 | **ask** (default) | Approve each edit and command as it comes |
 | **auto-edit** | File edits run automatically; commands still prompt |
-| **plan** | OSA proposes a plan and waits — no writes until you approve |
-| **overdrive (full auto)** | No prompts — OSA runs end to end |
+| **plan** | OSA proposes a plan and waits, no writes until you approve |
+| **overdrive (full auto)** | No prompts, OSA runs end to end |
 
 Cycle modes live with **Shift+Tab**, even mid-turn. Launch straight into full
 auto with `osa overdrive` (or `--overdrive`). Overdrive shows a red warning and
-a one-time confirmation the first time — only use it in a directory you trust.
+a one-time confirmation the first time; only use it in a directory you trust.
 
 ### Warm single-command startup
 
@@ -168,7 +186,7 @@ down on demand.
 | Command | What it does |
 |---|---|
 | `osa` | Attach the TUI (warms the backend daemon if needed) |
-| `osa overdrive` | Launch in overdrive (full auto) — skips approval prompts |
+| `osa overdrive` | Launch in overdrive (full auto), skips approval prompts |
 | `osa continue` | Resume the newest session in this directory |
 | `osa resume [id]` | Resume a specific session (or pick one) |
 | `osa stop` | Stop the background backend daemon |
@@ -182,10 +200,10 @@ down on demand.
 `osa update` downloads the latest prebuilt release + TUI, verifies its checksum,
 swaps them in atomically under `~/.osa`, prints the version delta and release
 notes, and relaunches. The swap is **rollback-safe**: a fresh version is staged
-and built, boot-probed against `/health`, and only then atomically repointed —
+and built, boot-probed against `/health`, and only then atomically repointed,
 `osa update --staged --rollback` reverts to the previous version if a new one
 misbehaves, and `--dry-run` prints the plan without touching anything.
-`osa doctor` runs real health checks — provider reachability, port binding,
+`osa doctor` runs real health checks: provider reachability, port binding,
 config sanity, workspace layout. `osa help` prints the complete command and
 flag reference.
 
@@ -208,7 +226,7 @@ Type `/` in the TUI for the full palette. The command set:
 | **Enter** | Send message |
 | **Shift+Tab** | Cycle permission mode (ask → auto-edit → overdrive …) |
 | **Esc** | Clear the composer |
-| **Esc Esc** | Rewind — jump back to edit a previous message |
+| **Esc Esc** | Rewind, jump back to edit a previous message |
 | **Ctrl+C** | Cancel the running turn (quit when the composer is empty) |
 | **Ctrl+D** | Exit |
 | **Ctrl+N** | New session |
@@ -216,16 +234,16 @@ Type `/` in the TUI for the full palette. The command set:
 | **Ctrl+K** | Command palette (kill-to-end-of-line with text) |
 | **Ctrl+O** | Toggle the agent tree / expand the last tool |
 | **Ctrl+L** | Toggle the sidebar |
-| **Ctrl+V** | Paste — images become `[Image #N]`, file paths attach |
+| **Ctrl+V** | Paste, images become `[Image #N]`, file paths attach |
 | **`/`** | Slash-command completions |
-| **`!`** | Shell mode — run the line as a shell command |
+| **`!`** | Shell mode, run the line as a shell command |
 | **`@`** | Mention a file or directory (fuzzy picker) |
 | **`?`** / **F1** | Help |
 
 ### `!` shell and `@` file mentions
 
 Prefix a line with **`!`** to run it as a shell command without leaving the
-chat — `!git status`, `!ls`, `!cargo test`. Type **`@`** to fuzzy-pick a file or
+chat, `!git status`, `!ls`, `!cargo test`. Type **`@`** to fuzzy-pick a file or
 directory; the path is inserted inline and its contents are pulled into context
 so you can say "explain `@lib/agent/loop.ex`" and OSA already has it.
 
@@ -243,11 +261,11 @@ Code execution routes through a pluggable sandbox layer. Backends:
 
 | Backend | Notes |
 |---|---|
-| **MIOSA** | Recommended managed sandbox — auto-selected when configured |
+| **MIOSA** | Recommended managed sandbox, auto-selected when configured |
 | **E2B** | Cloud microVM isolation (`E2B_API_KEY`) |
 | **Vercel** | Ephemeral cloud execution (`VERCEL_TOKEN`) |
 | **Docker** | Local container isolation |
-| **Host** | Direct execution — the fallback when no sandbox is configured |
+| **Host** | Direct execution, the fallback when no sandbox is configured |
 
 In *required* mode, host execution is blocked unless a real sandbox is
 available, so untrusted code never touches your machine. A dangerous-command
@@ -256,7 +274,7 @@ guard screens every shell invocation regardless of backend.
 ### Background agents and steer
 
 `delegate` spawns sub-agents that run in the background, in a fork, or in an
-isolated git worktree — in parallel, each with the right model for its step.
+isolated git worktree, in parallel, each with the right model for its step.
 They share a task list and talk over ETS-backed mailboxes. Watch them live in
 the agent tree, and **steer** a running agent mid-turn: send a new directive
 into an in-flight turn and it adapts without being cancelled and restarted.
@@ -270,8 +288,8 @@ before teardown so it stays inspectable even when discarded.
 `/plan` (or **Esc Esc**) puts OSA into investigative plan mode: read-only until
 you approve, with the plan itself written to a durable file so it survives a
 context reset or restart. For long autonomous runs, an independent read-only
-goal verifier periodically checks whether your actual *goal* was met — not
-just whether a file compiled — and a cross-turn goal tracker auto-pauses on a
+goal verifier periodically checks whether your actual *goal* was met (not
+just whether a file compiled) and a cross-turn goal tracker auto-pauses on a
 stall instead of spinning forever. **Esc Esc** also drives the unified
 `/rewind`: jump back to any previous turn (code + conversation, or either
 alone), see a diff of what's about to change, and undo the rewind itself if
@@ -287,9 +305,9 @@ osa
 
 First run detects your setup and offers:
 
-1. **Quick Start** — auto-detect providers and go
-2. **Manual Setup** — choose a provider, enter an API key or OAuth sign-in, pick a model
-3. **Skip** — configure later with `/setup` or by editing `~/.osa/.env`
+1. **Quick Start**: auto-detect providers and go
+2. **Manual Setup**: choose a provider, enter an API key or OAuth sign-in, pick a model
+3. **Skip**: configure later with `/setup` or by editing `~/.osa/.env`
 
 Then just talk to it:
 
@@ -330,7 +348,7 @@ OSA_AGENT_NAME=OSA
 OSA_HTTP_PORT=9089
 ```
 
-**Workspace** — everything OSA keeps lives under `~/.osa/`:
+**Workspace:** everything OSA keeps lives under `~/.osa/`:
 
 ```
 ~/.osa/
@@ -361,7 +379,7 @@ Override the HTTP port with `OSA_HTTP_PORT=<n>` in `~/.osa/.env` (default 9089).
 
 ## Overview
 
-OSA is the intelligence layer of [MIOSA](https://miosa.ai) — a local-first,
+OSA is the intelligence layer of [MIOSA](https://miosa.ai), a local-first,
 open-source AI agent built on Elixir/OTP. It runs on your machine, owns your
 data, and connects to any LLM provider you choose.
 
@@ -371,7 +389,7 @@ intent, domain, and complexity. Simple tasks go to fast, cheap models. Complex
 multi-step tasks get decomposed into parallel sub-agents with the right model
 for each step. The agent learns from every session.
 
-The theoretical foundation is [Signal Theory](https://zenodo.org/records/18774174) —
+The theoretical foundation is [Signal Theory](https://zenodo.org/records/18774174),
 a framework for maximizing signal-to-noise ratio in AI communication, grounded
 in Shannon, Ashby, Beer, and Wiener.
 
@@ -393,10 +411,10 @@ User Input
   ├─ Prompt Injection Guard (3-tier detection)
   │
   ├─ Context Compaction Pipeline
-  │   ├─ Micro-compact (no LLM — truncate old tool results)
+  │   ├─ Micro-compact (no LLM, truncate old tool results)
   │   ├─ Strip tool args → Merge consecutive → Summarize warm zone
   │   ├─ Structured 8-section compression (iterative, preserves details)
-  │   ├─ Context collapse (413 recovery — withhold large results)
+  │   ├─ Context collapse (413 recovery, withhold large results)
   │   └─ Post-compact restore (re-inject files, tasks, workspace)
   │
   ├─ Pre-Directives (explore, delegation, task creation nudges)
@@ -473,11 +491,11 @@ Every input is classified into a 5-tuple before it reaches the reasoning engine:
 ```
 S = (Mode, Genre, Type, Format, Weight)
 
-Mode    — What to do:       BUILD, EXECUTE, ANALYZE, MAINTAIN, ASSIST
-Genre   — Speech act:       DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
-Type    — Domain category:  question, request, issue, scheduling, summary
-Format  — Container:        message, command, document, notification
-Weight  — Complexity:       0.0 (trivial) → 1.0 (critical, multi-step)
+Mode      What to do:       BUILD, EXECUTE, ANALYZE, MAINTAIN, ASSIST
+Genre     Speech act:       DIRECT, INFORM, COMMIT, DECIDE, EXPRESS
+Type      Domain category:  question, request, issue, scheduling, summary
+Format    Container:        message, command, document, notification
+Weight    Complexity:       0.0 (trivial) → 1.0 (critical, multi-step)
 ```
 
 The classifier is LLM-primary with a deterministic regex fallback. Results are
@@ -490,13 +508,13 @@ possible.
 
 | Weight Range | Tier | Use Case |
 |---|---|---|
-| 0.00–0.35 | Utility | Fast, cheap — greetings, lookups, summaries |
-| 0.35–0.65 | Specialist | Balanced — code tasks, analysis, writing |
-| 0.65–1.00 | Elite | Full reasoning — architecture, orchestration, novel problems |
+| 0.00–0.35 | Utility | Fast, cheap: greetings, lookups, summaries |
+| 0.35–0.65 | Specialist | Balanced: code tasks, analysis, writing |
+| 0.65–1.00 | Elite | Full reasoning: architecture, orchestration, novel problems |
 
 | Provider | Notes |
 |---|---|
-| **Ollama Local** | Runs on your machine — fully private, no API cost |
+| **Ollama Local** | Runs on your machine, fully private, no API cost |
 | **Ollama Cloud** | Fast cloud inference, no GPU required |
 | **Anthropic** | Claude Opus, Sonnet, Haiku |
 | **OpenAI** | GPT-4o, GPT-4o-mini, o-series |
@@ -504,8 +522,14 @@ possible.
 | **MIOSA** | Fully managed Optimal agent endpoint |
 | **Custom** | Any OpenAI-compatible endpoint |
 
+**Recommended default:** Ollama Cloud with `glm-5.2:cloud` (no GPU, 1,000,000 token
+context) is the easy starting point the setup wizard marks recommended. Other
+no-GPU cloud models include `glm-5.1:cloud`, `kimi-k2.7-code:cloud`, and
+`minimax-m3:cloud`. See the [Getting Started guide](docs/GETTING_STARTED.md) for
+the full provider and model list.
+
 When a call rate-limits or fails, OSA walks a configurable fallback chain and
-reconnects mid-stream — the turn keeps going.
+reconnects mid-stream, the turn keeps going.
 
 ### Autonomous Task Orchestration
 
@@ -515,11 +539,11 @@ reconnects mid-stream — the turn keeps going.
 User: "Build a REST API with auth, tests, and docs"
 
 OSA:
-  ├── Explorer agent   — scans codebase (read-only, fast)
-  ├── Planner agent    — designs architecture + implementation plan
-  ├── Backend agent    — writes API + auth middleware
-  ├── Tester agent     — writes test suite
-  └── Doc-writer agent — writes documentation
+  ├── Explorer agent     scans codebase (read-only, fast)
+  ├── Planner agent      designs architecture + implementation plan
+  ├── Backend agent      writes API + auth middleware
+  ├── Tester agent       writes test suite
+  └── Doc-writer agent   writes documentation
 ```
 
 Sub-agents share a task list and communicate via ETS-backed mailboxes. Run them
@@ -584,16 +608,16 @@ automatically.
 ### Token-Budgeted Context Assembly
 
 ```
-CRITICAL  (unlimited)  — System identity, active tool schemas
-HIGH      (40%)        — Recent conversation turns, current task state
-MEDIUM    (30%)        — Relevant memories (hybrid RAG recall — see below)
-LOW       (remaining)  — Workflow context, environmental metadata
+CRITICAL  (unlimited)    System identity, active tool schemas
+HIGH      (40%)          Recent conversation turns, current task state
+MEDIUM    (30%)          Relevant memories (hybrid RAG recall, see below)
+LOW       (remaining)    Workflow context, environmental metadata
 ```
 
 **Three-zone compression:**
-- **HOT** — last 10 messages, full fidelity
-- **WARM** — older turns, progressively summarized
-- **COLD** — oldest content reduced to key facts only
+- **HOT**: last 10 messages, full fidelity
+- **WARM**: older turns, progressively summarized
+- **COLD**: oldest content reduced to key facts only
 
 Compaction preserves the most recent user message verbatim (never summarized),
 sizes the preserved tail to a token budget instead of a fixed message count,
@@ -601,7 +625,7 @@ and prunes stale tool-result output outright once it ages out of that budget.
 On context overflow, media blocks are stripped and the request replayed before
 falling back further. Recall itself is **hybrid**: vector KNN over a persisted
 embedding store, fused with MMR re-ranking (so results aren't three near-dupes
-of the same fact) and lightweight query expansion — degrading gracefully to
+of the same fact) and lightweight query expansion, degrading gracefully to
 keyword-only search when no embedding provider is configured.
 
 ### Computer Use
@@ -610,8 +634,8 @@ Control your desktop directly from the agent. Platform adapters:
 
 | Platform | Method |
 |---|---|
-| **macOS** | Accessibility API — click, type, screenshot, scroll |
-| **Linux X11** | xdotool + xclip — full desktop control |
+| **macOS** | Accessibility API: click, type, screenshot, scroll |
+| **Linux X11** | xdotool + xclip, full desktop control |
 | **Docker** | Container-isolated desktop interaction |
 | **Remote SSH** | Control machines over SSH tunnels |
 
@@ -622,8 +646,8 @@ interact with any GUI application.
 
 | Channel | Notes |
 |---|---|
-| **Rust TUI** | Primary terminal UI — onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions with frecency ranking + ghost-text, LaTeX/table rendering, desktop notifications, and a fixed-height streaming viewport |
-| **Elixir CLI** | REPL — streaming, task display, diff view, Ctrl+R search, multi-line input |
+| **Rust TUI** | Primary terminal UI: onboarding wizard, model picker, sessions, command palette, agent tree, `!` shell, `@` mentions with frecency ranking + ghost-text, LaTeX/table rendering, desktop notifications, and a fixed-height streaming viewport |
+| **Elixir CLI** | REPL: streaming, task display, diff view, Ctrl+R search, multi-line input |
 | **HTTP/SSE API** | Port 9089, JWT auth, 20+ route modules, real-time SSE streaming |
 | **Telegram** | Long-polling, typing indicators, markdown conversion |
 | **Discord** | Webhook mode, token validation |
@@ -635,7 +659,7 @@ interact with any GUI application.
 
 | Type | Description |
 |---|---|
-| **Function** | Elixir functions — built-in (security, budget, telemetry, learning) |
+| **Function** | Elixir functions, built-in (security, budget, telemetry, learning) |
 | **HTTP Webhook** | POST JSON to external URLs on any event |
 | **Shell Command** | Run commands with payload interpolation |
 | **Agent** | Spawn a subagent in response to an event |
@@ -673,7 +697,7 @@ Control thinking depth and iteration budget with `/effort`:
 
 Cron jobs (`CRONS.json`) and event-driven triggers (`TRIGGERS.json`) live in
 `~/.osa/`. `HEARTBEAT.md` defines a recurring proactive checklist OSA runs on a
-schedule — the "proactive" in proactive agent.
+schedule, the "proactive" in proactive agent.
 
 ---
 
@@ -698,7 +722,7 @@ When asked to analyze data:
 3. Produce a summary with key findings
 ```
 
-Skills are available immediately — no restart, no recompile. The Skills Registry
+Skills are available immediately, no restart, no recompile. The Skills Registry
 hot-reloads on file change. Recurring behavior patterns (occurrence ≥ 5) are
 auto-promoted to skills by the SICA engine.
 
@@ -716,7 +740,7 @@ OSA/
 ├── config/                          # Elixir build + runtime config (dev / prod / test / runtime.exs)
 ├── scripts/                         # install / update / TUI-launch scripts (sh + ps1)
 │
-├── lib/optimal_system_agent/        # THE ENGINE — 200+ Elixir modules
+├── lib/optimal_system_agent/        # THE ENGINE, 200+ Elixir modules
 │   ├── agent/                       #   the brain: turn orchestration + agent state
 │   │   ├── loop/                    #     the ReAct turn loop, tool executor, steer/cancel,
 │   │   │                            #     guardrails, genre routing, doom-loop detection
@@ -734,7 +758,7 @@ OSA/
 │   ├── providers/                   #   LLM providers (Ollama, Anthropic, OpenAI…) + fallback chain,
 │   │                                #   credential pool, health checks, resilience
 │   ├── tools/builtins/              #   the 60 built-in tools: file, shell, search, web, delegate…
-│   ├── signal/                      #   signal classifier — routes each message by intent + complexity
+│   ├── signal/                      #   signal classifier, routes each message by intent + complexity
 │   ├── memory/                      #   long-term memory, learning, skill generation (SICA / VIGIL)
 │   ├── store/                       #   Ecto schemas + repo (SQLite): sessions, messages, patterns, skills
 │   ├── mcp/                         #   Model Context Protocol client + server (protocol, transports)
@@ -748,7 +772,7 @@ OSA/
 │   └── soul/ · budget/ · skills/    #   agent identity, cost tracking, skill registry
 │
 ├── priv/
-│   ├── rust/tui/src/                # THE INTERFACE — terminal UI (Rust + ratatui)
+│   ├── rust/tui/src/                # THE INTERFACE, terminal UI (Rust + ratatui)
 │   │   ├── app/                     #   event loop, key handling, actions, layout
 │   │   ├── client/                  #   HTTP + SSE client that talks to the engine
 │   │   ├── components/              #   composer, message list, sidebar, agent tree
@@ -760,7 +784,7 @@ OSA/
 │   ├── agents/                      # built-in agent role definitions
 │   └── skills/                      # built-in skills (hot-loadable)
 │
-├── desktop/                         # legacy/experimental GUI (WIP — not part of the shipped agent)
+├── desktop/                         # legacy/experimental GUI (WIP, not part of the shipped agent)
 ├── test/                            # ExUnit test suite
 ├── docs/                            # additional documentation
 └── .github/workflows/               # release automation
@@ -784,12 +808,12 @@ mix test test/swarm/        # Swarm pattern tests
 
 OSA is grounded in four principles from information and systems theory:
 
-1. **Shannon (Channel Capacity)** — Every channel has finite capacity. Match compute to complexity. Don't run your best model on trivial tasks.
-2. **Ashby (Requisite Variety)** — The system must match the variety of inputs it receives. OSA handles every signal type, not just the common ones.
-3. **Beer (Viable System Model)** — Five operational modes mirror the five subsystems every viable organization needs. Structure enables autonomy.
-4. **Wiener (Feedback Loops)** — Every action produces feedback. OSA learns what works and adapts across sessions.
+1. **Shannon (Channel Capacity)**: Every channel has finite capacity. Match compute to complexity. Don't run your best model on trivial tasks.
+2. **Ashby (Requisite Variety)**: The system must match the variety of inputs it receives. OSA handles every signal type, not just the common ones.
+3. **Beer (Viable System Model)**: Five operational modes mirror the five subsystems every viable organization needs. Structure enables autonomy.
+4. **Wiener (Feedback Loops)**: Every action produces feedback. OSA learns what works and adapts across sessions.
 
-**Research paper:** [Signal Theory: The Architecture of Optimal Intent Encoding](https://zenodo.org/records/18774174) — Luna, MIOSA Research, 2026.
+**Research paper:** [Signal Theory: The Architecture of Optimal Intent Encoding](https://zenodo.org/records/18774174), Luna, MIOSA Research, 2026.
 
 ---
 
@@ -806,19 +830,19 @@ OSA is the intelligence layer of the MIOSA platform:
 
 ### Memory: native, plus Optimal Engine
 
-OSA ships with its **own native memory** — built in, on by default, and fully
+OSA ships with its **own native memory**, built in, on by default, and fully
 standalone. It works with no external services: long-term recall, episodic
 tracking, the vault, and skill learning all run locally out of the box. Nothing
 extra is required to get persistent, cross-session memory.
 
-**Optimal Engine** is a knowledge-base / "second brain" product in the ecosystem
-— a richer external memory and knowledge/data-store layer you can plug in. It's
+**Optimal Engine** is a knowledge-base / "second brain" product in the ecosystem,
+a richer external memory and knowledge/data-store layer you can plug in. It's
 **available today** and ships its **own CLI**: set it up, then tell OSA about it,
 and OSA can leverage Optimal Engine as an external memory/knowledge layer
 alongside its native memory. Native memory works standalone; Optimal Engine is
 the optional, recommended layer when you want a deeper, shared knowledge base.
 
-[miosa.ai](https://miosa.ai) — [GitHub](https://github.com/Miosa-osa/OSA)
+[miosa.ai](https://miosa.ai) · [GitHub](https://github.com/Miosa-osa/OSA)
 
 ---
 
@@ -829,7 +853,7 @@ Skills over code changes. Write a `SKILL.md`, share it with the community. See
 
 ## License
 
-Apache 2.0 — See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).
 
 ---
 
