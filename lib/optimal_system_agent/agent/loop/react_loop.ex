@@ -1059,6 +1059,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
     state = %{state | messages: state.messages ++ tool_messages}
 
+    # Per-iteration context-pressure emit (mid-turn meter fix): previously
+    # Telemetry.emit_context_pressure/1 only fired at turn boundaries (loop.ex),
+    # so the TUI context bar stayed frozen while a single turn ran many tool
+    # calls even though state.messages (and the char-count fallback estimate)
+    # grows with every tool result. Emitting here, right after this
+    # iteration's tool results are folded into state.messages and before the
+    # next model call / recursive run(state), makes the meter climb live.
+    # Cheap: at most once per ReAct iteration, and estimate_tokens is a
+    # char/word heuristic guarded by emit_context_pressure's own rescue.
+    Telemetry.emit_context_pressure(state)
+
     # Short-circuit: if ALL tool calls were computer_use and ALL succeeded,
     # return directly to avoid burning another LLM round-trip.
     all_computer_use = Enum.all?(tool_calls, fn tc -> tc.name == "computer_use" end)

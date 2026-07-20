@@ -763,6 +763,27 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert result.usage.output_tokens == 9
     end
 
+    # glm-style final chunk shape: "choices" is present but an EMPTY list
+    # (not absent), with a top-level "usage" object alongside it. This is
+    # distinct from the "no choices key at all" case above and from the
+    # "non-empty choices with attached usage" case: the first process_sse_line
+    # clause requires a NON-empty choices list (`[%{"delta" => delta} | _]`),
+    # so an empty list falls through to the standalone-usage clause, which
+    # matches on any map containing the usage sub-fields regardless of
+    # whatever else (including an empty "choices" key) is also present.
+    test "parses usage from a chunk with an empty choices list (glm final-chunk shape)" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "Hi there"}}]}),
+        sse(%{"choices" => [], "usage" => %{"prompt_tokens" => 77, "completion_tokens" => 21}}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+      assert result.usage.input_tokens == 77
+      assert result.usage.output_tokens == 21
+      refute Map.get(result.usage, :estimated)
+    end
+
     test "falls back to a non-zero char/token estimate when the server never sends usage" do
       messages = [%{role: "user", content: "Tell me a very long story about dragons and castles"}]
 
