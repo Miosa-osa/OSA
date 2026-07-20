@@ -53,6 +53,29 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FingerprintTest do
       assert File.exists?(path)
     end
 
+    test "regenerates a real 32-byte key when file is an empty placeholder" do
+      # The CLI writes an empty placeholder file at `osa opencomputers login`.
+      # Fingerprint must not hand that empty binary to the control plane.
+      path = tmp_path()
+      File.write!(path, "", [:binary])
+      on_exit(fn -> File.rm(path) end)
+
+      result = Fingerprint.load_or_generate(path)
+      assert byte_size(result) == 32
+      # The placeholder must have been overwritten with the generated key.
+      assert File.read!(path) == result
+    end
+
+    test "regenerates when file is the wrong size (truncated)" do
+      path = tmp_path()
+      File.write!(path, :crypto.strong_rand_bytes(10), [:binary])
+      on_exit(fn -> File.rm(path) end)
+
+      result = Fingerprint.load_or_generate(path)
+      assert byte_size(result) == 32
+      assert File.read!(path) == result
+    end
+
     test "returns 32-byte fallback when file is unreadable" do
       # Write a file then make it unreadable
       path = tmp_path()

@@ -8,17 +8,35 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Fingerprint do
 
   The control plane pins these bytes on first successful hello —
   every reconnect thereafter must present the same bytes.
+
+  A valid ed25519 private key is exactly 32 bytes. If the file exists
+  but is empty or the wrong size (for example the empty placeholder the
+  CLI writes at `osa opencomputers login`, or a truncated file), the key
+  is regenerated so we never hand an invalid fingerprint to the control
+  plane.
   """
 
   require Logger
+
+  # ed25519 private keys produced by :crypto.generate_key/2 are 32 bytes.
+  @key_bytes 32
 
   @spec load_or_generate(String.t()) :: binary()
   def load_or_generate(path) do
     full = Path.expand(path)
 
     case File.read(full) do
-      {:ok, bin} ->
+      {:ok, bin} when byte_size(bin) == @key_bytes ->
         bin
+
+      {:ok, _bin} ->
+        # Empty placeholder or wrong-sized file — treat as uninitialized
+        # and generate a real key in its place.
+        Logger.info(
+          "[OpenComputers.Session.Fingerprint] #{full} is empty or invalid — regenerating"
+        )
+
+        generate(full)
 
       {:error, :enoent} ->
         generate(full)

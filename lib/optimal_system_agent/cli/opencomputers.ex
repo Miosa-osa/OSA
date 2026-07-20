@@ -11,6 +11,9 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   defp marker_path, do: Path.join([osa_dir(), ".open_computers_enabled"])
   @default_control_url "wss://api.miosa.ai/api/v1/opencomputers/hosts/ws"
   @env_var "OSA_OPEN_COMPUTERS_ENABLED"
+  # Where a user generates a host key. The control plane is api.miosa.ai;
+  # the dashboard that mints oc_host_* keys lives at the app host.
+  @dashboard_url "https://miosa.ai/settings/computers"
 
   @doc "Dispatch a list of CLI args to the appropriate verb handler."
   def dispatch([verb | rest]) do
@@ -59,7 +62,48 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     IO.puts("  Supervisor:   #{supervisor_status()}")
     IO.puts("  Session:      #{session_status()}")
     IO.puts("")
+
+    has_key = present?(cfg[:host_key])
+    {verdict, hint} = connection_verdict(enabled, has_key, session_status())
+    IO.puts("  Status: #{verdict}")
+    if hint, do: IO.puts("  Next:   #{hint}")
+    IO.puts("")
   end
+
+  @doc false
+  # Pure summariser used by `status`: given whether the extension is enabled,
+  # whether a host_key is present, and the human session-status string, return
+  # {verdict, next_step_hint_or_nil}. Extracted so it can be tested without
+  # touching live processes or the network.
+  @spec connection_verdict(boolean(), boolean(), String.t()) :: {String.t(), String.t() | nil}
+  def connection_verdict(_enabled, false, _session) do
+    {"NOT connected — no host key configured",
+     "run `osa opencomputers login` (generate a key at #{@dashboard_url})"}
+  end
+
+  def connection_verdict(false, true, _session) do
+    {"NOT connected — extension disabled",
+     "run `osa opencomputers enable` then restart OSA"}
+  end
+
+  def connection_verdict(true, true, session) do
+    cond do
+      String.starts_with?(session, "connected") ->
+        {"CONNECTED — this machine is online in MIOSA", nil}
+
+      session == "not running" ->
+        {"NOT connected — enabled but session not started", "restart OSA to start the connection"}
+
+      true ->
+        {"connecting — session running but not yet active",
+         "check network / host key; `osa opencomputers status` again in a moment"}
+    end
+  end
+
+  defp present?(nil), do: false
+  defp present?(""), do: false
+  defp present?(v) when is_binary(v), do: String.trim(v) != ""
+  defp present?(_), do: false
 
   defp redact_key(nil), do: "(not set)"
   defp redact_key(""), do: "(not set)"
@@ -130,10 +174,15 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
       :ok ->
         File.chmod!(toml_path(), 0o600)
         ensure_fingerprint_file()
-        IO.puts("Written: #{toml_path()} (0600)")
-        IO.puts("Control URL: #{control_url}")
+        IO.puts("Host key saved: #{toml_path()} (0600)")
+        IO.puts("Control URL:   #{control_url}")
         IO.puts("")
-        IO.puts("Run `osa opencomputers enable` then restart OSA to connect.")
+        IO.puts("Next steps to bring this machine online in MIOSA:")
+        IO.puts("  1. osa opencomputers enable      # turn on host mode")
+        IO.puts("  2. restart OSA                   # so the connection starts")
+        IO.puts("  3. osa opencomputers status      # confirm 'Session: connected (active)'")
+        IO.puts("")
+        IO.puts("Once connected, the machine appears in your MIOSA dashboard as a Computer.")
 
       {:error, reason} ->
         IO.puts("Error: cannot write #{toml_path()}: #{inspect(reason)}")
@@ -144,6 +193,11 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   defp resolve_key(opts) do
     case opts[:key] do
       nil ->
+        IO.puts("")
+        IO.puts("To connect this machine to MIOSA you need a host key (oc_host_...).")
+        IO.puts("Generate one in your MIOSA account settings:")
+        IO.puts("  #{@dashboard_url}")
+        IO.puts("")
         IO.write("Paste your oc_host_* key: ")
         IO.gets("") |> String.trim()
 
