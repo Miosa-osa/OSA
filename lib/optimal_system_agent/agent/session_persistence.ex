@@ -29,13 +29,17 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   require Logger
 
   alias OptimalSystemAgent.Agent.SessionPersistence.Jsonl
+  alias OptimalSystemAgent.ConfigFile
 
-  @sessions_dir Path.expand("~/.osa/sessions")
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp sessions_dir, do: Path.join(ConfigFile.config_dir(), "sessions")
+
   @max_sessions 50
 
   @doc "Save session state to disk. `working_dir` tags the session to a folder so it can be resumed there."
   def save(session_id, messages, working_dir \\ nil) when is_list(messages) do
-    File.mkdir_p!(@sessions_dir)
+    File.mkdir_p!(sessions_dir())
     path = session_path(session_id)
 
     data =
@@ -167,12 +171,12 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     limit = Keyword.get(opts, :limit, @max_sessions)
     filter_dir = normalize_dir(Keyword.get(opts, :working_dir))
 
-    case File.ls(@sessions_dir) do
+    case File.ls(sessions_dir()) do
       {:ok, files} ->
         files
         |> Enum.filter(&String.ends_with?(&1, ".json"))
         |> Enum.flat_map(fn file ->
-          path = Path.join(@sessions_dir, file)
+          path = Path.join(sessions_dir(), file)
           session_id = String.trim_trailing(file, ".json")
 
           # Per-file try: a session file removed/renamed by a concurrent writer
@@ -241,13 +245,13 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     days = retention_days()
     cutoff = System.system_time(:second) - days * 86_400
 
-    case File.ls(@sessions_dir) do
+    case File.ls(sessions_dir()) do
       {:ok, files} ->
         removed =
           files
           |> Enum.filter(&String.ends_with?(&1, ".json"))
           |> Enum.count(fn file ->
-            path = Path.join(@sessions_dir, file)
+            path = Path.join(sessions_dir(), file)
 
             case File.stat(path, time: :posix) do
               {:ok, %{mtime: mtime}} when days == 0 or mtime < cutoff ->
@@ -292,7 +296,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   work before the first message is saved. Returns `:ok` or `{:error, reason}`.
   """
   def update_metadata(session_id, fields) when is_map(fields) do
-    File.mkdir_p!(@sessions_dir)
+    File.mkdir_p!(sessions_dir())
     path = session_path(session_id)
 
     existing =
@@ -393,7 +397,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
 
   defp session_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
-    Path.join(@sessions_dir, "#{safe_id}.json")
+    Path.join(sessions_dir(), "#{safe_id}.json")
   end
 
   # Path of the immutable append-only event log, sitting next to <id>.json.
@@ -401,7 +405,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   # which filter on `.json` — never treat it as a session record.
   defp updates_path(session_id) do
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
-    Path.join(@sessions_dir, "#{safe_id}.updates.jsonl")
+    Path.join(sessions_dir(), "#{safe_id}.updates.jsonl")
   end
 
   # Append only the messages not already present in the immutable log.

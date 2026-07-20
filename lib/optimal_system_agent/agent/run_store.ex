@@ -10,8 +10,14 @@ defmodule OptimalSystemAgent.Agent.RunStore do
 
   require Logger
 
+  alias OptimalSystemAgent.ConfigFile
+
   @table __MODULE__
-  @default_runs_dir Path.expand("~/.osa/agent-runs")
+
+  # Runtime-resolved default so a prebuilt release uses the END USER's home, not
+  # the CI runner's baked-in path. The `:agent_runs_dir` app-env override still
+  # wins; only this fallback is resolved at call time.
+  defp default_runs_dir, do: Path.join(ConfigFile.config_dir(), "agent-runs")
 
   # Cap on retained TERMINAL (completed/failed/cancelled) rows. Without this the
   # table grows unbounded over long-running/heavy-fan-out sessions, slowing every
@@ -313,7 +319,7 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   end
 
   defp runs_dir do
-    Application.get_env(:optimal_system_agent, :agent_runs_dir, @default_runs_dir)
+    Application.get_env(:optimal_system_agent, :agent_runs_dir) || default_runs_dir()
   end
 
   defp ensure_table do

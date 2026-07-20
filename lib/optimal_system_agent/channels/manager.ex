@@ -24,9 +24,12 @@ defmodule OptimalSystemAgent.Channels.Manager do
   """
   require Logger
 
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
 
-  @osa_dir Path.expand("~/.osa")
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp osa_dir, do: ConfigFile.config_dir()
 
   @channel_modules [
     OptimalSystemAgent.Channels.Telegram,
@@ -326,7 +329,7 @@ defmodule OptimalSystemAgent.Channels.Manager do
   end
 
   defp load_config_cached do
-    config_path = Path.join(@osa_dir, "config.json")
+    config_path = Path.join(osa_dir(), "config.json")
     now = System.monotonic_time(:millisecond)
 
     case :persistent_term.get({__MODULE__, :config_cache}, nil) do

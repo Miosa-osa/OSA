@@ -43,10 +43,14 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
 
   require Logger
 
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Workspace.Cwd
   alias OptimalSystemAgent.Workspace.FastWorktree.{Capabilities, Metadata, Populate}
 
-  @default_worktrees_dir Path.expand("~/.osa/worktrees")
+  # Runtime-resolved default so a prebuilt release uses the END USER's home, not
+  # the CI runner's baked-in path. The `:worktrees_dir` app-env override still
+  # wins; only this fallback is resolved at call time.
+  defp default_worktrees_dir, do: Path.join(ConfigFile.config_dir(), "worktrees")
 
   @type create_result :: %{
           path: String.t(),
@@ -62,7 +66,7 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
   """
   @spec worktrees_dir() :: String.t()
   def worktrees_dir do
-    Application.get_env(:optimal_system_agent, :worktrees_dir, @default_worktrees_dir)
+    Application.get_env(:optimal_system_agent, :worktrees_dir) || default_worktrees_dir()
   end
 
   @doc """

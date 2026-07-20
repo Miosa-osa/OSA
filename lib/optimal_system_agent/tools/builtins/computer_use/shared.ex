@@ -7,7 +7,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared do
   shell escaping, and screenshot directory management.
   """
 
-  @local_screenshot_dir Path.expand("~/.osa/screenshots")
+  alias OptimalSystemAgent.ConfigFile
+
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp local_screenshot_dir, do: Path.join(ConfigFile.config_dir(), "screenshots")
 
   # ---------------------------------------------------------------------------
   # xdotool / X11 key name map
@@ -137,8 +141,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared do
   @spec ensure_screenshot_dir() :: String.t()
   def ensure_screenshot_dir do
     try do
-      File.mkdir_p!(@local_screenshot_dir)
-      @local_screenshot_dir
+      File.mkdir_p!(local_screenshot_dir())
+      local_screenshot_dir()
     rescue
       _ ->
         fallback = Path.join(System.tmp_dir!(), "osa_screenshots")
@@ -149,5 +153,5 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared do
 
   @doc "Default screenshot directory path."
   @spec screenshot_dir() :: String.t()
-  def screenshot_dir, do: @local_screenshot_dir
+  def screenshot_dir, do: local_screenshot_dir()
 end

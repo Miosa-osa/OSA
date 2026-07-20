@@ -36,9 +36,13 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
   pattern.
   """
 
+  alias OptimalSystemAgent.ConfigFile
+
   @table :osa_pending_plans
 
-  @sessions_dir Path.expand("~/.osa/sessions")
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp sessions_dir, do: Path.join(ConfigFile.config_dir(), "sessions")
 
   @type pending :: %{plan: String.t(), input: String.t(), created_at: DateTime.t()}
 
@@ -54,7 +58,7 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
   """
   @spec plan_file_path(String.t()) :: String.t()
   def plan_file_path(session_id) when is_binary(session_id) do
-    Path.join(@sessions_dir, "#{safe_id(session_id)}.plan.md")
+    Path.join(sessions_dir(), "#{safe_id(session_id)}.plan.md")
   end
 
   @doc """
@@ -79,7 +83,7 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
   """
   @spec write_plan_file(String.t(), String.t()) :: :ok | {:error, term()}
   def write_plan_file(session_id, plan) when is_binary(session_id) and is_binary(plan) do
-    File.mkdir_p!(@sessions_dir)
+    File.mkdir_p!(sessions_dir())
     File.write(plan_file_path(session_id), plan)
   end
 

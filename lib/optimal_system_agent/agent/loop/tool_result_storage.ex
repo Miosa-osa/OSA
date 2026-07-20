@@ -26,7 +26,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   """
   require Logger
 
-  @results_dir Path.expand("~/.osa/tool-results")
+  alias OptimalSystemAgent.ConfigFile
+
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp results_dir, do: Path.join(ConfigFile.config_dir(), "tool-results")
   # 50KB — mirrors opencode's MAX_BYTES.
   @default_byte_threshold 51_200
   # 2000 lines — mirrors opencode's MAX_LINES.
@@ -91,7 +95,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   (or written before a session_id was threaded through) can't accumulate forever.
   """
   def cleanup(session_id) do
-    pattern = Path.join(@results_dir, "#{sanitize_component(session_id)}_*")
+    pattern = Path.join(results_dir(), "#{sanitize_component(session_id)}_*")
 
     case Path.wildcard(pattern) do
       [] ->
@@ -120,7 +124,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   def sweep_orphans(max_age_days \\ @orphan_max_age_days) do
     cutoff = System.system_time(:second) - max_age_days * 86_400
 
-    Path.join(@results_dir, "*.txt")
+    Path.join(results_dir(), "*.txt")
     |> Path.wildcard()
     |> Enum.reduce(0, fn path, acc ->
       case File.stat(path, time: :posix) do
@@ -169,7 +173,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
          threshold,
          line_count
        ) do
-    File.mkdir_p!(@results_dir)
+    File.mkdir_p!(results_dir())
 
     # Filename embeds the session so `cleanup/1`'s `<session>_*` glob matches and
     # per-session results are actually deleted on session end (previously named
@@ -179,7 +183,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     safe_id = sanitize_component(tool_call_id)
     safe_session = sanitize_component(session_id)
     filename = "#{safe_session}_#{safe_id}_#{safe_name}.txt"
-    path = Path.join(@results_dir, filename)
+    path = Path.join(results_dir(), filename)
 
     case File.write(path, result_str) do
       :ok ->

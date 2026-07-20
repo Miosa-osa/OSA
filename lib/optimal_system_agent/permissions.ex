@@ -46,9 +46,13 @@ defmodule OptimalSystemAgent.Permissions do
   Evaluation order (CC `permissions.ts`): deny → ask → allow → default `:ask`.
   """
 
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Settings
 
-  @default_permissions_file Path.expand("~/.osa/permissions.json")
+  # Runtime-resolved default so a prebuilt release uses the END USER's home, not
+  # the CI runner's baked-in path. The `:permissions_file` app-env override still
+  # wins; only this fallback is resolved at call time.
+  defp default_permissions_file, do: Path.join(ConfigFile.config_dir(), "permissions.json")
 
   # Settings-cascade sources, highest priority first (legacy store appended last).
   @settings_sources [:session, :flag, :local, :project, :user]
@@ -79,7 +83,7 @@ defmodule OptimalSystemAgent.Permissions do
   # Resolved at call time (not compile time) so tests can redirect the legacy
   # rule store to a tmp path via `config :optimal_system_agent, :permissions_file`.
   defp permissions_file do
-    Application.get_env(:optimal_system_agent, :permissions_file, @default_permissions_file)
+    Application.get_env(:optimal_system_agent, :permissions_file) || default_permissions_file()
   end
 
   # ── Evaluation ───────────────────────────────────────────────────────

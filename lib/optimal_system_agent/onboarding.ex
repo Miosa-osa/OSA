@@ -89,7 +89,7 @@ defmodule OptimalSystemAgent.Onboarding do
 
       _ ->
         if env_file_fallback_enabled?() do
-          [Path.expand(".env"), Path.join(@osa_dir, ".env")]
+          [Path.expand(".env"), Path.join(osa_dir(), ".env")]
           |> Enum.find_value(fn path ->
             if File.exists?(path) do
               case List.keyfind(parse_env_file(path), key, 0) do

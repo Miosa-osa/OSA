@@ -20,7 +20,12 @@ defmodule OptimalSystemAgent.Settings do
   """
   require Logger
 
-  @user_settings Path.expand("~/.osa/settings.json")
+  alias OptimalSystemAgent.ConfigFile
+
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp user_settings, do: Path.join(ConfigFile.config_dir(), "settings.json")
+
   @cache_table :osa_settings_cache
 
   @doc """
@@ -93,7 +98,7 @@ defmodule OptimalSystemAgent.Settings do
 
   @doc "Absolute paths of all file-backed settings sources (watched for changes)."
   def source_paths do
-    [@user_settings, project_settings_path(), local_settings_path()] ++
+    [user_settings(), project_settings_path(), local_settings_path()] ++
       List.wrap(flag_settings_path())
   end
 
@@ -112,13 +117,13 @@ defmodule OptimalSystemAgent.Settings do
   Refuses to overwrite an existing-but-unparseable settings file — returns
   `{:error, :corrupt_settings_file}` so a corrupt file is never clobbered.
   """
-  def set_user(key, value), do: set_in_file(@user_settings, key, value)
+  def set_user(key, value), do: set_in_file(user_settings(), key, value)
 
   @doc "Set a project-level setting (persisted to .osa/settings.json). Refuses to overwrite a corrupt file."
   def set_project(key, value), do: set_in_file(project_settings_path(), key, value)
 
   @doc "Delete a key from the user settings file (write-side delete semantics)."
-  def delete_user(key), do: update_in_file(@user_settings, &Map.delete(&1, to_string(key)))
+  def delete_user(key), do: update_in_file(user_settings(), &Map.delete(&1, to_string(key)))
 
   @doc "Delete a key from the project settings file."
   def delete_project(key),
@@ -150,7 +155,7 @@ defmodule OptimalSystemAgent.Settings do
   def all, do: merged()
 
   @doc "Get settings from a specific layer."
-  def layer(:user), do: load_json(@user_settings)
+  def layer(:user), do: load_json(user_settings())
   def layer(:project), do: load_json(project_settings_path())
   def layer(:local), do: load_json(local_settings_path())
   def layer(:session), do: get_all_session()

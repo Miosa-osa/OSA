@@ -45,9 +45,12 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
 
   require Logger
 
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
 
-  @sessions_dir Path.expand("~/.osa/sessions")
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp sessions_dir, do: Path.join(ConfigFile.config_dir(), "sessions")
 
   # Number of most-recent log entries surfaced by `summarize/1`. Keeps the
   # injected context bounded regardless of ledger length.
@@ -74,7 +77,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   """
   @spec path(String.t()) :: String.t()
   def path(session_id) when is_binary(session_id) do
-    Path.join(@sessions_dir, "#{safe_id(session_id)}.progress.md")
+    Path.join(sessions_dir(), "#{safe_id(session_id)}.progress.md")
   end
 
   @doc """
@@ -191,7 +194,7 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
     if File.exists?(file) do
       :ok
     else
-      File.mkdir_p!(@sessions_dir)
+      File.mkdir_p!(sessions_dir())
 
       case File.write(file, scaffold(session_id)) do
         :ok ->

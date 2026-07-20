@@ -15,7 +15,11 @@ defmodule OptimalSystemAgent.Agent.Worktree do
   """
   require Logger
 
-  @worktrees_dir Path.expand("~/.osa/worktrees")
+  alias OptimalSystemAgent.ConfigFile
+
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp worktrees_dir, do: Path.join(ConfigFile.config_dir(), "worktrees")
 
   @doc """
   Create an isolated git worktree for an agent.
@@ -26,11 +30,11 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     base_dir = Keyword.get(opts, :repo_dir, File.cwd!())
     safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, agent_id, "_")
     branch_name = "osa-worktree-#{safe_id}-#{System.unique_integer([:positive])}"
-    worktree_path = Path.join(@worktrees_dir, safe_id)
+    worktree_path = Path.join(worktrees_dir(), safe_id)
 
     # Ensure clean state — remove any stale worktree at this path
     cleanup_stale(worktree_path, base_dir)
-    File.mkdir_p!(@worktrees_dir)
+    File.mkdir_p!(worktrees_dir())
 
     # Create the worktree with a new branch from HEAD
     case System.cmd("git", ["worktree", "add", "-b", branch_name, worktree_path],
@@ -112,15 +116,15 @@ defmodule OptimalSystemAgent.Agent.Worktree do
 
   @doc "Check if a path is inside a worktree."
   def worktree?(path) do
-    String.starts_with?(Path.expand(path), @worktrees_dir)
+    String.starts_with?(Path.expand(path), worktrees_dir())
   end
 
   @doc "List all active worktrees."
   def list do
-    case File.ls(@worktrees_dir) do
+    case File.ls(worktrees_dir()) do
       {:ok, dirs} ->
         Enum.map(dirs, fn dir ->
-          path = Path.join(@worktrees_dir, dir)
+          path = Path.join(worktrees_dir(), dir)
           branch = get_worktree_branch(path)
           %{path: path, name: dir, branch: branch}
         end)

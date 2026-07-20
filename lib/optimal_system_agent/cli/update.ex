@@ -13,9 +13,12 @@ defmodule OptimalSystemAgent.CLI.Update do
 
   require Logger
 
+  alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.OpenComputers.Updater
 
-  @config_path Path.expand("~/.osa/open_computers.toml")
+  # Runtime-resolved so a prebuilt release uses the END USER's home, not the CI
+  # runner's baked-in path. Resolved on every call via ConfigFile.config_dir/0.
+  defp config_path, do: Path.join(ConfigFile.config_dir(), "open_computers.toml")
 
   # ---------------------------------------------------------------------------
   # Public entry points (called from CLI dispatcher)
@@ -66,31 +69,31 @@ defmodule OptimalSystemAgent.CLI.Update do
 
   @doc "osa update disable — write [update] enabled = false to config."
   def disable do
-    File.mkdir_p!(Path.dirname(@config_path))
+    File.mkdir_p!(Path.dirname(config_path()))
 
     current_contents =
-      case File.read(@config_path) do
+      case File.read(config_path()) do
         {:ok, c} -> c
         {:error, _} -> ""
       end
 
     updated = set_update_enabled(current_contents, false)
-    File.write!(@config_path, updated)
-    IO.puts("Auto-update disabled. Edit #{@config_path} to re-enable.")
+    File.write!(config_path(), updated)
+    IO.puts("Auto-update disabled. Edit #{config_path()} to re-enable.")
   end
 
   @doc "osa update enable — write [update] enabled = true to config."
   def enable do
-    File.mkdir_p!(Path.dirname(@config_path))
+    File.mkdir_p!(Path.dirname(config_path()))
 
     current_contents =
-      case File.read(@config_path) do
+      case File.read(config_path()) do
         {:ok, c} -> c
         {:error, _} -> ""
       end
 
     updated = set_update_enabled(current_contents, true)
-    File.write!(@config_path, updated)
+    File.write!(config_path(), updated)
     IO.puts("Auto-update enabled.")
   end
 
