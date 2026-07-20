@@ -40,10 +40,27 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
 
   @impl Plug
   def call(conn, _opts) do
-    ensure_table()
-    ip = conn.remote_ip |> normalize_ip() |> format_ip()
-    limit = limit_for_path(conn.request_path)
+    normalized = normalize_ip(conn.remote_ip)
 
+    # Loopback is the trusted local TUI/SDK — the only client when the backend
+    # binds to 127.0.0.1 (the default). It legitimately bursts many requests on
+    # attach (session create, command execute, event polling), so a 60/min cap
+    # throttles the app into unusability against itself. Rate limiting exists to
+    # bound REMOTE abuse (relevant only when OSA_HTTP_IP exposes the port), so
+    # skip it entirely for loopback — mirroring the "open-access on loopback"
+    # posture the auth layer already takes.
+    if loopback?(normalized) do
+      conn
+    else
+      ensure_table()
+      ip = format_ip(normalized)
+      limit = limit_for_path(conn.request_path)
+
+      consume(conn, ip, limit)
+    end
+  end
+
+  defp consume(conn, ip, limit) do
     case check_and_consume(ip, limit) do
       {:ok, remaining} ->
         conn
@@ -108,6 +125,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiter do
   defp limit_for_path("/api/v1/auth/" <> _), do: @auth_limit
   defp limit_for_path("/api/v1/platform/auth/" <> _), do: @auth_limit
   defp limit_for_path(_), do: @default_limit
+
+  # 127.0.0.0/8 and IPv6 ::1 (IPv4-mapped loopback already normalized above).
+  defp loopback?({127, _, _, _}), do: true
+  defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp loopback?(_), do: false
 
   defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
   defp format_ip({a, b, c, d, e, f, g, h}), do: "#{a}:#{b}:#{c}:#{d}:#{e}:#{f}:#{g}:#{h}"
