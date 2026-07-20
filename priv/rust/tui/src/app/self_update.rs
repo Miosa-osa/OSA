@@ -122,10 +122,17 @@ enum RunOutcome {
 /// in-place path if the launcher can't stage, and report the result.
 async fn run_self_update(tx: tokio::sync::mpsc::UnboundedSender<Event>) {
     let outcome = match run_osa_update(&tx, true).await {
-        RunOutcome::NeedsFallback => {
+        // The staged path is SOURCE-ONLY (bin/osa-update stages a git worktree).
+        // On a prebuilt install there is no repo, so `osa update --staged` errors
+        // with "current install left untouched" -- which is NOT a real failure,
+        // just the wrong path. Both an explicit NeedsFallback and any other
+        // staged Failure therefore retry the in-place `osa update`, which handles
+        // prebuilt installs AND the "already up to date" case correctly. Only if
+        // the in-place path also fails do we report an error.
+        RunOutcome::NeedsFallback | RunOutcome::Failed(_) => {
             let _ = tx.send(Event::Backend(BackendEvent::SelfUpdate(
                 SelfUpdateEvent::Progress(
-                    "Staged update unavailable, updating in place...".into(),
+                    "Updating in place...".into(),
                 ),
             )));
             run_osa_update(&tx, false).await
