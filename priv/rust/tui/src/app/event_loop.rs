@@ -151,6 +151,14 @@ impl App {
         // settles; grows still commit immediately.
         let mut shrink_streak: u8 = 0;
         const SHRINK_SETTLE_TICKS: u8 = 4; // ~0.8s at the 200ms tick cadence
+        // Height of the slash-completions popup on the previous frame. Opening a
+        // popup grows the viewport (already committed immediately); CLOSING it
+        // (running a command) shrinks it, which the debounce above would hold for
+        // ~0.8s -- long enough to leave the old, taller composer + status chrome
+        // visibly STACKED below the new content the moment you run a command. A
+        // popup open/close is a discrete user action, not a streaming dip, so it
+        // must rebuild cleanly and immediately (like a resize), never debounced.
+        let mut prev_popup_h: u16 = 0;
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
@@ -164,7 +172,15 @@ impl App {
             // `dispatch_event` before this runs, so a burst of Resize events from
             // a drag has already collapsed to the FINAL size in `self.width/height`
             // — a single rebuild at the settled size, never a per-event thrash.
-            let resized = std::mem::take(&mut self.resize_dirty);
+            // Treat a slash-popup open/close exactly like a resize: force the
+            // immediate clean rebuild (clear + rebuild) so a command that closes
+            // the popup never leaves stacked chrome behind during the shrink
+            // debounce. This is the fix for "it duplicates the composer/status
+            // every time I run a command".
+            let popup_h_now = self.input.completions_popup_height();
+            let popup_changed = popup_h_now != prev_popup_h;
+            prev_popup_h = popup_h_now;
+            let resized = std::mem::take(&mut self.resize_dirty) || popup_changed;
             if want_full != was_full {
                 if want_full {
                     // Full screen (Terminal::new) does NOT query the cursor, so no
