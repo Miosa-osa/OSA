@@ -779,11 +779,27 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # published maximums. GLM-5.2 ships a real 1M-token window (Ollama shows
     # "976K" only because it displays the count ÷1024); GLM-4.6 is 200K.
     "glm-5.2" => 1_000_000,
-    "glm-5.1" => 200_000,
+    "glm-5.1" => 202_752,
     "glm-5" => 200_000,
     "glm-4.6" => 200_000,
     "glm-4.5-air" => 128_000,
-    "glm-4.5" => 128_000
+    "glm-4.5" => 128_000,
+    # Other Ollama Cloud models. Windows verified 2026-07-20 live against
+    # ollama.com/api/show (model_info "<arch>.context_length") per model, so the
+    # runtime context budget matches the model's real limit instead of the
+    # picker's prior guesses (several were 4x off — e.g. nemotron-3-super was
+    # listed at 1M but is 262K, which would overflow the real window).
+    "nemotron-3-ultra" => 262_144,
+    "nemotron-3-super" => 262_144,
+    "minimax-m3" => 524_288,
+    "deepseek-v4-pro" => 524_288,
+    "deepseek-v4-flash" => 1_048_576,
+    "kimi-k2.7-code" => 262_144,
+    "kimi-k2.6" => 262_144,
+    "qwen3.5" => 262_144,
+    "gpt-oss:120b" => 131_072,
+    "gpt-oss:20b" => 131_072,
+    "gemma4" => 262_144
   }
 
   @spec context_window(String.t()) :: pos_integer()

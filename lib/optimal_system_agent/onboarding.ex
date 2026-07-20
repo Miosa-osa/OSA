@@ -187,7 +187,7 @@ defmodule OptimalSystemAgent.Onboarding do
           %{
             id: "glm-5.2:cloud",
             name: "GLM-5.2",
-            ctx: 204_800,
+            ctx: 1_000_000,
             tools: true,
             recommended: true,
             note: "Z.ai flagship — long-horizon agentic + coding"
@@ -195,7 +195,7 @@ defmodule OptimalSystemAgent.Onboarding do
           %{
             id: "glm-5.1:cloud",
             name: "GLM-5.1",
-            ctx: 204_800,
+            ctx: 202_752,
             tools: true,
             note: "agentic, state-of-the-art coding"
           },
@@ -216,23 +216,23 @@ defmodule OptimalSystemAgent.Onboarding do
           %{
             id: "minimax-m3:cloud",
             name: "MiniMax M3",
-            ctx: 1_048_576,
+            ctx: 524_288,
             tools: true,
-            note: "1M ctx, native multimodal + agentic"
+            note: "512K ctx, native multimodal + agentic"
           },
           %{
             id: "deepseek-v4-pro:cloud",
             name: "DeepSeek V4 Pro",
-            ctx: 163_840,
+            ctx: 524_288,
             tools: true,
-            note: "frontier MoE, multiple reasoning modes"
+            note: "512K ctx, frontier MoE, multiple reasoning modes"
           },
           %{
             id: "deepseek-v4-flash:cloud",
             name: "DeepSeek V4 Flash",
-            ctx: 163_840,
+            ctx: 1_048_576,
             tools: true,
-            note: "284B MoE / 13B active — fast"
+            note: "1M ctx, 284B MoE / 13B active — fast"
           },
           %{
             id: "gpt-oss:120b-cloud",
@@ -249,25 +249,25 @@ defmodule OptimalSystemAgent.Onboarding do
             note: "multimodal, vision + tools"
           },
           %{
-            id: "gemini-3-flash-preview:cloud",
-            name: "Gemini 3 Flash",
-            ctx: 1_048_576,
+            id: "gpt-oss:20b-cloud",
+            name: "GPT-OSS 20B",
+            ctx: 131_072,
             tools: true,
-            note: "frontier intelligence built for speed"
+            note: "OpenAI open-weight, fast — light utility tier"
           },
           %{
             id: "nemotron-3-super:cloud",
             name: "Nemotron 3 Super",
-            ctx: 1_048_576,
+            ctx: 262_144,
             tools: true,
-            note: "1M ctx, 120B MoE — efficient agentic"
+            note: "262K ctx, 120B MoE — efficient agentic"
           },
           %{
             id: "gemma4:cloud",
             name: "Gemma 4",
-            ctx: 131_072,
+            ctx: 262_144,
             tools: true,
-            note: "frontier reasoning + multimodal"
+            note: "262K ctx, frontier reasoning + multimodal"
           }
         ]
       },
