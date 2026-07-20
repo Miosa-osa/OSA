@@ -192,6 +192,21 @@ fn mcp_label(count: usize) -> Option<String> {
     }
 }
 
+/// Transient goal-verification indicator state, tied to the active-goal line.
+/// Set from the backend `goal_verifier_round` event and cleared on a new turn.
+/// Deliberately understated: one compact chip, never a popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalVerifyState {
+    /// The skeptic panel is spawning / voting (`phase: start`).
+    Verifying,
+    /// Majority did not refute — the goal reads as met (`verdict: complete`).
+    OnTrack,
+    /// Majority refuted — not done yet; carries the compact gap summary.
+    Incomplete { refuted: u32, total: u32, gaps: Vec<String> },
+    /// Majority judged the goal unachievable as framed (`verdict: off_track`).
+    OffTrack,
+}
+
 pub struct StatusBar {
     signal: Option<Signal>,
     provider: String,
@@ -218,6 +233,9 @@ pub struct StatusBar {
     cwd_basename: String,
     /// "goal N/max" indicator when a /goal auto-continue loop is active.
     goal_label: Option<String>,
+    /// Transient goal-verification indicator, rendered next to the goal line.
+    /// None ⇒ no verifier round this turn ⇒ chip omitted.
+    goal_verify: Option<GoalVerifyState>,
     /// Reasoning effort ("low"|"medium"|"high"|"max") from `/health.effort`.
     /// None ⇒ backend didn't report it ⇒ the chip is omitted.
     effort: Option<String>,
@@ -277,6 +295,7 @@ impl StatusBar {
             shell_count: 0,
             cwd_basename,
             goal_label: None,
+            goal_verify: None,
             effort: None,
             billing: None,
             percent_left: None,
@@ -313,6 +332,11 @@ impl StatusBar {
     /// Set (or clear with None) the active-goal indicator, e.g. "goal 3/25".
     pub fn set_goal_label(&mut self, label: Option<String>) {
         self.goal_label = label;
+    }
+
+    /// Set (or clear with None) the transient goal-verification indicator.
+    pub fn set_goal_verification(&mut self, state: Option<GoalVerifyState>) {
+        self.goal_verify = state;
     }
 
     /// U-T26 — number of connected MCP servers, feeding the row-0 MCP chip.
@@ -758,6 +782,59 @@ impl Component for StatusBar {
             ));
         }
 
+        // Goal-verification indicator — the agent judging its own work. One
+        // compact, understated chip tied to the goal line: dim for the common
+        // verifying/on-track cases, warning for a gap, error for off-track.
+        // Cleared on a new turn (submit_prompt). Glyphs degrade to plain ASCII
+        // on legacy/a11y terminals via render::glyphs, so this never breaks.
+        if let Some(ref gv) = self.goal_verify {
+            use crate::render::glyphs;
+            let legacy = matches!(glyphs::glyph_level(), glyphs::GlyphLevel::Legacy);
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            match gv {
+                GoalVerifyState::Verifying => {
+                    let sym = if legacy { "?" } else { "\u{2047}" }; // ⁇
+                    spans.push(Span::styled(
+                        format!("{} verifying goal\u{2026}", sym),
+                        theme.faint(),
+                    ));
+                }
+                GoalVerifyState::OnTrack => {
+                    spans.push(Span::styled(
+                        format!("{} on-track", glyphs::check()),
+                        theme.faint(),
+                    ));
+                }
+                GoalVerifyState::Incomplete {
+                    refuted,
+                    total,
+                    gaps,
+                } => {
+                    let sym = if legacy { "!" } else { "\u{26A0}" }; // ⚠
+                    let plural = if gaps.len() == 1 { "" } else { "s" };
+                    let mut label =
+                        format!("{} {}/{} \u{00b7} {} gap{}", sym, refuted, total, gaps.len(), plural);
+                    // Only name the first gap when the pane is wide enough that
+                    // it won't crowd the line — the chip stays one line, compact.
+                    if self.width >= 100 {
+                        if let Some(first) = gaps.first().filter(|g| !g.trim().is_empty()) {
+                            label.push_str(&format!(" \u{00b7} {}", first));
+                        }
+                    }
+                    spans.push(Span::styled(
+                        label,
+                        Style::default().fg(theme.colors.warning),
+                    ));
+                }
+                GoalVerifyState::OffTrack => {
+                    spans.push(Span::styled(
+                        format!("{} off-track", glyphs::cross()),
+                        Style::default().fg(theme.colors.error),
+                    ));
+                }
+            }
+        }
+
         // Reasoning-effort chip (`effort:medium`). Faint for low/medium; the
         // heavier high/max tiers get the accent color so a costly setting is
         // visible at a glance. Omitted entirely when the backend didn't report.
@@ -1195,6 +1272,59 @@ mod status_bar_tests {
         // Cleared again once the backend reports no update.
         sb.set_update_available(None);
         assert!(!render_sb(&sb).contains("\u{2B06}"), "chip disappears when cleared");
+    }
+
+    #[test]
+    fn goal_verification_indicator_renders_per_verdict_and_clears() {
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+
+        // No verifier state → no indicator.
+        let none = render_sb(&sb);
+        assert!(!none.contains("verifying") && !none.contains("on-track"));
+
+        // Verifying (start phase) → dim "verifying goal…".
+        sb.set_goal_verification(Some(GoalVerifyState::Verifying));
+        assert!(render_sb(&sb).contains("verifying goal"), "verifying chip");
+
+        // On-track (complete) → brief "on-track".
+        sb.set_goal_verification(Some(GoalVerifyState::OnTrack));
+        assert!(render_sb(&sb).contains("on-track"), "on-track chip");
+
+        // Incomplete with gaps → "1/3 · 1 gap" plus the first gap label (wide pane).
+        sb.set_goal_verification(Some(GoalVerifyState::Incomplete {
+            refuted: 2,
+            total: 3,
+            gaps: vec!["[completeness] error handling".to_string()],
+        }));
+        let inc = render_sb(&sb);
+        assert!(inc.contains("2/3"), "refuted/total, got: {inc:?}");
+        assert!(inc.contains("1 gap"), "gap count");
+        assert!(inc.contains("completeness"), "first gap label shown on wide pane");
+
+        // Off-track → "off-track".
+        sb.set_goal_verification(Some(GoalVerifyState::OffTrack));
+        assert!(render_sb(&sb).contains("off-track"), "off-track chip");
+
+        // Cleared → indicator gone.
+        sb.set_goal_verification(None);
+        let cleared = render_sb(&sb);
+        assert!(!cleared.contains("off-track") && !cleared.contains("verifying"));
+    }
+
+    #[test]
+    fn goal_verification_gap_count_pluralizes() {
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_goal_verification(Some(GoalVerifyState::Incomplete {
+            refuted: 3,
+            total: 3,
+            gaps: vec![
+                "[correctness] wrong branch".to_string(),
+                "[verifiability] no test".to_string(),
+            ],
+        }));
+        assert!(render_sb(&sb).contains("2 gaps"), "plural gaps");
     }
 
     #[test]

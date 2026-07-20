@@ -220,6 +220,23 @@ pub enum BackendEvent {
         task: String,
     },
     SwarmIntelligenceRound { swarm_id: String, round: u32 },
+
+    // === Goal Verification (independent skeptic panel) ===
+    /// The harness-owned goal verifier ran (or is running) a skeptic-panel
+    /// round. `phase` is "start" while the panel spawns, "done" once it voted.
+    /// On a done round `verdict` is "complete" | "incomplete" | "off_track";
+    /// `gaps` carries at most the first couple of lens-tagged findings so the
+    /// status indicator can name WHAT is missing. Surfaced as a single compact,
+    /// dim indicator tied to the goal line, never a popup.
+    GoalVerification {
+        phase: String,
+        verdict: String,
+        round: u32,
+        max_runs: u32,
+        refuted: u32,
+        total: u32,
+        gaps: Vec<String>,
+    },
     SwarmIntelligenceConverged { swarm_id: String, round: u32 },
     SwarmIntelligenceCompleted {
         swarm_id: String,

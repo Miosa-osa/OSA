@@ -628,4 +628,76 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert result.refuted_count == 2
     end
   end
+
+  describe "TUI event surfacing (goal_verifier_round emit)" do
+    # Capture the raw `:system_event` payloads this module emits on the Bus, so
+    # we can assert on the exact fields the TUI indicator consumes without
+    # spinning up the full forwarder/PubSub path.
+    defp capture_goal_verifier_events do
+      test_pid = self()
+
+      ref =
+        OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
+          data =
+            case payload do
+              %{data: d} when is_map(d) -> d
+              d when is_map(d) -> d
+            end
+
+          if data[:event] == :goal_verifier_round do
+            send(test_pid, {:goal_verifier_event, data})
+          end
+        end)
+
+      on_exit(fn -> OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, ref) end)
+      ref
+    end
+
+    test "emits a start-phase signal then a done-phase verdict with compact gaps",
+         %{session_id: sid} do
+      capture_goal_verifier_events()
+      mark_write(sid)
+
+      stub_runner(fn _sid, configs ->
+        # All refute with a lens-tagged, concrete gap -> :incomplete with gaps.
+        Enum.map(configs, fn _ ->
+          json_result(true, reason: "lib/exporter.ex is missing error handling for the widget path")
+        end)
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+      assert result.verdict == :incomplete
+
+      # 1) The lightweight "verifying…" start signal is emitted first.
+      assert_receive {:goal_verifier_event, %{phase: :start, round: 1}}, 2000
+
+      # 2) The done event carries the verdict plus a COMPACT, lens-tagged gap
+      #    summary (a small list of strings) for the status indicator.
+      assert_receive {:goal_verifier_event, done}, 2000
+      assert done.phase == :done
+      assert done.verdict == :incomplete
+      assert done.refuted_count == 3
+      assert done.total == 3
+      assert is_list(done.gaps) and done.gaps != []
+      # Kept small (at most the first two findings), each already lens-tagged.
+      assert length(done.gaps) <= 2
+      assert Enum.all?(done.gaps, &is_binary/1)
+      assert Enum.any?(done.gaps, &String.contains?(&1, "[completeness]"))
+    end
+
+    test "a complete verdict emits an empty gap summary", %{session_id: sid} do
+      capture_goal_verifier_events()
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+      assert result.verdict == :complete
+
+      assert_receive {:goal_verifier_event, %{phase: :start}}, 2000
+      assert_receive {:goal_verifier_event, %{phase: :done, verdict: :complete, gaps: []}}, 2000
+    end
+  end
 end

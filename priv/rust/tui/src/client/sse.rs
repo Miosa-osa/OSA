@@ -472,6 +472,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_round"
         | "swarm_intelligence_converged"
         | "swarm_intelligence_completed"
+        | "goal_verifier_round"
         | "hook_blocked"
         | "budget_warning"
         | "budget_exceeded"
@@ -1138,6 +1139,39 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "goal_verifier_round" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default = "default_phase")]
+                phase: String,
+                #[serde(default)]
+                verdict: String,
+                #[serde(default)]
+                round: u32,
+                #[serde(default)]
+                max_runs: u32,
+                #[serde(default)]
+                refuted_count: u32,
+                #[serde(default)]
+                total: u32,
+                #[serde(default)]
+                gaps: Vec<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("goal_verifier_round", e)),
+            };
+            Some(BackendEvent::GoalVerification {
+                phase: ev.phase,
+                verdict: ev.verdict,
+                round: ev.round,
+                max_runs: ev.max_runs,
+                refuted: ev.refuted_count,
+                total: ev.total,
+                gaps: ev.gaps,
+            })
+        }
+
         "swarm_intelligence_converged" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -1395,6 +1429,12 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
     }
 }
 
+/// A goal-verifier frame with no explicit `phase` is a completed round (older
+/// backends emit only the done event), so default the discriminator to "done".
+fn default_phase() -> String {
+    "done".to_string()
+}
+
 fn parse_warning(event_type: &str, err: serde_json::Error) -> BackendEvent {
     BackendEvent::ParseWarning {
         message: format!("[sse] parse {}: {}", event_type, err),
@@ -1432,6 +1472,48 @@ mod tests {
                 delay_ms: 4000,
                 reason,
             }) => assert_eq!(reason, "timeout"),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_goal_verifier_round_start_and_done() {
+        // Start phase: a lightweight "verifying…" signal (no verdict yet).
+        let start = br#"{"type":"system_event","event":"goal_verifier_round","session_id":"s1","phase":"start","round":1,"max_runs":3}"#;
+        match parse_sse_event("goal_verifier_round", start) {
+            Some(BackendEvent::GoalVerification { phase, round, .. }) => {
+                assert_eq!(phase, "start");
+                assert_eq!(round, 1);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Done phase, incomplete verdict with a compact gap summary.
+        let done = br#"{"type":"system_event","event":"goal_verifier_round","session_id":"s1","phase":"done","round":1,"max_runs":3,"verdict":"incomplete","refuted_count":2,"total":3,"gaps":["[completeness] error handling"]}"#;
+        match parse_sse_event("goal_verifier_round", done) {
+            Some(BackendEvent::GoalVerification {
+                phase,
+                verdict,
+                refuted,
+                total,
+                gaps,
+                ..
+            }) => {
+                assert_eq!(phase, "done");
+                assert_eq!(verdict, "incomplete");
+                assert_eq!((refuted, total), (2, 3));
+                assert_eq!(gaps, vec!["[completeness] error handling".to_string()]);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // A frame missing `phase` (older backend) defaults to a done round.
+        let legacy = br#"{"event":"goal_verifier_round","verdict":"complete","refuted_count":0,"total":3}"#;
+        match parse_sse_event("goal_verifier_round", legacy) {
+            Some(BackendEvent::GoalVerification { phase, verdict, .. }) => {
+                assert_eq!(phase, "done");
+                assert_eq!(verdict, "complete");
+            }
             other => panic!("unexpected: {:?}", other),
         }
     }

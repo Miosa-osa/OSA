@@ -277,6 +277,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     goal = resolve_goal(state)
     diff = capture_diff(state)
 
+    # Lightweight "verifying…" signal so the TUI can show the panel is running
+    # WHILE the skeptics spawn (a few seconds). Same sub-event name (so the
+    # forwarder allowlist covers it) discriminated by `phase: :start`.
+    Bus.emit(:system_event, %{
+      event: :goal_verifier_round,
+      session_id: session_id,
+      round: runs + 1,
+      max_runs: max_runs(),
+      phase: :start
+    })
+
     skeptic_results = spawn_panel(session_id, goal, diff, state)
     {refuted_count, total, verdict, reason, gaps} = aggregate(skeptic_results)
 
@@ -288,10 +299,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       session_id: session_id,
       round: runs + 1,
       max_runs: max_runs(),
+      phase: :done,
       verdict: verdict,
       refuted_count: refuted_count,
       total: total,
-      stall_count: stall_count
+      stall_count: stall_count,
+      # Compact, already lens-tagged gap summary (first two, each truncated) so
+      # the TUI can show WHAT is missing without shipping the full findings.
+      gaps: compact_gaps(gaps)
     })
 
     Logger.info(
@@ -588,6 +603,29 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # tells the agent WHICH failure mode is unmet (correctness vs completeness
   # vs verifiability) — strictly more actionable than a bare reason.
   defp gap_list(refuters), do: Enum.map(refuters, &lens_prefixed_reason/1)
+
+  # A tiny, TUI-sized projection of the gap list for the emitted event: at most
+  # the first two lens-tagged gaps, each truncated, so the status indicator can
+  # show WHAT is missing without carrying the full findings over the wire.
+  @compact_gap_max 2
+  @compact_gap_bytes 80
+  defp compact_gaps(gaps) when is_list(gaps) do
+    gaps
+    |> Enum.take(@compact_gap_max)
+    |> Enum.map(&truncate_gap/1)
+  end
+
+  defp compact_gaps(_), do: []
+
+  defp truncate_gap(gap) when is_binary(gap) do
+    if byte_size(gap) > @compact_gap_bytes do
+      String.slice(gap, 0, @compact_gap_bytes) <> "\u{2026}"
+    else
+      gap
+    end
+  end
+
+  defp truncate_gap(gap), do: to_string(gap)
 
   defp lens_prefixed_reason(%{lens: lens, reason: reason})
        when lens in [:correctness, :completeness, :verifiability] do

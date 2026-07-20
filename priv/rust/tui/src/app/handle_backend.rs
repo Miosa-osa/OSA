@@ -1736,6 +1736,39 @@ impl App {
                 self.recompute_layout();
             }
 
+            // === Goal Verification (independent skeptic panel) ===
+            BackendEvent::GoalVerification {
+                phase,
+                verdict,
+                round,
+                refuted,
+                total,
+                gaps,
+                ..
+            } => {
+                use crate::components::status_bar::GoalVerifyState;
+                debug!(
+                    "goal verifier round {} phase={} verdict={} {}/{}",
+                    round, phase, verdict, refuted, total
+                );
+                let state = if phase == "start" {
+                    Some(GoalVerifyState::Verifying)
+                } else {
+                    match verdict.as_str() {
+                        "complete" => Some(GoalVerifyState::OnTrack),
+                        "off_track" => Some(GoalVerifyState::OffTrack),
+                        // "incomplete" and anything unexpected fail toward the
+                        // gap indicator (mirrors the backend's fail-closed vote).
+                        _ => Some(GoalVerifyState::Incomplete {
+                            refuted,
+                            total,
+                            gaps,
+                        }),
+                    }
+                };
+                self.status.set_goal_verification(state);
+            }
+
             // === Phase 2+ HTTP Response Results ===
             // (U-B5: the dead `SkillsLoaded` handler was removed — it only
             // logged. The skills browser is driven by `SkillsBrowserLoaded`.)

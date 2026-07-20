@@ -547,6 +547,9 @@ impl App {
         self.activity.start();
         self.activity.set_model_name(self.header.model_name());
         self.status.set_active(true);
+        // Fresh turn — clear any prior goal-verification indicator so it never
+        // lingers into unrelated work.
+        self.status.set_goal_verification(None);
         self.processing_start = Some(std::time::Instant::now());
         self.stream_buf.clear();
         self.thinking_buf.clear();
