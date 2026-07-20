@@ -25,6 +25,31 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   def run(_args) do
     Application.ensure_all_started(:req)
 
+    safe_run(fn -> do_run() end)
+  end
+
+  @doc """
+  Runs `fun` and converts ANY unexpected raise into a friendly message
+  instead of a raw stack trace (C1-b). This is what stands between a
+  newcomer and a crash-on-first-run: no matter what blows up anywhere in
+  the wizard (a bad catalog entry, a provider health-check shape we didn't
+  anticipate, a nil where a string was expected, …) the wizard fails soft.
+
+  Public (not `defp`) specifically so it is unit-testable without a TTY —
+  see `test/mix/tasks/osa_setup_wizard_test.exs`.
+  """
+  @spec safe_run((-> term())) :: term() | {:error, String.t()}
+  def safe_run(fun) when is_function(fun, 0) do
+    fun.()
+  rescue
+    e ->
+      IO.puts("")
+      IO.puts("\e[31m✗\e[0m  Something unexpected happened during setup: #{Exception.message(e)}")
+      IO.puts("\e[2m│  Run 'osa setup' to try again.\e[0m")
+      {:error, Exception.message(e)}
+  end
+
+  defp do_run do
     Prompt.intro("OSA Agent Setup")
     Prompt.note(@security_note, "Before we start")
 
@@ -79,25 +104,58 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
           {"ollama_local", nil}
       end
 
-    default_model = provider_default_model(provider_id)
+    default_model = resolve_quickstart_model(provider_id, ollama_local)
     Prompt.completed("Provider", provider_label(provider_id))
     Prompt.completed("Model", default_model)
 
-    run_health_check(provider_id, api_key, default_model, nil)
+    case run_health_check(provider_id, api_key, default_model, nil) do
+      :cancel ->
+        Prompt.outro("Setup cancelled. Run 'osa setup' when you're ready.")
+        exit(:normal)
 
-    channel_tokens = configure_channels()
-    write_config(provider_id, api_key, default_model, nil, channel_tokens)
+      {_status, final_api_key} ->
+        channel_tokens = configure_channels()
+        write_config(provider_id, final_api_key, default_model, nil, channel_tokens)
 
-    Prompt.note(
-      "Make OSA yours — edit files in ~/.osa/:\n" <>
-        "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
-        "  HEARTBEAT.md            recurring proactive tasks\n" <>
-        "  skills/ · workflows/    custom skills & playbooks\n" <>
-        "Starter templates are in the examples/ folder.",
-      "Customize"
-    )
+        Prompt.note(
+          "Make OSA yours — edit files in ~/.osa/:\n" <>
+            "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
+            "  HEARTBEAT.md            recurring proactive tasks\n" <>
+            "  skills/ · workflows/    custom skills & playbooks\n" <>
+            "Starter templates are in the examples/ folder.",
+          "Customize"
+        )
 
-    Prompt.outro("Setup complete! Run 'osa' to start chatting.")
+        Prompt.outro("Setup complete! Run 'osa' to start chatting.")
+    end
+  end
+
+  # M5 fix: ollama_local must NEVER end up with the literal model name
+  # "default" (the old `provider_default_model/1` catch-all). Instead,
+  # query the local daemon's installed models (`GET /api/tags` via
+  # `Onboarding.model_list/2`) and use the first one — or prompt, if none
+  # are installed. `provider_default_model/1` is still used for providers
+  # that genuinely have a sensible hardcoded default (miosa, ollama_cloud,
+  # openrouter, anthropic, openai).
+  defp resolve_quickstart_model("ollama_local", ollama_local) do
+    case Onboarding.model_list("ollama_local", base_url: ollama_local.url) do
+      {:ok, [%{id: id} | _]} when is_binary(id) and id != "" ->
+        id
+
+      _ ->
+        Prompt.note(
+          "No installed models found on your local Ollama daemon.\n" <>
+            "Pull one first, e.g.: ollama pull llama3.2",
+          "Ollama Local"
+        )
+
+        prompt_for_model("ollama_local")
+    end
+  end
+
+  defp resolve_quickstart_model(provider_id, _ollama_local) do
+    provider_default_model(provider_id) ||
+      raise "No default model configured for #{provider_label(provider_id)}."
   end
 
   # ── Full Setup ────────────────────────────────────────────────
@@ -108,8 +166,7 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     provider_options =
       Onboarding.providers_list()
       |> Enum.map(fn p ->
-        badge = if MapSet.member?(detected_ids, p.id), do: "detected ✓", else: p.description
-        %{value: p.id, label: p.name, hint: badge}
+        %{value: p.id, label: p.name, hint: provider_hint(p, detected_ids)}
       end)
 
     provider_id = Prompt.select("How do you want to connect?", provider_options)
@@ -118,21 +175,41 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
 
     model = select_model(provider_id, api_key)
 
-    run_health_check(provider_id, api_key, model, base_url)
+    case run_health_check(provider_id, api_key, model, base_url) do
+      :cancel ->
+        Prompt.outro("Setup cancelled. Run 'osa setup' when you're ready.")
+        exit(:normal)
 
-    channel_tokens = configure_channels()
-    write_config(provider_id, api_key, model, base_url, channel_tokens)
+      {_status, final_api_key} ->
+        channel_tokens = configure_channels()
+        write_config(provider_id, final_api_key, model, base_url, channel_tokens)
 
-    Prompt.note(
-      "Make OSA yours — edit files in ~/.osa/:\n" <>
-        "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
-        "  HEARTBEAT.md            recurring proactive tasks\n" <>
-        "  skills/ · workflows/    custom skills & playbooks\n" <>
-        "Starter templates are in the examples/ folder.",
-      "Customize"
-    )
+        Prompt.note(
+          "Make OSA yours — edit files in ~/.osa/:\n" <>
+            "  IDENTITY.md / SOUL.md   name, vibe, voice\n" <>
+            "  HEARTBEAT.md            recurring proactive tasks\n" <>
+            "  skills/ · workflows/    custom skills & playbooks\n" <>
+            "Starter templates are in the examples/ folder.",
+          "Customize"
+        )
 
-    Prompt.outro("Setup complete! Run 'osa' to start chatting.")
+        Prompt.outro("Setup complete! Run 'osa' to start chatting.")
+    end
+  end
+
+  # C1-c fix: the picker hint used to render `p.description` unconditionally,
+  # so a `status: "coming_soon"` catalog entry (MIOSA) looked exactly like a
+  # normal, live provider. Surface the catalog's `badge` (falling back to a
+  # generic "coming soon" label) whenever `status == "coming_soon"`, and keep
+  # "detected ✓" as the highest-priority hint since it's actionable.
+  @doc false
+  @spec provider_hint(map(), MapSet.t()) :: String.t()
+  def provider_hint(p, detected_ids) do
+    cond do
+      MapSet.member?(detected_ids, p.id) -> "detected ✓"
+      Map.get(p, :status) == "coming_soon" -> Map.get(p, :badge) || "coming soon"
+      true -> p.description
+    end
   end
 
   # ── Credentials ───────────────────────────────────────────────
@@ -140,6 +217,47 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   defp collect_credentials("ollama_local", _detected) do
     Prompt.completed("Credentials", "no key required")
     {nil, "http://localhost:11434"}
+  end
+
+  # M2 fix: Ollama Cloud used to unconditionally prompt for OLLAMA_API_KEY
+  # and pin OLLAMA_URL=https://ollama.com — the documented "signed-in local
+  # Ollama, no key" path (the catalog's `key_optional: true`, onboarding.ex
+  # ~L178) could never actually be selected, and a blank key meant a 401 on
+  # every turn. Probe the local daemon first: if it's reachable, offer the
+  # keyless local route as the default; only fall through to a key prompt
+  # when there's no local daemon, or the user explicitly wants a key (e.g.
+  # a different account, or a headless box).
+  defp collect_credentials("ollama_cloud", detected) do
+    local = Onboarding.probe_ollama_local()
+
+    if local.reachable do
+      choice =
+        Prompt.select("Ollama Cloud connection", [
+          %{
+            value: :local,
+            label: "Use signed-in local Ollama (no key)",
+            hint: "detected at #{local.url} — proxies :cloud models via device identity"
+          },
+          %{
+            value: :key,
+            label: "Enter an Ollama Cloud API key",
+            hint: "for a different account or a headless setup"
+          }
+        ])
+
+      case choice do
+        :local ->
+          Prompt.completed("Credentials", "using signed-in local Ollama (no key)")
+          ollama_cloud_credentials(true, true, nil)
+
+        _ ->
+          {key, _base_url} = collect_ollama_cloud_key(detected)
+          ollama_cloud_credentials(true, false, key)
+      end
+    else
+      {key, _base_url} = collect_ollama_cloud_key(detected)
+      ollama_cloud_credentials(false, false, key)
+    end
   end
 
   defp collect_credentials(provider_id, detected) do
@@ -177,13 +295,48 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     Prompt.text("Base URL (e.g. https://api.together.ai/v1):")
   end
 
+  # Reuses the standard "detected key? confirm / re-enter" flow for
+  # ollama_cloud specifically, but never resolves a base_url itself — the
+  # caller always decides that via `ollama_cloud_credentials/3` so the
+  # keyless-local vs keyed-cloud URL choice lives in exactly one place.
+  defp collect_ollama_cloud_key(detected) do
+    env_var = provider_env_var("ollama_cloud")
+    existing_key = find_detected_key("ollama_cloud", detected) || System.get_env(env_var)
+
+    if existing_key do
+      use_existing = Prompt.confirm("Use detected #{env_var}? (#{preview_key(existing_key)})")
+
+      if use_existing do
+        Prompt.completed("Credentials", preview_key(existing_key))
+        {existing_key, nil}
+      else
+        ask_fresh_credentials("ollama_cloud", env_var)
+      end
+    else
+      ask_fresh_credentials("ollama_cloud", env_var)
+    end
+  end
+
+  # Pure decision table for the ollama_cloud credential route (M2). Public
+  # + `@doc false` so it's directly unit-testable without a TTY:
+  #   * signed in locally, chose the keyless route -> localhost, NO key
+  #     (must never fall through to https://ollama.com)
+  #   * key entered (with or without a local daemon) -> ollama.com, WITH key
+  @doc false
+  @spec ollama_cloud_credentials(boolean(), boolean(), String.t() | nil) ::
+          {String.t() | nil, String.t()}
+  def ollama_cloud_credentials(local_reachable, use_local?, key)
+  def ollama_cloud_credentials(true, true, _key), do: {nil, "http://localhost:11434"}
+
+  def ollama_cloud_credentials(_local_reachable, _use_local?, key),
+    do: {key, "https://ollama.com"}
+
   # ── Model Selection ───────────────────────────────────────────
 
   defp select_model(provider_id, api_key) do
     case Onboarding.model_list(provider_id, api_key: api_key) do
       {:ok, []} ->
-        model = Prompt.text("Model name:", default: provider_default_model(provider_id))
-        if model == "", do: provider_default_model(provider_id), else: model
+        prompt_for_model(provider_id)
 
       {:ok, models} ->
         options =
@@ -196,14 +349,56 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
         Prompt.select("Default model", options)
 
       {:error, _} ->
-        model = Prompt.text("Model name:", default: provider_default_model(provider_id))
-        if model == "", do: provider_default_model(provider_id), else: model
+        prompt_for_model(provider_id)
+    end
+  end
+
+  # Shared "no catalog to pick from" fallback (M5). `provider_default_model/1`
+  # returns `nil` for providers with no sensible hardcoded default (notably
+  # ollama_local — see M5) instead of the old literal string "default", so
+  # this NEVER hands back "default" as a model id. When there truly is no
+  # default, the user must type a real model name; an empty answer raises
+  # (caught by `safe_run/1`, C1-b) rather than silently writing a bogus model.
+  defp prompt_for_model(provider_id) do
+    default = provider_default_model(provider_id)
+
+    model =
+      if default do
+        Prompt.text("Model name:", default: default)
+      else
+        Prompt.text("Model name (required — no default for #{provider_label(provider_id)}):")
+      end
+
+    cond do
+      model != "" -> model
+      is_binary(default) -> default
+      true -> raise "No model specified for #{provider_label(provider_id)}."
     end
   end
 
   # ── Health Check ──────────────────────────────────────────────
 
-  defp run_health_check(provider_id, api_key, model, base_url) do
+  # C1-a fix: `Onboarding.health_check/1` can return `{:ok, result}` shapes
+  # that have NO `:latency_ms` key (e.g. MIOSA's `%{status: "coming_soon",
+  # ...}`, onboarding.ex ~L564-575). The old code only matched
+  # `{:ok, %{latency_ms: latency}}` and `{:error, %{message: msg}}`, so any
+  # other shape (including coming_soon) raised a `CaseClauseError` straight
+  # to the newcomer's terminal — the exact crash the audit found for MIOSA,
+  # the FIRST and "recommended" option in the picker.
+  #
+  # Public (not `defp`) + `@doc false` so this is directly unit-testable
+  # without a TTY: `Onboarding.health_check/1` for "miosa" never touches the
+  # network (it's a static `{:ok, %{status: "coming_soon", ...}}`), so
+  # exercising this function is fast and deterministic.
+  #
+  # Returns:
+  #   {:ok, api_key}       — verified (or a friendly non-failing notice)
+  #   {:continue, api_key} — verify failed, user chose "Continue anyway"
+  #   :cancel              — verify failed, user chose "Cancel"
+  @doc false
+  @spec run_health_check(String.t(), String.t() | nil, String.t() | nil, String.t() | nil) ::
+          {:ok, String.t() | nil} | {:continue, String.t() | nil} | :cancel
+  def run_health_check(provider_id, api_key, model, base_url) do
     stop = Prompt.spinner("Testing connection...")
 
     params = %{
@@ -217,12 +412,84 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
       {:ok, %{latency_ms: latency}} ->
         stop.("\e[32m✓\e[0m  Connection verified (#{latency}ms)")
         Prompt.completed("Health check", "verified #{latency}ms")
+        {:ok, api_key}
 
-      {:error, %{message: msg}} ->
-        stop.("\e[31m✗\e[0m  #{msg}")
-        Prompt.completed("Health check", "failed — fix later with 'osa setup'")
+      {:ok, %{status: "coming_soon"} = result} ->
+        msg =
+          Map.get(result, :message, "This provider isn't available yet — your setup is saved.")
+
+        stop.("\e[33m○\e[0m  #{msg}")
+        Prompt.completed("Health check", "saved — coming soon, no connection to verify yet")
+        {:ok, api_key}
+
+      {:ok, other} ->
+        # Any other non-latency `:ok` shape a provider might return in the
+        # future: never raise, always render SOMETHING sensible.
+        note = Map.get(other, :message) || to_string(Map.get(other, :status, "connected"))
+        stop.("\e[32m✓\e[0m  #{note}")
+        Prompt.completed("Health check", note)
+        {:ok, api_key}
+
+      {:error, %{message: _} = err} ->
+        stop.("\e[31m✗\e[0m  #{err.message}")
+        handle_health_check_failure(provider_id, api_key, model, base_url, err)
+
+      {:error, other} ->
+        stop.("\e[31m✗\e[0m  Connection failed.")
+        handle_health_check_failure(provider_id, api_key, model, base_url, other)
     end
   end
+
+  # M3 fix: the old code printed "failed — fix later" and unconditionally
+  # wrote config + claimed "Setup complete!" — a bad key silently broke
+  # every turn afterward with no chance to fix it during setup. Now: prompt
+  # a 3-way choice and loop on re-enter (so a fat-fingered key can be
+  # corrected right here), distinguishing a rejected key (401/403 — worth
+  # re-entering) from an unreachable network (safe to save + continue, since
+  # the key itself might be fine).
+  defp handle_health_check_failure(provider_id, api_key, model, base_url, err) do
+    hint =
+      case classify_health_failure(err) do
+        :key_rejected -> "Your key looks invalid or expired."
+        :network_or_other -> "Couldn't reach the provider — this may be a network issue."
+      end
+
+    Prompt.note(hint, "Health check failed")
+
+    choice =
+      Prompt.select("What would you like to do?", [
+        %{value: :retry, label: "Re-enter key", hint: "try a different/corrected key"},
+        %{
+          value: :continue,
+          label: "Continue anyway",
+          hint: "save config, fix later with 'osa setup'"
+        },
+        %{value: :cancel, label: "Cancel setup", hint: "don't save anything"}
+      ])
+
+    case choice do
+      :retry ->
+        env_var = provider_env_var(provider_id)
+        {new_key, new_base_url} = ask_fresh_credentials(provider_id, env_var)
+        run_health_check(provider_id, new_key, model, new_base_url || base_url)
+
+      :continue ->
+        Prompt.completed("Health check", "failed — saved anyway, fix later with 'osa setup'")
+        {:continue, api_key}
+
+      :cancel ->
+        :cancel
+    end
+  end
+
+  # Pure classifier so the 401/403-vs-network distinction is unit-testable
+  # without driving the interactive 3-way prompt. Public + `@doc false`.
+  @doc false
+  @spec classify_health_failure(map()) :: :key_rejected | :network_or_other
+  def classify_health_failure(%{error: error}) when error in ["unauthorized", "forbidden"],
+    do: :key_rejected
+
+  def classify_health_failure(_), do: :network_or_other
 
   # ── Channels ──────────────────────────────────────────────────
 
@@ -339,12 +606,23 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   defp provider_env_var("custom"), do: "OPENAI_API_KEY"
   defp provider_env_var(_), do: "API_KEY"
 
-  defp provider_default_model("miosa"), do: "nemotron-3-miosa"
-  defp provider_default_model("ollama_cloud"), do: "nemotron-3-super:cloud"
-  defp provider_default_model("openrouter"), do: "anthropic/claude-sonnet-4-6"
-  defp provider_default_model("anthropic"), do: "claude-sonnet-4-6-20260316"
-  defp provider_default_model("openai"), do: "gpt-5.4-pro"
-  defp provider_default_model(_), do: "default"
+  # m6 fix: ollama_cloud's default model must match the catalog
+  # (onboarding.ex ~L180) and docs — glm-5.2:cloud, not the stale
+  # nemotron-3-super:cloud that was drifting from the rest of the codebase.
+  #
+  # M5 fix: providers with no single sensible hardcoded default (ollama_local,
+  # custom, and anything unrecognized) return `nil` instead of the literal
+  # string "default" — a bogus model id that caused a 404 on every turn.
+  # Callers (`prompt_for_model/1`, `resolve_quickstart_model/2`) must handle
+  # `nil` explicitly rather than writing it straight into the config.
+  @doc false
+  @spec provider_default_model(String.t()) :: String.t() | nil
+  def provider_default_model("miosa"), do: "nemotron-3-miosa"
+  def provider_default_model("ollama_cloud"), do: "glm-5.2:cloud"
+  def provider_default_model("openrouter"), do: "anthropic/claude-sonnet-4-6"
+  def provider_default_model("anthropic"), do: "claude-sonnet-4-6-20260316"
+  def provider_default_model("openai"), do: "gpt-5.4-pro"
+  def provider_default_model(_), do: nil
 
   defp provider_signup_url("miosa"), do: "https://miosa.ai/settings/keys"
   defp provider_signup_url("ollama_cloud"), do: "https://ollama.com/account/keys"

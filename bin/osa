@@ -129,6 +129,20 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
 # present — that symlink is what `osa` follows on every subsequent launch.
 OSA_HOME="${OSA_HOME:-${HOME}/.osa}"
 
+# m9 fix: "is onboarding done" must be the SAME check the app uses
+# (Onboarding.first_run?/0, lib/optimal_system_agent/onboarding.ex ~L53-61):
+# ~/.osa/.env exists AND has an uncommented OSA_DEFAULT_PROVIDER= line. The
+# old gate here only checked file *existence*, so an .env with no provider
+# line (e.g. only channel tokens, or a partially-written file from an
+# interrupted wizard run) made bin/osa SKIP the wizard while the app still
+# reports first_run? == true — the wizard re-triggers on every subsequent
+# `osa` invocation, an infinite onboarding loop.
+env_has_provider() {
+  local env_file="$1"
+  [ -f "$env_file" ] || return 1
+  grep -qE '^[^#]*OSA_DEFAULT_PROVIDER=' "$env_file" 2>/dev/null
+}
+
 # Direct invocation of a source checkout (`./bin/osa` from a dev tree, or an
 # entrypoint symlink resolved via readlink -f to such a tree) always wins: a
 # developer iterating on their own checkout must never be silently redirected
@@ -775,7 +789,10 @@ else
   echo -e "${DIM}Backend ready. It stays warm in the background — ${RESET}${CYAN}osa stop${RESET}${DIM} to shut it down.${RESET}"
 fi
 
-# First-run: if no ~/.osa/.env exists, run the setup wizard.
+# First-run: if ~/.osa/.env has no configured provider yet, run the setup
+# wizard. Gated on env_has_provider (see its definition above, m9 fix) —
+# NOT plain file existence — so this always agrees with the app's own
+# Onboarding.first_run?/0 check.
 #
 # The wizard runs as its OWN OS process (not the daemon warmed above), so its
 # System.put_env/Application.put_env calls (onboarding.ex apply_env_vars) only
@@ -785,10 +802,10 @@ fi
 # *_api_key=nil) — the first turn then fails despite a valid key just having
 # been entered. Restart the daemon here so config/runtime.exs re-reads the
 # freshly written .env before the TUI ever attaches.
-if [ ! -f "$OSA_HOME/.env" ]; then
+if ! env_has_provider "$OSA_HOME/.env"; then
   echo -e "${CYAN}→${RESET} First-time setup..."
   if (cd "$ROOT" && mix osa.setup.wizard); then
-    if [ -f "$OSA_HOME/.env" ]; then
+    if env_has_provider "$OSA_HOME/.env"; then
       echo -e "${CYAN}→${RESET} Restarting backend to load your new configuration…"
       stop_daemon
       clear_stale_pid

@@ -1397,7 +1397,7 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
 
         body = %{
-          model: model || "nemotron-3-super:cloud",
+          model: model || "glm-5.2:cloud",
           messages: [%{role: "user", content: "hi"}],
           stream: false,
           options: %{num_predict: 5}
@@ -1523,7 +1523,18 @@ defmodule OptimalSystemAgent.Onboarding do
     String.slice(key, 0, 4) <> "..." <> String.slice(key, -4, 4)
   end
 
-  defp probe_ollama_local do
+  @doc """
+  Probe the local Ollama daemon (`http://localhost:11434` by default) for
+  reachability. Public so the setup wizard can offer the keyless
+  "signed-in local Ollama" path for `ollama_cloud` (M2 fix) without
+  duplicating the localhost-only guard here.
+  """
+  @spec probe_ollama_local() :: %{
+          reachable: boolean(),
+          url: String.t(),
+          model_count: non_neg_integer()
+        }
+  def probe_ollama_local do
     url =
       Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
