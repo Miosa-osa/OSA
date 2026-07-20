@@ -282,12 +282,35 @@ defmodule OptimalSystemAgent.Team do
   # Scratchpad
   # ---------------------------------------------------------------------------
 
-  @doc "Write to an agent's scratchpad."
-  def write_scratchpad(team_id, agent_id, content) do
+  @doc """
+  Write to an agent's scratchpad.
+
+  The ETS write is the fast, ephemeral coordination path (unchanged). Passing
+  `mirror: true` ALSO mirrors the content to the durable, inspectable file
+  scratchpad (`OptimalSystemAgent.Scratchpad`) under the team's shared
+  directory as `<agent_id>.md`, complementing (not replacing) the ETS surface.
+  Mirroring is best-effort and never fails the ETS write.
+  """
+  def write_scratchpad(team_id, agent_id, content, opts \\ []) do
     :ets.insert(@scratchpad_table, {{team_id, agent_id}, content})
+
+    if Keyword.get(opts, :mirror, false) do
+      mirror_to_file_scratchpad(team_id, agent_id, content)
+    end
+
     :ok
   rescue
     _ -> :ok
+  end
+
+  defp mirror_to_file_scratchpad(team_id, agent_id, content) do
+    safe_name = Regex.replace(~r/[^A-Za-z0-9_\-]/, to_string(agent_id), "_") <> ".md"
+    OptimalSystemAgent.Scratchpad.write(team_id, safe_name, content)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @doc "Read an agent's scratchpad."

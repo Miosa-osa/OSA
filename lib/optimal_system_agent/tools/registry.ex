@@ -781,6 +781,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "list_agents" => OptimalSystemAgent.Tools.Builtins.ListAgents.Tool,
       "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent.Tool,
       "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks.Tool,
+      "scratchpad" => OptimalSystemAgent.Tools.Builtins.Scratchpad.Tool,
       "team_create" => OptimalSystemAgent.Tools.Builtins.TeamCreate.Tool,
       "team_delete" => OptimalSystemAgent.Tools.Builtins.TeamDelete.Tool,
       "message_agent" => OptimalSystemAgent.Tools.Builtins.MessageAgent.Tool,

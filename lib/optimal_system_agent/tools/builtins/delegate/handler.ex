@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
   alias OptimalSystemAgent.Tools.UseContext
+  alias OptimalSystemAgent.Scratchpad
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Agents.Config, as: AgentConfig
   alias OptimalSystemAgent.Orchestrator
@@ -160,7 +161,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       end
 
     %{
-      task: child_task,
+      # Inject the SHARED scratchpad directory into the worker's task (CC
+      # scratchpadDir dependency-injection parity). The worker resolves the same
+      # directory at runtime because its own `scratchpad` tool walks the
+      # RunStore parent chain back to this root (see Scratchpad.session_root/1),
+      # so anything a worker drops here is readable by the coordinator and its
+      # siblings.
+      task: inject_scratchpad(child_task, parent_id),
       parent_session_id: parent_id,
       role: role || "agent",
       # Non-fatal signal: caller named a specific role/subagent_type but no such
@@ -545,4 +552,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   @doc false
   def fetch_peer_messages(_), do: []
+
+  # ── Shared scratchpad injection (CC scratchpadDir parity) ───────────────
+
+  # Resolve the SHARED scratchpad directory for this delegation and prepend a
+  # short preamble to the worker's task so the worker knows where to read/write
+  # shared findings. The directory is keyed by the coordinator's SESSION ROOT so
+  # every worker (and the reconcile coordinator) resolves the SAME directory —
+  # both here (parent side) and at the worker's runtime via
+  # `Scratchpad.session_root/1`.
+  #
+  # Public (`@doc false`) so the delegate-wiring test can assert the injected
+  # path equals the parent's resolved scratchpad dir without spawning a real LLM.
+  @doc false
+  @spec inject_scratchpad(String.t(), String.t()) :: String.t()
+  def inject_scratchpad(child_task, parent_id) do
+    dir = scratchpad_dir_for(parent_id)
+    scratchpad_preamble(dir) <> child_task
+  rescue
+    # Never let scratchpad wiring fail a delegation — fall back to the raw task.
+    _ -> child_task
+  end
+
+  @doc false
+  @spec scratchpad_dir_for(String.t()) :: String.t()
+  def scratchpad_dir_for(parent_id) do
+    Scratchpad.ensure_dir(Scratchpad.session_root(parent_id))
+  end
+
+  defp scratchpad_preamble(dir) do
+    """
+    [shared scratchpad] You are part of a coordinated team. A real, shared \
+    directory is available at:
+
+      #{dir}
+
+    Use the `scratchpad` tool (write/append/read/list) to publish findings, \
+    plans, and partial results your coordinator and sibling agents can read, \
+    and to read what they have already published. It resolves to this same \
+    directory automatically — do not pass a path.
+
+    """
+  end
 end
