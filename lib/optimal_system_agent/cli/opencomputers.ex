@@ -491,7 +491,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
 
   defp normalize_remote_opts(opts) do
     opts
-    |> Keyword.take([:url, :account_key])
+    |> Keyword.take([:url, :account_key, :timeout])
     |> maybe_timeout(opts[:timeout])
   end
 
