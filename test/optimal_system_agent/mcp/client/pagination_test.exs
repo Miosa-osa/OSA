@@ -83,7 +83,9 @@ defmodule OptimalSystemAgent.MCP.Client.PaginationTest do
     server = %Server{name: name, transport: :stdio, command: "irrelevant"}
 
     {:ok, pid} = ServerSession.start_link(server)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    # The session traps exits and is linked to this (transient) test process,
+    # so it may already be terminating by cleanup time; kill tolerantly.
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
 
     assert wait_until(fn -> ServerSession.status(name) == :ready end)
     assert wait_until(fn -> length(ServerSession.list_tools(name)) == 2 end)

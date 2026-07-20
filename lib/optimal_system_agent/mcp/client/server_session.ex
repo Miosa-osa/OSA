@@ -15,7 +15,19 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   `GenServer.reply/2` when the matching response arrives (or on timeout).
 
   On transport close, the session schedules a reconnect with exponential
-  backoff.
+  backoff — but only up to a bounded number of consecutive connect failures
+  (`@max_connect_failures`). Once that cap is reached the session goes
+  `:dormant` and STOPS reconnecting, so a permanently-broken server (a package
+  that 404s, a missing key) can no longer spin an unbounded npx-spawn loop that
+  blows the MCP supervisor's restart budget and cascades to the app root. A
+  connection that survives the stability window resets the counter, so a
+  flapping-but-recovering server is never penalized. This bounded auto-connect
+  is what makes discovery's auto-load (Discovery.discover/0) safe to enable.
+
+  The session also traps exits: the transport is LINKED, so a transport crash
+  would otherwise take the session down and have the DynamicSupervisor restart
+  it fresh — resetting the failure counter and defeating the cap. Trapping lets
+  a transport crash route through the capped reconnect path instead.
   """
 
   use GenServer
@@ -41,6 +53,13 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   # Guard against a server that paginates its tool list forever (or loops on a
   # repeated cursor); bound total pages defensively.
   @max_list_pages 1_000
+  # Bounded auto-connect: after this many CONSECUTIVE connect failures (transport
+  # never starts, handshake never completes, or the stream dies before it is
+  # stable) the session goes `:dormant` and stops reconnecting. A broken server
+  # thus makes a small, bounded burst of attempts then goes quiet instead of
+  # hot-looping forever. A stable connection (see `:mark_stable`) resets the
+  # count. Overridable in tests via `:mcp_max_connect_failures`.
+  @max_connect_failures 5
 
   defstruct [
     :server,
@@ -62,6 +81,9 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     stable_ref: nil,
     conn_gen: 0,
     stable?: false,
+    # Consecutive connect-failure counter for the dormancy cap. Reset to 0 when a
+    # connection survives the stability window (`:mark_stable`).
+    fail_count: 0,
     backoff: @initial_backoff_ms
   ]
 
@@ -99,7 +121,7 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     :exit, _ -> []
   end
 
-  @doc "Current lifecycle status: `:connecting | :ready | :failed`."
+  @doc "Current lifecycle status: `:connecting | :ready | :failed | :dormant`."
   def status(name) do
     GenServer.call(via(name), :status)
   catch
@@ -122,10 +144,16 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   @impl true
   def init(%Server{} = server) do
+    # Trap exits so a crash of the LINKED transport becomes an `{:EXIT, ...}`
+    # message we route through the capped reconnect path, instead of taking this
+    # session down and letting the DynamicSupervisor restart it fresh (which
+    # would reset the failure counter and defeat the dormancy cap).
+    Process.flag(:trap_exit, true)
+
     state = %__MODULE__{
       server: server,
       transport_mod: transport_mod(server),
-      throttle: SSEBackoff.new(base_ms: @initial_backoff_ms, max_ms: @max_backoff_ms),
+      throttle: SSEBackoff.new(base_ms: initial_backoff_ms(), max_ms: max_backoff_ms()),
       list_cursors: MapSet.new()
     }
 
@@ -201,7 +229,10 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   # and the connection is still up, the stream has survived the stability window
   # — mark it healthy and reset the reconnect backoff.
   def handle_info({:mark_stable, gen}, %{conn_gen: gen, status: :ready} = state) do
-    {:noreply, %{state | stable?: true, throttle: SSEBackoff.mark_stable(state.throttle)}}
+    # A survived connection also clears the dormancy failure counter, so a server
+    # that flapped a few times but then recovered is not held against the cap.
+    {:noreply,
+     %{state | stable?: true, fail_count: 0, throttle: SSEBackoff.mark_stable(state.throttle)}}
   end
 
   def handle_info({:mark_stable, _gen}, state), do: {:noreply, state}
@@ -217,6 +248,31 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   end
 
   def handle_info({:handshake_timeout, _id}, state), do: {:noreply, state}
+
+  # The LINKED transport exited normally / was shut down: this is a real
+  # teardown (e.g. the transport was deliberately stopped), so stop the session
+  # cleanly rather than reconnecting. Normal supervisor shutdown of the session
+  # itself arrives as a parent EXIT that `:gen_server` handles directly, so this
+  # clause never turns a routine shutdown into a reconnect.
+  def handle_info({:EXIT, pid, reason}, %{transport: pid} = state)
+      when is_pid(pid) and reason in [:normal, :shutdown] do
+    {:stop, reason, state}
+  end
+
+  # The LINKED transport CRASHED (abnormal exit). Because we trap exits this
+  # arrives as a message instead of killing us; route it through the capped
+  # reconnect path so a flapping transport counts toward dormancy instead of
+  # having the supervisor restart us fresh. Note: a clean `{:mcp_closed, ...}`
+  # already nils `state.transport` before this fires, so a transport that closed
+  # then exited :normal falls through to the ignore clause below (no double-count).
+  def handle_info({:EXIT, pid, reason}, %{transport: pid} = state) when is_pid(pid) do
+    Logger.warning("[MCP:#{state.server.name}] transport crashed: #{inspect(reason)}")
+    {:noreply, schedule_reconnect(fail_pending(state, :transport_crashed))}
+  end
+
+  # An EXIT from anything that is not our current transport (a stale transport
+  # already replaced, a transient helper port, etc.) is ignored.
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   def handle_info(_msg, state), do: {:noreply, state}
 
@@ -422,14 +478,46 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   # ── Reconnect / cleanup ───────────────────────────────────────────────
 
-  # Rapid-death-aware reconnect backoff (grok's SSE throttle). A connection that
-  # reached the stability window (`stable?`) resets the delay; a rapid death, or
-  # a server that never connects, escalates it geometrically toward the cap.
+  # Rapid-death-aware reconnect backoff (grok's SSE throttle) WITH a dormancy cap.
+  # A connection that reached the stability window (`stable?`) resets the failure
+  # count to 1; otherwise the count escalates by one. Once it reaches
+  # `max_connect_failures/0` the server is treated as permanently broken: mark it
+  # `:dormant` and do NOT schedule another reconnect (no `:reconnect` message), so
+  # it makes a bounded burst of attempts then goes quiet. Below the cap, a rapid
+  # death (or a server that never connects) escalates the delay geometrically
+  # toward the ceiling, exactly as before.
   defp schedule_reconnect(state) do
-    {delay, throttle} = SSEBackoff.observe_death(state.throttle, state.stable?)
-    Process.send_after(self(), :reconnect, delay)
+    fail_count = if state.stable?, do: 1, else: state.fail_count + 1
 
-    %{state | transport: nil, ref: nil, throttle: throttle, stable?: false, stable_ref: nil}
+    if fail_count >= max_connect_failures() do
+      Logger.warning(
+        "[MCP:#{state.server.name}] #{fail_count} consecutive connect failures — going dormant, " <>
+          "stopping reconnects (enable it manually once its config is fixed)"
+      )
+
+      %{
+        state
+        | transport: nil,
+          ref: nil,
+          status: :dormant,
+          fail_count: fail_count,
+          stable?: false,
+          stable_ref: nil
+      }
+    else
+      {delay, throttle} = SSEBackoff.observe_death(state.throttle, state.stable?)
+      Process.send_after(self(), :reconnect, delay)
+
+      %{
+        state
+        | transport: nil,
+          ref: nil,
+          throttle: throttle,
+          fail_count: fail_count,
+          stable?: false,
+          stable_ref: nil
+      }
+    end
   end
 
   # Arm a one-shot timer that, once elapsed, marks the CURRENT connection stable
@@ -495,4 +583,18 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(timer), do: Process.cancel_timer(timer)
+
+  # Tunables. Defaults are the module attributes; tests override them via
+  # Application env to make the dormancy cap fast and deterministic.
+  defp max_connect_failures do
+    Application.get_env(:optimal_system_agent, :mcp_max_connect_failures, @max_connect_failures)
+  end
+
+  defp initial_backoff_ms do
+    Application.get_env(:optimal_system_agent, :mcp_initial_backoff_ms, @initial_backoff_ms)
+  end
+
+  defp max_backoff_ms do
+    Application.get_env(:optimal_system_agent, :mcp_max_backoff_ms, @max_backoff_ms)
+  end
 end

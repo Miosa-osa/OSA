@@ -95,7 +95,9 @@ defmodule OptimalSystemAgent.MCP.Client.ProgressTimeoutTest do
 
     name = "prog_#{System.unique_integer([:positive])}"
     {:ok, pid} = ServerSession.start_link(%Server{name: name, transport: :stdio, command: "x"})
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    # The session traps exits and is linked to this (transient) test process,
+    # so it may already be terminating by cleanup time; kill tolerantly.
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
     assert wait_until(fn -> ServerSession.status(name) == :ready end)
 
     {:ok, name: name}

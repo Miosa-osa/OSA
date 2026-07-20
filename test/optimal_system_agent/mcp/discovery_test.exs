@@ -99,10 +99,10 @@ defmodule OptimalSystemAgent.MCP.DiscoveryTest do
       assert codex.args == ["-y", "codex-server"]
       assert codex.env == %{"TOKEN" => "abc"}
       assert codex.source == :codex
-      # Discovered servers are detected + listed but NOT auto-connected on boot
-      # (see Discovery.discover/0): they come back disabled so the daemon does not
-      # storm on borrowed configs that 404 or need absent keys.
-      refute codex.enabled
+      # Discovered servers auto-connect on boot (enabled: true). This is safe
+      # because ServerSession caps consecutive connect failures and goes dormant,
+      # so a borrowed config that 404s can no longer storm the daemon.
+      assert codex.enabled
 
       # Codex http server: url parsed as :http_sse.
       assert %Server{transport: :http_sse, url: "https://codex.example.com/mcp", source: :codex} =

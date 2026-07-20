@@ -54,16 +54,15 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     end)
     |> Map.values()
     |> Enum.reject(fn s -> MapSet.member?(native_names, s.name) end)
-    # Discovered servers are DETECTED and listed, but NOT auto-connected on boot.
-    # Auto-spawning every external server at startup storms the daemon: many
-    # borrowed configs point at packages that 404 or need env/keys that are not
-    # present, and each failed stdio server reconnects in a loop (observed ~1000
-    # npx spawns from 13 servers, killing boot). Marking them disabled means they
-    # show up in `/mcp` (the whole point of discovery) and the operator enables the
-    # ones that actually work. Native ~/.osa/mcp.json servers keep their own
-    # enabled state and still auto-connect. A capped auto-connect (bounded retries
-    # then dormant) can safely re-enable auto-load later.
-    |> Enum.map(fn s -> %{s | enabled: false} end)
+    # Discovered servers keep their parsed `enabled: true` and auto-connect on
+    # boot. This is SAFE because of the failure cap in `MCP.Client.ServerSession`:
+    # a borrowed config that 404s or needs an absent key makes a bounded burst of
+    # connect attempts (`@max_connect_failures`) then goes `:dormant` and stops
+    # reconnecting, so it can no longer storm the daemon with an unbounded npx
+    # loop (the ~1000-spawn boot cascade that previously forced these disabled).
+    # Broken servers still show up in `/mcp` (as dormant/down); the operator can
+    # fix and re-enable them. Native ~/.osa/mcp.json servers keep their own
+    # enabled state as before.
     |> Enum.sort_by(& &1.name)
   rescue
     e ->
