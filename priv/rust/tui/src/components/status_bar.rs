@@ -130,6 +130,24 @@ fn braille_bar(ratio: f64, cells: usize) -> (String, String) {
     (filled, empty)
 }
 
+/// Compact elapsed formatter for the active-goal indicator (Codex
+/// `fmt_elapsed_compact`, `status_indicator_widget.rs`). Mirrors Codex exactly:
+/// under a minute → `12s`; under an hour → `3m 40s` (seconds zero-padded); an
+/// hour or more → `1h 05m 22s` (minutes and seconds zero-padded). Distinct from
+/// `util::fmt_elapsed` (which drops trailing zero units) so the goal timer counts
+/// up smoothly second-by-second like Codex's thread-goal status line.
+pub(crate) fn fmt_elapsed_compact(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        let (m, s) = (secs / 60, secs % 60);
+        format!("{}m {:02}s", m, s)
+    } else {
+        let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+        format!("{}h {:02}m {:02}s", h, m, s)
+    }
+}
+
 /// U-T25 — integer percent of a USD daily cap already spent, if a cap exists.
 /// `None` ⇒ uncapped (no usage % to show). Divide-by-zero safe; clamps to 100.
 fn usage_pct(spent: f64, limit: Option<f64>) -> Option<u32> {
@@ -967,6 +985,20 @@ mod status_bar_tests {
         // Default (ask) mode shows no persistent mode banner at all (CC hides it).
         let def = render_status_text(PermissionMode::Default);
         assert!(!def.contains("ask on"), "default mode must not print a mode banner");
+    }
+
+    #[test]
+    fn fmt_elapsed_compact_boundaries() {
+        // Codex parity: bare seconds under a minute, zero-padded seconds under an
+        // hour, zero-padded minutes+seconds at/above an hour.
+        assert_eq!(fmt_elapsed_compact(0), "0s");
+        assert_eq!(fmt_elapsed_compact(12), "12s");
+        assert_eq!(fmt_elapsed_compact(59), "59s"); // just under the minute wall
+        assert_eq!(fmt_elapsed_compact(60), "1m 00s"); // the minute wall
+        assert_eq!(fmt_elapsed_compact(220), "3m 40s"); // the doc example
+        assert_eq!(fmt_elapsed_compact(3599), "59m 59s"); // just under the hour
+        assert_eq!(fmt_elapsed_compact(3600), "1h 00m 00s"); // the hour wall
+        assert_eq!(fmt_elapsed_compact(3922), "1h 05m 22s"); // the doc example
     }
 
     #[test]

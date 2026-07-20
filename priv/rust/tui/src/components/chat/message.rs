@@ -28,6 +28,17 @@ pub enum MessageType {
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
 const HELP_LINE_COUNT: u16 = 52;
 
+/// Sentinel [`ToolCallData::name`] marking a turn-separator carrier.
+///
+/// A separator reuses the `ToolCall` message type rather than introducing a new
+/// [`MessageType`] variant — an exhaustive `match` over `MessageType` in
+/// `dialogs/transcript_viewer.rs` would otherwise fail to compile. `draw_tool_call`
+/// detects this name and draws a width-reflowing dim rule instead of the baked
+/// `lines`, so the rule always spans the CURRENT render width (not a width frozen
+/// at enqueue time). The `\u{1}` prefix keeps it from ever colliding with a real
+/// tool name.
+pub(crate) const TURN_SEPARATOR_MARKER: &str = "\u{1}osa:turn-separator";
+
 /// Stored tool call metadata for rich rendering.
 #[derive(Clone)]
 pub struct ToolCallData {
@@ -122,6 +133,29 @@ impl Message {
             prerendered_body: Some(body),
             raw_mode: false,
         }
+    }
+
+    /// Create a turn separator: an understated dim horizontal rule drawn between
+    /// conversation turns. Carried as a `ToolCall` message (see
+    /// [`TURN_SEPARATOR_MARKER`]) holding a single placeholder line so its height
+    /// is exactly one row; the visible rule is drawn at the render width.
+    pub fn new_turn_separator() -> Self {
+        Message::new_tool_call(ToolCallData {
+            name: TURN_SEPARATOR_MARKER.to_string(),
+            args: String::new(),
+            result: String::new(),
+            duration_ms: 0,
+            success: true,
+            expanded: false,
+            lines: vec![Line::from("")], // 1 row; real rule drawn in draw_tool_call
+        })
+    }
+
+    /// Whether this message is a turn separator (see [`TURN_SEPARATOR_MARKER`]).
+    pub(crate) fn is_turn_separator(&self) -> bool {
+        self.tool_data
+            .as_ref()
+            .map_or(false, |td| td.name == TURN_SEPARATOR_MARKER)
     }
 
     pub fn invalidate_cache(&mut self) {
@@ -459,6 +493,12 @@ impl Message {
         area: Rect,
         theme: &style::Theme,
     ) {
+        // Turn separator: draw a width-reflowing dim rule instead of baked lines.
+        if self.is_turn_separator() {
+            self.draw_turn_separator(buf, area, theme);
+            return;
+        }
+
         // Rich tool call: render pre-built styled Lines directly
         if let Some(ref td) = self.tool_data {
             let paragraph = Paragraph::new(td.lines.clone());
@@ -479,6 +519,21 @@ impl Message {
         .block(block)
         .wrap(Wrap { trim: false });
         paragraph.render(area, buf);
+    }
+
+    /// Draw a turn separator: a single understated dim horizontal rule that spans
+    /// the current render width. Uses the light box char `─` (U+2500) in the
+    /// theme's `dim` color so it reads as a faint boundary, not a loud divider.
+    /// Width-safe: `repeat(area.width)` reflows on every render and never panics
+    /// (width 1 yields a single glyph; width 0 draws nothing).
+    fn draw_turn_separator(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let rule = "\u{2500}".repeat(area.width as usize);
+        let line = Line::from(Span::styled(rule, Style::default().fg(theme.colors.dim)));
+        let row = Rect::new(area.x, area.y, area.width, 1);
+        Paragraph::new(line).render(row, buf);
     }
 
     fn draw_survey_qa(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme) {
@@ -800,6 +855,48 @@ mod help_tests {
             HELP_LINE_COUNT,
             lines.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_separator_render_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+
+    /// Flatten the single rendered row of a separator into a String.
+    fn render_row(width: u16) -> String {
+        let sep = Message::new_turn_separator();
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        sep.render_to_buffer(area, &mut buf, 0);
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn separator_is_one_row_tall() {
+        assert_eq!(Message::new_turn_separator().height(80), 1);
+    }
+
+    #[test]
+    fn separator_reflows_to_render_width() {
+        for w in [4u16, 20, 80] {
+            let row = render_row(w);
+            let rule_cells = row.chars().filter(|c| *c == '\u{2500}').count();
+            assert_eq!(rule_cells, w as usize, "rule spans the full width {w}");
+        }
+    }
+
+    #[test]
+    fn separator_does_not_panic_at_width_one() {
+        // Width 1 must yield exactly one rule glyph and never panic.
+        let row = render_row(1);
+        assert_eq!(row, "\u{2500}");
+    }
+
+    #[test]
+    fn separator_detected_via_marker() {
+        assert!(Message::new_turn_separator().is_turn_separator());
+        assert!(!Message::new(MessageType::Agent, "hi".into(), None).is_turn_separator());
     }
 }
 

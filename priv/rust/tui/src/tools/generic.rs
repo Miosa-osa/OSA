@@ -1,8 +1,7 @@
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use super::{
-    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
+    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer, ToolStatus,
 };
 
 /// Fallback renderer for all unregistered tools.
@@ -10,8 +9,6 @@ pub struct GenericRenderer;
 
 impl ToolRenderer for GenericRenderer {
     fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
-        let theme = crate::style::theme();
-
         // Use the raw tool name as display, collapse args into a short preview
         let args_preview = args_summary(args);
 
@@ -23,32 +20,23 @@ impl ToolRenderer for GenericRenderer {
             opts.duration_ms,
         );
 
+        let is_error = opts.status == ToolStatus::Error;
+
         if !opts.expanded {
             // CC parity: unknown tools still show a short dimmed result block
             // under a `⎿` connector — 3 width-wrapped lines max plus a ctrl+o
-            // hint (OutputLine).
-            let body = super::collapsed_result_block(result, opts.width, false);
+            // hint (OutputLine) — now with JSON pretty-print, URL linkify, and
+            // the panel background shared by every tool renderer.
+            let body = super::collapse::enhanced_collapsed_block(result, opts.width, is_error);
             if body.is_empty() {
                 return vec![header];
             }
             return render_tool_box(header, body);
         }
 
-        let mut body: Vec<Line<'static>> = Vec::new();
-
-        // Try pretty-print JSON result
-        let result_lines: Vec<Line<'static>> =
-            if result.starts_with('{') || result.starts_with('[') {
-                render_json(result, &theme)
-            } else {
-                result
-                    .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), theme.faint())))
-                    .collect()
-            };
-
-        body.extend(result_lines);
-
+        // Expanded body: same quality upgrades (JSON pretty-print + URL linkify
+        // + panel bg), width-wrapped, then compact-capped.
+        let body = super::collapse::enhanced_output_lines(result, opts.width, is_error);
         let max_lines = if opts.compact { 6 } else { 10 };
         let body = truncate_lines(body, max_lines);
 
@@ -93,33 +81,4 @@ fn args_summary(args: &str) -> String {
     } else {
         preview
     }
-}
-
-/// Render JSON with basic key/value coloring.
-fn render_json(json_str: &str, theme: &crate::style::Theme) -> Vec<Line<'static>> {
-    let pretty = serde_json::from_str::<serde_json::Value>(json_str)
-        .ok()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok())
-        .unwrap_or_else(|| json_str.to_string());
-
-    pretty
-        .lines()
-        .map(|l| {
-            let trimmed = l.trim_start();
-            let style: Style = if trimmed.starts_with('"') && trimmed.contains(':') {
-                Style::default().fg(theme.colors.secondary)
-            } else if trimmed.starts_with('"') {
-                Style::default().fg(theme.colors.success)
-            } else if trimmed.parse::<f64>().is_ok() {
-                Style::default().fg(theme.colors.warning)
-            } else if trimmed == "true" || trimmed == "false" || trimmed == "null"
-                || trimmed.starts_with("true,") || trimmed.starts_with("false,")
-            {
-                Style::default().fg(theme.colors.primary)
-            } else {
-                theme.faint()
-            };
-            Line::from(Span::styled(l.to_string(), style))
-        })
-        .collect()
 }

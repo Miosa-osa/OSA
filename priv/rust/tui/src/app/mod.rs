@@ -279,6 +279,14 @@ pub struct App {
     pub goal: Option<String>,
     pub goal_cycle: u32,
     pub goal_max_cycles: u32,
+    /// Instant the active goal became live, so the status-line goal indicator can
+    /// count up "Working on: <goal> · 3m 40s" from activation (Codex
+    /// `thread_goal_actions` + `status_indicator_widget` elapsed). Stamped the
+    /// first frame a goal is present and reset the moment it clears, so the timer
+    /// freezes/resets instead of leaking across goals. Reconciled every frame in
+    /// `sync_goal_indicator` (called from `sync_chrome`) — additive, so the
+    /// existing `set_goal`/`clear_goal` paths need no change.
+    pub goal_activated_at: Option<Instant>,
 
     // Pasted / drag-dropped image & file attachments, shown as [Image #N] chips.
     pub attachments: Vec<crate::app::attachment::Attachment>,
@@ -558,6 +566,7 @@ impl App {
             goal: None,
             goal_cycle: 0,
             goal_max_cycles,
+            goal_activated_at: None,
             attachments: Vec::new(),
             welcome_injected: false,
             dir_session_resolved: false,
@@ -780,6 +789,11 @@ impl App {
         // message queue every frame (cheap; the writer only re-renders on change).
         self.activity.set_queued(self.message_queue.len());
 
+        // Goal + elapsed indicator: reconcile the status-line "Working on: <goal>
+        // · <elapsed>" chip every frame from the live goal state (cheap; the
+        // writer only re-renders on change).
+        self.sync_goal_indicator();
+
         // U-T28 — feed the compact sub-agent footer cue (count + est. cost) from
         // the agents panel while sub-agents are active; clear it otherwise.
         if self.agents.is_active() {
@@ -801,6 +815,30 @@ impl App {
         } else {
             self.permission_wait_since = None;
             self.permission_pinged = false;
+        }
+    }
+
+    /// Reconcile the status-line active-goal indicator ("Working on: <goal> ·
+    /// 3m 40s") with the live goal state, once per frame. Stamps the goal-active
+    /// Instant the first frame a goal is present so the elapsed counts from
+    /// activation, and clears it the moment the goal clears so the timer resets
+    /// (never leaks across goals). Overrides the plain "goal N/max" label that the
+    /// `/goal` command path seeds, so the richer indicator is the single winner.
+    pub(crate) fn sync_goal_indicator(&mut self) {
+        match self.goal.clone() {
+            Some(goal) => {
+                let since = *self.goal_activated_at.get_or_insert_with(Instant::now);
+                let elapsed = since.elapsed().as_secs();
+                self.status
+                    .set_goal_label(Some(compose_goal_label(&goal, elapsed)));
+            }
+            None => {
+                // Goal cleared: freeze/reset the timer and drop the chip.
+                if self.goal_activated_at.is_some() {
+                    self.goal_activated_at = None;
+                    self.status.set_goal_label(None);
+                }
+            }
         }
     }
 
@@ -840,6 +878,28 @@ impl App {
             self.last_progress_keepalive = None;
         }
     }
+}
+
+/// Compose the status-line active-goal chip: `Working on: <goal> · 3m 40s`. The
+/// goal text is ellipsized to keep the chip terse on narrow status bars, and the
+/// elapsed uses the Codex compact formatter so it counts up smoothly. Pure over
+/// its inputs so the composition is unit-testable without an `App` clock.
+fn compose_goal_label(goal: &str, elapsed_secs: u64) -> String {
+    const MAX_GOAL_CHARS: usize = 40;
+    let goal = goal.trim();
+    // Head-preserving trim: the start of a goal statement carries the intent, so
+    // keep the leading words and append an ellipsis when it overflows.
+    let shown = if goal.chars().count() > MAX_GOAL_CHARS {
+        let head: String = goal.chars().take(MAX_GOAL_CHARS - 1).collect();
+        format!("{}\u{2026}", head.trim_end())
+    } else {
+        goal.to_string()
+    };
+    format!(
+        "Working on: {} \u{00b7} {}",
+        shown,
+        crate::components::status_bar::fmt_elapsed_compact(elapsed_secs)
+    )
 }
 
 pub(super) fn generate_session_id() -> String {
@@ -936,6 +996,38 @@ mod turn_active_tests {
             AppState::ContextBreakdown,
             &[AppState::Idle]
         ));
+    }
+}
+
+#[cfg(test)]
+mod goal_indicator_tests {
+    use super::compose_goal_label;
+
+    #[test]
+    fn goal_label_shows_goal_and_nonzero_elapsed_once_activated() {
+        // Once a goal has been active for a while, the chip names the goal AND a
+        // non-zero, compact-formatted elapsed (Codex "Working on: <goal> · Nm Ss").
+        let label = compose_goal_label("ship the release", 220);
+        assert!(label.starts_with("Working on: ship the release"));
+        assert!(label.contains("3m 40s"), "non-zero elapsed must show, got: {label:?}");
+        assert!(!label.contains(" 0s "), "activated goal is not frozen at zero");
+    }
+
+    #[test]
+    fn goal_label_at_activation_reads_zero() {
+        // The instant a goal activates the elapsed is 0s — proving the timer
+        // counts FROM activation, not some earlier clock.
+        let label = compose_goal_label("do the thing", 0);
+        assert_eq!(label, "Working on: do the thing \u{00b7} 0s");
+    }
+
+    #[test]
+    fn goal_label_ellipsizes_long_goals() {
+        // A long goal is head-trimmed with an ellipsis so the chip stays terse.
+        let long = "a".repeat(80);
+        let label = compose_goal_label(&long, 5);
+        assert!(label.contains('\u{2026}'), "long goal must be ellipsized");
+        assert!(label.ends_with("\u{00b7} 5s"));
     }
 }
 

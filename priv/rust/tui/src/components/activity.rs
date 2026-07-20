@@ -136,6 +136,63 @@ fn format_count(n: usize) -> String {
     }
 }
 
+/// Ultra-compact short-number for the live token counter (CC's context-token
+/// indicator, e.g. `⇣12k`): a bare integer below 1k, one decimal in the low
+/// thousands (`1.5k`), and a rounded whole-k once it's large enough that the
+/// decimal is noise (`12k`).
+fn short_number(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else {
+        let k = n as f64 / 1000.0;
+        if k >= 10.0 {
+            format!("{}k", k.round() as u64)
+        } else {
+            format!("{:.1}k", k)
+        }
+    }
+}
+
+/// Tight elapsed formatter for the spinner's dual live timers (grok
+/// `turn_status`, e.g. `1m20s`): bare seconds under a minute, no-space
+/// `m`+zero-padded-`s` under an hour, `h`+`m`+`s` above. Deliberately spaceless
+/// so the phase and turn timers pack into the dim status group without eating
+/// width the way `util::fmt_elapsed`'s spaced form would.
+fn fmt_compact_tight(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m{:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
+/// Ease the displayed token counter one animation step toward `target` (CC's
+/// SpinnerAnimationRow token-count easing): step by a fraction of the gap, at
+/// least +3 so it visibly ticks, capped at +50 so a big jump animates instead of
+/// snapping, and never past `target` (no overshoot). Returns the new displayed
+/// value; when already at/above the target it holds (tokens are monotonic within
+/// a turn, so it never counts down).
+fn ease_tokens(displayed: u64, target: u64) -> u64 {
+    if displayed >= target {
+        return displayed;
+    }
+    let gap = target - displayed;
+    let step = (gap / 10).clamp(3, 50).min(gap);
+    displayed + step
+}
+
+/// Stall intensity in `0.0..=1.0` (CC `stalledIntensity`): 0 until output has
+/// been silent for the ~3s threshold, then ramps linearly to fully-red over the
+/// next ~3s. Drives interpolation of the spinner/label color toward error-red so
+/// a frozen turn visibly reddens instead of cheerfully spinning.
+fn stall_t(stall_secs: f64) -> f64 {
+    const THRESHOLD: f64 = 3.0;
+    const RAMP: f64 = 3.0;
+    ((stall_secs - THRESHOLD) / RAMP).clamp(0.0, 1.0)
+}
+
 
 /// Tool symbol + verb mapping for activity feed
 fn tool_display(name: &str) -> (&'static str, &'static str) {
@@ -259,6 +316,21 @@ pub struct Activity {
     /// different verb instead of always "Accomplishing".
     verb_offset: usize,
     start_time: Option<std::time::Instant>,
+    /// When the CURRENT processing phase began (stamped on every `set_phase`
+    /// transition). Drives the phase-elapsed timer in the dual-timer status group
+    /// so the row shows both "time in this activity" and "time in the turn".
+    phase_since: Option<std::time::Instant>,
+    /// When output last flowed (streamed/thinking chars, a usage report, or a
+    /// tool edge). Drives the stall→red interpolation: no progress for ~3s bleeds
+    /// the spinner/label color toward error-red (CC `stalledIntensity`).
+    last_output_at: Option<std::time::Instant>,
+    /// Eased on-screen token counter — steps toward the real value in `tick()`
+    /// (CC token easing) so the count glides instead of snapping on each usage
+    /// report. Reset in `start()`.
+    displayed_tokens: u64,
+    /// Whether the turn is being cancelled (interrupt landed, teardown pending).
+    /// Drives the red "Cancelling…" spinner label. Set via `set_cancelling`.
+    cancelling: bool,
     /// When the current thinking stretch began (phase == Thinking). Drives the
     /// CC-style "thinking" status segment; on leaving Thinking the duration is
     /// captured into `thought_for` so "thought for Ns" lingers briefly.
@@ -366,6 +438,10 @@ impl Activity {
             phrase_tick: 0,
             verb_offset: 0,
             start_time: None,
+            phase_since: None,
+            last_output_at: None,
+            displayed_tokens: 0,
+            cancelling: false,
             thinking_since: None,
             thought_for: None,
             active_verb: None,
@@ -490,7 +566,12 @@ impl Activity {
         self.phrase_tick = 0;
         self.verb_offset =
             VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.start_time = Some(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.start_time = Some(now);
+        self.phase_since = Some(now);
+        self.last_output_at = Some(now);
+        self.displayed_tokens = 0;
+        self.cancelling = false;
         self.thinking_since = None;
         self.thought_for = None;
         self.retry = None;
@@ -504,6 +585,10 @@ impl Activity {
         self.active = false;
         self.phase = ProcessingPhase::Waiting;
         self.start_time = None;
+        self.phase_since = None;
+        self.last_output_at = None;
+        self.displayed_tokens = 0;
+        self.cancelling = false;
         self.active_verb = None;
         self.thinking_since = None;
         self.thought_for = None;
@@ -512,6 +597,17 @@ impl Activity {
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
+    }
+
+    /// Mark/unmark the turn as being cancelled, driving the red "Cancelling…"
+    /// spinner label. Cleared by `start()`/`stop()` on the next turn edge.
+    pub fn set_cancelling(&mut self, cancelling: bool) {
+        self.cancelling = cancelling;
+    }
+
+    /// Whether the spinner is showing the cancelling state.
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
     }
 
     /// U-T22 — arm/disarm the "esc again to interrupt" affordance. Armed by the
@@ -561,6 +657,11 @@ impl Activity {
     /// entering Thinking stamps the start, leaving it captures the duration
     /// (clamped to 1s minimum, CC's Math.max(1, round) parity).
     pub fn set_phase(&mut self, phase: ProcessingPhase) {
+        // A phase transition restarts the phase-elapsed clock (the dual-timer's
+        // "time in this activity" leg).
+        if phase != self.phase {
+            self.phase_since = Some(std::time::Instant::now());
+        }
         if phase == ProcessingPhase::Thinking {
             if self.thinking_since.is_none() {
                 self.thinking_since = Some(std::time::Instant::now());
@@ -568,6 +669,11 @@ impl Activity {
         } else if let Some(since) = self.thinking_since.take() {
             let secs = since.elapsed().as_secs().max(1);
             self.thought_for = Some((secs, std::time::Instant::now()));
+        }
+        // Any real work phase counts as progress, so it also refreshes the
+        // stall clock (a phase change is the turn moving forward, not frozen).
+        if phase != ProcessingPhase::Waiting {
+            self.last_output_at = Some(std::time::Instant::now());
         }
         self.phase = phase;
         // Any non-Waiting phase means the turn is producing work again, so a
@@ -604,9 +710,11 @@ impl Activity {
 
     pub fn add_stream_chars(&mut self, n: usize) {
         self.stream_chars += n;
-        // Output is flowing again → the turn resumed; drop any retry label.
+        // Output is flowing again → the turn resumed; drop any retry label and
+        // refresh the stall clock (progress means "not frozen").
         if n > 0 {
             self.clear_retry();
+            self.last_output_at = Some(std::time::Instant::now());
         }
     }
 
@@ -614,6 +722,7 @@ impl Activity {
         self.thinking_chars += n;
         if n > 0 {
             self.clear_retry();
+            self.last_output_at = Some(std::time::Instant::now());
         }
     }
 
@@ -648,6 +757,7 @@ impl Activity {
             success: None,
         });
         self.last_tool_name = name.to_string();
+        self.last_output_at = Some(std::time::Instant::now());
         // Keep feed bounded
         if self.tool_feed.len() > 20 {
             self.tool_feed.remove(0);
@@ -673,6 +783,7 @@ impl Activity {
             entry.duration_ms = Some(effective_ms);
             entry.success = Some(success);
         }
+        self.last_output_at = Some(std::time::Instant::now());
     }
 
     /// Report token counts for the CURRENT LLM iteration. `output` is the
@@ -692,8 +803,9 @@ impl Activity {
         self.turn_output_tokens += delta;
         self.last_iter_output = output;
         // A usage report means the provider call succeeded → the turn resumed;
-        // any retry indicator is now stale (item 1).
+        // any retry indicator is now stale (item 1), and the stall clock resets.
         self.clear_retry();
+        self.last_output_at = Some(std::time::Instant::now());
     }
 
     /// Item 4 — richer usage report including the input, reasoning, and prompt-
@@ -723,12 +835,16 @@ impl Activity {
     /// "alive, streaming" feel. Under reduced-motion the verb is a single flat
     /// span. The trailing `…` is appended by the caller path via this fn so the
     /// ellipsis rides along uncolored-bright.
-    fn shimmer_verb_spans(&self, word: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> {
-        let base = Color::Rgb(147, 165, 255); // theme.spinner_verb() tint
+    fn shimmer_verb_spans(
+        &self,
+        word: &str,
+        base: Color,
+        theme: &crate::style::Theme,
+    ) -> Vec<Span<'static>> {
         if self.reduced_motion {
             return vec![Span::styled(
                 format!("{}\u{2026}", word),
-                theme.spinner_verb(),
+                Style::default().fg(base).add_modifier(Modifier::BOLD),
             )];
         }
         let bright = Color::Rgb(232, 240, 255);
@@ -750,15 +866,52 @@ impl Activity {
                 )
             })
             .collect();
-        spans.push(Span::styled("\u{2026}".to_string(), theme.spinner_verb()));
+        spans.push(Span::styled(
+            "\u{2026}".to_string(),
+            Style::default().fg(base).add_modifier(Modifier::BOLD),
+        ));
         spans
     }
 
-    /// Advance spinner animation on each tick
+    /// The live token target: the turn-cumulative output count, floored by a
+    /// char-based estimate (~4 chars/token) so the number only ever grows while
+    /// streaming, before the backend reports the first usage.
+    fn token_target(&self) -> u64 {
+        let est = ((self.stream_chars + self.thinking_chars) / 4) as u64;
+        self.turn_output_tokens.max(est)
+    }
+
+    /// Advance spinner animation on each tick, and ease the displayed token
+    /// counter one step toward its real value (CC token easing) so the count
+    /// glides up instead of snapping on each usage report.
     pub fn tick(&mut self) {
         if self.active {
             self.phrase_tick += 1;
+            self.displayed_tokens = ease_tokens(self.displayed_tokens, self.token_target());
         }
+    }
+
+    /// Base color for the spinner glyph + verb, keyed on the current activity
+    /// (grok `turn_status` colored labels): green while a tool runs, gray while
+    /// thinking/responding, otherwise the light-blue "working" accent — then
+    /// interpolated toward error-red by the stall intensity so a frozen turn
+    /// visibly reddens. Retry/cancel states are colored at the call site.
+    fn verb_base_color(&self, theme: &crate::style::Theme, stall: f64) -> Color {
+        let tool_running = self
+            .tool_feed
+            .iter()
+            .any(|e| e.duration_ms.is_none());
+        let base = if tool_running {
+            theme.colors.success
+        } else if matches!(
+            self.phase,
+            ProcessingPhase::Thinking | ProcessingPhase::Streaming
+        ) {
+            theme.colors.muted
+        } else {
+            Color::Rgb(147, 165, 255)
+        };
+        crate::style::gradient::lerp_color(base, theme.colors.error, stall)
     }
 
     pub fn height(&self) -> u16 {
@@ -834,35 +987,45 @@ impl Component for Activity {
 
         let theme = crate::style::theme();
 
-        // Star spinner (Claude Code): pulses out then back, ~200ms/frame here.
-        let spinner_frames = ["\u{00b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}",
-                              "\u{273d}", "\u{273b}", "\u{2736}", "\u{2733}", "\u{2722}", "\u{00b7}"];
-        let spinner_char = spinner_frames[(self.phrase_tick as usize) % spinner_frames.len()];
+        // Stall intensity: seconds since output last flowed → 0..1 red bleed
+        // (CC stalledIntensity). Drives both the spinner-glyph/verb color and, if
+        // the turn freezes, the whole row reddening.
+        let stall_secs = self
+            .last_output_at
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let stall = stall_t(stall_secs);
 
-        // Output-token count for the "↓ N tokens" suffix. Use the turn-cumulative
-        // count (summed across iterations), and fall back to / floor with a
-        // char-based estimate (~4 chars/token) while streaming before the backend
-        // reports the first count — so the number only ever grows within a turn.
-        let tokens = {
-            let est = (self.stream_chars + self.thinking_chars) / 4;
-            (self.turn_output_tokens as usize).max(est)
-        };
+        // Braille spinner (render::glyphs, legacy-fallback to |/-\). Advance on a
+        // wall clock at ~7.5fps (133ms/frame) so it spins smoothly regardless of
+        // the coarser ~200ms tick cadence.
+        let frame_idx = self
+            .start_time
+            .map(|t| (t.elapsed().as_millis() / 133) as usize)
+            .unwrap_or(self.phrase_tick as usize);
+        let spinner_char = crate::render::glyphs::spinner_frame(frame_idx);
 
-        // Claude-Code line: "✻ Zesting… (28s · ↓ 1.5k tokens)". Sub-phase detail
-        // (which tool is running) shows separately as the ✓ tool-result lines.
-        let elapsed_str = crate::util::fmt_elapsed(elapsed);
+        // Live token counter: the EASED on-screen value (glides toward the real
+        // count in tick()). Gated like CC — hidden until ~30s in unless the user
+        // asked for verbose — so short turns stay uncluttered while long ones show
+        // tokens ticking to prove work is flowing.
+        let show_tokens = self.displayed_tokens > 0
+            && (elapsed >= 30 || self.verbosity == Verbosity::Verbose);
 
-        // CC SpinnerAnimationRow status parts, in its exact order: suffix slot
-        // (our persistent "esc to interrupt" affordance), elapsed timer, token
-        // count with a direction glyph (↑ while waiting on the API, ↓ once
-        // output streams — CC's SpinnerModeGlyph), then the thinking status —
-        // all joined with " · " inside one dim paren group:
-        //   ✳ Pondering… (esc to interrupt · 12s · ↓ 1.2k tokens · thinking)
-        let mut parts: Vec<String> =
-            vec![interrupt_affordance(self.interrupt_armed).to_string(), elapsed_str];
+        // Dual live timers (grok turn_status): phase-elapsed (time in the current
+        // activity) and turn-elapsed, both spaceless-compact ("1m20s").
+        let phase_elapsed = self
+            .phase_since
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(elapsed);
+        let turn_timer = fmt_compact_tight(elapsed);
 
-        // Item 1 — live retry countdown, right after the timer so the stall is
-        // the most prominent status after "esc to interrupt · Ns".
+        // CC Byline status parts, priority-ordered high→low so `gate_parts`
+        // (keeps leading, drops trailing) sheds them in the CC order as the pane
+        // narrows: thinking → timer → tokens. The interrupt hint is always first.
+        let mut parts: Vec<String> = vec![interrupt_affordance(self.interrupt_armed).to_string()];
+
+        // Item 1 — live retry countdown (a stall notice), just under the hint.
         if let Some(r) = self.retry.as_ref() {
             let remaining = r
                 .resume_at
@@ -876,20 +1039,25 @@ impl Component for Activity {
             }
         }
 
-        // Show the live token count as soon as tokens actually flow — no 30s
-        // gate. On a long in-depth turn the user needs to SEE tokens ticking to
-        // trust that work is happening; hiding the count for 30s read as "frozen".
-        if tokens > 0 {
-            let arrow = if self.phase == ProcessingPhase::Waiting {
-                "\u{2191}"
-            } else {
-                "\u{2193}"
-            };
-            parts.push(format!("{} {} tokens", arrow, format_count(tokens)));
+        // Token counter "⇣12k" (render::glyphs token_arrow + short-number). Highest
+        // of the {thinking, timer, tokens} triple so it survives narrowing longest.
+        if show_tokens {
+            parts.push(format!(
+                "{}{}",
+                crate::render::glyphs::token_arrow(),
+                short_number(self.displayed_tokens)
+            ));
         }
-        // Item 4 — surface the input + cache breakdown so the count reflects the
-        // true context-window number, not output-only. Input is already tracked
-        // but was never shown; cache read+write is folded into one "⚡ cached".
+
+        // Dual timers: phase (only when it is a distinct sub-span, to avoid a
+        // duplicate "8s · 8s" at turn start) then the turn timer.
+        if elapsed.saturating_sub(phase_elapsed) >= 1 {
+            parts.push(fmt_compact_tight(phase_elapsed));
+        }
+        parts.push(turn_timer);
+
+        // Item 4 — input + cache breakdown, so the count reflects the true
+        // context-window number, not output-only.
         if self.input_tokens > 0 {
             parts.push(format!("\u{2191} {} in", format_count(self.input_tokens as usize)));
         }
@@ -897,9 +1065,8 @@ impl Component for Activity {
         if cached > 0 {
             parts.push(format!("\u{26A1} {} cached", format_count(cached as usize)));
         }
-        // "thinking" while reasoning deltas stream; "thought for Ns" lingers
-        // 2s after the stretch ends (CC's minimum-display window), expiring by
-        // age — draw never mutates.
+        // "thinking" while reasoning deltas stream; "thought for Ns" lingers 2s
+        // after the stretch ends. Lowest of the triple → first to width-gate out.
         if self.phase == ProcessingPhase::Thinking {
             parts.push("thinking".to_string());
         } else if let Some((secs, at)) = self.thought_for {
@@ -907,19 +1074,29 @@ impl Component for Activity {
                 parts.push(format!("thought for {}s", secs));
             }
         }
-        // U-T24 — messages queued behind the running turn. Low priority, so it
-        // sits near the end and is the first segment width-gating drops.
+        // U-T24 — messages queued behind the running turn. Lowest priority.
         if self.queued > 0 {
             parts.push(format!("{} queued", self.queued));
         }
 
         // ── Spinner glyph + verb selection ──────────────────────────────
         // Priority of what the spinner row telegraphs:
+        //   0. cancelling    → red "Cancelling…" (interrupt landing)
         //   1. pending-user  → pulsing ◆ "Waiting for your input" (you're the blocker, item 5)
         //   2. retry/stall   → warning "Retrying (attempt N/M)…" (item 1)
         //   3. waiting-reason→ named "Waiting on subagent…" (item 3)
-        //   4. normal        → shimmer spinner + flavor/activeForm verb (item 2)
-        let (glyph_span, verb_spans): (Span<'_>, Vec<Span<'_>>) = if self.pending_user {
+        //   4. normal        → shimmer spinner + activity-colored verb (green tool /
+        //                      gray thinking / working accent), reddened by stall
+        let (glyph_span, verb_spans): (Span<'_>, Vec<Span<'_>>) = if self.cancelling {
+            let err = Style::default().fg(theme.colors.error);
+            (
+                Span::styled(format!("{} ", spinner_char), err),
+                vec![Span::styled(
+                    "Cancelling\u{2026}".to_string(),
+                    err.add_modifier(Modifier::BOLD),
+                )],
+            )
+        } else if self.pending_user {
             // Pulsing ◆ in the accent color — one consistent "your turn" cue.
             let color = if pulse_bright(self.phrase_tick) {
                 theme.colors.primary
@@ -956,10 +1133,16 @@ impl Component for Activity {
         } else {
             // When a task is in progress, show its concrete active step (Claude
             // Code's activeForm). Otherwise ONE flavor verb per turn (CC parity).
+            // The verb + glyph are colored by activity (green tool / gray thinking
+            // / working accent) and interpolated toward error-red by the stall.
             let word = self.spinner_verb().to_string();
+            let base = self.verb_base_color(&theme, stall);
             (
-                Span::styled(format!("{} ", spinner_char), theme.spinner_verb()),
-                self.shimmer_verb_spans(&word, &theme),
+                Span::styled(
+                    format!("{} ", spinner_char),
+                    Style::default().fg(base).add_modifier(Modifier::BOLD),
+                ),
+                self.shimmer_verb_spans(&word, base, &theme),
             )
         };
 
@@ -1214,8 +1397,9 @@ mod activity_tests {
             a
         };
         let theme = crate::style::theme();
+        let base = Color::Rgb(147, 165, 255);
         assert_eq!(
-            act.shimmer_verb_spans("Working", &theme).len(),
+            act.shimmer_verb_spans("Working", base, &theme).len(),
             1,
             "reduced-motion verb is one flat span"
         );
@@ -1223,7 +1407,7 @@ mod activity_tests {
         let mut anim = Activity::new();
         anim.start();
         assert_eq!(
-            anim.shimmer_verb_spans("Working", &theme).len(),
+            anim.shimmer_verb_spans("Working", base, &theme).len(),
             "Working".chars().count() + 1
         );
     }
@@ -1352,5 +1536,128 @@ mod activity_tests {
         // A resuming phase clears the pending cue.
         act.set_phase(ProcessingPhase::ToolCall);
         assert!(!act.pending_user());
+    }
+
+    #[test]
+    fn fmt_compact_tight_is_spaceless() {
+        // grok turn_status "1m20s" style — no spaces, zero-padded lower units.
+        assert_eq!(fmt_compact_tight(5), "5s");
+        assert_eq!(fmt_compact_tight(59), "59s");
+        assert_eq!(fmt_compact_tight(80), "1m20s");
+        assert_eq!(fmt_compact_tight(3600), "1h00m00s");
+        assert_eq!(fmt_compact_tight(3922), "1h05m22s");
+    }
+
+    #[test]
+    fn short_number_is_terse() {
+        assert_eq!(short_number(0), "0");
+        assert_eq!(short_number(999), "999");
+        assert_eq!(short_number(1500), "1.5k");
+        assert_eq!(short_number(12_000), "12k");
+        assert_eq!(short_number(12_400), "12k");
+    }
+
+    #[test]
+    fn token_counter_eases_toward_target_without_overshoot() {
+        // The eased counter always moves TOWARD the target and never past it, and
+        // it converges. This is the CC token-easing invariant.
+        let target = 4_000u64;
+        let mut displayed = 0u64;
+        let mut prev = 0u64;
+        for _ in 0..1_000 {
+            displayed = ease_tokens(displayed, target);
+            assert!(displayed <= target, "must never overshoot the target");
+            assert!(displayed >= prev, "must be monotonic toward the target");
+            prev = displayed;
+        }
+        assert_eq!(displayed, target, "must converge exactly to the target");
+
+        // Small gap steps by at least +3 (visible tick) but never past target.
+        assert_eq!(ease_tokens(0, 5), 3);
+        assert_eq!(ease_tokens(0, 2), 2); // gap smaller than the min step → land on target
+        // Large gap is capped at +50 so a big jump animates instead of snapping.
+        assert_eq!(ease_tokens(0, 100_000), 50);
+        // At/over the target it holds (tokens are monotonic; never counts down).
+        assert_eq!(ease_tokens(500, 500), 500);
+        assert_eq!(ease_tokens(600, 500), 600);
+    }
+
+    #[test]
+    fn token_counter_easing_advances_on_tick() {
+        // A usage report sets a big target; each tick eases the on-screen value up
+        // without ever exceeding it.
+        let mut act = Activity::new();
+        act.start();
+        act.set_tokens(0, 900); // turn_output_tokens = 900
+        assert_eq!(act.displayed_tokens, 0, "starts at zero before any tick");
+        act.tick();
+        assert!(act.displayed_tokens > 0, "tick eases the counter up");
+        assert!(act.displayed_tokens <= 900, "never past the real value");
+        for _ in 0..1_000 {
+            act.tick();
+        }
+        assert_eq!(act.displayed_tokens, 900, "converges to the real value");
+    }
+
+    #[test]
+    fn stall_flips_color_after_threshold() {
+        // Below the ~3s threshold there is no red bleed; past it the intensity
+        // ramps up, so a base color interpolates toward error-red.
+        assert_eq!(stall_t(0.0), 0.0);
+        assert_eq!(stall_t(2.9), 0.0);
+        assert_eq!(stall_t(3.0), 0.0, "exactly at the threshold is still calm");
+        assert!(stall_t(4.5) > 0.0 && stall_t(4.5) < 1.0, "ramps in the band");
+        assert_eq!(stall_t(6.0), 1.0, "fully red a few seconds past threshold");
+        assert_eq!(stall_t(100.0), 1.0, "saturates, never exceeds 1");
+
+        // The interpolation actually moves the color: calm keeps the base, a full
+        // stall lands on error-red.
+        let base = Color::Rgb(147, 165, 255);
+        let red = Color::Rgb(255, 0, 0);
+        assert_eq!(crate::style::gradient::lerp_color(base, red, stall_t(0.0)), base);
+        assert_ne!(crate::style::gradient::lerp_color(base, red, stall_t(5.0)), base);
+        assert_eq!(crate::style::gradient::lerp_color(base, red, stall_t(6.0)), red);
+    }
+
+    #[test]
+    fn cancelling_renders_red_label() {
+        // set_cancelling flips the spinner label to the red "Cancelling…" cue and
+        // start()/stop() clear it.
+        let mut act = Activity::new();
+        act.start();
+        assert!(!act.is_cancelling());
+        act.set_cancelling(true);
+        assert!(act.is_cancelling());
+        let text = render_activity_text(&act);
+        assert!(
+            text.contains("Cancelling"),
+            "cancelling label must render, got: {text:?}"
+        );
+        act.start();
+        assert!(!act.is_cancelling(), "a fresh turn clears cancelling");
+    }
+
+    #[test]
+    fn token_counter_gated_until_thirty_seconds_unless_verbose() {
+        // The eased counter is hidden on short turns (no 30s elapsed) but shows
+        // immediately under verbose, matching CC's gate.
+        let mut act = Activity::new();
+        act.start();
+        act.set_tokens(0, 4_000);
+        for _ in 0..1_000 {
+            act.tick();
+        }
+        // Fresh turn (elapsed ~0s), default verbosity → the token counter (4.0k)
+        // is gated out. Check the numeric text (glyph-level independent).
+        assert!(
+            !render_activity_text(&act).contains("4.0k"),
+            "token counter is hidden before ~30s at default verbosity"
+        );
+        // Verbose surfaces it right away.
+        act.verbosity = Verbosity::Verbose;
+        assert!(
+            render_activity_text(&act).contains("4.0k"),
+            "verbose shows the token counter immediately"
+        );
     }
 }

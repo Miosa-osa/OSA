@@ -80,6 +80,14 @@ pub struct Chat {
     /// the toggle is active (and, once the lead wires it, the live preview). The
     /// copy-to-clipboard half of U-T7 is owned by another lane.
     raw_view: bool,
+    /// True once the first conversation turn has begun (first user message
+    /// enqueued). Gates the turn separator so none is emitted before the first
+    /// turn — a separator is inserted only when a NEW user message opens a turn
+    /// while a previous turn already exists.
+    turn_started: bool,
+    /// Appearance flag: draw an understated dim rule between conversation turns.
+    /// Default on; `set_turn_separators(false)` suppresses them entirely.
+    turn_separators: bool,
 }
 
 impl Chat {
@@ -102,7 +110,19 @@ impl Chat {
                 crate::render::markdown_stream::StreamingRenderer::new(80),
             ),
             raw_view: false,
+            turn_started: false,
+            turn_separators: true,
         }
+    }
+
+    /// Toggle the turn-separator appearance flag. Returns the new state.
+    pub fn set_turn_separators(&mut self, on: bool) {
+        self.turn_separators = on;
+    }
+
+    /// Whether turn separators are currently drawn between turns.
+    pub fn turn_separators_enabled(&self) -> bool {
+        self.turn_separators
     }
 
     /// U-T7: toggle the raw-markdown view. Returns the new state. Invalidates the
@@ -165,6 +185,14 @@ impl Chat {
 
     pub fn add_user_message(&mut self, content: &str) {
         self.last_user_text = Some(content.to_string());
+        // A new user message opens a turn. If a previous turn already exists,
+        // mark the boundary with an understated dim rule (never before the first
+        // turn). The separator is a normal scrollback block, so `height()` and
+        // the drain/insert_before path treat it like any other line.
+        if self.turn_separators && self.turn_started {
+            self.push_scrollback_block(Message::new_turn_separator());
+        }
+        self.turn_started = true;
         self.push_scrollback_block(Message::new(MessageType::User, content.to_string(), None));
     }
 
@@ -436,6 +464,7 @@ impl Chat {
         self.last_agent_text = None;
         self.last_user_text = None;
         self.scrollback_started = false;
+        self.turn_started = false;
     }
 
     pub fn last_agent_message(&self) -> Option<String> {
@@ -540,6 +569,92 @@ mod spacing_tests {
         chat.clear();
         chat.add_user_message("again");
         assert_eq!(chat.drain_scrollback().len(), 1, "no spacer after clear");
+    }
+}
+
+#[cfg(test)]
+mod turn_separator_tests {
+    use super::*;
+
+    fn sep_count(msgs: &[Message]) -> usize {
+        msgs.iter().filter(|m| m.is_turn_separator()).count()
+    }
+
+    #[test]
+    fn two_turns_get_exactly_one_separator_none_before_first() {
+        let mut chat = Chat::new();
+        // Turn 1
+        chat.add_user_message("q1");
+        chat.add_agent_message("a1", None);
+        // Turn 2 — opening this turn inserts the separator.
+        chat.add_user_message("q2");
+        chat.add_agent_message("a2", None);
+
+        let msgs = chat.drain_scrollback();
+        assert_eq!(sep_count(&msgs), 1, "exactly one separator between two turns");
+        // No separator before the first turn: the first block is the user message.
+        assert!(!msgs[0].is_turn_separator());
+        assert!(matches!(msgs[0].msg_type, MessageType::User));
+        // The separator precedes the second turn's user message.
+        let sep_idx = msgs.iter().position(|m| m.is_turn_separator()).unwrap();
+        let next_user = msgs[sep_idx + 1..]
+            .iter()
+            .any(|m| matches!(m.msg_type, MessageType::User));
+        assert!(next_user, "separator sits before the next turn's user message");
+    }
+
+    #[test]
+    fn single_turn_has_no_separator() {
+        let mut chat = Chat::new();
+        chat.add_user_message("q1");
+        chat.add_agent_message("a1", None);
+        assert_eq!(sep_count(&chat.drain_scrollback()), 0);
+    }
+
+    #[test]
+    fn three_turns_get_two_separators() {
+        let mut chat = Chat::new();
+        for i in 0..3 {
+            chat.add_user_message(&format!("q{i}"));
+            chat.add_agent_message(&format!("a{i}"), None);
+        }
+        assert_eq!(sep_count(&chat.drain_scrollback()), 2);
+    }
+
+    #[test]
+    fn separator_is_a_single_row() {
+        let mut chat = Chat::new();
+        chat.add_user_message("q1");
+        chat.add_agent_message("a1", None);
+        chat.add_user_message("q2");
+        let msgs = chat.drain_scrollback();
+        let sep = msgs.iter().find(|m| m.is_turn_separator()).unwrap();
+        // Height must be exactly one row at any width so the height cache stays
+        // consistent with what draw_turn_separator renders.
+        assert_eq!(sep.height(80), 1);
+        assert_eq!(sep.height(1), 1);
+    }
+
+    #[test]
+    fn toggle_off_disables_separators() {
+        let mut chat = Chat::new();
+        chat.set_turn_separators(false);
+        assert!(!chat.turn_separators_enabled());
+        chat.add_user_message("q1");
+        chat.add_agent_message("a1", None);
+        chat.add_user_message("q2");
+        assert_eq!(sep_count(&chat.drain_scrollback()), 0);
+    }
+
+    #[test]
+    fn clear_resets_turn_tracking() {
+        let mut chat = Chat::new();
+        chat.add_user_message("q1");
+        chat.add_agent_message("a1", None);
+        chat.clear();
+        // After clear the next user message opens the first turn again — no sep.
+        chat.add_user_message("q2");
+        assert_eq!(sep_count(&chat.drain_scrollback()), 0);
     }
 }
 

@@ -1,4 +1,4 @@
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -43,7 +43,7 @@ impl ToolRenderer for BashRenderer {
             // WIDTH-WRAPPED output lines under the `⎿` connector; exactly 4
             // print in full; more get "… +N lines (ctrl+o to expand)".
             // Errors render red; finished-but-empty shows "(No output)".
-            let body = super::collapsed_result_block(
+            let body = super::collapse::enhanced_collapsed_block(
                 result,
                 opts.width,
                 opts.status == ToolStatus::Error,
@@ -66,16 +66,8 @@ impl ToolRenderer for BashRenderer {
         // Expanded body
         let mut body: Vec<Line<'static>> = Vec::new();
 
-        // Full command line
-        body.push(Line::from(vec![
-            Span::styled("$ ".to_string(), Style::default().fg(theme.colors.muted)),
-            Span::styled(
-                command,
-                Style::default()
-                    .fg(theme.colors.secondary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        // Full command line — dim `$ ` prefix + light bash syntax coloring.
+        body.push(Line::from(super::collapse::shell_command_spans(&command)));
 
         // Background marker
         if is_background {
@@ -91,19 +83,13 @@ impl ToolRenderer for BashRenderer {
             Style::default().fg(theme.colors.dim),
         )));
 
-        // Output lines
-        let output_style = if opts.status == ToolStatus::Error {
-            Style::default().fg(theme.colors.error)
-        } else {
-            Style::default().fg(theme.colors.muted)
-        };
-
-        let cols = super::body_wrap_width(opts.width);
-        for line in result.lines() {
-            for row in super::wrap_plain(line, cols) {
-                body.push(Line::from(Span::styled(row, output_style)));
-            }
-        }
+        // Output body — JSON pretty-print + URL linkify + panel background,
+        // width-wrapped. stderr/error status renders in the error color.
+        body.extend(super::collapse::enhanced_output_lines(
+            result,
+            opts.width,
+            opts.status == ToolStatus::Error,
+        ));
 
         // CC parity: expanded (ctrl+o / verbose) shows the full output; only
         // compact contexts keep a cap.
