@@ -159,6 +159,20 @@ impl App {
         // popup open/close is a discrete user action, not a streaming dip, so it
         // must rebuild cleanly and immediately (like a resize), never debounced.
         let mut prev_popup_h: u16 = 0;
+        // Top row (absolute terminal row) of the inline viewport the last time we
+        // were inline, captured the instant BEFORE switching to the full/alternate
+        // screen. `EnterAlternateScreen`/`LeaveAlternateScreen` (DECSET 1049) save
+        // and restore the cursor position on the PRIMARY screen across the trip,
+        // but ratatui's `Viewport::Inline` reconstruction anchors the new region on
+        // wherever the cursor happens to be when it queries it back — which is
+        // wherever the last inline draw left it (typically inside/below the
+        // composer's own text-cursor row), NOT the top of the old chrome. Without
+        // this, `switch_to_inline` builds the fresh region starting mid-way through
+        // the OLD composer + status rows, leaving the rows above (the rest of the
+        // old chrome) stranded on screen as a visible duplicate. Remembering the
+        // real top lets us explicitly clear from there before rebuilding, so
+        // exactly one copy of the chrome ever exists. See `switch_to_inline`.
+        let mut last_inline_top: Option<u16> = None;
 
         loop {
             // 1. Reconcile the terminal's viewport mode with what the app wants.
@@ -181,8 +195,35 @@ impl App {
             let popup_changed = popup_h_now != prev_popup_h;
             prev_popup_h = popup_h_now;
             let resized = std::mem::take(&mut self.resize_dirty) || popup_changed;
-            if want_full != was_full {
+            // /clear was run: the in-memory transcript is already wiped
+            // (commands.rs), but in inline mode the finalized messages were
+            // flushed into the terminal's REAL scrollback via `insert_before`,
+            // which no in-memory clear can touch. Only meaningful while inline —
+            // a dialog owns the whole screen anyway, so there is no scrollback to
+            // purge until we return. Handled before the mode-switch reconciliation
+            // below so it never races a simultaneous dialog close.
+            // Only actually consume the flag when we act on it. `/clear` can only
+            // be typed from the composer (inline), but if it ever landed while a
+            // dialog owns the full screen, leaving the flag set (instead of
+            // `mem::take`-ing it unconditionally) means the clear is deferred
+            // until we're back inline rather than silently dropped.
+            let do_clear = !want_full && self.pending_clear;
+            if do_clear {
+                self.pending_clear = false;
+                term_handle.abort();
+                let _ = term_handle.await;
+                purge_scrollback()?;
+                rebuild_inline(&mut terminal, desired_inline_h)?;
+                term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
+                cur_inline_h = desired_inline_h;
+                shrink_streak = 0;
+                last_inline_top = Some(terminal.get_frame().area().top());
+            } else if want_full != was_full {
                 if want_full {
+                    // Remember where the inline chrome currently starts (its real
+                    // top row) before we leave it for the alternate screen — see
+                    // `last_inline_top` above.
+                    last_inline_top = Some(terminal.get_frame().area().top());
                     // Full screen (Terminal::new) does NOT query the cursor, so no
                     // reader contention — switch directly.
                     switch_to_full(&mut terminal)?;
@@ -194,9 +235,10 @@ impl App {
                     // practice (the user just closed a dialog).
                     term_handle.abort();
                     let _ = term_handle.await;
-                    switch_to_inline(&mut terminal, desired_inline_h)?;
+                    switch_to_inline(&mut terminal, desired_inline_h, last_inline_top)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                     cur_inline_h = desired_inline_h;
+                    last_inline_top = Some(terminal.get_frame().area().top());
                 }
                 was_full = want_full;
                 // A mode switch rebuilds the viewport fresh (switch_to_* clear +
@@ -258,6 +300,7 @@ impl App {
                     rebuild_inline(&mut terminal, desired_inline_h)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                     cur_inline_h = desired_inline_h;
+                    last_inline_top = Some(terminal.get_frame().area().top());
                 }
             } else {
                 // Staying inline, wanted height already matches what's built, no
@@ -1035,9 +1078,33 @@ fn switch_to_full(terminal: &mut Term) -> Result<()> {
     Ok(())
 }
 
+/// Whether a remembered inline-viewport top row is still safe to clear from
+/// on the current terminal. `top` is captured BEFORE a full/alternate-screen
+/// excursion; if the terminal shrank (or was resized to something tiny) while
+/// a dialog owned the screen, the row may no longer exist. Kept as a free,
+/// pure function so the boundary logic is unit-testable without a real
+/// terminal (see `render_tests::clamp_inline_top_*`).
+fn clamp_inline_top(top: Option<u16>, term_rows: u16) -> Option<u16> {
+    top.filter(|&t| t < term_rows)
+}
+
 /// Leave the alternate screen and rebuild the inline viewport, restoring the
 /// host terminal's scrollback untouched.
-fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
+///
+/// `prev_inline_top` is the top row of the inline chrome as it stood the last
+/// time we were inline (captured by the caller right before entering the
+/// alternate screen). Ratatui's `Viewport::Inline` reconstruction anchors the
+/// new region wherever the cursor is queried back to be — which, after
+/// `LeaveAlternateScreen` restores the primary-screen cursor, is wherever the
+/// LAST inline draw physically left it (typically the composer's own text
+/// cursor, partway through the old chrome), not the top of the old region.
+/// Left alone, that strands the rows of the old chrome ABOVE that point still
+/// on screen while a fresh copy is drawn below/at it — the "two chat things"
+/// duplicate. Explicitly homing the cursor to the remembered top and clearing
+/// downward before rebuilding erases exactly the old chrome (never the real
+/// transcript scrollback above `prev_inline_top`, which this never touches)
+/// so the freshly built viewport lands in the same place the old one started.
+fn switch_to_inline(terminal: &mut Term, inline_h: u16, prev_inline_top: Option<u16>) -> Result<()> {
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
 
     // Viewport::Inline queries the cursor (DSR); the first query after leaving the
@@ -1050,6 +1117,20 @@ fn switch_to_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+
+    // Erase the old inline chrome before rebuilding. `crossterm::terminal::size`
+    // reflects the terminal as it stands right now (a resize could have landed
+    // while the dialog owned the screen), so re-validate the remembered row
+    // against it rather than trusting a possibly-stale value blindly.
+    let term_rows = crossterm::terminal::size().map(|(_, r)| r).unwrap_or(u16::MAX);
+    if let Some(top) = clamp_inline_top(prev_inline_top, term_rows) {
+        let _ = execute!(
+            std::io::stdout(),
+            crossterm::cursor::MoveTo(0, top),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
+        );
+    }
+
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
@@ -1116,6 +1197,29 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16) -> Result<()> {
     info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
     *terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    Ok(())
+}
+
+/// Purge the terminal's REAL scrollback (`/clear`). In inline mode every
+/// finalized message was flushed into the host terminal's native scrollback
+/// via `insert_before` (step 2 of the run loop) — it never lived in a ratatui
+/// buffer, so `terminal.clear()` (which only resets ratatui's own diff state
+/// and the live viewport region) cannot touch it, and neither can wiping
+/// `self.chat` / `self.transcript_log`. `ClearType::Purge` is `ESC[3J`
+/// (erase saved lines — supported by every xterm-compatible terminal in
+/// mainstream use; emulators without it simply ignore the private sequence
+/// and only the visible screen clears, which is still a correct, if smaller,
+/// clear). `ClearType::All` (`ESC[2J`) then erases the now-scrollback-free
+/// visible screen, and homing the cursor to (0, 0) means the caller's
+/// following `Viewport::Inline` rebuild anchors fresh at the very top instead
+/// of wherever the old composer happened to leave the cursor.
+fn purge_scrollback() -> Result<()> {
+    execute!(
+        std::io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0),
+    )?;
     Ok(())
 }
 
@@ -1626,6 +1730,316 @@ mod render_tests {
                 .iter()
                 .any(|(name, _)| text.contains(name.as_str())),
             "slash popup must render a real command name; buffer had none"
+        );
+    }
+
+    // ── Bug 1 repro/fix: "two chat things" (duplicated composer+status) ──────
+    //
+    // Root cause: `Viewport::Inline` reconstruction (`Terminal::with_options`)
+    // anchors the fresh region wherever the backend's cursor is queried to be
+    // (ratatui's `compute_inline_size`), not at the top of whatever inline
+    // chrome was on screen before. After `LeaveAlternateScreen` restores the
+    // primary-screen cursor, that position is wherever the LAST inline draw
+    // physically left it (the composer's own text-cursor row), which sits
+    // INSIDE the old chrome, not above it. Rebuilding there without clearing
+    // strands the old chrome's rows above the new viewport, still holding the
+    // previous frame's rendered characters — the visible duplicate.
+    use super::clamp_inline_top;
+
+    #[test]
+    fn clamp_inline_top_accepts_row_within_current_terminal() {
+        assert_eq!(clamp_inline_top(Some(5), 30), Some(5));
+        assert_eq!(clamp_inline_top(Some(0), 30), Some(0));
+    }
+
+    #[test]
+    fn clamp_inline_top_rejects_row_the_terminal_shrank_past() {
+        // A resize while a dialog owned the screen can invalidate the
+        // remembered row; using it anyway would move the cursor out of bounds.
+        assert_eq!(clamp_inline_top(Some(25), 10), None);
+        assert_eq!(clamp_inline_top(Some(10), 10), None); // top must be < rows
+        assert_eq!(clamp_inline_top(None, 30), None);
+    }
+
+    /// True if any cell in `row` holds non-blank rendered content.
+    fn row_has_content(backend: &TestBackend, row: u16) -> bool {
+        let area = backend.buffer().area;
+        if row >= area.bottom() {
+            return false;
+        }
+        (0..area.width).any(|x| backend.buffer()[(x, row)].symbol() != " ")
+    }
+
+    /// First row in `[top, top + h)` that has rendered (non-blank) content.
+    /// The exact row a given widget lands on within the chrome (composer vs.
+    /// status vs. an empty spacer row) is an implementation detail of
+    /// `draw_inline_chrome`'s layout, so tests locate it dynamically instead
+    /// of hard-coding a row index that could silently start asserting nothing
+    /// if that layout ever changes.
+    fn first_content_row(backend: &TestBackend, top: u16, h: u16) -> u16 {
+        (top..top + h)
+            .find(|&r| row_has_content(backend, r))
+            .expect("the drawn chrome must render at least one non-blank row")
+    }
+
+    #[test]
+    fn full_to_inline_naive_rebuild_strands_stale_chrome_rows() {
+        // Demonstrates the BUG mechanism directly against ratatui's real
+        // `Viewport::Inline` reconstruction: rebuilding anchored at a cursor row
+        // INSIDE the old chrome (not its top) leaves the rows above it stale.
+        let w = 40u16;
+        let old_top = 5u16;
+        let old_h = 6u16;
+        let total_h = 30u16;
+
+        let mut backend = TestBackend::new(w, total_h);
+        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Inline(old_h) },
+        )
+        .unwrap();
+        assert_eq!(term.get_frame().area().top(), old_top);
+
+        let input = InputComponent::new();
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+        let content_row = first_content_row(term.backend(), old_top, old_h);
+
+        // Simulate the return from the alternate screen: the restored cursor
+        // sits inside the old chrome (its last-drawn row), not at the top.
+        let stale_cursor_row = old_top + old_h - 1;
+        let mut carried = term.backend().clone();
+        carried
+            .set_cursor_position(Position { x: 0, y: stale_cursor_row })
+            .unwrap();
+
+        // The buggy path: rebuild WITHOUT clearing first.
+        let new_h = 8u16;
+        let mut buggy = Terminal::with_options(carried, TerminalOptions { viewport: Viewport::Inline(new_h) })
+            .unwrap();
+        let new_top = buggy.get_frame().area().top();
+
+        assert!(
+            new_top > old_top,
+            "bug mechanism: naive rebuild anchors below the old chrome's top (new_top={new_top}, old_top={old_top})"
+        );
+        assert!(
+            row_has_content(buggy.backend(), content_row),
+            "bug mechanism: the old chrome's content row is left stale once it falls above the new viewport"
+        );
+    }
+
+    #[test]
+    fn full_to_inline_fixed_rebuild_leaves_no_stale_chrome() {
+        // The FIX: clear from the remembered top before rebuilding (mirrors
+        // `switch_to_inline`'s `clamp_inline_top` + explicit
+        // `MoveTo`/`Clear(FromCursorDown)`, exercised here through
+        // `TestBackend`'s equivalent `ClearType::AfterCursor`).
+        let w = 40u16;
+        let old_top = 5u16;
+        let old_h = 6u16;
+        let total_h = 30u16;
+
+        let mut backend = TestBackend::new(w, total_h);
+        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Inline(old_h) },
+        )
+        .unwrap();
+        let input = InputComponent::new();
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+        let content_row = first_content_row(term.backend(), old_top, old_h);
+
+        // last_inline_top, captured right before the full-screen excursion.
+        let remembered_top = Some(old_top);
+
+        let mut fixed = term.backend().clone();
+        let term_rows = fixed.size().unwrap().height;
+        let top = clamp_inline_top(remembered_top, term_rows).expect("top must be in bounds");
+        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
+        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+        assert!(
+            !row_has_content(&fixed, content_row),
+            "clearing from the remembered top must wipe the old chrome"
+        );
+
+        let new_h = 8u16;
+        let mut fixed_term = Terminal::with_options(fixed, TerminalOptions { viewport: Viewport::Inline(new_h) })
+            .unwrap();
+        assert_eq!(
+            fixed_term.get_frame().area().top(),
+            old_top,
+            "fixed rebuild must anchor exactly where the old chrome started, not below it"
+        );
+        assert!(
+            !row_has_content(fixed_term.backend(), content_row),
+            "fixed path: no row anywhere the old chrome used to be may still hold stale content"
+        );
+    }
+
+    #[test]
+    fn full_to_inline_fix_preserves_transcript_above_old_chrome() {
+        // The clear must never reach ABOVE the remembered top — that is real
+        // transcript scrollback, not chrome, and must survive untouched.
+        let w = 40u16;
+        let old_top = 6u16;
+        let old_h = 5u16;
+        let total_h = 30u16;
+
+        let mut backend = TestBackend::new(w, total_h);
+        // Paint a fake transcript line directly into the row just above the
+        // chrome (row old_top - 1), standing in for a finalized message that
+        // was flushed into native scrollback via insert_before.
+        {
+            use ratatui::widgets::Widget;
+            let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, old_top - 1, w, 1));
+            Paragraph::new("earlier transcript line").render(buf.area, &mut buf);
+            backend.draw(buf.content().iter().enumerate().map(|(i, c)| {
+                let x = (i as u16) % w;
+                let y = old_top - 1;
+                (x, y, c)
+            }))
+            .unwrap();
+        }
+        assert!(
+            row_has_content(&backend, old_top - 1),
+            "sanity: fake transcript row must have content before the clear"
+        );
+
+        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Inline(old_h) },
+        )
+        .unwrap();
+        let input = InputComponent::new();
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+
+        let mut fixed = term.backend().clone();
+        let top = clamp_inline_top(Some(old_top), fixed.size().unwrap().height).unwrap();
+        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
+        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+
+        assert!(
+            row_has_content(&fixed, old_top - 1),
+            "the real transcript row directly above the old chrome must survive the clear"
+        );
+    }
+
+    // ── Bug 2 repro/fix: `/clear` doesn't visibly clear ──────────────────────
+    //
+    // Root cause: in inline mode every finalized message is flushed into the
+    // terminal's REAL scrollback via `insert_before` (run-loop step 2), not
+    // into any ratatui-owned buffer. `/clear`'s in-memory resets (`self.chat`,
+    // `self.transcript_log`, ...) cannot touch that scrollback, and neither
+    // can `Terminal::clear()` (it only resets ratatui's own diff state / the
+    // live viewport region, never the host terminal's scroll history). The fix
+    // signals the event loop (which owns the terminal) via `pending_clear` to
+    // run `purge_scrollback()` (`ESC[3J` + `ESC[2J` + home) and rebuild the
+    // inline viewport fresh at the top. `ESC[3J` (erase saved lines) has no
+    // ratatui-level `ClearType` equivalent (it is a raw terminal/scrollback
+    // concept `TestBackend`'s in-memory model doesn't represent), so the
+    // scrollback purge itself can only be verified on a real TTY — see the
+    // manual verification note below. What IS covered here at the logic level:
+    // the App-side signal contract (set-once, consumed-once, deferred while a
+    // dialog owns the screen) and the shared "clear + rebuild lands the fresh
+    // viewport at the top" mechanism the two bugs both rely on.
+
+    #[test]
+    fn pending_clear_signal_is_consumed_exactly_once_when_inline() {
+        // Mirrors the run loop's `let do_clear = !want_full && self.pending_clear;`
+        // followed by `self.pending_clear = false;` inside the `if do_clear` arm
+        // -- consuming the flag only when it is actually acted on.
+        let mut pending_clear = true;
+        let want_full = false;
+        let do_clear = !want_full && pending_clear;
+        if do_clear {
+            pending_clear = false;
+        }
+        assert!(do_clear, "must fire while inline");
+        assert!(!pending_clear, "flag must be consumed exactly once");
+
+        // A second iteration with nothing new pending must not fire again.
+        let do_clear_again = !want_full && pending_clear;
+        assert!(!do_clear_again, "must not re-fire after being consumed");
+    }
+
+    #[test]
+    fn pending_clear_signal_is_deferred_not_dropped_while_full_screen() {
+        // If `/clear` somehow lands while a dialog owns the full screen, the
+        // flag must survive to the next inline iteration rather than being
+        // silently eaten by an unconditional `mem::take`.
+        let pending_clear = true;
+        let want_full = true;
+        let do_clear = !want_full && pending_clear;
+        assert!(!do_clear, "must not clear while a dialog owns the viewport");
+        // The (bugged) alternative -- `std::mem::take(&mut pending_clear) &&
+        // !want_full` -- would have zeroed `pending_clear` here even though
+        // `do_clear` is false, permanently losing the request. The fixed
+        // contract only writes `pending_clear = false` inside `if do_clear`.
+        assert!(pending_clear, "flag must remain set until we return inline");
+    }
+
+    #[test]
+    fn purged_and_rebuilt_inline_viewport_lands_at_the_top() {
+        // The scrollback purge itself (ESC[3J) has no TestBackend equivalent,
+        // but the second half of the fix -- home the cursor, then rebuild the
+        // inline viewport fresh -- is the exact same "clear + rebuild anchors
+        // the new viewport where the cursor was left" mechanism as Bug 1's
+        // fix, just anchored at (0, 0) instead of the old chrome's top. Proves
+        // the composer + status redraw at the very top of the (now empty)
+        // screen, not wherever the old composer happened to leave the cursor.
+        let w = 40u16;
+        let old_top = 12u16;
+        let old_h = 6u16;
+        let total_h = 30u16;
+
+        let mut backend = TestBackend::new(w, total_h);
+        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Inline(old_h) },
+        )
+        .unwrap();
+        let input = InputComponent::new();
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+
+        // purge_scrollback()'s ClearType::All + MoveTo(0, 0), modeled with the
+        // nearest TestBackend equivalent (a full clear + cursor home).
+        let mut purged = term.backend().clone();
+        purged.clear().unwrap(); // ClearType::All
+        purged.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+
+        for row in 0..total_h {
+            assert!(
+                !row_has_content(&purged, row),
+                "every row must be blank immediately after the purge"
+            );
+        }
+
+        let mut rebuilt = Terminal::with_options(purged, TerminalOptions { viewport: Viewport::Inline(old_h) })
+            .unwrap();
+        assert_eq!(
+            rebuilt.get_frame().area().top(),
+            0,
+            "the re-primed inline viewport must land at the very top of the screen"
         );
     }
 

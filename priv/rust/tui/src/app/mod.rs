@@ -372,6 +372,14 @@ pub struct App {
     // always reflects the FINAL size.
     pub resize_dirty: bool,
 
+    // One-shot "/clear was run" request. The terminal (and thus the real
+    // scrollback the finalized transcript lives in when inline) is owned by
+    // the event loop, not `App`, so `/clear` can only clear the in-memory
+    // state (`self.chat`, `self.transcript_log`, ...) and must signal the
+    // loop to purge the real scrollback + re-prime the inline viewport.
+    // Consumed (set back to false) once per event-loop iteration.
+    pub pending_clear: bool,
+
     // WS10 — user-configurable keybindings: compiled defaults overlaid by
     // ~/.osa/keybindings.json, consulted by update.rs before hardcoded arms.
     pub keymap: crate::config::keybindings::Keybindings,
@@ -596,6 +604,7 @@ impl App {
             esc_tracker: EscTracker::default(),
             force_redraw: false,
             resize_dirty: false,
+            pending_clear: false,
             keymap,
             chord_pending: None,
             kill_agents_armed: None,

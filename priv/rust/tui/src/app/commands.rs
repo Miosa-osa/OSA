@@ -130,6 +130,13 @@ impl App {
                 self.tasks.clear();
                 self.transcript_log.clear();
                 self.attachments.clear();
+                // In inline mode the finalized transcript lives in the real
+                // terminal scrollback (each message was flushed there via
+                // insert_before), which the clears above never touch. Signal
+                // the event loop (which owns the terminal) to purge the real
+                // scrollback and re-prime the inline viewport on its next
+                // iteration, or /clear looks like it silently did nothing.
+                self.pending_clear = true;
                 // ...AND a backend context reset (POST /sessions/:id/clear).
                 // Without it the model still carries the "cleared" context —
                 // CC commands/clear/conversation.ts parity. Failure surfaces
