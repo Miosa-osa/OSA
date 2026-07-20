@@ -1,8 +1,6 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const PANEL_WIDTH: u16 = 34;
 const MAX_HEIGHT: u16 = 12;
 
 pub struct ChecklistItem {
@@ -20,10 +18,26 @@ pub enum ChecklistStatus {
     Failed,
 }
 
+impl ChecklistStatus {
+    /// Stable ordinal used to key a snapshot so status changes are detected
+    /// (spinner ticks never touch this, so identical states never re-snapshot).
+    fn ordinal(&self) -> u8 {
+        match self {
+            ChecklistStatus::Pending => 0,
+            ChecklistStatus::InProgress => 1,
+            ChecklistStatus::Completed => 2,
+            ChecklistStatus::Failed => 3,
+        }
+    }
+}
+
 pub struct TaskChecklist {
     items: Vec<ChecklistItem>,
     visible: bool,
-    tick: u64,
+    /// Key of the last checklist state pushed to scrollback. `snapshot_if_changed`
+    /// compares against this so a snapshot is only emitted when the set of items
+    /// or any item's status actually differs from what history already shows.
+    last_snapshot_key: Option<String>,
 }
 
 impl TaskChecklist {
@@ -31,7 +45,7 @@ impl TaskChecklist {
         Self {
             items: Vec::new(),
             visible: true,
-            tick: 0,
+            last_snapshot_key: None,
         }
     }
 
@@ -54,7 +68,7 @@ impl TaskChecklist {
 
     /// The present-continuous `active_form` of the first in-progress task, if any.
     /// Feeds the activity spinner so it shows the current step (Claude Code's
-    /// activeForm). Returns `None` when nothing is in progress — the caller clears
+    /// activeForm). Returns `None` when nothing is in progress -- the caller clears
     /// the spinner override in that case.
     pub fn current_active_form(&self) -> Option<String> {
         self.items
@@ -75,105 +89,363 @@ impl TaskChecklist {
         self.visible && !self.items.is_empty()
     }
 
-    pub fn tick(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
-    }
+    /// Retained for the app loop's per-frame tick. The inline checklist no longer
+    /// animates a spinner (InProgress renders a static glyph), so this is a no-op.
+    pub fn tick(&mut self) {}
 
-    /// Total height including border (items + header line + 2 border rows).
+    /// Total height of the inline panel: one header line plus one row per item,
+    /// capped so a very long plan can never exceed the live region.
     pub fn height(&self) -> u16 {
-        // +2 for top/bottom border, +1 for the counter line
-        ((self.items.len() + 3) as u16).min(MAX_HEIGHT)
+        ((self.items.len() + 1) as u16).min(MAX_HEIGHT)
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.last_snapshot_key = None;
     }
 
+    /// Glyph + style for a status, shared by the live panel and the scrollback
+    /// snapshot so both read with the same grammar.
+    fn glyph_style(status: &ChecklistStatus, theme: &crate::style::Theme) -> (char, Style) {
+        match status {
+            // Completed: dimmed and struck through so finished steps recede.
+            ChecklistStatus::Completed => (
+                '\u{2714}', // heavy check
+                theme
+                    .task_done()
+                    .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM),
+            ),
+            // InProgress: the current step, accented and bold.
+            ChecklistStatus::InProgress => ('\u{25b8}', theme.task_active()), // right-pointing triangle
+            // Pending: faint, not yet started.
+            ChecklistStatus::Pending => ('\u{25a1}', theme.task_pending()), // white square
+            // Failed: red.
+            ChecklistStatus::Failed => ('\u{2717}', theme.task_failed()), // ballot X
+        }
+    }
+
+    /// Dim header line: `Updated plan` while a step is running, `Plan` otherwise,
+    /// followed by a compact `done/total` count. Both spans are faint so the
+    /// header stays quiet.
+    fn header_line(&self, theme: &crate::style::Theme) -> Line<'static> {
+        let in_progress = self
+            .items
+            .iter()
+            .any(|i| i.status == ChecklistStatus::InProgress);
+        let title = if in_progress { "Updated plan" } else { "Plan" };
+        let completed = self
+            .items
+            .iter()
+            .filter(|i| i.status == ChecklistStatus::Completed)
+            .count();
+        Line::from(vec![
+            Span::styled(title.to_string(), theme.faint()),
+            Span::styled(format!("  {}/{}", completed, self.items.len()), theme.faint()),
+        ])
+    }
+
+    /// One styled item line. When `max_width` is `Some`, the subject is truncated
+    /// on a char boundary to fit (glyph + space prefix accounted for); `None`
+    /// keeps the full subject (used by the frozen scrollback snapshot).
+    fn item_line(
+        item: &ChecklistItem,
+        theme: &crate::style::Theme,
+        max_width: Option<usize>,
+    ) -> Line<'static> {
+        let (glyph, style) = Self::glyph_style(&item.status, theme);
+        let subject = match max_width {
+            Some(w) => {
+                let avail = w.saturating_sub(2); // "{glyph} " prefix
+                if item.subject.len() > avail {
+                    format!(
+                        "{}\u{2026}",
+                        crate::util::truncate_str(&item.subject, avail.saturating_sub(1))
+                    )
+                } else {
+                    item.subject.clone()
+                }
+            }
+            None => item.subject.clone(),
+        };
+        Line::from(vec![
+            Span::styled(format!("{} ", glyph), style),
+            Span::styled(subject, style),
+        ])
+    }
+
+    /// A frozen, full-width snapshot of the current checklist as styled text,
+    /// used for the `Updated plan` scrollback cell.
+    fn snapshot_text(&self, theme: &crate::style::Theme) -> Text<'static> {
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.items.len() + 1);
+        lines.push(self.header_line(theme));
+        for item in &self.items {
+            lines.push(Self::item_line(item, theme, None));
+        }
+        Text::from(lines)
+    }
+
+    /// Plain-text form of the snapshot, stored on the scrollback cell so the
+    /// transcript log has readable text (the styled `Text` is display-only).
+    fn snapshot_plain(&self) -> String {
+        let in_progress = self
+            .items
+            .iter()
+            .any(|i| i.status == ChecklistStatus::InProgress);
+        let mut out = String::from(if in_progress { "Updated plan" } else { "Plan" });
+        for item in &self.items {
+            let mark = match item.status {
+                ChecklistStatus::Completed => "[x]",
+                ChecklistStatus::InProgress => "[>]",
+                ChecklistStatus::Pending => "[ ]",
+                ChecklistStatus::Failed => "[!]",
+            };
+            out.push('\n');
+            out.push_str(mark);
+            out.push(' ');
+            out.push_str(&item.subject);
+        }
+        out
+    }
+
+    /// Dedupe key: the ordered set of `id:status` pairs. Changes when an item is
+    /// added, removed, or transitions status; unaffected by anything cosmetic.
+    fn snapshot_key(&self) -> String {
+        self.items
+            .iter()
+            .map(|i| format!("{}:{}", i.id, i.status.ordinal()))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    /// If the rendered checklist state differs from the last one pushed to
+    /// scrollback, return the styled snapshot text and its plain-text form and
+    /// remember the new state. Returns `None` when nothing meaningful changed
+    /// (identical status, spinner ticks) or when there are no items.
+    pub fn snapshot_if_changed(&mut self) -> Option<(Text<'static>, String)> {
+        if self.items.is_empty() {
+            return None;
+        }
+        let key = self.snapshot_key();
+        if self.last_snapshot_key.as_deref() == Some(key.as_str()) {
+            return None;
+        }
+        self.last_snapshot_key = Some(key);
+        let theme = crate::style::theme();
+        Some((self.snapshot_text(&theme), self.snapshot_plain()))
+    }
+
+    /// Draw the live checklist inline, left-aligned, at the bottom of `area`.
+    /// No border, no title -- a dim header line then one glyph + text row per
+    /// item. Retains every panic-safety clamp of the old panel.
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
-        if !self.is_visible() || area.width < PANEL_WIDTH || area.height < 4 {
+        if !self.is_visible() {
             return;
         }
 
         let theme = crate::style::theme();
-        // Clamp the panel height to the parent area: `height()` grows with the item
-        // count and can exceed the live region. Left unclamped it once produced a
-        // panel that sat ABOVE the inline viewport and wrote outside the frame
-        // buffer, panicking with "index outside of buffer". Never taller/wider
-        // than the area we were handed.
+        // Clamp the panel height to the parent area: `height()` grows with the
+        // item count and can exceed the live region. Left unclamped it once
+        // produced a panel that sat ABOVE the inline viewport and wrote outside
+        // the frame buffer, panicking with "index outside of buffer". Never
+        // taller than the area we were handed.
         let h = self.height().min(area.height);
-        let w = PANEL_WIDTH.min(area.width);
-        if h < 3 || w == 0 {
+        let w = area.width;
+        if h < 2 || w < 8 {
             return;
         }
 
-        // Position: bottom-right of the given area.
-        let x = area.x + area.width.saturating_sub(w);
+        // Bottom-left of the given area.
+        let x = area.x;
         let y = area.y + area.height.saturating_sub(h);
         let panel = Rect::new(x, y, w, h);
 
-        // Second line of defense: intersect the self-computed panel with the
-        // frame's real drawable area. If the (already area-clamped) panel still
-        // does not fully fit the frame, render nothing rather than risk writing
-        // outside the buffer.
+        // Second line of defense: intersect with the frame's real drawable area.
+        // If the (already area-clamped) panel still does not fully fit the frame,
+        // render nothing rather than risk writing outside the buffer.
         let bounds = frame.area();
         let panel = panel.intersection(bounds);
         if panel.width == 0 || panel.height == 0 {
             return;
         }
 
-        let block = Block::default()
-            .title(" Tasks ")
-            .title_style(theme.section_title())
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.colors.border));
+        let width = panel.width as usize;
+        let max_rows = panel.height as usize;
 
-        let inner = block.inner(panel);
-        crate::app::event_loop::safe_render_widget(frame, block, panel);
-
-        if inner.height == 0 || inner.width == 0 {
-            return;
-        }
-
-        let completed = self.items.iter().filter(|i| i.status == ChecklistStatus::Completed).count();
-        let total = self.items.len();
-        let max_subject_len = (inner.width as usize).saturating_sub(4); // "  X " prefix
-
-        let mut lines: Vec<Line> = Vec::with_capacity(total + 1);
-
-        // Counter line
-        lines.push(Line::from(Span::styled(
-            format!("  {} of {} completed", completed, total),
-            theme.faint(),
-        )));
-
-        // Item lines
-        let spinner_char = SPINNER_FRAMES[(self.tick as usize) % SPINNER_FRAMES.len()];
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(max_rows);
+        lines.push(self.header_line(&theme));
         for item in &self.items {
-            let (icon, style) = match item.status {
-                ChecklistStatus::Completed => ('✓', theme.task_done()),
-                ChecklistStatus::InProgress => (spinner_char, theme.task_active()),
-                ChecklistStatus::Pending => ('○', theme.task_pending()),
-                ChecklistStatus::Failed => ('✗', theme.task_failed()),
-            };
-
-            let subject = if item.subject.len() > max_subject_len {
-                // Slice on a char boundary so multi-byte subjects can never panic.
-                format!(
-                    "{}…",
-                    crate::util::truncate_str(&item.subject, max_subject_len.saturating_sub(1))
-                )
-            } else {
-                item.subject.clone()
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", icon), style),
-                Span::styled(subject, style),
-            ]));
+            if lines.len() >= max_rows {
+                break;
+            }
+            lines.push(Self::item_line(item, &theme, Some(width)));
         }
 
         let para = Paragraph::new(lines);
-        crate::app::event_loop::safe_render_widget(frame, para, inner);
+        crate::app::event_loop::safe_render_widget(frame, para, panel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: &str, subject: &str, status: ChecklistStatus) -> ChecklistItem {
+        ChecklistItem {
+            id: id.to_string(),
+            subject: subject.to_string(),
+            status,
+            active_form: None,
+        }
+    }
+
+    fn checklist(items: Vec<ChecklistItem>) -> TaskChecklist {
+        TaskChecklist {
+            items,
+            visible: true,
+            last_snapshot_key: None,
+        }
+    }
+
+    /// Flatten a `Text` into per-line "glyph+content" strings.
+    fn flat(text: &Text<'_>) -> Vec<String> {
+        text.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn header_says_updated_plan_while_running_else_plan() {
+        let theme = crate::style::theme();
+        let running = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
+        let idle = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        let h_running: String = running.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+        let h_idle: String = idle.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(h_running.starts_with("Updated plan"), "got {h_running:?}");
+        assert!(h_idle.starts_with("Plan"), "got {h_idle:?}");
+    }
+
+    #[test]
+    fn progress_count_renders() {
+        let theme = crate::style::theme();
+        let c = checklist(vec![
+            item("1", "a", ChecklistStatus::Completed),
+            item("2", "b", ChecklistStatus::Completed),
+            item("3", "c", ChecklistStatus::Pending),
+        ]);
+        let header: String = c.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("2/3"), "expected 2/3 count, got {header:?}");
+    }
+
+    #[test]
+    fn each_status_uses_its_own_glyph_and_style() {
+        let theme = crate::style::theme();
+        let cases = [
+            (ChecklistStatus::Completed, '\u{2714}'),
+            (ChecklistStatus::InProgress, '\u{25b8}'),
+            (ChecklistStatus::Pending, '\u{25a1}'),
+            (ChecklistStatus::Failed, '\u{2717}'),
+        ];
+        for (status, glyph) in cases {
+            let (g, _style) = TaskChecklist::glyph_style(&status, &theme);
+            assert_eq!(g, glyph, "wrong glyph for status");
+        }
+        // Completed is struck through and dimmed; InProgress is bold.
+        let (_g, done) = TaskChecklist::glyph_style(&ChecklistStatus::Completed, &theme);
+        assert!(done.add_modifier.contains(Modifier::CROSSED_OUT));
+        assert!(done.add_modifier.contains(Modifier::DIM));
+        let (_g, active) = TaskChecklist::glyph_style(&ChecklistStatus::InProgress, &theme);
+        assert!(active.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn snapshot_text_has_header_plus_one_line_per_item() {
+        let theme = crate::style::theme();
+        let c = checklist(vec![
+            item("1", "first", ChecklistStatus::Completed),
+            item("2", "second", ChecklistStatus::InProgress),
+        ]);
+        let lines = flat(&c.snapshot_text(&theme));
+        assert_eq!(lines.len(), 3); // header + 2 items
+        assert!(lines[0].starts_with("Updated plan"));
+        assert!(lines[1].contains("first"));
+        assert!(lines[2].contains("second"));
+    }
+
+    #[test]
+    fn snapshot_dedupes_identical_states() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        // First call snapshots.
+        assert!(c.snapshot_if_changed().is_some());
+        // Identical state -> no new snapshot (simulates a no-op TaskUpdated).
+        assert!(c.snapshot_if_changed().is_none());
+        assert!(c.snapshot_if_changed().is_none());
+    }
+
+    #[test]
+    fn snapshot_fires_again_on_real_status_change() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        assert!(c.snapshot_if_changed().is_some());
+        assert!(c.snapshot_if_changed().is_none());
+        // A real transition changes the key -> new snapshot.
+        c.update("1", ChecklistStatus::InProgress);
+        assert!(c.snapshot_if_changed().is_some());
+        // And adding an item also changes the set.
+        c.add("2".into(), "b".into(), None);
+        assert!(c.snapshot_if_changed().is_some());
+    }
+
+    #[test]
+    fn empty_checklist_never_snapshots() {
+        let mut c = checklist(vec![]);
+        assert!(c.snapshot_if_changed().is_none());
+    }
+
+    #[test]
+    fn draw_has_no_border_or_title() {
+        // Render the live panel and assert none of the box-drawing border chars
+        // nor the old " Tasks " title appear anywhere in the buffer.
+        let c = checklist(vec![
+            item("1", "alpha", ChecklistStatus::Completed),
+            item("2", "beta", ChecklistStatus::InProgress),
+        ]);
+        let area = Rect::new(0, 0, 40, 10);
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| c.draw(f, area)).unwrap();
+        let rendered = term.backend().buffer().clone();
+        let text: String = rendered.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(!text.contains("Tasks"), "no title");
+        for border in ['\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}', '\u{2502}', '\u{2500}'] {
+            assert!(!text.contains(border), "no border glyph {border:?}");
+        }
+        // Header and content are present.
+        assert!(text.contains("Updated plan"));
+        assert!(text.contains("alpha"));
+    }
+
+    #[test]
+    fn draw_does_not_panic_at_tiny_or_edge_sizes() {
+        let c = checklist(vec![
+            item("1", "a very long subject that will need truncation for sure", ChecklistStatus::Pending),
+            item("2", "second item", ChecklistStatus::InProgress),
+            item("3", "third", ChecklistStatus::Completed),
+        ]);
+        for (w, h) in [(0u16, 0u16), (1, 1), (2, 2), (8, 1), (8, 2), (10, 3), (200, 200)] {
+            let backend = ratatui::backend::TestBackend::new(w.max(1), h.max(1));
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            let area = Rect::new(0, 0, w, h);
+            // Must never panic regardless of area size.
+            term.draw(|f| c.draw(f, area)).unwrap();
+        }
+    }
+
+    #[test]
+    fn draw_noop_when_hidden_or_empty() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        c.hide();
+        assert!(!c.is_visible());
+        let empty = checklist(vec![]);
+        assert!(!empty.is_visible());
     }
 }

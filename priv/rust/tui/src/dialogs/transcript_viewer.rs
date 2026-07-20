@@ -85,6 +85,7 @@ pub fn entry_from_message(msg: &Message) -> Option<TranscriptEntry> {
         }
         MessageType::ToolCall => TranscriptRole::Tool,
         MessageType::SurveyQA => TranscriptRole::System,
+        MessageType::Plan => TranscriptRole::System,
         MessageType::Help => return None,
     };
 

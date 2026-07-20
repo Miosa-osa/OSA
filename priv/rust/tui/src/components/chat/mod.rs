@@ -229,6 +229,12 @@ impl Chat {
         self.push_scrollback_block(Message::new(msg_type, content.to_string(), None));
     }
 
+    /// Push an `Updated plan` snapshot cell into scrollback. `body` is the frozen
+    /// styled checklist; `plain` is its plain-text form for the transcript log.
+    pub fn add_plan_snapshot(&mut self, body: Text<'static>, plain: String) {
+        self.push_scrollback_block(Message::new_plan(body, plain));
+    }
+
     /// Add a styled help message (rendering is hardcoded).
     pub fn add_help_message(&mut self) {
         self.push_scrollback_block(Message::new(MessageType::Help, String::new(), None));

@@ -509,6 +509,12 @@ impl App {
             } => {
                 self.tasks.add(task_id.clone(), subject.clone(), String::new());
                 self.task_checklist.add(task_id, subject, Some(active_form));
+                // Snapshot the plan into scrollback when it meaningfully changes
+                // (dedup guards against no-op churn), so history shows the plan
+                // evolving the way Codex prints "Updated plan" cells.
+                if let Some((body, plain)) = self.task_checklist.snapshot_if_changed() {
+                    self.chat.add_plan_snapshot(body, plain);
+                }
                 self.recompute_layout();
             }
             BackendEvent::TaskUpdated { task_id, status } => {
@@ -525,6 +531,12 @@ impl App {
                 // progress (current_active_form -> None).
                 let verb = self.task_checklist.current_active_form();
                 self.activity.set_active_verb(verb);
+                // Snapshot only when the checklist state actually differs from the
+                // last one in scrollback (a real status transition), not on every
+                // TaskUpdated or spinner tick.
+                if let Some((body, plain)) = self.task_checklist.snapshot_if_changed() {
+                    self.chat.add_plan_snapshot(body, plain);
+                }
             }
             BackendEvent::TaskChecklistShow { tasks } => {
                 self.task_checklist.clear();

@@ -23,6 +23,10 @@ pub enum MessageType {
     ToolCall,
     Help,
     SurveyQA,
+    /// A frozen "Updated plan" checklist snapshot pushed into scrollback when the
+    /// task plan meaningfully changes. Renders its pre-built styled lines (carried
+    /// in `prerendered_body`) with no border, mirroring the live inline panel.
+    Plan,
 }
 
 /// Number of rendered lines for the Help message (must match `build_help_lines`).
@@ -135,6 +139,24 @@ impl Message {
         }
     }
 
+    /// Create a `Plan` snapshot cell. `body` is the pre-rendered styled checklist
+    /// (header + one line per item) shown in scrollback; `plain` is its plain-text
+    /// form, kept in `content` so the transcript log has readable text. Carries no
+    /// timestamp (like tool calls) so it reads as an inline status cell.
+    pub fn new_plan(body: Text<'static>, plain: String) -> Self {
+        Self {
+            msg_type: MessageType::Plan,
+            content: plain,
+            signal: None,
+            tool_data: None,
+            survey_data: None,
+            cached_height: None,
+            timestamp: None,
+            prerendered_body: Some(body),
+            raw_mode: false,
+        }
+    }
+
     /// Create a turn separator: an understated dim horizontal rule drawn between
     /// conversation turns. Carried as a `ToolCall` message (see
     /// [`TURN_SEPARATOR_MARKER`]) holding a single placeholder line so its height
@@ -199,6 +221,16 @@ impl Message {
         // Help messages have fixed styled content — bypass text-based calc.
         if matches!(self.msg_type, MessageType::Help) {
             return HELP_LINE_COUNT;
+        }
+
+        // Plan snapshot: one row per pre-rendered line (header + items).
+        if matches!(self.msg_type, MessageType::Plan) {
+            return self
+                .prerendered_body
+                .as_ref()
+                .map(|b| b.lines.len() as u16)
+                .unwrap_or(1)
+                .max(1);
         }
 
         // Tool call messages with rich data — use line count directly.
@@ -330,7 +362,26 @@ impl Message {
             MessageType::SurveyQA => {
                 self.draw_survey_qa(buf, area, &theme)
             }
+            MessageType::Plan => {
+                self.draw_plan(buf, area, scroll_top)
+            }
         }
+    }
+
+    /// Draw a `Plan` snapshot: the frozen styled checklist lines, left-aligned,
+    /// with no border or title (same understated grammar as the live panel).
+    /// Width-safe — `Paragraph` clips to the area and never panics.
+    fn draw_plan(&self, buf: &mut Buffer, area: Rect, scroll_top: u16) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let text = self
+            .prerendered_body
+            .clone()
+            .unwrap_or_else(|| Text::from(""));
+        Paragraph::new(text)
+            .scroll((scroll_top, 0))
+            .render(area, buf);
     }
 
     fn draw_user(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme, scroll_top: u16) {
