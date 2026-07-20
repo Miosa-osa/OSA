@@ -40,6 +40,12 @@ defmodule OptimalSystemAgent.OpenComputers.RemoteTest do
              {:remote_session_open, %{ref: "r", host_id: "h", kind: :exec, params: %{cmd: "pwd"}}}
            )
 
+    assert Protocol.client_body?(
+             {:remote_session_close, %{session_id: "s", reason: :client_closed}}
+           )
+
+    refute Protocol.client_body?({:remote_session_close, %{session_id: "s"}})
+
     refute Protocol.client_body?({:remote_session_frame, %{session_id: "s", frame: {:job, %{}}}})
   end
 

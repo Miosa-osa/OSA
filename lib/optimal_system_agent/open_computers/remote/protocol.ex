@@ -44,8 +44,9 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Protocol do
       when is_binary(ref) and is_binary(host_id) and kind in [:exec, :agent] and is_map(params),
       do: true
 
-  def client_body?({:remote_session_close, %{session_id: session_id}}) when is_binary(session_id),
-    do: true
+  def client_body?({:remote_session_close, %{session_id: session_id, reason: reason}})
+      when is_binary(session_id) and reason in [:client_closed, :cancelled],
+      do: true
 
   def client_body?({:pong, seq}) when is_integer(seq), do: true
   def client_body?(_), do: false

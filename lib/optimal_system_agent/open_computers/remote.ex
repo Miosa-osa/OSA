@@ -123,7 +123,7 @@ defmodule OptimalSystemAgent.OpenComputers.Remote do
     _ =
       Client.request(
         client,
-        {:remote_session_close, %{session_id: session_id}},
+        {:remote_session_close, %{session_id: session_id, reason: :client_closed}},
         fn _ -> false end,
         0
       )
