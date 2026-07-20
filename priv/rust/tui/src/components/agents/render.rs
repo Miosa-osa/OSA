@@ -286,6 +286,37 @@ impl Agents {
                     frame.render_widget(Paragraph::new(row), Rect::new(area.x, y, area.width, 1));
                     y += 1;
                 }
+
+                // Result-summary line: a dim, single truncated `⎿ <summary>` under
+                // a FINISHED worker so the panel shows WHAT it produced, not just
+                // that it finished. Only for terminal rows carrying a summary;
+                // running rows are untouched. Failed rows use the error color.
+                // MUST stay in lockstep with `Agents::entry_rows`.
+                if matches!(entry.status, AgentStatus::Completed | AgentStatus::Failed) {
+                    if let Some(summary) = entry.result_summary.as_deref() {
+                        if y < area.y + area.height {
+                            let style = if entry.status == AgentStatus::Failed {
+                                theme.error_text()
+                            } else {
+                                theme.faint()
+                            };
+                            let max_summary = (area.width as usize)
+                                .saturating_sub(continuation.len() + 4)
+                                .max(8);
+                            let summary_truncated = truncate_str(summary, max_summary);
+                            let row = Line::from(vec![
+                                Span::styled(continuation, theme.faint()),
+                                Span::styled("\u{23bf} ", theme.faint()),
+                                Span::styled(summary_truncated, style),
+                            ]);
+                            frame.render_widget(
+                                Paragraph::new(row),
+                                Rect::new(area.x, y, area.width, 1),
+                            );
+                            y += 1;
+                        }
+                    }
+                }
             }
         }
 

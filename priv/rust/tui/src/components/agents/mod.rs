@@ -225,7 +225,9 @@ impl Agents {
                 let more = usize::from(entry.tool_uses as usize > shown);
                 1 + (shown + more).max(1) as u16
             }
-            _ => 2,
+            // Terminal rows: 1 subject + 1 Done/Failed trail + an optional dim
+            // `⎿ <summary>` line when the backend delivered a result preview.
+            _ => 2 + u16::from(entry.result_summary.is_some()),
         }
     }
 
@@ -310,6 +312,7 @@ impl Agents {
                     started_at: std::time::Instant::now(),
                     finished_at: None,
                     last_activity: std::time::Instant::now(),
+                    result_summary: None,
                 });
             }
         }
@@ -341,6 +344,7 @@ impl Agents {
             entry.started_at = std::time::Instant::now();
             entry.finished_at = None;
             entry.last_activity = std::time::Instant::now();
+            entry.result_summary = None;
             if batch_id.is_some() {
                 entry.batch_id = batch_id;
             }
@@ -359,6 +363,7 @@ impl Agents {
                 started_at: std::time::Instant::now(),
                 finished_at: None,
                 last_activity: std::time::Instant::now(),
+                result_summary: None,
             });
         }
         self.active = true;
@@ -396,13 +401,20 @@ impl Agents {
         }
     }
 
-    pub fn agent_completed(&mut self, name: &str, tool_uses: u32, tokens: u32) {
+    pub fn agent_completed(
+        &mut self,
+        name: &str,
+        tool_uses: u32,
+        tokens: u32,
+        summary: Option<String>,
+    ) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.status = AgentStatus::Completed;
             entry.current_action = "complete".into();
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
             entry.finished_at = Some(std::time::Instant::now());
+            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
         }
     }
 
@@ -412,6 +424,7 @@ impl Agents {
         error: impl Into<String>,
         tool_uses: u32,
         tokens: u32,
+        summary: Option<String>,
     ) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.status = AgentStatus::Failed;
@@ -419,6 +432,7 @@ impl Agents {
             entry.tool_uses = tool_uses;
             entry.tokens_used = tokens;
             entry.finished_at = Some(std::time::Instant::now());
+            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
         }
     }
 
@@ -617,5 +631,86 @@ mod tests {
         a.agent_started("worker-1", "", "", "work", None);
         let text = render_text(&a, 80, 8);
         assert!(!text.contains("scratchpad"), "unexpected scratchpad section: {:?}", text);
+    }
+
+    #[test]
+    fn completed_summary_populates_entry_and_renders_dim_line() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_completed("worker-1", 3, 1200, Some("Found 4 dead code paths".to_string()));
+
+        // Entry carries the summary + the terminal row reserves one extra line.
+        let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(entry.result_summary.as_deref(), Some("Found 4 dead code paths"));
+        assert_eq!(Agents::entry_rows(entry), 3);
+
+        let text = render_text(&a, 80, 12);
+        // The dim `⎿ <summary>` line is visible under the finished row.
+        assert!(text.contains("Found 4 dead code paths"), "missing summary line: {:?}", text);
+        assert!(text.contains('\u{23bf}'), "missing ⎿ glyph: {:?}", text);
+    }
+
+    #[test]
+    fn completed_without_summary_renders_no_extra_line() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan modules", None);
+        a.agent_completed("worker-1", 1, 100, None);
+
+        let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(entry.result_summary, None);
+        // No summary → compact 2-row terminal layout, no ⎿ line.
+        assert_eq!(Agents::entry_rows(entry), 2);
+        let text = render_text(&a, 80, 12);
+        assert!(!text.contains('\u{23bf}'), "unexpected ⎿ line: {:?}", text);
+    }
+
+    #[test]
+    fn blank_summary_is_treated_as_none() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_completed("worker-1", 0, 0, Some("   \n  ".to_string()));
+        let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(entry.result_summary, None, "whitespace-only summary must be dropped");
+    }
+
+    #[test]
+    fn failed_summary_renders_in_error_style() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_failed("worker-1", "timeout", 2, 500, Some("join timeout after 300ms".to_string()));
+
+        let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(entry.status, AgentStatus::Failed);
+        assert_eq!(entry.result_summary.as_deref(), Some("join timeout after 300ms"));
+        let text = render_text(&a, 80, 12);
+        assert!(text.contains("join timeout after 300ms"), "missing failed summary: {:?}", text);
+    }
+
+    #[test]
+    fn summary_line_is_width_truncated() {
+        let mut a = Agents::new();
+        a.agent_started("w", "", "", "s", None);
+        let long = "abcdefghijklmnopqrstuvwxyz0123456789 ".repeat(6);
+        a.agent_completed("w", 1, 1, Some(long));
+        // Narrow panel: the summary line must fit (ellipsis), no panic, no wrap.
+        let text = render_text(&a, 40, 10);
+        assert!(text.contains('\u{2026}'), "expected ellipsis truncation: {:?}", text);
+    }
+
+    #[test]
+    fn summary_clears_when_agent_restarts_and_on_new_turn() {
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "", "", "work", None);
+        a.agent_completed("worker-1", 1, 1, Some("done stuff".to_string()));
+        assert!(a.entries[0].result_summary.is_some());
+
+        // Re-running the same agent (resume/new wave) clears the stale summary.
+        a.agent_started("worker-1", "", "", "work", None);
+        assert_eq!(a.entries[0].result_summary, None);
+
+        a.agent_completed("worker-1", 1, 1, Some("done again".to_string()));
+        // A new top-level turn wipes the whole panel (rows + their summaries).
+        a.task_started("task-2");
+        assert_eq!(a.entry_count(), 0);
     }
 }

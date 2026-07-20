@@ -1268,16 +1268,22 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
-            BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, .. } => {
-                self.agents.agent_completed(&agent_name, tool_uses, tokens_used);
+            BackendEvent::OrchestratorAgentCompleted { agent_name, tool_uses, tokens_used, summary, .. } => {
+                self.agents.agent_completed(&agent_name, tool_uses, tokens_used, summary);
                 self.sidebar.set_current_agent("");
                 // Clear the stale "@agent: subject" spinner label set on every
                 // progress tick — otherwise the leader spinner keeps naming a
                 // finished sub-agent until some unrelated event overwrites it.
                 self.activity.set_active_verb(None);
             }
-            BackendEvent::OrchestratorAgentFailed { agent_name, error, tool_uses, tokens_used } => {
-                self.agents.agent_failed(&agent_name, &error, tool_uses, tokens_used);
+            BackendEvent::OrchestratorAgentFailed { agent_name, error, tool_uses, tokens_used, summary } => {
+                // Fall back to the (truncated) error text when the backend sent no
+                // dedicated summary, so a failed row still previews what went wrong.
+                let fail_summary = summary.or_else(|| {
+                    let e = error.trim();
+                    if e.is_empty() { None } else { Some(e.chars().take(140).collect()) }
+                });
+                self.agents.agent_failed(&agent_name, &error, tool_uses, tokens_used, fail_summary);
                 self.sidebar.set_current_agent("");
             }
             BackendEvent::OrchestratorWaveStarted { wave_number, total_waves } => {
@@ -1365,7 +1371,11 @@ impl App {
             }
             BackendEvent::BackgroundAgentCompleted { agent_id, role, result, duration_ms } => {
                 let label = if role.is_empty() { "background".to_string() } else { role };
-                self.agents.agent_completed(&agent_id, 0, 0);
+                let panel_summary: Option<String> = {
+                    let first = result.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
+                };
+                self.agents.agent_completed(&agent_id, 0, 0, panel_summary);
                 let preview: String = result.trim().chars().take(200).collect();
                 // Format duration as h/m/s (shared formatter) so a 2h33m run reads
                 // "2h33m", not "9180.0s". Styled as a teammate-finished line.
@@ -1385,7 +1395,11 @@ impl App {
             }
             BackendEvent::BackgroundAgentFailed { agent_id, role, error, duration_ms } => {
                 let label = if role.is_empty() { "background".to_string() } else { role };
-                self.agents.agent_failed(&agent_id, error.clone(), 0, 0);
+                let panel_summary: Option<String> = {
+                    let first = error.trim().lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    if first.is_empty() { None } else { Some(first.chars().take(140).collect()) }
+                };
+                self.agents.agent_failed(&agent_id, error.clone(), 0, 0, panel_summary);
                 let preview: String = error.trim().chars().take(200).collect();
                 let elapsed = crate::util::fmt_elapsed(duration_ms / 1000);
                 self.chat.add_system_message(

@@ -88,12 +88,17 @@ pub enum BackendEvent {
         status: String,
         tool_uses: u32,
         tokens_used: u32,
+        /// Compact one-line preview of the worker's final result (<=~140 chars),
+        /// surfaced under the finished row. `None` from older backends.
+        summary: Option<String>,
     },
     OrchestratorAgentFailed {
         agent_name: String,
         error: String,
         tool_uses: u32,
         tokens_used: u32,
+        /// Compact one-line error preview (<=~140 chars). `None` from older backends.
+        summary: Option<String>,
     },
     OrchestratorWaveStarted {
         wave_number: u32,

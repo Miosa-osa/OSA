@@ -851,6 +851,9 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tokens_used: u32,
                 #[serde(default)]
                 error: String,
+                // Compact one-line result/error preview (absent from older backends).
+                #[serde(default)]
+                summary: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             // Backend uses this event for both success and failure
@@ -860,6 +863,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                     error: ev.error,
                     tool_uses: ev.tool_uses,
                     tokens_used: ev.tokens_used,
+                    summary: ev.summary,
                 })
             } else {
                 Some(BackendEvent::OrchestratorAgentCompleted {
@@ -867,6 +871,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                     status: ev.status,
                     tool_uses: ev.tool_uses,
                     tokens_used: ev.tokens_used,
+                    summary: ev.summary,
                 })
             }
         }
@@ -882,6 +887,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 tool_uses: u32,
                 #[serde(default)]
                 tokens_used: u32,
+                #[serde(default)]
+                summary: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentFailed {
@@ -889,6 +896,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 error: ev.error,
                 tool_uses: ev.tool_uses,
                 tokens_used: ev.tokens_used,
+                summary: ev.summary,
             })
         }
 
@@ -1578,6 +1586,38 @@ mod tests {
             Some(BackendEvent::ScratchpadActivity { action, bytes, .. }) => {
                 assert_eq!(action, "append");
                 assert_eq!(bytes, 42);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_agent_completed_summary_backward_compatible() {
+        // Success frame WITH a summary → OrchestratorAgentCompleted carrying it.
+        let ok = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w1","status":"completed","tool_uses":3,"tokens_used":1200,"summary":"Found 4 dead paths"}"#;
+        match parse_sse_event("orchestrator_agent_completed", ok) {
+            Some(BackendEvent::OrchestratorAgentCompleted { agent_name, summary, .. }) => {
+                assert_eq!(agent_name, "w1");
+                assert_eq!(summary.as_deref(), Some("Found 4 dead paths"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Failure frame carries the error summary on the same field.
+        let fail = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w2","status":"failed","error":"boom","summary":"boom: join timeout"}"#;
+        match parse_sse_event("orchestrator_agent_completed", fail) {
+            Some(BackendEvent::OrchestratorAgentFailed { agent_name, summary, .. }) => {
+                assert_eq!(agent_name, "w2");
+                assert_eq!(summary.as_deref(), Some("boom: join timeout"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Older backend without the field → summary is None (no panic, no drop).
+        let legacy = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w3","status":"completed","tool_uses":1,"tokens_used":10}"#;
+        match parse_sse_event("orchestrator_agent_completed", legacy) {
+            Some(BackendEvent::OrchestratorAgentCompleted { summary, .. }) => {
+                assert_eq!(summary, None);
             }
             other => panic!("unexpected: {:?}", other),
         }

@@ -487,6 +487,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           agent_name: subagent_id,
           status: "failed",
           error: inspect(reason),
+          summary: completion_summary(inspect(reason)),
           tool_uses: 0,
           tokens_used: 0
         })
@@ -975,6 +976,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           tokens_used: tokens_used,
           duration_ms: duration_ms,
           batch_id: batch_id,
+          summary: completion_summary(structured),
           result: structured
         })
 
@@ -1001,6 +1003,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           display_name: display_name,
           status: "failed",
           error: to_string(reason),
+          summary: completion_summary(to_string(reason)),
           tool_uses: tool_uses,
           tokens_used: tokens_used,
           duration_ms: duration_ms,
@@ -1039,7 +1042,8 @@ defmodule OptimalSystemAgent.Orchestrator do
           tool_uses: tool_uses,
           tokens_used: tokens_used,
           duration_ms: duration_ms,
-          batch_id: batch_id
+          batch_id: batch_id,
+          summary: completion_summary(structured)
         })
 
         emit_agent_finished(parent_id, subagent_id, display_name, duration_ms, batch_id, :completed)
@@ -1184,6 +1188,46 @@ defmodule OptimalSystemAgent.Orchestrator do
     do: "the subagent process crashed/exited: #{inspect(reason)}"
 
   defp failure_reason_text(reason), do: inspect(reason)
+
+  # Longest compact `summary` shipped to the TUI agents panel. The full
+  # structured result (which can be large) is NEVER sent on this field — only
+  # this short, single-line preview rides the completion event.
+  @summary_max 140
+
+  # Best-effort compact one-line summary of a worker's final result (or error),
+  # for the agents panel. Takes the first meaningful line, collapses interior
+  # whitespace/newlines, and trims to `@summary_max` chars. Never raises: any
+  # extraction failure yields "" so it can never break the completion emit.
+  # Public only as a deterministic test seam (`@doc false`); not a stable API.
+  @doc false
+  def completion_summary(source) do
+    source
+    |> summary_source_text()
+    |> first_meaningful_line()
+    |> String.slice(0, @summary_max)
+  rescue
+    _ -> ""
+  catch
+    _, _ -> ""
+  end
+
+  # Pull the worker's final assistant text out of whatever we were handed. A
+  # structured result map carries it in `:summary`; a bare string is used as-is;
+  # anything without an obvious text field falls back to a truncated inspect.
+  defp summary_source_text(%{summary: s}) when is_binary(s), do: s
+  defp summary_source_text(s) when is_binary(s), do: s
+  defp summary_source_text(other), do: inspect(other)
+
+  # First non-blank line with interior runs of whitespace (including embedded
+  # newlines) collapsed to single spaces, so the panel always gets ONE clean line.
+  defp first_meaningful_line(text) do
+    text
+    |> String.split(~r/\r?\n/)
+    |> Enum.map(&String.trim/1)
+    |> Enum.find("", &(&1 != ""))
+    |> then(&Regex.replace(~r/\s+/, &1, " "))
+    |> String.trim()
+  end
 
   defp changed_files(nil), do: []
 

@@ -33,6 +33,12 @@ pub struct AgentEntry {
     /// dropped it) it stops updating this — so the panel can detect it as stale
     /// and stop showing a dead "Running … 14m" ghost forever.
     pub last_activity: std::time::Instant,
+    /// Compact one-line preview of what this worker PRODUCED, set when it reaches
+    /// a terminal state (the first meaningful line of its final result, or a
+    /// short error on failure). Rendered as a dim `⎿ <summary>` line under the
+    /// finished row so a fan-out shows the outcome, not just "@name finished".
+    /// `None` while running or when the backend sent no summary.
+    pub result_summary: Option<String>,
 }
 
 impl AgentEntry {
