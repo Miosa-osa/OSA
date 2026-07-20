@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   @moduledoc """
   CLI handler for `osa opencomputers <verb>`.
 
-  Verbs: status | login | connect | enable | disable | logout
+  Verbs: status | login | connect | enable | disable | logout | remote
   """
 
   defp osa_dir, do: System.get_env("OSA_HOME") || Path.join(System.user_home!(), ".osa")
@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
       "enable" -> cmd_enable(rest)
       "disable" -> cmd_disable()
       "logout" -> cmd_logout(rest)
+      "remote" -> cmd_remote(rest)
       _ -> usage()
     end
   end
@@ -395,6 +396,127 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     end
   end
 
+  # ── remote client ─────────────────────────────────────────────────
+
+  # Host mode owns a machine with an oc_host_* grant. Remote mode is for a
+  # person using their existing MIOSA account credential to reach a host they
+  # own. Keeping both verbs here makes the credential boundary visible.
+  defp cmd_remote(["hosts" | args]) do
+    opts = remote_opts(args)
+
+    case OptimalSystemAgent.OpenComputers.Remote.list_hosts(opts) do
+      {:ok, hosts} ->
+        Enum.each(hosts, fn host ->
+          IO.puts(
+            [
+              Map.get(host, :id, "unknown"),
+              Map.get(host, :name, Map.get(host, :alias, "")),
+              if(Map.get(host, :online, false), do: "online", else: "offline")
+            ]
+            |> Enum.join("\t")
+          )
+        end)
+
+      {:error, reason} ->
+        remote_error(reason)
+    end
+  end
+
+  defp cmd_remote(["exec" | args]) do
+    {opts, command_args, _} =
+      OptionParser.parse(args,
+        strict: [host: :string, url: :string, timeout: :integer, account_key: :string],
+        aliases: [h: :host]
+      )
+
+    host_id = opts[:host]
+    command = Enum.join(command_args, " ")
+
+    if is_binary(host_id) and host_id != "" and command != "" do
+      case OptimalSystemAgent.OpenComputers.Remote.exec(
+             host_id,
+             command,
+             normalize_remote_opts(opts)
+           ) do
+        {:ok, result} -> IO.puts(format_remote_result(result))
+        {:error, reason} -> remote_error(reason)
+      end
+    else
+      IO.puts("Usage: osa opencomputers remote exec --host <host-id> -- <command>")
+      System.halt(2)
+    end
+  end
+
+  defp cmd_remote(["agent" | args]) do
+    {opts, _rest, _} =
+      OptionParser.parse(args,
+        strict: [
+          host: :string,
+          prompt: :string,
+          url: :string,
+          timeout: :integer,
+          account_key: :string
+        ],
+        aliases: [h: :host, p: :prompt]
+      )
+
+    if is_binary(opts[:host]) and opts[:host] != "" and is_binary(opts[:prompt]) and
+         opts[:prompt] != "" do
+      case OptimalSystemAgent.OpenComputers.Remote.dispatch_agent(
+             opts[:host],
+             opts[:prompt],
+             %{},
+             normalize_remote_opts(opts)
+           ) do
+        {:ok, result} -> IO.puts(format_remote_result(result))
+        {:error, reason} -> remote_error(reason)
+      end
+    else
+      IO.puts("Usage: osa opencomputers remote agent --host <host-id> --prompt <prompt>")
+      System.halt(2)
+    end
+  end
+
+  defp cmd_remote(_args) do
+    IO.puts("Usage: osa opencomputers remote <hosts|exec|agent> ...")
+    System.halt(2)
+  end
+
+  defp remote_opts(args) do
+    {opts, _rest, _} =
+      OptionParser.parse(args, strict: [url: :string, timeout: :integer, account_key: :string])
+
+    normalize_remote_opts(opts)
+  end
+
+  defp normalize_remote_opts(opts) do
+    opts
+    |> Keyword.take([:url, :account_key])
+    |> maybe_timeout(opts[:timeout])
+  end
+
+  defp maybe_timeout(opts, nil), do: opts
+
+  defp maybe_timeout(opts, seconds) when is_integer(seconds) and seconds > 0,
+    do: Keyword.put(opts, :timeout, :timer.seconds(seconds))
+
+  defp maybe_timeout(opts, _), do: opts
+
+  defp format_remote_result(%{result: result}), do: to_string(result)
+  defp format_remote_result(%{"result" => result}), do: to_string(result)
+  defp format_remote_result(result) when is_binary(result), do: result
+  defp format_remote_result(result), do: inspect(result)
+
+  defp remote_error(:missing_platform_api_key) do
+    IO.puts("No MIOSA account key found. Run `miosa login` or set MIOSA_PLATFORM_API_KEY.")
+    System.halt(1)
+  end
+
+  defp remote_error(reason) do
+    IO.puts("OpenComputers remote request failed: #{inspect(reason)}")
+    System.halt(1)
+  end
+
   # ── TOML helpers ─────────────────────────────────────────────────
 
   defp read_toml do
@@ -477,6 +599,14 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
       enable [--no-profile]          Enable host mode; optionally skip shell profile edits
       disable                        Remove env var + stop running supervisor
       logout [--force]               Clear host_key and stop session
+      remote hosts                   List your online OpenComputers hosts
+      remote exec --host <id> -- <command>
+                                    Run one command on a host you own
+      remote agent --host <id> --prompt <prompt>
+                                    Dispatch OSA's local agent on a host you own
+
+    Remote commands use the existing MIOSA platform key from `miosa login`
+    or `MIOSA_PLATFORM_API_KEY`. They never use or store an `oc_host_*` key.
     """)
   end
 end

@@ -75,6 +75,33 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouterTest do
     end
   end
 
+  describe "handle/2 — PTY frames" do
+    test "routes an open request to the executor boundary" do
+      frame = {:pty_open_request, %{session_id: "remote-shell-1", shell: "/bin/sh"}}
+
+      {actions, state} = FrameRouter.handle(frame, @initial_state)
+
+      assert actions == [{:route_to_executor, frame}]
+      assert state == @initial_state
+    end
+
+    test "routes input, resize, and close frames with a session id" do
+      for frame <- [
+            {:pty_input, %{session_id: "remote-shell-1", data: "echo hi\\n"}},
+            {:pty_resize, %{session_id: "remote-shell-1", cols: 120, rows: 40}},
+            {:pty_close, %{session_id: "remote-shell-1"}}
+          ] do
+        {actions, _state} = FrameRouter.handle(frame, @initial_state)
+        assert actions == [{:route_to_executor, frame}]
+      end
+    end
+
+    test "does not route malformed PTY frames without a session id" do
+      {actions, _state} = FrameRouter.handle({:pty_input, %{data: "echo hi\\n"}}, @initial_state)
+      assert actions == []
+    end
+  end
+
   describe "handle/2 — unknown frame" do
     test "returns empty actions for unknown frames" do
       {actions, _state} = FrameRouter.handle({:unknown_frame, "data"}, @initial_state)

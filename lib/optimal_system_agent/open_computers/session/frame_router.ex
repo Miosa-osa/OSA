@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouter do
   @type action ::
           :noop
           | {:send, term()}
+          | {:route_to_executor, term()}
           | {:start_heartbeat, pos_integer()}
           | :reconnect
 
@@ -40,6 +41,15 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouter do
       :ok -> {[{:send, {:job_accept, job.id, 0}}], state}
       {:error, _reason} -> {[], state}
     end
+  end
+
+  # PTY frames are delivered over the host's existing OpenComputers session.
+  # Keep this routing decision pure so Session owns the side effect and tests
+  # can prove the frame reaches the executor boundary without a live socket.
+  def handle({tag, %{session_id: session_id}} = frame, state)
+      when tag in [:pty_open_request, :pty_input, :pty_resize, :pty_close] and
+             is_binary(session_id) do
+    {[{:route_to_executor, frame}], state}
   end
 
   def handle({:grant_renewed, %{new_token: new_token} = info}, state) do
