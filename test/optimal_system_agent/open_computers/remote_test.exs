@@ -47,4 +47,9 @@ defmodule OptimalSystemAgent.OpenComputers.RemoteTest do
     assert {:error, :invalid_envelope} =
              Protocol.unwrap({:oc_remote, %{v: 2, request_id: "r", body: :x}})
   end
+
+  test "remote protocol preserves the request correlation id" do
+    assert {:ok, "request-123", {:remote_hosts_list, %{}}} =
+             Protocol.unwrap(Protocol.envelope({:remote_hosts_list, %{}}, "request-123"))
+  end
 end

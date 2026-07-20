@@ -22,10 +22,10 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Protocol do
     {:oc_remote, %{v: @version, request_id: request_id, body: body}}
   end
 
-  @spec unwrap(term()) :: {:ok, term()} | {:error, :invalid_envelope}
+  @spec unwrap(term()) :: {:ok, binary(), term()} | {:error, :invalid_envelope}
   def unwrap({:oc_remote, %{v: @version, request_id: request_id, body: body}})
       when is_binary(request_id) do
-    {:ok, body}
+    {:ok, request_id, body}
   end
 
   def unwrap(_), do: {:error, :invalid_envelope}

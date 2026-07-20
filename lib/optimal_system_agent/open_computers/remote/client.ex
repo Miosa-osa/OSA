@@ -52,9 +52,15 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
           {:ok, t(), term()} | {:error, term()}
   def request(%__MODULE__{} = client, frame, matcher, timeout \\ @timeout_ms)
       when is_function(matcher, 1) do
+    request(client, frame, matcher, timeout, Ecto.UUID.generate())
+  end
+
+  @doc "Send one remote protocol body with an explicit correlation id."
+  def request(%__MODULE__{} = client, frame, matcher, timeout, request_id)
+      when is_function(matcher, 1) and is_binary(request_id) do
     with :ok <- validate_outgoing(frame),
-         {:ok, client} <- send_frame(client, Protocol.envelope(frame)) do
-      receive_frames(client, matcher, timeout)
+         {:ok, client} <- send_frame(client, Protocol.envelope(frame, request_id)) do
+      receive_frames(client, matcher, timeout, request_id)
     end
   end
 
@@ -78,10 +84,10 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
   @doc "Receive frames until `matcher` accepts one, replying to wire pings."
   @spec receive_frames(t(), (term() -> boolean()), timeout()) ::
           {:ok, t(), term()} | {:error, term()}
-  def receive_frames(%__MODULE__{} = client, matcher, timeout \\ @timeout_ms)
+  def receive_frames(%__MODULE__{} = client, matcher, timeout \\ @timeout_ms, request_id \\ nil)
       when is_function(matcher, 1) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    receive_until(client, matcher, deadline)
+    receive_until(client, matcher, deadline, request_id)
   end
 
   @doc "Best-effort close."
@@ -91,7 +97,7 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
     :ok
   end
 
-  defp receive_until(client, matcher, deadline) do
+  defp receive_until(client, matcher, deadline, request_id) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
@@ -101,9 +107,9 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
         message ->
           case Mint.WebSocket.stream(client.conn, message) do
             {:ok, conn, responses} ->
-              case decode_responses(%{client | conn: conn}, responses, matcher) do
+              case decode_responses(%{client | conn: conn}, responses, matcher, request_id) do
                 {:match, client, frame} -> {:ok, client, frame}
-                {:continue, client} -> receive_until(client, matcher, deadline)
+                {:continue, client} -> receive_until(client, matcher, deadline, request_id)
                 {:error, reason} -> {:error, reason}
               end
 
@@ -111,7 +117,7 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
               {:error, reason}
 
             :unknown ->
-              receive_until(client, matcher, deadline)
+              receive_until(client, matcher, deadline, request_id)
           end
       after
         remaining -> {:error, :timeout}
@@ -119,14 +125,14 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
     end
   end
 
-  defp decode_responses(client, responses, matcher) do
+  defp decode_responses(client, responses, matcher, request_id) do
     Enum.reduce_while(responses, {:continue, client}, fn
       {:data, _ref, data}, {:continue, client} ->
         case Mint.WebSocket.decode(client.websocket, data) do
           {:ok, websocket, frames} ->
             client = %{client | websocket: websocket}
 
-            case decode_frames(client, frames, matcher) do
+            case decode_frames(client, frames, matcher, request_id) do
               {:continue, client} -> {:cont, {:continue, client}}
               other -> {:halt, other}
             end
@@ -143,7 +149,7 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
     end)
   end
 
-  defp decode_frames(client, frames, matcher) do
+  defp decode_frames(client, frames, matcher, request_id) do
     Enum.reduce_while(frames, {:continue, client}, fn
       {:binary, bin}, {:continue, client} ->
         case FrameCodec.decode(bin) do
@@ -155,19 +161,23 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
 
           {:ok, envelope} ->
             case Protocol.unwrap(envelope) do
-              {:ok, frame} when is_tuple(frame) ->
-                if matcher.(frame) do
-                  {:halt, {:match, client, frame}}
-                else
-                  {:cont, {:continue, client}}
+              {:ok, incoming_request_id, frame}
+              when is_tuple(frame) and (is_nil(request_id) or incoming_request_id == request_id) ->
+                case terminal_remote_error(frame) do
+                  {:error, reason} ->
+                    {:halt, {:error, reason}}
+
+                  :continue ->
+                    if matcher.(frame) do
+                      {:halt, {:match, client, frame}}
+                    else
+                      {:cont, {:continue, client}}
+                    end
                 end
 
               _ ->
                 {:halt, {:error, :invalid_envelope}}
             end
-
-          {:ok, _invalid_envelope} ->
-            {:halt, {:error, :invalid_envelope}}
 
           :error ->
             {:halt, {:error, :invalid_frame}}
@@ -186,4 +196,12 @@ defmodule OptimalSystemAgent.OpenComputers.Remote.Client do
 
   defp validate_outgoing(body),
     do: if(Protocol.client_body?(body), do: :ok, else: {:error, :invalid_client_operation})
+
+  defp terminal_remote_error({:remote_error, %{code: code, message: message}}),
+    do: {:error, {:remote_error, code, message}}
+
+  defp terminal_remote_error({:remote_session_closed, %{reason: reason}}),
+    do: {:error, {:remote_session_closed, reason}}
+
+  defp terminal_remote_error(_), do: :continue
 end

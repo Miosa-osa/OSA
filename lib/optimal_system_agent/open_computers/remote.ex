@@ -30,8 +30,13 @@ defmodule OptimalSystemAgent.OpenComputers.Remote do
 
   @spec exec(binary(), binary(), options()) :: {:ok, map()} | {:error, term()}
   def exec(host_id, command, opts \\ []) when is_binary(host_id) and is_binary(command) do
-    with_session(host_id, :exec, %{cmd: command}, opts, fn client, session_id ->
-      case Client.receive_frames(client, &job_terminal?(&1, session_id), timeout(opts)) do
+    with_session(host_id, :exec, %{cmd: command}, opts, fn client, session_id, request_id ->
+      case Client.receive_frames(
+             client,
+             &job_terminal?(&1, session_id),
+             timeout(opts),
+             request_id
+           ) do
         {:ok, client,
          {:remote_session_frame,
           %{session_id: ^session_id, frame: {:job_done, ^session_id, result}}}} ->
@@ -55,8 +60,14 @@ defmodule OptimalSystemAgent.OpenComputers.Remote do
   def dispatch_agent(host_id, prompt, context \\ %{}, opts \\ [])
       when is_binary(host_id) and is_binary(prompt) and is_map(context) do
     with_session(host_id, :agent, %{prompt: prompt, context: context}, opts, fn client,
-                                                                                session_id ->
-      case Client.receive_frames(client, &job_terminal?(&1, session_id), timeout(opts)) do
+                                                                                session_id,
+                                                                                request_id ->
+      case Client.receive_frames(
+             client,
+             &job_terminal?(&1, session_id),
+             timeout(opts),
+             request_id
+           ) do
         {:ok, client,
          {:remote_session_frame,
           %{session_id: ^session_id, frame: {:job_done, ^session_id, result}}}} ->
@@ -81,10 +92,16 @@ defmodule OptimalSystemAgent.OpenComputers.Remote do
       ref = Ecto.UUID.generate()
       frame = {:remote_session_open, %{ref: ref, host_id: host_id, kind: kind, params: params}}
 
-      case Client.request(client, frame, &match?({:remote_session_opened, _}, &1), timeout(opts)) do
+      case Client.request(
+             client,
+             frame,
+             &match?({:remote_session_opened, _}, &1),
+             timeout(opts),
+             ref
+           ) do
         {:ok, client, {:remote_session_opened, %{session_id: session_id}}}
         when is_binary(session_id) ->
-          result = fun.(client, session_id)
+          result = fun.(client, session_id, ref)
           close_session(client, session_id)
 
           case result do

@@ -384,22 +384,6 @@ defmodule OptimalSystemAgent.OpenComputers.Session do
 
         {:cont, {:ok, new_s}}
 
-      {:route_to_executor, frame}, {:ok, s} ->
-        # The session is the only process that receives host WebSocket frames.
-        # Delegate PTY work to the long-lived executor router rather than
-        # pretending that a remote shell is active while dropping its input.
-        case Process.whereis(GlobalFrameRouter) do
-          nil ->
-            Logger.warning(
-              "[OC.Session] executor router unavailable - dropping #{inspect(elem(frame, 0))}"
-            )
-
-          _pid ->
-            GlobalFrameRouter.dispatch(frame)
-        end
-
-        {:cont, {:ok, s}}
-
       :reconnect, {:ok, s} ->
         {:halt, {:reconnect, s}}
 
