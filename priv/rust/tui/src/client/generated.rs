@@ -33,6 +33,24 @@ pub struct HealthResponse {
     /// unavailable; individual limits are `null` when uncapped.
     #[serde(default)]
     pub billing: Option<HealthBilling>,
+    /// Cached "update available" signal. `available: false` on source/dev
+    /// builds, when the checker hasn't run, or on failure. Drives the TUI's
+    /// one-time startup notice + status-bar chip; the user runs `/update`.
+    #[serde(default)]
+    pub update: Option<HealthUpdate>,
+}
+
+/// Update-availability signal carried on `GET /health`. Understated, never
+/// auto-installs (Codex parity). `latest_version` is `null` when unknown or
+/// when already up to date.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthUpdate {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub current_version: String,
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 /// Billing projection carried on `GET /health` (see tui-statusline-spec).

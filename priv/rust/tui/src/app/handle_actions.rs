@@ -46,6 +46,24 @@ impl App {
                 // send simply leaves its chip off (no "effort:" / "$" shown).
                 self.status.set_effort(health.effort.clone());
                 self.status.set_billing(health.billing.clone());
+
+                // Update-available signal (Codex parity: understated, no
+                // auto-install). Refresh the persistent status-bar chip on every
+                // health poll — it appears while an update is available and
+                // vanishes once the backend reports none. Then, at most ONCE per
+                // session, drop a dim non-blocking notice into the transcript
+                // pointing at `/update`. Never interrupts an in-progress turn:
+                // this only runs on a completed health response.
+                self.status.set_update_available(health.update.clone());
+                if should_show_update_notice(health.update.as_ref(), self.update_notice_shown) {
+                    self.update_notice_shown = true;
+                    // Safe: should_show_* only returns true for Some(available).
+                    if let Some(update) = health.update.as_ref() {
+                        self.chat
+                            .add_system_message(&update_notice_line(update), "info");
+                    }
+                }
+
                 // Skip banner — go straight to Idle (no jarring screen switch)
                 if self.state == AppState::Connecting {
                     self.transition(AppState::Idle);
@@ -1615,6 +1633,81 @@ pub(crate) fn join_queued_for_composer(items: &[String], current: &str) -> Strin
         parts.push(current.to_string());
     }
     parts.join("\n")
+}
+
+/// Whether to drop the one-time "update available" transcript notice on this
+/// health response. True only when the backend flags an available update AND we
+/// haven't already shown it this session — keeping it quiet (once, never a nag).
+pub(crate) fn should_show_update_notice(
+    update: Option<&crate::client::types::HealthUpdate>,
+    already_shown: bool,
+) -> bool {
+    !already_shown && matches!(update, Some(u) if u.available)
+}
+
+/// The understated update-notice line (Codex `UpdateAvailableHistoryCell`
+/// style): `✨ Update available: vX → vY  ·  type /update to install`. When the
+/// latest version is unknown the arrow is dropped. Names `/update` so the user
+/// runs it themselves — OSA never auto-installs.
+pub(crate) fn update_notice_line(update: &crate::client::types::HealthUpdate) -> String {
+    let latest = update.latest_version.as_deref().unwrap_or("").trim();
+    if latest.is_empty() {
+        "\u{2728} Update available  \u{00b7}  type /update to install".to_string()
+    } else {
+        format!(
+            "\u{2728} Update available: v{} \u{2192} v{}  \u{00b7}  type /update to install",
+            update.current_version.trim(),
+            latest
+        )
+    }
+}
+
+#[cfg(test)]
+mod update_notice_tests {
+    use super::{should_show_update_notice, update_notice_line};
+    use crate::client::types::HealthUpdate;
+
+    fn upd(available: bool, latest: Option<&str>) -> HealthUpdate {
+        HealthUpdate {
+            available,
+            current_version: "0.4.6".to_string(),
+            latest_version: latest.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn notice_shows_once_per_session() {
+        let update = upd(true, Some("0.5.0"));
+        // First health response with an available update → show it.
+        assert!(should_show_update_notice(Some(&update), false));
+        // Every subsequent poll (flag now set) → suppressed.
+        assert!(!should_show_update_notice(Some(&update), true));
+    }
+
+    #[test]
+    fn notice_suppressed_when_no_update_or_up_to_date() {
+        // No update object at all.
+        assert!(!should_show_update_notice(None, false));
+        // Object present but not available (up to date / source build).
+        assert!(!should_show_update_notice(Some(&upd(false, None)), false));
+    }
+
+    #[test]
+    fn notice_line_names_update_command_and_versions() {
+        let line = update_notice_line(&upd(true, Some("0.5.0")));
+        assert!(line.contains("Update available"));
+        assert!(line.contains("v0.4.6"));
+        assert!(line.contains("v0.5.0"));
+        assert!(line.contains("/update"), "must point the user at /update");
+    }
+
+    #[test]
+    fn notice_line_drops_arrow_when_latest_unknown() {
+        let line = update_notice_line(&upd(true, None));
+        assert!(line.contains("Update available"));
+        assert!(!line.contains("\u{2192}"), "no arrow without a known latest");
+        assert!(line.contains("/update"));
+    }
 }
 
 #[cfg(test)]

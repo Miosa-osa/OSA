@@ -809,3 +809,41 @@ impl RewindScope {
 
 // RewindRestoreRequest, RewindRestoreResponse and ErrorResponse are generated
 // (re-exported at the top of this module).
+
+#[cfg(test)]
+mod health_update_parse_tests {
+    use super::HealthResponse;
+
+    const BASE: &str = r#"{"status":"ok","version":"0.4.6","provider":"ollama","model":"glm"#;
+
+    #[test]
+    fn parses_update_object_when_available() {
+        let json = format!(
+            r#"{BASE}","update":{{"available":true,"current_version":"0.4.6","latest_version":"0.5.0"}}}}"#
+        );
+        let h: HealthResponse = serde_json::from_str(&json).unwrap();
+        let update = h.update.expect("update object present");
+        assert!(update.available);
+        assert_eq!(update.current_version, "0.4.6");
+        assert_eq!(update.latest_version.as_deref(), Some("0.5.0"));
+    }
+
+    #[test]
+    fn parses_available_false_with_null_latest() {
+        let json = format!(
+            r#"{BASE}","update":{{"available":false,"current_version":"0.4.6","latest_version":null}}}}"#
+        );
+        let h: HealthResponse = serde_json::from_str(&json).unwrap();
+        let update = h.update.expect("update object present");
+        assert!(!update.available);
+        assert_eq!(update.latest_version, None);
+    }
+
+    #[test]
+    fn absent_update_field_is_none_backward_compatible() {
+        // An older backend that omits `update` must still decode.
+        let json = format!(r#"{BASE}"}}"#);
+        let h: HealthResponse = serde_json::from_str(&json).unwrap();
+        assert!(h.update.is_none());
+    }
+}

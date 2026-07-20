@@ -168,7 +168,13 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           theme: OptimalSystemAgent.ConfigFile.tui_theme(),
           verbosity: OptimalSystemAgent.ConfigFile.tui_verbosity()
         },
-        billing: billing
+        billing: billing,
+        # Cached "update available" signal (CC/Codex parity: understated
+        # notice, never auto-install). Read-only app-env lookup — no git/network
+        # on the /health path. `available: false` on source/dev builds, when the
+        # checker hasn't run, or on any failure. Drives the TUI's one-time
+        # startup notice + the status-bar `⬆ vX` chip; the user runs /update.
+        update: OptimalSystemAgent.System.UpdateChecker.health_update()
       })
 
     conn

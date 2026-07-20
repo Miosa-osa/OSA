@@ -262,6 +262,11 @@ pub struct App {
     pub backend_spawn_attempted: bool,
     pub health_retry_count: u32,
 
+    // Whether the one-time "update available" transcript notice has been shown
+    // this session. /health is polled repeatedly (startup + config changes), so
+    // this guard keeps the notice to exactly once — quiet, never nagging.
+    pub update_notice_shown: bool,
+
     // Commands from backend
     pub command_entries: Vec<crate::client::types::CommandEntry>,
 
@@ -555,6 +560,7 @@ impl App {
             active_fg_shell_count: 0,
             backend_spawn_attempted: false,
             health_retry_count: 0,
+            update_notice_shown: false,
             // Seed the Ctrl+K palette / `/help` with the full built-in set at
             // construction, mirroring the inline `/` completions seed above, so
             // the palette is populated immediately — before (or entirely

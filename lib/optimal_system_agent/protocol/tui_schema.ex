@@ -86,7 +86,23 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
             default: true,
             doc:
               "Spend/limit snapshot from the backend Budget. `null` when Budget is\nunavailable; individual limits are `null` when uncapped."
+          ),
+          f("update", {:option, {:struct, "HealthUpdate"}},
+            default: true,
+            doc:
+              "Cached \"update available\" signal. `available: false` on source/dev\nbuilds, when the checker hasn't run, or on failure. Drives the TUI's\none-time startup notice + status-bar chip; the user runs `/update`."
           )
+        ]
+      },
+      %{
+        name: "HealthUpdate",
+        derive: :deserialize,
+        doc:
+          "Update-availability signal carried on `GET /health`. Understated, never\nauto-installs (Codex parity). `latest_version` is `null` when unknown or\nwhen already up to date.",
+        fields: [
+          f("available", :bool, default: true),
+          f("current_version", :string, default: true),
+          f("latest_version", {:option, :string}, default: true)
         ]
       },
       %{

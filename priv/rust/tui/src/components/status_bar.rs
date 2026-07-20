@@ -239,6 +239,10 @@ pub struct StatusBar {
     /// "⛓ N subagents · $cost · ↓ manage" footer cue. 0 ⇒ omitted.
     subagent_count: usize,
     subagent_cost: Option<f64>,
+    /// Latest available release when the backend reports one on `/health.update`
+    /// (`available: true`). Drives the understated `⬆ vX` chip. `None` ⇒ up to
+    /// date / source build / not yet reported ⇒ chip omitted.
+    update_latest: Option<String>,
 }
 
 impl StatusBar {
@@ -281,6 +285,7 @@ impl StatusBar {
             swarm_label: None,
             subagent_count: 0,
             subagent_cost: None,
+            update_latest: None,
         }
     }
 
@@ -325,6 +330,24 @@ impl StatusBar {
     pub fn set_subagents(&mut self, count: usize, cost: Option<f64>) {
         self.subagent_count = count;
         self.subagent_cost = cost;
+    }
+
+    /// Set (or clear) the "update available" chip from `/health.update`. Stores
+    /// the latest version only when the backend flags one available; anything
+    /// else (up to date, source build, absent) clears the chip. Understated by
+    /// design — a compact `⬆ vX`, never a nag.
+    pub fn set_update_available(&mut self, update: Option<crate::client::types::HealthUpdate>) {
+        self.update_latest = match update {
+            Some(u) if u.available => {
+                u.latest_version.filter(|v| !v.trim().is_empty())
+            }
+            _ => None,
+        };
+    }
+
+    /// The latest-version string currently backing the update chip, if any.
+    pub fn update_latest(&self) -> Option<&str> {
+        self.update_latest.as_deref()
     }
 
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
@@ -806,6 +829,15 @@ impl Component for StatusBar {
             }
         }
 
+        // Update-available chip (`⬆ vX`). Understated: dim, no color alarm, and
+        // dropped entirely once there's no newer release. Sits just left of the
+        // version chip so "v{current} → ⬆ v{latest}" reads together. The user
+        // runs `/update` (see the one-time startup transcript notice).
+        if let Some(ref latest) = self.update_latest {
+            spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
+            spans.push(Span::styled(format!("\u{2B06} v{}", latest), theme.faint()));
+        }
+
         // Persistent OSA version chip (single build-time source — never stale).
         // Right-most element so it's the first to be clipped on narrow panes.
         spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
@@ -1127,6 +1159,42 @@ mod status_bar_tests {
         sb.set_swarm(None);
         let cleared = render_sb(&sb);
         assert!(!cleared.contains("subagents") && !cleared.contains("MCP"));
+    }
+
+    #[test]
+    fn update_chip_renders_only_when_available() {
+        use crate::client::types::HealthUpdate;
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+
+        // No update reported → no chip.
+        sb.set_update_available(None);
+        assert_eq!(sb.update_latest(), None);
+        assert!(!render_sb(&sb).contains("\u{2B06}"), "no ⬆ chip when absent");
+
+        // available:false (up to date / source build) → still no chip.
+        sb.set_update_available(Some(HealthUpdate {
+            available: false,
+            current_version: "0.4.6".into(),
+            latest_version: Some("0.5.0".into()),
+        }));
+        assert_eq!(sb.update_latest(), None);
+        assert!(!render_sb(&sb).contains("\u{2B06}"), "no chip when not available");
+
+        // available:true → compact "⬆ vX" chip appears.
+        sb.set_update_available(Some(HealthUpdate {
+            available: true,
+            current_version: "0.4.6".into(),
+            latest_version: Some("0.5.0".into()),
+        }));
+        assert_eq!(sb.update_latest(), Some("0.5.0"));
+        let text = render_sb(&sb);
+        assert!(text.contains("\u{2B06}"), "⬆ chip must render, got: {text:?}");
+        assert!(text.contains("v0.5.0"), "chip shows latest version");
+
+        // Cleared again once the backend reports no update.
+        sb.set_update_available(None);
+        assert!(!render_sb(&sb).contains("\u{2B06}"), "chip disappears when cleared");
     }
 
     #[test]

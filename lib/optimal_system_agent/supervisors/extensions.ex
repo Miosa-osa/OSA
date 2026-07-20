@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
     children =
       treasury_children() ++
         updater_children() ++
+        update_checker_children() ++
         open_computers_children() ++
         context_refs_children() ++
         fs_checkpoint_children() ++
@@ -47,6 +48,13 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
     else
       []
     end
+  end
+
+  # Update-availability signal — always on (cheap local poller). Caches the
+  # "update available" result the /health path reads; the actual compare is
+  # gated to no-op on source/dev builds. Disable via update_check_enabled=false.
+  defp update_checker_children do
+    [OptimalSystemAgent.System.UpdateChecker]
   end
 
   # OpenComputers — opt-in via OSA_OPEN_COMPUTERS_ENABLED=true
