@@ -35,6 +35,7 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("usage", "Show session context usage"),
     ("tools", "Show how many tools are available"),
     ("version", "Show the OSA version"),
+    ("update", "Update OSA to the latest version"),
     ("reasoning", "Set the reasoning effort level"),
     ("verbose", "Cycle tool output detail"),
     ("theme", "Switch the color theme"),
@@ -650,6 +651,15 @@ impl App {
                 // a checkpoint snapshotted before an earlier prompt.
                 self.load_rewind_checkpoints();
             }
+            "/update" => {
+                // Self-update via the installed `osa` launcher's rollback-safe
+                // staged updater. Runs in the background (non-blocking, cancel-
+                // safe): input stays live, phases stream in as toasts, and the
+                // final result reports the new version + a relaunch reminder.
+                // The swap only takes effect on the next launch, so we never try
+                // to hot-swap the running binary.
+                self.start_self_update();
+            }
             _ => {
                 // Unknown slash command -> send to backend
                 let cmd_name = &cmd[1..]; // strip leading /
@@ -824,5 +834,23 @@ impl App {
         tokio::spawn(async move {
             let _ = client.logout().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILTIN_SLASH_COMMANDS;
+
+    #[test]
+    fn update_command_is_registered() {
+        // `/update` must be discoverable in the completions popup / palette.
+        let entry = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "update");
+        assert!(
+            entry.is_some(),
+            "`update` missing from BUILTIN_SLASH_COMMANDS"
+        );
+        assert_eq!(entry.unwrap().1, "Update OSA to the latest version");
     }
 }

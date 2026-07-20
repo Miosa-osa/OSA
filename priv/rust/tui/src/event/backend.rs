@@ -282,6 +282,10 @@ pub enum BackendEvent {
     SandboxesLoaded(Result<crate::client::types::SandboxesResponse, String>),
     ChannelsListLoaded(Result<crate::client::types::ChannelsListResponse, String>),
     CommandResult(Result<CommandExecuteResponse, String>),
+    /// Progress / result of the in-app `/update` self-updater (see
+    /// `crate::app::self_update`). Carried on this channel so the background
+    /// update task can stream phases and the final outcome to the UI thread.
+    SelfUpdate(crate::app::self_update::SelfUpdateEvent),
     SessionsLoaded(Result<Vec<SessionInfo>, String>),
     SessionCreated(Result<SessionCreateResponse, String>),
     RewindCheckpointsLoaded(Result<Vec<RewindCheckpoint>, String>),

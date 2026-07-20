@@ -1005,6 +1005,9 @@ impl App {
             BackendEvent::CommandResult(result) => {
                 self.handle_command_result(result);
             }
+            BackendEvent::SelfUpdate(ev) => {
+                self.handle_self_update(ev);
+            }
             BackendEvent::ModelSwitched(result) => match result {
                 Ok(resp) => {
                     self.header.set_provider_info(&resp.provider, &resp.model);

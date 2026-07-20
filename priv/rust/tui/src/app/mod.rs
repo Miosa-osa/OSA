@@ -7,6 +7,7 @@ mod handle_backend;
 mod handle_dialogs;
 pub mod key_normalize;
 mod keymap_dispatch;
+pub mod self_update;
 pub mod keys;
 pub mod layout;
 pub mod state;
