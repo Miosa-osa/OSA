@@ -22,6 +22,9 @@ defmodule OptimalSystemAgent.Settings.Schema do
       {:map, ~s(Use {"hooks": {"pre_tool_use": [{"type": "shell", "command": "..."}]}})},
     "permissions" =>
       {:map, ~s(Use {"permissions": {"allow": [...], "deny": [...], "ask": [...]}})},
+    "agent_overrides" =>
+      {:map,
+       ~s(Use {"agent_overrides": {"code-reviewer": {"model": "glm-5.2:cloud", "tier": "elite"}}})},
     "model" => {:string, ~s(Use a model id string, e.g. {"model": "glm-4.7:cloud"})},
     "personality" => {:string, "Use a personality name string"},
     "skin" => {:string, ~s(Use a skin name string, e.g. "dark")},

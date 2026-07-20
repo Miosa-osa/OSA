@@ -14,6 +14,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Tools.Builtins.Delegate.Constants
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
+  alias OptimalSystemAgent.Agents.Config, as: AgentConfig
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Tier
@@ -143,6 +144,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     raw_tier =
       cond do
         tier_str -> parse_tier(tier_str)
+        tier_override = AgentConfig.tier_override(role) -> tier_override
         agent_def -> agent_def[:tier] || Constants.min_subagent_tier()
         true -> Constants.min_subagent_tier()
       end
@@ -169,7 +171,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # name (fan-out) wins over a top-level "name" arg.
       name: name || Map.get(args, "name"),
       tier: tier,
-      model: Map.get(args, "model") || (agent_def && agent_def[:model]),
+      model:
+        Map.get(args, "model") || AgentConfig.model_override(role) ||
+          (agent_def && agent_def[:model]),
       provider: Map.get(args, "provider") || (agent_def && agent_def[:provider]),
       permission_tier:
         parse_permission_tier(

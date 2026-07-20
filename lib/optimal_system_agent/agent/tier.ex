@@ -199,16 +199,31 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
   @doc """
   Get the model for a specific agent by name.
-  Looks up the agent's tier in the Roster, then maps to the current provider.
+
+  Resolution precedence (high -> low), matching the `delegate` spawn path:
+
+      settings override (agent_overrides)  >  agent .md `model:`  >
+        agent tier -> provider tier-model  >  provider auto model
+
+  Previously this ignored the agent entirely and always returned the provider
+  auto model, so a named agent's declared tier/model never took effect on this
+  path.
   """
   @spec model_for_agent(String.t()) :: String.t()
-  def model_for_agent(agent_name) do
+  def model_for_agent(agent_name) when is_binary(agent_name) do
     provider = Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+    agent_def = OptimalSystemAgent.Agents.Registry.get(agent_name)
 
-    # Roster module removed — use auto model
-    _ = agent_name
-    auto_model(provider)
+    tier =
+      OptimalSystemAgent.Agents.Config.tier_override(agent_name) ||
+        (agent_def && agent_def[:tier]) || :specialist
+
+    OptimalSystemAgent.Agents.Config.model_override(agent_name) ||
+      (agent_def && agent_def[:model]) ||
+      model_for(tier, provider)
   end
+
+  def model_for_agent(_), do: auto_model(Application.get_env(:optimal_system_agent, :default_provider, :ollama))
 
   @doc "Get the token budget for a tier."
   @spec budget_for(tier()) :: map()
