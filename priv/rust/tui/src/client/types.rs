@@ -707,6 +707,12 @@ pub struct OnboardingHealthCheckResponse {
     pub message: Option<String>,
     #[serde(default)]
     pub warning: Option<String>,
+    /// Three-way classification from the backend hotfix: "ok" | "key_rejected"
+    /// | "unverified". Preferred over guessing from `error` codes when
+    /// present; falls back to the old error-code heuristic when absent (older
+    /// backend / other providers not yet returning this).
+    #[serde(default)]
+    pub verified: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

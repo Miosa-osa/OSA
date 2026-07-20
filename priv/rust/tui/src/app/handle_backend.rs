@@ -1124,10 +1124,23 @@ impl App {
                     self.enter_overlay(AppState::ModelPicker);
                 }
                 Err(e) => {
+                    // Hotfix: a failed fetch must never leave the newcomer
+                    // with no picker at all. Open a small offline fallback
+                    // catalog (paste-key providers + local Ollama) so setup
+                    // can still be completed; Ctrl+R inside the picker
+                    // retries the real fetch and swaps in the full catalog
+                    // once it succeeds.
                     self.toasts.push(
-                        format!("Failed to load providers: {}", e),
-                        crate::components::toast::ToastLevel::Error,
+                        format!("Couldn't load full provider list ({}) — showing basics", e),
+                        crate::components::toast::ToastLevel::Warning,
                     );
+                    let current_provider = self.header.provider().to_string();
+                    let current_model = self.header.model_name().to_string();
+                    self.model_picker = Some(crate::dialogs::model_picker::ModelPicker::new_fallback(
+                        current_provider,
+                        current_model,
+                    ));
+                    self.enter_overlay(AppState::ModelPicker);
                 }
             },
 
@@ -1139,20 +1152,31 @@ impl App {
                             picker.set_verify_success(r.latency_ms.unwrap_or(0));
                         }
                         Ok(r) => {
-                            // Distinguish a bad key from a network/API error by
-                            // branching on the JSON error code (HTTP is always 200).
+                            // Distinguish a bad key from a network/API error.
+                            // Prefer the backend's explicit `verified` tag
+                            // ("key_rejected" vs "unverified") from the
+                            // hotfix; fall back to the old error-code
+                            // heuristic for providers/backends that don't
+                            // send it yet (HTTP is always 200 either way).
                             let reason = r
                                 .message
                                 .clone()
                                 .or_else(|| r.error.clone())
                                 .unwrap_or_else(|| "Unknown error".into());
-                            match r.error.as_deref() {
-                                Some("unauthorized")
-                                | Some("forbidden")
-                                | Some("insufficient_credits") => {
-                                    picker.set_verify_failed(reason);
-                                }
-                                _ => picker.set_verify_error(reason),
+                            let key_rejected = match r.verified.as_deref() {
+                                Some("key_rejected") => true,
+                                Some("unverified") | Some("ok") => false,
+                                _ => matches!(
+                                    r.error.as_deref(),
+                                    Some("unauthorized")
+                                        | Some("forbidden")
+                                        | Some("insufficient_credits")
+                                ),
+                            };
+                            if key_rejected {
+                                picker.set_verify_failed(reason);
+                            } else {
+                                picker.set_verify_error(reason);
                             }
                         }
                         Err(e) => picker.set_verify_error(e),

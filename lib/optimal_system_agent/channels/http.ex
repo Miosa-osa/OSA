@@ -204,15 +204,32 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   get "/onboarding/status" do
     alias OptimalSystemAgent.Onboarding
 
-    bootstrap_exists = File.exists?(Path.expand("~/.osa/BOOTSTRAP.md"))
+    # Hotfix: the onboarding picker must ALWAYS get a usable payload. Each
+    # risky sub-call (system probing, env/network detection) is isolated so
+    # one failing piece degrades to a safe default instead of taking the
+    # whole response down with a 500 — a dead /onboarding/status is a hard
+    # dead-end for a newcomer (the picker never opens at all, with nothing
+    # to retry against).
+    needs_onboarding = safe_call(fn -> Onboarding.first_run?() end, true)
+    bootstrap_exists = safe_call(fn -> File.exists?(Path.expand("~/.osa/BOOTSTRAP.md")) end, false)
+    system_info = safe_call(fn -> Onboarding.detect_system() end, %{})
+    # providers_list/0 is static data (no I/O), but still isolated: a future
+    # change to it must never be able to blank the whole picker.
+    providers = safe_call(fn -> Onboarding.providers_list() end, [])
+
+    detected =
+      safe_call(fn -> Onboarding.detect_existing() end, %{
+        detected: [],
+        ollama_local: %{reachable: false, url: "http://localhost:11434", model_count: 0}
+      })
 
     body =
       Jason.encode!(%{
-        needs_onboarding: Onboarding.first_run?(),
+        needs_onboarding: needs_onboarding,
         needs_bootstrap: bootstrap_exists,
-        system_info: Onboarding.detect_system(),
-        providers: Onboarding.providers_list(),
-        detected: Onboarding.detect_existing()
+        system_info: system_info,
+        providers: providers,
+        detected: detected
       })
 
     conn
@@ -737,6 +754,22 @@ defmodule OptimalSystemAgent.Channels.HTTP do
   )
 
   defp allowed_health_check_providers, do: @allowed_health_check_providers
+
+  # Run a risky call, degrading to `default` on ANY exception/throw/exit
+  # instead of letting it crash the whole response (onboarding hotfix: a
+  # 500 from /onboarding/status is a hard dead-end for a newcomer since the
+  # picker never opens). Logs so the degraded path is still visible in
+  # operator logs even though the caller gets a 200.
+  defp safe_call(fun, default) do
+    fun.()
+  catch
+    kind, reason ->
+      Logger.warning(
+        "[Onboarding] status sub-call failed (#{kind}: #{inspect(reason)}) — using default"
+      )
+
+      default
+  end
 
   # ── Health billing snapshot ─────────────────────────────────────────
   # Projects the Budget GenServer status into the /health `billing` object.

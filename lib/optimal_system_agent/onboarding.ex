@@ -559,6 +559,31 @@ defmodule OptimalSystemAgent.Onboarding do
   Verify connection to a provider by sending a minimal test request.
 
   Returns {:ok, result_map} on success or {:error, error_map} on failure.
+
+  ## Three-way classification (hotfix: onboarding TUI dead-end on ollama_cloud)
+
+  Every `{:error, map}` result now carries a `verified:` tag so callers never
+  have to guess whether a failure means "this key is bad" or "we simply
+  couldn't reach the provider right now":
+
+    * `:key_rejected` — the provider EXPLICITLY rejected the credential
+      (HTTP 401, 403, or the 402 `insufficient_credits` case). Worth asking
+      the user to re-enter the key, but MUST still allow "save anyway".
+    * `:unverified` — everything else that isn't a clean 2xx: transport
+      errors (connection refused, timeout, DNS), a non-auth 4xx (e.g. 404
+      model-not-found), or a 5xx. A transport/HTTP error must NEVER be
+      reported as "key invalid" — the key might be perfectly fine and the
+      network/provider is just flaky. Callers treat this as non-blocking.
+
+  `ollama_cloud` gets a dedicated route: the RUNTIME path for a signed-in
+  local Ollama daemon is keyless device-identity (`Providers.Ollama`,
+  `http://localhost:11434`), not a Bearer token against `https://ollama.com`.
+  So health_check now probes the local daemon FIRST and, if it's reachable,
+  verifies against it (matching what actually runs) regardless of whether a
+  key was typed — a mismatched Bearer-vs-device-identity path must never
+  fail an otherwise-working local setup. Only when no local daemon is
+  reachable does a supplied key get verified against `ollama.com`, and even
+  then a transport error there is `:unverified`, never `:key_rejected`.
   """
   @spec health_check(map()) :: {:ok, map()} | {:error, map()}
   def health_check(%{"provider" => "miosa"} = _params) do
@@ -574,61 +599,164 @@ defmodule OptimalSystemAgent.Onboarding do
      }}
   end
 
+  def health_check(%{"provider" => "ollama_cloud"} = params) do
+    api_key = Map.get(params, "api_key")
+    model = Map.get(params, "model")
+    req_opts = req_opts(params)
+
+    local = probe_ollama_local(req_opts)
+
+    cond do
+      local.reachable ->
+        # The real runtime path: keyless device-identity through the signed-in
+        # local daemon. Verify success there IS success, regardless of the
+        # (possibly stale/mismatched) key the user pasted.
+        run_health_request("ollama_local", nil, model, local.url, req_opts)
+
+      is_binary(api_key) and api_key != "" ->
+        # No local daemon — fall back to the keyed ollama.com Bearer path.
+        run_health_request("ollama_cloud", api_key, model, "https://ollama.com", req_opts)
+
+      true ->
+        # No local daemon, no key: nothing we can verify yet. Non-blocking —
+        # this is not a key rejection, just an unverified/unreachable state.
+        {:error,
+         %{
+           verified: :unverified,
+           error: "no_local_daemon",
+           message:
+             "No local Ollama daemon detected and no API key supplied. " <>
+               "Sign in to Ollama locally or add a key — you can still continue."
+         }}
+    end
+  end
+
   def health_check(params) do
     provider = Map.get(params, "provider", "ollama")
     api_key = Map.get(params, "api_key")
     model = Map.get(params, "model")
     base_url = Map.get(params, "base_url")
 
+    run_health_request(provider, api_key, model, base_url, req_opts(params))
+  end
+
+  # Shared verification request + three-way classification, used both by the
+  # generic provider path and by ollama_cloud's local-first / keyed-fallback
+  # routing above.
+  @spec run_health_request(
+          String.t(),
+          String.t() | nil,
+          String.t() | nil,
+          String.t() | nil,
+          keyword()
+        ) :: {:ok, map()} | {:error, map()}
+  defp run_health_request(provider, api_key, model, base_url, req_opts) do
     {url, headers, body} = build_health_check_request(provider, api_key, model, base_url)
 
     start_time = System.monotonic_time(:millisecond)
 
-    case Req.post(url,
-           headers: headers,
-           json: body,
-           receive_timeout: 15_000,
-           retry: :transient,
-           max_retries: 2
-         ) do
+    # req_opts LAST: Req folds options into a map via `Map.new/1`, where the
+    # LAST occurrence of a duplicate key wins — so putting req_opts after the
+    # production defaults lets an injected test override (e.g. `retry:
+    # false`) actually take effect instead of being shadowed.
+    post_opts =
+      [
+        headers: headers,
+        json: body,
+        receive_timeout: 15_000,
+        retry: :transient,
+        max_retries: 2
+      ] ++ req_opts
+
+    case Req.post([url: url] ++ post_opts) do
       {:ok, %{status: status}} when status in 200..299 ->
         latency = System.monotonic_time(:millisecond) - start_time
-        {:ok, %{status: "ok", latency_ms: latency, model: model, response_status: status}}
+
+        {:ok,
+         %{verified: :ok, status: "ok", latency_ms: latency, model: model, response_status: status}}
 
       {:ok, %{status: 401}} ->
-        {:error, %{error: "unauthorized", message: "API key is invalid or expired."}}
+        {:error,
+         %{verified: :key_rejected, error: "unauthorized", message: "API key is invalid or expired."}}
 
       {:ok, %{status: 402}} ->
         {:error,
-         %{error: "insufficient_credits", message: "Insufficient credits on this account."}}
+         %{
+           verified: :key_rejected,
+           error: "insufficient_credits",
+           message: "Insufficient credits on this account."
+         }}
 
       {:ok, %{status: 403}} ->
-        {:error, %{error: "forbidden", message: "Access denied. Check your API key permissions."}}
+        {:error,
+         %{
+           verified: :key_rejected,
+           error: "forbidden",
+           message: "Access denied. Check your API key permissions."
+         }}
 
       {:ok, %{status: 404}} ->
-        {:error, %{error: "model_not_found", message: "Model '#{model}' not found."}}
+        # Not an auth failure — the model/endpoint just isn't there. The key
+        # (if any) may be perfectly valid, so this is unverified, not rejected.
+        {:error,
+         %{verified: :unverified, error: "model_not_found", message: "Model '#{model}' not found."}}
 
       {:ok, %{status: 429}} ->
         # Rate limited but key works
         latency = System.monotonic_time(:millisecond) - start_time
-        {:ok, %{status: "ok", latency_ms: latency, model: model, warning: "rate_limited"}}
+
+        {:ok,
+         %{
+           verified: :ok,
+           status: "ok",
+           latency_ms: latency,
+           model: model,
+           warning: "rate_limited"
+         }}
 
       {:ok, %{status: status, body: resp_body}} ->
         msg = extract_error_message(resp_body) || "Server returned #{status}"
-        {:error, %{error: "server_error", message: msg, status: status}}
+        {:error, %{verified: :unverified, error: "server_error", message: msg, status: status}}
 
       {:error, %Req.TransportError{reason: :econnrefused}} ->
-        {:error, %{error: "connection_refused", message: "Can't reach #{url}. Check the URL."}}
+        {:error,
+         %{
+           verified: :unverified,
+           error: "connection_refused",
+           message: "Can't reach #{url}. Check the URL."
+         }}
 
       {:error, %Req.TransportError{reason: :timeout}} ->
-        {:error, %{error: "timeout", message: "Connection timed out after 15 seconds."}}
+        {:error,
+         %{verified: :unverified, error: "timeout", message: "Connection timed out after 15 seconds."}}
 
       {:error, reason} ->
-        {:error, %{error: "connection_failed", message: "Connection failed: #{inspect(reason)}"}}
+        {:error,
+         %{
+           verified: :unverified,
+           error: "connection_failed",
+           message: "Connection failed: #{inspect(reason)}"
+         }}
     end
   rescue
     e ->
-      {:error, %{error: "exception", message: Exception.message(e)}}
+      {:error, %{verified: :unverified, error: "exception", message: Exception.message(e)}}
+  end
+
+  # Lets tests inject a `Req.Test` plug without threading a new param through
+  # every public call site: `params["req_plug"]` (string key, matches every
+  # other onboarding param) is stripped from the request build and turned
+  # into Req opts merged into the call. Absent in production (real HTTP
+  # calls from the TUI/wizard never set it). When a plug IS present we also
+  # disable the transient-error retry/backoff — deterministic offline tests
+  # must not sit through multi-second retry sleeps for the transport-error
+  # cases they're specifically testing.
+  @spec req_opts(map()) :: keyword()
+  defp req_opts(params) do
+    case Map.get(params, "req_plug") || Map.get(params, :req_plug) do
+      nil -> []
+      plug -> [plug: plug, retry: false]
+    end
   end
 
   @doc """
@@ -1528,13 +1656,17 @@ defmodule OptimalSystemAgent.Onboarding do
   reachability. Public so the setup wizard can offer the keyless
   "signed-in local Ollama" path for `ollama_cloud` (M2 fix) without
   duplicating the localhost-only guard here.
+
+  Never raises — any failure (daemon down, DNS, timeout, malformed body)
+  degrades to `reachable: false` so callers (onboarding status, health-check)
+  can always render/return SOMETHING instead of crashing.
   """
   @spec probe_ollama_local() :: %{
           reachable: boolean(),
           url: String.t(),
           model_count: non_neg_integer()
         }
-  def probe_ollama_local do
+  def probe_ollama_local(req_opts \\ []) do
     url =
       Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
@@ -1543,7 +1675,7 @@ defmodule OptimalSystemAgent.Onboarding do
     host = uri.host || "localhost"
 
     if host in ["localhost", "127.0.0.1", "::1"] do
-      case Req.get("#{url}/api/tags", receive_timeout: 3_000) do
+      case Req.get([url: "#{url}/api/tags", receive_timeout: 3_000] ++ req_opts) do
         {:ok, %{status: 200, body: %{"models" => models}}} ->
           %{reachable: true, url: url, model_count: length(models)}
 

@@ -102,6 +102,13 @@ impl App {
                 } => {
                     self.load_provider_models(provider, base_url, api_key);
                 }
+                // Hotfix: retry the catalog+detection fetch on demand — the
+                // picker stays open (on the fallback catalog, if that's why
+                // Reload was needed) until the fresh data arrives and
+                // replaces it via ProviderPickerData.
+                ModelPickerAction::Reload => {
+                    self.load_models();
+                }
             }
         }
         false

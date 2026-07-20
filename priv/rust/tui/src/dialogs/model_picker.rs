@@ -52,6 +52,10 @@ pub enum ModelPickerAction {
         base_url: Option<String>,
         api_key: Option<String>,
     },
+    /// Retry the initial `/onboarding/status` catalog+detection fetch.
+    /// Reachable from Providers mode any time (not just after a load
+    /// failure) so a newcomer is never stuck on a stale/degraded list.
+    Reload,
 }
 
 // ── Internal enums ───────────────────────────────────────────────────────────
@@ -141,6 +145,12 @@ pub struct ModelPicker {
     /// (via `Cell`, since `draw` takes `&self`) so handle_key scroll math
     /// matches the real dialog height instead of the MAX_H upper bound.
     list_viewport: Cell<usize>,
+
+    /// True when this picker was built from `new_fallback` (the real
+    /// `/onboarding/status` fetch failed). Drives a banner + retry hint so
+    /// the user knows they're on a degraded static catalog and can ask for
+    /// a fresh one instead of silently being stuck on stale data.
+    load_failed: bool,
 }
 
 impl ModelPicker {
@@ -168,7 +178,73 @@ impl ModelPicker {
             models_base_url: None,
             key_entry: None,
             list_viewport: Cell::new((MAX_H as usize).saturating_sub(6)),
+            load_failed: false,
         }
+    }
+
+    /// Hotfix: hardcoded, offline fallback catalog used ONLY when the
+    /// `/onboarding/status` fetch that would normally populate the picker
+    /// fails (backend unreachable, transient error, etc.). Without this the
+    /// picker simply never opens on a load failure — a hard dead-end for a
+    /// newcomer with nothing left to retry against. Mirrors the shape of
+    /// `Onboarding.providers_list/0`'s top entries closely enough that key
+    /// entry / device-identity verify / save-and-switch all still work; the
+    /// full dynamic catalog (extra providers, live model lists) reappears
+    /// the moment a retry of the real fetch succeeds.
+    pub fn new_fallback(current_provider: String, current_model: String) -> Self {
+        let providers = vec![
+            OnboardingProvider {
+                id: "ollama_cloud".to_string(),
+                name: "Ollama Cloud".to_string(),
+                description: "No GPU needed — recommended".to_string(),
+                group: "recommended".to_string(),
+                requires_key: serde_json::Value::Bool(true),
+                env_var: Some("OLLAMA_API_KEY".to_string()),
+                default_model: Some("glm-5.2:cloud".to_string()),
+                base_url: Some("https://ollama.com".to_string()),
+                signup_url: Some("https://ollama.com/download".to_string()),
+                models: serde_json::Value::String("dynamic".to_string()),
+            },
+            OnboardingProvider {
+                id: "anthropic".to_string(),
+                name: "Anthropic".to_string(),
+                description: "Claude models".to_string(),
+                group: "popular".to_string(),
+                requires_key: serde_json::Value::Bool(true),
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                default_model: Some("claude-sonnet-4-20250514".to_string()),
+                base_url: None,
+                signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
+                models: serde_json::Value::String("dynamic".to_string()),
+            },
+            OnboardingProvider {
+                id: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                description: "GPT models".to_string(),
+                group: "popular".to_string(),
+                requires_key: serde_json::Value::Bool(true),
+                env_var: Some("OPENAI_API_KEY".to_string()),
+                default_model: Some("gpt-4o".to_string()),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                signup_url: Some("https://platform.openai.com/api-keys".to_string()),
+                models: serde_json::Value::String("dynamic".to_string()),
+            },
+            OnboardingProvider {
+                id: "ollama_local".to_string(),
+                name: "Ollama (local)".to_string(),
+                description: "Run models on this machine".to_string(),
+                group: "local".to_string(),
+                requires_key: serde_json::Value::String("optional".to_string()),
+                env_var: None,
+                default_model: Some("llama3.2".to_string()),
+                base_url: Some("http://localhost:11434".to_string()),
+                signup_url: None,
+                models: serde_json::Value::String("dynamic".to_string()),
+            },
+        ];
+        let mut picker = Self::new_provider_first(providers, None, current_provider, current_model);
+        picker.load_failed = true;
+        picker
     }
 
     // ── Sorting / lookup ─────────────────────────────────────────────────────
@@ -293,6 +369,13 @@ impl ModelPicker {
     }
 
     fn handle_providers_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            // Hotfix: retry the catalog/detection fetch on demand — covers
+            // both the fallback-catalog-after-failure case and a normal
+            // "detection changed since I opened this" refresh (e.g. the
+            // user just signed in to a local Ollama daemon in another pane).
+            return Some(ModelPickerAction::Reload);
+        }
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return None;
         }
@@ -554,7 +637,23 @@ impl ModelPicker {
                         })
                     }
                     VerifyState::Verifying => None,
-                    _ => {
+                    // Hotfix: a failed/errored verify must never dead-end the
+                    // screen. A second, unmodified Enter (the user already saw
+                    // the failure reason and pressed Enter again deliberately)
+                    // saves and continues anyway — mirrors the CLI wizard's
+                    // "Continue anyway" choice for the TUI's keyboard-only flow.
+                    VerifyState::Invalid { .. } | VerifyState::Error { .. } => {
+                        let provider = ke.provider_id.clone();
+                        ke.verify = VerifyState::Idle;
+                        Some(ModelPickerAction::SaveKeyAndSwitch {
+                            runtime_provider: Self::runtime_provider(&provider),
+                            provider,
+                            api_key: None,
+                            model,
+                            base_url: Some("http://localhost:11434".to_string()),
+                        })
+                    }
+                    VerifyState::Idle => {
                         ke.verify = VerifyState::Verifying;
                         Some(ModelPickerAction::VerifyKey {
                             provider: "ollama_local".to_string(),
@@ -585,7 +684,31 @@ impl ModelPicker {
                         })
                     }
                     VerifyState::Verifying => None,
-                    _ => {
+                    // Hotfix: this used to fall into the catch-all "re-verify"
+                    // branch below, which meant a rejected key OR a transport
+                    // error (ollama_cloud's Bearer-vs-device-identity mismatch,
+                    // a flaky network, etc.) could NEVER be saved — the user
+                    // was stuck re-verifying forever with no way to finish
+                    // onboarding. A second, unmodified Enter after seeing the
+                    // failure now saves the key and moves on: an explicitly
+                    // rejected key (401/403) is still saved so the user can
+                    // fix it later with `osa setup` / the in-app key screen,
+                    // and an unverified/network error is by definition not
+                    // proof the key is bad, so it must never block completion.
+                    VerifyState::Invalid { .. } | VerifyState::Error { .. } => {
+                        let provider = ke.provider_id.clone();
+                        let api_key = ke.api_key.clone();
+                        let base_url = ke.base_url.clone();
+                        ke.verify = VerifyState::Idle;
+                        Some(ModelPickerAction::SaveKeyAndSwitch {
+                            runtime_provider: Self::runtime_provider(&provider),
+                            provider,
+                            api_key: Some(api_key),
+                            model,
+                            base_url,
+                        })
+                    }
+                    VerifyState::Idle => {
                         // First Enter → verify.
                         ke.verify = VerifyState::Verifying;
                         Some(ModelPickerAction::VerifyKey {
@@ -727,6 +850,19 @@ impl ModelPicker {
         );
         cy += 1;
 
+        // Hotfix: on the offline fallback catalog, say so and offer a retry
+        // instead of silently showing a shorter list with no explanation.
+        if self.load_failed {
+            frame.render_widget(
+                Paragraph::new(
+                    "  ⚠ Couldn't reach the server — showing a basic list. Ctrl+R to retry.",
+                )
+                .style(Style::default().fg(theme.colors.warning)),
+                Rect::new(inner.x, cy, inner.width, 1),
+            );
+            cy += 1;
+        }
+
         let sep = "─".repeat(inner.width as usize);
         frame.render_widget(
             Paragraph::new(sep.as_str()).style(Style::default().fg(theme.colors.dim)),
@@ -828,6 +964,7 @@ impl ModelPicker {
                 ("↑↓/jk", "nav"),
                 ("Enter", "open"),
                 ("type", "filter"),
+                ("Ctrl+R", "reload"),
                 ("Esc", "cancel"),
             ],
         );
@@ -1074,11 +1211,17 @@ impl ModelPicker {
                 Style::default().fg(theme.colors.success),
             ),
             VerifyState::Invalid { reason } => (
-                format!("  ✗ Invalid key: {}", reason),
+                format!(
+                    "  ✗ Invalid key: {} — edit key to retry, or Enter again to save anyway",
+                    reason
+                ),
                 Style::default().fg(theme.colors.error),
             ),
             VerifyState::Error { reason } => (
-                format!("  ✗ Network/API error: {}", reason),
+                format!(
+                    "  ⚠ Could not verify (network/API): {} — press Enter to save and continue",
+                    reason
+                ),
                 Style::default().fg(theme.colors.warning),
             ),
         };
@@ -1140,6 +1283,151 @@ fn clean_pasted_key(raw: &str) -> String {
         value
     };
     unquoted.strip_suffix(';').unwrap_or(unquoted).trim().to_string()
+}
+
+#[cfg(test)]
+mod hotfix_tests {
+    //! Regression coverage for the onboarding-TUI hotfix: a verify failure
+    //! (rejected key OR network/unverified error) must never dead-end the
+    //! key-entry screen, and a failed initial catalog fetch must never leave
+    //! the picker unopenable.
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn ollama_cloud_provider() -> OnboardingProvider {
+        OnboardingProvider {
+            id: "ollama_cloud".to_string(),
+            name: "Ollama Cloud".to_string(),
+            description: "No GPU needed".to_string(),
+            group: "recommended".to_string(),
+            requires_key: serde_json::Value::Bool(true),
+            env_var: Some("OLLAMA_API_KEY".to_string()),
+            default_model: Some("glm-5.2:cloud".to_string()),
+            base_url: Some("https://ollama.com".to_string()),
+            signup_url: None,
+            models: serde_json::Value::String("dynamic".to_string()),
+        }
+    }
+
+    fn picker_with_key_entry() -> ModelPicker {
+        let mut picker = ModelPicker::new_provider_first(
+            vec![ollama_cloud_provider()],
+            None,
+            "anthropic".to_string(),
+            "claude".to_string(),
+        );
+        picker.open_key_entry(&ollama_cloud_provider());
+        picker.mode = PickerMode::KeyEntry;
+        picker
+    }
+
+    // ── PasteKey: rejected key or network error must both be save-able ──────
+
+    #[test]
+    fn paste_key_verify_error_second_enter_saves_and_continues() {
+        let mut picker = picker_with_key_entry();
+        picker.key_entry.as_mut().unwrap().api_key = "sk-something".to_string();
+
+        // First Enter → fires VerifyKey, not a terminal action.
+        let first = picker.key_entry_submit();
+        assert!(matches!(first, Some(ModelPickerAction::VerifyKey { .. })));
+
+        // Backend comes back with a network/unverified error (the exact bug:
+        // ollama_cloud's Bearer-vs-device-identity mismatch, or any transport
+        // failure) — this must NOT be reported as an invalid key, and must
+        // NOT dead-end the screen.
+        picker.set_verify_error("Connection failed: timeout".to_string());
+
+        // Second Enter (unmodified key) → save-and-continue, not re-verify.
+        let second = picker.key_entry_submit();
+        match second {
+            Some(ModelPickerAction::SaveKeyAndSwitch { api_key, .. }) => {
+                assert_eq!(api_key.as_deref(), Some("sk-something"));
+            }
+            other => panic!("expected SaveKeyAndSwitch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn paste_key_verify_rejected_second_enter_still_allows_save_anyway() {
+        let mut picker = picker_with_key_entry();
+        picker.key_entry.as_mut().unwrap().api_key = "bad-key".to_string();
+        let _ = picker.key_entry_submit();
+
+        // Explicit 401/403 rejection this time.
+        picker.set_verify_failed("API key is invalid or expired.".to_string());
+
+        let second = picker.key_entry_submit();
+        assert!(
+            matches!(second, Some(ModelPickerAction::SaveKeyAndSwitch { .. })),
+            "a rejected key must still be save-able so the user can fix it later, got {:?}",
+            second
+        );
+    }
+
+    #[test]
+    fn paste_key_editing_after_failure_resets_to_reverify_not_save() {
+        let mut picker = picker_with_key_entry();
+        picker.key_entry.as_mut().unwrap().api_key = "sk-something".to_string();
+        let _ = picker.key_entry_submit();
+        picker.set_verify_error("timeout".to_string());
+
+        // Typing a correction resets verify state — Enter should re-verify,
+        // not silently save the edited-but-unverified key.
+        picker.handle_key(key(KeyCode::Char('x')));
+        let after_edit = picker.key_entry_submit();
+        assert!(matches!(
+            after_edit,
+            Some(ModelPickerAction::VerifyKey { .. })
+        ));
+    }
+
+    // ── DeviceFree (keyless ollama_cloud): same guarantee ────────────────────
+
+    #[test]
+    fn device_free_verify_error_second_enter_saves_anyway() {
+        let mut picker = picker_with_key_entry();
+        picker.key_entry.as_mut().unwrap().auth_method = AuthMethod::DeviceFree;
+
+        let first = picker.key_entry_submit();
+        assert!(matches!(first, Some(ModelPickerAction::VerifyKey { .. })));
+
+        picker.set_verify_error("no local daemon reachable".to_string());
+        let second = picker.key_entry_submit();
+        assert!(matches!(
+            second,
+            Some(ModelPickerAction::SaveKeyAndSwitch { api_key: None, .. })
+        ));
+    }
+
+    // ── Load-path hardening: failed initial fetch is never a dead end ───────
+
+    #[test]
+    fn fallback_picker_always_has_a_usable_provider_list() {
+        let picker =
+            ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
+        assert!(picker.load_failed);
+        assert!(!picker.providers.is_empty());
+        // The zero-config local option must always be present so a newcomer
+        // has at least one path that needs no key at all.
+        assert!(picker.providers.iter().any(|p| p.id == "ollama_local"));
+    }
+
+    #[test]
+    fn ctrl_r_in_providers_mode_requests_a_reload() {
+        let mut picker =
+            ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
+        let action = picker.handle_key(ctrl(KeyCode::Char('r')));
+        assert!(matches!(action, Some(ModelPickerAction::Reload)));
+    }
 }
 
 #[cfg(test)]
