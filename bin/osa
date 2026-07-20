@@ -38,6 +38,13 @@ HOME="${HOME:-/root}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export LANG="${LANG:-C.UTF-8}"
 
+# Capture the user's launch directory BEFORE any `cd` below, and hand it to the
+# backend as OSA_ORIGINAL_CWD. The daemon starts with `cd "$ROOT"` (the OSA
+# source tree) then `mix osa.serve`, so without this the backend's File.cwd!()
+# resolves to the OSA source dir — making the workspace identity (and the TUI
+# status bar) read "OptimalSystemAgent" instead of the project you launched in.
+export OSA_ORIGINAL_CWD="${OSA_ORIGINAL_CWD:-$PWD}"
+
 # sudo helper: skip when already root
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
