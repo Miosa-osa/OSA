@@ -40,11 +40,26 @@ defmodule OptimalSystemAgent.Channels.HTTP.RateLimiterTest do
 
   describe "single request" do
     test "passes through and sets ratelimit headers" do
-      conn = conn_for_ip("/sessions", {127, 0, 0, 1}) |> call_limiter()
+      # A remote (non-loopback) IP is rate-limited and carries the headers.
+      # Loopback is exempt (see the loopback test below), so it cannot be used
+      # here to assert the header presence.
+      conn = conn_for_ip("/sessions", {203, 0, 113, 1}) |> call_limiter()
 
       refute conn.halted
       assert get_resp_header(conn, "x-ratelimit-limit") == ["60"]
       assert get_resp_header(conn, "x-ratelimit-remaining") != []
+    end
+
+    test "loopback is exempt: never limited, no ratelimit headers" do
+      # The backend binds to 127.0.0.1 and the only loopback client is the local
+      # TUI, which bursts on attach. Loopback must never be rate-limited (it was
+      # 429-ing the TUI into "Session create failed"); it also skips the headers
+      # entirely since no bucket is tracked for it.
+      results = drain(200, {127, 0, 0, 1}, "/sessions")
+
+      assert Enum.all?(results, &(&1.halted == false))
+      last = List.last(results)
+      assert get_resp_header(last, "x-ratelimit-limit") == []
     end
 
     test "remaining starts at limit minus one for first request" do
