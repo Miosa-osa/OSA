@@ -71,6 +71,12 @@ pub(super) struct FleetCounts {
 /// Most recent shared-scratchpad writes retained + rendered under the panel.
 const SCRATCHPAD_CAP: usize = 5;
 
+/// Cap on how many agent rows the INLINE under-composer roster renders before
+/// collapsing the remainder into a dim "+K more agents" summary line. Keeps the
+/// inline panel bounded no matter how large the fleet grows; the full-screen
+/// `/agents` dashboard (`draw_dashboard`) still lists every node.
+pub(super) const INLINE_ROSTER_MAX_AGENTS: usize = 8;
+
 impl Agents {
     pub fn new() -> Self {
         Self {
@@ -252,7 +258,15 @@ impl Agents {
         if self.collapsed {
             return 1 + summary_line;
         }
-        let agent_lines: u16 = self.entries.iter().map(Self::entry_rows).sum();
+        // Inline roster is capped at INLINE_ROSTER_MAX_AGENTS rows; the overflow
+        // collapses into a single "+K more agents" summary line (see draw_tree).
+        let agent_lines: u16 = self
+            .entries
+            .iter()
+            .take(INLINE_ROSTER_MAX_AGENTS)
+            .map(Self::entry_rows)
+            .sum();
+        let more_line = u16::from(self.entries.len() > INLINE_ROSTER_MAX_AGENTS);
         let batch_header_lines = {
             let groups = self.grouped_entries();
             // Only show batch headers if any entry has a batch_id
@@ -280,6 +294,7 @@ impl Agents {
             + main_line
             + batch_header_lines
             + agent_lines
+            + more_line
             + synth_lines
             + swarm_lines
             + scratchpad_lines;
@@ -885,5 +900,150 @@ mod tests {
         // A new top-level turn wipes the whole panel (rows + their summaries).
         a.task_started("task-2");
         assert_eq!(a.entry_count(), 0);
+    }
+
+    // ── Wave 2: display edge-case hardening ───────────────────────────────────
+
+    #[test]
+    fn inline_roster_caps_agents_and_shows_more_summary() {
+        // (1) A 20-node fleet must NOT blow past the inline panel: only the first
+        // INLINE_ROSTER_MAX_AGENTS rows render, the rest collapse into a dim
+        // "+K more agents" line. The full-screen dashboard still lists them all.
+        let mut a = Agents::new();
+        for i in 0..20 {
+            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None);
+        }
+        let text = render_text(&a, 80, 40);
+        // First cap agents (0..=7) are visible.
+        assert!(text.contains("subj0"), "first agent visible: {text:?}");
+        assert!(text.contains("subj7"), "8th (cap) agent visible: {text:?}");
+        // Agents beyond the cap are collapsed away, not drawn inline.
+        assert!(!text.contains("subj9"), "past-cap agent hidden inline: {text:?}");
+        assert!(!text.contains("subj19"), "last agent hidden inline: {text:?}");
+        // The dim overflow summary counts the remainder (20 - 8 = 12).
+        assert!(text.contains("12 more agent"), "overflow summary: {text:?}");
+        // height() reserves for the capped rows + the summary line, not all 20.
+        assert!(a.height() <= 30, "inline panel height stays bounded: {}", a.height());
+    }
+
+    #[test]
+    fn inline_roster_no_more_line_when_under_cap() {
+        // Below the cap there is no overflow line at all.
+        let mut a = Agents::new();
+        for i in 0..3 {
+            a.agent_started(format!("w{i}"), "", "", format!("subj{i}"), None);
+        }
+        let text = render_text(&a, 80, 20);
+        assert!(!text.contains("more agent"), "no overflow line under cap: {text:?}");
+    }
+
+    #[test]
+    fn long_activity_truncates_with_ellipsis() {
+        // (1) Long node activity/name still truncates with `…`, never wraps/overflows.
+        let mut a = Agents::new();
+        a.agent_started("w", "", "", "x".repeat(300), None);
+        let text = render_text(&a, 40, 8);
+        assert!(text.contains('\u{2026}'), "activity truncated: {text:?}");
+    }
+
+    #[test]
+    fn header_fleet_gauge_clamps_and_keeps_large_fleet_hint() {
+        // (2) running > cap (a backend race) must render `cap/cap`, never `30/16`;
+        // the ">=25 large fleet" dim warning is preserved.
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        a.set_fleet_summary(30, 0, 16, 30, true);
+        let text = render_text(&a, 100, 12);
+        assert!(text.contains("16/16 agents"), "clamped gauge: {text:?}");
+        assert!(!text.contains("30/16"), "impossible ratio never shown: {text:?}");
+        assert!(text.contains("large fleet"), "warn hint retained: {text:?}");
+    }
+
+    #[test]
+    fn header_fleet_gauge_zero_cap_no_slash_zero() {
+        // (2) cap == 0 must not render an odd `N/0`; show a plain count instead.
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        a.set_fleet_summary(4, 0, 0, 4, false);
+        let text = render_text(&a, 100, 12);
+        assert!(text.contains("4 agents"), "plain count when cap=0: {text:?}");
+        assert!(!text.contains("4/0"), "never renders N/0: {text:?}");
+    }
+
+    #[test]
+    fn fleet_select_enter_gate_matches_subagent_hint() {
+        // (3) The App gates `←`-enter into FleetSelect on is_active() &&
+        // has_entries() — exactly the condition that makes the status-bar
+        // `← for agents` hint appear (subagent_count = entry_count while active).
+        // So you can never enter the roster into a state that showed no hint.
+        let mut a = Agents::new();
+        // A scratchpad write activates the panel WITHOUT adding any worker rows:
+        // active but no entries → hint absent → enter must be blocked.
+        a.scratchpad_activity("lead", "notes.md", "write", 10);
+        assert!(a.is_active(), "scratchpad activity activates the panel");
+        assert!(!a.has_entries(), "…but there are no worker rows to browse");
+        // Once a real worker exists, both the hint and the enter-gate fire.
+        a.agent_started("w1", "researcher", "", "scan", None);
+        assert!(a.is_active() && a.has_entries(), "worker present → gate + hint agree");
+    }
+
+    #[test]
+    fn main_only_roster_clamps_nav_to_index_zero() {
+        // (3) With no real nodes the inline roster is `main` alone: roster_count
+        // is 1, so the FleetSelect cursor can only ever sit at index 0 (all nav is
+        // clamped by `roster_count`), and main is never cancellable.
+        let a = Agents::new();
+        assert_eq!(a.roster_count(), 1, "main-only roster is a single row");
+        assert!(!a.is_cancellable(0), "main is never cancellable");
+    }
+
+    #[test]
+    fn prune_stale_reaps_finished_rows_and_flips_silent_runners() {
+        // (4) Finished rows older than the retain window are dropped; a running
+        // row silent past the stale window flips to Failed (no forever-ghost).
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        a.agent_started("done-1", "", "", "s", None);
+        a.agent_completed("done-1", 1, 10, None);
+        a.agent_started("live-1", "", "", "s", None); // fresh running row stays
+
+        let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
+        for e in a.entries.iter_mut() {
+            if e.name == "done-1" {
+                e.finished_at = Some(old);
+            }
+        }
+        a.prune_stale();
+        assert!(a.entries.iter().all(|e| e.name != "done-1"), "stale finished row reaped");
+        assert!(a.entries.iter().any(|e| e.name == "live-1"), "fresh running row kept");
+
+        // Silence the live runner past the stale threshold → flipped to Failed.
+        if let Some(e) = a.entries.iter_mut().find(|e| e.name == "live-1") {
+            e.last_activity = Instant::now() - Duration::from_secs(Agents::STALE_SECS + 40);
+        }
+        a.prune_stale();
+        let live = a.entries.iter().find(|e| e.name == "live-1").unwrap();
+        assert_eq!(live.status, AgentStatus::Failed, "silent runner marked failed");
+    }
+
+    #[test]
+    fn prune_stale_does_not_accumulate_dead_rows_under_churn() {
+        // (4) Rapid churn: many completed rows all past the retain window are all
+        // reaped in one pass — the roster never accumulates dead rows — and the
+        // panel goes idle once nothing remains.
+        use std::time::{Duration, Instant};
+        let mut a = Agents::new();
+        for i in 0..50 {
+            let name = format!("w{i}");
+            a.agent_started(name.clone(), "", "", "s", None);
+            a.agent_completed(&name, 1, 1, None);
+        }
+        let old = Instant::now() - Duration::from_secs(Agents::RETAIN_SECS + 40);
+        for e in a.entries.iter_mut() {
+            e.finished_at = Some(old);
+        }
+        a.prune_stale();
+        assert_eq!(a.entry_count(), 0, "all lingering finished rows reaped");
+        assert!(!a.is_active(), "panel goes idle when nothing remains");
     }
 }

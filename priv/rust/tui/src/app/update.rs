@@ -551,7 +551,13 @@ impl App {
     /// seeding it on `main` so the first Enter is a harmless detach. No-op if
     /// there is nothing to focus.
     pub(crate) fn enter_fleet_select(&mut self) {
-        if !self.agents.is_active() {
+        // Gate on is_active() AND has_entries(): this is exactly the condition
+        // that makes the status-bar `← for agents` hint appear (subagent_count =
+        // entry_count while active). Aligning them means you can never enter the
+        // roster into a state that showed no hint — e.g. the panel is "active"
+        // from a scratchpad write or swarm start but has zero worker rows to
+        // browse (only the synthetic `main` node).
+        if !self.agents.is_active() || !self.agents.has_entries() {
             return;
         }
         self.agents_dashboard_selected = 0;
@@ -1004,10 +1010,14 @@ impl App {
             // dashboard. Only intercepted with agents to manage and no @-file
             // dropdown open, so it never steals the composer's cursor motion
             // while typing.
+            // Require has_entries() (not just is_active()) so this matches the
+            // footer `← for agents` hint (shown on subagent_count>0): no visible
+            // hint ⇒ no entry into an empty/main-only roster.
             (KeyCode::Left, KeyModifiers::NONE)
                 if input_empty
                     && !self.input.file_search_active()
-                    && self.agents.is_active() =>
+                    && self.agents.is_active()
+                    && self.agents.has_entries() =>
             {
                 self.enter_fleet_select();
                 false

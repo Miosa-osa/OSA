@@ -92,7 +92,7 @@ impl Agents {
             // once the backend flags the >=25 warning threshold.
             if let Some(ref f) = self.fleet {
                 spans.push(Span::styled(
-                    format!(" \u{00b7} {}/{} agents", f.running, f.cap),
+                    format!(" \u{00b7} {}", fmt_fleet_gauge(f.running, f.cap)),
                     header_style,
                 ));
                 if f.warn {
@@ -169,10 +169,15 @@ impl Agents {
         }
 
         // ── Agent rows (tree-view, with optional batch grouping) ──────────
+        // Bounded: the inline roster shows at most INLINE_ROSTER_MAX_AGENTS agent
+        // rows, then collapses the remainder into a dim "+K more agents" line so a
+        // 30+ node fleet never blows past the panel. The full-screen dashboard
+        // still lists every node.
         let groups = self.grouped_entries();
         let has_batches = groups.iter().any(|g| g.batch_id.is_some());
+        let mut agents_shown = 0usize;
 
-        for (group_idx, group) in groups.iter().enumerate() {
+        'groups: for (group_idx, group) in groups.iter().enumerate() {
             if y + 1 >= area.y + area.height {
                 break;
             }
@@ -200,6 +205,11 @@ impl Agents {
                 if y + 1 >= area.y + area.height {
                     break;
                 }
+                // Cap the inline roster; the remainder is summarized below.
+                if agents_shown >= super::INLINE_ROSTER_MAX_AGENTS {
+                    break 'groups;
+                }
+                agents_shown += 1;
                 let entry = &self.entries[idx];
 
                 let is_last = pos == group_len - 1;
@@ -369,6 +379,27 @@ impl Agents {
             }
         }
 
+        // ── Overflow summary ─────────────────────────────────────────────────
+        // When the fleet exceeds the inline cap, collapse the un-rendered rows
+        // into a single dim "+K more agents · ↓ to manage" line so the inline
+        // roster stays bounded (the full-screen dashboard lists them all).
+        let hidden = self.entries.len().saturating_sub(agents_shown);
+        if hidden > 0 && y + 1 <= area.y + area.height {
+            let line = format!(
+                "   +{} more agent{} \u{00b7} \u{2193} to manage",
+                hidden,
+                if hidden == 1 { "" } else { "s" },
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_str(&line, (area.width as usize).max(8)),
+                    theme.faint(),
+                ))),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            y += 1;
+        }
+
         // ── Synthesizing line ───────────────────────────────────────────────
         if let SynthesisState::Synthesizing { count } = self.synthesis {
             if y < area.y + area.height {
@@ -496,7 +527,7 @@ impl Agents {
         }
         // Live fleet gauge `<running>/<cap> agents` (Part 4.2) from `fleet_summary`.
         if let Some(ref f) = self.fleet {
-            title = format!("{}· {}/{} agents ", title.trim_end(), f.running, f.cap);
+            title = format!("{}· {} ", title.trim_end(), fmt_fleet_gauge(f.running, f.cap));
             if f.warn {
                 title = format!("{}· large fleet ", title.trim_end());
             }
@@ -729,6 +760,20 @@ impl Agents {
     }
 }
 
+/// Format the roster fleet gauge `<running>/<cap> agents`, defensively clamping
+/// the impossible cases so the header never renders nonsense: `running > cap` (a
+/// backend race) clamps to `cap/cap` rather than e.g. `18/16`, and `cap == 0`
+/// (unknown / unbounded — no denominator to divide by) shows a plain `N agents`
+/// instead of an odd `N/0`. The separate ">=25 large fleet" hint is unaffected.
+fn fmt_fleet_gauge(running: u32, cap: u32) -> String {
+    if cap == 0 {
+        format!("{} agent{}", running, if running == 1 { "" } else { "s" })
+    } else {
+        let shown = running.min(cap);
+        format!("{}/{} agents", shown, cap)
+    }
+}
+
 /// Format an appraised cost in USD compactly: 0.0042 → "$0.0042", 1.2 → "$1.20".
 /// Sub-cent estimates keep four decimals so small runs aren't rendered as "$0.00".
 fn fmt_cost(usd: f64) -> String {
@@ -817,5 +862,29 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
         format!("{}…", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_fleet_gauge;
+
+    #[test]
+    fn fleet_gauge_normal_case() {
+        assert_eq!(fmt_fleet_gauge(3, 16), "3/16 agents");
+        assert_eq!(fmt_fleet_gauge(16, 16), "16/16 agents");
+    }
+
+    #[test]
+    fn fleet_gauge_clamps_running_above_cap() {
+        // running > cap can't legitimately happen; clamp so it never shows 18/16.
+        assert_eq!(fmt_fleet_gauge(18, 16), "16/16 agents");
+    }
+
+    #[test]
+    fn fleet_gauge_zero_cap_shows_plain_count_no_slash_zero() {
+        assert_eq!(fmt_fleet_gauge(0, 0), "0 agents");
+        assert_eq!(fmt_fleet_gauge(1, 0), "1 agent");
+        assert_eq!(fmt_fleet_gauge(5, 0), "5 agents");
     }
 }
