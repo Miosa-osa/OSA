@@ -767,6 +767,18 @@ impl ApiClient {
         req: &OnboardingSetupRequest,
     ) -> Result<OnboardingSetupResponse> {
         let resp = self.post_no_auth("/onboarding/setup", req).await?;
+        // A retried POST that lands after the write already succeeded returns 409
+        // (setup_already_complete). That is success from the user's point of view,
+        // so report it as such using the choices we just sent, rather than trying
+        // to decode the 409 body into a setup response and surfacing a spurious
+        // "error decoding response body" on what was actually a completed setup.
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(OnboardingSetupResponse {
+                status: "ok".to_string(),
+                provider: Some(req.provider.clone()),
+                model: Some(req.model.clone()),
+            });
+        }
         Ok(resp.json().await?)
     }
 
@@ -1064,10 +1076,16 @@ impl ApiClient {
         };
 
         let url = format!("{}/api/v1/auth/refresh", self.base_url);
-        let resp = self.http
-            .post(&url)
-            .json(&serde_json::json!({ "refresh_token": refresh_token }))
-            .send()
+        // Retry transient transport blips (a stale pooled socket or brief reset)
+        // so a network hiccup during refresh is not mistaken for a rejected token,
+        // which would clear the session and log the user out on a passing blip.
+        // Only a real HTTP response, or exhausted retries, decides success/failure.
+        let resp = self
+            .send_retry_body(
+                self.http
+                    .post(&url)
+                    .json(&serde_json::json!({ "refresh_token": refresh_token })),
+            )
             .await;
 
         match resp {
