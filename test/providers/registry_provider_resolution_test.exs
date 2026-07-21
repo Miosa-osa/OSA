@@ -59,5 +59,44 @@ defmodule OptimalSystemAgent.Providers.RegistryProviderResolutionTest do
 
       assert Registry.effective_context_window("gpt-4o", :ollama) == 8_192
     end
+
+    test "does NOT cap an Ollama Cloud (:cloud) model to the local num_ctx ceiling" do
+      # Regression: glm-5.2:cloud is served via the :ollama provider (the local
+      # daemon proxies it to Ollama's hosted hardware) but runs REMOTELY with its
+      # full 1M window. It must keep that window, NOT collapse to the tiny local
+      # KV-cache ceiling — otherwise the context meter divides usage by ~32k
+      # instead of 1M and reads ~30x too high, filling almost instantly.
+      prev = Application.get_env(:optimal_system_agent, :ollama_num_ctx)
+      Application.put_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_num_ctx, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_num_ctx)
+      end)
+
+      # The meter denominator must be the true context window (1M), not the local
+      # ceiling (32k) and definitely not the model's OUTPUT cap (128k).
+      window = Registry.effective_context_window("glm-5.2:cloud", :ollama)
+      assert window == 1_000_000
+      assert window == Registry.context_window("glm-5.2:cloud")
+      refute window == 32_768
+      refute window == OptimalSystemAgent.Providers.ModelLimits.max_output("glm-5.2:cloud")
+    end
+
+    test "meter denominator is the context window, not the output cap, across providers" do
+      # The context-usage meter must always divide by the CONTEXT WINDOW, never the
+      # (much smaller) per-model OUTPUT cap — mixing them up is what makes the bar
+      # fill too fast.
+      for {model, provider, window} <- [
+            {"glm-5.2:cloud", :ollama, 1_000_000},
+            {"claude-sonnet-4-6", :anthropic, 1_000_000},
+            {"gpt-4o", :openai, 128_000}
+          ] do
+        assert Registry.effective_context_window(model, provider) == window
+        assert Registry.effective_context_window(model, provider) >
+                 OptimalSystemAgent.Providers.ModelLimits.max_output(model)
+      end
+    end
   end
 end

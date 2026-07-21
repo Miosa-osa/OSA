@@ -866,6 +866,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
   always agree, instead of Context believing it has a 32k-128k window while the
   Ollama server honors only 4096.
 
+  EXCEPTION — Ollama Cloud models (a ":cloud" tag, e.g. "glm-5.2:cloud"): even
+  though they are served through the `:ollama` provider (the local daemon proxies
+  them to Ollama's hosted hardware by device identity), they run REMOTELY and keep
+  their full trained window. The local KV-cache `:ollama_num_ctx` ceiling does not
+  apply, so they must NOT be capped — otherwise the context meter divides usage by
+  the tiny local ceiling (e.g. 32k) instead of the real window (e.g. 1M), reading
+  ~30x too high and filling almost instantly, and Agent.Context under-budgets the
+  prompt. Detected via the same ":cloud" convention `provider_for_model/1` uses.
+
   A nil/non-binary `model` resolves through `context_window/1`'s catch-all to the
   config default (128k), preserving prior behavior for cloud providers.
   """
@@ -873,7 +882,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def effective_context_window(model, provider) do
     trained = context_window(model)
 
-    if provider in [:ollama, :lmstudio, :llamacpp] do
+    if provider in [:ollama, :lmstudio, :llamacpp] and not ollama_cloud_model?(model) do
       ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
 
       # Floor against the model's REAL trained window too, not just the config
@@ -903,6 +912,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   defp local_trained_window(_provider, _model, default), do: default
+
+  # True for an Ollama Cloud model (a ":cloud" tag). These are proxied to Ollama's
+  # hosted hardware and keep their full trained window, so `effective_context_window/2`
+  # must not squeeze them under the local KV-cache num_ctx ceiling. Mirrors the
+  # ":cloud" heuristic in `provider_for_model/1`.
+  defp ollama_cloud_model?(model) when is_binary(model), do: String.contains?(model, ":cloud")
+  defp ollama_cloud_model?(_), do: false
 
   @doc """
   Resolve the provider atom that OWNS `model`.
