@@ -1440,6 +1440,30 @@ mod status_bar_tests {
     }
 
     #[test]
+    fn fleet_select_hint_switches_between_idle_and_roster_focus() {
+        // G — the footer cue swaps `← for agents · ↓ manage` (idle) for the
+        // per-row `Enter to view · x to stop` action hint while the roster is
+        // focused. Both only render alongside the sub-agent footer (count > 0).
+        let mut sb = StatusBar::new();
+        sb.set_width(120);
+        sb.set_subagents(2, None);
+
+        // Idle roster: advertise how to open it + the full dashboard.
+        sb.set_fleet_select(false);
+        let idle = render_sb(&sb);
+        assert!(idle.contains("for agents"), "idle hint present, got: {idle:?}");
+        assert!(idle.contains("manage"), "idle hint advertises ↓ manage");
+        assert!(!idle.contains("Enter to view"), "no action hint when unfocused");
+
+        // Roster focused (`←` pressed): show the per-row actions instead.
+        sb.set_fleet_select(true);
+        let focused = render_sb(&sb);
+        assert!(focused.contains("Enter to view"), "focused action hint, got: {focused:?}");
+        assert!(focused.contains("x to stop"), "focused stop hint");
+        assert!(!focused.contains("manage"), "idle hint is replaced when focused");
+    }
+
+    #[test]
     fn update_chip_renders_only_when_available() {
         use crate::client::types::HealthUpdate;
         let mut sb = StatusBar::new();

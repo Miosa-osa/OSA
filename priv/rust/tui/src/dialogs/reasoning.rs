@@ -218,3 +218,111 @@ impl ReasoningSelector {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [ReasoningLevel; 6] = [
+        ReasoningLevel::Off,
+        ReasoningLevel::Fast,
+        ReasoningLevel::Medium,
+        ReasoningLevel::High,
+        ReasoningLevel::Xhigh,
+        ReasoningLevel::Ultra,
+    ];
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn index_from_index_roundtrip_for_all_six() {
+        // Every level survives index()→from_index() unchanged, and indices are 0..6.
+        for (expect_i, level) in ALL.iter().enumerate() {
+            assert_eq!(level.index(), expect_i, "index is stable & contiguous");
+            assert_eq!(ReasoningLevel::from_index(level.index()), *level, "roundtrip {level:?}");
+        }
+        // Descriptor table stays in lockstep with the enum order.
+        for (i, (level, _, _)) in LEVELS.iter().enumerate() {
+            assert_eq!(*level, ReasoningLevel::from_index(i), "LEVELS[{i}] matches from_index");
+        }
+    }
+
+    #[test]
+    fn new_seeds_cursor_to_current_and_enter_selects_it() {
+        // Opening on a level and pressing Enter immediately re-selects that level
+        // (cursor is seeded from current.index()).
+        for level in ALL {
+            let mut sel = ReasoningSelector::new(level);
+            match sel.handle_key(key(KeyCode::Enter)) {
+                Some(ReasoningAction::Select(got)) => assert_eq!(got, level, "Enter returns seeded level"),
+                other => panic!("expected Select({level:?}), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn down_and_j_advance_then_enter_yields_target() {
+        // From Off, three Downs land on High; Enter selects it.
+        let mut sel = ReasoningSelector::new(ReasoningLevel::Off);
+        assert!(sel.handle_key(key(KeyCode::Down)).is_none());
+        assert!(sel.handle_key(key(KeyCode::Char('j'))).is_none());
+        assert!(sel.handle_key(key(KeyCode::Down)).is_none());
+        match sel.handle_key(key(KeyCode::Enter)) {
+            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::High),
+            other => panic!("expected Select(High), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn up_wraps_from_first_to_last() {
+        // Off is index 0; Up wraps to Ultra (index 5).
+        let mut sel = ReasoningSelector::new(ReasoningLevel::Off);
+        assert!(sel.handle_key(key(KeyCode::Up)).is_none());
+        match sel.handle_key(key(KeyCode::Enter)) {
+            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Ultra, "Up wraps to Ultra"),
+            other => panic!("expected Select(Ultra), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn down_wraps_from_last_to_first() {
+        // Ultra is index 5; Down wraps to Off (index 0).
+        let mut sel = ReasoningSelector::new(ReasoningLevel::Ultra);
+        assert!(sel.handle_key(key(KeyCode::Char('j'))).is_none());
+        match sel.handle_key(key(KeyCode::Enter)) {
+            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Off, "Down wraps to Off"),
+            other => panic!("expected Select(Off), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_cancels_and_k_moves_up() {
+        let mut sel = ReasoningSelector::new(ReasoningLevel::Medium);
+        // k moves up one (Medium→Fast), Enter would select Fast — prove via cursor path.
+        assert!(sel.handle_key(key(KeyCode::Char('k'))).is_none());
+        // Esc cancels regardless of cursor position.
+        match sel.handle_key(key(KeyCode::Esc)) {
+            Some(ReasoningAction::Cancel) => {}
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_and_alt_chords_are_ignored() {
+        // Modifier chords never move the cursor or select (they belong to the app).
+        let mut sel = ReasoningSelector::new(ReasoningLevel::Off);
+        assert!(sel
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+            .is_none());
+        assert!(sel
+            .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))
+            .is_none());
+        // Cursor unmoved → plain Enter still selects Off.
+        match sel.handle_key(key(KeyCode::Enter)) {
+            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Off),
+            other => panic!("expected Select(Off), got {other:?}"),
+        }
+    }
+}

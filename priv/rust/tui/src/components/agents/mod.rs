@@ -791,6 +791,85 @@ mod tests {
         assert!(text.contains('\u{2026}'), "expected ellipsis truncation: {:?}", text);
     }
 
+    // ── FleetView roster: inline `← for agents` navigation invariants ─────────
+    // These lock the ROSTER index space (0 = synthetic `main`, 1..=entries) that
+    // `handle_fleet_select_key` / `view_selected_dashboard_item` /
+    // `stop_selected_dashboard_item` rely on. See app/update.rs + handle_dialogs.rs.
+
+    #[test]
+    fn roster_count_is_one_plus_entries() {
+        // Bounds the FleetSelect cursor (B): `main` alone is 1 row; each worker
+        // adds one. Empty roster is never zero — `main` always exists.
+        let mut a = Agents::new();
+        assert_eq!(a.roster_count(), 1, "main-only roster is 1 row");
+        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_started("w2", "coder", "", "build", None);
+        assert_eq!(a.roster_count(), 3, "main + 2 workers");
+    }
+
+    #[test]
+    fn is_active_true_once_a_worker_exists() {
+        // Gate for entering FleetSelect via `←` (A): the Left arm + enter_fleet_select
+        // both guard on is_active(), which flips true the moment an agent is tracked.
+        let mut a = Agents::new();
+        assert!(!a.is_active(), "fresh panel is inactive");
+        a.agent_started("w1", "researcher", "", "scan", None);
+        assert!(a.is_active(), "tracking a worker activates the panel");
+    }
+
+    #[test]
+    fn main_row_index_zero_is_never_cancellable() {
+        // `x`/`c` on `main` must be a NO-OP (E): is_cancellable(0) is always false,
+        // even with live workers present.
+        let mut a = Agents::new();
+        assert!(!a.is_cancellable(0), "empty: main not cancellable");
+        a.agent_started("w1", "researcher", "", "scan", None);
+        assert!(!a.is_cancellable(0), "with workers: main STILL not cancellable");
+    }
+
+    #[test]
+    fn worker_cancellable_while_running_not_after_terminal() {
+        // `x` on a running worker stops it; a completed/failed worker is inert (E).
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scan", None);
+        assert!(a.is_cancellable(1), "running worker at roster idx 1 is cancellable");
+        a.agent_completed("w1", 1, 10, None);
+        assert!(!a.is_cancellable(1), "completed worker is not cancellable");
+
+        a.agent_started("w2", "coder", "", "build", None);
+        a.agent_failed("w2", "boom", 0, 0, None);
+        assert!(!a.is_cancellable(2), "failed worker is not cancellable");
+    }
+
+    #[test]
+    fn agent_id_and_summary_are_roster_indexed_main_is_none() {
+        // Enter/x routing depends on this offset (C/D/I): roster idx 0 = `main`
+        // (no backend id, no worker transcript → None); idx 1 maps to entries[0].
+        let mut a = Agents::new();
+        a.agent_started("worker-alpha", "researcher", "", "scan modules", None);
+        a.agent_started("worker-beta", "coder", "", "write code", None);
+
+        assert_eq!(a.agent_id_at(0), None, "main has no backend agent id");
+        assert_eq!(a.agent_id_at(1).as_deref(), Some("worker-alpha"), "idx 1 → entries[0]");
+        assert_eq!(a.agent_id_at(2).as_deref(), Some("worker-beta"), "idx 2 → entries[1]");
+        assert_eq!(a.agent_id_at(3), None, "past the end → None");
+
+        assert_eq!(a.entry_summary_at(0), None, "main has no worker summary");
+        let s1 = a.entry_summary_at(1).expect("worker-alpha summary");
+        assert!(s1.contains("scan modules"), "summary names the worker subject: {s1:?}");
+        assert!(a.entry_summary_at(3).is_none(), "past the end → None");
+    }
+
+    #[test]
+    fn is_cancellable_saturates_below_zero_and_above_end() {
+        // Defensive: no panic / no wraparound at the roster edges.
+        let mut a = Agents::new();
+        a.agent_started("w1", "", "", "s", None);
+        assert!(!a.is_cancellable(0));
+        assert!(a.is_cancellable(1));
+        assert!(!a.is_cancellable(99), "way out of range → false, no panic");
+    }
+
     #[test]
     fn summary_clears_when_agent_restarts_and_on_new_turn() {
         let mut a = Agents::new();

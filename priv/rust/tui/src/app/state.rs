@@ -255,3 +255,35 @@ impl std::fmt::Display for AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod fleet_select_transition_tests {
+    use super::AppState::*;
+
+    #[test]
+    fn idle_can_enter_fleet_select() {
+        // A — pressing `←` on an empty composer transitions Idle → FleetSelect
+        // (enter_fleet_select guards on this). It must be an allowed edge.
+        assert!(Idle.can_transition_to(FleetSelect));
+    }
+
+    #[test]
+    fn fleet_select_returns_to_idle() {
+        // C / F — Enter-on-main (detach) and →/Esc/q (exit) both drop back to Idle.
+        assert!(FleetSelect.can_transition_to(Idle));
+    }
+
+    #[test]
+    fn fleet_select_can_start_processing() {
+        // Submitting from the composer after leaving FleetSelect must be reachable
+        // (the roster mode never traps the user out of a turn).
+        assert!(FleetSelect.can_transition_to(Processing));
+    }
+
+    #[test]
+    fn fleet_select_does_not_open_full_dashboard_directly() {
+        // A guarantees the inline roster is distinct from the full-screen
+        // dashboard: there is no FleetSelect → AgentsDashboard edge.
+        assert!(!FleetSelect.can_transition_to(AgentsDashboard));
+    }
+}
