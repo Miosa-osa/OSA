@@ -53,7 +53,12 @@ isolated worktrees, verify it, and commit itself. See `docs/FLEETVIEW_DESIGN.md`
 - **Worktree-per-node isolation** (`isolation: :worktree`) so parallel nodes edit
   their own worktrees and never collide.
 - **`Fleet.Finalizer`** — merges disjoint node diffs, runs an authoritative gate,
-  and commits when green (attribution-clean, never pushes).
+  and commits when green (scoped `git add -- <file>`, attribution-clean, never pushes).
+- **The loop is closed end-to-end** — `fan_out` waits for each node to complete before
+  capturing its worktree diff (so the finalizer merges *real* changes), and the `fleet`
+  tool exposes `isolation` + `finalize` (gate + commit) so the coordinator can run the
+  whole recon → isolate → merge → gate → commit flow. (Unit-verified end to end; a
+  live-repo integration test is the next follow-up.)
 - **Fleet Orchestration playbook** (`priv/skills/fleet-orchestration`) — teaches the
   coordinator the disjoint-workstream method: recon → partition by file ownership →
   isolate → structured reports → finalize → checkpoint.
@@ -71,7 +76,12 @@ isolated worktrees, verify it, and commit itself. See `docs/FLEETVIEW_DESIGN.md`
   fleet-tool argument validation, and scratchpad concurrency (cluster-serialized
   writes). Two provider thinking bugs fixed (OpenAI silently disabling reasoning on
   a bad effort value; Gemini `nil > 0` term-ordering emitting a bogus budget).
-  FleetView keyboard navigation verified end-to-end.
+  FleetView keyboard navigation verified end-to-end. **TUI resize no longer duplicates
+  content** — the inline-viewport clear now anchors to the actual cursor instead of
+  ratatui's stale pre-resize geometry, which had been scrolling old chrome into
+  scrollback on every resize. Intermittently-flaky tests stabilized at the root cause
+  (session-scoped event capture; `async: false` where global app-env is shared). Full
+  suite: 5116 tests, 0 failures.
 
 ## [1.0.10] — displays as `v1.0.010`
 
