@@ -149,7 +149,34 @@ defmodule OptimalSystemAgent.MCP.EndToEndTest do
       {:ok, pid} = ServerSession.start_link(server)
       # The session traps exits and is linked to this (transient) test process,
       # so it may already be terminating by cleanup time; kill tolerantly.
-      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+      #
+      # The session also reports its discovered tools to the MCP Manager, which
+      # rewrites the GLOBAL `{Registry, :mcp_tools}` persistent_term. That write
+      # is asynchronous, so without draining it here a pending report/reload can
+      # land during a LATER test and clobber the tools that test injected into
+      # the same persistent_term (flaked "deferred mcp tools …"/list_active). We
+      # wait for the session to actually die, then issue a synchronous
+      # Manager.reload — ordered after any queued report_tools casts — so the
+      # aggregate is recomputed from LIVE sessions only and nothing is left
+      # in-flight to race the next test.
+      on_exit(fn ->
+        if Process.alive?(pid) do
+          ref = Process.monitor(pid)
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^ref, :process, ^pid, _} -> :ok
+          after
+            1_000 -> :ok
+          end
+        end
+
+        try do
+          OptimalSystemAgent.MCP.Client.Manager.reload()
+        catch
+          _, _ -> :ok
+        end
+      end)
 
       assert wait_until(fn -> ServerSession.status(name) == :ready end)
       assert wait_until(fn -> ServerSession.list_tools(name) != [] end)

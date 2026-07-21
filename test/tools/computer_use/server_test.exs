@@ -27,6 +27,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     end
   end
 
+  # `Server.start_link/1` LINKS the server to the test process, so when the test
+  # body finishes the server is torn down by the exit signal at the same time
+  # on_exit runs in its own process. `Process.alive?/1` can therefore still read
+  # true a hair before the stop lands, making a bare `GenServer.stop/1` crash
+  # with :noproc. Tolerate an already-terminated server — cleanup is best-effort.
+  defp stop_server(pid) do
+    if Process.alive?(pid) do
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Server lifecycle
   # ---------------------------------------------------------------------------
@@ -106,7 +121,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       {:ok, pid} =
         Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_exec")
 
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      on_exit(fn -> stop_server(pid) end)
       %{pid: pid}
     end
 
@@ -162,7 +177,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       {:ok, pid} =
         Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_refs")
 
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      on_exit(fn -> stop_server(pid) end)
 
       # Populate refs by fetching tree
       {:ok, _tree_text} = Server.execute(pid, "get_tree", %{})
@@ -190,7 +205,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       {:ok, pid} =
         Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_cache")
 
-      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      on_exit(fn -> stop_server(pid) end)
       %{pid: pid}
     end
 
