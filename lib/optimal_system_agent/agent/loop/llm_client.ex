@@ -487,10 +487,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         state.model ||
           Application.get_env(:optimal_system_agent, :anthropic_model, "claude-sonnet-4-6")
 
-      if String.contains?(to_string(model), "opus") do
+      if String.contains?(to_string(model), "opus") and not Effort.current_at_least?(:ultra) do
+        # Opus uses adaptive thinking by default (it self-sizes reasoning). At :ultra we
+        # force an explicit max budget so ultra visibly thinks harder on opus too, honoring
+        # the "effort = how much it thinks" model at the top tier.
         %{type: "adaptive"}
       else
-        # Use effort level's thinking budget instead of flat config
+        # Use effort level's thinking budget instead of flat config.
         budget = Effort.thinking_budget()
         %{type: "enabled", budget_tokens: budget}
       end
