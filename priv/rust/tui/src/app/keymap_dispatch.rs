@@ -271,7 +271,9 @@ impl App {
         }
         self.kill_agents_armed = None;
         let mut stopped = 0usize;
-        for idx in 0..self.agents.entry_count() {
+        // Roster index space: 0 is the synthetic `main` root (never cancellable),
+        // so agents live at 1..=entry_count.
+        for idx in 1..=self.agents.entry_count() {
             if !self.agents.is_cancellable(idx) {
                 continue;
             }

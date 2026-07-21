@@ -26,6 +26,23 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
       iteration: state.iteration,
       plan_mode: state.plan_mode,
       turn_count: state.turn_count,
+      # Spend accumulators (audit gap C2): persist the running budget totals so a
+      # crash-restarted loop resumes with a NON-zero spend and a `max_budget_usd`
+      # cap keeps holding. Without this a $48-of-$50 run resumes at $0 and blows
+      # past the cap. Pricing/accounting math is unchanged — we only persist the
+      # totals `Loop.Accounting` already maintains on the state.
+      session_cost_usd: Map.get(state, :session_cost_usd, 0.0),
+      session_input_tokens: Map.get(state, :session_input_tokens, 0),
+      session_output_tokens: Map.get(state, :session_output_tokens, 0),
+      session_cache_creation_tokens: Map.get(state, :session_cache_creation_tokens, 0),
+      session_cache_read_tokens: Map.get(state, :session_cache_read_tokens, 0),
+      # Budget cap (audit gap D2 restore half): persist the CAP itself, not just
+      # the accumulated spend. Without this a $50 cap is re-read fresh from
+      # opts→app env each Loop.init, so a crash/restart of a run started with an
+      # explicit cap would silently reset it (app-env default is nil = uncapped).
+      # nil is preserved (uncapped stays uncapped).
+      max_budget_usd: Map.get(state, :max_budget_usd),
+      started_at: serialize_started_at(Map.get(state, :started_at)),
       checkpointed_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
@@ -52,6 +69,13 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
     File.write!(tmp, Jason.encode!(sanitized), [:utf8])
     File.rename!(tmp, path)
+
+    # Also mirror the running spend into the durable between-turn sidecar. The
+    # crash-recovery checkpoint above is CLEARED at every clean turn boundary
+    # (Loop.terminate/2), so on a resume AFTER a completed turn it is gone. The
+    # spend sidecar is NOT cleared there, so accumulated spend survives a resume
+    # too — and a `max_budget_usd` cap keeps holding across turns. Best-effort.
+    persist_spend_sidecar(state)
 
     Logger.debug(
       "[loop] Checkpoint written for session #{state.session_id} at iteration #{state.iteration}"
@@ -90,7 +114,20 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
                 messages: messages,
                 iteration: data["iteration"] || 0,
                 plan_mode: data["plan_mode"] || false,
-                turn_count: data["turn_count"] || 0
+                turn_count: data["turn_count"] || 0,
+                # Spend accumulators (audit gap C2). Absent on pre-C2 checkpoints,
+                # so default to zero — the loop's sidecar fallback then supplies
+                # any post-turn spend.
+                session_cost_usd: num(data["session_cost_usd"], 0.0),
+                session_input_tokens: num(data["session_input_tokens"], 0),
+                session_output_tokens: num(data["session_output_tokens"], 0),
+                session_cache_creation_tokens: num(data["session_cache_creation_tokens"], 0),
+                session_cache_read_tokens: num(data["session_cache_read_tokens"], 0),
+                # Budget cap (audit gap D2). Absent on pre-D2 checkpoints → nil,
+                # so Loop.init falls back to opts→app env. A persisted number wins
+                # so a resumed run honors the cap it was started with.
+                max_budget_usd: num_or_nil(data["max_budget_usd"]),
+                started_at: data["started_at"]
               }
 
             {:error, _} ->
@@ -131,6 +168,37 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
   end
 
   defp sanitize_utf8(other), do: to_string(other)
+
+  # Coerce a possibly-nil / possibly-string JSON number into a number, else default.
+  defp num(v, _default) when is_number(v), do: v
+  defp num(_, default), do: default
+
+  # Like num/2 but preserves nil (absent cap) instead of coercing to a default —
+  # a nil `max_budget_usd` means "uncapped, fall back to opts→app env".
+  defp num_or_nil(v) when is_number(v), do: v
+  defp num_or_nil(_), do: nil
+
+  # started_at may be a %DateTime{} on live state or an iso8601 string on a
+  # restored one; normalize both to a string for the JSON payload.
+  defp serialize_started_at(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp serialize_started_at(s) when is_binary(s), do: s
+  defp serialize_started_at(_), do: nil
+
+  # Mirror the running spend into the durable between-turn sidecar (never raises).
+  defp persist_spend_sidecar(state) do
+    OptimalSystemAgent.Agent.SessionPersistence.save_spend(state.session_id, %{
+      cost_usd: Map.get(state, :session_cost_usd, 0.0),
+      input_tokens: Map.get(state, :session_input_tokens, 0),
+      output_tokens: Map.get(state, :session_output_tokens, 0),
+      cache_creation_tokens: Map.get(state, :session_cache_creation_tokens, 0),
+      cache_read_tokens: Map.get(state, :session_cache_read_tokens, 0),
+      started_at: serialize_started_at(Map.get(state, :started_at))
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   @doc "Delete the checkpoint file for the given session."
   def clear_checkpoint(session_id) do
@@ -289,7 +357,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Checkpoint do
     case get_rewind_checkpoint(session_id, id) do
       {:ok, entry} ->
         code = if scope in [:code, :both], do: restore_code(entry), else: :skipped
-        {convo, messages} = if scope in [:conversation, :both], do: restore_conversation(entry), else: {:skipped, nil}
+
+        {convo, messages} =
+          if scope in [:conversation, :both],
+            do: restore_conversation(entry),
+            else: {:skipped, nil}
 
         {:ok,
          %{

@@ -207,7 +207,7 @@ defmodule OptimalSystemAgent.Agent.Context do
   # from the full dynamic budget. Everything else (memory, episodic, project
   # context, skills, learned skills, agent roles) is RECALL and competes within
   # a bounded sub-budget capped to a fraction of the REAL window.
-  @essential_labels ~w(bootstrap personality tool_process runtime environment plan_mode task_state workflow scratchpad project_instructions)
+  @essential_labels ~w(bootstrap personality task_brief tool_process runtime environment plan_mode task_state workflow scratchpad project_instructions)
 
   defp assemble_dynamic_context(state, budget, effective_window) do
     blocks = gather_dynamic_blocks(state)
@@ -268,6 +268,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     [
       {bootstrap_block(), 0, "bootstrap"},
       {personality_block(), 0, "personality"},
+      {task_brief_block(state), 0, "task_brief"},
       {tool_process_block(state), 1, "tool_process"},
       {runtime_block(state), 1, "runtime"},
       {environment_block(state), 1, "environment"},
@@ -741,6 +742,27 @@ defmodule OptimalSystemAgent.Agent.Context do
     end
   rescue
     _ -> nil
+  end
+
+  # Durable, always-re-injected Task Brief (audit gap M1). When a run has a
+  # founding goal captured on disk (`Agent.TaskBrief`), inject it verbatim on
+  # EVERY turn as part of this `role: "system"` prompt. Because it is re-derived
+  # from disk each turn AND lives in a system block (which the Compactor
+  # preserves — see `split_system/1`), the original instruction can never be
+  # compacted away over a days-long single-instruction run. Normal short chats
+  # have no brief, so this returns nil and injects nothing.
+  defp task_brief_block(state) do
+    session_id = Map.get(state, :session_id)
+
+    if is_binary(session_id) do
+      OptimalSystemAgent.Agent.TaskBrief.context_block(session_id)
+    else
+      nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp task_state_block(state) do

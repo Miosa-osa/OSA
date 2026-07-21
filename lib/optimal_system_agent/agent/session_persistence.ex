@@ -231,6 +231,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     # deleted session leaves nothing behind.
     Jsonl.delete(updates_path(session_id))
     _ = File.rm(path <> ".corrupt")
+    _ = File.rm(spend_path(session_id))
     File.rm(path)
   end
 
@@ -260,6 +261,7 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
                 session_id = String.trim_trailing(file, ".json")
                 Jsonl.delete(updates_path(session_id))
                 _ = File.rm(path <> ".corrupt")
+                _ = File.rm(spend_path(session_id))
                 File.rm(path) == :ok
 
               _ ->
@@ -356,6 +358,10 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
         try do
           state = :sys.get_state(pid)
           save(session_id, state.messages, Map.get(state, :working_dir))
+          # Persist the running spend at the turn boundary too (audit gap C2).
+          # The crash-recovery checkpoint is cleared on a clean turn end, so this
+          # is what carries accumulated spend into a resume AFTER a completed turn.
+          save_spend(session_id, spend_from_state(state))
         rescue
           _ -> :ok
         end
@@ -363,6 +369,94 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
       _ ->
         :ok
     end
+  end
+
+  # ── Durable spend sidecar (audit gap C2) ─────────────────────────────────
+  #
+  # A tiny `<id>.spend.json` next to the session transcript that holds ONLY the
+  # running budget totals. It is written every tool cycle (via Checkpoint) and
+  # every turn boundary (via auto_save), and — unlike the crash-recovery
+  # checkpoint — is NOT cleared when a turn ends cleanly. That makes accumulated
+  # spend survive BOTH a mid-turn crash and a resume after a completed turn, so a
+  # `max_budget_usd` cap keeps holding across the whole run.
+
+  @doc "Persist the running per-session spend totals (atomic write). Best-effort."
+  @spec save_spend(String.t(), map()) :: :ok | {:error, term()}
+  def save_spend(session_id, spend) when is_binary(session_id) and is_map(spend) do
+    File.mkdir_p!(sessions_dir())
+    write_json(spend_path(session_id), stringify_spend(spend))
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  def save_spend(_, _), do: {:error, :invalid_args}
+
+  @doc """
+  Load the durable per-session spend totals. Returns a map with atom keys and
+  zero defaults when no sidecar exists yet (never raises).
+  """
+  @spec load_spend(String.t()) :: %{
+          cost_usd: number(),
+          input_tokens: non_neg_integer(),
+          output_tokens: non_neg_integer(),
+          cache_creation_tokens: non_neg_integer(),
+          cache_read_tokens: non_neg_integer(),
+          started_at: String.t() | nil
+        }
+  def load_spend(session_id) when is_binary(session_id) do
+    with {:ok, json} <- File.read(spend_path(session_id)),
+         {:ok, data} when is_map(data) <- Jason.decode(json) do
+      %{
+        cost_usd: spend_num(data["cost_usd"], 0.0),
+        input_tokens: spend_num(data["input_tokens"], 0),
+        output_tokens: spend_num(data["output_tokens"], 0),
+        cache_creation_tokens: spend_num(data["cache_creation_tokens"], 0),
+        cache_read_tokens: spend_num(data["cache_read_tokens"], 0),
+        started_at: data["started_at"]
+      }
+    else
+      _ -> zero_spend()
+    end
+  rescue
+    _ -> zero_spend()
+  end
+
+  def load_spend(_), do: zero_spend()
+
+  defp zero_spend do
+    %{
+      cost_usd: 0.0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      started_at: nil
+    }
+  end
+
+  defp spend_from_state(state) do
+    %{
+      cost_usd: Map.get(state, :session_cost_usd, 0.0),
+      input_tokens: Map.get(state, :session_input_tokens, 0),
+      output_tokens: Map.get(state, :session_output_tokens, 0),
+      cache_creation_tokens: Map.get(state, :session_cache_creation_tokens, 0),
+      cache_read_tokens: Map.get(state, :session_cache_read_tokens, 0),
+      started_at: started_at_string(Map.get(state, :started_at))
+    }
+  end
+
+  defp started_at_string(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp started_at_string(s) when is_binary(s), do: s
+  defp started_at_string(_), do: nil
+
+  defp stringify_spend(spend), do: Map.new(spend, fn {k, v} -> {to_string(k), v} end)
+
+  defp spend_num(v, _default) when is_number(v), do: v
+  defp spend_num(_, default), do: default
+
+  defp spend_path(session_id) do
+    safe_id = Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
+    Path.join(sessions_dir(), "#{safe_id}.spend.json")
   end
 
   @doc """

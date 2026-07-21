@@ -84,7 +84,21 @@ defmodule OptimalSystemAgent.Agent.PlanStore do
   @spec write_plan_file(String.t(), String.t()) :: :ok | {:error, term()}
   def write_plan_file(session_id, plan) when is_binary(session_id) and is_binary(plan) do
     File.mkdir_p!(sessions_dir())
-    File.write(plan_file_path(session_id), plan)
+    # Atomic write (audit gap D4): temp-file + rename, mirroring
+    # SessionPersistence's crash-safe pattern. A crash mid-write can never leave a
+    # torn plan file — the file a long run reads back to recover its intent — so a
+    # reader always sees either the intact old plan or the intact new one.
+    path = plan_file_path(session_id)
+    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
+
+    with :ok <- File.write(tmp, plan),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, reason}
+    end
   end
 
   def write_plan_file(_, _), do: {:error, :invalid_args}

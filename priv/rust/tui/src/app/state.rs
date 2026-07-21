@@ -15,6 +15,10 @@ pub enum AppState {
     Survey,
     Recording,
     AgentsDashboard,
+    /// Inline `← for agents` roster focus (CC FleetView): the composer yields
+    /// keyboard focus to the under-composer roster WITHOUT opening the
+    /// full-screen dashboard. Renders inline (NOT an overlay / fullscreen state).
+    FleetSelect,
     Rewind,
     Status,
     ThemePicker,
@@ -56,6 +60,9 @@ impl AppState {
                 | (Idle, Onboarding)
                 | (Idle, Recording)
                 | (Idle, AgentsDashboard)
+                | (Idle, FleetSelect)
+                | (FleetSelect, Idle)
+                | (FleetSelect, Processing)
                 | (Idle, Rewind)
                 | (Idle, Status)
                 | (Idle, ThemePicker)
@@ -226,6 +233,7 @@ impl std::fmt::Display for AppState {
             AppState::Survey => write!(f, "Survey"),
             AppState::Recording => write!(f, "Recording"),
             AppState::AgentsDashboard => write!(f, "Agent Dashboard"),
+            AppState::FleetSelect => write!(f, "Fleet Select"),
             AppState::Rewind => write!(f, "Rewind"),
             AppState::Status => write!(f, "Status"),
             AppState::ThemePicker => write!(f, "Theme"),

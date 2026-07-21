@@ -39,6 +39,9 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     scratchpad_activity
     coordinator_mode
     error
+    fleet_node_started
+    fleet_node_progress
+    fleet_node_completed
   )a
 
   def start_link(_opts \\ []) do

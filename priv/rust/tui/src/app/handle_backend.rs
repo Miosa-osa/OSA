@@ -1326,6 +1326,35 @@ impl App {
                 self.recompute_layout();
             }
 
+            // === Fleet events → Agents component (CC FleetView roster) ===
+            // Full-power background nodes drive the same roster mutation API as
+            // orchestrator workers, so they appear inline identically.
+            BackendEvent::FleetNodeStarted { node_id, agent_type, task, .. } => {
+                self.agents.agent_started(&node_id, &agent_type, "", &task, None);
+                self.recompute_layout();
+            }
+            BackendEvent::FleetNodeProgress {
+                node_id,
+                current_action,
+                tool_uses,
+                tokens_used,
+                recent_actions,
+            } => {
+                self.agents.agent_progress(
+                    &node_id,
+                    &current_action,
+                    tool_uses,
+                    tokens_used,
+                    "",
+                    recent_actions,
+                );
+                self.recompute_layout();
+            }
+            BackendEvent::FleetNodeCompleted { node_id, summary, status } => {
+                self.agents.fleet_node_completed(&node_id, &status, summary);
+                self.recompute_layout();
+            }
+
             // === Swarm events → Agents component ===
             BackendEvent::SwarmStarted { swarm_id, pattern, agent_count, .. } => {
                 self.agents.swarm_started(&swarm_id, &pattern, agent_count);

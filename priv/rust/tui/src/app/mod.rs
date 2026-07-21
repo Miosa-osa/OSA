@@ -840,9 +840,36 @@ impl App {
         if self.agents.is_active() {
             self.status
                 .set_subagents(self.agents.entry_count(), self.agents.est_cost_usd());
+            // CC FleetView `main` root row: synthesize it from live session
+            // state (top-level action, turn elapsed, session output tokens). No
+            // backend event drives `main` — it is the home node the TUI owns.
+            let activity = match self.goal.as_deref() {
+                Some(g) if !g.trim().is_empty() => g.trim().to_string(),
+                _ if self.state == AppState::Processing => "Working…".to_string(),
+                _ => "Ready".to_string(),
+            };
+            let elapsed = if self.state == AppState::Processing {
+                self.processing_start
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let tokens = self.status.output_tokens().min(u32::MAX as u64) as u32;
+            self.agents.set_main_row(activity, elapsed, tokens);
         } else {
             self.status.set_subagents(0, None);
         }
+
+        // FleetSelect roster focus: mirror the shared selection cursor into the
+        // Agents component (for the inline highlight) and flip the footer hint.
+        let fleet_select = self.state == AppState::FleetSelect;
+        self.status.set_fleet_select(fleet_select);
+        self.agents.set_roster_selected(if fleet_select {
+            Some(self.agents_dashboard_selected)
+        } else {
+            None
+        });
 
         if self.permissions.is_some() {
             let since = *self.permission_wait_since.get_or_insert_with(Instant::now);

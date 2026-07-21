@@ -458,6 +458,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "orchestrator_wave_started"
         | "orchestrator_synthesizing"
         | "orchestrator_task_completed"
+        | "fleet_node_started"
+        | "fleet_node_progress"
+        | "fleet_node_completed"
         | "context_pressure"
         | "task_created"
         | "task_updated"
@@ -874,6 +877,84 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                     summary: ev.summary,
                 })
             }
+        }
+
+        // === Fleet events (Part 3.2) — full-power background nodes. All fields
+        // `#[serde(default)]` so a partial frame decodes cleanly rather than
+        // dropping to a ParseWarning.
+        "fleet_node_started" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                node_id: String,
+                #[serde(default)]
+                agent_type: String,
+                #[serde(default)]
+                task: String,
+                #[serde(default)]
+                flavor: String,
+                #[serde(default)]
+                depth: u32,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(v) => v,
+                Err(e) => return Some(parse_warning("fleet_node_started", e)),
+            };
+            Some(BackendEvent::FleetNodeStarted {
+                node_id: ev.node_id,
+                agent_type: ev.agent_type,
+                task: ev.task,
+                flavor: ev.flavor,
+                depth: ev.depth,
+            })
+        }
+
+        "fleet_node_progress" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                node_id: String,
+                #[serde(default)]
+                current_action: String,
+                #[serde(default)]
+                tool_uses: u32,
+                #[serde(default)]
+                tokens_used: u32,
+                #[serde(default)]
+                recent_actions: Vec<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(v) => v,
+                Err(e) => return Some(parse_warning("fleet_node_progress", e)),
+            };
+            Some(BackendEvent::FleetNodeProgress {
+                node_id: ev.node_id,
+                current_action: ev.current_action,
+                tool_uses: ev.tool_uses,
+                tokens_used: ev.tokens_used,
+                recent_actions: ev.recent_actions,
+            })
+        }
+
+        "fleet_node_completed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                node_id: String,
+                #[serde(default)]
+                summary: Option<String>,
+                #[serde(default)]
+                status: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(v) => v,
+                Err(e) => return Some(parse_warning("fleet_node_completed", e)),
+            };
+            Some(BackendEvent::FleetNodeCompleted {
+                node_id: ev.node_id,
+                summary: ev.summary,
+                status: ev.status,
+            })
         }
 
         "orchestrator_agent_failed" => {

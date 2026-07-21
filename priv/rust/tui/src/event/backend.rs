@@ -107,6 +107,34 @@ pub enum BackendEvent {
     OrchestratorSynthesizing { agent_count: usize },
     OrchestratorTaskCompleted { task_id: String },
 
+    // === Fleet (full-power background nodes → CC FleetView roster) ===
+    /// A full-power fleet node was spawned (Part 3.2 of FLEETVIEW_DESIGN). Drives
+    /// the shared `Agents` roster identically to an orchestrator worker.
+    FleetNodeStarted {
+        node_id: String,
+        agent_type: String,
+        task: String,
+        /// "full" (full-power Loop) or "worker" (lightweight delegate).
+        flavor: String,
+        depth: u32,
+    },
+    /// Live progress for a fleet node (current action + cumulative counters).
+    FleetNodeProgress {
+        node_id: String,
+        current_action: String,
+        tool_uses: u32,
+        tokens_used: u32,
+        /// Last few tool actions, newest first (empty from older backends).
+        recent_actions: Vec<String>,
+    },
+    /// A fleet node reached a terminal state ("completed" | "failed" |
+    /// "cancelled"), with a compact one-line result/error preview.
+    FleetNodeCompleted {
+        node_id: String,
+        summary: Option<String>,
+        status: String,
+    },
+
     // === Background Agents (fire-and-forget subagents) ===
     /// Fetched sidechain transcript for a subagent run (dashboard "view" /
     /// nested Ctrl+O expansion). Ok payload is (agent_id, transcript text).

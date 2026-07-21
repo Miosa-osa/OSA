@@ -60,6 +60,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.TurnPipeline
   alias OptimalSystemAgent.Agent.Hooks
+  alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Agent.TaskNotifications
 
   defstruct [
@@ -714,6 +715,39 @@ defmodule OptimalSystemAgent.Agent.Loop do
     plan_mode = Map.get(restored, :plan_mode, false)
     turn_count = Map.get(restored, :turn_count, 0)
 
+    # Spend restore (audit gap C2): the accumulated budget totals must survive a
+    # crash so a `max_budget_usd` cap keeps holding on resume. Two durable
+    # sources cover the two resume shapes: the crash-recovery checkpoint (fresh
+    # mid-turn, then cleared at a clean turn boundary) and the between-turn spend
+    # sidecar (rewritten every turn, NOT cleared at turn end). Since spend only
+    # grows, taking the MAX of the two is the latest value regardless of which
+    # resume path fired — no precedence bug when the checkpoint is absent/zero.
+    spend_sidecar = SessionPersistence.load_spend(session_id)
+
+    session_cost_usd =
+      max(Map.get(restored, :session_cost_usd, 0.0), spend_sidecar.cost_usd) * 1.0
+
+    session_input_tokens =
+      max(Map.get(restored, :session_input_tokens, 0), spend_sidecar.input_tokens)
+
+    session_output_tokens =
+      max(Map.get(restored, :session_output_tokens, 0), spend_sidecar.output_tokens)
+
+    session_cache_creation_tokens =
+      max(
+        Map.get(restored, :session_cache_creation_tokens, 0),
+        spend_sidecar.cache_creation_tokens
+      )
+
+    session_cache_read_tokens =
+      max(Map.get(restored, :session_cache_read_tokens, 0), spend_sidecar.cache_read_tokens)
+
+    # Preserve the ORIGINAL run start across a crash so elapsed-time budgeting and
+    # the task brief's `created_at` stay anchored. Fall back to the sidecar, then
+    # to now for a fresh session.
+    restored_started_at =
+      parse_started_at(Map.get(restored, :started_at) || spend_sidecar.started_at)
+
     # Coordinator precedence mirrors permission_mode: an explicit opt
     # (subagent inheritance / CLI --coordinator) wins; then the sticky
     # per-session store (the TUI's runtime toggle, which survives a fresh/late
@@ -736,11 +770,22 @@ defmodule OptimalSystemAgent.Agent.Loop do
       iteration: iteration,
       plan_mode: plan_mode,
       turn_count: turn_count,
+      session_cost_usd: session_cost_usd,
+      session_input_tokens: session_input_tokens,
+      session_output_tokens: session_output_tokens,
+      session_cache_creation_tokens: session_cache_creation_tokens,
+      session_cache_read_tokens: session_cache_read_tokens,
       tools: ToolFilter.filter_for_coordinator(all_tools, coordinator?),
       all_tools: all_tools,
       coordinator: coordinator?,
+      # Budget cap precedence (audit gap D2 restore half): a cap PERSISTED in the
+      # checkpoint wins, so a run started with an explicit $50 cap keeps it across
+      # a crash/restart instead of resetting to the app-env default (nil =
+      # uncapped). Only when the checkpoint has none do we fall back to an
+      # explicit opt, then the app-env default.
       max_budget_usd:
-        Keyword.get(opts, :max_budget_usd) ||
+        Map.get(restored, :max_budget_usd) ||
+          Keyword.get(opts, :max_budget_usd) ||
           Application.get_env(:optimal_system_agent, :max_budget_usd),
       max_turns:
         Keyword.get(opts, :max_turns) || Application.get_env(:optimal_system_agent, :max_turns),
@@ -766,7 +811,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           OptimalSystemAgent.Workspace.Cwd.get(),
       strategy: nil,
       strategy_state: %{},
-      started_at: DateTime.utc_now()
+      started_at: restored_started_at
     }
 
     # Durable execution (primitive #27): if a checkpoint is being restored AND
@@ -814,6 +859,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     {:ok, state}
   end
+
+  # Restore `started_at` from a persisted iso8601 string, defaulting to now for a
+  # fresh session (or an unparseable value) so a resumed run keeps its original
+  # start time instead of resetting the clock every crash.
+  defp parse_started_at(nil), do: DateTime.utc_now()
+
+  defp parse_started_at(s) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _offset} -> dt
+      _ -> DateTime.utc_now()
+    end
+  end
+
+  defp parse_started_at(%DateTime{} = dt), do: dt
+  defp parse_started_at(_), do: DateTime.utc_now()
 
   # Emits both the internal Bus event (analytics/telemetry) and the
   # session-scoped PubSub broadcast the TUI/HTTP channels already consume for
@@ -1051,6 +1111,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call({:proactive_compact, instructions}, _from, state) do
     messages = state.messages || []
+
     compacted =
       OptimalSystemAgent.Agent.Loop.ProactiveCompaction.compact(
         messages,

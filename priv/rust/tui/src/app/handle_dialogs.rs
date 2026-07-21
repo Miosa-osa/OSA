@@ -1013,11 +1013,12 @@ impl App {
             .collect()
     }
 
-    /// Total selectable dashboard rows: sub-agents followed by background
-    /// terminals. Selection indices `< entry_count` address agents; the rest
-    /// address `bg_tasks`.
+    /// Total selectable dashboard rows in ROSTER index space: the synthetic
+    /// `main` root (index 0), then sub-agents (`1..=entry_count`), then
+    /// background terminals. Selection index 0 is `main`, `1..=entry_count`
+    /// address agents, and the rest address `bg_tasks`.
     pub(crate) fn dashboard_item_count(&self) -> usize {
-        self.agents.entry_count() + self.bg_tasks.len()
+        1 + self.agents.entry_count() + self.bg_tasks.len()
     }
 
     /// True when there is anything to manage in the dashboard (agents, Ctrl+B'd
@@ -1080,15 +1081,22 @@ impl App {
         }
     }
 
-    /// Dashboard "stop" action: cancel the selected sub-agent (backend
-    /// `task_stop` equivalent) or stop the selected background terminal.
+    /// Dashboard/inline "stop" action in ROSTER index space: index 0 is the
+    /// synthetic `main` root (never cancellable → hint), `1..=entry_count`
+    /// cancel a sub-agent (backend `task_stop` equivalent), and the rest stop a
+    /// background terminal.
     pub(super) fn stop_selected_dashboard_item(&mut self) {
         let sel = self.agents_dashboard_selected;
         let agents = self.agents.entry_count();
-        if sel < agents {
+        if sel == 0 {
+            self.toasts.push(
+                "main is the root node — it can't be stopped".into(),
+                crate::components::toast::ToastLevel::Info,
+            );
+        } else if sel <= agents {
             self.cancel_selected_agent();
         } else {
-            self.stop_background_terminal(sel - agents);
+            self.stop_background_terminal(sel - agents - 1);
         }
     }
 
@@ -1098,7 +1106,10 @@ impl App {
     pub(super) fn view_selected_dashboard_item(&mut self) {
         let sel = self.agents_dashboard_selected;
         let agents = self.agents.entry_count();
-        if sel < agents {
+        if sel == 0 {
+            // `main` root: Enter detaches → return to the main transcript.
+            self.detach_to_main();
+        } else if sel <= agents {
             // Instant feedback while the full nested transcript loads.
             if let Some(summary) = self.agents.entry_summary_at(sel) {
                 self.toasts
@@ -1122,8 +1133,27 @@ impl App {
                 });
             }
         } else {
-            self.view_background_terminal(sel - agents);
+            self.view_background_terminal(sel - agents - 1);
         }
+    }
+
+    /// Detach from any attached worker view and return to the user's own main
+    /// transcript. Closes a nested transcript viewer if open and, when invoked
+    /// from the full-screen dashboard or the inline FleetSelect roster, drops
+    /// back to the normal composer/chat view (the `main` node keeps running).
+    pub(super) fn detach_to_main(&mut self) {
+        self.transcript = None;
+        self.transcript_override = None;
+        if self.state == AppState::AgentsDashboard {
+            self.close_agents_dashboard();
+        } else if self.state == AppState::FleetSelect {
+            self.agents.set_roster_selected(None);
+            self.transition(AppState::Idle);
+        }
+        self.toasts.push(
+            "Returned to main".into(),
+            crate::components::toast::ToastLevel::Info,
+        );
     }
 
     /// Bring the background terminal at `bg_idx` back to the foreground activity

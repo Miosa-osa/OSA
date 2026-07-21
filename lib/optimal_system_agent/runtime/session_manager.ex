@@ -141,6 +141,32 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
 
   defp maybe_put_parent(opts, _), do: opts
 
+  # Thread through optional loop opts only when explicitly provided, so a plain
+  # channel session keeps Loop.init's defaults. This is what lets a full-power
+  # fleet node (Agent.Fleet) pass its agent-type system prompt + tool allowlist +
+  # budget cap into the spawned Loop without a bespoke start path.
+  @passthrough_opts [
+    :system_prompt_override,
+    :allowed_tools,
+    :blocked_tools,
+    :role,
+    :provider,
+    :model,
+    :max_budget_usd,
+    :max_turns,
+    :permission_mode
+  ]
+
+  defp put_passthrough_opts(loop_opts, opts) do
+    Enum.reduce(@passthrough_opts, loop_opts, fn key, acc ->
+      case Keyword.fetch(opts, key) do
+        {:ok, nil} -> acc
+        {:ok, value} -> Keyword.put(acc, key, value)
+        :error -> acc
+      end
+    end)
+  end
+
   # Push a changed working_dir into a live loop. Best-effort: a loop mid-turn (or
   # gone) must never make ensure_loop fail.
   defp maybe_update_working_dir(session_id, wd) when is_binary(wd) and wd != "" do
@@ -282,6 +308,7 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
       [session_id: session_id, user_id: user_id, channel: channel]
       |> maybe_put_working_dir(Keyword.get(opts, :working_dir))
       |> maybe_put_parent(Keyword.get(opts, :parent_session_id))
+      |> put_passthrough_opts(opts)
 
     case DynamicSupervisor.start_child(
            OptimalSystemAgent.SessionSupervisor,

@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "skill" => {"List, run, enable, disable, or create a skill", :cmd_skill},
     "agents" => {"Runtime agent dashboard — live subagent runs and roles", :cmd_agents},
     "bg" => {"List background work — subagent runs and background commands", :cmd_bg},
+    "fg" => {"Foreground a running agent/fleet node — switch the active session to it", :cmd_fg},
     "steer" => {"Inject a directive into the running turn (mid-turn steer)", :cmd_steer},
     "sessions" => {"List recent sessions", :cmd_sessions},
     "tasks" => {"Show current tasks", :cmd_tasks},
@@ -795,6 +796,88 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
     session_id
+  end
+
+  # ── /fg — foreground a running agent / fleet node ────────────────────
+
+  @doc """
+  Switch the active session to a running agent/fleet node by its run id.
+
+  Minimum-viable foreground switch: validates the id exists in RunStore and is
+  live in the SessionRegistry, then RETURNS that id as the REPL's active session
+  (subsequent input is routed to it). A true input-handoff that also transfers
+  queued/streaming input needs more plumbing — see the note printed on success.
+  """
+  def cmd_fg(args, session_id) do
+    IO.puts("")
+    target = String.trim(args)
+
+    cond do
+      target == "" ->
+        IO.puts("  #{@dim}Usage: /fg <run-id>#{@reset}")
+        IO.puts("  #{@dim}Run ids come from /bg or /agents (the live subagent/fleet runs).#{@reset}")
+        IO.puts("")
+        session_id
+
+      true ->
+        run = fg_lookup_run(target)
+        live? = fg_live?(target)
+
+        cond do
+          is_nil(run) ->
+            IO.puts("  #{@yellow}No run found with id #{target}#{@reset}")
+            IO.puts("  #{@dim}List runnable ids with /bg or /agents.#{@reset}")
+            IO.puts("")
+            session_id
+
+          to_string(Map.get(run, :status)) not in ["running", "active", "starting"] ->
+            IO.puts(
+              "  #{@yellow}Run #{target} is #{Map.get(run, :status)} — only running agents can be foregrounded.#{@reset}"
+            )
+
+            IO.puts("")
+            session_id
+
+          not live? ->
+            IO.puts("  #{@yellow}Run #{target} has no live process to attach to.#{@reset}")
+            IO.puts("")
+            session_id
+
+          true ->
+            role = to_string(Map.get(run, :role, "agent"))
+            IO.puts("  #{@green}✓#{@reset} Foregrounded #{@cyan}#{target}#{@reset} #{@dim}(#{role})#{@reset}")
+
+            IO.puts(
+              "  #{@dim}Active session switched — your next message goes to this agent. " <>
+                "Use /fg <root-id> or /resume to return.#{@reset}"
+            )
+
+            IO.puts("")
+            # Returning the node id makes it the REPL's active session (dispatch
+            # contract: cmd handlers return the new session_id).
+            target
+        end
+    end
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: could not foreground run#{@reset}\n")
+      session_id
+  end
+
+  defp fg_lookup_run(id) do
+    OptimalSystemAgent.Agent.RunStore.get(id)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp fg_live?(id) do
+    OptimalSystemAgent.Runtime.SessionManager.live_session?(id)
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp safe_run_list do

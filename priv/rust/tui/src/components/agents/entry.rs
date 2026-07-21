@@ -91,6 +91,21 @@ pub struct ScratchpadNote {
     pub bytes: u64,
 }
 
+/// Synthetic `main` root row shown at the top of the roster (inline + full
+/// dashboard). It is NOT a backend agent — the TUI synthesizes it from live
+/// session state (top-level action, turn elapsed, session output tokens). Always
+/// roster index 0, never cancellable; selecting it detaches back to the main
+/// transcript.
+#[derive(Debug, Clone, Default)]
+pub struct MainRow {
+    /// One-line summary of the current top-level action (goal / working state).
+    pub activity: String,
+    /// Turn elapsed in seconds (frozen at 0 when idle).
+    pub elapsed_secs: u64,
+    /// Cumulative session output tokens.
+    pub tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WaveInfo {
     pub current: u32,

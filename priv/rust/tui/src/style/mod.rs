@@ -191,6 +191,15 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// The `main` root roster node: green + bold. It is the home node the user
+    /// always returns to, so both its `●` glyph and `main` label render green
+    /// (CC-parity FleetView cue).
+    pub fn agent_main(&self) -> Style {
+        Style::default()
+            .fg(self.colors.success)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn agent_role(&self) -> Style {
         Style::default().fg(self.colors.muted)
     }

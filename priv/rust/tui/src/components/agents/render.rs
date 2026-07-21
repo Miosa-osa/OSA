@@ -116,6 +116,45 @@ impl Agents {
             return;
         }
 
+        // ── `main` root row (CC FleetView) ──────────────────────────────────
+        // Always roster index 0, rendered GREEN (● + `main`). Synthesized by the
+        // App from live session state (top-level action, turn elapsed, session
+        // tokens). Selecting it + Enter detaches back to the main transcript.
+        if let Some(ref main) = self.main_row {
+            if y + 1 <= area.y + area.height {
+                let selected = self.roster_selected == Some(0);
+                let type_style = if selected {
+                    theme.plan_selected()
+                } else {
+                    theme.agent_main()
+                };
+                let meta = fmt_cc_meta(main.elapsed_secs, main.tokens);
+                // Reserve columns for the glyph ("● "), the label, the gap and
+                // the right-hand meta, then truncate the activity to what's left.
+                let prefix_cols = 2 + "main".chars().count() + 2;
+                let max_activity = (area.width as usize)
+                    .saturating_sub(prefix_cols + meta.chars().count() + 2)
+                    .max(4);
+                let mut spans = vec![
+                    Span::styled("\u{25cf} ", theme.agent_main()),
+                    Span::styled("main", type_style),
+                ];
+                if !main.activity.trim().is_empty() {
+                    spans.push(Span::styled("  ", theme.faint()));
+                    spans.push(Span::styled(
+                        truncate_str(&main.activity, max_activity),
+                        theme.faint(),
+                    ));
+                }
+                spans.push(Span::styled(format!("  {}", meta), theme.faint()));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+                y += 1;
+            }
+        }
+
         // ── Agent rows (tree-view, with optional batch grouping) ──────────
         let groups = self.grouped_entries();
         let has_batches = groups.iter().any(|g| g.batch_id.is_some());
@@ -154,75 +193,62 @@ impl Agents {
                 let connector = if is_last { "└─ " } else { "├─ " };
                 let continuation = if is_last { "   " } else { "│  " };
 
-                // Row 1: connector + spinner + subject + stats
-                let (icon, icon_style) = self.agent_icon(entry);
-                let subject = if entry.subject.is_empty() {
+                // Row 1: connector + CC roster layout —
+                //   <glyph> <agent-type>  <live-activity…>  <elapsed> · ↓<tokens>
+                // Glyph ● when this row is the selected/attached node (roster
+                // index == entry index + 1), ◯ otherwise. agent-type is the
+                // node's role identity (the custom-agent it was spawned as),
+                // falling back to its name. Activity is the live current action.
+                let selected = self.roster_selected == Some(idx + 1);
+                let glyph = if selected { '\u{25cf}' } else { '\u{25cb}' };
+                let glyph_style = if selected {
+                    theme.agent_main()
+                } else {
+                    theme.faint()
+                };
+                let agent_type = if !entry.role.is_empty() {
+                    entry.role.clone()
+                } else {
                     entry.name.clone()
+                };
+                let type_style = if selected {
+                    theme.plan_selected()
                 } else {
+                    theme.agent_name()
+                };
+                // Live activity: current action, or the subject as a fallback.
+                let activity = if !entry.current_action.is_empty() {
+                    entry.current_action.clone()
+                } else if !entry.subject.is_empty() {
                     entry.subject.clone()
-                };
-
-                // Build optional role/model tag strings
-                let role_str = if entry.role.is_empty() {
+                } else {
                     String::new()
-                } else {
-                    format!(" [{}]", entry.role)
                 };
-                let model_str = if entry.model.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", shorten_model_name(&entry.model))
-                };
+                let meta = fmt_cc_meta(entry.elapsed_secs(), entry.tokens_used);
 
-                // Truncate subject to fit
-                let stats_str = format!(
-                    " · {} tool use{} · {} tokens",
-                    entry.tool_uses,
-                    if entry.tool_uses == 1 { "" } else { "s" },
-                    fmt_tokens(entry.tokens_used)
-                );
-                // CC TeammateSpinnerLine: "@name: subject" — the @-handle in the
-                // agent color, the subject dim after a faint ": " separator.
-                // When the backend sent no distinct subject the handle alone
-                // stands in.
-                let name_prefix = format!("@{}", entry.name);
-                let show_handle = !entry.subject.is_empty() && entry.subject != entry.name;
-                let name_cols = if show_handle {
-                    name_prefix.chars().count() + 2 // "@name" + ": "
-                } else {
-                    0
-                };
-                // Char-count width: the connector is multi-byte box drawing, so
+                // Char-count widths: the connector is multi-byte box drawing, so
                 // byte .len() would treble-count its 3 columns.
-                let prefix_len = connector.chars().count() + 2 + name_cols;
-                let tags_len = role_str.len() + model_str.len();
-                let max_subject = (area.width as usize)
-                    .saturating_sub(prefix_len + tags_len + stats_str.len())
-                    .max(8);
-                let subject_display = if show_handle {
-                    truncate_str(&subject, max_subject)
-                } else {
-                    truncate_str(&name_prefix, max_subject)
-                };
+                let prefix_len = connector.chars().count()
+                    + 2 // glyph + space
+                    + agent_type.chars().count()
+                    + 2; // gap before activity
+                let max_activity = (area.width as usize)
+                    .saturating_sub(prefix_len + meta.chars().count() + 2)
+                    .max(4);
 
                 let mut row1_spans = vec![
                     Span::styled(connector, theme.faint()),
-                    Span::styled(format!("{} ", icon), icon_style),
+                    Span::styled(format!("{} ", glyph), glyph_style),
+                    Span::styled(agent_type, type_style),
                 ];
-                if show_handle {
-                    row1_spans.push(Span::styled(name_prefix.clone(), theme.agent_name()));
-                    row1_spans.push(Span::styled(": ", theme.faint()));
-                    row1_spans.push(Span::styled(subject_display, theme.faint()));
-                } else {
-                    row1_spans.push(Span::styled(subject_display, theme.agent_name()));
+                if !activity.trim().is_empty() {
+                    row1_spans.push(Span::styled("  ", theme.faint()));
+                    row1_spans.push(Span::styled(
+                        truncate_str(&activity, max_activity),
+                        theme.faint(),
+                    ));
                 }
-                if !role_str.is_empty() {
-                    row1_spans.push(Span::styled(role_str, theme.role_tag()));
-                }
-                if !model_str.is_empty() {
-                    row1_spans.push(Span::styled(model_str, theme.model_tag()));
-                }
-                row1_spans.push(Span::styled(stats_str, theme.faint()));
+                row1_spans.push(Span::styled(format!("  {}", meta), theme.faint()));
 
                 let row1 = Line::from(row1_spans);
                 frame.render_widget(
@@ -463,6 +489,43 @@ impl Agents {
 
         let mut lines: Vec<Line> = Vec::new();
 
+        // ── `main` root row (CC FleetView) — always selection index 0, GREEN.
+        // Selecting it + Enter detaches back to the main transcript; it is never
+        // cancellable. Synthesized from live session state by the App.
+        {
+            let is_sel = selected == 0;
+            let marker = if is_sel { "▸ " } else { "  " };
+            let (activity, meta) = match self.main_row {
+                Some(ref m) => (
+                    if m.activity.trim().is_empty() {
+                        String::new()
+                    } else {
+                        m.activity.clone()
+                    },
+                    format!("  {}", fmt_cc_meta(m.elapsed_secs, m.tokens)),
+                ),
+                None => (String::new(), String::new()),
+            };
+            let type_style = if is_sel {
+                theme.plan_selected()
+            } else {
+                theme.agent_main()
+            };
+            let mut spans = vec![
+                Span::styled(marker, theme.plan_selected()),
+                Span::styled("\u{25cf} ", theme.agent_main()),
+                Span::styled("main", type_style),
+            ];
+            if !activity.is_empty() {
+                spans.push(Span::styled("  ", theme.faint()));
+                spans.push(Span::styled(activity, theme.faint()));
+            }
+            if !meta.is_empty() {
+                spans.push(Span::styled(meta, theme.faint()));
+            }
+            lines.push(Line::from(spans));
+        }
+
         // Fixed group order with the labels the task calls for. "Ready" maps to
         // agents that are spawned but not yet running.
         let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 4] = [
@@ -494,7 +557,9 @@ impl Agents {
 
             for idx in idxs {
                 let entry = &self.entries[idx];
-                let is_sel = idx == selected;
+                // Selection is in ROSTER index space (0 = main), so an entry at
+                // `entries[idx]` is selected when the cursor is at `idx + 1`.
+                let is_sel = idx + 1 == selected;
 
                 let (icon, icon_style) = self.agent_icon(entry);
                 let marker = if is_sel { "▸ " } else { "  " };
@@ -549,7 +614,8 @@ impl Agents {
             )));
 
             for (pos, row) in bg_rows.iter().enumerate() {
-                let global_idx = self.entries.len() + pos;
+                // Roster index space: 0 = main, 1..=entries, then bg terminals.
+                let global_idx = 1 + self.entries.len() + pos;
                 let is_sel = global_idx == selected;
                 let (icon, icon_style) = if row.done {
                     ('✓', theme.task_done())
@@ -661,13 +727,27 @@ fn token_bar(tokens: u32, max_tokens: u32) -> String {
     bar
 }
 
-/// Format token count as compact string: 4213 → "4.2k", 90512 → "90.5k"
+/// Format token count as a compact k/M-scaled string: 4213 → "4.2k",
+/// 117_500 → "117.5k", 1_200_000 → "1.2M" (CC FleetView roster style).
 fn fmt_tokens(n: u32) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         n.to_string()
     }
+}
+
+/// The CC roster row's right-hand meta column: `<elapsed> · ↓<tokens>`, e.g.
+/// `10m 25s · ↓107.3k`. Reuses the shared compact elapsed formatter and the
+/// k/M token scaler so every roster surface renders identically.
+fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
+    format!(
+        "{} \u{00b7} \u{2193}{}",
+        crate::components::status_bar::fmt_elapsed_compact(elapsed_secs),
+        fmt_tokens(tokens),
+    )
 }
 
 /// Format a byte size compactly: 312 → "312", 2100 → "2.1k", 1_500_000 → "1.5M".
@@ -690,6 +770,7 @@ fn short_agent(agent: &str) -> String {
 }
 
 /// Shorten model names by stripping the "claude-" prefix.
+#[allow(dead_code)]
 fn shorten_model_name(model: &str) -> &str {
     if let Some(rest) = model.strip_prefix("claude-") {
         rest

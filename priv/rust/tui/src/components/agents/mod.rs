@@ -7,7 +7,7 @@ use crate::event::Event;
 use crate::event::backend::SpawningAgent;
 
 use super::{Component, ComponentAction};
-use entry::{AgentEntry, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
+use entry::{AgentEntry, MainRow, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState, WaveInfo};
 pub use entry::AgentStatus;
 pub use entry::BgTerminalRow;
 
@@ -44,6 +44,13 @@ pub struct Agents {
     /// the team finishes or a new top-level turn starts — a transient, dim
     /// coordination surface, never a scrolling log.
     scratchpad: Vec<ScratchpadNote>,
+    /// Synthetic `main` root row (roster index 0), fed each frame from live
+    /// session state by `App::sync_chrome`. `None` until the App populates it.
+    main_row: Option<MainRow>,
+    /// Selection cursor in ROSTER index space (0 = `main`, 1..=entries), set
+    /// while the inline `← for agents` FleetSelect mode is active; `None` when
+    /// the roster is not focused (no highlight drawn).
+    roster_selected: Option<usize>,
 }
 
 /// Most recent shared-scratchpad writes retained + rendered under the panel.
@@ -63,7 +70,28 @@ impl Agents {
             bg_summary: 0,
             est_cost_usd: None,
             scratchpad: Vec::new(),
+            main_row: None,
+            roster_selected: None,
         }
+    }
+
+    /// Feed the synthetic `main` root row from live session state (top-level
+    /// action, turn elapsed, session output tokens). Rendered as roster index 0.
+    pub fn set_main_row(&mut self, activity: impl Into<String>, elapsed_secs: u64, tokens: u32) {
+        self.main_row = Some(MainRow { activity: activity.into(), elapsed_secs, tokens });
+    }
+
+    /// Enter/update inline roster focus with the selection cursor in ROSTER
+    /// index space (0 = `main`, 1..=entries). Pass `None` to leave focus (no
+    /// selection highlight drawn).
+    pub fn set_roster_selected(&mut self, sel: Option<usize>) {
+        self.roster_selected = sel;
+    }
+
+    /// Number of selectable rows in the INLINE roster: `main` (always present)
+    /// plus one per tracked agent entry. Bounds the `← for agents` nav cursor.
+    pub fn roster_count(&self) -> usize {
+        1 + self.entries.len()
     }
 
     /// Record a shared-scratchpad write/append. Pushed newest-first and capped at
@@ -105,10 +133,13 @@ impl Agents {
         self.est_cost_usd
     }
 
-    /// One-line "name — action" summary for the entry at `idx`, used when the
-    /// dashboard "view" action is invoked on an agent (the TUI keeps no separate
-    /// per-agent output buffer, so this is the richest state available).
+    /// One-line "name — action" summary for the roster row at `idx`, used when
+    /// the dashboard/inline "view" action is invoked on an agent (the TUI keeps
+    /// no separate per-agent output buffer, so this is the richest state
+    /// available). Index is ROSTER space: 0 = `main` (synthetic, no worker
+    /// transcript → `None`), 1..=entries maps to `entries[idx-1]`.
     pub fn entry_summary_at(&self, idx: usize) -> Option<String> {
+        let idx = idx.checked_sub(1)?;
         self.entries.get(idx).map(|e| {
             let who = if e.subject.is_empty() { &e.name } else { &e.subject };
             let action = match e.status {
@@ -157,14 +188,23 @@ impl Agents {
         !self.entries.is_empty()
     }
 
-    /// Stable id (entry name / agent_id) of the entry at `idx` in dashboard order,
-    /// used to target the backend cancel endpoint.
+    /// Stable id (entry name / agent_id) of the roster row at `idx`, used to
+    /// target the backend cancel endpoint. Index is ROSTER space: 0 = `main`
+    /// (synthetic, not a backend agent → `None`), 1..=entries maps to
+    /// `entries[idx-1]`.
     pub fn agent_id_at(&self, idx: usize) -> Option<String> {
+        let idx = idx.checked_sub(1)?;
         self.entries.get(idx).map(|e| e.name.clone())
     }
 
-    /// True when the entry at `idx` is still cancellable (running or spawning).
+    /// True when the roster row at `idx` is still cancellable (running or
+    /// spawning). Index is ROSTER space: row 0 is the synthetic `main` node,
+    /// which is NEVER cancellable (`is_cancellable(0) == false`); 1..=entries
+    /// maps to `entries[idx-1]`.
     pub fn is_cancellable(&self, idx: usize) -> bool {
+        let Some(idx) = idx.checked_sub(1) else {
+            return false;
+        };
         self.entries
             .get(idx)
             .map(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
@@ -202,9 +242,13 @@ impl Agents {
         } else {
             1 + self.scratchpad.len() as u16
         };
-        // summary + 1 header + batch headers + agents + synth + swarm + scratchpad
+        // Synthetic `main` root row (CC FleetView) renders as a single line
+        // between the header and the agent rows when populated.
+        let main_line = u16::from(self.main_row.is_some());
+        // summary + 1 header + main + batch headers + agents + synth + swarm + scratchpad
         let total = summary_line
             + 1
+            + main_line
             + batch_header_lines
             + agent_lines
             + synth_lines
@@ -436,6 +480,25 @@ impl Agents {
         }
     }
 
+    /// Terminal transition for a fleet node from a `fleet_node_completed` frame.
+    /// The frame carries NO tool/token counts (they were set by the preceding
+    /// progress events), so this flips status + records the summary WITHOUT
+    /// overwriting the accumulated counters. `status` is
+    /// "completed" | "failed" | "cancelled".
+    pub fn fleet_node_completed(&mut self, name: &str, status: &str, summary: Option<String>) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            let failed = matches!(status, "failed" | "cancelled");
+            entry.status = if failed {
+                AgentStatus::Failed
+            } else {
+                AgentStatus::Completed
+            };
+            entry.current_action = status.to_string();
+            entry.finished_at = Some(std::time::Instant::now());
+            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+        }
+    }
+
     /// Optimistically flag an agent as cancelled (preserving its recorded
     /// tool/token counts) so the dashboard reflects the action immediately, even
     /// before the backend's terminal event lands.
@@ -528,6 +591,8 @@ impl Agents {
         self.bg_summary = 0;
         self.est_cost_usd = None;
         self.scratchpad.clear();
+        self.main_row = None;
+        self.roster_selected = None;
     }
 }
 

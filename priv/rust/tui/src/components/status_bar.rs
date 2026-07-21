@@ -289,6 +289,10 @@ pub struct StatusBar {
     /// "⛓ N subagents · $cost · ↓ manage" footer cue. 0 ⇒ omitted.
     subagent_count: usize,
     subagent_cost: Option<f64>,
+    /// True while the inline `← for agents` FleetSelect roster focus is active,
+    /// so the footer swaps the `← for agents` idle hint for the per-row
+    /// `Enter to view · x to stop` action hint (CC FleetView).
+    fleet_select: bool,
     /// Latest available release when the backend reports one on `/health.update`
     /// (`available: true`). Drives the understated `⬆ vX` chip. `None` ⇒ up to
     /// date / source build / not yet reported ⇒ chip omitted.
@@ -338,6 +342,7 @@ impl StatusBar {
             swarm_label: None,
             subagent_count: 0,
             subagent_cost: None,
+            fleet_select: false,
             update_latest: None,
         }
     }
@@ -398,6 +403,11 @@ impl StatusBar {
 
     /// U-T28 — set the active sub-agent count + estimated cost for the footer
     /// cue. `count == 0` clears it.
+    /// Toggle the inline FleetSelect roster-focus footer hint.
+    pub fn set_fleet_select(&mut self, active: bool) {
+        self.fleet_select = active;
+    }
+
     pub fn set_subagents(&mut self, count: usize, cost: Option<f64>) {
         self.subagent_count = count;
         self.subagent_cost = cost;
@@ -545,6 +555,13 @@ impl StatusBar {
         self.input_tokens = input;
         self.output_tokens = output;
         self.elapsed_ms = elapsed;
+    }
+
+    /// Last-reported output tokens for the session's top-level turn — the token
+    /// source for the synthetic `main` roster row (no cumulative per-session
+    /// counter exists; this is the freshest LLM-response figure available).
+    pub fn output_tokens(&self) -> u64 {
+        self.output_tokens
     }
 
     pub fn set_active(&mut self, active: bool) {
@@ -1092,10 +1109,15 @@ impl Component for StatusBar {
                 label,
                 Style::default().fg(theme.colors.primary),
             ));
-            extras.push(Span::styled(
-                " \u{00b7} \u{2193} manage",
-                theme.faint(),
-            ));
+            // CC FleetView nav hints: while the roster is focused
+            // (`← for agents` pressed) show the per-row actions; otherwise
+            // advertise how to open the roster / the full dashboard.
+            let hint = if self.fleet_select {
+                " \u{00b7} Enter to view \u{00b7} x to stop"
+            } else {
+                " \u{00b7} \u{2190} for agents \u{00b7} \u{2193} manage"
+            };
+            extras.push(Span::styled(hint, theme.faint()));
         }
 
         if !self.permission_mode.is_default() {

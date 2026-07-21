@@ -251,6 +251,7 @@ impl App {
             AppState::Processing => self.handle_processing_key(key),
             AppState::Recording => self.handle_recording_key(key),
             AppState::AgentsDashboard => self.handle_agents_dashboard_key(key),
+            AppState::FleetSelect => self.handle_fleet_select_key(key),
             AppState::Status => self.handle_status_dashboard_key(key),
             AppState::ThemePicker => self.handle_theme_picker_key(key),
             AppState::Keybindings => self.handle_keybindings_key(key),
@@ -543,6 +544,73 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Enter the inline `← for agents` FleetSelect roster focus. Reuses the
+    /// shared `agents_dashboard_selected` cursor (roster index space: 0 = main),
+    /// seeding it on `main` so the first Enter is a harmless detach. No-op if
+    /// there is nothing to focus.
+    pub(crate) fn enter_fleet_select(&mut self) {
+        if !self.agents.is_active() {
+            return;
+        }
+        self.agents_dashboard_selected = 0;
+        if self.state.can_transition_to(AppState::FleetSelect) {
+            self.transition(AppState::FleetSelect);
+        }
+    }
+
+    /// Key handling for the inline `← for agents` FleetSelect roster focus.
+    /// ↑/↓ (and k/j) move the cursor over the inline roster (main at 0, bounded
+    /// by `roster_count`), Enter views/attaches a worker (or detaches on main),
+    /// x/c stops the selected worker, and →/Esc return focus to the composer.
+    fn handle_fleet_select_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // The inline roster spans only main + agents (background terminals are
+        // managed from the full-screen dashboard), so bound the cursor there.
+        let count = self.agents.roster_count();
+        if self.agents_dashboard_selected >= count {
+            self.agents_dashboard_selected = count.saturating_sub(1);
+        }
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _)
+            | (KeyCode::Right, _)
+            | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                self.exit_fleet_select();
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                if self.agents_dashboard_selected > 0 {
+                    self.agents_dashboard_selected -= 1;
+                }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                if self.agents_dashboard_selected + 1 < count {
+                    self.agents_dashboard_selected += 1;
+                }
+            }
+            (KeyCode::Enter, _) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                // Enter on main detaches (view_selected_dashboard_item routes
+                // index 0 → detach_to_main); on a worker it opens its transcript.
+                self.view_selected_dashboard_item();
+            }
+            (KeyCode::Char('x'), KeyModifiers::NONE)
+            | (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                self.stop_selected_dashboard_item();
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.exit_fleet_select();
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Leave FleetSelect roster focus, returning keyboard focus to the composer
+    /// and clearing the roster selection highlight.
+    fn exit_fleet_select(&mut self) {
+        self.agents.set_roster_selected(None);
+        if self.state == AppState::FleetSelect {
+            self.transition(AppState::Idle);
+        }
     }
 
     /// Advance the tool-permission mode one step (Shift+Tab). OSA's cycle is
@@ -929,6 +997,19 @@ impl App {
                     && self.has_dashboard_items() =>
             {
                 self.open_agents_dashboard();
+                false
+            }
+            // ← on an empty composer enters the inline `← for agents` FleetSelect
+            // roster focus (CC FleetView) WITHOUT opening the full-screen
+            // dashboard. Only intercepted with agents to manage and no @-file
+            // dropdown open, so it never steals the composer's cursor motion
+            // while typing.
+            (KeyCode::Left, KeyModifiers::NONE)
+                if input_empty
+                    && !self.input.file_search_active()
+                    && self.agents.is_active() =>
+            {
+                self.enter_fleet_select();
                 false
             }
             // '@' is handled inline by the composer (fuzzy file/dir mention

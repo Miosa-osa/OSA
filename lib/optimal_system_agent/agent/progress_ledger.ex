@@ -151,8 +151,15 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
           "#{head}#{body}#{tail}"
         end)
 
-      case File.write(path(session_id), updated) do
+      case atomic_write(path(session_id), updated) do
         :ok ->
+          # Capture the durable, immutable Task Brief once, at the moment the run's
+          # first real goal is set (audit gap M1). Every goal-set path funnels
+          # through here (progress_note tool, GoalTracker.start/2, memory
+          # coordinator, /goal), so this single chokepoint covers them all.
+          # `capture/3` is a no-op once a brief exists and ignores the placeholder,
+          # so re-issuing /goal never clobbers the founding brief. Best-effort.
+          maybe_capture_brief(session_id, body)
           emit(session_id, :goal_set, %{goal: body})
           Logger.debug("[progress_ledger] goal set for #{session_id}")
           {:ok, body}
@@ -288,6 +295,35 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   @spec safe_id(String.t()) :: String.t()
   defp safe_id(session_id) do
     Regex.replace(~r/[^a-zA-Z0-9_\-]/, session_id, "_")
+  end
+
+  # Atomic full-file rewrite (temp + rename), mirroring SessionPersistence's
+  # crash-safe pattern (audit gap D4). Used for the `## Goal` section rewrite so a
+  # crash mid-write can never leave a torn goal file — the exact file a long run
+  # relies on to recover its intent. Pure appends (append_entry/2) stay O_APPEND:
+  # a torn final line is tolerable for an append-only log and preserves replay.
+  @spec atomic_write(String.t(), iodata()) :: :ok | {:error, term()}
+  defp atomic_write(path, contents) do
+    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
+
+    with :ok <- File.write(tmp, contents),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, reason}
+    end
+  end
+
+  # Immutable Task Brief capture (audit gap M1). Never raises into set_goal.
+  defp maybe_capture_brief(session_id, goal) do
+    OptimalSystemAgent.Agent.TaskBrief.capture(session_id, goal)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   @spec now() :: String.t()
