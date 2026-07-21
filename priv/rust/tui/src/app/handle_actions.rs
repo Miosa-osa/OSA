@@ -949,6 +949,7 @@ impl App {
     ) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
         tokio::spawn(async move {
             let saved = client
                 .providers_save_key(
@@ -961,12 +962,16 @@ impl App {
                 .await;
             match saved {
                 Ok(_) => {
-                    // Reflect the switch live in the UI header + context window.
+                    // Reflect the switch live in the UI header + context window
+                    // AND on the live session's Loop GenServer — session-scoped
+                    // so the current conversation actually uses the newly-saved
+                    // key/model on its next turn (the global-only endpoint left
+                    // an already-running session silently stuck on the old one).
                     let req = crate::client::types::ModelSwitchRequest {
                         provider: runtime_provider,
                         model: model.clone(),
                     };
-                    let event = match client.switch_model(&req).await {
+                    let event = match client.switch_session_model(&sid, &req).await {
                         Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
                         Err(e) => BackendEvent::ModelSwitched(Err(e.to_string())),
                     };

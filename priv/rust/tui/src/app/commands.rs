@@ -702,6 +702,7 @@ impl App {
     pub(crate) fn switch_model(&self, provider: &str, model: &str) {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
+        let sid = self.session_id.clone();
         let provider = provider.to_string();
         let model = model.to_string();
         tokio::spawn(async move {
@@ -709,7 +710,13 @@ impl App {
                 provider: provider.clone(),
                 model: model.clone(),
             };
-            let result = client.switch_model(&req).await;
+            // Session-scoped: hot-swaps the LIVE session's Loop GenServer so
+            // the very next turn in THIS conversation actually uses the new
+            // model. The old `/api/v1/models/switch` call only updated
+            // process-wide defaults — the UI would show "Model: x/y" and the
+            // header/status bar would update, but the running session kept
+            // silently calling the previous provider until it was recreated.
+            let result = client.switch_session_model(&sid, &req).await;
             let event = match result {
                 Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
                 Err(e) => BackendEvent::ModelSwitched(Err(e.to_string())),

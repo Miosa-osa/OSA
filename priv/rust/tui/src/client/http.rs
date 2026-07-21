@@ -443,9 +443,30 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// POST /api/v1/models/switch
+    /// POST /api/v1/models/switch — GLOBAL default only (affects future
+    /// sessions, not any session that already has a live `Loop` GenServer).
+    /// Kept for onboarding/first-run flows where no session exists yet.
+    /// Do NOT use this to switch the model of the CURRENT session — use
+    /// `switch_session_model` instead, or the live turn keeps calling the
+    /// old provider/model while the UI silently claims success.
     pub async fn switch_model(&self, req: &ModelSwitchRequest) -> Result<ModelSwitchResponse> {
         let resp = self.post("/api/v1/models/switch", req).await?;
+        Ok(resp.json().await?)
+    }
+
+    /// POST /api/v1/sessions/:id/provider — hot-swap the LLM provider/model on
+    /// the LIVE session's `Loop` GenServer (`Loop.handle_call({:swap_provider,
+    /// ...})`). This is the endpoint that actually changes what the current
+    /// conversation uses on its next turn; `switch_model` above only updates
+    /// process-wide defaults that a brand-new session would pick up.
+    pub async fn switch_session_model(
+        &self,
+        session_id: &str,
+        req: &ModelSwitchRequest,
+    ) -> Result<ModelSwitchResponse> {
+        let resp = self
+            .post(&format!("/api/v1/sessions/{}/provider", session_id), req)
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -1507,5 +1528,52 @@ mod health_check_retry_tests {
         let result = client.onboarding_setup(&req).await;
 
         assert!(result.is_err(), "expected a transport error, got Ok");
+    }
+
+    /// Regression test: `/model` (and the model-picker "save key and switch"
+    /// flow) must hit the SESSION-scoped `POST /sessions/:id/provider` route
+    /// so the CURRENT live session's `Loop` GenServer actually picks up the
+    /// new provider/model on its next turn. A prior version called the
+    /// global-only `POST /models/switch`, which updated process-wide
+    /// defaults but left an already-running session silently stuck on the
+    /// old provider while the UI reported success.
+    #[tokio::test]
+    async fn switch_session_model_posts_to_the_session_scoped_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        let (line_tx, line_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                let _ = line_tx.send(request_line);
+
+                let body = "{\"status\":\"ok\",\"provider\":\"ollama\",\"model\":\"qwen3:8b\",\"context_window\":32000}";
+                let _ = stream.write_all(http_ok_response(body).as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = make_client(base_url);
+        let req = crate::client::types::ModelSwitchRequest {
+            provider: "ollama".to_string(),
+            model: "qwen3:8b".to_string(),
+        };
+        let result = client.switch_session_model("session-abc-123", &req).await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+        let resp = result.unwrap();
+        assert_eq!(resp.provider, "ollama");
+        assert_eq!(resp.model, "qwen3:8b");
+
+        let request_line = line_rx.await.expect("server observed a request");
+        assert_eq!(
+            request_line, "POST /api/v1/sessions/session-abc-123/provider HTTP/1.1",
+            "switch_session_model must hit the session-scoped route, not the global /models/switch"
+        );
     }
 }
