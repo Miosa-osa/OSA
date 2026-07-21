@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilter do
   # Tools that spawn further agents. Names + declared aliases (Delegate.Tool
   # aliases and CreateAgent.Tool aliases) — matched by tool name so a rename in
   # either tool keeps this guard effective as long as the alias list is updated.
-  @spawning_tools ~w(delegate agent subagent spawn_agent create_agent define_agent new_agent)
+  @spawning_tools ~w(delegate agent subagent spawn_agent create_agent define_agent new_agent
+    fleet fleet_spawn fleet_workflow spawn_fleet_node fan_out)
 
   # Priority tools kept when trimming for local providers.
   @priority_tools ~w(file_read file_write file_edit shell_execute ask_user computer_use memory_recall)

@@ -778,6 +778,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
       # ── Multi-agent + orchestration ────────────────────────────────────
       "delegate" => OptimalSystemAgent.Tools.Builtins.Delegate.Tool,
+      "fleet" => OptimalSystemAgent.Tools.Builtins.Fleet.Tool,
       "list_agents" => OptimalSystemAgent.Tools.Builtins.ListAgents.Tool,
       "create_agent" => OptimalSystemAgent.Tools.Builtins.CreateAgent.Tool,
       "team_tasks" => OptimalSystemAgent.Tools.Builtins.TeamTasks.Tool,

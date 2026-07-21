@@ -1,0 +1,161 @@
+defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
+  @moduledoc """
+  Handler-level tests for the `fleet` tool: input validation, permission
+  gating, the full-power spawn path, and the ULTRA-GATED workflow path.
+
+  These do NOT boot real agent loops — the per-item spawn is injected through
+  the `:fleet_spawn_fun` app-env seam. The ultra-gate itself always lives in
+  `Agent.Fleet.fan_out/3`, so injecting a fake spawn never bypasses it.
+  """
+  use ExUnit.Case, async: false
+
+  alias OptimalSystemAgent.Agent.Effort
+  alias OptimalSystemAgent.Tools.Builtins.Fleet.Handler
+  alias OptimalSystemAgent.Tools.Builtins.Fleet.Tool
+  alias OptimalSystemAgent.Tools.UseContext
+
+  setup do
+    prev_spawn = Application.get_env(:optimal_system_agent, :fleet_spawn_fun)
+    prev_effort = Application.get_env(:optimal_system_agent, :effort_level)
+
+    on_exit(fn ->
+      restore(:fleet_spawn_fun, prev_spawn)
+      restore(:effort_level, prev_effort)
+    end)
+
+    {:ok, ctx: UseContext.new(%{session_id: "parent-#{System.unique_integer([:positive])}"})}
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:optimal_system_agent, key)
+  defp restore(key, val), do: Application.put_env(:optimal_system_agent, key, val)
+
+  defp put_spawn(fun), do: Application.put_env(:optimal_system_agent, :fleet_spawn_fun, fun)
+
+  describe "identity + schema" do
+    test "name is fleet and schema is plain (no Union/anyOf/oneOf/format)" do
+      assert Tool.name() == "fleet"
+      schema = Tool.parameters()
+      # Hard schema constraint: no forbidden constructs anywhere in the schema.
+      json = inspect(schema)
+      refute json =~ "anyOf"
+      refute json =~ "oneOf"
+      refute Map.has_key?(schema["properties"], "format")
+      assert schema["properties"]["action"]["enum"] == ["spawn", "workflow"]
+    end
+  end
+
+  describe "validate/2" do
+    test "missing action", %{ctx: ctx} do
+      assert {:error, msg, -32_602} = Handler.validate(%{}, ctx)
+      assert msg =~ "action"
+    end
+
+    test "unknown action", %{ctx: ctx} do
+      assert {:error, msg, -32_602} = Handler.validate(%{"action" => "nope"}, ctx)
+      assert msg =~ "Unknown action"
+    end
+
+    test "spawn requires a string task", %{ctx: ctx} do
+      assert {:error, msg, -32_602} = Handler.validate(%{"action" => "spawn"}, ctx)
+      assert msg =~ "task"
+    end
+
+    test "workflow requires an items array", %{ctx: ctx} do
+      assert {:error, msg, -32_602} = Handler.validate(%{"action" => "workflow"}, ctx)
+      assert msg =~ "items"
+    end
+
+    test "accepts valid spawn + workflow inputs", %{ctx: ctx} do
+      assert {:ok, _} = Handler.validate(%{"action" => "spawn", "task" => "do it"}, ctx)
+      assert {:ok, _} = Handler.validate(%{"action" => "workflow", "items" => ["a"]}, ctx)
+    end
+  end
+
+  describe "check_permissions/2" do
+    test "denies a blank spawn task", %{ctx: ctx} do
+      assert {:deny, _} = Handler.check_permissions(%{"action" => "spawn", "task" => "   "}, ctx)
+    end
+
+    test "denies non-string workflow items", %{ctx: ctx} do
+      assert {:deny, _} =
+               Handler.check_permissions(%{"action" => "workflow", "items" => [1, 2]}, ctx)
+    end
+
+    test "allows valid spawn + workflow", %{ctx: ctx} do
+      assert {:allow, _} =
+               Handler.check_permissions(%{"action" => "spawn", "task" => "go"}, ctx)
+
+      assert {:allow, _} =
+               Handler.check_permissions(%{"action" => "workflow", "items" => ["a"]}, ctx)
+    end
+  end
+
+  describe "execute/2 — spawn (any effort)" do
+    test "returns node id + confirmation, forwarding task/agent_type", %{ctx: ctx} do
+      Effort.set(:low)
+      test_pid = self()
+
+      put_spawn(fn parent, opts ->
+        send(test_pid, {:spawned, parent, opts})
+        {:ok, "fleet:#{parent}:1"}
+      end)
+
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{"action" => "spawn", "task" => "reindex", "agent_type" => "code-reviewer"},
+                 ctx
+               )
+
+      assert msg =~ "Spawned full-power fleet node"
+      assert msg =~ "code-reviewer"
+      assert_received {:spawned, _parent, opts}
+      assert Keyword.get(opts, :task) == "reindex"
+      assert Keyword.get(opts, :agent_type) == "code-reviewer"
+    end
+
+    test "surfaces the fleet cap message", %{ctx: ctx} do
+      put_spawn(fn _p, _o -> {:error, {:fleet_cap_reached, 16, 16}} end)
+
+      assert {:ok, msg} = Handler.execute(%{"action" => "spawn", "task" => "x"}, ctx)
+      assert msg =~ "Fleet at capacity (16/16)"
+    end
+  end
+
+  describe "execute/2 — workflow (ultra-gated)" do
+    test "below ultra returns a clear raise-to-ultra message", %{ctx: ctx} do
+      Effort.set(:high)
+      put_spawn(fn _p, o -> {:ok, Keyword.get(o, :task)} end)
+
+      assert {:ok, msg} =
+               Handler.execute(%{"action" => "workflow", "items" => ["a", "b"]}, ctx)
+
+      assert msg =~ "ultra-gated"
+      assert msg =~ "ultra"
+    end
+
+    test "at ultra drains all items via the injected spawn fn", %{ctx: ctx} do
+      Effort.set(:ultra)
+      test_pid = self()
+
+      put_spawn(fn _p, o ->
+        send(test_pid, {:item, Keyword.get(o, :task), Keyword.get(o, :agent_type)})
+        {:ok, Keyword.get(o, :task)}
+      end)
+
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{
+                   "action" => "workflow",
+                   "items" => ["a", "b", "c"],
+                   "agent_type" => "general-purpose",
+                   "task" => "umbrella"
+                 },
+                 ctx
+               )
+
+      assert msg =~ "3 spawned OK, 0 failed"
+      # Every item ran through the full-power path with the shared agent_type.
+      for t <- ~w(a b c), do: assert_received({:item, ^t, "general-purpose"})
+    end
+  end
+end

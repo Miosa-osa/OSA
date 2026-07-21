@@ -229,6 +229,37 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       # Every summary carries the cap + warn fields the header needs.
       assert Enum.all?(summaries, fn s -> s[:cap] == 4 and is_boolean(s[:warn]) end)
     end
+
+    test "seeds the shared scratchpad with a workflow header at start" do
+      parent = "parent-seed-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      ref =
+        OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
+          data = if is_map(payload[:data]), do: payload[:data], else: payload
+
+          if (data[:event] || data["event"]) == :scratchpad_activity and
+               (data[:agent] || data["agent"]) == "fleet-workflow" do
+            send(test_pid, {:seeded, data})
+          end
+        end)
+
+      assert {:ok, %{total: 2}} =
+               Fleet.fan_out(parent, ["a", "b"], spawn_fun: fake_spawn(), task: "big goal")
+
+      # The workflow header was published to the shared scratchpad (best-effort,
+      # but here it must succeed) so orchestrated nodes share a workspace.
+      assert_receive {:seeded, data}, 1_000
+      assert data[:entry] == "workflow.md"
+
+      OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, ref)
+
+      # And the entry is actually readable in the shared session-root scratchpad.
+      id = OptimalSystemAgent.Scratchpad.session_root(parent)
+      assert {:ok, content} = OptimalSystemAgent.Scratchpad.read(id, "workflow.md")
+      assert content =~ "Dynamic workflow"
+      assert content =~ "big goal"
+    end
   end
 
   defp fake_spawn do

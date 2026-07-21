@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Runtime.SessionManager
+  alias OptimalSystemAgent.Scratchpad
 
   @default_max_fleet_agents 16
   # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
@@ -174,6 +175,11 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       end
 
     total = length(work)
+
+    # Seed the SHARED scratchpad with a workflow header so the orchestrated
+    # nodes share a common workspace and the team-visibility panel shows the
+    # workflow. Best-effort — must never crash the fan_out.
+    seed_workflow_scratchpad(parent, base_opts, total)
 
     # Start summary: everything queued, nothing spawned yet.
     emit_fleet_summary(parent, %{queued: total, cap: cap, total_spawned: 0})
@@ -436,6 +442,51 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       total_spawned: spawned,
       warn: running + queued >= @large_fleet_threshold
     })
+  end
+
+  # Seed the shared scratchpad with a workflow header entry (task + item count)
+  # at the start of a fan_out so every orchestrated node shares a common
+  # workspace and the team-visibility panel surfaces the workflow. The entry is
+  # written to the coordinator's SESSION ROOT — the same directory every spawned
+  # node resolves via `Scratchpad.session_root/1` — and a `scratchpad_activity`
+  # event is emitted so the TUI panel lights up. Entirely best-effort: any
+  # failure (bad path, disabled scratchpad, emit crash) is swallowed so the
+  # fan_out proceeds regardless.
+  defp seed_workflow_scratchpad(parent, base_opts, item_count) do
+    id = Scratchpad.session_root(parent)
+    task = base_opts |> Keyword.get(:task, "") |> to_string() |> String.trim()
+
+    header =
+      "# Dynamic workflow\n\n" <>
+        "Coordinator: #{parent}\n" <>
+        "Items: #{item_count}\n" <>
+        "Started: #{DateTime.utc_now() |> DateTime.to_iso8601()}\n\n" <>
+        "Task: #{if task == "", do: "(unspecified)", else: task}\n\n" <>
+        "Nodes: publish findings/partial results here so siblings and the " <>
+        "coordinator can read them.\n"
+
+    case Scratchpad.write(id, "workflow.md", header) do
+      {:ok, _path} ->
+        Bus.emit(:system_event, %{
+          event: :scratchpad_activity,
+          session_id: id,
+          agent: "fleet-workflow",
+          entry: "workflow.md",
+          action: :write,
+          bytes: byte_size(header)
+        })
+
+        :ok
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   defp node_tokens(node_id) do
