@@ -287,16 +287,47 @@ impl App {
                 };
                 if commit {
                     shrink_streak = 0;
-                    // Clear first so no stale rows of the previous,
-                    // differently-sized (or differently-wrapped) live region are
-                    // left behind — this is what kills the duplicated banners /
-                    // status lines and the misaligned post-split rows. Rebuild
-                    // fresh to bypass ratatui's in-place inline-resize (which can
-                    // misplace the viewport on a shrink). Pause the reader around
-                    // the DSR query, exactly as the full→inline switch does.
-                    let _ = terminal.clear();
+                    // Erase the OLD inline chrome before rebuilding fresh at the
+                    // new size — this is what kills the duplicated banners /
+                    // status lines and the misaligned post-split rows. Pause the
+                    // reader FIRST (shared stdin) so the DSR cursor query below
+                    // isn't eaten by it, exactly as the full→inline switch does.
                     term_handle.abort();
                     let _ = term_handle.await;
+                    // The previous code cleared with `terminal.clear()`, but
+                    // `Terminal::clear` erases from `self.viewport_area` — a Rect
+                    // ratatui only recomputes inside `draw`/`autoresize`. Between
+                    // the last draw (at the OLD size) and here it still holds the
+                    // PRE-resize geometry, whose top row is stale: after a height
+                    // shrink it points below the resized screen entirely. So that
+                    // clear missed the old chrome, and the `rebuild_inline` below
+                    // then scrolled the stale copy up into scrollback — the
+                    // content that "duplicates and stacks" on every resize event.
+                    //
+                    // Anchor the clear to the terminal's ACTUAL current cursor
+                    // (queried fresh, where the emulator left it inside the
+                    // reflowed old region) and wipe from the top of that region
+                    // downward. This handles grow, shrink and width-only changes
+                    // uniformly and never reaches the transcript scrollback above.
+                    // If the DSR query is dropped, fall back to ratatui's clear —
+                    // no worse than the old behaviour, and rare.
+                    match crossterm::cursor::position() {
+                        Ok((_, cursor_row)) => {
+                            let top = resize_clear_top(cursor_row, cur_inline_h);
+                            let _ = execute!(
+                                std::io::stdout(),
+                                crossterm::cursor::MoveTo(0, top),
+                                crossterm::terminal::Clear(
+                                    crossterm::terminal::ClearType::FromCursorDown
+                                ),
+                            );
+                        }
+                        Err(_) => {
+                            let _ = terminal.clear();
+                        }
+                    }
+                    // Rebuild fresh to bypass ratatui's in-place inline-resize
+                    // (which can misplace the viewport on a shrink).
                     rebuild_inline(&mut terminal, desired_inline_h)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
                     cur_inline_h = desired_inline_h;
@@ -1088,6 +1119,25 @@ fn clamp_inline_top(top: Option<u16>, term_rows: u16) -> Option<u16> {
     top.filter(|&t| t < term_rows)
 }
 
+/// Absolute terminal row to start clearing from when erasing the OLD inline
+/// chrome before a resize rebuild, given the terminal's ACTUAL current cursor
+/// row (queried fresh via DSR after the resize, i.e. where the emulator left it
+/// inside the reflowed old region) and the height the old inline region had
+/// (`prev_inline_h`).
+///
+/// The old inline chrome occupies at most `prev_inline_h` rows ending at (or
+/// just above) the cursor — the composer parks the terminal's text cursor on its
+/// own row near the bottom of the region — so clearing from `cursor -
+/// (prev_inline_h - 1)` downward wipes exactly the old region and nothing above
+/// it (the transcript scrollback the user wants to keep). Saturating so a cursor
+/// high on the screen can never underflow past row 0.
+///
+/// Kept as a free, pure function so the anchor arithmetic is unit-testable
+/// without a real terminal (see `render_tests::resize_clear_top_*`).
+fn resize_clear_top(cursor_row: u16, prev_inline_h: u16) -> u16 {
+    cursor_row.saturating_sub(prev_inline_h.saturating_sub(1))
+}
+
 /// Leave the alternate screen and rebuild the inline viewport, restoring the
 /// host terminal's scrollback untouched.
 ///
@@ -1744,7 +1794,7 @@ mod render_tests {
     // INSIDE the old chrome, not above it. Rebuilding there without clearing
     // strands the old chrome's rows above the new viewport, still holding the
     // previous frame's rendered characters — the visible duplicate.
-    use super::clamp_inline_top;
+    use super::{clamp_inline_top, resize_clear_top};
 
     #[test]
     fn clamp_inline_top_accepts_row_within_current_terminal() {
@@ -1759,6 +1809,98 @@ mod render_tests {
         assert_eq!(clamp_inline_top(Some(25), 10), None);
         assert_eq!(clamp_inline_top(Some(10), 10), None); // top must be < rows
         assert_eq!(clamp_inline_top(None, 30), None);
+    }
+
+    // ── Bug 3 repro/fix: content duplicates / stacks on terminal RESIZE ───────
+    //
+    // Root cause: the resize-commit path cleared the old inline chrome with
+    // `terminal.clear()` before rebuilding fresh. `Terminal::clear` (ratatui
+    // 0.29) erases from `self.viewport_area`, a Rect ratatui only recomputes
+    // inside `draw`/`autoresize`. Between the last draw (at the OLD size) and the
+    // resize rebuild it still holds the PRE-resize geometry, so after a height
+    // change its top row is stale — below the resized screen entirely on a
+    // shrink. That clear therefore missed the old chrome, and the following
+    // `Viewport::Inline` rebuild scrolled the stale copy up into scrollback: one
+    // duplicate per resize commit, stacking as a pane-drag fires many of them.
+    //
+    // Fix: anchor the clear to the terminal's ACTUAL current cursor (queried
+    // fresh post-resize) via `resize_clear_top`, wiping from the top of the old
+    // region downward, instead of trusting ratatui's stale `viewport_area`.
+
+    #[test]
+    fn resize_clear_top_lands_on_old_region_top_when_cursor_is_bottom_anchored() {
+        // The composer parks the terminal cursor on its own row near the bottom
+        // of the inline region, so the cursor sits at the region's LAST row.
+        // Clearing from `cursor - (h - 1)` must then land exactly on the region's
+        // FIRST row — erasing the whole region and nothing above it.
+        // Region rows 18..=23 (height 6), cursor at the bottom row 23.
+        assert_eq!(resize_clear_top(23, 6), 18);
+        // Height 1 region: clear starts on the cursor row itself.
+        assert_eq!(resize_clear_top(23, 1), 23);
+    }
+
+    #[test]
+    fn resize_clear_top_saturates_and_never_underflows() {
+        // A cursor high on the screen must never underflow past row 0 (which
+        // would wrap to a huge row and move the clear off-screen).
+        assert_eq!(resize_clear_top(2, 6), 0);
+        assert_eq!(resize_clear_top(0, 10), 0);
+        assert_eq!(resize_clear_top(0, 0), 0);
+    }
+
+    #[test]
+    fn stale_viewport_area_after_shrink_is_why_naive_clear_missed_the_chrome() {
+        // Demonstrates the root cause directly against a real `Terminal`: after
+        // the backend shrinks, the terminal's cached inline geometry
+        // (`viewport_area`, surfaced by `get_frame().area()`) still points at the
+        // OLD rows — out of bounds for the new size. `Terminal::clear` would have
+        // homed the cursor to exactly this stale top, so it could not have
+        // cleared the old chrome. The fix stops trusting this Rect and anchors to
+        // the live cursor instead (see `resize_clear_top`).
+        let w = 40u16;
+        let old_rows = 24u16;
+        let old_h = 6u16;
+        let old_top = old_rows - old_h; // 18 — bottom-anchored live region
+        let mut backend = TestBackend::new(w, old_rows);
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
+        let mut term = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Inline(old_h) },
+        )
+        .unwrap();
+        let input = InputComponent::new();
+        let mut status = StatusBar::new();
+        status.set_width(w);
+        status.set_provider_info("openclaw", "glm-5.2:cloud");
+        term.draw(|frame| draw_inline_chrome(frame, &input, &status))
+            .unwrap();
+        assert_eq!(term.get_frame().area().top(), old_top);
+
+        // A pane-drag shrinks the terminal to fewer rows than the old region top.
+        let new_rows = 12u16;
+        term.backend_mut().resize(w, new_rows);
+
+        // ratatui has NOT recomputed the inline geometry yet (no draw/autoresize
+        // between the resize event and the rebuild), so the cached top is stale
+        // and now out of bounds — the exact reason the old `terminal.clear()`
+        // could not erase the on-screen chrome.
+        let stale_top = term.get_frame().area().top();
+        assert_eq!(stale_top, old_top, "cached inline top must still be the pre-resize row");
+        assert!(
+            stale_top >= new_rows,
+            "root cause: the stale viewport top ({stale_top}) is out of bounds for the shrunk terminal ({new_rows} rows), so a clear anchored to it misses the old chrome",
+        );
+
+        // The fix anchors to where the emulator actually leaves the cursor within
+        // the resized screen (in-bounds), so the clear lands on real rows.
+        let cursor_row = new_rows - 1; // emulator clamps the cursor into view
+        let fix_top = resize_clear_top(cursor_row, old_h);
+        assert!(
+            fix_top < new_rows,
+            "fix: the cursor-anchored clear top ({fix_top}) is within the resized terminal ({new_rows} rows)",
+        );
     }
 
     /// True if any cell in `row` holds non-blank rendered content.
