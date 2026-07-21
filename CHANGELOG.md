@@ -9,6 +9,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.30] — displays as `v1.0.030`
+
+### Fixed / robustness
+
+- **A port conflict no longer crashes the whole app.** When `OSA_HTTP_PORT` (default 9089)
+  was already in use, OSA hard-crashed on boot — Bandit failed to bind, the supervisor
+  restarted it 10×/60s, and the entire OTP tree died with a cryptic dump. Now a boot
+  **preflight** halts cleanly with an actionable message that distinguishes *another OSA
+  instance already running* ("connect to it, or set `OSA_HTTP_PORT`") from *a foreign
+  process holding the port* ("free it — `ss -ltnp | grep 9089` — or set `OSA_HTTP_PORT`"). A
+  single shared `Net.Port` helper backs every surface below.
+- **`osa doctor`** now reports three distinct states — OSA responding, OSA not running, and
+  **port taken by a non-OSA process** (the case it previously misdiagnosed as "API not
+  responding"). It also reads `OLLAMA_URL` (was `OLLAMA_HOST`, misaligned with the app).
+- **Onboarding** warns if the HTTP port is already taken *before* you finish setup, instead
+  of completing "successfully" and then crashing on first launch.
+- **TUI** — the "backend unreachable" message now names the port and points at `osa doctor`
+  instead of a vague dead-end.
+
 ## [1.0.29] — displays as `v1.0.029`
 
 ### Fixed
