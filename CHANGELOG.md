@@ -9,6 +9,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.29] — displays as `v1.0.029`
+
+### Fixed
+
+- **Context meter read far too high on Ollama Cloud models.** For a `:cloud` model running
+  through the `:ollama` provider (e.g. `glm-5.2:cloud`), the usage denominator collapsed to
+  the local Ollama KV-cache ceiling (`ollama_num_ctx`, ~32k → ~12.7k after the reserve)
+  instead of the model's real context window (1,000,000) — so a normal ~15k-token turn read
+  **over 100%** and the bar filled almost instantly. `effective_context_window/2` now skips
+  the local KV cap for `:cloud` models, so the meter (and context budgeting + `num_ctx`
+  sizing, one source of truth) use the true window. A ~50k-token session now reads ~5%
+  instead of pinned-full.
+
 ## [1.0.28] — displays as `v1.0.028`
 
 This cycle built an agent **fleet**: a Claude-Code-parity roster of full-power
