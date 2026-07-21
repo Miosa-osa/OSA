@@ -19,6 +19,20 @@ defmodule OptimalSystemAgent.MCP.Transport.StdioReapingTest do
 
   setup do
     if System.find_executable("setsid") do
+      # Isolate the MCP stderr log under a throwaway config dir so the real
+      # ~/.osa is never touched by the child-stderr redirect.
+      tmp = Path.join(System.tmp_dir!(), "osa_reap_cfg_#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:optimal_system_agent, :config_dir)
+      Application.put_env(:optimal_system_agent, :config_dir, tmp)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :config_dir, prev),
+          else: Application.delete_env(:optimal_system_agent, :config_dir)
+
+        File.rm_rf(tmp)
+      end)
+
       :ok
     else
       {:skip, "setsid unavailable — reaping degrades to direct-child cleanup"}

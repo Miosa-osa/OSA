@@ -5,10 +5,21 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   Wraps an Erlang `Port` opened with `{:spawn_executable, exe}` in `:binary`
   mode with `:exit_status`. MCP frames messages as newline-delimited JSON, so
   we buffer partial lines and emit one `{:mcp_message, ref, line}` per
-  complete line. The child's stderr is captured via `:stderr_to_stdout`... no —
-  stderr must stay separate from the JSON channel, so we do NOT merge it;
-  instead we rely on the child writing protocol JSON to stdout and diagnostics
-  to its own stderr, and surface any stdout non-JSON lines to `Logger`.
+  complete line.
+
+  ## stderr routing
+
+  stderr must NEVER merge into the JSON stdout channel (no `:stderr_to_stdout`
+  on the port). By default a `:spawn_executable` child inherits the daemon's
+  fd 2, so a misconfigured MCP server's npx/npm noise ("Cannot find package
+  'zod'", EPIPE, executable-not-found) sprays straight into the daemon's
+  console/backend.log and reads as a broken install. To keep boot calm we wrap
+  the child in a tiny `sh -c 'exec "$@" 2>>LOG'` so its stderr is redirected to
+  the MCP stderr log (`<config_dir>/logs/mcp-stderr.log`, best-effort, falling
+  back to `/dev/null`) — off the console but still available for debugging. The
+  `exec` keeps the child's pid stable so the process-group reaping below is
+  unaffected. When `sh` is unavailable we spawn the command unchanged. Non-JSON
+  lines that arrive on stdout are still surfaced to `Logger` at debug.
 
   On owner death or port exit the port is closed and `{:mcp_closed, ref, _}`
   is delivered. The GenServer traps exits so it can `Port.close/1` cleanly.
@@ -79,10 +90,10 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
         port_env =
           Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
 
-        # Wrap the child under `setsid -w` so it leads its own process group and
-        # the whole tree can be reaped on teardown. Falls back to a direct spawn
-        # when setsid is missing.
-        {spawn_exe, spawn_args, reap?} = maybe_wrap_setsid(exe, args)
+        # Redirect the child's stderr off the daemon console AND wrap it under
+        # `setsid -w` so it leads its own process group for teardown reaping.
+        # Falls back gracefully when `sh`/`setsid` are missing.
+        {spawn_exe, spawn_args, reap?} = build_spawn(exe, args)
 
         port =
           Port.open(
@@ -231,14 +242,62 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
 
   # ── Process-group reaping ─────────────────────────────────────────────
 
-  # Wrap the resolved executable under `setsid -w <exe> <args...>` so the child
-  # leads its own process group. Returns {spawn_exe, spawn_args, reap?}. When
-  # setsid isn't installed we spawn directly and skip reaping (best-effort).
-  defp maybe_wrap_setsid(exe, args) do
+  # Build the final `{spawn_exe, spawn_args, reap?}` for `Port.open`, applied
+  # inside-out:
+  #
+  #   1. `wrap_stderr` wraps the command in `sh -c 'exec "$@" 2>>LOG'` so the
+  #      child's stderr lands in the MCP stderr log instead of the daemon's
+  #      inherited fd 2. `exec` keeps the child's pid stable, so the pgid
+  #      resolution below still finds the same leader. stdout (the JSON channel)
+  #      is untouched — stderr is NEVER merged into it.
+  #   2. `setsid -w` makes that child a process-group leader so the whole tree
+  #      can be reaped on teardown. When setsid is missing we spawn directly and
+  #      skip reaping (best-effort, direct-child-only cleanup, as before).
+  defp build_spawn(exe, args) do
+    {exe, args} = wrap_stderr(exe, args)
+
     case System.find_executable("setsid") do
       nil -> {exe, args, false}
       setsid -> {setsid, ["-w", exe | args], true}
     end
+  end
+
+  # Redirect the child's stderr to the MCP stderr log via a tiny `sh` wrapper
+  # that `exec`s the real command (no extra process layer; pid stays stable for
+  # pgid resolution). When `sh` is unavailable the command is spawned unchanged
+  # (its stderr stays inherited — best-effort, matching the setsid fallback).
+  defp wrap_stderr(exe, args) do
+    case System.find_executable("sh") do
+      nil ->
+        {exe, args}
+
+      sh ->
+        script = ~s(exec "$@" 2>>#{shell_quote(stderr_log_path())})
+        {sh, ["-c", script, "sh", exe | args]}
+    end
+  end
+
+  # Absolute path to the shared MCP child-stderr log, created best-effort. If the
+  # log dir cannot be made we fall back to /dev/null so stderr is still kept off
+  # the daemon console.
+  defp stderr_log_path do
+    dir = Path.join(config_dir(), "logs")
+
+    case File.mkdir_p(dir) do
+      :ok -> Path.join(dir, "mcp-stderr.log")
+      _ -> "/dev/null"
+    end
+  rescue
+    _ -> "/dev/null"
+  end
+
+  defp config_dir do
+    Application.get_env(:optimal_system_agent, :config_dir, "~/.osa") |> Path.expand()
+  end
+
+  # POSIX single-quote a path for safe embedding in the `sh -c` script.
+  defp shell_quote(str) do
+    "'" <> String.replace(str, "'", "'\\''") <> "'"
   end
 
   # Resolve and cache the child's process-group id once, from the (still alive)

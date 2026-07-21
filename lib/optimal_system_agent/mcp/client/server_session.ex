@@ -206,7 +206,10 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   end
 
   def handle_info({:mcp_closed, ref, reason}, %{ref: ref} = state) do
-    Logger.warning("[MCP:#{state.server.name}] transport closed: #{inspect(reason)}")
+    # Expected for optional/misconfigured servers on a fresh install; not
+    # individually actionable, so keep it at debug and let the Manager emit a
+    # single calm boot summary instead of a per-server wall of warnings.
+    Logger.debug("[MCP:#{state.server.name}] transport closed: #{inspect(reason)}")
     {:noreply, schedule_reconnect(fail_pending(state, :connection_closed))}
   end
 
@@ -239,8 +242,9 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
   def handle_info({:handshake_timeout, id}, %{init_id: id} = state) when not is_nil(id) do
     # initialize is still pending after the deadline — the server started but
-    # never completed the handshake. Mark failed and retry with backoff.
-    Logger.warning(
+    # never completed the handshake. Mark failed and retry with backoff. Expected
+    # for a misconfigured/optional server; debug, not warning (see boot summary).
+    Logger.debug(
       "[MCP:#{state.server.name}] initialize timed out after #{@handshake_timeout_ms}ms — retrying"
     )
 
@@ -266,7 +270,8 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   # already nils `state.transport` before this fires, so a transport that closed
   # then exited :normal falls through to the ignore clause below (no double-count).
   def handle_info({:EXIT, pid, reason}, %{transport: pid} = state) when is_pid(pid) do
-    Logger.warning("[MCP:#{state.server.name}] transport crashed: #{inspect(reason)}")
+    # Expected connectivity failure for an optional/misconfigured server; debug.
+    Logger.debug("[MCP:#{state.server.name}] transport crashed: #{inspect(reason)}")
     {:noreply, schedule_reconnect(fail_pending(state, :transport_crashed))}
   end
 
@@ -288,12 +293,16 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
 
     case mod.start_link(opts) do
       {:ok, transport} ->
-        Logger.info("[MCP:#{server.name}] #{server.transport} transport started, initializing")
+        # Per-server boot chatter: keep at debug so a 16-server fresh install
+        # does not print 16 "transport started" lines. The Manager boot summary
+        # is the one line a newcomer sees.
+        Logger.debug("[MCP:#{server.name}] #{server.transport} transport started, initializing")
         state = %{state | transport_mod: mod, transport: transport, ref: ref, status: :connecting}
         start_handshake(state)
 
       {:error, reason} ->
-        Logger.warning("[MCP:#{server.name}] transport failed to start: #{inspect(reason)}")
+        # Expected for an optional server whose package/command is unavailable.
+        Logger.debug("[MCP:#{server.name}] transport failed to start: #{inspect(reason)}")
         schedule_reconnect(%{state | transport: nil, status: :failed})
     end
   end
@@ -332,7 +341,8 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
         %{state | init_id: msg["id"]}
 
       {:error, reason} ->
-        Logger.warning("[MCP:#{state.server.name}] initialize send failed: #{inspect(reason)}")
+        # Expected connectivity failure for an optional/misconfigured server; debug.
+        Logger.debug("[MCP:#{state.server.name}] initialize send failed: #{inspect(reason)}")
         schedule_reconnect(%{state | status: :failed})
     end
   end
@@ -454,12 +464,14 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   end
 
   defp handle_error(id, err, %{init_id: id} = state) do
-    Logger.warning("[MCP:#{state.server.name}] initialize error: #{inspect(err)}")
+    # Expected for a server that rejects the handshake (bad config/version); debug.
+    Logger.debug("[MCP:#{state.server.name}] initialize error: #{inspect(err)}")
     schedule_reconnect(%{state | status: :failed, init_id: nil})
   end
 
   defp handle_error(id, err, %{list_id: id} = state) do
-    Logger.warning("[MCP:#{state.server.name}] tools/list error: #{inspect(err)}")
+    # Expected connectivity/availability failure; debug (see boot summary).
+    Logger.debug("[MCP:#{state.server.name}] tools/list error: #{inspect(err)}")
     # Finalize with whatever pages we accumulated before the error.
     finalize_tools(state.tools_acc, state)
   end
@@ -490,7 +502,11 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     fail_count = if state.stable?, do: 1, else: state.fail_count + 1
 
     if fail_count >= max_connect_failures() do
-      Logger.warning(
+      # Expected end-state for a permanently-broken optional server on a fresh
+      # install. Kept at debug so it does not read as a broken install; the count
+      # of dormant servers is surfaced calmly in the Manager boot summary, and
+      # `osa doctor` / `MCP list_servers` still show per-server dormant status.
+      Logger.debug(
         "[MCP:#{state.server.name}] #{fail_count} consecutive connect failures — going dormant, " <>
           "stopping reconnects (enable it manually once its config is fixed)"
       )
@@ -530,7 +546,9 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
   # Finalize a (possibly paginated) tools/list: publish the aggregated tools and
   # clear pagination state.
   defp finalize_tools(tools, state) do
-    Logger.info("[MCP:#{state.server.name}] discovered #{length(tools)} tools")
+    # Per-server success is boot chatter too; keep it at debug so the Manager's
+    # single "connected N of M servers" summary is the one line a newcomer sees.
+    Logger.debug("[MCP:#{state.server.name}] discovered #{length(tools)} tools")
     report_tools(state.server.name, tools)
 
     %{state | tools: tools, list_id: nil, tools_acc: [], list_cursors: MapSet.new(), list_pages: 0}

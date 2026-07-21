@@ -25,6 +25,12 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
   @supervisor OptimalSystemAgent.MCP.Supervisor
   @pt_key {OptimalSystemAgent.Tools.Registry, :mcp_tools}
 
+  # How long after boot to snapshot the connect wave for the single calm summary
+  # line. Long enough for most servers to either finish their handshake or start
+  # failing (npx spawn + handshake), short enough to be reassuring. Overridable
+  # in tests / by operators via `:mcp_boot_summary_ms`.
+  @boot_summary_ms 5_000
+
   defstruct servers: %{}, tools_by_server: %{}
 
   # ── Public API ────────────────────────────────────────────────────────
@@ -102,7 +108,12 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
 
   @impl true
   def handle_continue(:boot, state) do
-    {:noreply, load_and_start(state)}
+    state = load_and_start(state)
+    # Sessions connect asynchronously; snapshot the outcome once after the connect
+    # wave has had time to settle and emit ONE calm summary line instead of the
+    # per-server warnings (now debug).
+    Process.send_after(self(), :boot_summary, boot_summary_ms())
+    {:noreply, state}
   end
 
   @impl true
@@ -174,6 +185,37 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
     {:noreply, state}
   end
 
+  # Post-boot reconcile: count how many ENABLED servers actually reached `:ready`
+  # versus how many are still unavailable (connecting/failed/dormant/down) and
+  # log a single calm summary line. The per-server detail lives at debug (and in
+  # `MCP list_servers` / `osa doctor`), so nothing actionable is lost.
+  @impl true
+  def handle_info(:boot_summary, state) do
+    statuses =
+      state.servers
+      |> Map.values()
+      |> Enum.filter(& &1.enabled)
+      |> Enum.map(&{&1.name, server_status(&1)})
+
+    case statuses do
+      [] ->
+        :ok
+
+      _ ->
+        Logger.info(boot_summary_line(statuses))
+
+        unavailable = for {name, s} <- statuses, s != :ready, do: name
+
+        if unavailable != [] do
+          Logger.debug("[MCP] unavailable servers: #{Enum.join(unavailable, ", ")}")
+        end
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
   # ── Internal ──────────────────────────────────────────────────────────
 
   defp load_and_start(state) do
@@ -225,7 +267,9 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
         {:ok, pid}
 
       {:error, reason} = err ->
-        Logger.warning("[MCP.Manager] Failed to start session #{server.name}: #{inspect(reason)}")
+        # Expected for an optional/misconfigured server; debug, not warning. The
+        # boot summary reports the aggregate connected/unavailable count instead.
+        Logger.debug("[MCP.Manager] Failed to start session #{server.name}: #{inspect(reason)}")
         err
     end
   end
@@ -271,5 +315,32 @@ defmodule OptimalSystemAgent.MCP.Client.Manager do
     else
       :down
     end
+  end
+
+  # Build the single calm boot-summary line from `[{name, status}]`. A server is
+  # "connected" iff its status is `:ready`; everything else counts as unavailable.
+  # Pure and public (@doc false) so it is unit-testable without booting the app.
+  #
+  #   0/2  → "[MCP] connected 0 of 2 servers (2 unavailable, run 'osa doctor' for details)"
+  #   2/2  → "[MCP] connected 2 of 2 servers"
+  @doc false
+  @spec boot_summary_line([{String.t(), atom()}]) :: String.t()
+  def boot_summary_line(statuses) do
+    total = length(statuses)
+    ready = Enum.count(statuses, fn {_name, status} -> status == :ready end)
+    unavailable = total - ready
+
+    note =
+      if unavailable > 0 do
+        " (#{unavailable} unavailable, run 'osa doctor' for details)"
+      else
+        ""
+      end
+
+    "[MCP] connected #{ready} of #{total} servers" <> note
+  end
+
+  defp boot_summary_ms do
+    Application.get_env(:optimal_system_agent, :mcp_boot_summary_ms, @boot_summary_ms)
   end
 end
