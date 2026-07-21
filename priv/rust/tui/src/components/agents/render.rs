@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SynthesisState, SwarmStatus};
 use super::Agents;
@@ -142,26 +143,20 @@ impl Agents {
                     theme.agent_main()
                 };
                 let meta = fmt_cc_meta(main.elapsed_secs, main.tokens);
-                // Reserve columns for the glyph ("● "), the label, the gap and
-                // the right-hand meta, then truncate the activity to what's left.
-                let prefix_cols = 2 + "main".chars().count() + 2;
-                let max_activity = (area.width as usize)
-                    .saturating_sub(prefix_cols + meta.chars().count() + 2)
-                    .max(4);
-                let mut spans = vec![
-                    Span::styled("\u{25cf} ", theme.agent_main()),
-                    Span::styled("main", type_style),
-                ];
-                if !main.activity.trim().is_empty() {
-                    spans.push(Span::styled("  ", theme.faint()));
-                    spans.push(Span::styled(
-                        truncate_str(&main.activity, max_activity),
-                        theme.faint(),
-                    ));
-                }
-                spans.push(Span::styled(format!("  {}", meta), theme.faint()));
+                // Right-align the meta flush to the pane edge so the `main` root
+                // shares the roster's meta column with every worker row below.
+                let line = roster_row_line(
+                    vec![Span::styled("\u{25cf} ", theme.agent_main())],
+                    "main",
+                    type_style,
+                    &main.activity,
+                    theme.faint(),
+                    &meta,
+                    theme.faint(),
+                    area.width as usize,
+                );
                 frame.render_widget(
-                    Paragraph::new(Line::from(spans)),
+                    Paragraph::new(line),
                     Rect::new(area.x, y, area.width, 1),
                 );
                 y += 1;
@@ -191,7 +186,11 @@ impl Agents {
                     Some(id) => format!("─── Batch {}: {} ", group_idx + 1, id),
                     None => "─── Ungrouped ".to_string(),
                 };
-                let pad_len = (area.width as usize).saturating_sub(label.len());
+                // Display-width, not byte-len: the leading `───` are 3-byte box
+                // glyphs (1 column each), so `.len()` would over-count their
+                // width and short the separator (it wouldn't reach the right edge).
+                let pad_len =
+                    (area.width as usize).saturating_sub(UnicodeWidthStr::width(label.as_str()));
                 let padded = format!("{}{}", label, "─".repeat(pad_len));
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(padded, theme.faint()))),
@@ -249,31 +248,23 @@ impl Agents {
                 };
                 let meta = fmt_cc_meta(entry.elapsed_secs(), entry.tokens_used);
 
-                // Char-count widths: the connector is multi-byte box drawing, so
-                // byte .len() would treble-count its 3 columns.
-                let prefix_len = connector.chars().count()
-                    + 2 // glyph + space
-                    + agent_type.chars().count()
-                    + 2; // gap before activity
-                let max_activity = (area.width as usize)
-                    .saturating_sub(prefix_len + meta.chars().count() + 2)
-                    .max(4);
-
-                let mut row1_spans = vec![
-                    Span::styled(connector, theme.faint()),
-                    Span::styled(format!("{} ", glyph), glyph_style),
-                    Span::styled(agent_type, type_style),
-                ];
-                if !activity.trim().is_empty() {
-                    row1_spans.push(Span::styled("  ", theme.faint()));
-                    row1_spans.push(Span::styled(
-                        truncate_str(&activity, max_activity),
-                        theme.faint(),
-                    ));
-                }
-                row1_spans.push(Span::styled(format!("  {}", meta), theme.faint()));
-
-                let row1 = Line::from(row1_spans);
+                // Right-align the meta flush to the pane edge (display-width
+                // aware, so wide connector/glyph/name chars don't misalign the
+                // column). The connector + glyph form the fixed prefix; the
+                // agent-type is truncated only if a narrow pane demands it.
+                let row1 = roster_row_line(
+                    vec![
+                        Span::styled(connector.to_string(), theme.faint()),
+                        Span::styled(format!("{} ", glyph), glyph_style),
+                    ],
+                    &agent_type,
+                    type_style,
+                    &activity,
+                    theme.faint(),
+                    &meta,
+                    theme.faint(),
+                    area.width as usize,
+                );
                 frame.render_widget(
                     Paragraph::new(row1),
                     Rect::new(area.x, y, area.width, 1),
@@ -334,9 +325,13 @@ impl Agents {
                     if y >= area.y + area.height {
                         break;
                     }
-                    let max_action =
-                        (area.width as usize).saturating_sub(continuation.len() + 4).max(8);
-                    let action_truncated = truncate_str(&line_text, max_action);
+                    // `continuation` is `│  ` (3 cols, 5 bytes) for non-last rows,
+                    // so measure DISPLAY width — `.len()` would over-reserve and
+                    // clip the action text early.
+                    let max_action = (area.width as usize)
+                        .saturating_sub(UnicodeWidthStr::width(continuation) + 4)
+                        .max(8);
+                    let action_truncated = truncate_display(&line_text, max_action);
                     let row = Line::from(vec![
                         Span::styled(continuation, theme.faint()),
                         Span::styled("└─ ", theme.faint()),
@@ -359,10 +354,13 @@ impl Agents {
                             } else {
                                 theme.faint()
                             };
+                            // Display-width for the `│  ` box-glyph continuation
+                            // (see the trail rows above), so the summary isn't
+                            // clipped early on non-last agent rows.
                             let max_summary = (area.width as usize)
-                                .saturating_sub(continuation.len() + 4)
+                                .saturating_sub(UnicodeWidthStr::width(continuation) + 4)
                                 .max(8);
-                            let summary_truncated = truncate_str(summary, max_summary);
+                            let summary_truncated = truncate_display(summary, max_summary);
                             let row = Line::from(vec![
                                 Span::styled(continuation, theme.faint()),
                                 Span::styled("\u{23bf} ", theme.faint()),
@@ -852,6 +850,109 @@ fn shorten_model_name(model: &str) -> &str {
     } else {
         model
     }
+}
+
+/// Truncate `s` to at most `max_w` DISPLAY columns, appending `…` (1 col) when
+/// it doesn't fit. Wide (CJK/emoji) chars count as their true 2-column advance,
+/// so the result never overflows the reserved span (unlike `.chars().count()`).
+fn truncate_display(s: &str, max_w: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_w {
+        return s.to_string();
+    }
+    if max_w == 0 {
+        return String::new();
+    }
+    let budget = max_w - 1; // reserve 1 col for the ellipsis
+    let mut out = String::new();
+    let mut acc = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + cw > budget {
+            break;
+        }
+        out.push(ch);
+        acc += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// Assemble one FleetView roster row with the `<elapsed> · ↓<tokens>` meta column
+/// **right-aligned flush to the pane edge** (`width` columns) so the meta forms a
+/// clean vertical column across every row — the `main` root, worker rows — instead
+/// of left-flowing right after each agent's activity (Claude Code FleetView parity).
+///
+/// Layout: `[prefix][name]  [activity…]<pad><meta>` where `<pad>` is the spacer
+/// that pushes `meta` against column `width`. All widths are DISPLAY widths
+/// (`unicode-width`), so a wide (CJK/emoji) glyph in the connector, marker or name
+/// still lands the meta in the same column as an ASCII row.
+///
+/// Priority / graceful degradation (never overflows or wraps):
+/// * `prefix` (tree connector + glyph) is fixed and short; `name` (agent-type) is
+///   truncated by display width to whatever remains left of the meta.
+/// * `activity` fills the middle and is truncated so it can never collide with the
+///   meta (there is always ≥1 blank column between them).
+/// * On a pane too narrow to hold the prefix and a flush-right meta, the meta wins
+///   (it carries the live elapsed + token counts) and the rest is dropped; if even
+///   the meta overflows, it is itself truncated to the pane.
+#[allow(clippy::too_many_arguments)]
+fn roster_row_line(
+    prefix: Vec<Span<'static>>,
+    name: &str,
+    name_style: Style,
+    activity: &str,
+    activity_style: Style,
+    meta: &str,
+    meta_style: Style,
+    width: usize,
+) -> Line<'static> {
+    let prefix_w: usize = prefix
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let meta_w = UnicodeWidthStr::width(meta);
+
+    // Too narrow to place the prefix AND a flush-right meta without collision:
+    // meta wins, everything else is dropped (meta truncated only if it overflows).
+    if width <= meta_w + prefix_w {
+        return Line::from(Span::styled(truncate_display(meta, width), meta_style));
+    }
+
+    // The meta occupies the final `meta_w` columns; all content sits left of `right`.
+    let right = width - meta_w;
+    let mut spans = prefix;
+    let mut used = prefix_w;
+
+    // Agent-type name: truncate to whatever is left before the meta (keep ≥1 col
+    // of separation so the name never touches the meta on a tight row).
+    let name_budget = right.saturating_sub(prefix_w + 1);
+    if name_budget > 0 && !name.is_empty() {
+        let n = truncate_display(name, name_budget);
+        let n_w = UnicodeWidthStr::width(n.as_str());
+        spans.push(Span::styled(n, name_style));
+        used += n_w;
+    }
+
+    // Live activity: a 2-col gap after the name, then fill the middle, leaving at
+    // least 1 blank column before the right-aligned meta.
+    if !activity.trim().is_empty() {
+        let budget = right.saturating_sub(used + 2 + 1);
+        if budget > 0 {
+            let act = truncate_display(activity, budget);
+            let act_w = UnicodeWidthStr::width(act.as_str());
+            spans.push(Span::styled("  ", activity_style));
+            spans.push(Span::styled(act, activity_style));
+            used += 2 + act_w;
+        }
+    }
+
+    // Pad so the meta lands flush against the right edge → a clean vertical column.
+    let pad = right.saturating_sub(used);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), meta_style));
+    }
+    spans.push(Span::styled(meta.to_string(), meta_style));
+    Line::from(spans)
 }
 
 /// UTF-8 safe truncation with ellipsis.

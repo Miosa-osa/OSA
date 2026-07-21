@@ -1046,4 +1046,230 @@ mod tests {
         assert_eq!(a.entry_count(), 0, "all lingering finished rows reaped");
         assert!(!a.is_active(), "panel goes idle when nothing remains");
     }
+
+    // ── FleetView roster: visual layout / column-alignment snapshots ───────────
+    // These render the panel to a TestBackend and assert on the actual per-row
+    // pixels, locking the CC-parity roster columns (glyph · type · activity ·
+    // elapsed · ↓tokens) and the box-drawing width accounting.
+
+    /// Render the panel and return one String per terminal row (each exactly `w`
+    /// columns, so column positions are directly assertable). Every glyph the
+    /// roster uses is width-1, so cell index == column.
+    fn render_lines(agents: &Agents, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| agents.draw(f, f.area())).unwrap();
+        let content: Vec<String> = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        (0..h as usize)
+            .map(|y| content[y * w as usize..(y + 1) * w as usize].concat())
+            .collect()
+    }
+
+    #[test]
+    fn roster_renders_main_root_and_worker_meta_columns() {
+        // The synthetic `main` root row + a live worker, with the CC meta column
+        // (`<elapsed> · ↓<tokens>`) on each. Locks: the green `● main` root, the
+        // `◯` worker glyph, and the right-hand token/elapsed column.
+        let mut a = Agents::new();
+        a.set_main_row("orchestrating the fleet", 625, 107_300);
+        a.agent_started("worker-1", "researcher", "", "scanning modules", None);
+        a.agent_progress("worker-1", "reading entry.rs", 4, 4213, "scanning modules", vec![]);
+
+        let lines = render_lines(&a, 70, 12);
+        let joined = lines.join("\n");
+
+        // The `main` root row: `● main` + its activity + compact meta.
+        let main_line = lines.iter().find(|l| l.contains("main")).expect("main row");
+        assert!(main_line.contains('\u{25cf}'), "main uses ● glyph: {main_line:?}");
+        assert!(main_line.contains("orchestrating the fleet"), "main activity: {main_line:?}");
+        // 625s → "10m 25s", 107_300 → "107.3k", arrow ↓.
+        assert!(main_line.contains("10m 25s"), "main elapsed column: {main_line:?}");
+        assert!(main_line.contains("\u{2193}107.3k"), "main ↓tokens column: {main_line:?}");
+
+        // The worker row: `◯` unselected glyph, role as the type, activity, meta.
+        let worker_line = lines
+            .iter()
+            .find(|l| l.contains("researcher"))
+            .expect("worker row");
+        assert!(worker_line.contains('\u{25cb}'), "unselected worker uses ◯: {worker_line:?}");
+        assert!(worker_line.contains("reading entry.rs"), "worker activity: {worker_line:?}");
+        assert!(worker_line.contains("\u{2193}4.2k"), "worker ↓tokens: {worker_line:?}");
+        // Tree connector present.
+        assert!(worker_line.contains('\u{2514}') || worker_line.contains('\u{251c}'),
+            "worker row has a tree connector: {worker_line:?}");
+
+        // No row overflows the width (TestBackend is exactly 70 wide).
+        assert!(lines.iter().all(|l| l.chars().count() == 70), "all rows padded to width");
+        // Nothing wrapped the activity onto a stray line (sanity on total content).
+        assert!(joined.contains("researcher"), "role rendered: {joined:?}");
+    }
+
+    #[test]
+    fn selected_worker_uses_filled_glyph() {
+        // In FleetSelect focus the selected roster row swaps `◯` → `●`.
+        let mut a = Agents::new();
+        a.set_main_row("working", 5, 100);
+        a.agent_started("w1", "coder", "", "building", None);
+        // Roster index 1 == entries[0] selected.
+        a.set_roster_selected(Some(1));
+        let lines = render_lines(&a, 60, 10);
+        let worker = lines.iter().find(|l| l.contains("coder")).expect("worker row");
+        assert!(worker.contains('\u{25cf}'), "selected worker uses ● glyph: {worker:?}");
+    }
+
+    #[test]
+    fn batch_separator_fills_to_right_edge() {
+        // Regression: the batch header `─── Batch N: id ` pads with `─` to the
+        // pane's right edge. The label's leading box glyphs are 3-byte chars, so
+        // the pad must be computed by CHAR width — a byte-len pad shorted the rule
+        // and left a ragged gap before the edge.
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "s1", Some("alpha".to_string()));
+        a.agent_started("w2", "coder", "", "s2", Some("beta".to_string()));
+
+        let w = 72u16;
+        let lines = render_lines(&a, w, 14);
+        let sep = lines
+            .iter()
+            .find(|l| l.contains("Batch 1"))
+            .expect("batch 1 header");
+        // The separator reaches the last column (`─` fill, not blank).
+        let last = sep.chars().nth((w - 1) as usize).unwrap();
+        assert_eq!(last, '\u{2500}', "separator fills to the right edge: {sep:?}");
+    }
+
+    #[test]
+    fn done_row_shows_frozen_elapsed() {
+        // A completed worker renders `Done · <elapsed>` (frozen), not a live timer.
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scan", None);
+        a.agent_completed("w1", 3, 1200, Some("found 4 paths".to_string()));
+        let lines = render_lines(&a, 70, 10);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Done \u{00b7}"), "Done · elapsed line: {joined:?}");
+        assert!(joined.contains("found 4 paths"), "result summary line: {joined:?}");
+    }
+
+    #[test]
+    fn narrow_pane_truncates_without_overflow() {
+        // Very narrow pane with long activity: every row is exactly the pane width
+        // (ratatui clips), and the ellipsis marks the truncation.
+        let mut a = Agents::new();
+        a.set_main_row("x".repeat(200), 30, 500);
+        a.agent_started("w1", "researcher", "", "y".repeat(200), None);
+        a.agent_progress("w1", "z".repeat(200), 2, 100, "", vec![]);
+        let w = 32u16;
+        let lines = render_lines(&a, w, 10);
+        assert!(lines.iter().all(|l| l.chars().count() == w as usize), "no row exceeds width");
+        assert!(lines.join("\n").contains('\u{2026}'), "long content truncated with …");
+    }
+
+    // ── FleetView roster: right-aligned meta column ────────────────────────────
+    // The `<elapsed> · ↓<tokens>` meta is flush-right to the pane edge so it forms
+    // a clean vertical column (CC parity), instead of left-flowing after each
+    // agent's activity. These render to a TestBackend and assert on the *cell
+    // grid* (not the char-collapsed string) so wide (CJK) glyphs are handled: a
+    // wide cell keeps its column and the trailing cell is empty, so a cell's index
+    // is its true display column.
+
+    /// Render the panel to a `w × h` grid of per-cell symbols (row-major). Cell
+    /// index within a row == its display column, even across wide glyphs.
+    fn render_cells(agents: &Agents, w: u16, h: u16) -> Vec<Vec<String>> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| agents.draw(f, f.area())).unwrap();
+        let flat: Vec<String> = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        (0..h as usize)
+            .map(|y| flat[y * w as usize..(y + 1) * w as usize].to_vec())
+            .collect()
+    }
+
+    /// The display column of the first `↓` cell in a row, if any.
+    fn arrow_col(row: &[String]) -> Option<usize> {
+        row.iter().position(|s| s == "\u{2193}")
+    }
+
+    #[test]
+    fn roster_meta_column_is_right_aligned_across_rows() {
+        // main + two workers, all with equal-width metas (`0s · ↓X.Xk`). Because
+        // the meta is flush-right, the `↓` — and the meta's start column — land in
+        // the SAME column on every row: a clean vertical table column.
+        for w in [60u16, 80u16] {
+            let mut a = Agents::new();
+            a.set_main_row("orchestrating the fleet", 0, 5_000); // ↓5.0k
+            a.agent_started("w1", "researcher", "", "scanning modules", None);
+            a.agent_progress("w1", "reading entry.rs", 4, 4_200, "scanning modules", vec![]); // ↓4.2k
+            a.agent_started("w2", "coder", "", "building the crate", None);
+            a.agent_progress("w2", "compiling render.rs", 7, 5_100, "building", vec![]); // ↓5.1k
+
+            let cells = render_cells(&a, w, 12);
+
+            // Collect the roster rows (main + the two workers).
+            let rows: Vec<&Vec<String>> = cells
+                .iter()
+                .filter(|r| {
+                    let s: String = r.concat();
+                    s.contains("main") || s.contains("researcher") || s.contains("coder")
+                })
+                .collect();
+            assert_eq!(rows.len(), 3, "expected main + 2 worker rows at w={w}");
+
+            // Every row's `↓` sits in the identical column.
+            let cols: Vec<usize> = rows.iter().map(|r| arrow_col(r).expect("↓ present")).collect();
+            assert!(
+                cols.iter().all(|c| *c == cols[0]),
+                "meta ↓ column must line up across rows at w={w}: {cols:?}"
+            );
+            // Equal-width metas → the ↓ sits 5 columns in from the right edge
+            // (`↓X.Xk`), and the token digit 'k' is the last cell.
+            assert_eq!(cols[0], w as usize - 5, "↓ is 5 cols from the edge at w={w}");
+            for r in &rows {
+                assert_eq!(r[w as usize - 1], "k", "meta ends flush at the right edge at w={w}");
+            }
+        }
+    }
+
+    #[test]
+    fn roster_meta_aligns_with_wide_glyph_row() {
+        // A worker whose agent-type carries wide (CJK) glyphs must NOT drift the
+        // meta column: display-width accounting keeps its `↓` in the same column
+        // as an ASCII row, and the row still fills the pane exactly (no overflow).
+        let w = 70u16;
+        let mut a = Agents::new();
+        a.set_main_row("orchestrating", 0, 5_000); // ↓5.0k
+        a.agent_started("w1", "researcher", "", "scanning modules", None);
+        a.agent_progress("w1", "reading entry.rs", 4, 4_200, "scanning modules", vec![]); // ↓4.2k
+        // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
+        a.agent_started("w2", "研究者", "", "x".repeat(120), None);
+        a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![]); // ↓3.3k
+
+        let cells = render_cells(&a, w, 12);
+        let rows: Vec<&Vec<String>> = cells
+            .iter()
+            .filter(|r| {
+                let s: String = r.concat();
+                s.contains("researcher") || s.contains("\u{7814}") // 研
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "ascii worker + wide-glyph worker rows");
+
+        let cols: Vec<usize> = rows.iter().map(|r| arrow_col(r).expect("↓ present")).collect();
+        assert_eq!(cols[0], cols[1], "wide-glyph row keeps the meta column aligned: {cols:?}");
+        // The wide-glyph row still occupies exactly the pane width (no overflow),
+        // and its meta is flush-right.
+        for r in &rows {
+            assert_eq!(r.len(), w as usize, "row spans exactly the pane width");
+            assert_eq!(r[w as usize - 1], "k", "meta ends flush at the right edge");
+        }
+    }
 }

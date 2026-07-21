@@ -1423,6 +1423,36 @@ mod activity_tests {
     }
 
     #[test]
+    fn thinking_phrase_escalates_with_elapsed() {
+        // CC parity: the live thinking verb intensifies as the stretch grows.
+        assert_eq!(thinking_phrase(0), "thinking");
+        assert_eq!(thinking_phrase(7), "thinking");
+        assert_eq!(thinking_phrase(8), "thinking more");
+        assert_eq!(thinking_phrase(19), "thinking more");
+        assert_eq!(thinking_phrase(20), "thinking harder");
+        assert_eq!(thinking_phrase(600), "thinking harder");
+    }
+
+    #[test]
+    fn thinking_segment_appends_effort_when_known() {
+        // The live thinking segment reads "thinking with <effort> effort" once an
+        // effort tier is synced; "off"/blank tiers are suppressed (no suffix).
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Thinking);
+        act.set_current_effort(Some("medium".into()));
+        let text = render_activity_text(&act);
+        assert!(text.contains("thinking"), "thinking segment present: {text:?}");
+        assert!(text.contains("with medium effort"), "effort suffix present: {text:?}");
+
+        // "off" / blank must not render an effort suffix.
+        act.set_current_effort(Some("off".into()));
+        assert_eq!(act.current_effort, None, "'off' effort is suppressed");
+        act.set_current_effort(Some("   ".into()));
+        assert_eq!(act.current_effort, None, "blank effort is suppressed");
+    }
+
+    #[test]
     fn spinner_verb_is_stable_for_a_turn() {
         let mut act = Activity::new();
         act.start();
