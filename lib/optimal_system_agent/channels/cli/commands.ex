@@ -1262,11 +1262,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("#{@dim}  Opening your browser...#{@reset}")
     IO.puts("")
 
-    case :os.type() do
-      {:unix, :darwin} -> System.cmd("open", [authorize_url])
-      {:unix, _} -> System.cmd("xdg-open", [authorize_url])
-      {:win32, _} -> System.cmd("cmd", ["/c", "start", authorize_url])
-    end
+    # Best-effort only — on a headless box (SSH, container) with no
+    # xdg-open/open on PATH, System.cmd/2 raises ErlangError(:enoent). The
+    # URL is printed below regardless, so a missing/failing opener must
+    # never crash the /login flow. See OptimalSystemAgent.Utils.Browser.
+    OptimalSystemAgent.Utils.Browser.open(authorize_url)
 
     IO.puts("#{@dim}  If the browser didn't open, visit:#{@reset}")
     IO.puts("#{@cyan}  #{authorize_url}#{@reset}")

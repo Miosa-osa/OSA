@@ -79,12 +79,26 @@ impl ApiClient {
     }
 
     /// POST /api/v1/auth/login
+    ///
+    /// Runs right after the health check succeeds, on the SAME connection
+    /// pool that just finished (possibly retried) health polling — a
+    /// stale-socket/ECONNRESET blip here is exactly as likely as the one
+    /// that hit the onboarding health-check POST, but this call had no
+    /// retry protection at all: a single transient failure meant no SSE
+    /// connect, no onboarding check, no commands/tools load, dropping a
+    /// fresh install straight into an empty Idle screen with the onboarding
+    /// wizard never even offered. `send_retry_body` covers the same
+    /// transport-only retry as every other hardened onboarding call; login
+    /// has no side effect to double-apply (it just mints a fresh token), so
+    /// retrying is safe.
     pub async fn login(&self, user_id: Option<&str>) -> Result<LoginResponse> {
         let body = LoginRequest {
             user_id: user_id.map(|s| s.to_string()),
         };
         let url = format!("{}/api/v1/auth/login", self.base_url);
-        let resp = self.http.post(&url).json(&body).send().await?;
+        let resp = self
+            .send_retry_body(self.http.post(&url).json(&body))
+            .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -773,7 +787,22 @@ impl ApiClient {
             "model": model,
             "set_active": set_active,
         });
-        let _ = self.post("/api/v1/providers/key", &body).await?;
+        // Idempotent config write (merges the key into ~/.osa/.env), so retry
+        // transient transport failures the same way the onboarding-path POSTs
+        // do, rather than surfacing a stale-socket blip as a raw error. Scoped
+        // here on purpose: the shared `post` helper stays un-retried so it can
+        // keep guarding non-idempotent mutating endpoints.
+        let url = format!("{}/api/v1/providers/key", self.base_url);
+        let mut req = self.http.post(&url).json(&body);
+        if let Ok(token) = self.auth.read().await.require_token() {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        let resp = self.send_retry_body(req).await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("HTTP {} from /api/v1/providers/key: {}", status, text);
+        }
         Ok(())
     }
 
@@ -1091,14 +1120,27 @@ impl ApiClient {
         result
     }
 
-    /// POST JSON without auth (for onboarding endpoints before auth is configured).
+    /// POST JSON without auth (for onboarding endpoints before auth is
+    /// configured — currently only `/onboarding/setup`, the final
+    /// "save the wizard's choices" step).
+    ///
+    /// Same transport-error retry as the onboarding health-check probes
+    /// (`send_retry_body`). Without this, a one-off stale-socket/ECONNRESET
+    /// blip on this exact hop right after the health-check screen succeeds
+    /// was fatal and un-retried, even though every GET and the health-check
+    /// POSTs already get 2 free retries. `write_setup/1` on the backend is
+    /// an idempotent upsert (writes the same config fields every time), so
+    /// retrying a transport failure here can never double-apply or corrupt
+    /// state — at worst a retry that lands after the first attempt actually
+    /// succeeded hits the backend's `setup_already_complete` 409 guard,
+    /// which is a harmless no-op from the caller's perspective.
     async fn post_no_auth<T: serde::Serialize>(
         &self,
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.post(&url).json(body).send().await?;
+        let resp = self.send_retry_body(self.http.post(&url).json(body)).await?;
         Ok(resp)
     }
 
@@ -1323,6 +1365,128 @@ mod health_check_retry_tests {
                 "api_key": "test"
             }))
             .await;
+
+        assert!(result.is_err(), "expected a transport error, got Ok");
+    }
+
+    const VALID_LOGIN_RESPONSE: &str =
+        "{\"token\":\"tok-abc\",\"refresh_token\":\"ref-abc\",\"expires_in\":3600}";
+
+    /// Regression test: `login()` runs immediately after the health check
+    /// succeeds, on the same connection pool, so it is just as exposed to a
+    /// stale-pooled-socket/ECONNRESET blip as the onboarding health-check
+    /// POST was. Before this fix a dead first connection here was fatal —
+    /// no retry — and dropped a fresh install straight into an empty Idle
+    /// screen with SSE never started and onboarding never checked.
+    #[tokio::test]
+    async fn login_retries_past_a_dead_first_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(http_ok_response(VALID_LOGIN_RESPONSE).as_bytes())
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = make_client(base_url);
+        let result = client.login(Some("local")).await;
+
+        assert!(
+            result.is_ok(),
+            "expected the dead first connection to be retried transparently, got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().token, "tok-abc");
+    }
+
+    const VALID_ONBOARDING_SETUP_RESPONSE: &str =
+        "{\"status\":\"ok\",\"provider\":\"ollama_cloud\",\"model\":\"glm-5.2:cloud\"}";
+
+    /// Regression test: the final "save the wizard's choices" POST
+    /// (`/onboarding/setup`, via `post_no_auth`) had zero retry protection —
+    /// the exact same bug class as the onboarding verify POST — even though
+    /// the TUI already shows "Setup complete!" and drops the user into the
+    /// Idle chat screen the instant this call is fired, so a transient
+    /// failure here silently left the backend never actually configured.
+    #[tokio::test]
+    async fn onboarding_setup_retries_past_a_dead_first_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(http_ok_response(VALID_ONBOARDING_SETUP_RESPONSE).as_bytes())
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = make_client(base_url);
+        let req = crate::client::types::OnboardingSetupRequest {
+            provider: "ollama_cloud".to_string(),
+            model: "glm-5.2:cloud".to_string(),
+            api_key: None,
+            base_url: None,
+            channel_tokens: None,
+            user_name: None,
+            agent_name: None,
+        };
+        let result = client.onboarding_setup(&req).await;
+
+        assert!(
+            result.is_ok(),
+            "expected the dead first connection to be retried transparently, got: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().status, "ok");
+    }
+
+    /// Without a healthy connection ever available, `/onboarding/setup` must
+    /// still fail cleanly (bounded retries) rather than hang or panic.
+    #[tokio::test]
+    async fn onboarding_setup_fails_cleanly_when_every_connection_is_dead() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                if let Ok((stream, _)) = listener.accept().await {
+                    drop(stream);
+                } else {
+                    break;
+                }
+            }
+        });
+
+        let client = make_client(base_url);
+        let req = crate::client::types::OnboardingSetupRequest {
+            provider: "ollama_cloud".to_string(),
+            model: "glm-5.2:cloud".to_string(),
+            api_key: None,
+            base_url: None,
+            channel_tokens: None,
+            user_name: None,
+            agent_name: None,
+        };
+        let result = client.onboarding_setup(&req).await;
 
         assert!(result.is_err(), "expected a transport error, got Ok");
     }

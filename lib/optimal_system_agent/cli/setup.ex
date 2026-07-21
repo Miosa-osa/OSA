@@ -281,11 +281,11 @@ defmodule OptimalSystemAgent.CLI.Setup do
 
     IO.puts("\e[2m│  Opening browser...\e[0m")
 
-    case :os.type() do
-      {:unix, :darwin} -> System.cmd("open", [authorize_url])
-      {:unix, _} -> System.cmd("xdg-open", [authorize_url])
-      {:win32, _} -> System.cmd("cmd", ["/c", "start", authorize_url])
-    end
+    # Best-effort only — on a headless box (SSH, container) with no
+    # xdg-open/open on PATH, System.cmd/2 raises ErlangError(:enoent). The
+    # URL is printed below regardless, so a missing/failing opener must
+    # never crash the setup wizard. See OptimalSystemAgent.Utils.Browser.
+    OptimalSystemAgent.Utils.Browser.open(authorize_url)
 
     IO.puts("\e[2m│  If browser didn't open:\e[0m")
     IO.puts("\e[36m│  #{authorize_url}\e[0m")

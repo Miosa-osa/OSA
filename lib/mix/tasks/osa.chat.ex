@@ -357,12 +357,11 @@ defmodule Mix.Tasks.Osa.Chat do
     IO.puts("  #{IO.ANSI.cyan()}#{auth_url}#{IO.ANSI.reset()}")
     IO.puts("")
 
-    # Try to open browser
-    case :os.type() do
-      {:unix, :darwin} -> System.cmd("open", [auth_url])
-      {:unix, _} -> System.cmd("xdg-open", [auth_url])
-      {:win32, _} -> System.cmd("cmd", ["/c", "start", auth_url])
-    end
+    # Try to open browser (best-effort only — on a headless box with no
+    # xdg-open/open on PATH, System.cmd/2 raises ErlangError(:enoent); the
+    # URL is already printed above, so a missing/failing opener must never
+    # crash this flow. See OptimalSystemAgent.Utils.Browser).
+    OptimalSystemAgent.Utils.Browser.open(auth_url)
 
     IO.puts(
       "  #{IO.ANSI.faint()}Waiting for sign-in... (paste the code if browser redirect fails)#{IO.ANSI.reset()}"
