@@ -134,6 +134,16 @@ pub enum BackendEvent {
         summary: Option<String>,
         status: String,
     },
+    /// Fleet-wide live counters for the roster header (Part 4.2 of
+    /// FLEETVIEW_DESIGN): `running/cap agents`, plus a "large fleet" warning
+    /// once `warn` (>=25 scheduled) so the header reflects the bounded pool.
+    FleetSummary {
+        running: u32,
+        queued: u32,
+        cap: u32,
+        total_spawned: u32,
+        warn: bool,
+    },
 
     // === Background Agents (fire-and-forget subagents) ===
     /// Fetched sidechain transcript for a subagent run (dashboard "view" /

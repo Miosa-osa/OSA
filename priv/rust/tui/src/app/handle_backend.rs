@@ -1354,6 +1354,11 @@ impl App {
                 self.agents.fleet_node_completed(&node_id, &status, summary);
                 self.recompute_layout();
             }
+            BackendEvent::FleetSummary { running, queued, cap, total_spawned, warn } => {
+                self.agents
+                    .set_fleet_summary(running, queued, cap, total_spawned, warn);
+                self.recompute_layout();
+            }
 
             // === Swarm events → Agents component ===
             BackendEvent::SwarmStarted { swarm_id, pattern, agent_count, .. } => {

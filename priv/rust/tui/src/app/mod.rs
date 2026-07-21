@@ -830,6 +830,11 @@ impl App {
         // message queue every frame (cheap; the writer only re-renders on change).
         self.activity.set_queued(self.message_queue.len());
 
+        // Effort tier: feed the live thinking segment ("thinking with <effort>
+        // effort") from the same status-bar effort chip every frame. Cheap
+        // clone; additive to the existing thinking timer/verb rotation.
+        self.activity.set_current_effort(self.status.effort());
+
         // Goal + elapsed indicator: reconcile the status-line "Working on: <goal>
         // · <elapsed>" chip every frame from the live goal state (cheap; the
         // writer only re-renders on change).

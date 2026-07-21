@@ -30,12 +30,17 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.{Loop, RunStore}
+  alias OptimalSystemAgent.Agent.{Effort, Loop, RunStore}
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Runtime.SessionManager
 
   @default_max_fleet_agents 16
+  # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
+  @default_max_fleet_total 1000
+  # ≥ this many in-flight (running + queued) flips the "large fleet" warning (a
+  # dim advisory in the roster header — NOT a cap).
+  @large_fleet_threshold 25
   @default_agent_type "general-purpose"
 
   # Minimal built-in fallback registry, used only when neither an explicit
@@ -101,6 +106,118 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   end
 
   def spawn_fleet_node(_parent, _opts), do: {:error, :invalid_parent_session_id}
+
+  @doc """
+  Dynamic-workflow fan-out: spawn one full-power fleet node per `item` through a
+  BOUNDED-CONCURRENCY queue-drain (FleetView B5 / `docs/FLEETVIEW_DESIGN.md`
+  Part 4.2).
+
+  Semantics mirror Claude Code's dynamic workflows:
+
+    * `max_fleet_agents()` (default 16) nodes run concurrently; the rest QUEUE
+      and drain FIFO as slots free — excess spawns never fail.
+    * `max_fleet_total()` (default 1000) is a run-lifetime kill switch: items
+      past that ceiling are dropped (reported as `:dropped`).
+    * A `fleet_summary` Bus event is emitted at start and on every completion so
+      the TUI roster header can render a live `running/cap` gauge.
+
+  GATE: dynamic workflows require the `:ultra` effort tier. Below ultra this
+  returns `{:error, :ultra_required}` (peer `spawn_fleet_node/2` stays ungated —
+  it works at any effort).
+
+  `items` may be binary tasks or per-item spawn opts (keyword lists / maps),
+  merged over the shared `opts` and handed to the full-power spawn path.
+
+  Opts:
+    * `:spawn_fun` — 2-arity `(parent, opts) -> {:ok, id} | {:error, term}`
+      override for the per-item spawn (defaults to `spawn_fleet_node/2`; used to
+      exercise the queue-drain without booting real loops).
+    * any other opt is forwarded as base spawn opts for each item.
+
+  Returns `{:ok, %{total: T, dropped: D, results: [...]}}` or
+  `{:error, :ultra_required}`.
+  """
+  @spec fan_out(String.t(), [term()], keyword()) ::
+          {:ok, %{total: non_neg_integer(), dropped: non_neg_integer(), results: list()}}
+          | {:error, :ultra_required | :invalid_parent_session_id}
+  def fan_out(parent_session_id, items, opts \\ [])
+
+  def fan_out(parent_session_id, items, opts)
+      when is_binary(parent_session_id) and is_list(items) do
+    # The ultra-only gate. Use the effort-ladder rank helper (ultra is the top
+    # rung) so the check survives new tiers being added above.
+    if Effort.current_at_least?(:ultra) do
+      do_fan_out(parent_session_id, items, opts)
+    else
+      Logger.info(
+        "[Fleet] fan_out refused — raise effort to ultra to run dynamic workflows " <>
+          "(current: #{inspect(Effort.current())})."
+      )
+
+      {:error, :ultra_required}
+    end
+  end
+
+  def fan_out(_parent, _items, _opts), do: {:error, :invalid_parent_session_id}
+
+  defp do_fan_out(parent, items, opts) do
+    cap = max_fleet_agents()
+    total_cap = max_fleet_total()
+    spawn_fun = Keyword.get(opts, :spawn_fun, &spawn_fleet_node/2)
+    base_opts = Keyword.drop(opts, [:spawn_fun])
+
+    # Run-lifetime kill switch: never drain more than the total ceiling.
+    {work, dropped} =
+      case length(items) - total_cap do
+        over when over > 0 -> {Enum.take(items, total_cap), over}
+        _ -> {items, 0}
+      end
+
+    total = length(work)
+
+    # Start summary: everything queued, nothing spawned yet.
+    emit_fleet_summary(parent, %{queued: total, cap: cap, total_spawned: 0})
+
+    results =
+      work
+      |> Task.async_stream(
+        fn item -> run_fan_out_item(parent, item, spawn_fun, base_opts) end,
+        max_concurrency: cap,
+        ordered: false,
+        timeout: :infinity
+      )
+      |> Stream.with_index(1)
+      |> Enum.map(fn {res, completed} ->
+        # One yield == one slot freed. Emit a fresh summary so the header tracks
+        # the drain live; `running` is read from RunStore (source of truth).
+        emit_fleet_summary(parent, %{
+          queued: max(total - completed, 0),
+          cap: cap,
+          total_spawned: completed
+        })
+
+        case res do
+          {:ok, value} -> value
+          {:exit, reason} -> {:error, {:exit, reason}}
+        end
+      end)
+
+    {:ok, %{total: total, dropped: dropped, results: results}}
+  end
+
+  # Normalize an item to per-item spawn opts, merge over the shared base opts,
+  # and spawn via the full-power path (or the injected spawn_fun in tests).
+  defp run_fan_out_item(parent, item, spawn_fun, base_opts) do
+    item_opts =
+      cond do
+        is_binary(item) -> [task: item]
+        is_list(item) -> item
+        is_map(item) -> Map.to_list(item)
+        true -> []
+      end
+
+    spawn_fun.(parent, Keyword.merge(base_opts, item_opts))
+  end
 
   defp do_spawn(parent_session_id, opts) do
     agent_type = Keyword.get(opts, :agent_type, @default_agent_type) |> to_string()
@@ -210,6 +327,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     Application.get_env(:optimal_system_agent, :max_fleet_agents, @default_max_fleet_agents)
   end
 
+  @doc "Run-lifetime kill switch — max nodes a single fan_out drains (`:max_fleet_total`)."
+  @spec max_fleet_total() :: pos_integer()
+  def max_fleet_total do
+    Application.get_env(:optimal_system_agent, :max_fleet_total, @default_max_fleet_total)
+  end
+
   # ── internals ────────────────────────────────────────────────────────
 
   # Watch the node: subscribe to its session topic, drive its first turn via
@@ -297,6 +420,22 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     _ -> :ok
   catch
     _, _ -> :ok
+  end
+
+  # Emit a live `fleet_summary` counter for the roster header. `running` is read
+  # from RunStore (source of truth for :running nodes); `warn: true` once
+  # running+queued crosses the "large fleet" advisory threshold (25).
+  defp emit_fleet_summary(parent, %{queued: queued, cap: cap, total_spawned: spawned}) do
+    running = running_count()
+
+    emit_fleet_event(parent, %{
+      event: "fleet_summary",
+      running: running,
+      queued: queued,
+      cap: cap,
+      total_spawned: spawned,
+      warn: running + queued >= @large_fleet_threshold
+    })
   end
 
   defp node_tokens(node_id) do

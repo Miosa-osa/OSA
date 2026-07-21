@@ -87,6 +87,19 @@ impl Agents {
                 spans.push(Span::styled(" \u{00b7} \u{2193} to manage", theme.faint()));
             }
 
+            // Live fleet gauge `<running>/<cap> agents` (Part 4.2), from the
+            // backend `fleet_summary` frame. A dim "large fleet" hint appears
+            // once the backend flags the >=25 warning threshold.
+            if let Some(ref f) = self.fleet {
+                spans.push(Span::styled(
+                    format!(" \u{00b7} {}/{} agents", f.running, f.cap),
+                    header_style,
+                ));
+                if f.warn {
+                    spans.push(Span::styled(" \u{00b7} large fleet", theme.faint()));
+                }
+            }
+
             // Surface the task-level appraised cost when available (the only cost
             // signal the backend reports — there is no per-agent breakdown).
             if let Some(cost) = self.est_cost_usd {
@@ -263,7 +276,17 @@ impl Agents {
                 // a single Done/Failed row. Row count MUST match
                 // `Agents::entry_rows` or the layout desyncs.
                 let trail: Vec<(String, Style)> = match entry.status {
-                    AgentStatus::Completed => vec![("Done".to_string(), theme.task_done())],
+                    // CC's finished line: `Done · 15m 5s`. Elapsed is frozen at
+                    // `finished_at` (via `elapsed_secs()`) and formatted with the
+                    // shared compact formatter, so a completed node shows how long
+                    // it ran, not just that it finished.
+                    AgentStatus::Completed => vec![(
+                        format!(
+                            "Done \u{00b7} {}",
+                            crate::components::status_bar::fmt_elapsed_compact(entry.elapsed_secs()),
+                        ),
+                        theme.task_done(),
+                    )],
                     AgentStatus::Failed => {
                         let msg = if entry.current_action.is_empty() {
                             "Failed".to_string()
@@ -470,6 +493,13 @@ impl Agents {
         );
         if let Some(cost) = self.est_cost_usd {
             title = format!("{}· est. {} ", title.trim_end(), fmt_cost(cost));
+        }
+        // Live fleet gauge `<running>/<cap> agents` (Part 4.2) from `fleet_summary`.
+        if let Some(ref f) = self.fleet {
+            title = format!("{}· {}/{} agents ", title.trim_end(), f.running, f.cap);
+            if f.warn {
+                title = format!("{}· large fleet ", title.trim_end());
+            }
         }
         let block = Block::default()
             .title(Span::styled(title, theme.section_title()))

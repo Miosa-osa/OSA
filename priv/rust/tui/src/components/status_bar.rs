@@ -376,6 +376,12 @@ impl StatusBar {
         self.effort = effort.filter(|s| !s.trim().is_empty());
     }
 
+    /// The current reasoning-effort tier, if any. Source of truth for the live
+    /// thinking segment's "thinking with <effort> effort" suffix (activity.rs).
+    pub fn effort(&self) -> Option<String> {
+        self.effort.clone()
+    }
+
     /// Set (or clear with None) the billing spend/limit chip.
     pub fn set_billing(&mut self, billing: Option<crate::client::types::HealthBilling>) {
         self.billing = billing;
@@ -959,7 +965,7 @@ impl Component for StatusBar {
         // visible at a glance. Omitted entirely when the backend didn't report.
         if let Some(ref effort) = self.effort {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            let heavy = matches!(effort.as_str(), "high" | "max");
+            let heavy = matches!(effort.as_str(), "high" | "max" | "ultra");
             let style = if heavy {
                 Style::default()
                     .fg(theme.colors.primary)

@@ -25,6 +25,8 @@ pub enum ReasoningLevel {
     Low,
     Medium,
     High,
+    /// Max tier — gates OSA's dynamic-workflow orchestration.
+    Ultra,
 }
 
 impl ReasoningLevel {
@@ -34,6 +36,7 @@ impl ReasoningLevel {
             ReasoningLevel::Low => 1,
             ReasoningLevel::Medium => 2,
             ReasoningLevel::High => 3,
+            ReasoningLevel::Ultra => 4,
         }
     }
 
@@ -42,6 +45,7 @@ impl ReasoningLevel {
             1 => ReasoningLevel::Low,
             2 => ReasoningLevel::Medium,
             3 => ReasoningLevel::High,
+            4 => ReasoningLevel::Ultra,
             _ => ReasoningLevel::Off,
         }
     }
@@ -57,11 +61,12 @@ pub enum ReasoningAction {
 
 // ── Level descriptors ─────────────────────────────────────────────────────────
 
-const LEVELS: [(ReasoningLevel, &str, &str); 4] = [
+const LEVELS: [(ReasoningLevel, &str, &str); 5] = [
     (ReasoningLevel::Off, "Off", "No extended thinking"),
     (ReasoningLevel::Low, "Low", "Brief reasoning chain"),
     (ReasoningLevel::Medium, "Medium", "Balanced depth"),
     (ReasoningLevel::High, "High", "Deep multi-step reasoning"),
+    (ReasoningLevel::Ultra, "Ultra", "Max · unlocks dynamic workflows"),
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────

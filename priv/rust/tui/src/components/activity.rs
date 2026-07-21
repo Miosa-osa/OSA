@@ -194,6 +194,19 @@ fn stall_t(stall_secs: f64) -> f64 {
 }
 
 
+/// Escalating verb for the live thinking segment (CC parity:
+/// "thinking" → "thinking more" → "thinking harder" as the current thinking
+/// stretch grows). `secs` is the elapsed time in the active thinking phase.
+fn thinking_phrase(secs: u64) -> &'static str {
+    if secs < 8 {
+        "thinking"
+    } else if secs < 20 {
+        "thinking more"
+    } else {
+        "thinking harder"
+    }
+}
+
 /// Tool symbol + verb mapping for activity feed
 fn tool_display(name: &str) -> (&'static str, &'static str) {
     match name {
@@ -339,6 +352,11 @@ pub struct Activity {
     /// as "thought for Ns" for 2s after capture (CC's minimum-display window),
     /// then expires by age check in `draw` — no mutation needed.
     thought_for: Option<(u64, std::time::Instant)>,
+    /// Current reasoning-effort tier ("low"|"medium"|"high"|"max"|"ultra"),
+    /// synced each frame from the status bar (`set_current_effort`). Rendered
+    /// inside the live thinking segment as CC's "thinking with <effort> effort".
+    /// A session setting, so it is NOT reset by `start()`/`stop()`.
+    current_effort: Option<String>,
     /// When set, overrides the rotating spinner verb with the active task's
     /// present-continuous form (Claude Code's `activeForm`), so the spinner shows
     /// the concrete current step (e.g. "Wiring the checklist…") instead of a
@@ -444,6 +462,7 @@ impl Activity {
             cancelling: false,
             thinking_since: None,
             thought_for: None,
+            current_effort: None,
             active_verb: None,
             retry: None,
             waiting_reason: None,
@@ -454,6 +473,14 @@ impl Activity {
             verbosity: Verbosity::All,
             a11y: false,
         }
+    }
+
+    /// Sync the current reasoning-effort tier (from the status bar) so the live
+    /// thinking segment can read "thinking with <effort> effort" (CC parity).
+    /// Pass `None`/blank to hide the effort suffix. Additive: never touches the
+    /// existing "Thought for Ns" timer or verb rotation.
+    pub fn set_current_effort(&mut self, effort: Option<String>) {
+        self.current_effort = effort.filter(|s| !s.trim().is_empty() && s.trim() != "off");
     }
 
     /// Enable/disable the shimmer sweep (reduced-motion a11y). When enabled the
@@ -1148,7 +1175,16 @@ impl Component for Activity {
         // "thinking" while reasoning deltas stream; "thought for Ns" lingers 2s
         // after the stretch ends. Lowest of the triple → first to width-gate out.
         if self.phase == ProcessingPhase::Thinking {
-            parts.push("thinking".to_string());
+            // CC-style live thinking segment: the verb escalates with the
+            // thinking-phase elapsed ("thinking" → "thinking more" → "thinking
+            // harder"), and the current effort tier is appended when known
+            // ("thinking with medium effort"). Additive — the "thought for Ns"
+            // timer + verb rotation are untouched.
+            let phrase = thinking_phrase(phase_elapsed);
+            match self.current_effort.as_deref() {
+                Some(eff) => parts.push(format!("{} with {} effort", phrase, eff)),
+                None => parts.push(phrase.to_string()),
+            }
         } else if let Some((secs, at)) = self.thought_for {
             if at.elapsed() < std::time::Duration::from_secs(2) {
                 parts.push(format!("thought for {}s", secs));

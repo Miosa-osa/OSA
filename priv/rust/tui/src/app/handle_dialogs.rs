@@ -740,6 +740,7 @@ impl App {
                             crate::dialogs::reasoning::ReasoningLevel::Low => "low",
                             crate::dialogs::reasoning::ReasoningLevel::Medium => "medium",
                             crate::dialogs::reasoning::ReasoningLevel::High => "high",
+                            crate::dialogs::reasoning::ReasoningLevel::Ultra => "ultra",
                         };
                         self.reasoning_selector = None;
                         // Send reasoning toggle to backend via command

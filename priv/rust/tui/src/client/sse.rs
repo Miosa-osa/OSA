@@ -461,6 +461,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "fleet_node_started"
         | "fleet_node_progress"
         | "fleet_node_completed"
+        | "fleet_summary"
         | "context_pressure"
         | "task_created"
         | "task_updated"
@@ -954,6 +955,33 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 node_id: ev.node_id,
                 summary: ev.summary,
                 status: ev.status,
+            })
+        }
+
+        "fleet_summary" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                running: u32,
+                #[serde(default)]
+                queued: u32,
+                #[serde(default)]
+                cap: u32,
+                #[serde(default)]
+                total_spawned: u32,
+                #[serde(default)]
+                warn: bool,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(v) => v,
+                Err(e) => return Some(parse_warning("fleet_summary", e)),
+            };
+            Some(BackendEvent::FleetSummary {
+                running: ev.running,
+                queued: ev.queued,
+                cap: ev.cap,
+                total_spawned: ev.total_spawned,
+                warn: ev.warn,
             })
         }
 

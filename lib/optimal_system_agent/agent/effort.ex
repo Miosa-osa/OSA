@@ -7,6 +7,11 @@ defmodule OptimalSystemAgent.Agent.Effort do
     - `:medium` — Balanced depth and speed. Default.
     - `:high`   — Deep reasoning, thorough analysis.
     - `:max`    — Maximum thinking, extended reasoning enabled.
+    - `:ultra`  — Maximum reasoning + dynamic workflows (OSA's `ultracode`).
+
+  Ordering (lowest→highest): `:low < :medium < :high < :max < :ultra`. Use
+  `rank/1`, `at_least?/2`, and `current_at_least?/1` for ordinal comparisons —
+  never rely on map/list position.
   """
 
   @levels %{
@@ -55,15 +60,42 @@ defmodule OptimalSystemAgent.Agent.Effort do
       temperature: 0.8,
       label: "max",
       description: "Maximum thinking, extended reasoning"
+    },
+    ultra: %{
+      thinking_budget: 64_000,
+      # Above :max's 2000 — ultra drives dynamic-workflow orchestration and must
+      # not be capped mid-run. Explicit `:max_iterations` config still wins.
+      max_iterations: 4000,
+      max_response_tokens: 32_768,
+      tool_budget: 48,
+      temperature: 0.9,
+      label: "Ultra",
+      description: "Maximum reasoning + dynamic workflows"
     }
   }
+
+  # Ordinal rank per level (low→high). Drives `at_least?/2` gates such as the
+  # dynamic-workflow (`ultra`-only) gate — never compare by map/list position.
+  @ranks %{low: 0, medium: 1, high: 2, max: 3, ultra: 4}
 
   @doc "Get config for an effort level."
   def get(level) when is_atom(level), do: Map.get(@levels, level, @levels[:medium])
   def get(_), do: @levels[:medium]
 
-  @doc "List all available levels."
-  def levels, do: [:low, :medium, :high, :max]
+  @doc "List all available levels, lowest→highest."
+  def levels, do: [:low, :medium, :high, :max, :ultra]
+
+  @doc "Ordinal rank of a level (higher = more effort). Unknown levels rank -1."
+  def rank(level) when is_atom(level), do: Map.get(@ranks, level, -1)
+  def rank(_), do: -1
+
+  @doc "True when `level` is at least `floor` on the effort ladder."
+  def at_least?(level, floor) when is_atom(level) and is_atom(floor) do
+    rank(level) >= rank(floor)
+  end
+
+  @doc "True when the current global effort is at least `floor`."
+  def current_at_least?(floor) when is_atom(floor), do: at_least?(current(), floor)
 
   @doc "Get the current global effort level."
   def current do
@@ -73,7 +105,7 @@ defmodule OptimalSystemAgent.Agent.Effort do
   end
 
   @doc "Set the global effort level."
-  def set(level) when level in [:low, :medium, :high, :max] do
+  def set(level) when level in [:low, :medium, :high, :max, :ultra] do
     OptimalSystemAgent.Settings.set_session(:effort_level, level)
     Application.put_env(:optimal_system_agent, :effort_level, level)
     :ok

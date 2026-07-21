@@ -51,6 +51,21 @@ pub struct Agents {
     /// while the inline `← for agents` FleetSelect mode is active; `None` when
     /// the roster is not focused (no highlight drawn).
     roster_selected: Option<usize>,
+    /// Live fleet-wide counters from a `fleet_summary` frame (Part 4.2). Drives
+    /// the roster header's `<running>/<cap> agents` gauge + "large fleet" hint;
+    /// `None` until the backend reports, in which case the header omits it.
+    fleet: Option<FleetCounts>,
+}
+
+/// Fleet-wide live counts for the roster header gauge (`14/16 agents`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FleetCounts {
+    pub running: u32,
+    pub queued: u32,
+    pub cap: u32,
+    pub total_spawned: u32,
+    /// Backend "large fleet" signal (>=25 scheduled); drives a dim header hint.
+    pub warn: bool,
 }
 
 /// Most recent shared-scratchpad writes retained + rendered under the panel.
@@ -72,7 +87,21 @@ impl Agents {
             scratchpad: Vec::new(),
             main_row: None,
             roster_selected: None,
+            fleet: None,
         }
+    }
+
+    /// Record fleet-wide live counters from a `fleet_summary` frame. Drives the
+    /// roster header gauge (`<running>/<cap> agents`) + "large fleet" hint.
+    pub fn set_fleet_summary(
+        &mut self,
+        running: u32,
+        queued: u32,
+        cap: u32,
+        total_spawned: u32,
+        warn: bool,
+    ) {
+        self.fleet = Some(FleetCounts { running, queued, cap, total_spawned, warn });
     }
 
     /// Feed the synthetic `main` root row from live session state (top-level

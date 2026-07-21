@@ -455,11 +455,11 @@ impl App {
                     // an unvalidated typo would display a bogus effort while
                     // the backend rejects it.
                     let lvl = arg.to_ascii_lowercase();
-                    if matches!(lvl.as_str(), "off" | "low" | "medium" | "high" | "max") {
+                    if matches!(lvl.as_str(), "off" | "low" | "medium" | "high" | "max" | "ultra") {
                         self.execute_reasoning_command(&lvl);
                     } else {
                         self.chat.add_system_message(
-                            "Usage: /reasoning off|low|medium|high|max",
+                            "Usage: /reasoning off|low|medium|high|max|ultra",
                             "warning",
                         );
                     }
