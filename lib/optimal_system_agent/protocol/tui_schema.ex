@@ -80,7 +80,7 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
           f("effort", {:option, :string},
             default: true,
             doc:
-              "Current reasoning effort: \"low\" | \"medium\" | \"high\" | \"max\".\n`Option` + `default` keep older backends (which omit it) decodable."
+              "Current reasoning effort: \"fast\" | \"medium\" | \"high\" | \"xhigh\" | \"ultra\".\n`Option` + `default` keep older backends (which omit it) decodable."
           ),
           f("billing", {:option, {:struct, "HealthBilling"}},
             default: true,

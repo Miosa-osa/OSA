@@ -20,8 +20,8 @@ defmodule OptimalSystemAgent.SettingsSchemaTypesTest do
     assert [%{key: "effort_level", severity: :error, message: msg, tip: tip}] =
              Schema.validate(%{"effort_level" => "banana"})
 
-    assert msg =~ ~s(one of "low", "medium", "high")
-    assert tip =~ "low"
+    assert msg =~ ~s(one of "fast", "medium", "high")
+    assert tip =~ "fast"
   end
 
   test "pos_integer rejects a fractional/zero port" do

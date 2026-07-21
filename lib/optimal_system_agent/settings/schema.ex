@@ -28,7 +28,9 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "model" => {:string, ~s(Use a model id string, e.g. {"model": "glm-4.7:cloud"})},
     "personality" => {:string, "Use a personality name string"},
     "skin" => {:string, ~s(Use a skin name string, e.g. "dark")},
-    "effort_level" => {{:enum, ["low", "medium", "high"]}, ~s(Use "low" | "medium" | "high")},
+    "effort_level" =>
+      {{:enum, ["fast", "medium", "high", "xhigh", "ultra"]},
+       ~s(Use "fast" | "medium" | "high" | "xhigh" | "ultra")},
     "permission_mode" =>
       {{:enum, ["ask", "auto-edit", "plan", "overdrive"]},
        ~s(Use "ask" | "auto-edit" | "plan" | "overdrive")},

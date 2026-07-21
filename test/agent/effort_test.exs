@@ -22,7 +22,7 @@ defmodule OptimalSystemAgent.Agent.EffortTest do
   end
 
   test "fast mode uses the low-latency profile" do
-    Effort.set(:low)
+    Effort.set(:fast)
 
     assert Effort.fast_mode?()
     assert Effort.thinking_budget() == 0
@@ -31,11 +31,11 @@ defmodule OptimalSystemAgent.Agent.EffortTest do
     assert Effort.tool_budget() == 18
   end
 
-  test "toggle_fast switches between low and medium" do
+  test "toggle_fast switches between fast and medium" do
     Effort.set(:medium)
 
     assert :ok = Effort.toggle_fast()
-    assert Effort.current() == :low
+    assert Effort.current() == :fast
 
     assert :ok = Effort.toggle_fast()
     assert Effort.current() == :medium

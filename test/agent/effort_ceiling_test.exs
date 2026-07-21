@@ -7,9 +7,9 @@ defmodule OptimalSystemAgent.Agent.EffortCeilingTest do
     assert Effort.get(:medium).max_iterations >= 100
   end
 
-  test "low/high/max ceilings are backstops, not routine caps" do
-    assert Effort.get(:low).max_iterations >= 50
+  test "fast/high/xhigh ceilings are backstops, not routine caps" do
+    assert Effort.get(:fast).max_iterations >= 50
     assert Effort.get(:high).max_iterations >= 150
-    assert Effort.get(:max).max_iterations >= 2000
+    assert Effort.get(:xhigh).max_iterations >= 2000
   end
 end

@@ -25,7 +25,7 @@ pub struct HealthResponse {
     pub model: String,
     #[serde(default)]
     pub context_window: Option<u64>,
-    /// Current reasoning effort: "low" | "medium" | "high" | "max".
+    /// Current reasoning effort: "fast" | "medium" | "high" | "xhigh" | "ultra".
     /// `Option` + `default` keep older backends (which omit it) decodable.
     #[serde(default)]
     pub effort: Option<String>,

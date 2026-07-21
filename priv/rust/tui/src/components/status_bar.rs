@@ -268,7 +268,7 @@ pub struct StatusBar {
     /// Transient goal-verification indicator, rendered next to the goal line.
     /// None ⇒ no verifier round this turn ⇒ chip omitted.
     goal_verify: Option<GoalVerifyState>,
-    /// Reasoning effort ("low"|"medium"|"high"|"max") from `/health.effort`.
+    /// Reasoning effort ("fast"|"medium"|"high"|"xhigh"|"ultra") from `/health.effort`.
     /// None ⇒ backend didn't report it ⇒ the chip is omitted.
     effort: Option<String>,
     /// Billing snapshot from `/health.billing`. None ⇒ omit the spend chip.
@@ -960,12 +960,12 @@ impl Component for StatusBar {
             }
         }
 
-        // Reasoning-effort chip (`effort:medium`). Faint for low/medium; the
-        // heavier high/max tiers get the accent color so a costly setting is
-        // visible at a glance. Omitted entirely when the backend didn't report.
+        // Reasoning-effort chip (`effort:medium`). Faint for fast/medium; the
+        // heavier high/xhigh/ultra tiers get the accent color so a costly setting
+        // is visible at a glance. Omitted entirely when the backend didn't report.
         if let Some(ref effort) = self.effort {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
-            let heavy = matches!(effort.as_str(), "high" | "max" | "ultra");
+            let heavy = matches!(effort.as_str(), "high" | "xhigh" | "ultra");
             let style = if heavy {
                 Style::default()
                     .fg(theme.colors.primary)

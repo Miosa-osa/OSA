@@ -3,19 +3,24 @@ defmodule OptimalSystemAgent.Agent.Effort do
   Effort level system — controls thinking depth, iteration limits, and temperature.
 
   Levels:
-    - `:low`    — Fast, concise responses. Minimal thinking.
+    - `:fast`   — Fast, concise responses. Minimal thinking.
     - `:medium` — Balanced depth and speed. Default.
     - `:high`   — Deep reasoning, thorough analysis.
-    - `:max`    — Maximum thinking, extended reasoning enabled.
+    - `:xhigh`  — Maximum thinking, extended reasoning enabled.
     - `:ultra`  — Maximum reasoning + dynamic workflows (OSA's `ultracode`).
 
-  Ordering (lowest→highest): `:low < :medium < :high < :max < :ultra`. Use
+  Ordering (lowest→highest): `:fast < :medium < :high < :xhigh < :ultra`. Use
   `rank/1`, `at_least?/2`, and `current_at_least?/1` for ordinal comparisons —
   never rely on map/list position.
+
+  Back-compat: the ladder was renamed from `:low/:medium/:high/:max` — legacy
+  `:low`/`:max` (and their string forms, plus `"off"`) are accepted everywhere
+  and mapped via `normalize/1` (`:low → :fast`, `:max → :xhigh`, `"off" → :fast`)
+  so persisted settings and old callers keep working.
   """
 
   @levels %{
-    low: %{
+    fast: %{
       thinking_budget: 0,
       # Raised from 30. CC has no fixed per-turn iteration ceiling by default; the
       # cap is a backstop, not a routine limit. Explicit :max_iterations wins.
@@ -23,7 +28,7 @@ defmodule OptimalSystemAgent.Agent.Effort do
       max_response_tokens: 32_768,
       tool_budget: 18,
       temperature: 0.2,
-      label: "low",
+      label: "fast",
       description: "Fast path: full capability with speculative prefetch and lean routing"
     },
     medium: %{
@@ -49,21 +54,21 @@ defmodule OptimalSystemAgent.Agent.Effort do
       label: "high",
       description: "Deep reasoning, thorough analysis"
     },
-    max: %{
+    xhigh: %{
       thinking_budget: 32_000,
       # Raised from 100 → 2000 so effort-driven autonomous callers (the
-      # "autonomous" preset uses :max) aren't capped mid-run. Explicit
+      # "autonomous" preset uses :xhigh) aren't capped mid-run. Explicit
       # `:max_iterations` config still wins over this ceiling.
       max_iterations: 2000,
       max_response_tokens: 32_768,
       tool_budget: 40,
       temperature: 0.8,
-      label: "max",
+      label: "xhigh",
       description: "Maximum thinking, extended reasoning"
     },
     ultra: %{
       thinking_budget: 64_000,
-      # Above :max's 2000 — ultra drives dynamic-workflow orchestration and must
+      # Above :xhigh's 2000 — ultra drives dynamic-workflow orchestration and must
       # not be capped mid-run. Explicit `:max_iterations` config still wins.
       max_iterations: 4000,
       max_response_tokens: 32_768,
@@ -76,42 +81,78 @@ defmodule OptimalSystemAgent.Agent.Effort do
 
   # Ordinal rank per level (low→high). Drives `at_least?/2` gates such as the
   # dynamic-workflow (`ultra`-only) gate — never compare by map/list position.
-  @ranks %{low: 0, medium: 1, high: 2, max: 3, ultra: 4}
+  @ranks %{fast: 0, medium: 1, high: 2, xhigh: 3, ultra: 4}
 
-  @doc "Get config for an effort level."
-  def get(level) when is_atom(level), do: Map.get(@levels, level, @levels[:medium])
-  def get(_), do: @levels[:medium]
+  @valid_levels [:fast, :medium, :high, :xhigh, :ultra]
+
+  @doc """
+  Normalize a level to a current-ladder atom.
+
+  Maps legacy names (`:low → :fast`, `:max → :xhigh`, and the string forms), the
+  wire value `"off" → :fast` (lowest / disabled), and coerces known level strings
+  to atoms. Unknown values pass through unchanged.
+  """
+  def normalize(:low), do: :fast
+  def normalize(:max), do: :xhigh
+  def normalize(level) when is_atom(level), do: level
+
+  def normalize(level) when is_binary(level) do
+    case level |> String.trim() |> String.downcase() do
+      "low" -> :fast
+      "max" -> :xhigh
+      "off" -> :fast
+      s when s in ~w(fast medium high xhigh ultra) -> String.to_atom(s)
+      _ -> level
+    end
+  end
+
+  def normalize(other), do: other
+
+  @doc "Get config for an effort level (legacy names normalized)."
+  def get(level), do: Map.get(@levels, normalize(level), @levels[:medium])
 
   @doc "List all available levels, lowest→highest."
-  def levels, do: [:low, :medium, :high, :max, :ultra]
+  def levels, do: @valid_levels
 
   @doc "Ordinal rank of a level (higher = more effort). Unknown levels rank -1."
-  def rank(level) when is_atom(level), do: Map.get(@ranks, level, -1)
+  def rank(level) when is_atom(level), do: Map.get(@ranks, normalize(level), -1)
+  def rank(level) when is_binary(level), do: Map.get(@ranks, normalize(level), -1)
   def rank(_), do: -1
 
   @doc "True when `level` is at least `floor` on the effort ladder."
-  def at_least?(level, floor) when is_atom(level) and is_atom(floor) do
+  def at_least?(level, floor) do
     rank(level) >= rank(floor)
   end
 
   @doc "True when the current global effort is at least `floor`."
-  def current_at_least?(floor) when is_atom(floor), do: at_least?(current(), floor)
+  def current_at_least?(floor), do: at_least?(current(), floor)
 
-  @doc "Get the current global effort level."
+  @doc "Get the current global effort level (legacy values normalized)."
   def current do
     # Settings cascade: session → local → project → user → app default
-    OptimalSystemAgent.Settings.get(:effort_level) ||
-      Application.get_env(:optimal_system_agent, :effort_level, :medium)
+    (OptimalSystemAgent.Settings.get(:effort_level) ||
+       Application.get_env(:optimal_system_agent, :effort_level, :medium))
+    |> normalize()
   end
 
-  @doc "Set the global effort level."
-  def set(level) when level in [:low, :medium, :high, :max, :ultra] do
-    OptimalSystemAgent.Settings.set_session(:effort_level, level)
-    Application.put_env(:optimal_system_agent, :effort_level, level)
-    :ok
-  end
+  @doc """
+  Set the global effort level.
 
-  def set(_), do: {:error, :invalid_level}
+  Accepts current ladder atoms plus legacy names (`:low`/`:max`, string forms,
+  `"off"`) — the value is normalized before validation and only the canonical
+  atom is persisted.
+  """
+  def set(level) do
+    case normalize(level) do
+      norm when norm in @valid_levels ->
+        OptimalSystemAgent.Settings.set_session(:effort_level, norm)
+        Application.put_env(:optimal_system_agent, :effort_level, norm)
+        :ok
+
+      _ ->
+        {:error, :invalid_level}
+    end
+  end
 
   @doc "Get the current thinking budget based on effort level."
   def thinking_budget, do: get(current()).thinking_budget
@@ -128,11 +169,11 @@ defmodule OptimalSystemAgent.Agent.Effort do
   @doc "Get the current temperature based on effort level."
   def temperature, do: get(current()).temperature
 
-  @doc "Check if fast mode is active (effort == :low)."
-  def fast_mode?, do: current() == :low
+  @doc "Check if fast mode is active (effort == :fast)."
+  def fast_mode?, do: current() == :fast
 
-  @doc "Toggle fast mode on/off."
+  @doc "Toggle fast mode on/off (fast ↔ medium)."
   def toggle_fast do
-    if fast_mode?(), do: set(:medium), else: set(:low)
+    if fast_mode?(), do: set(:medium), else: set(:fast)
   end
 end

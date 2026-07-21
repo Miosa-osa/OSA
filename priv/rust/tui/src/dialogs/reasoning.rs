@@ -1,7 +1,7 @@
 // Phase 2+: reasoning dialog — UI wired but some methods not yet called
 #![allow(dead_code)]
 
-/// Reasoning level selector — small centered modal with 4 levels.
+/// Reasoning level selector — small centered modal with 6 levels.
 ///
 /// # Actions to add to `DialogAction` in mod.rs:
 /// ```
@@ -22,10 +22,11 @@ const DIALOG_H: u16 = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningLevel {
     Off,
-    Low,
+    Fast,
     Medium,
     High,
-    /// Max tier — gates OSA's dynamic-workflow orchestration.
+    Xhigh,
+    /// Ultra tier — gates OSA's dynamic-workflow orchestration.
     Ultra,
 }
 
@@ -33,19 +34,21 @@ impl ReasoningLevel {
     fn index(self) -> usize {
         match self {
             ReasoningLevel::Off => 0,
-            ReasoningLevel::Low => 1,
+            ReasoningLevel::Fast => 1,
             ReasoningLevel::Medium => 2,
             ReasoningLevel::High => 3,
-            ReasoningLevel::Ultra => 4,
+            ReasoningLevel::Xhigh => 4,
+            ReasoningLevel::Ultra => 5,
         }
     }
 
     fn from_index(i: usize) -> Self {
         match i {
-            1 => ReasoningLevel::Low,
+            1 => ReasoningLevel::Fast,
             2 => ReasoningLevel::Medium,
             3 => ReasoningLevel::High,
-            4 => ReasoningLevel::Ultra,
+            4 => ReasoningLevel::Xhigh,
+            5 => ReasoningLevel::Ultra,
             _ => ReasoningLevel::Off,
         }
     }
@@ -61,12 +64,13 @@ pub enum ReasoningAction {
 
 // ── Level descriptors ─────────────────────────────────────────────────────────
 
-const LEVELS: [(ReasoningLevel, &str, &str); 5] = [
+const LEVELS: [(ReasoningLevel, &str, &str); 6] = [
     (ReasoningLevel::Off, "Off", "No extended thinking"),
-    (ReasoningLevel::Low, "Low", "Brief reasoning chain"),
+    (ReasoningLevel::Fast, "Fast", "Brief reasoning chain"),
     (ReasoningLevel::Medium, "Medium", "Balanced depth"),
     (ReasoningLevel::High, "High", "Deep multi-step reasoning"),
-    (ReasoningLevel::Ultra, "Ultra", "Max · unlocks dynamic workflows"),
+    (ReasoningLevel::Xhigh, "Xhigh", "Extended reasoning"),
+    (ReasoningLevel::Ultra, "Ultra", "Unlocks dynamic workflows"),
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────

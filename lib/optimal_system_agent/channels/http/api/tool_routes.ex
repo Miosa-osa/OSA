@@ -514,12 +514,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # user saw an "Unknown command" suggestion instead of the command running.
 
   defp handle_api_only_command(conn, "reasoning", arg) do
-    # The TUI reasoning selector sends off|low|medium|high; the backend's
-    # canonical implementation is /effort (low|medium|high|max). "off" maps to
-    # the lowest effort tier.
+    # The TUI reasoning selector sends off|fast|medium|high|xhigh|ultra; the
+    # backend's canonical implementation is /effort
+    # (fast|medium|high|xhigh|ultra). "off" maps to the lowest effort tier
+    # (fast). Legacy low/max pass through and are normalized by /effort.
     level =
       case arg |> String.trim() |> String.downcase() do
-        "off" -> "low"
+        "off" -> "fast"
         other -> other
       end
 

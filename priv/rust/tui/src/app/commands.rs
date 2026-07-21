@@ -449,17 +449,17 @@ impl App {
                     // Open the reasoning level selector dialog
                     self.open_reasoning_selector();
                 } else {
-                    // Accept direct level: /reasoning off|low|medium|high|max.
+                    // Accept direct level: /reasoning off|fast|medium|high|xhigh.
                     // Validate BEFORE dispatch — execute_reasoning_command
                     // optimistically stamps the status line with the level, so
                     // an unvalidated typo would display a bogus effort while
                     // the backend rejects it.
                     let lvl = arg.to_ascii_lowercase();
-                    if matches!(lvl.as_str(), "off" | "low" | "medium" | "high" | "max" | "ultra") {
+                    if matches!(lvl.as_str(), "off" | "fast" | "medium" | "high" | "xhigh" | "ultra") {
                         self.execute_reasoning_command(&lvl);
                     } else {
                         self.chat.add_system_message(
-                            "Usage: /reasoning off|low|medium|high|max|ultra",
+                            "Usage: /reasoning off|fast|medium|high|xhigh|ultra",
                             "warning",
                         );
                     }

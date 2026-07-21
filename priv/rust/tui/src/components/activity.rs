@@ -352,7 +352,7 @@ pub struct Activity {
     /// as "thought for Ns" for 2s after capture (CC's minimum-display window),
     /// then expires by age check in `draw` — no mutation needed.
     thought_for: Option<(u64, std::time::Instant)>,
-    /// Current reasoning-effort tier ("low"|"medium"|"high"|"max"|"ultra"),
+    /// Current reasoning-effort tier ("fast"|"medium"|"high"|"xhigh"|"ultra"),
     /// synced each frame from the status bar (`set_current_effort`). Rendered
     /// inside the live thinking segment as CC's "thinking with <effort> effort".
     /// A session setting, so it is NOT reset by `start()`/`stop()`.

@@ -135,7 +135,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         :exit, _ -> nil
       end
 
-    # Active reasoning/effort level (:low | :medium | :high | :max). Settings
+    # Active reasoning/effort level (:fast | :medium | :high | :xhigh | :ultra). Settings
     # cascade resolves session → local → project → user → app default.
     effort =
       try do

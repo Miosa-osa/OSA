@@ -900,7 +900,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   # Add reasoning_effort for OpenAI o-series models.
-  # o3/o3-mini/o4-mini support "low", "medium", "high" (default: medium).
+  # OpenAI's API only accepts "low" | "medium" | "high" (default: medium), so the
+  # OSA effort ladder (:fast/:medium/:high/:xhigh/:ultra, plus legacy low/max and
+  # "off") is mapped down via openai_reasoning_effort/1 — never passed raw.
   # For non-reasoning models this is a no-op.
   defp maybe_add_reasoning(body, model, opts) do
     case Keyword.get(opts, :reasoning_effort) do
@@ -911,11 +913,29 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           body
         end
 
-      effort when effort in ["low", "medium", "high"] ->
-        Map.put(body, :reasoning_effort, effort)
+      effort ->
+        case openai_reasoning_effort(effort) do
+          nil -> body
+          value -> Map.put(body, :reasoning_effort, value)
+        end
+    end
+  end
 
-      _ ->
-        body
+  # Map an OSA effort level (atom or string) to the OpenAI reasoning_effort value.
+  # OpenAI only understands "low"/"medium"/"high"; anything above "high" clamps to
+  # "high", and "off" omits the field entirely (nil). Legacy low/max are handled.
+  defp openai_reasoning_effort(effort) do
+    case effort |> to_string() |> String.trim() |> String.downcase() do
+      "off" -> nil
+      "none" -> nil
+      "fast" -> "low"
+      "low" -> "low"
+      "medium" -> "medium"
+      "high" -> "high"
+      "xhigh" -> "high"
+      "max" -> "high"
+      "ultra" -> "high"
+      _ -> nil
     end
   end
 

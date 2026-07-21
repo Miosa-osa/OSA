@@ -946,14 +946,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # controlled stop. Explicit opts always win over the preset.
   @autonomous_preset [
     permission_mode: :overdrive,
-    effort_level: :max
+    effort_level: :xhigh
   ]
 
   defp apply_preset(opts) do
     case Keyword.get(opts, :preset) do
       preset when preset in [:autonomous, "autonomous"] ->
         if Keyword.get(opts, :effort_level) == nil,
-          do: OptimalSystemAgent.Agent.Effort.set(:max)
+          do: OptimalSystemAgent.Agent.Effort.set(:xhigh)
 
         Keyword.merge(@autonomous_preset, opts)
 

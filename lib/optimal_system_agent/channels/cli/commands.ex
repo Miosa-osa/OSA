@@ -1132,21 +1132,22 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}Max iterations:#{@reset}  #{config.max_iterations}")
         IO.puts("  #{@dim}Temperature:#{@reset}     #{config.temperature}")
         IO.puts("")
-        IO.puts("  #{@dim}Usage: /effort low|medium|high|max#{@reset}")
+        IO.puts("  #{@dim}Usage: /effort fast|medium|high|xhigh|ultra#{@reset}")
 
       level_str ->
-        level = String.to_existing_atom(level_str)
+        # Effort.set normalizes legacy names (low→fast, max→xhigh) and validates.
+        case Effort.set(level_str) do
+          :ok ->
+            level = Effort.current()
+            config = Effort.get(level)
 
-        if level in Effort.levels() do
-          Effort.set(level)
-          config = Effort.get(level)
+            IO.puts(
+              "  #{@green}✓#{@reset} Effort set to #{@bold}#{level}#{@reset} — #{config.description}"
+            )
 
-          IO.puts(
-            "  #{@green}✓#{@reset} Effort set to #{@bold}#{level}#{@reset} — #{config.description}"
-          )
-        else
-          IO.puts("  #{@yellow}error: invalid level '#{level_str}'#{@reset}")
-          IO.puts("  #{@dim}Valid levels: low, medium, high, max#{@reset}")
+          {:error, _} ->
+            IO.puts("  #{@yellow}error: invalid level '#{level_str}'#{@reset}")
+            IO.puts("  #{@dim}Valid levels: fast, medium, high, xhigh, ultra#{@reset}")
         end
     end
 
@@ -1155,7 +1156,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   rescue
     _ ->
       IO.puts("  #{@yellow}error: invalid level#{@reset}")
-      IO.puts("  #{@dim}Valid levels: low, medium, high, max#{@reset}\n")
+      IO.puts("  #{@dim}Valid levels: fast, medium, high, xhigh, ultra#{@reset}\n")
       session_id
   end
 

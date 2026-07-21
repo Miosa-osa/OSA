@@ -737,9 +737,10 @@ impl App {
                     crate::dialogs::reasoning::ReasoningAction::Select(level) => {
                         let label = match level {
                             crate::dialogs::reasoning::ReasoningLevel::Off => "off",
-                            crate::dialogs::reasoning::ReasoningLevel::Low => "low",
+                            crate::dialogs::reasoning::ReasoningLevel::Fast => "fast",
                             crate::dialogs::reasoning::ReasoningLevel::Medium => "medium",
                             crate::dialogs::reasoning::ReasoningLevel::High => "high",
+                            crate::dialogs::reasoning::ReasoningLevel::Xhigh => "xhigh",
                             crate::dialogs::reasoning::ReasoningLevel::Ultra => "ultra",
                         };
                         self.reasoning_selector = None;

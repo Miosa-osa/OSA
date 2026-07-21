@@ -151,7 +151,7 @@ pub struct ConfigEditor {
     editing: Option<String>,
 }
 
-const REASONING_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+const REASONING_LEVELS: [&str; 5] = ["fast", "medium", "high", "xhigh", "ultra"];
 const PERMISSION_MODES: [&str; 5] = ["default", "auto", "acceptEdits", "plan", "bypass"];
 const SANDBOX_BACKENDS: [&str; 5] = ["miosa", "e2b", "vercel", "local", "none"];
 

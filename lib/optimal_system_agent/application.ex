@@ -365,16 +365,20 @@ defmodule OptimalSystemAgent.Application do
 
   @doc false
   # Pure effort resolution — normalizes a config.toml [model].effort string to a
-  # known level atom (:low | :medium | :high | :max), or nil for absent/invalid.
-  @spec resolve_effort(term()) :: :low | :medium | :high | :max | nil
+  # known level atom (:fast | :medium | :high | :xhigh | :ultra), or nil for
+  # absent/invalid. Legacy "low"/"max" are accepted and mapped (low→fast,
+  # max→xhigh) for back-compat with older config files.
+  @spec resolve_effort(term()) :: :fast | :medium | :high | :xhigh | :ultra | nil
   def resolve_effort(effort) when is_binary(effort) do
     e = effort |> String.trim() |> String.downcase()
 
-    if e in ~w(low medium high max) do
-      String.to_atom(e)
-    else
-      Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
-      nil
+    cond do
+      e in ~w(fast medium high xhigh ultra) -> String.to_atom(e)
+      e == "low" -> :fast
+      e == "max" -> :xhigh
+      true ->
+        Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
+        nil
     end
   end
 
