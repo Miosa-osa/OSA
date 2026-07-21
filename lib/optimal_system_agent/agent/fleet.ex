@@ -31,10 +31,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   require Logger
 
   alias OptimalSystemAgent.Agent.{Effort, Loop, RunStore}
+  alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agents.Registry, as: AgentRegistry
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Runtime.SessionManager
   alias OptimalSystemAgent.Scratchpad
+  alias OptimalSystemAgent.Workspace.FastWorktree
 
   @default_max_fleet_agents 16
   # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
@@ -134,16 +136,54 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   merged over the shared `opts` and handed to the full-power spawn path.
 
   Opts:
+    * `:isolation` — `:worktree` runs EACH item's node in its OWN CoW git
+      worktree (via `Workspace.FastWorktree`) so parallel nodes editing files
+      never collide with each other or the main tree. The node's `:working_dir`
+      is pointed at its worktree and the branch is recorded as the result's
+      `worktree_ref` (+ durably on the RunStore run via
+      `attach_worktree_snapshot/2`). Best-effort: if worktree creation fails the
+      item falls back to non-isolated (a logged warning, `worktree_ref: nil`) —
+      never crashing the workflow. Omit (default) to keep today's shared-cwd
+      behavior.
     * `:spawn_fun` — 2-arity `(parent, opts) -> {:ok, id} | {:error, term}`
       override for the per-item spawn (defaults to `spawn_fleet_node/2`; used to
       exercise the queue-drain without booting real loops).
+    * `:worktree_fun` — 2-arity `(parent, item_opts) -> {:ok, %{path, branch}} |
+      {:error, term}` override for isolated worktree creation (defaults to
+      `FastWorktree.create/2`; lets tests inject fake refs without real git).
+    * `:budget_fun` — 1-arity `(parent) -> boolean` override for the pre-spawn
+      tree-budget guard (defaults to a `Loop.get_state` + `Accounting`
+      rollup check).
     * any other opt is forwarded as base spawn opts for each item.
+
+  Each item resolves to a STRUCTURED result map (frozen contract consumed by
+  `Fleet.Finalizer`):
+
+      %{
+        node_id: binary,
+        worktree_ref: binary | nil,
+        files_changed: [binary],
+        gate: :pass | :fail | :skipped,
+        stubbed: [binary],
+        summary: binary,
+        error: term | nil
+      }
+
+  A completed node → `gate: :pass`; an errored/timed-out node → `gate: :fail`
+  with `:error` set; an item skipped because the tree budget is exhausted →
+  `gate: :skipped`.
+
+  BUDGET GUARD: before spawning each item the parent's WHOLE-TREE spend is
+  checked via `Accounting.budget_exhausted?/1`. Once exhausted, spawning STOPS —
+  every remaining item is marked `gate: :skipped` (dropped-for-budget) instead
+  of being spawned. The check degrades to "not exhausted" (keeps spawning) if
+  the parent state can't be fetched — it never crashes the fan_out.
 
   Returns `{:ok, %{total: T, dropped: D, results: [...]}}` or
   `{:error, :ultra_required}`.
   """
   @spec fan_out(String.t(), [term()], keyword()) ::
-          {:ok, %{total: non_neg_integer(), dropped: non_neg_integer(), results: list()}}
+          {:ok, %{total: non_neg_integer(), dropped: non_neg_integer(), results: [map()]}}
           | {:error, :ultra_required | :invalid_parent_session_id}
   def fan_out(parent_session_id, items, opts \\ [])
 
@@ -168,8 +208,19 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   defp do_fan_out(parent, items, opts) do
     cap = max_fleet_agents()
     total_cap = max_fleet_total()
-    spawn_fun = Keyword.get(opts, :spawn_fun, &spawn_fleet_node/2)
-    base_opts = Keyword.drop(opts, [:spawn_fun])
+
+    # Per-item execution context: the spawn/worktree/budget seams (each
+    # overridable for tests), the isolation mode, the base opts forwarded to
+    # every node, and a shared atomics "stop" flag the budget guard flips once
+    # the tree budget is exhausted so remaining items skip instead of spawning.
+    ctx = %{
+      spawn_fun: Keyword.get(opts, :spawn_fun, &spawn_fleet_node/2),
+      worktree_fun: Keyword.get(opts, :worktree_fun, &default_create_worktree/2),
+      budget_fun: Keyword.get(opts, :budget_fun, &default_budget_exhausted?/1),
+      isolation: Keyword.get(opts, :isolation),
+      base_opts: Keyword.drop(opts, [:spawn_fun, :worktree_fun, :budget_fun, :isolation]),
+      budget_stopped: :atomics.new(1, [])
+    }
 
     # Run-lifetime kill switch: never drain more than the total ceiling.
     {work, dropped} =
@@ -183,7 +234,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     # Seed the SHARED scratchpad with a workflow header so the orchestrated
     # nodes share a common workspace and the team-visibility panel shows the
     # workflow. Best-effort — must never crash the fan_out.
-    seed_workflow_scratchpad(parent, base_opts, total)
+    seed_workflow_scratchpad(parent, ctx.base_opts, total)
 
     # Start summary: everything queued, nothing spawned yet.
     emit_fleet_summary(parent, %{queued: total, cap: cap, total_spawned: 0})
@@ -191,7 +242,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     results =
       work
       |> Task.async_stream(
-        fn item -> run_fan_out_item(parent, item, spawn_fun, base_opts) end,
+        fn item -> run_fan_out_item(parent, item, ctx) end,
         max_concurrency: cap,
         ordered: false,
         # Per-node timeout (was :infinity). A node that runs past the ceiling is
@@ -212,12 +263,20 @@ defmodule OptimalSystemAgent.Agent.Fleet do
         })
 
         case res do
-          {:ok, value} -> value
-          # Reaped by the per-node timeout: record a timed-out result, keep going.
-          {:exit, :timeout} -> {:error, :node_timeout}
-          # Any other task exit (crash we couldn't trap): isolate it as an error
+          # run_fan_out_item already returns the structured result map.
+          {:ok, %{} = result} ->
+            result
+
+          # Reaped by the per-node timeout: the task was killed so its item
+          # identity is unrecoverable — record a timed-out fail result and keep
+          # draining.
+          {:exit, :timeout} ->
+            fail_result("", :node_timeout)
+
+          # Any other task exit (crash we couldn't trap): isolate it as a fail
           # result so remaining items still drain.
-          {:exit, reason} -> {:error, {:exit, reason}}
+          {:exit, reason} ->
+            fail_result("", {:exit, reason})
         end
       end)
 
@@ -225,8 +284,10 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   end
 
   # Normalize an item to per-item spawn opts, merge over the shared base opts,
-  # and spawn via the full-power path (or the injected spawn_fun in tests).
-  defp run_fan_out_item(parent, item, spawn_fun, base_opts) do
+  # apply the budget guard + (optional) worktree isolation, and produce the
+  # structured result map (O2). `hint` is bound in the head so it stays visible
+  # to the rescue/catch clauses if the node raises/throws/exits.
+  defp run_fan_out_item(parent, item, ctx) do
     item_opts =
       cond do
         is_binary(item) -> [task: item]
@@ -235,14 +296,217 @@ defmodule OptimalSystemAgent.Agent.Fleet do
         true -> []
       end
 
-    spawn_fun.(parent, Keyword.merge(base_opts, item_opts))
+    merged = Keyword.merge(ctx.base_opts, item_opts)
+    hint = node_hint(merged)
+    do_run_item(parent, merged, hint, ctx)
+  end
+
+  defp do_run_item(parent, merged, hint, ctx) do
+    cond do
+      # Budget already tripped by an earlier item → skip without spawning.
+      budget_stopped?(ctx) ->
+        skipped_result(hint)
+
+      # Pre-spawn tree-budget guard: once the whole-tree spend is exhausted,
+      # flip the shared flag so every REMAINING item skips too, then skip.
+      ctx.budget_fun.(parent) ->
+        mark_budget_stopped(ctx)
+        skipped_result(hint)
+
+      true ->
+        spawn_item(parent, merged, hint, ctx)
+    end
   rescue
-    # Node error isolation: a raising node becomes an error result, its slot
+    # Node error isolation: a raising node becomes a fail result, its slot
     # frees, and the remaining items keep draining. Never crashes the workflow.
-    e -> {:error, {:node_error, Exception.message(e)}}
+    e -> fail_result(hint, {:node_error, Exception.message(e)})
   catch
-    :throw, val -> {:error, {:node_throw, val}}
+    :throw, val -> fail_result(hint, {:node_throw, val})
+    :exit, reason -> fail_result(hint, {:exit, reason})
+  end
+
+  # Isolated spawn: create a CoW worktree, point the node's working_dir at it,
+  # spawn, then derive files_changed + record the branch ref. Best-effort — a
+  # worktree failure logs and falls back to a non-isolated spawn.
+  defp spawn_item(parent, merged, hint, %{isolation: :worktree} = ctx) do
+    case safe_worktree(ctx, parent, merged) do
+      {:ok, %{path: path, branch: branch}} ->
+        merged
+        |> Keyword.put(:working_dir, path)
+        |> then(&ctx.spawn_fun.(parent, &1))
+        |> finalize_isolated(hint, path, branch)
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Fleet] worktree isolation failed for #{hint} (#{inspect(reason)}) — " <>
+            "falling back to non-isolated spawn."
+        )
+
+        spawn_item(parent, merged, hint, %{ctx | isolation: nil})
+    end
+  end
+
+  defp spawn_item(parent, merged, hint, ctx) do
+    ctx.spawn_fun.(parent, merged) |> spawn_result(hint, nil, [])
+  end
+
+  # Map a successful isolated spawn to a pass result carrying the branch ref +
+  # (best-effort) changed files; a failed one keeps the branch as worktree_ref.
+  defp finalize_isolated({:ok, node_id} = ok, _hint, path, branch) do
+    _ = safe_attach_snapshot(node_id, branch)
+    spawn_result(ok, node_id, branch, changed_files(path))
+  end
+
+  defp finalize_isolated(other, hint, _path, branch) do
+    spawn_result(other, hint, branch, [])
+  end
+
+  # Turn the spawn_fun return into a structured result map.
+  defp spawn_result({:ok, node_id}, _hint, worktree_ref, files),
+    do: success_result(node_id, worktree_ref, files)
+
+  defp spawn_result({:error, reason}, hint, worktree_ref, _files),
+    do: fail_result(hint, reason, worktree_ref)
+
+  defp spawn_result(_other, hint, worktree_ref, _files),
+    do: fail_result(hint, :spawn_failed, worktree_ref)
+
+  # ── structured result builders (O2 — FROZEN CONTRACT) ──────────────────
+
+  defp success_result(node_id, worktree_ref, files) do
+    %{
+      node_id: to_string(node_id),
+      worktree_ref: worktree_ref,
+      files_changed: files,
+      gate: :pass,
+      stubbed: [],
+      summary: "completed",
+      error: nil
+    }
+  end
+
+  defp fail_result(node_id, reason, worktree_ref \\ nil) do
+    %{
+      node_id: to_string(node_id),
+      worktree_ref: worktree_ref,
+      files_changed: [],
+      gate: :fail,
+      stubbed: [],
+      summary: "failed: #{inspect(reason)}",
+      error: reason
+    }
+  end
+
+  defp skipped_result(node_id) do
+    %{
+      node_id: to_string(node_id),
+      worktree_ref: nil,
+      files_changed: [],
+      gate: :skipped,
+      stubbed: [],
+      summary: "skipped: tree budget exhausted",
+      error: nil
+    }
+  end
+
+  # ── budget guard helpers ───────────────────────────────────────────────
+
+  defp budget_stopped?(%{budget_stopped: ref}), do: :atomics.get(ref, 1) == 1
+  defp mark_budget_stopped(%{budget_stopped: ref}), do: :atomics.put(ref, 1, 1)
+
+  # Fetch the parent loop's live state and ask Accounting whether the WHOLE-TREE
+  # spend has reached the cap. Degrades to `false` (keep spawning) whenever the
+  # state can't be fetched — never crashes the fan_out.
+  defp default_budget_exhausted?(parent) do
+    case Loop.get_state(parent) do
+      {:ok, %{session_id: sid, spend: spend}} when is_map(spend) ->
+        Accounting.budget_exhausted?(%{
+          session_id: sid,
+          session_cost_usd: Map.get(spend, :cost_usd, 0.0),
+          max_budget_usd: Map.get(spend, :max_budget_usd)
+        })
+
+      _ ->
+        false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  # ── worktree isolation helpers ─────────────────────────────────────────
+
+  defp safe_worktree(ctx, parent, merged) do
+    ctx.worktree_fun.(parent, merged)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Default per-item worktree: a CoW worktree of the shared repo (Cwd), named
+  # from the item's node hint. Returns `{:ok, %{path, branch}}` or `{:error, _}`.
+  defp default_create_worktree(_parent, merged) do
+    id = "fleet-wt-" <> (node_hint(merged) |> String.slice(0, 40))
+    FastWorktree.create(id, [])
+  end
+
+  # Record the worktree branch/path durably on the run row (reusing RunStore's
+  # `worktree_snapshot_ref`) so the finalizer can locate a node's worktree.
+  defp safe_attach_snapshot(node_id, ref) when is_binary(node_id) and is_binary(ref) do
+    RunStore.attach_worktree_snapshot(node_id, ref)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp safe_attach_snapshot(_node_id, _ref), do: :ok
+
+  # Repo-relative paths a node modified in its worktree (best-effort `git status
+  # --porcelain`). `[]` when the tree is clean, git is unavailable, or the path
+  # doesn't exist (e.g. a fake worktree ref in unit tests).
+  defp changed_files(path) when is_binary(path) do
+    # Guard on existence: `System.cmd` cd-ing into a vanished/fake dir prints a
+    # noisy `spawn: Could not cd` to stderr (and there's nothing to diff anyway).
+    if not File.dir?(path) do
+      []
+    else
+      changed_files_git(path)
+    end
+  end
+
+  defp changed_files(_), do: []
+
+  defp changed_files_git(path) do
+    case System.cmd("git", ["status", "--porcelain", "-z"], cd: path, stderr_to_stdout: true) do
+      {out, 0} ->
+        out
+        |> String.split(<<0>>, trim: true)
+        |> Enum.map(&porcelain_path/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
+  end
+
+  # Strip the leading 3-char `XY ` porcelain status prefix to recover the
+  # repo-relative path. Best-effort: shorter/odd fields degrade to "".
+  defp porcelain_path(entry) when byte_size(entry) > 3 do
+    entry |> String.slice(3..-1//1) |> String.trim()
+  end
+
+  defp porcelain_path(_), do: ""
+
+  defp node_hint(opts) do
+    (Keyword.get(opts, :node_id) || Keyword.get(opts, :task) || "") |> to_string()
   end
 
   defp do_spawn(parent_session_id, opts) do

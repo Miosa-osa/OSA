@@ -181,7 +181,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
 
       # All 6 drained; the queue never fails an item.
       assert length(results) == 6
-      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert Enum.all?(results, &(&1.gate == :pass))
 
       {_cur, mx} = Agent.get(peak, & &1)
       Agent.stop(peak)
@@ -290,8 +290,10 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
     test "a single item runs" do
       parent = "parent-single-#{System.unique_integer([:positive])}"
 
-      assert {:ok, %{total: 1, dropped: 0, results: [{:ok, "only"}]}} =
+      assert {:ok, %{total: 1, dropped: 0, results: [result]}} =
                Fleet.fan_out(parent, ["only"], spawn_fun: fake_spawn())
+
+      assert %{node_id: "only", gate: :pass, worktree_ref: nil, error: nil} = result
     end
 
     test "a huge batch past :max_fleet_total truncates and reports dropped" do
@@ -332,9 +334,9 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
 
       # Every item produced a result — none aborted the drain.
       assert length(results) == 4
-      # The good ones succeeded; the bad one is isolated as an error result.
-      assert Enum.count(results, &match?({:ok, _}, &1)) == 3
-      assert Enum.any?(results, &match?({:error, {:node_error, _}}, &1))
+      # The good ones succeeded; the bad one is isolated as a fail result.
+      assert Enum.count(results, &(&1.gate == :pass)) == 3
+      assert Enum.any?(results, &match?(%{gate: :fail, error: {:node_error, _}}, &1))
     end
 
     test "a throwing node is isolated too and the rest still drain" do
@@ -351,8 +353,8 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       assert {:ok, %{total: 3, results: results}} =
                Fleet.fan_out(parent, ["x", "throw", "y"], spawn_fun: spawn_fun)
 
-      assert Enum.count(results, &match?({:ok, _}, &1)) == 2
-      assert Enum.any?(results, &match?({:error, {:node_throw, :nope}}, &1))
+      assert Enum.count(results, &(&1.gate == :pass)) == 2
+      assert Enum.any?(results, &match?(%{gate: :fail, error: {:node_throw, :nope}}, &1))
     end
   end
 
@@ -386,8 +388,8 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
 
       assert length(results) == 4
       # The hung node was reaped; the three fast nodes still completed.
-      assert Enum.count(results, &match?({:ok, _}, &1)) == 3
-      assert {:error, :node_timeout} in results
+      assert Enum.count(results, &(&1.gate == :pass)) == 3
+      assert Enum.any?(results, &match?(%{gate: :fail, error: :node_timeout}, &1))
     end
   end
 
@@ -410,9 +412,172 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
                Fleet.fan_out(parent, items, spawn_fun: spawn_fun)
 
       assert length(results) == 5
-      assert Enum.all?(results, &match?({:ok, _}, &1))
+      assert Enum.all?(results, &(&1.gate == :pass))
       # Effort really was dropped mid-flight, yet the workflow completed.
       refute Effort.current_at_least?(:ultra)
+    end
+  end
+
+  describe "fan_out/3 structured node reports (O2 — frozen contract)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "every result is the frozen result-map shape" do
+      parent = "parent-shape-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["do-thing"], spawn_fun: fake_spawn())
+
+      # Exact key set the finalizer depends on.
+      assert Map.keys(result) |> Enum.sort() ==
+               [:error, :files_changed, :gate, :node_id, :stubbed, :summary, :worktree_ref]
+
+      assert result.node_id == "do-thing"
+      assert result.worktree_ref == nil
+      assert result.files_changed == []
+      assert result.gate == :pass
+      assert result.stubbed == []
+      assert is_binary(result.summary)
+      assert result.error == nil
+    end
+
+    test "a failed spawn maps to gate: :fail with the error preserved" do
+      parent = "parent-failshape-#{System.unique_integer([:positive])}"
+
+      spawn_fun = fn _p, _opts -> {:error, :boom} end
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["x"], spawn_fun: spawn_fun)
+
+      assert result.gate == :fail
+      assert result.error == :boom
+      assert result.files_changed == []
+    end
+  end
+
+  describe "fan_out/3 worktree isolation (O1)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "non-isolated (default) has no worktree_ref" do
+      parent = "parent-noiso-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["a"], spawn_fun: fake_spawn())
+
+      assert result.worktree_ref == nil
+    end
+
+    test "isolation: :worktree records the branch ref and points working_dir at the worktree" do
+      parent = "parent-iso-wt-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      # Fake worktree creation — no real git needed.
+      worktree_fun = fn _p, _opts ->
+        {:ok, %{path: "/tmp/fake-wt-#{System.unique_integer([:positive])}", branch: "osa-wt-fake"}}
+      end
+
+      # The spawn seam records the working_dir it was handed so we can prove the
+      # node was pointed at its worktree.
+      spawn_fun = fn _p, opts ->
+        send(test_pid, {:working_dir, Keyword.get(opts, :working_dir)})
+        {:ok, Keyword.get(opts, :task)}
+      end
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["edit-files"],
+                 isolation: :worktree,
+                 worktree_fun: worktree_fun,
+                 spawn_fun: spawn_fun
+               )
+
+      assert result.gate == :pass
+      assert result.worktree_ref == "osa-wt-fake"
+      # files_changed is [] here (fake path → no real git); real-git derivation
+      # is exercised by integration, not this unit test.
+      assert result.files_changed == []
+
+      assert_receive {:working_dir, wd}
+      assert wd =~ "/tmp/fake-wt-"
+    end
+
+    test "worktree creation failure falls back to non-isolated (never crashes)" do
+      parent = "parent-iso-fail-#{System.unique_integer([:positive])}"
+
+      worktree_fun = fn _p, _opts -> {:error, :no_git} end
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["a"],
+                 isolation: :worktree,
+                 worktree_fun: worktree_fun,
+                 spawn_fun: fake_spawn()
+               )
+
+      # Fell back: node still ran, just without a worktree ref.
+      assert result.gate == :pass
+      assert result.worktree_ref == nil
+    end
+  end
+
+  describe "fan_out/3 budget guard (deferred W2)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "stops spawning once the tree budget is exhausted; the rest are :skipped" do
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 1)
+      parent = "parent-budget-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      # Sequential drain (cap 1). The budget trips after the 2nd successful
+      # spawn, so items 3..5 must be skipped, not spawned.
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      budget_fun = fn _parent -> Agent.get(counter, & &1) >= 2 end
+
+      spawn_fun = fn _p, opts ->
+        Agent.update(counter, &(&1 + 1))
+        send(test_pid, {:spawned, Keyword.get(opts, :task)})
+        {:ok, Keyword.get(opts, :task)}
+      end
+
+      items = for i <- 1..5, do: "task-#{i}"
+
+      assert {:ok, %{total: 5, results: results}} =
+               Fleet.fan_out(parent, items,
+                 spawn_fun: spawn_fun,
+                 budget_fun: budget_fun
+               )
+
+      Agent.stop(counter)
+
+      # Exactly 2 spawned, 3 skipped for budget.
+      assert Enum.count(results, &(&1.gate == :pass)) == 2
+      assert Enum.count(results, &(&1.gate == :skipped)) == 3
+
+      skipped = Enum.filter(results, &(&1.gate == :skipped))
+      assert Enum.all?(skipped, &(&1.summary =~ "budget"))
+
+      # Only two spawn messages arrived — the guard truly STOPPED spawning.
+      assert_receive {:spawned, _}
+      assert_receive {:spawned, _}
+      refute_receive {:spawned, _}, 100
+    end
+
+    test "an unfetchable parent state degrades to spawning (never crashes)" do
+      parent = "parent-nostate-#{System.unique_integer([:positive])}"
+
+      # Default budget_fun: Loop.get_state(parent) has no live loop → {:error,
+      # :not_found} → treated as not-exhausted → all items spawn.
+      assert {:ok, %{results: results}} =
+               Fleet.fan_out(parent, ["a", "b"], spawn_fun: fake_spawn())
+
+      assert Enum.all?(results, &(&1.gate == :pass))
     end
   end
 
