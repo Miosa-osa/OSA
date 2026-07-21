@@ -633,7 +633,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
     # Capture the raw `:system_event` payloads this module emits on the Bus, so
     # we can assert on the exact fields the TUI indicator consumes without
     # spinning up the full forwarder/PubSub path.
-    defp capture_goal_verifier_events do
+    # Filter on the test's OWN session_id. The Bus dispatches handlers via
+    # asynchronous supervised Tasks, so a `goal_verifier_round` event emitted by
+    # a PRIOR test's verify/1 can still be in-flight when this test registers its
+    # handler — without the session guard that stale event (a different verdict,
+    # e.g. :off_track) races into our mailbox and flakes the assert_receive.
+    defp capture_goal_verifier_events(sid) do
       test_pid = self()
 
       ref =
@@ -644,7 +649,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
               d when is_map(d) -> d
             end
 
-          if data[:event] == :goal_verifier_round do
+          if data[:event] == :goal_verifier_round and data[:session_id] == sid do
             send(test_pid, {:goal_verifier_event, data})
           end
         end)
@@ -655,7 +660,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
     test "emits a start-phase signal then a done-phase verdict with compact gaps",
          %{session_id: sid} do
-      capture_goal_verifier_events()
+      capture_goal_verifier_events(sid)
       mark_write(sid)
 
       stub_runner(fn _sid, configs ->
@@ -686,7 +691,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
     end
 
     test "a complete verdict emits an empty gap summary", %{session_id: sid} do
-      capture_goal_verifier_events()
+      capture_goal_verifier_events(sid)
       mark_write(sid)
 
       stub_runner(fn _sid, _configs ->

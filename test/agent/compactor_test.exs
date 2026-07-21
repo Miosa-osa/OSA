@@ -16,9 +16,42 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
     @hot_zone_size  20
     @warm_zone_end  50
   """
-  use ExUnit.Case, async: true
+  # async: false — several tests mutate GLOBAL application env
+  # (`:max_context_tokens`, `:compaction_warn/aggressive/emergency`) that lib
+  # code reads via Application.get_env. Under async: true those tiny values leak
+  # into concurrently-running readers (Integration.ConversationTest,
+  # PromptTemplateTest) and truncate their budgeted prompts, causing intermittent
+  # cross-test failures. Running in ExUnit's serial phase isolates the mutation.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Compactor
+
+  # The cold-zone summarizer persists its last structured summary in the GLOBAL
+  # `:osa_compactor_state` ETS table (created at app boot, :public/:named_table).
+  # That entry is written by ANY compaction anywhere in the suite — other test
+  # modules and the app's own proactive/background compaction — and the
+  # divide-and-conquer cold path folds it back in as a `<chunk_summary
+  # index="prev">` block. A stale entry perturbs these deterministic pipeline
+  # assertions (e.g. it can unbalance the chunk-tag validation so NO
+  # `[Context Summary]` is emitted). Clear the summary keys before each test so
+  # `get_previous_summary/0` is deterministically empty.
+  setup do
+    clear_compactor_summary = fn ->
+      try do
+        :ets.delete(:osa_compactor_state, :previous_summary)
+        :ets.delete(:osa_compactor_state, :last_summary_at)
+      rescue
+        ArgumentError -> :ok
+      end
+    end
+
+    # Clear before (stale entry from another module / background compaction) AND
+    # after (so a summary THIS module persists doesn't leak into later modules
+    # that trigger the same divide-and-conquer cold path).
+    clear_compactor_summary.()
+    on_exit(clear_compactor_summary)
+    :ok
+  end
 
   # ---------------------------------------------------------------------------
   # Helpers

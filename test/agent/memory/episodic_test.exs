@@ -13,11 +13,18 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicTest do
         on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
       pid ->
-        # Clear existing events
+        # `record/3` is an async GenServer cast, so an earlier test's write can
+        # still be sitting in the mailbox here. Drain it FIRST (a synchronous
+        # :sys.get_state is processed in-order, after every queued cast) so those
+        # writes land BEFORE we wipe — otherwise a stray cast lands AFTER
+        # delete_all_objects and inflates the global counts stats/0 reports.
         try do
+          :sys.get_state(pid)
           :ets.delete_all_objects(@table)
         rescue
           ArgumentError -> :ok
+        catch
+          :exit, _ -> :ok
         end
 
         on_exit(fn -> if Process.alive?(pid), do: :ets.delete_all_objects(@table) end)
@@ -189,7 +196,9 @@ defmodule OptimalSystemAgent.Agent.Memory.EpisodicTest do
       Episodic.record(:tool_call, %{tool: "a"}, "sess-1")
       Episodic.record(:error, %{msg: "b"}, "sess-1")
       Episodic.record(:tool_call, %{tool: "c"}, "sess-2")
-      :timer.sleep(50)
+      # Flush these three casts deterministically (drain the mailbox) instead of
+      # racing a fixed sleep — stats/0 reads ETS directly and counts globally.
+      :sys.get_state(Episodic)
 
       stats = Episodic.stats()
       assert stats.total_events == 3
