@@ -39,7 +39,14 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           result: map() | nil,
           transcript_path: String.t(),
           resumed_from: String.t() | nil,
-          worktree_snapshot_ref: String.t() | nil
+          worktree_snapshot_ref: String.t() | nil,
+          # W3/D3 — coordinator posture under which the run was dispatched
+          # (`:autonomous` for unattended/overdrive fleets, else nil/`:supervised`).
+          # Read by the boot FleetResumer to decide which orphaned `:running`
+          # runs are safe to re-dispatch. Optional: populated only when a caller
+          # passes `:posture` to `start_run/1` (or persists it in the messages
+          # meta), so it defaults to nil and the resumer stays safe-by-default.
+          posture: atom() | nil
         }
 
   @doc "Start or replace a run record."
@@ -72,7 +79,10 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         # when `config[:resumed_from]` is present. Purely informational — never
         # read for control flow.
         resumed_from: Map.get(attrs, :resumed_from),
-        worktree_snapshot_ref: nil
+        worktree_snapshot_ref: nil,
+        # W3/D3 — optional coordinator posture (see @type). Additive: absent
+        # callers leave it nil and nothing changes.
+        posture: Map.get(attrs, :posture)
       }
 
     :ets.insert(@table, {agent_id, run})
@@ -186,6 +196,89 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     |> Enum.filter(fn run -> is_nil(status) or run.status == status end)
     |> Enum.sort_by(fn run -> DateTime.to_unix(run.started_at, :millisecond) end, :desc)
     |> Enum.take(limit)
+  end
+
+  @doc """
+  W3/D3 — every `:running` row, unbounded (unlike `list/1`, which caps at
+  `:limit`). The boot resumer needs the COMPLETE set of in-flight runs to walk
+  the parent chain and reconcile, so a 20-row default would silently drop
+  orphans. Newest-first.
+  """
+  @spec all_running() :: [run()]
+  def all_running do
+    ensure_table()
+
+    @table
+    |> :ets.tab2list()
+    |> Enum.map(fn {_id, run} -> run end)
+    |> Enum.filter(fn run -> run.status == :running end)
+    |> Enum.sort_by(fn run -> DateTime.to_unix(run.started_at, :millisecond) end, :desc)
+  end
+
+  @doc """
+  W3/D3 — boot reconciliation of stale `:running` rows.
+
+  After a daemon crash/restart the loop processes that owned in-flight runs are
+  gone, but their ETS rows (rehydrated from disk, or surviving in a shared
+  table) still read `:running` — inflating the `/runs` roster and any
+  autonomous-fleet counts. This walks every `:running` row, and for each whose
+  owning process is NOT alive marks it terminal (`:cancelled` by default) so the
+  counts settle. Rows whose process IS alive (e.g. a run the FleetResumer just
+  re-dispatched under its original id) are left untouched.
+
+  Options:
+    * `:alive_fun`  — `(agent_id -> boolean)` liveness probe. Defaults to a
+      `SessionRegistry` lookup. Injectable so the selection logic is unit
+      testable without booting real loops.
+    * `:status`     — terminal status to stamp (`:cancelled` | `:failed`),
+      default `:cancelled`.
+    * `:reason`     — human note recorded on the row/transcript.
+
+  Returns the list of rows it reconciled. Best-effort; never raises.
+  """
+  @spec reconcile_stale_running(keyword()) :: [run()]
+  def reconcile_stale_running(opts \\ []) do
+    ensure_table()
+    alive_fun = Keyword.get(opts, :alive_fun, &default_alive?/1)
+    status = Keyword.get(opts, :status, :cancelled)
+    reason = Keyword.get(opts, :reason, "reconciled at boot: owning process gone after restart")
+    now = DateTime.utc_now()
+
+    all_running()
+    |> Enum.reject(fn run -> safe_alive?(alive_fun, run.agent_id) end)
+    |> Enum.map(fn run ->
+      reconciled = %{
+        run
+        | status: status,
+          completed_at: now,
+          result: Map.merge(run.result || %{}, %{status: status, summary: reason})
+      }
+
+      :ets.insert(@table, {run.agent_id, reconciled})
+      append(run.agent_id, "RECONCILE status=#{status}\n\n#{reason}")
+      Logger.info("[RunStore] reconciled stale :running run #{run.agent_id} -> #{status}")
+      reconciled
+    end)
+  rescue
+    _ -> []
+  end
+
+  # Default liveness probe: a run is alive iff its agent_id has a live entry in
+  # the SessionRegistry. Wrapped so a missing registry (tests) reads as "dead".
+  defp default_alive?(agent_id) do
+    Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) != []
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp safe_alive?(fun, agent_id) do
+    fun.(agent_id) == true
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
   end
 
   @doc "Return a transcript as text if it exists."
@@ -428,7 +521,8 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           recent_actions: [],
           result: nil,
           transcript_path: md_path,
-          resumed_from: Map.get(meta, :resumed_from)
+          resumed_from: Map.get(meta, :resumed_from),
+          posture: Map.get(meta, :posture)
         }
 
         :ets.insert(@table, {agent_id, run})

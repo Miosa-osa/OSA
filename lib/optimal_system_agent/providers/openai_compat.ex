@@ -923,7 +923,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # Map an OSA effort level (atom or string) to the OpenAI reasoning_effort value.
   # OpenAI only understands "low"/"medium"/"high"; anything above "high" clamps to
-  # "high", and "off" omits the field entirely (nil). Legacy low/max are handled.
+  # "high", and "off"/"none" omit the field entirely (nil). Legacy low/max are
+  # handled. An unknown / corrupt persisted value falls back to "medium" (the
+  # model's own default) rather than nil — a garbage effort must not silently
+  # DISABLE reasoning on an o-series model (W4 invalid-effort hardening); only an
+  # explicit off/none turns it off.
   defp openai_reasoning_effort(effort) do
     case effort |> to_string() |> String.trim() |> String.downcase() do
       "off" -> nil
@@ -935,7 +939,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       "xhigh" -> "high"
       "max" -> "high"
       "ultra" -> "high"
-      _ -> nil
+      _ -> "medium"
     end
   end
 

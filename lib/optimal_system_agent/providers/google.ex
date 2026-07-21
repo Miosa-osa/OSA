@@ -149,6 +149,15 @@ defmodule OptimalSystemAgent.Providers.Google do
     end
   end
 
+  @doc """
+  Test seam: build just the thinking portion of the generationConfig for a
+  model + opts, without a live HTTP call. Returns `%{thinkingConfig: %{...}}`
+  for a thinking model with a positive `:thinking_budget`, or `%{}` (no-op)
+  when thinking is off / the model has no thinking support. Lets the W4 matrix
+  test assert the effort→thinking_budget mapping per tier.
+  """
+  def build_thinking_config(model, opts), do: maybe_add_thinking_config(%{}, model, opts)
+
   # Gemini 2.5 Pro/Flash support thinkingConfig for extended reasoning.
   # Default: enabled with 8192 token budget for thinking models.
   # Override per-call: opts[:thinking_budget] = N (0 to disable).
@@ -156,7 +165,11 @@ defmodule OptimalSystemAgent.Providers.Google do
     if thinking_model?(model) do
       budget = Keyword.get(opts, :thinking_budget, 8192)
 
-      if budget > 0 do
+      # `is_integer` guard: a caller passing `thinking_budget: nil` (or any
+      # non-integer) must NOT emit `thinkingBudget: nil` — Elixir term ordering
+      # makes `nil > 0` true (atom > number), so an unguarded `budget > 0` would
+      # send a bogus null budget. Fall through to the no-op instead (W4 harden).
+      if is_integer(budget) and budget > 0 do
         Map.put(config, :thinkingConfig, %{thinkingBudget: budget})
       else
         config

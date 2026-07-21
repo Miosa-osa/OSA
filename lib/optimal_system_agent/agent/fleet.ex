@@ -39,6 +39,10 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   @default_max_fleet_agents 16
   # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
   @default_max_fleet_total 1000
+  # Per-node wall-clock ceiling for a single fan_out item. A hung node is reaped
+  # (its Task killed, slot freed) and recorded as a timed-out result instead of
+  # stalling the whole queue forever (the old `timeout: :infinity`). 5 minutes.
+  @default_node_timeout_ms 300_000
   # ≥ this many in-flight (running + queued) flips the "large fleet" warning (a
   # dim advisory in the roster header — NOT a cap).
   @large_fleet_threshold 25
@@ -190,7 +194,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
         fn item -> run_fan_out_item(parent, item, spawn_fun, base_opts) end,
         max_concurrency: cap,
         ordered: false,
-        timeout: :infinity
+        # Per-node timeout (was :infinity). A node that runs past the ceiling is
+        # KILLED — its slot frees for the next queued item and it surfaces as
+        # {:exit, :timeout}, recorded below as a timed-out result. This prevents
+        # one hung node from stalling the queue forever.
+        timeout: node_timeout_ms(),
+        on_timeout: :kill_task
       )
       |> Stream.with_index(1)
       |> Enum.map(fn {res, completed} ->
@@ -204,6 +213,10 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
         case res do
           {:ok, value} -> value
+          # Reaped by the per-node timeout: record a timed-out result, keep going.
+          {:exit, :timeout} -> {:error, :node_timeout}
+          # Any other task exit (crash we couldn't trap): isolate it as an error
+          # result so remaining items still drain.
           {:exit, reason} -> {:error, {:exit, reason}}
         end
       end)
@@ -223,6 +236,13 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       end
 
     spawn_fun.(parent, Keyword.merge(base_opts, item_opts))
+  rescue
+    # Node error isolation: a raising node becomes an error result, its slot
+    # frees, and the remaining items keep draining. Never crashes the workflow.
+    e -> {:error, {:node_error, Exception.message(e)}}
+  catch
+    :throw, val -> {:error, {:node_throw, val}}
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp do_spawn(parent_session_id, opts) do
@@ -337,6 +357,12 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   @spec max_fleet_total() :: pos_integer()
   def max_fleet_total do
     Application.get_env(:optimal_system_agent, :max_fleet_total, @default_max_fleet_total)
+  end
+
+  @doc "Per-node fan_out timeout in ms (`:node_timeout_ms`, default 5 min)."
+  @spec node_timeout_ms() :: pos_integer()
+  def node_timeout_ms do
+    Application.get_env(:optimal_system_agent, :node_timeout_ms, @default_node_timeout_ms)
   end
 
   # ── internals ────────────────────────────────────────────────────────

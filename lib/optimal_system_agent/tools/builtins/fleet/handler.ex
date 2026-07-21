@@ -49,6 +49,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
       action == "workflow" and not is_list(Map.get(input, "items")) ->
         {:error, "action 'workflow' requires an array of string 'items'", -32_602}
 
+      action == "workflow" and Map.get(input, "items") == [] ->
+        {:error, "action 'workflow' requires a non-empty array of 'items'", -32_602}
+
       true ->
         {:ok, input}
     end
@@ -163,8 +166,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
 
   defp agent_type(args) do
     case Map.get(args, "agent_type") do
-      t when is_binary(t) and t != "" -> t
-      _ -> "general-purpose"
+      t when is_binary(t) ->
+        case String.trim(t) do
+          "" -> "general-purpose"
+          trimmed -> trimmed
+        end
+
+      _ ->
+        "general-purpose"
     end
   end
 

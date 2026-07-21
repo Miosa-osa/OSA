@@ -649,6 +649,15 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     end
   end
 
+  @doc """
+  Test seam: apply the `think` field decision to a request body for a model +
+  opts, without a live HTTP call. Ollama has no effort→thinking wiring, so this
+  must be a clean no-op (body unchanged, no `"think"` key) for a non-thinking
+  model with no `:think` opt / `:ollama_think` env — regardless of effort tier
+  (W4: "no thinking → clean no-op, never crash").
+  """
+  def apply_think(body, model, opts), do: maybe_add_think(body, model, opts)
+
   # Controls the `think` field for Ollama reasoning models (kimi, qwen3 thinking, etc.)
   # Default: disabled for known thinking models to prevent unbounded timeouts.
   # Override per-call: opts[:think] = true/false

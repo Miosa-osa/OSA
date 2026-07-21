@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
     prev_runs = Application.get_env(:optimal_system_agent, :agent_runs_dir)
     prev_cap = Application.get_env(:optimal_system_agent, :max_fleet_agents)
     prev_total = Application.get_env(:optimal_system_agent, :max_fleet_total)
+    prev_node_timeout = Application.get_env(:optimal_system_agent, :node_timeout_ms)
     prev_effort = Application.get_env(:optimal_system_agent, :effort_level)
     prev_session_effort = session_effort_level()
     Application.put_env(:optimal_system_agent, :agent_runs_dir, tmp)
@@ -28,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       restore_env(:agent_runs_dir, prev_runs)
       restore_env(:max_fleet_agents, prev_cap)
       restore_env(:max_fleet_total, prev_total)
+      restore_env(:node_timeout_ms, prev_node_timeout)
       restore_env(:effort_level, prev_effort)
       restore_session_effort_level(prev_session_effort)
       File.rm_rf(tmp)
@@ -259,6 +261,158 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
       assert {:ok, content} = OptimalSystemAgent.Scratchpad.read(id, "workflow.md")
       assert content =~ "Dynamic workflow"
       assert content =~ "big goal"
+    end
+  end
+
+  describe "node_timeout_ms/0" do
+    test "defaults to 5 minutes and is configurable" do
+      Application.delete_env(:optimal_system_agent, :node_timeout_ms)
+      assert Fleet.node_timeout_ms() == 300_000
+
+      Application.put_env(:optimal_system_agent, :node_timeout_ms, 50)
+      assert Fleet.node_timeout_ms() == 50
+    end
+  end
+
+  describe "fan_out/3 edge cases (ultra)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "empty items is a no-op — {:ok, total: 0} with no crash" do
+      parent = "parent-empty-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{total: 0, dropped: 0, results: []}} =
+               Fleet.fan_out(parent, [], spawn_fun: fake_spawn())
+    end
+
+    test "a single item runs" do
+      parent = "parent-single-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{total: 1, dropped: 0, results: [{:ok, "only"}]}} =
+               Fleet.fan_out(parent, ["only"], spawn_fun: fake_spawn())
+    end
+
+    test "a huge batch past :max_fleet_total truncates and reports dropped" do
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 8)
+      Application.put_env(:optimal_system_agent, :max_fleet_total, 5)
+      parent = "parent-huge-#{System.unique_integer([:positive])}"
+
+      items = for i <- 1..50, do: "task-#{i}"
+
+      assert {:ok, %{total: 5, dropped: 45, results: results}} =
+               Fleet.fan_out(parent, items, spawn_fun: fake_spawn())
+
+      assert length(results) == 5
+    end
+  end
+
+  describe "fan_out/3 node error isolation (ultra)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "one raising node does not kill the workflow — it becomes an error result" do
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 4)
+      parent = "parent-iso-#{System.unique_integer([:positive])}"
+
+      spawn_fun = fn _p, opts ->
+        case Keyword.get(opts, :task) do
+          "boom" -> raise "kaboom"
+          other -> {:ok, other}
+        end
+      end
+
+      items = ["a", "boom", "b", "c"]
+
+      assert {:ok, %{total: 4, dropped: 0, results: results}} =
+               Fleet.fan_out(parent, items, spawn_fun: spawn_fun)
+
+      # Every item produced a result — none aborted the drain.
+      assert length(results) == 4
+      # The good ones succeeded; the bad one is isolated as an error result.
+      assert Enum.count(results, &match?({:ok, _}, &1)) == 3
+      assert Enum.any?(results, &match?({:error, {:node_error, _}}, &1))
+    end
+
+    test "a throwing node is isolated too and the rest still drain" do
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 4)
+      parent = "parent-throw-#{System.unique_integer([:positive])}"
+
+      spawn_fun = fn _p, opts ->
+        case Keyword.get(opts, :task) do
+          "throw" -> throw(:nope)
+          other -> {:ok, other}
+        end
+      end
+
+      assert {:ok, %{total: 3, results: results}} =
+               Fleet.fan_out(parent, ["x", "throw", "y"], spawn_fun: spawn_fun)
+
+      assert Enum.count(results, &match?({:ok, _}, &1)) == 2
+      assert Enum.any?(results, &match?({:error, {:node_throw, :nope}}, &1))
+    end
+  end
+
+  describe "fan_out/3 per-node timeout (ultra)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "a hung node is reaped as a timed-out result and the others complete" do
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 4)
+      # Tight per-node ceiling so the slow node is reaped quickly.
+      Application.put_env(:optimal_system_agent, :node_timeout_ms, 80)
+      parent = "parent-timeout-#{System.unique_integer([:positive])}"
+
+      spawn_fun = fn _p, opts ->
+        case Keyword.get(opts, :task) do
+          "hang" ->
+            Process.sleep(5_000)
+            {:ok, "should-never-return"}
+
+          other ->
+            {:ok, other}
+        end
+      end
+
+      items = ["fast1", "hang", "fast2", "fast3"]
+
+      assert {:ok, %{total: 4, results: results}} =
+               Fleet.fan_out(parent, items, spawn_fun: spawn_fun)
+
+      assert length(results) == 4
+      # The hung node was reaped; the three fast nodes still completed.
+      assert Enum.count(results, &match?({:ok, _}, &1)) == 3
+      assert {:error, :node_timeout} in results
+    end
+  end
+
+  describe "fan_out/3 effort gate is entry-only (ultra)" do
+    test "a workflow started at :ultra keeps running if effort drops mid-flight" do
+      Effort.set(:ultra)
+      Application.put_env(:optimal_system_agent, :max_fleet_agents, 2)
+      parent = "parent-effortdrop-#{System.unique_integer([:positive])}"
+
+      # The first node to run lowers the effort tier below ultra. Because the
+      # gate is checked ONCE at entry (not per item), every item must still run.
+      spawn_fun = fn _p, opts ->
+        Effort.set(:high)
+        {:ok, Keyword.get(opts, :task)}
+      end
+
+      items = for i <- 1..5, do: "task-#{i}"
+
+      assert {:ok, %{total: 5, dropped: 0, results: results}} =
+               Fleet.fan_out(parent, items, spawn_fun: spawn_fun)
+
+      assert length(results) == 5
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+      # Effort really was dropped mid-flight, yet the workflow completed.
+      refute Effort.current_at_least?(:ultra)
     end
   end
 

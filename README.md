@@ -423,7 +423,7 @@ User Input
   │
   ├─ Context Build (cached static base + dynamic per-request)
   │   ├─ Async memory prefetch (fires parallel while context builds)
-  │   ├─ Effort-aware thinking config (low/medium/high/max)
+  │   ├─ Effort-aware thinking config (fast/medium/high/xhigh/ultra)
   │   ├─ Agent message injection (inter-agent communication)
   │   └─ Iteration budget tracking
   │
@@ -562,6 +562,43 @@ them mid-turn.
 Swarms use ETS-backed team coordination: shared task lists, per-agent mailboxes,
 scratchpads, and configurable iteration limits.
 
+### Agent Fleet & Dynamic Workflows
+
+OSA can fan out into a **fleet** of independent, full-power agents and watch them
+live from a Claude-Code-style roster under the composer.
+
+**The fleet roster.** Beneath the composer sits a live roster of every running
+agent. `main` is always row 0, rendered in green, the home node you always return
+to and never killable. Each spawned node shows its agent-type, a one-line live
+activity summary, wall-clock elapsed, and cumulative tokens (`↓ 107.3k`), all
+updated every tick. Press **←** to move focus from the composer into the roster,
+**↑/↓** to select a node, **Enter** to attach (the transcript view switches to
+that node's live stream, so you watch it think and act in real time), and **x**
+to stop it. Attaching is a read view: it never pauses the node or steals its
+input. Selecting `main` + Enter returns you to your own conversation.
+
+**Full-power spawn.** Every fleet node is a complete OSA agent loop, not a
+restricted worker, its own conversation, its own token budget, and full tools,
+MCP, memory, and permissions. Each is booted with the system prompt and tool
+allowlist of its **custom agent-type** (`general-purpose`, `code-reviewer`, …),
+so a `code-reviewer` node comes up with the reviewer prompt and read-only tools,
+not a generic clone.
+
+**Automatic, not manual.** Spawning is the agent's own decision, it invokes the
+`fleet` tool itself when a task benefits from parallel peers. `←` (browse the
+roster) and `/fg` are optional *viewing* controls, not something you run to make
+the fleet happen. Nodes coordinate through a shared scratchpad, and each node's
+budget (spend plus cap) is checkpointed, so a cap survives a crash or restart
+instead of resetting to zero.
+
+**Dynamic workflows (ultra only).** At the top effort tier, `ultra`, OSA unlocks
+dynamic workflows: fan-out orchestration that spreads a list of work across the
+fleet through a bounded pool of **16 concurrent** agents. Spawns past the cap
+queue FIFO and drain as slots free (they never fail), and the roster header
+carries a live `N/16` counter. Below `ultra`, plain peer-spawning still works,
+only the orchestrated fan-out is gated, raise effort to `ultra` to run dynamic
+workflows.
+
 ### Built-in Tools
 
 60 tools, all schema-validated, most deferred-loaded (excluded from the prompt
@@ -684,14 +721,22 @@ Configure via `~/.osa/settings.json`:
 
 ### Effort Levels
 
-Control thinking depth and iteration budget with `/effort`:
+Effort controls **how much OSA thinks**, the reasoning budget it spends before
+acting. Set it with `/effort`. The current tier drives the live thinking
+indicator, so you see it working harder as effort climbs (e.g. *"thinking harder
+with ultra effort"*).
 
-| Level | Thinking | Iterations | Use Case |
-|---|---|---|---|
-| `low` | 1K tokens | 10 | Quick answers, fast mode |
-| `medium` | 5K tokens | 30 | Balanced (default) |
-| `high` | 10K tokens | 50 | Deep reasoning |
-| `max` | 32K tokens | 100 | Maximum analysis |
+| Level | What it does |
+|---|---|
+| `fast` | Minimal thinking, quick answers and low-latency replies |
+| `medium` | Balanced reasoning for everyday tasks (default) |
+| `high` | Deeper reasoning for harder, multi-step work |
+| `xhigh` | Extended reasoning for complex analysis |
+| `ultra` | Maximum thinking, and unlocks dynamic workflows (fan-out fleet orchestration) |
+
+Higher effort means more visible thinking in the indicator; `ultra` additionally
+enables the fan-out dynamic-workflow orchestration described in
+[Agent Fleet & Dynamic Workflows](#agent-fleet--dynamic-workflows).
 
 ### Scheduler
 

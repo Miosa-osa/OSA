@@ -64,4 +64,73 @@ defmodule OptimalSystemAgent.Agent.RunStoreHardeningTest do
 
     assert %{status: :running} = RunStore.get("keep_running")
   end
+
+  describe "reconcile_stale_running/1 (W3/D3)" do
+    defp start_running(id, attrs \\ %{}) do
+      RunStore.start_run(
+        Map.merge(
+          %{agent_id: id, parent_session_id: "parent", role: "agent", task: "t"},
+          attrs
+        )
+      )
+    end
+
+    test "marks running rows whose process is gone as terminal" do
+      start_running("ghost_a")
+      start_running("ghost_b")
+
+      # No process is alive for either id.
+      reconciled = RunStore.reconcile_stale_running(alive_fun: fn _ -> false end)
+
+      assert Enum.map(reconciled, & &1.agent_id) |> Enum.sort() == ["ghost_a", "ghost_b"]
+      assert %{status: :cancelled} = RunStore.get("ghost_a")
+      assert %{status: :cancelled} = RunStore.get("ghost_b")
+    end
+
+    test "leaves running rows whose process is still alive untouched" do
+      start_running("alive_one")
+      start_running("dead_one")
+
+      reconciled =
+        RunStore.reconcile_stale_running(alive_fun: fn id -> id == "alive_one" end)
+
+      assert Enum.map(reconciled, & &1.agent_id) == ["dead_one"]
+      assert %{status: :running} = RunStore.get("alive_one")
+      assert %{status: :cancelled} = RunStore.get("dead_one")
+    end
+
+    test "does not touch already-terminal rows (counts don't regress)" do
+      start_and_complete("done_one", :completed)
+
+      reconciled = RunStore.reconcile_stale_running(alive_fun: fn _ -> false end)
+
+      assert reconciled == []
+      assert %{status: :completed} = RunStore.get("done_one")
+    end
+
+    test "honours a custom terminal status and records a reason on the row" do
+      start_running("orphan_fail")
+
+      [row] =
+        RunStore.reconcile_stale_running(alive_fun: fn _ -> false end, status: :failed)
+
+      assert row.status == :failed
+      assert %{status: :failed} = RunStore.get("orphan_fail")
+      assert row.result.status == :failed
+      assert is_binary(row.result.summary)
+    end
+
+    test "all_running/0 returns every running row, unbounded" do
+      for n <- 1..30, do: start_running("run_all_#{n}")
+
+      running = RunStore.all_running()
+      assert length(running) == 30
+      assert Enum.all?(running, fn r -> r.status == :running end)
+    end
+
+    test "start_run/1 accepts an optional posture and preserves it" do
+      start_running("auto_run", %{posture: :autonomous})
+      assert %{posture: :autonomous} = RunStore.get("auto_run")
+    end
+  end
 end

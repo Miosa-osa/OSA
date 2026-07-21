@@ -19,6 +19,21 @@ Status: ✅ done+committed · 🟢 done, opt-in/gated by design · ⏸ deferred 
 | — | post-compaction auto-continue | ✅ | proactive_compaction + wired, e40ba38 |
 | — | **message-derived loop state (crash-resume)** | ✅ | COVERED by a different mechanism — verified: Checkpoint.checkpoint_state runs per-iteration (react_loop:1088), Loop.init restores it (loop.ex:581) + falls back to SessionPersistence, so a mid-turn crash resumes; interleaving is handled by the Steer queue + task-notification drains. opencode's re-derive-every-step architecture would add zero capability. |
 
+## Agent Fleet & Dynamic Workflows (CC-parity)
+| ID | Item | Status | Proof |
+|----|------|--------|-------|
+| F-1 | CC-parity FleetView roster: green `main` root row 0 (never killable), live nodes with agent-type/activity/elapsed/tokens | ✅ | draw_tree + main synthetic row (priv/rust/tui) |
+| F-2 | Inline `←` select mode: ↑/↓ select, Enter attach (read-view stream), x stop, →/Esc back to composer | ✅ | FleetSelect + handle_agents_dashboard_key reuse |
+| F-3 | Full-power fleet spawn: each node a complete OSA loop (`:full` tier, own budget/tools/MCP/memory) with custom agent-type system prompt + tool allowlist | ✅ | SessionManager.ensure_loop + RunStore.start_run + agent-type registry |
+| F-4 | `fleet` tool the agent auto-invokes (spawning is automatic; `/fg`/`←` are optional viewing) | ✅ | spawn_fleet_node + fleet builtin |
+| F-5 | `fleet_node_started/progress/completed` wire events → roster via Agents mutation API | ✅ | Bus.emit + TuiForwarder allowlist + sse.rs/backend.rs/handle_backend.rs arms |
+| F-6 | Subtree cancel (x/stop cascades to descendants) + shared-scratchpad coordination | ✅ | SessionManager.cancel → Loop.cancel BFS |
+| F-7 | Budget survives restart: `max_budget_usd` cap persisted + restored in checkpoint (not just spend) | ✅ | checkpoint.ex persist/restore cap, loop.ex init honors it |
+| F-8 | Dynamic workflows gated behind `ultra` effort tier (fan-out orchestration; below ultra = plain peer-spawn) | ✅ | effort==ultra runtime gate at fan-out entry |
+| F-9 | Fan-out = 16-concurrent bounded pool + FIFO queue-drain (excess queues, never fails) + `N/16` live counter in roster header | ✅ | :max_fleet_agents pool + fleet_summary event + header render |
+| F-10 | Effort ladder `fast/medium/high/xhigh/ultra`, effort drives live thinking indicator ("thinking harder with ultra effort") | ✅ | effort.ex tiers + thinking-config wiring, indicator intact |
+| F-11 | README + docs: "Agent Fleet & Dynamic Workflows" section + effort-levels table | ✅ | README.md (W7) |
+
 ## TUI — composer
 U-T1 @-mention structured attachment ✅ · U-T2 Ctrl+N/P history + Alt+D ✅ · U-T3 ghost-text ✅ ·
 U-T4 bash `!` submit-mode ✅ · U-T5 huge-input pill ✅ · U-T6 frecency recall ✅ · U-T30 @-popup glyphs ✅

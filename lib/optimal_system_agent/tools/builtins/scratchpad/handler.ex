@@ -18,6 +18,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
     2. otherwise the SESSION ROOT of the caller — `Scratchpad.session_root/1`
        walks the parent chain so a spawned worker lands in the SAME directory
        as the coordinator that spawned it.
+
+  ## Concurrency & turn boundaries (W6)
+
+  * **Concurrent writes** — `write`/`append` are serialized through a
+    cluster-wide `:global.trans` lock keyed by the coordination id (see
+    `with_write_lock/2`), so many fleet nodes hammering the SAME shared dir at
+    once cannot interleave/tear an append or race a directory (re)create. Reads,
+    `list`, and `delete` need no lock.
+
+  * **Turn-boundary clear** — the file-based shared scratchpad is DURABLE by
+    design and is deliberately NOT wired to any new-turn clear. Only the
+    in-memory provider thinking-scratchpad (`Agent.Scratchpad`) resets per turn;
+    these are distinct surfaces. Therefore an in-flight workflow's shared
+    entries survive across turns automatically. As defense in depth against an
+    external/hostile mid-run wipe, every mutating op re-seeds the coordination
+    dir (`Scratchpad.ensure_dir/1`) before writing, so coordination self-heals
+    rather than crashing if the directory disappears.
   """
 
   alias OptimalSystemAgent.Events.Bus
@@ -67,7 +84,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
   def execute(%{"action" => "write", "name" => name, "content" => content} = args, ctx) do
     id = scratchpad_id(args, ctx)
 
-    case Scratchpad.write(id, name, content) do
+    result =
+      with_write_lock(id, fn ->
+        # Self-heal: re-create the coordination dir if it was wiped mid-run
+        # (e.g. a turn-boundary clear) so an in-flight workflow keeps writing.
+        Scratchpad.ensure_dir(id)
+        Scratchpad.write(id, name, content)
+      end)
+
+    case result do
       {:ok, path} ->
         emit_activity(id, session_id(args, ctx), name, :write, byte_size(content))
         {:ok, "Wrote #{name} (#{byte_size(content)} bytes) → #{path}"}
@@ -80,7 +105,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
   def execute(%{"action" => "append", "name" => name, "content" => content} = args, ctx) do
     id = scratchpad_id(args, ctx)
 
-    case Scratchpad.append(id, name, content) do
+    result =
+      with_write_lock(id, fn ->
+        Scratchpad.ensure_dir(id)
+        Scratchpad.append(id, name, content)
+      end)
+
+    case result do
       {:ok, path} ->
         emit_activity(id, session_id(args, ctx), name, :append, byte_size(content))
         {:ok, "Appended #{byte_size(content)} bytes to #{name} → #{path}"}
@@ -134,6 +165,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.Scratchpad.Handler do
   end
 
   # ── Private ───────────────────────────────────────────────────────────
+
+  # W6 — concurrency safety. Serialize MUTATING scratchpad ops (`write` /
+  # `append`) so many fleet nodes writing the SAME shared coordination dir at
+  # once cannot interleave/tear an append or race a directory (re)create.
+  #
+  # `:global.trans/2` takes a cluster-wide lock keyed by the coordination id, so
+  # the serialization holds whether the fleet workers are concurrent processes
+  # in one BEAM or nodes across a distributed cluster. The default (infinite)
+  # retry means the lock blocks until acquired rather than aborting; the
+  # `:aborted` clause is defensive (fall through to the raw op so a lock-service
+  # hiccup never drops a write). Reads/list/delete need no lock — a read
+  # tolerates a concurrent write and a delete is a single `File.rm`.
+  defp with_write_lock(id, fun) do
+    case :global.trans({{:osa_scratchpad, id}, self()}, fun) do
+      :aborted -> fun.()
+      result -> result
+    end
+  rescue
+    _ -> fun.()
+  catch
+    _, _ -> fun.()
+  end
 
   # Resolve the shared coordination id. An explicit `team_id` wins (team-scoped
   # sharing); otherwise the session ROOT of the caller — so a spawned worker

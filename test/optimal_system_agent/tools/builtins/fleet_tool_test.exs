@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
       json = inspect(schema)
       refute json =~ "anyOf"
       refute json =~ "oneOf"
+      refute json =~ "Type.Union"
       refute Map.has_key?(schema["properties"], "format")
       assert schema["properties"]["action"]["enum"] == ["spawn", "workflow"]
     end
@@ -62,6 +63,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
 
     test "workflow requires an items array", %{ctx: ctx} do
       assert {:error, msg, -32_602} = Handler.validate(%{"action" => "workflow"}, ctx)
+      assert msg =~ "items"
+    end
+
+    test "workflow rejects an empty items array with a clear message", %{ctx: ctx} do
+      assert {:error, msg, -32_602} =
+               Handler.validate(%{"action" => "workflow", "items" => []}, ctx)
+
+      assert msg =~ "non-empty"
       assert msg =~ "items"
     end
 
@@ -118,6 +127,53 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
 
       assert {:ok, msg} = Handler.execute(%{"action" => "spawn", "task" => "x"}, ctx)
       assert msg =~ "Fleet at capacity (16/16)"
+    end
+
+    test "surfaces an arbitrary spawn failure gracefully (no crash)", %{ctx: ctx} do
+      put_spawn(fn _p, _o -> {:error, :boom} end)
+
+      assert {:ok, msg} = Handler.execute(%{"action" => "spawn", "task" => "x"}, ctx)
+      assert msg =~ "Fleet spawn failed"
+      assert msg =~ "boom"
+    end
+
+    test "unknown agent_type is forwarded as-is (registry default handles fallback)",
+         %{ctx: ctx} do
+      Effort.set(:low)
+      test_pid = self()
+
+      put_spawn(fn parent, opts ->
+        send(test_pid, {:spawned, parent, opts})
+        {:ok, "fleet:#{parent}:1"}
+      end)
+
+      # An unknown agent_type must NOT be an error at the tool boundary — it is
+      # forwarded; the registry resolves unknown types to "general-purpose".
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{"action" => "spawn", "task" => "x", "agent_type" => "does-not-exist"},
+                 ctx
+               )
+
+      assert msg =~ "Spawned full-power fleet node"
+      assert_received {:spawned, _parent, opts}
+      assert Keyword.get(opts, :agent_type) == "does-not-exist"
+    end
+
+    test "blank/omitted agent_type defaults to general-purpose", %{ctx: ctx} do
+      Effort.set(:low)
+      test_pid = self()
+
+      put_spawn(fn parent, opts ->
+        send(test_pid, {:spawned, parent, opts})
+        {:ok, "fleet:#{parent}:1"}
+      end)
+
+      assert {:ok, _msg} =
+               Handler.execute(%{"action" => "spawn", "task" => "x", "agent_type" => "  "}, ctx)
+
+      assert_received {:spawned, _parent, opts}
+      assert Keyword.get(opts, :agent_type) == "general-purpose"
     end
   end
 
