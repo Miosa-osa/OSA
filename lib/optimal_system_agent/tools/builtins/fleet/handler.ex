@@ -195,8 +195,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp format_workflow(total, dropped, results) do
-    ok = Enum.count(results, &match?({:ok, _}, &1))
-    failed = length(results) - ok
+    # Results are the O2 structured node maps (%{gate: :pass | :fail | :skipped, ...}),
+    # not {:ok, _}/{:error, _} tuples — count by the gate field.
+    ok = Enum.count(results, &(is_map(&1) and &1[:gate] == :pass))
+    failed = Enum.count(results, &(is_map(&1) and &1[:gate] == :fail))
+    skipped = Enum.count(results, &(is_map(&1) and &1[:gate] == :skipped))
+
+    skip_note = if skipped > 0, do: ", #{skipped} skipped (budget)", else: ""
 
     drop_note =
       if dropped > 0,
@@ -204,7 +209,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
         else: ""
 
     "Dynamic workflow drained #{total} item#{if total == 1, do: "", else: "s"}#{drop_note}: " <>
-      "#{ok} spawned OK, #{failed} failed. Full-power peers run in the background and " <>
+      "#{ok} spawned OK, #{failed} failed#{skip_note}. Full-power peers run in the background and " <>
       "report on the fleet roster; shared results land in the workflow scratchpad."
   end
 
