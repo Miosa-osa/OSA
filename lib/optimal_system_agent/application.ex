@@ -240,6 +240,15 @@ defmodule OptimalSystemAgent.Application do
     # Workspace SQLite tables (workspaces + task_journals)
     OptimalSystemAgent.Workspace.Store.init()
 
+    # ── Phase 2.5: HTTP port preflight ───────────────────────────────────
+    # BEFORE the supervision tree starts Bandit: if the configured HTTP port
+    # can't be bound (`:eaddrinuse`), Bandit would fail to start → the
+    # `:rest_for_one` supervisor restarts it 10x/60s → the WHOLE app dies with
+    # a cryptic OTP crash dump. Detect it here and exit cleanly with an
+    # actionable message instead. (No silent auto-pick: the TUI reads the SAME
+    # configured port, so a different port would break the TUI↔backend contract.)
+    preflight_http_port!()
+
     # ── Phase 3: Supervision Tree ────────────────────────────────────────
     children =
       platform_repo_children() ++
@@ -323,9 +332,33 @@ defmodule OptimalSystemAgent.Application do
   end
 
   defp http_port do
-    case System.get_env("OSA_HTTP_PORT") do
-      nil -> Application.get_env(:optimal_system_agent, :http_port, 9089)
-      port -> String.to_integer(port)
+    # Single source of truth shared with the boot preflight, `osa doctor`, and
+    # onboarding so they can never disagree about which port OSA binds.
+    OptimalSystemAgent.Net.Port.configured_http_port()
+  end
+
+  # Exit cleanly (no OTP crash dump, no 10x restart loop) when the configured
+  # HTTP port is already taken. Probes WHO holds it so the message is
+  # actionable: another OSA instance vs. a foreign process.
+  defp preflight_http_port! do
+    port = http_port()
+
+    unless OptimalSystemAgent.Net.Port.available?(port) do
+      message =
+        case OptimalSystemAgent.Net.Port.holder_kind(port) do
+          :osa ->
+            "OSA already appears to be running on port #{port} — connect to it, " <>
+              "or set OSA_HTTP_PORT to run a second instance."
+
+          _ ->
+            "Port #{port} is in use by another process — free it " <>
+              "(ss -ltnp | grep #{port}) or set OSA_HTTP_PORT=<other>."
+        end
+
+      IO.puts(:stderr, "\n\e[31m✗ OSA cannot start\e[0m\n\n#{message}\n")
+      # Clean, non-zero exit — NOT a supervisor crash. `halt` skips the OTP
+      # shutdown/crash-report path that produced today's cryptic failure.
+      System.halt(1)
     end
   end
 

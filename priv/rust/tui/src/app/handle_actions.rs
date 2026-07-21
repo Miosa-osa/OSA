@@ -87,8 +87,17 @@ impl App {
                 if self.health_retry_count >= 12 {
                     error!("Backend unreachable after {} attempts", self.health_retry_count);
                     self.transition(AppState::Idle);
+                    // Name the most common real cause (HTTP port already in use, so
+                    // the backend crashed on start) and point at a single next step.
+                    // Pull the actual configured port from the client's base_url so
+                    // the diagnostic command is copy-pasteable.
+                    let port = port_from_base_url(self.client.base_url());
                     self.toasts.push(
-                        "Backend unreachable — start it manually or check config".into(),
+                        format!(
+                            "Backend unreachable on port {port}. It may have failed to start \
+                             because the port ({port}) is already in use. Run `osa doctor` to \
+                             diagnose, or check: ss -ltnp | grep {port}"
+                        ),
                         crate::components::toast::ToastLevel::Error,
                     );
                     return;
@@ -1612,6 +1621,22 @@ fn osa_home_dir() -> std::path::PathBuf {
         .map(|d| d.home_dir().to_path_buf())
         .or_else(|| std::env::var("HOME").ok().map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Best-effort extraction of the HTTP port the TUI is trying to reach, so the
+/// "backend unreachable" toast can name a copy-pasteable diagnostic command.
+/// Parses the port out of the client's base_url (e.g. "http://localhost:9089");
+/// falls back to $OSA_HTTP_PORT and finally the compiled default (9089).
+fn port_from_base_url(base_url: &str) -> String {
+    // Trim scheme, then take host:port before any path, and grab the ":port".
+    let after_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    if let Some(port) = authority.rsplit(':').next() {
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return port.to_string();
+        }
+    }
+    std::env::var("OSA_HTTP_PORT").unwrap_or_else(|_| "9089".to_string())
 }
 
 /// Read user name from ~/.osa/USER.md (sync, for welcome message)

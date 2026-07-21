@@ -8,7 +8,6 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   """
 
   @app :optimal_system_agent
-  @http_port 9089
   @separator "────────────────────────────────"
 
   @doc "Run all health checks and print the report."
@@ -207,20 +206,41 @@ defmodule OptimalSystemAgent.CLI.Doctor do
 
   defp check_api do
     port = resolve_http_port()
+    api_status(OptimalSystemAgent.Net.Port.holder_kind(port), port)
+  end
 
-    case :gen_tcp.connect(~c"127.0.0.1", port, [], 2_000) do
-      {:ok, socket} ->
-        :gen_tcp.close(socket)
-        {:pass, "API", ":#{port} (responding)"}
+  @doc """
+  Map a port `holder` classification into the `{status, "API", detail}` tuple
+  the report prints. Public so the three distinct states can be tested without
+  standing up real sockets:
 
-      {:error, _} ->
-        {:fail, "API", ":#{port} (not responding)"}
+    * `:osa`     — OSA is running and answering → `:pass`
+    * `:free`    — port is free, OSA simply isn't running → `:fail` (start it)
+    * `:foreign` — port is occupied by a NON-OSA process (the blind spot the
+      old TCP-connect check reported as a generic "responding") → `:fail` with
+      the actionable fix.
+  """
+  @spec api_status(OptimalSystemAgent.Net.Port.holder(), non_neg_integer()) ::
+          {:pass | :fail, String.t(), String.t()}
+  def api_status(kind, port) do
+    case kind do
+      :osa ->
+        {:pass, "API", ":#{port} (OSA responding)"}
+
+      :free ->
+        {:fail, "API", ":#{port} (OSA not running — start with 'osa')"}
+
+      :foreign ->
+        {:fail, "API",
+         ":#{port} in use by another process — free it (ss -ltnp | grep #{port}) or set OSA_HTTP_PORT"}
     end
   end
 
   defp check_provider do
-    # Try Ollama first (most common local provider)
-    ollama_url = System.get_env("OLLAMA_HOST") || "http://localhost:11434"
+    # Try Ollama first (most common local provider). OLLAMA_URL is the var the
+    # rest of the app reads (onboarding, providers, setup) — OLLAMA_HOST was a
+    # misalignment that made doctor probe the wrong endpoint.
+    ollama_url = System.get_env("OLLAMA_URL") || "http://localhost:11434"
 
     case detect_ollama(ollama_url) do
       {:ok, _first_pulled_model} ->
@@ -405,16 +425,9 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   end
 
   defp resolve_http_port do
-    case System.get_env("OSA_HTTP_PORT") do
-      nil ->
-        Application.get_env(@app, :http_port, @http_port)
-
-      port_str ->
-        case Integer.parse(port_str) do
-          {port, _} -> port
-          :error -> @http_port
-        end
-    end
+    # Delegate to the shared helper so doctor, boot preflight, and onboarding
+    # resolve the port identically.
+    OptimalSystemAgent.Net.Port.configured_http_port()
   end
 
   defp detect_ollama(base_url) do

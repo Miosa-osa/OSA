@@ -54,6 +54,11 @@ defmodule OptimalSystemAgent.CLI.Setup do
   def run do
     Prompt.intro("OSA Setup")
 
+    # Warn early if the HTTP port is already taken, so a fresh user is told
+    # DURING onboarding rather than "completing setup" then crashing on first
+    # launch (the boot preflight would halt). Non-fatal — setup can proceed.
+    warn_if_port_unavailable()
+
     # Step 1: Provider
     provider = Prompt.select("Choose your AI provider", @providers)
 
@@ -103,6 +108,33 @@ defmodule OptimalSystemAgent.CLI.Setup do
         :ok
       end
     end
+  end
+
+  @doc """
+  Warn (non-fatally) during onboarding if the configured HTTP port is already
+  in use, using the SAME `Net.Port` helper the boot preflight and doctor use.
+  Public so the setup wizard can share this one formatting/decision path.
+  """
+  def warn_if_port_unavailable do
+    port = OptimalSystemAgent.Net.Port.configured_http_port()
+
+    unless OptimalSystemAgent.Net.Port.available?(port) do
+      message =
+        case OptimalSystemAgent.Net.Port.holder_kind(port) do
+          :osa ->
+            "OSA already appears to be running on port #{port}.\n" <>
+              "You can connect to it, or set OSA_HTTP_PORT to run a second instance."
+
+          _ ->
+            "Port #{port} is in use by another process.\n" <>
+              "Free it (ss -ltnp | grep #{port}) or set OSA_HTTP_PORT=<other>\n" <>
+              "before launching OSA — otherwise it won't start."
+        end
+
+      Prompt.note(message, "Heads up: port #{port} is busy")
+    end
+
+    :ok
   end
 
   @doc "Check if setup is needed and run it if so."

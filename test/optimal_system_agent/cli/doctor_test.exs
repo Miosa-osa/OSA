@@ -64,4 +64,23 @@ defmodule OptimalSystemAgent.CLI.DoctorTest do
                "totally_unknown_provider"
     end
   end
+
+  describe "api_status/2 — the three port states" do
+    test "OSA responding is a pass" do
+      assert {:pass, "API", detail} = Doctor.api_status(:osa, 9089)
+      assert detail =~ "OSA responding"
+    end
+
+    test "port free (OSA not running) is a fail that tells you to start it" do
+      assert {:fail, "API", detail} = Doctor.api_status(:free, 9089)
+      assert detail =~ "not running"
+    end
+
+    test "port held by a foreign process is a fail with the actionable fix (the old blind spot)" do
+      assert {:fail, "API", detail} = Doctor.api_status(:foreign, 9089)
+      assert detail =~ "in use by another process"
+      assert detail =~ "ss -ltnp"
+      assert detail =~ "OSA_HTTP_PORT"
+    end
+  end
 end

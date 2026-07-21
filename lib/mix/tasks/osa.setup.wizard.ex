@@ -53,6 +53,10 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
     Prompt.intro("OSA Agent Setup")
     Prompt.note(@security_note, "Before we start")
 
+    # Warn early if the HTTP port is taken (shared Net.Port helper via Setup) so
+    # onboarding surfaces it before the user finishes and hits the boot preflight.
+    OptimalSystemAgent.CLI.Setup.warn_if_port_unavailable()
+
     unless Prompt.confirm("Ready to set up?") do
       IO.puts("\e[2m│  Cancelled. Run 'mix osa.setup.wizard' when ready.\e[0m")
       exit(:normal)
