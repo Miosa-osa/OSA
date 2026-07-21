@@ -581,6 +581,91 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
     end
   end
 
+  describe "fan_out/3 completion wait (#1 — the make-or-break fix)" do
+    setup do
+      Effort.set(:ultra)
+      :ok
+    end
+
+    test "an isolated node WAITS for completion, then captures its (non-empty) diff" do
+      parent = "parent-await-diff-#{System.unique_integer([:positive])}"
+      test_pid = self()
+      {:ok, order} = Agent.start_link(fn -> [] end)
+
+      worktree_fun = fn _p, _o -> {:ok, %{path: "/tmp/wt-#{System.unique_integer([:positive])}", branch: "osa-wt-x"}} end
+
+      # The await seam records that it ran (and returns a terminal status) BEFORE
+      # the diff seam is consulted — proving spawn→wait→capture ordering.
+      await_fun = fn node_id ->
+        Agent.update(order, &(&1 ++ [:awaited]))
+        send(test_pid, {:awaited, node_id})
+        :completed
+      end
+
+      # The diff the node produced only becomes visible AFTER it finished; the
+      # seam returns a non-empty set to prove fan_out captured real work.
+      diff_fun = fn _path ->
+        Agent.update(order, &(&1 ++ [:diffed]))
+        ["lib/x.ex", "lib/y.ex"]
+      end
+
+      spawn_fun = fn _p, opts -> {:ok, Keyword.get(opts, :task)} end
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, ["do-work"],
+                 isolation: :worktree,
+                 worktree_fun: worktree_fun,
+                 spawn_fun: spawn_fun,
+                 await_fun: await_fun,
+                 diff_fun: diff_fun
+               )
+
+      assert result.gate == :pass
+      assert result.worktree_ref == "osa-wt-x"
+      # The diff was captured AFTER the wait — non-empty, so the finalizer has
+      # something to merge (the whole point of the fix).
+      assert result.files_changed == ["lib/x.ex", "lib/y.ex"]
+      assert_received {:awaited, "do-work"}
+      # Ordering: awaited strictly before diffed.
+      assert Agent.get(order, & &1) == [:awaited, :diffed]
+      Agent.stop(order)
+    end
+
+    test "the default await BLOCKS a fan_out item until the node reaches terminal state" do
+      Application.put_env(:optimal_system_agent, :fleet_await_poll_ms, 20)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :fleet_await_poll_ms) end)
+
+      parent = "parent-real-await-#{System.unique_integer([:positive])}"
+      node = "await-node-#{System.unique_integer([:positive])}"
+
+      # spawn registers the node as :running (as the real path does), then an
+      # async worker flips it to :completed ~60ms later. The default await must
+      # poll RunStore and not return until that terminal transition.
+      spawn_fun = fn p, _opts ->
+        RunStore.start_run(%{agent_id: node, parent_session_id: p, role: "gp", task: "t"})
+
+        spawn(fn ->
+          Process.sleep(60)
+          RunStore.complete(node, %{status: :completed, summary: "done"})
+        end)
+
+        {:ok, node}
+      end
+
+      t0 = System.monotonic_time(:millisecond)
+
+      assert {:ok, %{results: [result]}} =
+               Fleet.fan_out(parent, [[node_id: node, task: "t"]], spawn_fun: spawn_fun)
+
+      elapsed = System.monotonic_time(:millisecond) - t0
+
+      assert result.gate == :pass
+      # It genuinely blocked until the async completion (~60ms), not returned at
+      # spawn time.
+      assert elapsed >= 40
+    end
+  end
+
   defp fake_spawn do
     fn _parent, opts -> {:ok, Keyword.get(opts, :task, "done")} end
   end

@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
   """
 
   alias OptimalSystemAgent.Agent.Fleet
+  alias OptimalSystemAgent.Agent.Fleet.Finalizer
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Tools.UseContext
 
@@ -132,11 +133,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
   def execute(%{"action" => "workflow"} = args, ctx) do
     parent = resolve_parent_id(args, ctx)
     items = Map.get(args, "items", [])
-    base_opts = [spawn_fun: spawn_fun()] ++ workflow_opts(args)
+    isolate? = Map.get(args, "isolation", false) == true
+    base_opts = [spawn_fun: spawn_fun()] ++ worktree_seam() ++ workflow_opts(args, isolate?)
 
     case Fleet.fan_out(parent, items, base_opts) do
       {:ok, %{total: total, dropped: dropped, results: results}} ->
-        {:ok, format_workflow(total, dropped, results)}
+        {:ok, format_workflow(total, dropped, results) <> maybe_finalize(parent, args, isolate?, results)}
 
       {:error, :ultra_required} ->
         {:ok,
@@ -184,11 +186,91 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Handler do
 
   # Base opts forwarded to every workflow item. Per-item task comes from `items`;
   # `task` here is the umbrella instruction used for the scratchpad header.
-  defp workflow_opts(args) do
+  # `isolate?` opts each item into its own CoW worktree (O1) so the finalizer has
+  # disjoint diffs to merge.
+  defp workflow_opts(args, isolate?) do
     [agent_type: agent_type(args)]
     |> maybe_put(:task, Map.get(args, "task"))
     |> maybe_put(:working_dir, Map.get(args, "working_dir"))
+    |> maybe_put_isolation(isolate?)
   end
+
+  defp maybe_put_isolation(opts, true), do: Keyword.put(opts, :isolation, :worktree)
+  defp maybe_put_isolation(opts, _false), do: opts
+
+  # Optional worktree-creation seam so the handler's isolation path is testable
+  # without booting real git worktrees (mirrors the :fleet_spawn_fun seam). Absent
+  # by default → fan_out uses the real FastWorktree creator.
+  defp worktree_seam do
+    case Application.get_env(:optimal_system_agent, :fleet_worktree_fun) do
+      fun when is_function(fun, 2) -> [worktree_fun: fun]
+      _ -> []
+    end
+  end
+
+  # Injectable finalizer (default `Fleet.Finalizer.finalize/3`) so the tool's
+  # finalize wiring is unit-testable without real git.
+  defp finalize_fun do
+    Application.get_env(:optimal_system_agent, :fleet_finalize_fun, &Finalizer.finalize/3)
+  end
+
+  # O3 wiring: after the wave, iff `finalize` was requested AND isolation actually
+  # ran, merge the disjoint worktree diffs → run the authoritative `gate` → commit
+  # `commit_message` when green, and fold the finalizer's result into the message.
+  # `finalize` without `isolation` has nothing to merge, so it is skipped (noted).
+  defp maybe_finalize(parent, args, isolate?, results) do
+    finalize? = Map.get(args, "finalize", false) == true
+
+    cond do
+      not finalize? ->
+        ""
+
+      not isolate? ->
+        "\n\nFinalize skipped: `finalize` requires `isolation: true` — there are " <>
+          "no isolated worktree diffs to merge."
+
+      true ->
+        fin = finalize_fun().(parent, results, gate_cmds: gate_cmds(args), commit: commit_message(args))
+        format_finalize(fin)
+    end
+  end
+
+  defp gate_cmds(args) do
+    case Map.get(args, "gate") do
+      list when is_list(list) -> Enum.filter(list, &is_binary/1)
+      _ -> []
+    end
+  end
+
+  defp commit_message(args) do
+    case Map.get(args, "commit_message") do
+      m when is_binary(m) ->
+        case String.trim(m) do
+          "" -> nil
+          _ -> m
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp format_finalize(%{} = fin) do
+    merged = fin |> Map.get(:merged, []) |> length()
+    conflicts = Map.get(fin, :conflicts, [])
+    gate = Map.get(fin, :gate)
+    committed = Map.get(fin, :committed, false)
+
+    conflict_note =
+      if conflicts == [],
+        do: "no conflicts",
+        else: "#{length(conflicts)} conflict(s): #{Enum.join(conflicts, ", ")}"
+
+    "\n\nFinalize: merged #{merged} file(s), #{conflict_note}, gate #{gate}, " <>
+      "committed #{committed}."
+  end
+
+  defp format_finalize(_), do: "\n\nFinalize: no result."
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, _key, ""), do: opts

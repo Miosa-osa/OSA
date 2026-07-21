@@ -214,4 +214,111 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.ToolTest do
       for t <- ~w(a b c), do: assert_received({:item, ^t, "general-purpose"})
     end
   end
+
+  describe "execute/2 — workflow isolation + finalize wiring" do
+    test "isolation:true runs each item in its own worktree", %{ctx: ctx} do
+      Effort.set(:ultra)
+      test_pid = self()
+
+      # Inject a fake worktree creator so no real git is touched; a non-existent
+      # path means the default diff read is [] (fine — merge is mocked below).
+      Application.put_env(:optimal_system_agent, :fleet_worktree_fun, fn _p, _o ->
+        send(test_pid, :worktree_created)
+        {:ok, %{path: "/tmp/no-such-#{System.unique_integer([:positive])}", branch: "br"}}
+      end)
+
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :fleet_worktree_fun) end)
+
+      put_spawn(fn _p, o -> {:ok, Keyword.get(o, :task)} end)
+
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{"action" => "workflow", "items" => ["a", "b"], "isolation" => true},
+                 ctx
+               )
+
+      assert msg =~ "2 spawned OK"
+      # One worktree per item → isolation reached fan_out's isolated spawn path.
+      assert_received :worktree_created
+      assert_received :worktree_created
+    end
+
+    test "finalize:true with isolation calls the finalizer and folds its result in",
+         %{ctx: ctx} do
+      Effort.set(:ultra)
+      test_pid = self()
+
+      Application.put_env(:optimal_system_agent, :fleet_worktree_fun, fn _p, _o ->
+        {:ok, %{path: "/tmp/wt-#{System.unique_integer([:positive])}", branch: "br"}}
+      end)
+
+      Application.put_env(:optimal_system_agent, :fleet_finalize_fun, fn parent, results, opts ->
+        send(test_pid, {:finalized, parent, results, opts})
+        %{merged: ["lib/a.ex"], conflicts: [], gate: :pass, gate_output: "", committed: true, message: "ok"}
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :fleet_worktree_fun)
+        Application.delete_env(:optimal_system_agent, :fleet_finalize_fun)
+      end)
+
+      put_spawn(fn _p, o -> {:ok, Keyword.get(o, :task)} end)
+
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{
+                   "action" => "workflow",
+                   "items" => ["a"],
+                   "isolation" => true,
+                   "finalize" => true,
+                   "gate" => ["mix compile", "mix test"],
+                   "commit_message" => "feat: land wave"
+                 },
+                 ctx
+               )
+
+      assert_received {:finalized, _parent, results, opts}
+      assert is_list(results)
+      assert Keyword.get(opts, :gate_cmds) == ["mix compile", "mix test"]
+      assert Keyword.get(opts, :commit) == "feat: land wave"
+
+      # The finalizer's outcome is folded into the tool's returned message.
+      assert msg =~ "Finalize: merged 1 file(s)"
+      assert msg =~ "no conflicts"
+      assert msg =~ "gate pass"
+      assert msg =~ "committed true"
+    end
+
+    test "finalize:true WITHOUT isolation is skipped (finalizer never called)",
+         %{ctx: ctx} do
+      Effort.set(:ultra)
+
+      Application.put_env(:optimal_system_agent, :fleet_finalize_fun, fn _p, _r, _o ->
+        raise "finalizer must not be called without isolation"
+      end)
+
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :fleet_finalize_fun) end)
+
+      put_spawn(fn _p, o -> {:ok, Keyword.get(o, :task)} end)
+
+      assert {:ok, msg} =
+               Handler.execute(
+                 %{"action" => "workflow", "items" => ["a"], "finalize" => true},
+                 ctx
+               )
+
+      assert msg =~ "Finalize skipped"
+      assert msg =~ "isolation: true"
+    end
+
+    test "workflow without finalize appends no finalize note", %{ctx: ctx} do
+      Effort.set(:ultra)
+      put_spawn(fn _p, o -> {:ok, Keyword.get(o, :task)} end)
+
+      assert {:ok, msg} =
+               Handler.execute(%{"action" => "workflow", "items" => ["a"]}, ctx)
+
+      refute msg =~ "Finalize"
+    end
+  end
 end

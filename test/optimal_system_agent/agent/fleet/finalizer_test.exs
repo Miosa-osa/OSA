@@ -180,7 +180,9 @@ defmodule OptimalSystemAgent.Agent.Fleet.FinalizerTest do
       assert res.committed == true
 
       calls = Agent.get(pid, & &1)
-      assert ["add", "-A"] in calls
+      # Scoped staging: the merged file is staged by pathspec, never `git add -A`.
+      refute ["add", "-A"] in calls
+      assert ["add", "--", "lib/a.ex"] in calls
       assert ["commit", "-m", "feat(fleet): merge wave"] in calls
     end
 
@@ -230,6 +232,52 @@ defmodule OptimalSystemAgent.Agent.Fleet.FinalizerTest do
 
     test "does not commit when no :commit message given", %{calls: pid, git: git} do
       res = Finalizer.finalize("sess", [node("a", ["lib/a.ex"])], git_fun: git)
+      assert res.committed == false
+      refute Enum.any?(Agent.get(pid, & &1), &match?(["commit" | _], &1))
+    end
+  end
+
+  describe "scoped staging (never git add -A)" do
+    test "stages the merged worktree diff AND non-isolated node files by pathspec",
+         %{calls: pid, git: git} do
+      nodes = [
+        # isolated → checked out into the working tree (part of `merged`)
+        node("a", ["lib/a.ex"], worktree_ref: "ref-a"),
+        # non-isolated → its edits already live in the working tree; must still be
+        # staged explicitly so the commit includes them
+        node("b", ["lib/b.ex"], worktree_ref: nil)
+      ]
+
+      res = Finalizer.finalize("sess", nodes, git_fun: git, commit: "feat: scoped")
+
+      assert res.committed == true
+
+      calls = Agent.get(pid, & &1)
+      # The blanket over-staging is gone.
+      refute ["add", "-A"] in calls
+      # Both the merged and the non-isolated file are staged, each by pathspec.
+      assert ["add", "--", "lib/a.ex"] in calls
+      assert ["add", "--", "lib/b.ex"] in calls
+    end
+
+    test "a failing scoped `git add` aborts the commit (no unrelated sweep)",
+         %{calls: pid} do
+      failing_add = fn
+        ["add" | _] = args, _cwd ->
+          Agent.update(pid, fn c -> c ++ [args] end)
+          {"fatal: pathspec", 1}
+
+        args, _cwd ->
+          Agent.update(pid, fn c -> c ++ [args] end)
+          {"ok", 0}
+      end
+
+      res =
+        Finalizer.finalize("sess", [node("a", ["lib/a.ex"], worktree_ref: nil)],
+          git_fun: failing_add,
+          commit: "feat: x"
+        )
+
       assert res.committed == false
       refute Enum.any?(Agent.get(pid, & &1), &match?(["commit" | _], &1))
     end

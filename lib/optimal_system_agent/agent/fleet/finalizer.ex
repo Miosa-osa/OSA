@@ -119,7 +119,13 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
     case merge_nodes(node_results, conflicts, cwd, git_fun) do
       {:ok, merged} ->
         {gate, gate_output} = run_gate(gate_cmds, cwd, cmd_fun)
-        {committed, commit_note} = maybe_commit(commit_msg, conflicts, gate, cwd, git_fun)
+        # Stage ONLY the files this finalize is responsible for — the merged
+        # worktree diffs PLUS the non-conflicting files of non-isolated non-error
+        # nodes (whose edits already live in the working tree). A blanket
+        # `git add -A` would sweep in unrelated dirty files / secrets under the
+        # orchestration commit; scoped staging keeps the commit honest.
+        stage_files = staged_files(node_results, merged, conflicts)
+        {committed, commit_note} = maybe_commit(commit_msg, conflicts, gate, stage_files, cwd, git_fun)
 
         result = %{
           merged: merged,
@@ -236,25 +242,62 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
     end)
   end
 
+  # ── Staging set (scoped — never `git add -A`) ────────────────────────
+
+  # The files this orchestration commit is allowed to stage: the merged worktree
+  # diffs UNION the non-conflicting files of non-isolated non-error nodes (their
+  # edits are already in the working tree, so they were never checked out into
+  # `merged`). Conflicted files are excluded. De-duped + sorted for stable calls.
+  defp staged_files(node_results, merged, conflicts) do
+    conflict_set = MapSet.new(conflicts)
+
+    non_isolated =
+      node_results
+      |> Enum.reject(&node_error?/1)
+      |> Enum.filter(&is_nil(worktree_ref_of(&1)))
+      |> Enum.flat_map(fn node -> node |> files_of() |> Enum.uniq() end)
+
+    (merged ++ non_isolated)
+    |> Enum.reject(&MapSet.member?(conflict_set, &1))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
   # ── Commit (attribution-clean, never push) ───────────────────────────
 
-  defp maybe_commit(nil, _conflicts, _gate, _cwd, _git_fun), do: {false, "no commit requested"}
+  defp maybe_commit(nil, _conflicts, _gate, _files, _cwd, _git_fun),
+    do: {false, "no commit requested"}
 
-  defp maybe_commit(_msg, conflicts, _gate, _cwd, _git_fun) when conflicts != [],
+  defp maybe_commit(_msg, conflicts, _gate, _files, _cwd, _git_fun) when conflicts != [],
     do: {false, "not committed: #{length(conflicts)} conflict(s)"}
 
-  defp maybe_commit(_msg, _conflicts, :fail, _cwd, _git_fun),
+  defp maybe_commit(_msg, _conflicts, :fail, _files, _cwd, _git_fun),
     do: {false, "not committed: gate failed"}
 
-  defp maybe_commit(msg, _conflicts, _gate, cwd, git_fun) do
-    with {_out, 0} <- git_fun.(["add", "-A"], cwd),
+  defp maybe_commit(_msg, _conflicts, _gate, [], _cwd, _git_fun),
+    do: {false, "not committed: no files to stage"}
+
+  defp maybe_commit(msg, _conflicts, _gate, files, cwd, git_fun) do
+    with :ok <- add_files(files, cwd, git_fun),
          # NOTE: message is passed verbatim — NO Co-Authored-By / AI footer is
          # ever appended here. Attribution stays exactly what the caller wrote.
          {_out2, 0} <- git_fun.(["commit", "-m", msg], cwd) do
       {true, "committed"}
     else
+      {:error, out} -> {false, "commit failed: #{out}"}
       {out, _code} -> {false, "commit failed: #{out}"}
     end
+  end
+
+  # Stage each scoped file individually via a pathspec `git add -- <file>` — never
+  # `-A` — so nothing outside the merged/owned set can be swept into the commit.
+  defp add_files(files, cwd, git_fun) do
+    Enum.reduce_while(files, :ok, fn file, :ok ->
+      case git_fun.(["add", "--", file], cwd) do
+        {_out, 0} -> {:cont, :ok}
+        {out, _code} -> {:halt, {:error, out}}
+      end
+    end)
   end
 
   # ── Summary ──────────────────────────────────────────────────────────

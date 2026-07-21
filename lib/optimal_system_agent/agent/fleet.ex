@@ -151,6 +151,15 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     * `:worktree_fun` — 2-arity `(parent, item_opts) -> {:ok, %{path, branch}} |
       {:error, term}` override for isolated worktree creation (defaults to
       `FastWorktree.create/2`; lets tests inject fake refs without real git).
+    * `:await_fun` — 1-arity `(node_id) -> terminal_status` override for the
+      per-item COMPLETION WAIT. After a node is spawned (its loop merely STARTS),
+      fan_out BLOCKS on this before reading the worktree diff so `files_changed`
+      captures the node's finished work, not the empty pre-work tree. Defaults to
+      polling `RunStore.get(node_id).status` until `:completed | :failed |
+      :cancelled` (or the per-node timeout). An unknown/never-registered id
+      (e.g. a fake test spawn) returns immediately.
+    * `:diff_fun` — 1-arity `(worktree_path) -> [binary]` override for deriving a
+      node's changed files (defaults to a real `git status --porcelain` read).
     * `:budget_fun` — 1-arity `(parent) -> boolean` override for the pre-spawn
       tree-budget guard (defaults to a `Loop.get_state` + `Accounting`
       rollup check).
@@ -217,8 +226,23 @@ defmodule OptimalSystemAgent.Agent.Fleet do
       spawn_fun: Keyword.get(opts, :spawn_fun, &spawn_fleet_node/2),
       worktree_fun: Keyword.get(opts, :worktree_fun, &default_create_worktree/2),
       budget_fun: Keyword.get(opts, :budget_fun, &default_budget_exhausted?/1),
+      # Completion-wait seam: block until a spawned node reaches a terminal state
+      # so the worktree diff we read reflects its COMPLETED work (not the empty
+      # pre-work tree). Overridable so unit tests need no real loops.
+      await_fun: Keyword.get(opts, :await_fun, &default_await_completion/1),
+      # Diff seam: repo-relative files a node changed in its worktree. Defaults to
+      # a real `git status` read; injectable so tests assert a non-empty diff.
+      diff_fun: Keyword.get(opts, :diff_fun, &changed_files/1),
       isolation: Keyword.get(opts, :isolation),
-      base_opts: Keyword.drop(opts, [:spawn_fun, :worktree_fun, :budget_fun, :isolation]),
+      base_opts:
+        Keyword.drop(opts, [
+          :spawn_fun,
+          :worktree_fun,
+          :budget_fun,
+          :await_fun,
+          :diff_fun,
+          :isolation
+        ]),
       budget_stopped: :atomics.new(1, [])
     }
 
@@ -326,15 +350,16 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   end
 
   # Isolated spawn: create a CoW worktree, point the node's working_dir at it,
-  # spawn, then derive files_changed + record the branch ref. Best-effort — a
-  # worktree failure logs and falls back to a non-isolated spawn.
+  # spawn, WAIT for the node to finish, then derive files_changed + record the
+  # branch ref. Best-effort — a worktree failure logs and falls back to a
+  # non-isolated spawn.
   defp spawn_item(parent, merged, hint, %{isolation: :worktree} = ctx) do
     case safe_worktree(ctx, parent, merged) do
       {:ok, %{path: path, branch: branch}} ->
         merged
         |> Keyword.put(:working_dir, path)
         |> then(&ctx.spawn_fun.(parent, &1))
-        |> finalize_isolated(hint, path, branch)
+        |> await_and_finalize_isolated(ctx, hint, path, branch)
 
       {:error, reason} ->
         Logger.warning(
@@ -347,18 +372,51 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   end
 
   defp spawn_item(parent, merged, hint, ctx) do
-    ctx.spawn_fun.(parent, merged) |> spawn_result(hint, nil, [])
+    case ctx.spawn_fun.(parent, merged) do
+      {:ok, node_id} = ok ->
+        # Spawn only STARTS the node — block until it reaches a terminal state so
+        # the result reflects completion. Non-isolated nodes edit the shared tree
+        # directly, so there is no per-node diff to capture (files stay []).
+        _ = safe_await(ctx, node_id)
+        spawn_result(ok, node_id, nil, [])
+
+      other ->
+        spawn_result(other, hint, nil, [])
+    end
   end
 
-  # Map a successful isolated spawn to a pass result carrying the branch ref +
-  # (best-effort) changed files; a failed one keeps the branch as worktree_ref.
-  defp finalize_isolated({:ok, node_id} = ok, _hint, path, branch) do
+  # A successful isolated spawn: BLOCK on the node's completion (the make-or-break
+  # fix — the spawn returned the instant the loop started, so reading the diff now
+  # WITHOUT waiting would always see an empty worktree), then capture the branch
+  # ref + the node's now-materialized changed files. A failed spawn keeps the
+  # branch as worktree_ref with no diff.
+  defp await_and_finalize_isolated({:ok, node_id} = ok, ctx, _hint, path, branch) do
+    _ = safe_await(ctx, node_id)
     _ = safe_attach_snapshot(node_id, branch)
-    spawn_result(ok, node_id, branch, changed_files(path))
+    spawn_result(ok, node_id, branch, safe_diff(ctx, path))
   end
 
-  defp finalize_isolated(other, hint, _path, branch) do
+  defp await_and_finalize_isolated(other, _ctx, hint, _path, branch) do
     spawn_result(other, hint, branch, [])
+  end
+
+  # Block on a node's terminal state via the (injectable) await seam; degrade to
+  # `:unknown` on any failure so the workflow never crashes on the wait.
+  defp safe_await(ctx, node_id) do
+    ctx.await_fun.(node_id)
+  rescue
+    _ -> :unknown
+  catch
+    _, _ -> :unknown
+  end
+
+  # Derive changed files via the (injectable) diff seam; degrade to [].
+  defp safe_diff(ctx, path) do
+    ctx.diff_fun.(path)
+  rescue
+    _ -> []
+  catch
+    _, _ -> []
   end
 
   # Turn the spawn_fun return into a structured result map.
@@ -464,6 +522,51 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
   defp safe_attach_snapshot(_node_id, _ref), do: :ok
 
+  # ── completion wait ────────────────────────────────────────────────────
+
+  @default_await_poll_ms 250
+
+  # Default per-item completion wait: poll RunStore until the node reaches a
+  # terminal state (`:completed | :failed | :cancelled`), bounded by the same
+  # per-node timeout the queue drain enforces. `spawn_fleet_node/2` registers the
+  # run (status `:running`) BEFORE returning, so the real path always has a row to
+  # poll; a never-registered id (a fake test spawn) returns `:unknown` at once so
+  # unit tests don't block. Returns the terminal status atom, or `:timeout` /
+  # `:unknown`.
+  defp default_await_completion(node_id) when is_binary(node_id) and node_id != "" do
+    deadline = System.monotonic_time(:millisecond) + node_timeout_ms()
+    await_loop(node_id, deadline)
+  end
+
+  defp default_await_completion(_), do: :unknown
+
+  defp await_loop(node_id, deadline) do
+    case RunStore.get(node_id) do
+      %{status: status} when status in [:completed, :failed, :cancelled] ->
+        status
+
+      nil ->
+        # Never registered — nothing to wait on (fake test spawn / stale id).
+        :unknown
+
+      _running ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          :timeout
+        else
+          Process.sleep(await_poll_ms())
+          await_loop(node_id, deadline)
+        end
+    end
+  rescue
+    _ -> :unknown
+  catch
+    :exit, _ -> :unknown
+  end
+
+  defp await_poll_ms do
+    Application.get_env(:optimal_system_agent, :fleet_await_poll_ms, @default_await_poll_ms)
+  end
+
   # Repo-relative paths a node modified in its worktree (best-effort `git status
   # --porcelain`). `[]` when the tree is clean, git is unavailable, or the path
   # doesn't exist (e.g. a fake worktree ref in unit tests).
@@ -481,15 +584,8 @@ defmodule OptimalSystemAgent.Agent.Fleet do
 
   defp changed_files_git(path) do
     case System.cmd("git", ["status", "--porcelain", "-z"], cd: path, stderr_to_stdout: true) do
-      {out, 0} ->
-        out
-        |> String.split(<<0>>, trim: true)
-        |> Enum.map(&porcelain_path/1)
-        |> Enum.reject(&(&1 == ""))
-        |> Enum.uniq()
-
-      _ ->
-        []
+      {out, 0} -> parse_porcelain_z(out)
+      _ -> []
     end
   rescue
     _ -> []
@@ -497,13 +593,57 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     _, _ -> []
   end
 
-  # Strip the leading 3-char `XY ` porcelain status prefix to recover the
-  # repo-relative path. Best-effort: shorter/odd fields degrade to "".
-  defp porcelain_path(entry) when byte_size(entry) > 3 do
-    entry |> String.slice(3..-1//1) |> String.trim()
+  @doc """
+  Parse `git status --porcelain -z` output into a de-duplicated list of
+  repo-relative paths.
+
+  The `-z` format is NUL-separated and, critically, a rename/copy entry
+  (`R`/`C` in the XY status) spans TWO NUL-separated fields: the destination
+  path (carrying the `XY ` status prefix) followed by a BARE origin path with
+  NO status prefix. A naive `split(NUL) |> map(strip 3 chars)` corrupts that
+  origin field (it slices off its first 3 bytes) and silently produces a wrong
+  path — which then breaks the finalizer's `git checkout <ref> -- <path>` merge.
+
+  This parser walks entries sequentially and, on a rename/copy, consumes the
+  following bare field as the origin path verbatim. Both the destination and
+  origin paths are returned (both are genuinely changed). Public + `@doc false`
+  so the NUL/rename parsing is unit-testable without invoking real git.
+  """
+  @doc false
+  @spec parse_porcelain_z(binary()) :: [binary()]
+  def parse_porcelain_z(out) when is_binary(out) do
+    out
+    |> String.split(<<0>>, trim: true)
+    |> parse_porcelain_entries([])
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
   end
 
-  defp porcelain_path(_), do: ""
+  def parse_porcelain_z(_), do: []
+
+  # Sequential walk: each entry is `XY <path>`; a rename/copy also consumes the
+  # NEXT (bare, unprefixed) field as the origin path.
+  defp parse_porcelain_entries([], acc), do: Enum.reverse(acc)
+
+  defp parse_porcelain_entries([entry | rest], acc) when byte_size(entry) > 3 do
+    xy = binary_part(entry, 0, 2)
+    path = entry |> binary_part(3, byte_size(entry) - 3) |> String.trim()
+
+    if rename_or_copy?(xy) do
+      case rest do
+        [orig | rest2] -> parse_porcelain_entries(rest2, [String.trim(orig), path | acc])
+        [] -> parse_porcelain_entries([], [path | acc])
+      end
+    else
+      parse_porcelain_entries(rest, [path | acc])
+    end
+  end
+
+  # Malformed/short field: skip it (do not slice a sub-3-byte string).
+  defp parse_porcelain_entries([_short | rest], acc), do: parse_porcelain_entries(rest, acc)
+
+  defp rename_or_copy?(<<x, y>>), do: x in [?R, ?C] or y in [?R, ?C]
+  defp rename_or_copy?(_), do: false
 
   defp node_hint(opts) do
     (Keyword.get(opts, :node_id) || Keyword.get(opts, :task) || "") |> to_string()

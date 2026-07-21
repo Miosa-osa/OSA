@@ -98,6 +98,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.Fleet.Tool do
           "description" =>
             "Optional working directory for the spawned peer(s). Defaults to the " <>
               "shared workspace cwd."
+        },
+        "isolation" => %{
+          "type" => "boolean",
+          "description" =>
+            "For action 'workflow' (default false): run EACH item in its OWN git " <>
+              "worktree so parallel peers editing files never collide with each " <>
+              "other or the main tree. Required before `finalize` can merge."
+        },
+        "finalize" => %{
+          "type" => "boolean",
+          "description" =>
+            "For action 'workflow' (default false): after the wave, merge the " <>
+              "isolated worktree diffs, run the `gate`, and commit (attribution-" <>
+              "clean) when green. Requires `isolation: true` — otherwise skipped."
+        },
+        "gate" => %{
+          "type" => "array",
+          "description" =>
+            "For action 'workflow' finalize: shell commands run in order as the " <>
+              "ONE authoritative gate (e.g. 'mix compile', 'mix test'). The first " <>
+              "non-zero exit fails the gate and blocks the commit.",
+          "items" => %{
+            "type" => "string",
+            "description" => "One gate shell command."
+          }
+        },
+        "commit_message" => %{
+          "type" => "string",
+          "description" =>
+            "For action 'workflow' finalize: commit message used VERBATIM when the " <>
+              "gate passes and there are no conflicts. Omit to merge + gate without " <>
+              "committing."
         }
       }
     }
