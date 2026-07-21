@@ -9,6 +9,70 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.28] — displays as `v1.0.028`
+
+This cycle built an agent **fleet**: a Claude-Code-parity roster of full-power
+sub-agents, dynamic multi-agent **workflows**, a renamed **effort ladder** that
+gates them, and — the capstone — **self-orchestration** so OSA can decompose a
+task into disjoint file-owned workstreams, fan out a collision-free wave in
+isolated worktrees, verify it, and commit itself. See `docs/FLEETVIEW_DESIGN.md`,
+`docs/FLEET_ORCHESTRATION.md`, and `docs/FLEET_EDGE_CASES.md`.
+
+### Agent Fleet
+
+- **FleetView roster** — a live, arrow-selectable panel under the composer: a
+  green never-killable `main` root row plus one row per running node (agent-type,
+  live activity, elapsed, `↓ tokens`). `←` browses, ↑/↓ select, Enter attaches a
+  read-view of a node's stream, `x` stops it. Inline roster is bounded to 8 rows
+  (`+K more`); the `/agents` dashboard lists all.
+- **Full-power spawn** (`Fleet.spawn_fleet_node`) — each node is a complete OSA
+  loop (full tools/MCP/memory/permissions) on its own session with its own
+  custom-agent system prompt + tool allowlist, joined to the run tree. Not the
+  restricted delegate path.
+- **`fleet` tool** — the model auto-invokes it (`action: spawn | workflow`);
+  spawning is automatic, `/fg` and `←` are optional viewing. Depth- and
+  fleet-cap-guarded (spawn-bomb safe).
+- **Dynamic workflows** (`Fleet.fan_out`) — fan out one full-power node per item
+  through a 16-concurrent bounded pool with FIFO queue-drain, a 1000-node
+  run-lifetime kill switch, and a live `N/16` roster counter. Per-node timeout,
+  per-item error isolation, and a whole-tree budget guard that stops spawning when
+  the fleet budget is exhausted. Nodes coordinate through the shared scratchpad.
+
+### Effort
+
+- **Ladder renamed** to `fast / medium / high / xhigh / ultra` (was
+  `low/medium/high/max`), with a back-compat normalizer so persisted `:low`/`:max`
+  settings keep working. Effort = how much it thinks; the current tier is shown
+  live in the thinking indicator (e.g. *"thinking harder with ultra effort"*).
+- **`ultra`** is the max tier and the gate for dynamic workflows. Effort drives the
+  provider thinking budget across Anthropic / OpenAI / Gemini / Ollama (verified
+  matrix); opus honors an explicit max budget at `ultra` instead of always adaptive.
+
+### Self-orchestration
+
+- **Worktree-per-node isolation** (`isolation: :worktree`) so parallel nodes edit
+  their own worktrees and never collide.
+- **`Fleet.Finalizer`** — merges disjoint node diffs, runs an authoritative gate,
+  and commits when green (attribution-clean, never pushes).
+- **Fleet Orchestration playbook** (`priv/skills/fleet-orchestration`) — teaches the
+  coordinator the disjoint-workstream method: recon → partition by file ownership →
+  isolate → structured reports → finalize → checkpoint.
+
+### Durability & recovery
+
+- **Budget survives restart** — the `max_budget_usd` cap is persisted in the
+  checkpoint and restored, so a crash can no longer reset it to zero.
+- **Crash recovery** — stale `:running` rows are reconciled at boot; an opt-in
+  resumer re-dispatches orphaned autonomous runs.
+
+### Hardening
+
+- Fleet edge cases across `fan_out` (timeout / error isolation / empty-huge items),
+  fleet-tool argument validation, and scratchpad concurrency (cluster-serialized
+  writes). Two provider thinking bugs fixed (OpenAI silently disabling reasoning on
+  a bad effort value; Gemini `nil > 0` term-ordering emitting a bogus budget).
+  FleetView keyboard navigation verified end-to-end.
+
 ## [1.0.10] — displays as `v1.0.010`
 
 This cycle closed out the CC-parity backlog: 16 workstreams across the agent
