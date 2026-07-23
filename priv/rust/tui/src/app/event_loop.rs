@@ -141,6 +141,15 @@ impl App {
         // height the viewport is currently built at and is rebuilt when the wanted
         // height changes. Seeded with the height main.rs constructed the viewport.
         let mut cur_inline_h = inline_h;
+        // Terminal height as of the last iteration, so a resize can be classified
+        // as height-changing vs. width-only. A width-only resize must NOT rebuild
+        // the inline viewport: the manual rebuild re-anchors the region to a fresh
+        // cursor row and strands the old chrome's top rows on screen (the "context
+        // used" + divider staircase seen when dragging the pane wider/narrower).
+        // ratatui's own autoresize reflows the width in place at the SAME anchor,
+        // so a width-only change just needs a clean repaint. Seeded to 0 so the
+        // first real resize (if any) is treated as a height change and rebuilds.
+        let mut last_term_rows: u16 = 0;
         // Shrink-debounce state for the inline viewport (see the rebuild block
         // below). The wanted height dips transiently almost every tick (activity
         // spinner, streaming quantization, transient notices). Rebuilding on each
@@ -195,6 +204,16 @@ impl App {
             let popup_changed = popup_h_now != prev_popup_h;
             prev_popup_h = popup_h_now;
             let resized = std::mem::take(&mut self.resize_dirty) || popup_changed;
+            // Classify the resize: a WIDTH-ONLY change (terminal height unchanged and
+            // our wanted viewport height unchanged) needs no vertical repositioning,
+            // so it must skip the re-anchoring rebuild that strands old chrome. A
+            // popup open/close always rebuilds (it changes the wanted height).
+            let term_height_unchanged = term_rows == last_term_rows;
+            last_term_rows = term_rows;
+            let width_only_resize = resized
+                && !popup_changed
+                && term_height_unchanged
+                && desired_inline_h == cur_inline_h;
             // /clear was run: the in-memory transcript is already wiped
             // (commands.rs), but in inline mode the finalized messages were
             // flushed into the terminal's REAL scrollback via `insert_before`,
@@ -251,6 +270,31 @@ impl App {
                 if resized {
                     let _ = terminal.clear();
                 }
+            } else if width_only_resize {
+                // WIDTH-ONLY resize (terminal height and wanted viewport height both
+                // unchanged). The inline region keeps the same height and the same
+                // (bottom-anchored) vertical position — only the columns change. The
+                // previous code rebuilt the viewport here anyway, and that manual
+                // `Viewport::Inline` reconstruction re-anchors the region to a fresh
+                // cursor row; when the emulator leaves the cursor mid-chrome, the new
+                // region is drawn a couple rows below the old one and the old chrome's
+                // top rows (the "N% context used" hint + top divider) are stranded on
+                // screen — the staircase seen when dragging the pane wider/narrower.
+                //
+                // Don't rebuild. Explicitly wipe the region the OLD chrome occupies
+                // BEFORE the next draw, anchored to the terminal's current height
+                // (crossterm::terminal::size — an ioctl, no DSR round-trip, and not
+                // ratatui's stale viewport_area). The inline region is pinned to the
+                // bottom `cur_inline_h` rows, so home to `rows - cur_inline_h` and
+                // clear downward, then reset ratatui's diff so autoresize repaints the
+                // full-width chrome in place at the same anchor.
+                // Reset ratatui's diff so the whole region repaints, and let its
+                // autoresize reflow the width in place at the SAME anchor on the next
+                // draw. No manual rebuild → no re-anchor → the region can't be
+                // stranded a few rows above its new position. (last_inline_top is
+                // unchanged: the region did not move.)
+                let _ = terminal.clear();
+                shrink_streak = 0;
             } else if resized || desired_inline_h != cur_inline_h {
                 // Staying inline, and either a real resize landed or the wanted
                 // height changed. Rebuilding the inline viewport issues a DSR
