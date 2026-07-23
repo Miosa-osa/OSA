@@ -304,16 +304,27 @@ impl App {
                     // then scrolled the stale copy up into scrollback — the
                     // content that "duplicates and stacks" on every resize event.
                     //
-                    // Anchor the clear to the terminal's ACTUAL current cursor
-                    // (queried fresh, where the emulator left it inside the
-                    // reflowed old region) and wipe from the top of that region
-                    // downward. This handles grow, shrink and width-only changes
-                    // uniformly and never reaches the transcript scrollback above.
-                    // If the DSR query is dropped, fall back to ratatui's clear —
-                    // no worse than the old behaviour, and rare.
-                    match crossterm::cursor::position() {
-                        Ok((_, cursor_row)) => {
-                            let top = resize_clear_top(cursor_row, cur_inline_h);
+                    // A later revision anchored the clear to a fresh DSR cursor
+                    // query (`crossterm::cursor::position`). That still stranded a
+                    // duplicate composer on terminals/tmux that DROP or answer with
+                    // a STALE row during a resize burst (a pane drag fires many
+                    // Resize events in quick succession): a stale `cursor_row`
+                    // computes a `top` that misses the old chrome, and the `Err`
+                    // fallback to `terminal.clear()` misses it too. The DSR
+                    // round-trip is the fragile part.
+                    //
+                    // The inline live region is pinned to the BOTTOM `inline_h`
+                    // rows of the screen (the bottom-anchored model asserted in the
+                    // resize tests), so its top row is simply `term_rows -
+                    // inline_h`. Derive `term_rows` from `crossterm::terminal::size`
+                    // — an ioctl that already reflects the just-applied resize, with
+                    // no escape-sequence round-trip to drop — and wipe from that row
+                    // downward. This erases exactly the old chrome (never the
+                    // transcript scrollback above it) and is deterministic for the
+                    // grow / width-only case regardless of emulator DSR behaviour.
+                    match crossterm::terminal::size() {
+                        Ok((_, term_rows)) => {
+                            let top = resize_clear_top_from_bottom(term_rows, cur_inline_h);
                             let _ = execute!(
                                 std::io::stdout(),
                                 crossterm::cursor::MoveTo(0, top),
@@ -1134,8 +1145,23 @@ fn clamp_inline_top(top: Option<u16>, term_rows: u16) -> Option<u16> {
 ///
 /// Kept as a free, pure function so the anchor arithmetic is unit-testable
 /// without a real terminal (see `render_tests::resize_clear_top_*`).
-fn resize_clear_top(cursor_row: u16, prev_inline_h: u16) -> u16 {
-    cursor_row.saturating_sub(prev_inline_h.saturating_sub(1))
+/// Absolute top row of the bottom-anchored inline live region, given the
+/// terminal's CURRENT height (`term_rows`) and the region's height (`inline_h`).
+///
+/// The inline chrome (composer + status bar) is pinned to the bottom `inline_h`
+/// rows of the screen — the bottom-anchored model asserted directly in the
+/// resize tests (`old_top = old_rows - old_h`). So the region's first row is
+/// `term_rows - inline_h`, and clearing from there downward erases exactly the
+/// old chrome and nothing above it.
+///
+/// `term_rows` comes from `crossterm::terminal::size()` (an ioctl reflecting the
+/// just-applied resize), NOT a DSR cursor round-trip — which tmux and some
+/// emulators drop or answer with a stale row during a resize burst, the failure
+/// that stranded a duplicate composer on screen. Saturating so a region briefly
+/// taller than the terminal (mid-shrink) clamps to row 0 instead of underflowing
+/// to a huge row that would move the clear off-screen.
+fn resize_clear_top_from_bottom(term_rows: u16, inline_h: u16) -> u16 {
+    term_rows.saturating_sub(inline_h)
 }
 
 /// Leave the alternate screen and rebuild the inline viewport, restoring the
@@ -1794,7 +1820,7 @@ mod render_tests {
     // INSIDE the old chrome, not above it. Rebuilding there without clearing
     // strands the old chrome's rows above the new viewport, still holding the
     // previous frame's rendered characters — the visible duplicate.
-    use super::{clamp_inline_top, resize_clear_top};
+    use super::{clamp_inline_top, resize_clear_top_from_bottom};
 
     #[test]
     fn clamp_inline_top_accepts_row_within_current_terminal() {
@@ -1823,29 +1849,32 @@ mod render_tests {
     // `Viewport::Inline` rebuild scrolled the stale copy up into scrollback: one
     // duplicate per resize commit, stacking as a pane-drag fires many of them.
     //
-    // Fix: anchor the clear to the terminal's ACTUAL current cursor (queried
-    // fresh post-resize) via `resize_clear_top`, wiping from the top of the old
-    // region downward, instead of trusting ratatui's stale `viewport_area`.
+    // Fix: anchor the clear to the bottom-anchored region geometry derived from
+    // the terminal's CURRENT height (crossterm::terminal::size) via
+    // `resize_clear_top_from_bottom`, wiping from the region's first row downward,
+    // instead of trusting ratatui's stale `viewport_area` OR a DSR cursor query
+    // that a resize burst can drop or answer stale.
 
     #[test]
-    fn resize_clear_top_lands_on_old_region_top_when_cursor_is_bottom_anchored() {
-        // The composer parks the terminal cursor on its own row near the bottom
-        // of the inline region, so the cursor sits at the region's LAST row.
-        // Clearing from `cursor - (h - 1)` must then land exactly on the region's
-        // FIRST row — erasing the whole region and nothing above it.
-        // Region rows 18..=23 (height 6), cursor at the bottom row 23.
-        assert_eq!(resize_clear_top(23, 6), 18);
-        // Height 1 region: clear starts on the cursor row itself.
-        assert_eq!(resize_clear_top(23, 1), 23);
+    fn resize_clear_top_from_bottom_lands_on_region_first_row() {
+        // The inline live region is pinned to the bottom `inline_h` rows. On a
+        // 24-row terminal a height-6 region occupies rows 18..=23, so the clear
+        // must start at row 18 and wipe to the bottom — erasing the whole region
+        // and nothing above it. Derived from the terminal's CURRENT height
+        // (crossterm::terminal::size), never a fragile DSR cursor query.
+        assert_eq!(resize_clear_top_from_bottom(24, 6), 18);
+        // Height-1 region on a 24-row terminal starts on the last row.
+        assert_eq!(resize_clear_top_from_bottom(24, 1), 23);
     }
 
     #[test]
-    fn resize_clear_top_saturates_and_never_underflows() {
-        // A cursor high on the screen must never underflow past row 0 (which
-        // would wrap to a huge row and move the clear off-screen).
-        assert_eq!(resize_clear_top(2, 6), 0);
-        assert_eq!(resize_clear_top(0, 10), 0);
-        assert_eq!(resize_clear_top(0, 0), 0);
+    fn resize_clear_top_from_bottom_saturates_when_region_taller_than_screen() {
+        // A region momentarily taller than the terminal (mid-shrink, before the
+        // height is rebuilt) must clamp to row 0 rather than underflow to a huge
+        // row that would move the clear off-screen.
+        assert_eq!(resize_clear_top_from_bottom(4, 6), 0);
+        assert_eq!(resize_clear_top_from_bottom(0, 10), 0);
+        assert_eq!(resize_clear_top_from_bottom(6, 6), 0);
     }
 
     #[test]
@@ -1856,7 +1885,7 @@ mod render_tests {
         // OLD rows — out of bounds for the new size. `Terminal::clear` would have
         // homed the cursor to exactly this stale top, so it could not have
         // cleared the old chrome. The fix stops trusting this Rect and anchors to
-        // the live cursor instead (see `resize_clear_top`).
+        // the terminal's current height instead (see `resize_clear_top_from_bottom`).
         let w = 40u16;
         let old_rows = 24u16;
         let old_h = 6u16;
@@ -1893,14 +1922,17 @@ mod render_tests {
             "root cause: the stale viewport top ({stale_top}) is out of bounds for the shrunk terminal ({new_rows} rows), so a clear anchored to it misses the old chrome",
         );
 
-        // The fix anchors to where the emulator actually leaves the cursor within
-        // the resized screen (in-bounds), so the clear lands on real rows.
-        let cursor_row = new_rows - 1; // emulator clamps the cursor into view
-        let fix_top = resize_clear_top(cursor_row, old_h);
+        // The fix anchors the clear to the bottom-anchored region geometry derived
+        // from the terminal's CURRENT height (crossterm::terminal::size), which is
+        // always in-bounds — no DSR cursor round-trip that a resize burst can drop
+        // or answer stale. On the shrunk 12-row screen a height-6 region starts at
+        // row 6, so the clear lands on real rows and erases the old chrome.
+        let fix_top = resize_clear_top_from_bottom(new_rows, old_h);
         assert!(
             fix_top < new_rows,
-            "fix: the cursor-anchored clear top ({fix_top}) is within the resized terminal ({new_rows} rows)",
+            "fix: the size-anchored clear top ({fix_top}) is within the resized terminal ({new_rows} rows)",
         );
+        assert_eq!(fix_top, new_rows - old_h, "fix: clear starts on the region's first row");
     }
 
     /// True if any cell in `row` holds non-blank rendered content.
