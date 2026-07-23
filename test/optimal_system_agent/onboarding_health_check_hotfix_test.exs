@@ -143,31 +143,35 @@ defmodule OptimalSystemAgent.OnboardingHealthCheckHotfixTest do
     end
   end
 
-  # ── ollama_cloud: local-daemon-first routing (the actual hotfix bug) ─────
+  # ── ollama_cloud: explicit cloud selection honours the key ───────────────
+  #
+  # Corrected priority (a real cloud user hit the old bug): when the user picks
+  # Ollama Cloud AND supplies a key, verify against ollama.com — do NOT hijack to
+  # a local daemon that may not even serve the chosen `:cloud` model. Only a
+  # KEYLESS cloud selection falls back to the local device-identity daemon.
 
-  describe "health_check/1 for ollama_cloud — local daemon takes priority over Bearer" do
-    test "local daemon reachable -> verifies against it and succeeds, even with a key typed that would fail against ollama.com" do
-      name = stub_name(:ollama_local_ok)
+  describe "health_check/1 for ollama_cloud — a keyed cloud selection uses ollama.com" do
+    test "key supplied -> verifies against ollama.com (Bearer), NOT the local daemon, even if a local daemon is reachable" do
+      name = stub_name(:ollama_cloud_key_wins)
 
       Req.Test.stub(name, fn conn ->
         case {conn.host, conn.request_path} do
-          {"localhost", "/api/tags"} ->
-            Req.Test.json(conn, %{"models" => [%{"name" => "glm-5.2:cloud"}]})
-
-          {"localhost", "/api/chat"} ->
+          # The path an explicit keyed cloud selection MUST take.
+          {"ollama.com", "/api/chat"} ->
             Req.Test.json(conn, %{"message" => %{"content" => "hi"}})
 
-          # Must NEVER be hit: the key is garbage and would 401 on ollama.com,
-          # but the local daemon is reachable so that path must not be tried.
-          {"ollama.com", _} ->
-            Plug.Conn.send_resp(conn, 401, "")
+          # The local daemon must NOT be consulted when a key is present: a
+          # `:cloud` model (glm-5.2:cloud) isn't served by a bare local daemon,
+          # so hijacking to it was exactly what failed a real cloud user.
+          {"localhost", _} ->
+            Plug.Conn.send_resp(conn, 500, "local must not be used for a keyed cloud selection")
         end
       end)
 
       assert {:ok, %{verified: :ok}} =
                Onboarding.health_check(%{
                  "provider" => "ollama_cloud",
-                 "api_key" => "this-key-would-fail-on-ollama-dot-com",
+                 "api_key" => "valid-cloud-key",
                  "model" => "glm-5.2:cloud",
                  "req_plug" => {Req.Test, name}
                })

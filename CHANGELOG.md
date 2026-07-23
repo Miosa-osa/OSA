@@ -9,6 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.34] — displays as `v1.0.034`
+
+### Fixed — Ollama Cloud onboarding (client-blocking)
+
+- **Selecting "Ollama Cloud" with an API key now verifies against `https://ollama.com`, not
+  a local daemon.** The onboarding health-check was **local-first**: it probed for a local
+  Ollama daemon and only fell back to the cloud endpoint if none was found. So an explicit
+  cloud selection could get hijacked to `http://localhost:11434` — which does not serve a
+  `:cloud` model like `glm-5.2:cloud` — and verification died with
+  `error sending request for url (http://localhost:11434…)`.
+
+  Corrected priority: **cloud selection ⇒ cloud URL, always.** When a key is supplied, verify
+  against `ollama.com` with the Bearer key. Only a **keyless** cloud selection falls back to a
+  reachable local device-identity daemon. Every other provider was already correct (Anthropic →
+  `api.anthropic.com`, OpenAI → `api.openai.com`, OpenRouter → `openrouter.ai`, Ollama Local →
+  `localhost:11434`).
+
 ## [1.0.33] — displays as `v1.0.033`
 
 ### Fixed — TUI resize, for real this time (duplication AND crash)

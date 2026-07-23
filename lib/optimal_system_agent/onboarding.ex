@@ -604,30 +604,36 @@ defmodule OptimalSystemAgent.Onboarding do
     model = Map.get(params, "model")
     req_opts = req_opts(params)
 
-    local = probe_ollama_local(req_opts)
-
     cond do
-      local.reachable ->
-        # The real runtime path: keyless device-identity through the signed-in
-        # local daemon. Verify success there IS success, regardless of the
-        # (possibly stale/mismatched) key the user pasted.
-        run_health_request("ollama_local", nil, model, local.url, req_opts)
-
       is_binary(api_key) and api_key != "" ->
-        # No local daemon — fall back to the keyed ollama.com Bearer path.
+        # The user explicitly picked **Ollama Cloud** and supplied a key: verify
+        # against ollama.com with the Bearer key. This is the whole point of the
+        # cloud selection — honour it. The previous "local-first" ordering
+        # hijacked an explicit cloud choice to a local daemon on localhost:11434
+        # whenever one happened to be running, and since a `:cloud` model
+        # (e.g. glm-5.2:cloud) is NOT served by a bare local daemon, verification
+        # died with "error sending request for url (http://localhost:11434…)".
+        # Cloud selection ⇒ cloud URL, always.
         run_health_request("ollama_cloud", api_key, model, "https://ollama.com", req_opts)
 
       true ->
-        # No local daemon, no key: nothing we can verify yet. Non-blocking —
-        # this is not a key rejection, just an unverified/unreachable state.
-        {:error,
-         %{
-           verified: :unverified,
-           error: "no_local_daemon",
-           message:
-             "No local Ollama daemon detected and no API key supplied. " <>
-               "Sign in to Ollama locally or add a key — you can still continue."
-         }}
+        # No key: the only thing verifiable is a keyless local device-identity
+        # daemon (Ollama's signed-in local app, which can proxy cloud models).
+        # Use it if present; otherwise report unverified (non-blocking).
+        local = probe_ollama_local(req_opts)
+
+        if local.reachable do
+          run_health_request("ollama_local", nil, model, local.url, req_opts)
+        else
+          {:error,
+           %{
+             verified: :unverified,
+             error: "no_local_daemon",
+             message:
+               "No local Ollama daemon detected and no API key supplied. " <>
+                 "Sign in to Ollama locally or add a key — you can still continue."
+           }}
+        end
     end
   end
 
