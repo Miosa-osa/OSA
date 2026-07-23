@@ -304,27 +304,44 @@ impl App {
                     // then scrolled the stale copy up into scrollback — the
                     // content that "duplicates and stacks" on every resize event.
                     //
-                    // A later revision anchored the clear to a fresh DSR cursor
-                    // query (`crossterm::cursor::position`). That still stranded a
-                    // duplicate composer on terminals/tmux that DROP or answer with
-                    // a STALE row during a resize burst (a pane drag fires many
-                    // Resize events in quick succession): a stale `cursor_row`
-                    // computes a `top` that misses the old chrome, and the `Err`
-                    // fallback to `terminal.clear()` misses it too. The DSR
-                    // round-trip is the fragile part.
+                    // Two earlier revisions each fixed only one sub-case:
+                    //   1. A fresh DSR cursor query (`crossterm::cursor::position`)
+                    //      — stranded a duplicate on terminals/tmux that DROP or
+                    //      answer STALE during a resize burst.
+                    //   2. A bottom-anchor `term_rows - inline_h` — correct only
+                    //      when the region is pinned to the BOTTOM (a screen full of
+                    //      transcript), and WRONG for a fresh/near-empty session
+                    //      where the inline region sits high on the screen with
+                    //      blank space below it: it then clears empty bottom rows and
+                    //      leaves the real chrome untouched — the duplicate the user
+                    //      still saw.
                     //
-                    // The inline live region is pinned to the BOTTOM `inline_h`
-                    // rows of the screen (the bottom-anchored model asserted in the
-                    // resize tests), so its top row is simply `term_rows -
-                    // inline_h`. Derive `term_rows` from `crossterm::terminal::size`
-                    // — an ioctl that already reflects the just-applied resize, with
-                    // no escape-sequence round-trip to drop — and wipe from that row
-                    // downward. This erases exactly the old chrome (never the
-                    // transcript scrollback above it) and is deterministic for the
-                    // grow / width-only case regardless of emulator DSR behaviour.
-                    match crossterm::terminal::size() {
-                        Ok((_, term_rows)) => {
-                            let top = resize_clear_top_from_bottom(term_rows, cur_inline_h);
+                    // The robust anchor is the region's ACTUAL top, which we already
+                    // track in `last_inline_top` (captured at startup and every
+                    // rebuild, so it is the on-screen chrome's current top). Home the
+                    // cursor there and wipe downward: this erases exactly the old
+                    // chrome whether it sits high (empty session) or low (full
+                    // screen), and the rebuild below re-anchors the fresh region at
+                    // the same row, so exactly one copy ever exists. Clamp into the
+                    // resized screen (a shrink can leave the tracked row below the new
+                    // bottom). Fall back to the bottom-anchored estimate only when we
+                    // have no tracked top yet, and to ratatui's clear if even the
+                    // terminal size can't be read.
+                    let clear_top = match last_inline_top {
+                        Some(t) => {
+                            let max_row = crossterm::terminal::size()
+                                .map(|(_, r)| r.saturating_sub(1))
+                                .unwrap_or(t);
+                            Some(t.min(max_row))
+                        }
+                        None => crossterm::terminal::size()
+                            .ok()
+                            .map(|(_, term_rows)| {
+                                resize_clear_top_from_bottom(term_rows, cur_inline_h)
+                            }),
+                    };
+                    match clear_top {
+                        Some(top) => {
                             let _ = execute!(
                                 std::io::stdout(),
                                 crossterm::cursor::MoveTo(0, top),
@@ -333,7 +350,7 @@ impl App {
                                 ),
                             );
                         }
-                        Err(_) => {
+                        None => {
                             let _ = terminal.clear();
                         }
                     }

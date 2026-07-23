@@ -9,6 +9,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.32] — displays as `v1.0.032`
+
+### Fixed
+
+- **TUI resize duplication — corrected anchor.** v1.0.31's fix anchored the inline-region
+  clear to the *bottom* of the screen, which is only right when the region is pinned to the
+  bottom (a screen full of transcript). In a fresh / near-empty session the live region sits
+  high on the screen with blank space below it, so the bottom-anchored clear wiped empty rows
+  and left the real composer/status untouched — the duplicate persisted. The clear now homes
+  to the region's **actual tracked top** (`last_inline_top`, captured at startup and every
+  rebuild), clamped into the resized screen, so it erases the on-screen chrome whether it sits
+  high (empty session) or low (full screen); the rebuild re-anchors the fresh region at the
+  same row, leaving exactly one copy.
+
 ## [1.0.31] — displays as `v1.0.031`
 
 ### Added — post-edit format + diagnostics loop (stop editing blind)
