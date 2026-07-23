@@ -160,9 +160,11 @@ defmodule OptimalSystemAgent.ActionAuthority do
       capability: capability["fingerprint"],
       params: params_fingerprint,
       surface: surface,
-      tool: tool_name,
-      workspace_id: workspace_id
+      tool: tool_name
     }
+
+    invocation =
+      if workspace_id, do: Map.put(invocation, :workspace_id, workspace_id), else: invocation
 
     body = %{
       capability: %{
