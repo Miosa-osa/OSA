@@ -9,6 +9,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.31] — displays as `v1.0.031`
+
+### Added — post-edit format + diagnostics loop (stop editing blind)
+
+- **OSA no longer edits code blind.** After every `file_edit` / `multi_file_edit` /
+  `file_write` / `file_create`, the touched file is run through a fast, single-file
+  **format + diagnostics** pass and any syntax/parse error is injected back into the tool
+  result the **same turn** — so the model sees the mistake it just made instead of
+  discovering it 20 tool-calls later. This was the top convergent gap versus Claude Code,
+  Codex, OpenCode and Grok (`docs/GAP_ANALYSIS.md` G1 + G2).
+  - **Auto-format on write** — Elixir formats **in-process** via `Code.format_string!/2`
+    (respecting `.formatter.exs` opts, no `mix` startup cost); Go/Rust/JS·TS/Python use
+    their single-file formatter (`gofmt -w`, `rustfmt`, `prettier --write`, `ruff format`).
+  - **Fast diagnostics** — Elixir syntax via `Code.string_to_quoted/2` (instant, in-process);
+    Go via `gofmt -e`, Rust via `rustfmt`, JS via `node --check`, Python via `ruff check` /
+    `py_compile`; TS/TSX parse errors surface through `prettier`.
+  - Dependency-light and **degrades to a no-op** when a tool binary is absent; each command
+    is time-boxed; a file that fails to parse is left byte-for-byte untouched and its error
+    reported. Wired via the pluggable `:diagnostics_provider` seam; disable with
+    `config :optimal_system_agent, post_edit_verify: [enabled: false]`.
+
+### Fixed
+
+- **TUI — resizing no longer duplicates the composer/status bar.** The inline-region rebuild
+  cleared old chrome anchored to a `crossterm::cursor::position()` **DSR query**, which tmux
+  and some emulators drop or answer with a stale row during a resize burst (a pane drag fires
+  many `Resize` events) — stranding a duplicate composer while a fresh one drew below. The
+  clear now anchors to the bottom-anchored region geometry derived from
+  `crossterm::terminal::size()` (an ioctl reflecting the applied resize, no escape round-trip
+  to drop): deterministic for grow/width-only changes, exact for shrink.
+
 ## [1.0.30] — displays as `v1.0.030`
 
 ### Fixed / robustness

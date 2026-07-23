@@ -9,6 +9,11 @@ Synthesized from four parallel read-only source audits of the reference clones i
 ## TIER 1 — convergent, high-impact (the real gaps; multiple harnesses agree)
 
 **G1. LSP-in-the-loop — post-edit diagnostics + code intelligence.** *(ALL FOUR)*
+> ✅ **SHIPPED v1.0.31** (the fast core): `Verify.PostEdit` runs a single-file
+> syntax/parse check after every edit/write and injects errors back into the tool
+> result the same turn (Elixir in-process via `Code.string_to_quoted/2`; Go/Rust/JS/
+> Python via their own tools). Full language-server code-intelligence (go-to-def /
+> find-refs / cross-file type errors) remains a follow-up on the same seam.
 OpenCode P0, Grok P0, CC P1, Codex (via apply_patch hooks). OSA has ZERO LSP
 (`reminders.ex:30` "no LSP backend"; only one-shot tree-sitter `code_symbols`). The killer
 piece: run the language server after every edit/write and inject the compile/type errors
@@ -19,6 +24,9 @@ and every coding-agent competitor doesn't.** Effort L.
 **G2. Auto-format on write.** *(OpenCode P0)* Run `mix format`/gofmt/prettier keyed by
 extension after each mutation. OSA has none. Effort S — quickest high-value win, pairs
 with G1.
+> ✅ **SHIPPED v1.0.31** in the same `Verify.PostEdit` pass: Elixir formats in-process
+> (respecting `.formatter.exs`), Go/Rust/JS·TS/Python via `gofmt -w` / `rustfmt` /
+> `prettier --write` / `ruff format`; skipped cleanly when a binary is absent.
 
 **G3. OS-level sandbox + sandbox×approval safety model.** *(Codex P0, Grok P1; CC notes it)*
 Landlock/seccomp (Linux), Seatbelt (macOS), bwrap, WFP (Windows) — per-command confinement
@@ -117,8 +125,10 @@ Effort M–L.
 
 ## The one-line takeaway
 
-OSA is the **best-in-class autonomous multi-agent orchestrator** but **edits code
-comparatively blind**. The highest-leverage convergent gap — flagged by all four harnesses —
-is the **LSP / format / diagnostics edit-feedback loop (G1 + G2)**. Second is **OS-level
-sandboxing for safe full-auto (G3)**. Third is **unifying the task/agent registry (G4)**,
-which the fleet work has already started. Everything else is profile/ecosystem/polish.
+OSA is the **best-in-class autonomous multi-agent orchestrator**, and as of **v1.0.31 it no
+longer edits code blind**: the highest-leverage convergent gap — the **format + diagnostics
+edit-feedback loop (G1 + G2)**, flagged by all four harnesses — now ships as `Verify.PostEdit`
+(fast single-file core; full cross-file LSP code-intelligence is the remaining follow-up on the
+same seam). The next targets are **OS-level sandboxing for safe full-auto (G3)** and **unifying
+the task/agent registry (G4)**, which the fleet work has already started. Everything else is
+profile/ecosystem/polish.

@@ -562,6 +562,25 @@ them mid-turn.
 Swarms use ETS-backed team coordination: shared task lists, per-agent mailboxes,
 scratchpads, and configurable iteration limits.
 
+### Post-edit format + diagnostics (OSA doesn't edit blind)
+
+After every edit or write, OSA runs the touched file through a fast, single-file
+**format + diagnostics** pass and injects any syntax/parse error straight back into
+the tool result **the same turn** — so the model sees the mistake it just made
+instead of discovering it many tool-calls later.
+
+- **Auto-format on write.** Elixir formats in-process via `Code.format_string!/2`
+  (respecting your `.formatter.exs`, no `mix` startup cost); Go, Rust, JS/TS and
+  Python use their own single-file formatter (`gofmt -w`, `rustfmt`,
+  `prettier --write`, `ruff format`).
+- **Fast diagnostics.** Elixir syntax via `Code.string_to_quoted/2` (instant,
+  in-process); Go via `gofmt -e`, Rust via `rustfmt`, JS via `node --check`, Python
+  via `ruff check` / `py_compile`; TS/TSX parse errors surface through `prettier`.
+
+It's dependency-light — each tool is time-boxed and quietly skipped when its binary
+isn't installed, and a file that fails to parse is left untouched with its error
+reported. Turn it off with `config :optimal_system_agent, post_edit_verify: [enabled: false]`.
+
 ### Agent Fleet & Dynamic Workflows
 
 OSA can fan out into a **fleet** of independent, full-power agents and watch them

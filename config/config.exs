@@ -322,6 +322,18 @@ config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 
 config :optimal_system_agent, budget_event_emitter: OptimalSystemAgent.BudgetEmitter
 
+# Post-edit format + diagnostics loop (gap analysis G1 + G2). After every
+# file_edit / multi_file_edit / file_write / file_create, `Verify.PostEdit` runs
+# on the touched file: it auto-formats in place (mix format in-process, gofmt,
+# rustfmt, prettier, ruff) and runs a fast single-file syntax/parse check whose
+# errors are injected back into the tool result the SAME turn — so the model sees
+# the mistake it just made instead of editing blind. Wired via the pluggable
+# `:diagnostics_provider` seam consumed by Agent.Reminders.collect_diagnostics/2.
+# Disable with `post_edit_verify: [enabled: false]`.
+config :optimal_system_agent,
+  diagnostics_provider: {OptimalSystemAgent.Verify.PostEdit, :run},
+  post_edit_verify: [enabled: true, timeout_ms: 8_000]
+
 # Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
 # dangerous tool calls and the Guardian pauses unattended execution after
 # `pause_after_blocks` blocked actions. `untrusted_host_allowlist` names the

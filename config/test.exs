@@ -2,6 +2,12 @@ import Config
 
 config :logger, level: :warning
 
+# The post-edit format+diagnostics loop shells out to formatters/compilers and
+# rewrites edited files in place. The suite exercises the edit tools heavily
+# against temp fixtures, so keep it OFF here (its own unit tests drive
+# Verify.PostEdit directly with an injected exec seam). Prod default stays on.
+config :optimal_system_agent, post_edit_verify: [enabled: false]
+
 # Sandbox pool removed — singleton GenServers (Memory, TaskQueue, etc.) call
 # Repo from their own processes and can't do Sandbox.checkout!(), which causes
 # DBConnection.OwnershipError → rest_for_one cascade → flaky "no process" failures.
