@@ -61,7 +61,7 @@ defmodule OptimalSystemAgent.MCP.Server.Dispatcher do
 
   defp handle("tools/call", params, id) do
     name = params["name"]
-    arguments = params["arguments"] || %{}
+    arguments = (params["arguments"] || %{}) |> Map.put("__surface__", "mcp")
 
     result =
       cond do

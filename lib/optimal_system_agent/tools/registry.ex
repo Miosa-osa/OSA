@@ -185,14 +185,19 @@ defmodule OptimalSystemAgent.Tools.Registry do
         mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
         case Map.get(mcp_tools, tool_name) do
-          nil -> {:error, "Unknown tool: #{tool_name}"}
-          _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
+          nil ->
+            {:error, "Unknown tool: #{tool_name}"}
+
+          _mcp_info ->
+            with :ok <- action_authority_result(tool_name, arguments) do
+              OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
+            end
         end
 
       mod ->
-        case validate_arguments(mod, arguments) do
-          :ok -> mod.execute(arguments)
-          {:error, _reason} = error -> error
+        with :ok <- validate_arguments(mod, arguments),
+             :ok <- action_authority_result(tool_name, arguments) do
+          mod.execute(arguments)
         end
     end
   end
@@ -233,6 +238,14 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "This action is never permitted, in any permission tier."
   end
 
+  defp action_authority_result(tool_name, arguments) do
+    case OptimalSystemAgent.ActionAuthority.authorize_tool(tool_name, arguments) do
+      :not_governed -> :ok
+      {:allow, _receipt} -> :ok
+      {:blocked, message} -> {:error, "Blocked: " <> message}
+    end
+  end
+
   defp execute_unguarded(tool_name, arguments) do
     builtin_tools = :persistent_term.get({__MODULE__, :builtin_tools}, %{})
 
@@ -241,14 +254,19 @@ defmodule OptimalSystemAgent.Tools.Registry do
         mcp_tools = :persistent_term.get({__MODULE__, :mcp_tools}, %{})
 
         case Map.get(mcp_tools, tool_name) do
-          nil -> {:error, "Unknown tool: #{tool_name}"}
-          _mcp_info -> OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
+          nil ->
+            {:error, "Unknown tool: #{tool_name}"}
+
+          _mcp_info ->
+            with :ok <- action_authority_result(tool_name, arguments) do
+              OptimalSystemAgent.MCP.Client.ToolBridge.call(tool_name, arguments)
+            end
         end
 
       mod ->
-        case validate_arguments(mod, arguments) do
-          :ok -> dispatch(mod, arguments)
-          {:error, _reason} = error -> error
+        with :ok <- validate_arguments(mod, arguments),
+             :ok <- action_authority_result(tool_name, arguments) do
+          dispatch(mod, arguments)
         end
     end
   rescue

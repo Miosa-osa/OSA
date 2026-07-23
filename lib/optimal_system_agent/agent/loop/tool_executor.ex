@@ -913,15 +913,28 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
       {:ok, %{arguments: modified_args} = _modified_payload} ->
         # Hook modified the tool arguments — use the modified version
-        enriched_args = Map.put(modified_args, "__session_id__", state.session_id)
+        enriched_args =
+          modified_args
+          |> Map.put("__session_id__", state.session_id)
+          |> Map.put("__surface__", authority_surface(state))
+
         execute_tool(tool_call.name, enriched_args)
 
       _ ->
         # Inject session_id so tools like ask_user can register pending state
-        enriched_args = Map.put(tool_call.arguments, "__session_id__", state.session_id)
+        enriched_args =
+          tool_call.arguments
+          |> Map.put("__session_id__", state.session_id)
+          |> Map.put("__surface__", authority_surface(state))
+
         execute_tool(tool_call.name, enriched_args)
     end
   end
+
+  defp authority_surface(%{channel: channel}) when channel in [:scheduler, :heartbeat],
+    do: "schedule"
+
+  defp authority_surface(_state), do: "osa"
 
   # CONCERN 3 — result finalization.
   #
