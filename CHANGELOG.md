@@ -9,6 +9,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.33] — displays as `v1.0.033`
+
+### Fixed — TUI resize, for real this time (duplication AND crash)
+
+- **Resizing the terminal no longer duplicates the composer or crashes.** On terminals
+  that don't answer the cursor-position query (DSR) quickly during a resize — tmux, some
+  SSH sessions, and others — the inline live region could not be located after the terminal
+  reflowed, so earlier surgical-clear attempts either **stranded a staircase of old
+  `N% context used` + divider rows**, or (when left to ratatui's auto-resize) crashed with
+  `Error: The cursor position could not be read within a normal duration`.
+
+  Since surgical clearing is impossible without a working DSR, the resize path now does a
+  **DSR-free full-screen wipe** (`ClearType::All`) before rebuilding the region fresh —
+  exactly one copy of the chrome can ever exist and the reflow position never matters.
+  Validated against a DSR-dropping pane across widen / narrow / rapid-resize bursts: no
+  duplicate, no crash.
+
+  Trade-off: the on-screen transcript is cleared on resize (it repaints from the live region
+  down). The finalized conversation still lives in the terminal's scrollback history and the
+  in-app transcript viewer — only the on-screen copy is redrawn.
+
 ## [1.0.32] — displays as `v1.0.032`
 
 ### Fixed
