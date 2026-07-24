@@ -106,6 +106,7 @@ Tools run through a middleware pipeline that can wrap execution with cross-cutti
 | Stage | Purpose |
 |-------|---------|
 | **Schema validation** | Validate input against JSON schema before calling `execute/1` |
+| **Central action authority** | For governed platform actions only, ask MIOSA's durable action authority whether the authenticated principal may act in the selected tenant/workspace; fail closed. Purely local tools are ungoverned and skip it (no network call). See `OptimalSystemAgent.ActionAuthority`. |
 | **Safety gate** | Block tools inappropriate for the current permission tier |
 | **Budget check** | Verify the operation fits within the session token/cost budget |
 | **Telemetry** | Emit execution time, success/failure metrics |
@@ -118,6 +119,7 @@ Tool.execute/1
   → Middleware.schema_validate
   → Middleware.safety_check(permission_tier)
   → Middleware.budget_check(session)
+  → ActionAuthority.authorize_tool  (governed platform actions only; fail closed)
   → Tool.execute/1  (actual work)
   → Middleware.telemetry_emit
   → {:ok | :error, result}
