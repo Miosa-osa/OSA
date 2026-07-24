@@ -44,6 +44,13 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 /// returns 0 when there's nothing to show, so the row collapses when idle.
 pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
 
+/// Fixed row count reserved for the live tool-use / activity feed whenever a turn
+/// is active. Held CONSTANT for the whole turn (a fixed slot, like the streaming
+/// preview) so the feed growing one row per tool can never grow the inline
+/// viewport mid-turn — which rebuilt the viewport and stacked composers down the
+/// screen. Matches the previous `.min(6)` cap. The feed draws top-down into it.
+pub(crate) const ACTIVITY_SLOT_ROWS: u16 = 6;
+
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     const OVERHEAD: u16 = 3;
     let want = OVERHEAD.saturating_add(input_needed);
@@ -930,16 +937,22 @@ impl App {
         if !self.thinking_box.is_empty() {
             // Collapsed → 1 row; expanded (ctrl+t) → the box's measured height.
             self.thinking_box.height(self.width)
+        } else if self.activity.height() > 0 {
+            // FIXED-height activity slot — the same fixed-slot cure the streaming
+            // preview uses. The live tool-use feed grows 0→N rows as tools run
+            // (spinner, then one row per running/finished tool). Sizing this to the
+            // LIVE count (`activity.height().min(6)`) grew the inline viewport
+            // mid-turn, and EVERY growth rebuilt the viewport (a DSR cursor
+            // re-anchor) — which, tick after tick as tools ran, stacked a fresh
+            // composer + status bar down the whole screen (the staircase seen
+            // during an agent turn). Reserving the constant cap for the whole turn
+            // keeps the viewport height STABLE: the feed draws top-down into the
+            // slot, so no per-tool rebuild happens and nothing stacks. `Activity::
+            // draw` needs ≥2 rows or it draws only the spinner, so the cap must
+            // stay well above that.
+            ACTIVITY_SLOT_ROWS
         } else {
-            // Full activity height so the LIVE tool-use feed (spinner row +
-            // one row per running/finished tool) actually gets vertical space.
-            // Previously clamped to `.min(1)`, which left the inline layout a
-            // single row for the whole activity component: `Activity::draw`
-            // returns early when `area.height < 2` (see activity.rs), so ONLY
-            // the "✦ Working…" spinner drew and every per-tool feed row was
-            // dropped — that is why the user never saw tools as they ran.
-            // Capped so a long feed can never swallow the compact live region.
-            self.activity.height().min(6)
+            0
         }
     }
 

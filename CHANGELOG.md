@@ -9,6 +9,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.37] — displays as `v1.0.037`
+
+### Fixed — composer no longer stacks down the screen during an agent turn
+
+- **The real fix for the mid-turn staircase.** As tools ran during a turn, the live
+  activity/tool feed grew one row per tool (`pwd`, then `ls`, then `date`…), and that growth
+  grew the inline viewport height **mid-turn** — each growth rebuilt the viewport (a DSR cursor
+  re-anchor), stacking a fresh composer + status bar down the whole screen. The streaming
+  preview was already given a fixed-height slot to prevent exactly this; the activity feed was
+  not. It now reserves a **constant fixed slot** for the whole turn (the feed draws top-down
+  into it), so the viewport height stays stable, no per-tool rebuild happens, and nothing
+  stacks. **Validated live** against a real agent turn executing shell tools: single composer,
+  no stacking, no crash.
+
 ## [1.0.36] — displays as `v1.0.036`
 
 ### Fixed — resize wipe was firing on every height change (regression)
