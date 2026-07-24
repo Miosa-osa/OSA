@@ -27,6 +27,8 @@ defmodule OptimalSystemAgent.ActionAuthority do
           | {:blocked, String.t()}
 
   @default_timeout_ms 10_000
+  @default_catalog_cache_ttl_ms 30_000
+  @catalog_cache :osa_action_authority_catalog_cache
 
   @doc """
   Authorize one tool invocation at the final execution boundary.
@@ -151,22 +153,102 @@ defmodule OptimalSystemAgent.ActionAuthority do
   end
 
   defp fetch_capability(name, key) do
-    case request(:get, "/api/v1/actions/catalog", key, []) do
-      {:ok, 200, %{"data" => catalog}} when is_list(catalog) ->
-        case Enum.find(catalog, &(&1["name"] == name)) do
-          %{"fingerprint" => fingerprint} = capability
-          when is_binary(fingerprint) and fingerprint != "" ->
-            {:ok, capability}
+    with {:ok, catalog} <- fetch_catalog(key) do
+      case Enum.find(catalog, &(&1["name"] == name)) do
+        %{"fingerprint" => fingerprint} = capability
+        when is_binary(fingerprint) and fingerprint != "" ->
+          {:ok, capability}
 
-          _ ->
-            {:error, {:capability_not_registered, name}}
+        _ ->
+          {:error, {:capability_not_registered, name}}
+      end
+    end
+  end
+
+  defp fetch_catalog(key) do
+    cache_key = catalog_cache_key(key)
+
+    case cached_catalog(cache_key) do
+      {:ok, catalog} ->
+        {:ok, catalog}
+
+      :miss ->
+        case request(:get, "/api/v1/actions/catalog", key, []) do
+          {:ok, 200, %{"data" => catalog}} when is_list(catalog) ->
+            put_cached_catalog(cache_key, catalog)
+            {:ok, catalog}
+
+          {:ok, status, body} ->
+            {:error, {:catalog_http_error, status, body}}
+
+          {:error, reason} ->
+            {:error, {:catalog_unavailable, reason}}
+        end
+    end
+  end
+
+  defp cached_catalog(cache_key) do
+    ttl_ms = catalog_cache_ttl_ms()
+
+    if ttl_ms <= 0 do
+      :miss
+    else
+      table = ensure_catalog_cache()
+      now = System.monotonic_time(:millisecond)
+
+      case :ets.lookup(table, cache_key) do
+        [{^cache_key, expires_at, catalog}] when expires_at > now ->
+          {:ok, catalog}
+
+        [{^cache_key, _expires_at, _catalog}] ->
+          :ets.delete(table, cache_key)
+          :miss
+
+        [] ->
+          :miss
+      end
+    end
+  end
+
+  defp put_cached_catalog(cache_key, catalog) do
+    ttl_ms = catalog_cache_ttl_ms()
+
+    if ttl_ms > 0 do
+      expires_at = System.monotonic_time(:millisecond) + ttl_ms
+      :ets.insert(ensure_catalog_cache(), {cache_key, expires_at, catalog})
+    end
+
+    :ok
+  end
+
+  defp catalog_cache_key(key) do
+    config = authority_config()
+    key_digest = :crypto.hash(:sha256, key)
+    {base_url(config), Keyword.get(config, :plug), key_digest}
+  end
+
+  defp catalog_cache_ttl_ms do
+    authority_config()
+    |> Keyword.get(:catalog_cache_ttl_ms, @default_catalog_cache_ttl_ms)
+  end
+
+  defp ensure_catalog_cache do
+    case :ets.whereis(@catalog_cache) do
+      :undefined ->
+        try do
+          :ets.new(@catalog_cache, [
+            :named_table,
+            :public,
+            :set,
+            read_concurrency: true,
+            write_concurrency: true
+          ])
+        rescue
+          ArgumentError -> @catalog_cache
         end
 
-      {:ok, status, body} ->
-        {:error, {:catalog_http_error, status, body}}
-
-      {:error, reason} ->
-        {:error, {:catalog_unavailable, reason}}
+      table ->
+        table
     end
   end
 

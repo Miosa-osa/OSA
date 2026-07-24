@@ -17,9 +17,15 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
       action_authority: Application.get_env(:optimal_system_agent, :action_authority),
       cli_config_dir: Application.get_env(:optimal_system_agent, :miosa_cli_config_dir),
       sandbox_backend: Application.get_env(:optimal_system_agent, :sandbox_backend),
-      computer_use_platform: Application.get_env(:optimal_system_agent, :computer_use_platform)
+      computer_use_platform: Application.get_env(:optimal_system_agent, :computer_use_platform),
+      platform_api_key: System.get_env("MIOSA_PLATFORM_API_KEY"),
+      platform_endpoint: System.get_env("MIOSA_PLATFORM_ENDPOINT"),
+      platform_workspace_id: System.get_env("MIOSA_PLATFORM_WORKSPACE_ID")
     }
 
+    System.delete_env("MIOSA_PLATFORM_API_KEY")
+    System.delete_env("MIOSA_PLATFORM_ENDPOINT")
+    System.delete_env("MIOSA_PLATFORM_WORKSPACE_ID")
     Application.put_env(:optimal_system_agent, :miosa_cli_config_dir, config_dir)
     Application.put_env(:optimal_system_agent, :sandbox_backend, :miosa)
 
@@ -40,6 +46,13 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
       restore_env(:miosa_cli_config_dir, previous.cli_config_dir)
       restore_env(:sandbox_backend, previous.sandbox_backend)
       restore_env(:computer_use_platform, previous.computer_use_platform)
+      restore_system_env("MIOSA_PLATFORM_API_KEY", previous.platform_api_key)
+      restore_system_env("MIOSA_PLATFORM_ENDPOINT", previous.platform_endpoint)
+
+      restore_system_env(
+        "MIOSA_PLATFORM_WORKSPACE_ID",
+        previous.platform_workspace_id
+      )
     end)
 
     :ok
@@ -102,6 +115,58 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
 
     assert {"authorization", "Bearer msk_test_authority"} in headers
     refute inspect(request) =~ "session-secret"
+  end
+
+  test "reuses the versioned server catalog within the configured cache window" do
+    test_pid = self()
+    plug_name = unique_plug_name()
+
+    Req.Test.stub(plug_name, fn conn ->
+      case conn.request_path do
+        "/api/v1/actions/catalog" ->
+          send(test_pid, :catalog_requested)
+
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "name" => "sandbox.exec",
+                "version" => "1.0.0",
+                "fingerprint" => capability_fingerprint("sandbox.exec")
+              }
+            ]
+          })
+
+        "/api/v1/actions/authorize" ->
+          Req.Test.json(conn, %{"decision" => "allow", "receipt_id" => "receipt-cache"})
+      end
+    end)
+
+    configure_plug(plug_name)
+
+    assert {:allow, _receipt} =
+             ActionAuthority.authorize_tool("shell_execute", %{"command" => "echo one"})
+
+    assert {:allow, _receipt} =
+             ActionAuthority.authorize_tool("shell_execute", %{"command" => "echo two"})
+
+    assert_receive :catalog_requested
+    refute_receive :catalog_requested, 50
+  end
+
+  test "an environment credential uses only its matching endpoint and workspace context" do
+    System.put_env("MIOSA_PLATFORM_API_KEY", "msk_environment")
+    System.put_env("MIOSA_PLATFORM_ENDPOINT", "https://environment.miosa.test/")
+    System.put_env("MIOSA_PLATFORM_WORKSPACE_ID", "workspace-environment")
+
+    assert Platform.platform_api_key() == "msk_environment"
+    assert Platform.endpoint() == "https://environment.miosa.test"
+    assert Platform.workspace_id() == "workspace-environment"
+
+    System.delete_env("MIOSA_PLATFORM_ENDPOINT")
+    System.delete_env("MIOSA_PLATFORM_WORKSPACE_ID")
+
+    assert Platform.endpoint() == "https://api.miosa.ai"
+    assert Platform.workspace_id() == nil
   end
 
   test "pending central approval blocks the registry before the tool dispatches" do
@@ -262,4 +327,7 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
 
   defp restore_env(key, nil), do: Application.delete_env(:optimal_system_agent, key)
   defp restore_env(key, value), do: Application.put_env(:optimal_system_agent, key, value)
+
+  defp restore_system_env(key, nil), do: System.delete_env(key)
+  defp restore_system_env(key, value), do: System.put_env(key, value)
 end

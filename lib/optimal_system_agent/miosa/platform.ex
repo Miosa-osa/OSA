@@ -9,10 +9,12 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
 
   ## Resolution order
 
-  `platform_api_key/0` returns the first of:
+  Platform context is resolved atomically from one source:
 
-    1. `MIOSA_PLATFORM_API_KEY` environment variable
-    2. `api_key` in the MIOSA CLI's own config, `~/.miosa/config.json`
+    1. When `MIOSA_PLATFORM_API_KEY` is set, the key is paired only with
+       `MIOSA_PLATFORM_ENDPOINT` and `MIOSA_PLATFORM_WORKSPACE_ID`.
+    2. Otherwise the key, endpoint, and workspace all come from the MIOSA CLI's
+       own config, `~/.miosa/config.json`.
 
   This mirrors how the `:miosa` sandbox backend resolves its Bearer token, so
   logging in once with `miosa login` (which writes `~/.miosa/config.json`)
@@ -22,7 +24,10 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
   require Logger
 
   @env_var "MIOSA_PLATFORM_API_KEY"
+  @endpoint_env_var "MIOSA_PLATFORM_ENDPOINT"
+  @workspace_env_var "MIOSA_PLATFORM_WORKSPACE_ID"
   @config_file "config.json"
+  @default_endpoint "https://api.miosa.ai"
 
   @doc "Name of the platform-auth environment variable."
   @spec env_var() :: String.t()
@@ -39,12 +44,7 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
   `~/.miosa/config.json`.
   """
   @spec platform_api_key() :: String.t() | nil
-  def platform_api_key do
-    case System.get_env(@env_var) do
-      key when is_binary(key) and key != "" -> key
-      _ -> config_api_key()
-    end
-  end
+  def platform_api_key, do: platform_context().api_key
 
   @doc """
   Is a platform account credential available (env var **or** CLI config)?
@@ -86,21 +86,11 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
 
   @doc "The workspace selected by the MIOSA CLI, if one is active."
   @spec workspace_id() :: String.t() | nil
-  def workspace_id do
-    case config()["workspace"] do
-      value when is_binary(value) and value != "" -> value
-      _ -> nil
-    end
-  end
+  def workspace_id, do: platform_context().workspace_id
 
   @doc "The MIOSA platform endpoint selected by the CLI."
   @spec endpoint() :: String.t()
-  def endpoint do
-    case config()["endpoint"] do
-      value when is_binary(value) and value != "" -> String.trim_trailing(value, "/")
-      _ -> "https://api.miosa.ai"
-    end
-  end
+  def endpoint, do: platform_context().endpoint
 
   @doc """
   Persist `key` as the platform credential into `~/.miosa/config.json`,
@@ -141,6 +131,44 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
   def persist_api_key(_), do: {:error, :invalid_key}
 
   # ── Private ──────────────────────────────────────────────────────
+
+  defp platform_context do
+    case non_empty_env(@env_var) do
+      nil ->
+        config = config()
+
+        %{
+          api_key: non_empty_value(config["api_key"]),
+          endpoint: normalized_endpoint(config["endpoint"]),
+          workspace_id: non_empty_value(config["workspace"])
+        }
+
+      key ->
+        %{
+          api_key: key,
+          endpoint: normalized_endpoint(non_empty_env(@endpoint_env_var)),
+          workspace_id: non_empty_env(@workspace_env_var)
+        }
+    end
+  end
+
+  defp normalized_endpoint(value) do
+    case non_empty_value(value) do
+      nil -> @default_endpoint
+      endpoint -> String.trim_trailing(endpoint, "/")
+    end
+  end
+
+  defp non_empty_env(name), do: name |> System.get_env() |> non_empty_value()
+
+  defp non_empty_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp non_empty_value(_value), do: nil
 
   # The MIOSA CLI's config directory. Overridable via app env for tests.
   defp config_dir do
