@@ -16,7 +16,8 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
     previous = %{
       action_authority: Application.get_env(:optimal_system_agent, :action_authority),
       cli_config_dir: Application.get_env(:optimal_system_agent, :miosa_cli_config_dir),
-      sandbox_backend: Application.get_env(:optimal_system_agent, :sandbox_backend)
+      sandbox_backend: Application.get_env(:optimal_system_agent, :sandbox_backend),
+      computer_use_platform: Application.get_env(:optimal_system_agent, :computer_use_platform)
     }
 
     Application.put_env(:optimal_system_agent, :miosa_cli_config_dir, config_dir)
@@ -38,6 +39,7 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
       restore_env(:action_authority, previous.action_authority)
       restore_env(:miosa_cli_config_dir, previous.cli_config_dir)
       restore_env(:sandbox_backend, previous.sandbox_backend)
+      restore_env(:computer_use_platform, previous.computer_use_platform)
     end)
 
     :ok
@@ -150,6 +152,59 @@ defmodule OptimalSystemAgent.ActionAuthorityTest do
   test "local tools remain ungoverned" do
     assert :not_governed =
              ActionAuthority.authorize_tool("file_read", %{"path" => "/tmp/example"})
+  end
+
+  test "MIOSA computer use resolves each operation through the generated contract" do
+    test_pid = self()
+    plug_name = unique_plug_name()
+
+    Req.Test.stub(plug_name, fn conn ->
+      case conn.request_path do
+        "/api/v1/actions/catalog" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "name" => "computer.screenshot",
+                "version" => "1.0.0",
+                "fingerprint" => capability_fingerprint("computer.screenshot")
+              }
+            ]
+          })
+
+        "/api/v1/actions/authorize" ->
+          {:ok, raw, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:computer_authority_request, Jason.decode!(raw)})
+          Req.Test.json(conn, %{"decision" => "allow", "receipt_id" => "computer-receipt"})
+      end
+    end)
+
+    configure_plug(plug_name)
+    Application.put_env(:optimal_system_agent, :computer_use_platform, :miosa)
+
+    assert {:allow, %{"receipt_id" => "computer-receipt"}} =
+             ActionAuthority.authorize_tool("computer_use", %{
+               "action" => "screenshot",
+               "region" => %{"x" => 0, "y" => 0, "width" => 200, "height" => 100}
+             })
+
+    assert_receive {:computer_authority_request, request}
+    assert request["capability"]["name"] == "computer.screenshot"
+  end
+
+  test "unknown MIOSA computer use operations fail closed" do
+    Application.put_env(:optimal_system_agent, :computer_use_platform, :miosa)
+
+    assert {:blocked, message} =
+             ActionAuthority.authorize_tool("computer_use", %{"action" => "future_action"})
+
+    assert message =~ "no canonical capability"
+  end
+
+  test "computer use on a local display remains under OSA local safety only" do
+    Application.put_env(:optimal_system_agent, :computer_use_platform, :macos)
+
+    assert :not_governed =
+             ActionAuthority.authorize_tool("computer_use", %{"action" => "screenshot"})
   end
 
   test "scheduled commands use the shared authority seam with a schedule surface" do

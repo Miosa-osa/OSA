@@ -16,8 +16,10 @@ defmodule OptimalSystemAgent.ActionAuthority do
 
   require Logger
 
+  alias OptimalSystemAgent.ActionAuthority.Contract
   alias OptimalSystemAgent.MIOSA.Platform
   alias OptimalSystemAgent.Sandbox
+  alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapter, as: ComputerUseAdapter
 
   @type decision ::
           :not_governed
@@ -38,6 +40,9 @@ defmodule OptimalSystemAgent.ActionAuthority do
     case capability_for(tool_name, arguments) do
       nil ->
         :not_governed
+
+      {:error, alias_name} ->
+        {:blocked, "MIOSA-backed action #{alias_name} has no canonical capability"}
 
       capability_name ->
         authorize(
@@ -114,7 +119,11 @@ defmodule OptimalSystemAgent.ActionAuthority do
         configured
 
       tool_name == "shell_execute" and miosa_sandbox?(arguments) ->
-        "sandbox.exec"
+        capability_from_contract("shell_execute:miosa")
+
+      tool_name == "computer_use" and miosa_computer_use?() ->
+        action = arguments["action"] || arguments[:action] || "unknown"
+        capability_from_contract("computer_use:#{action}")
 
       true ->
         nil
@@ -123,6 +132,15 @@ defmodule OptimalSystemAgent.ActionAuthority do
 
   defp miosa_sandbox?(_arguments) do
     Sandbox.Router.backend() == Sandbox.MIOSA
+  end
+
+  defp miosa_computer_use?, do: ComputerUseAdapter.detect_platform() == :miosa
+
+  defp capability_from_contract(alias_name) do
+    case Contract.capability_for(alias_name) do
+      {:ok, capability_name} -> capability_name
+      {:error, :unknown_alias} -> {:error, alias_name}
+    end
   end
 
   defp require_platform_key do

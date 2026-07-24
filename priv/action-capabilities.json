@@ -1,0 +1,2124 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "name": "api.key.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f85284d3102718b04f9283b29daf944e27e0fadc45a42be6d918991130ad4fd0",
+      "surfaces": {
+        "mcp": [
+          "api_key_create"
+        ]
+      }
+    },
+    {
+      "name": "api.key.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e660837edac3b62a1bef31f882b4d80ec24284bd3e1022f6709d1b2bb67998a8",
+      "surfaces": {
+        "mcp": [
+          "api_key_delete"
+        ]
+      }
+    },
+    {
+      "name": "api.key.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a53f94d8207a2088147303412149e3afe8b2f5098104efd8b81d94c24ed09f29",
+      "surfaces": {
+        "mcp": [
+          "api_key_list"
+        ]
+      }
+    },
+    {
+      "name": "billing.plan",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b2e6c894c66fec453814e1c7a800d677fff533fe62633943c7876c504804b43f",
+      "surfaces": {
+        "mcp": [
+          "billing_plan"
+        ]
+      }
+    },
+    {
+      "name": "billing.usage",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7a5e29da6f0fc43a83ae5fe4f1d045bf47d38174f7fec3649fe10d1f1d82fdf5",
+      "surfaces": {
+        "mcp": [
+          "billing_usage"
+        ]
+      }
+    },
+    {
+      "name": "computer.accessibility.tree",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d46bc88b86ba0eeea5917d98d8c6d1128a4a0b7867ad8fe1bb181c6a9f7c4e5b",
+      "surfaces": {
+        "mcp": [
+          "computer_accessibility_tree"
+        ],
+        "osa": [
+          "computer_use:snapshot"
+        ]
+      }
+    },
+    {
+      "name": "computer.bash",
+      "version": "1.0.0",
+      "fingerprint": "sha256:707cfaefe6bb66c13209f3928b834d14eb70e89b5801a0ec1dfc36f2609a52e1",
+      "surfaces": {
+        "mcp": [
+          "computer_bash"
+        ]
+      }
+    },
+    {
+      "name": "computer.checkpoint.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1f5bacc3874d891d338fde69b259736f53a36b94de33d97e6c0635b7d5373571",
+      "surfaces": {
+        "mcp": [
+          "computer_checkpoint_create"
+        ]
+      }
+    },
+    {
+      "name": "computer.checkpoint.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7dac5558429aad7bfe610b16a3f6685911dc48cda24ea8096ae09705f6386cc1",
+      "surfaces": {
+        "mcp": [
+          "computer_checkpoint_delete"
+        ]
+      }
+    },
+    {
+      "name": "computer.checkpoint.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ce1588e7042b7b004331e7ef04dc18ffda1da99d6291e0bc737c503535cf1eb7",
+      "surfaces": {
+        "mcp": [
+          "computer_checkpoint_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.checkpoint.restore",
+      "version": "1.0.0",
+      "fingerprint": "sha256:2b146ae014252e27c0a33130491ecaf75e89acd3a9bf09dc63ed73c0443736ed",
+      "surfaces": {
+        "mcp": [
+          "computer_checkpoint_restore"
+        ]
+      }
+    },
+    {
+      "name": "computer.click",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ee0de626a7903700a88d56e5bac49c340598b7395c5ac70c786766d652829999",
+      "surfaces": {
+        "mcp": [
+          "computer_click"
+        ],
+        "osa": [
+          "computer_use:click"
+        ]
+      }
+    },
+    {
+      "name": "computer.close.window",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5f0af6b4e647670df418cb449169cdfb6a0cd083380715241f2eda3248f28b50",
+      "surfaces": {
+        "mcp": [
+          "computer_close_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.copy.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:0e8e2af50fd4fe8376459acabd52b9c30219784038baed01cb53fbade507b5a6",
+      "surfaces": {
+        "mcp": [
+          "computer_copy_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:6ad26fe45a5370a83a278ee5406b8fbc3b933aee405f32b07900a3059577a34e",
+      "surfaces": {
+        "mcp": [
+          "computer_create"
+        ]
+      }
+    },
+    {
+      "name": "computer.delete.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:07ca2d71cd9e8afdc1d83a62af9d2c2b62afa82fae66b57f60011ec52408d9cb",
+      "surfaces": {
+        "mcp": [
+          "computer_delete_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.destroy",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1d1211165a9ece144cd7164e6b71d1c2818aaffa69d17595ddebe729214e855e",
+      "surfaces": {
+        "mcp": [
+          "computer_destroy"
+        ]
+      }
+    },
+    {
+      "name": "computer.domain.add",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3eb8944da0bb2010d35c0addc303586032eded6b873a6899ef05db521b509139",
+      "surfaces": {
+        "mcp": [
+          "computer_domain_add"
+        ]
+      }
+    },
+    {
+      "name": "computer.domain.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3290192a43b133ccf1b020b05a16845b5015a1dbfab8959d5588e6a8dabeb0d1",
+      "surfaces": {
+        "mcp": [
+          "computer_domain_delete"
+        ]
+      }
+    },
+    {
+      "name": "computer.domain.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5353a4c4b71ecec85a86a20aab911d6d38421d8730a132f7c54c393503caf852",
+      "surfaces": {
+        "mcp": [
+          "computer_domain_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.double.click",
+      "version": "1.0.0",
+      "fingerprint": "sha256:829fba5476e3c538240e8bd8911ba75b65b7744ee0cdee55ce4237f1eca42fe1",
+      "surfaces": {
+        "mcp": [
+          "computer_double_click"
+        ],
+        "osa": [
+          "computer_use:double_click"
+        ]
+      }
+    },
+    {
+      "name": "computer.drag",
+      "version": "1.0.0",
+      "fingerprint": "sha256:021437d90bb10cd6190ca49ea5439ab3dd3a2e609cd03c4110954645544dfc8f",
+      "surfaces": {
+        "mcp": [
+          "computer_drag"
+        ],
+        "osa": [
+          "computer_use:drag"
+        ]
+      }
+    },
+    {
+      "name": "computer.env.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:73db6ce0418fb7974e4d0cc8a86fbda7761e07ba3865b1145e23560224c67818",
+      "surfaces": {
+        "mcp": [
+          "computer_env_delete"
+        ]
+      }
+    },
+    {
+      "name": "computer.env.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:382626d451975d737d4c3b5a0bb2fd6865c58d7e9470036fdd62bff6e1217a7c",
+      "surfaces": {
+        "mcp": [
+          "computer_env_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.env.set",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f70edd685aab015f317f17e9ea10f907494fc21d625f04cd313a5afe783bf13d",
+      "surfaces": {
+        "mcp": [
+          "computer_env_set"
+        ]
+      }
+    },
+    {
+      "name": "computer.expose.port",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e989cb95baa83f129d8557e81ce528d0da9085c242f0d54c1805c57b5f2f3e4a",
+      "surfaces": {
+        "mcp": [
+          "computer_expose_port"
+        ]
+      }
+    },
+    {
+      "name": "computer.focus.window",
+      "version": "1.0.0",
+      "fingerprint": "sha256:718b5c00c0abe8b291df206824b9c51d96b3c9455f3bc124558b06ee89073d97",
+      "surfaces": {
+        "mcp": [
+          "computer_focus_window"
+        ],
+        "osa": [
+          "computer_use:focus_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c54e2682fa3d85a253fac31a875c6c5cf8daf6c2c320d57a0e580ed4879dd285",
+      "surfaces": {
+        "mcp": [
+          "computer_get"
+        ]
+      }
+    },
+    {
+      "name": "computer.get.clipboard",
+      "version": "1.0.0",
+      "fingerprint": "sha256:752c2605cd4e1585ee3749c1c784ee07589871a763082437fc0ce32c2fc66efe",
+      "surfaces": {
+        "mcp": [
+          "computer_get_clipboard"
+        ],
+        "osa": [
+          "computer_use:clipboard_get"
+        ]
+      }
+    },
+    {
+      "name": "computer.get.cursor.position",
+      "version": "1.0.0",
+      "fingerprint": "sha256:2c45ae9ea8163e297d2956a41fba080bd7d966ecfae0700374bfa63a750300dd",
+      "surfaces": {
+        "mcp": [
+          "computer_get_cursor_position"
+        ],
+        "osa": [
+          "computer_use:cursor"
+        ]
+      }
+    },
+    {
+      "name": "computer.get.desktop.env",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ed05b5ac08cd8c1030a48f85262bf6f68d7798e142a0c834b687366d423c7a28",
+      "surfaces": {
+        "mcp": [
+          "computer_get_desktop_env"
+        ]
+      }
+    },
+    {
+      "name": "computer.get.screen.size",
+      "version": "1.0.0",
+      "fingerprint": "sha256:42a7d95b4e068af30b357c3df86512a8abd923b4dcc41cf63f78c42dae000f8f",
+      "surfaces": {
+        "mcp": [
+          "computer_get_screen_size"
+        ]
+      }
+    },
+    {
+      "name": "computer.hotkey",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d37a765e43dbaa58b8ed626aced7e6dc9a1fef8a4b423ba293004f4e9cd3c00a",
+      "surfaces": {
+        "mcp": [
+          "computer_hotkey"
+        ]
+      }
+    },
+    {
+      "name": "computer.key",
+      "version": "1.0.0",
+      "fingerprint": "sha256:51476a099bbb3d3bde9a888a048efeff72b00f1c047893b27c57d29609d16e4e",
+      "surfaces": {
+        "mcp": [
+          "computer_key"
+        ],
+        "osa": [
+          "computer_use:key_press"
+        ]
+      }
+    },
+    {
+      "name": "computer.key.down",
+      "version": "1.0.0",
+      "fingerprint": "sha256:0ad363f35ca47037bbbe6b550e3228a94c9f94a3743a08e6c36827643b8c130c",
+      "surfaces": {
+        "mcp": [
+          "computer_key_down"
+        ]
+      }
+    },
+    {
+      "name": "computer.key.up",
+      "version": "1.0.0",
+      "fingerprint": "sha256:9517292e8f773a2e28749764087a3f3d71f7e5839b02588b11ec91179b584e04",
+      "surfaces": {
+        "mcp": [
+          "computer_key_up"
+        ]
+      }
+    },
+    {
+      "name": "computer.launch",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4077f25e91b23394e74639188953f181d099f57dc96412c860d6d53bbdc973c3",
+      "surfaces": {
+        "mcp": [
+          "computer_launch"
+        ],
+        "osa": [
+          "computer_use:launch"
+        ]
+      }
+    },
+    {
+      "name": "computer.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a2768d37e4a55d495d12233e7e5049599f6629736d4741137d03ba6f7c4d7759",
+      "surfaces": {
+        "mcp": [
+          "computer_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.list.apps",
+      "version": "1.0.0",
+      "fingerprint": "sha256:520f915c1c842ff750281e6b3b6775df5285022b2676a209a94e0a2d15f433ae",
+      "surfaces": {
+        "mcp": [],
+        "osa": [
+          "computer_use:list_apps"
+        ]
+      }
+    },
+    {
+      "name": "computer.list.files",
+      "version": "1.0.0",
+      "fingerprint": "sha256:75da591f5b97eab930b223b70d34f78b660911a7e3ac0fa8f4129d8f63ed4044",
+      "surfaces": {
+        "mcp": [
+          "computer_list_files"
+        ]
+      }
+    },
+    {
+      "name": "computer.list.ports",
+      "version": "1.0.0",
+      "fingerprint": "sha256:34a7b14226834f5a31fbec356d67bf85e74be4b19457db9c198ee90131d35538",
+      "surfaces": {
+        "mcp": [
+          "computer_list_ports"
+        ]
+      }
+    },
+    {
+      "name": "computer.list.regions",
+      "version": "1.0.0",
+      "fingerprint": "sha256:43c3ff98fbc595b751e2f542bb442ac604ccdb25c7956951cf45cd71792975c9",
+      "surfaces": {
+        "mcp": [
+          "computer_list_regions"
+        ]
+      }
+    },
+    {
+      "name": "computer.list.surfaces",
+      "version": "1.0.0",
+      "fingerprint": "sha256:cdb6430549d23e7bdea85c791299a222fe3e2aa9df8710dee4c5f7a887e3e48e",
+      "surfaces": {
+        "mcp": [],
+        "osa": [
+          "computer_use:list_surfaces"
+        ]
+      }
+    },
+    {
+      "name": "computer.logs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:02a1737f77fdfdc73b5a729bf81288862bb124b029ad0621aca2e583d0a52772",
+      "surfaces": {
+        "mcp": [
+          "computer_logs"
+        ]
+      }
+    },
+    {
+      "name": "computer.maximize.window",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c726e482ca5a6ff75441aac1f2be7eef9ed8fc663a4e0ca836671013b0701b07",
+      "surfaces": {
+        "mcp": [
+          "computer_maximize_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.minimize.window",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c6c6f4e4e5fe8aaef2a2bb3ce5587fa7c75d4485adacad815018c9ef8af8bb99",
+      "surfaces": {
+        "mcp": [
+          "computer_minimize_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.mkdir",
+      "version": "1.0.0",
+      "fingerprint": "sha256:613fd7f5a2038d18e6ed8020b92e865436e5d3ed2db0a22b8c53327b796c9731",
+      "surfaces": {
+        "mcp": [
+          "computer_mkdir"
+        ]
+      }
+    },
+    {
+      "name": "computer.mouse.down",
+      "version": "1.0.0",
+      "fingerprint": "sha256:20b6236dc0b9f230c8b29ad6bbb5f29133695be9c5c45382d376781d9043299b",
+      "surfaces": {
+        "mcp": [
+          "computer_mouse_down"
+        ]
+      }
+    },
+    {
+      "name": "computer.mouse.up",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5885807e36a3608a49c8173b90f7216e3d6b5c842048080882b25162b28a78ae",
+      "surfaces": {
+        "mcp": [
+          "computer_mouse_up"
+        ]
+      }
+    },
+    {
+      "name": "computer.move.cursor",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1c82d73935be589e7ddea89f706c93c3153947dd2d6cbe2ff44f9b1ae7850461",
+      "surfaces": {
+        "mcp": [
+          "computer_move_cursor"
+        ]
+      }
+    },
+    {
+      "name": "computer.network.policy.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a6d9e1464191fce9e07d2883221eca76dc666920b906f4cdee414545590fcf24",
+      "surfaces": {
+        "mcp": [
+          "computer_network_policy_get"
+        ]
+      }
+    },
+    {
+      "name": "computer.network.policy.reset",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c4a6c9cfe7f8c4987a9f6a9f2fb3f6b51ac3adf91a1e24906645e0f9ff897560",
+      "surfaces": {
+        "mcp": [
+          "computer_network_policy_reset"
+        ]
+      }
+    },
+    {
+      "name": "computer.network.policy.set",
+      "version": "1.0.0",
+      "fingerprint": "sha256:365adf6d5226dd3f962d55227d7279db28a138f276f58552cf794ad5a9585838",
+      "surfaces": {
+        "mcp": [
+          "computer_network_policy_set"
+        ]
+      }
+    },
+    {
+      "name": "computer.preview.url",
+      "version": "1.0.0",
+      "fingerprint": "sha256:fffb9c3b232cc0e440d3b26a2e7d826d4d4be4c56024c4a6cbc1802feccd0928",
+      "surfaces": {
+        "mcp": [
+          "computer_preview_url"
+        ]
+      }
+    },
+    {
+      "name": "computer.read.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:354f0c5f3bf3002dbc2a326e3c8543ceee1018009035595593e74036a74ed2fb",
+      "surfaces": {
+        "mcp": [
+          "computer_read_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.rename.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e8cf3d31a37814d58f3afc6071fc38d842e10edc331bb7da3d65345de33c04a2",
+      "surfaces": {
+        "mcp": [
+          "computer_rename_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.restart",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a1e52ec2426efc241d39ac101e5bd56ca50447775b4508989c5cb4ed996bd292",
+      "surfaces": {
+        "mcp": [
+          "computer_restart"
+        ]
+      }
+    },
+    {
+      "name": "computer.right.click",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3e8a86ef7beaab4bf1a89f1ac027997f7eab81151e28689484a3caa4f816ce38",
+      "surfaces": {
+        "mcp": [
+          "computer_right_click"
+        ],
+        "osa": [
+          "computer_use:right_click"
+        ]
+      }
+    },
+    {
+      "name": "computer.rotate.viewer.password",
+      "version": "1.0.0",
+      "fingerprint": "sha256:8cde1a302f37c628dc007ec8ad38693068a3479c4efe832fe6200dece91d7f68",
+      "surfaces": {
+        "mcp": [
+          "computer_rotate_viewer_password"
+        ]
+      }
+    },
+    {
+      "name": "computer.screenshot",
+      "version": "1.0.0",
+      "fingerprint": "sha256:6ae31d50dd0fdf3270236ea1cf56ac2bf7e593dc186ae7bde9f6f2a582e69e44",
+      "surfaces": {
+        "mcp": [
+          "computer_screenshot"
+        ],
+        "osa": [
+          "computer_use:screenshot"
+        ]
+      }
+    },
+    {
+      "name": "computer.scroll",
+      "version": "1.0.0",
+      "fingerprint": "sha256:fa23b244733c40f3ee2203735e130e4ab5d530343ec3c823cfa0702ceb16dcbc",
+      "surfaces": {
+        "mcp": [
+          "computer_scroll"
+        ],
+        "osa": [
+          "computer_use:scroll"
+        ]
+      }
+    },
+    {
+      "name": "computer.scroll.to",
+      "version": "1.0.0",
+      "fingerprint": "sha256:afeb484e737c086ec7dc48eb0aa7a1ae34f9e8a52af0344d9ff60ec5658af75f",
+      "surfaces": {
+        "mcp": [],
+        "osa": [
+          "computer_use:scroll_to"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f4f0aed8b20df4c67049cf714994a7659b219f66effac5ca543aa6a3c53936f0",
+      "surfaces": {
+        "mcp": [
+          "computer_service_create"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:25cf8dbebc06434fd3ae28286aa01e106f62260fa032eced26a270b872d42b7a",
+      "surfaces": {
+        "mcp": [
+          "computer_service_delete"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:24649b7d8b4b81c704171a8ec5b13f2a6c9240b640ebdf146d2ca87e2d771b2e",
+      "surfaces": {
+        "mcp": [
+          "computer_service_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.logs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:193e36d43e9276a7fed8dc18e303391536197d7f72800a9d8a8f5b3ffaa93261",
+      "surfaces": {
+        "mcp": [
+          "computer_service_logs"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.restart",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4ea55e124119a2fdc4832c5fe29f9851dcab0f07569c23fea06c4899dc2b738d",
+      "surfaces": {
+        "mcp": [
+          "computer_service_restart"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.start",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ed0245a3c8ada34b1058c5b03fc09741895af1d55b92be91d19d6f278f0c6841",
+      "surfaces": {
+        "mcp": [
+          "computer_service_start"
+        ]
+      }
+    },
+    {
+      "name": "computer.service.stop",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3365591f01d49b4afe92b962b72ce9343040f6ba9873904e9900e59f15f2c297",
+      "surfaces": {
+        "mcp": [
+          "computer_service_stop"
+        ]
+      }
+    },
+    {
+      "name": "computer.set.clipboard",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b7e080d159a7ee93cc881c00742dead1c71c456905e125090141d41e5d44ff65",
+      "surfaces": {
+        "mcp": [
+          "computer_set_clipboard"
+        ],
+        "osa": [
+          "computer_use:clipboard_clear",
+          "computer_use:clipboard_set"
+        ]
+      }
+    },
+    {
+      "name": "computer.set.value",
+      "version": "1.0.0",
+      "fingerprint": "sha256:812d6214f8968e468ffa1130a6b1536fce6cef3eb305c09d3cd33833274aff14",
+      "surfaces": {
+        "mcp": [],
+        "osa": [
+          "computer_use:set_value"
+        ]
+      }
+    },
+    {
+      "name": "computer.set.wallpaper",
+      "version": "1.0.0",
+      "fingerprint": "sha256:34eb0ff709503e3b7099bf68eb48277dc9c546b6bd6bad7628ed5f02e5cbb1b9",
+      "surfaces": {
+        "mcp": [
+          "computer_set_wallpaper"
+        ]
+      }
+    },
+    {
+      "name": "computer.set.window.position",
+      "version": "1.0.0",
+      "fingerprint": "sha256:11bb67cadbd39442d6b6270a2412cb5e5473ad998c2b5c9b6542baf5a47d1adf",
+      "surfaces": {
+        "mcp": [
+          "computer_set_window_position"
+        ],
+        "osa": [
+          "computer_use:move_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.set.window.size",
+      "version": "1.0.0",
+      "fingerprint": "sha256:9f8487c9705770eed22c25cf095982aeb065b30dc333f49b6aa3d5688eb7ce64",
+      "surfaces": {
+        "mcp": [
+          "computer_set_window_size"
+        ],
+        "osa": [
+          "computer_use:resize_window"
+        ]
+      }
+    },
+    {
+      "name": "computer.start",
+      "version": "1.0.0",
+      "fingerprint": "sha256:83a9b400b232bdf46989a59267c518eed0307b1c1b833cda1f272b2ac3cdb42b",
+      "surfaces": {
+        "mcp": [
+          "computer_start"
+        ]
+      }
+    },
+    {
+      "name": "computer.stat.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c695fe5ae4794fa42c2fdf88e64574d6510cefe2f9f2bcc1e8b0d249570b146d",
+      "surfaces": {
+        "mcp": [
+          "computer_stat_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.stop",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1d7c49b0f2def4b9162b28aaaf27ab9eefbdb60b2d90e55d85b04be656641206",
+      "surfaces": {
+        "mcp": [
+          "computer_stop"
+        ]
+      }
+    },
+    {
+      "name": "computer.template.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3cdc16e1db61ba81c6da6c8b37df7414841c3f2ce0dbaf81df22f53c11e5623d",
+      "surfaces": {
+        "mcp": [
+          "computer_template_create"
+        ]
+      }
+    },
+    {
+      "name": "computer.template.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:40c1e4b44d8d5f902a74694a9ad1fb48aecd61677085ce2285a629ec3fbe0bb5",
+      "surfaces": {
+        "mcp": [
+          "computer_template_list"
+        ]
+      }
+    },
+    {
+      "name": "computer.triple.click",
+      "version": "1.0.0",
+      "fingerprint": "sha256:8dade18cc40742e367d9d45c5a2ebb1f0bafc06fa6e3dfde2a103bc5e8627072",
+      "surfaces": {
+        "mcp": [],
+        "osa": [
+          "computer_use:triple_click"
+        ]
+      }
+    },
+    {
+      "name": "computer.type",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5cd3e3b3945585b96a180f6c33ae51ff5c5fbd4fa0a06019103737ba7651ac03",
+      "surfaces": {
+        "mcp": [
+          "computer_type"
+        ],
+        "osa": [
+          "computer_use:type_text"
+        ]
+      }
+    },
+    {
+      "name": "computer.update",
+      "version": "1.0.0",
+      "fingerprint": "sha256:8b87271a743137360210a720ea80ff31fa1b259ba300839bbbbb87b3979b6c80",
+      "surfaces": {
+        "mcp": [
+          "computer_update"
+        ]
+      }
+    },
+    {
+      "name": "computer.upload.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:50682d7059bcaf98fe23346b7aaeb0e58f17cf2813759b5cd5b7a409f40f1e66",
+      "surfaces": {
+        "mcp": [
+          "computer_upload_file"
+        ]
+      }
+    },
+    {
+      "name": "computer.viewer.password",
+      "version": "1.0.0",
+      "fingerprint": "sha256:2adf8e197340ce3da695b06d95bd494ba4cd4b2b1b1c9b61e4009d33e4795c9b",
+      "surfaces": {
+        "mcp": [
+          "computer_viewer_password"
+        ]
+      }
+    },
+    {
+      "name": "computer.wait",
+      "version": "1.0.0",
+      "fingerprint": "sha256:66fb2fdc3b819df01fd4e60d36ef3e323f0579d99cc1cac68d54659218672e1b",
+      "surfaces": {
+        "mcp": [
+          "computer_wait"
+        ],
+        "osa": [
+          "computer_use:wait"
+        ]
+      }
+    },
+    {
+      "name": "computer.windows",
+      "version": "1.0.0",
+      "fingerprint": "sha256:13e04681a22af9face9f6c799dd1b0cc6b8f930fea5ae78aa996c8c695d7b9c6",
+      "surfaces": {
+        "mcp": [
+          "computer_windows"
+        ],
+        "osa": [
+          "computer_use:list_windows"
+        ]
+      }
+    },
+    {
+      "name": "computer.write.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d086eaabd04ae1bd47192a2a1f399c51a95f4c9a2d813d1373c34fdbb31afbea",
+      "surfaces": {
+        "mcp": [
+          "computer_write_file"
+        ]
+      }
+    },
+    {
+      "name": "cron.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:279ad9721675a6003da18d7f635b1756f5425a352e01a8949c22025ebec6dd24",
+      "surfaces": {
+        "mcp": [
+          "cron_create"
+        ]
+      }
+    },
+    {
+      "name": "cron.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e881128c012f046d9fc5342ed69c7a67da003e2919c31ec6177008cd33aaa7df",
+      "surfaces": {
+        "mcp": [
+          "cron_delete"
+        ]
+      }
+    },
+    {
+      "name": "cron.executions",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f682b772adea30d069d70a2d5443a87646111b03ebd222ef9d45773d857c43dc",
+      "surfaces": {
+        "mcp": [
+          "cron_executions"
+        ]
+      }
+    },
+    {
+      "name": "cron.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d8827c82f3489e62befb5e66c41d3fad126a92123b2aadfc481ff84e53b08a16",
+      "surfaces": {
+        "mcp": [
+          "cron_get"
+        ]
+      }
+    },
+    {
+      "name": "cron.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c8706904c92613a6e787298ff47168e5da83c1c13f461d0e7ecad6ccff3652c1",
+      "surfaces": {
+        "mcp": [
+          "cron_list"
+        ]
+      }
+    },
+    {
+      "name": "cron.pause",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c7686b66d20079c629fa8a9f0d1d2d34cb57ce6256806f3a693f5a41bf4a0186",
+      "surfaces": {
+        "mcp": [
+          "cron_pause"
+        ]
+      }
+    },
+    {
+      "name": "cron.resume",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4c9086a6ba1b8f687d967a45b4e9adfa041c9f13f5914b7258cc9c6840a44744",
+      "surfaces": {
+        "mcp": [
+          "cron_resume"
+        ]
+      }
+    },
+    {
+      "name": "cron.run.now",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b343849e2d89fbcd5aaad22c8180b5a1a1c80ae01f8389d721441251024c3b2b",
+      "surfaces": {
+        "mcp": [
+          "cron_run_now"
+        ]
+      }
+    },
+    {
+      "name": "database.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:98809f0dde51dd8b04b9f352fa9b712b37c0fea3526388f4341be8979e1f73c2",
+      "surfaces": {
+        "mcp": [
+          "database_create"
+        ]
+      }
+    },
+    {
+      "name": "database.credentials",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f7990be708be87ebf87e91efcc1d2f7c27d745c29f66dfff0aacf04ea867f912",
+      "surfaces": {
+        "mcp": [
+          "database_credentials"
+        ]
+      }
+    },
+    {
+      "name": "database.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:8aad8bb0138c46e9a770556690398ff1e1fd0b9cfdf358d705c038bd31d42d8e",
+      "surfaces": {
+        "mcp": [
+          "database_delete"
+        ]
+      }
+    },
+    {
+      "name": "database.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:bab318049bd65cad88a0ed40c36ec7bb8d2151e45969c887b0e667ef81f5387f",
+      "surfaces": {
+        "mcp": [
+          "database_get"
+        ]
+      }
+    },
+    {
+      "name": "database.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f4961073ea0980ee345dc37eaa5716dcbc671dbe59a987d1883e7bce2f2ded8f",
+      "surfaces": {
+        "mcp": [
+          "database_list"
+        ]
+      }
+    },
+    {
+      "name": "database.logs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:da263177e899311261a780421fc7f68a69592bab9ca8b7c9c6cfb628f161a3b2",
+      "surfaces": {
+        "mcp": [
+          "database_logs"
+        ]
+      }
+    },
+    {
+      "name": "deployment.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:827dcf1c1eb5050dc0049abf37aad7a29b7aaa1c04377e6c668ad71aee18e1f2",
+      "surfaces": {
+        "mcp": [
+          "deployment_create"
+        ]
+      }
+    },
+    {
+      "name": "deployment.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b9c2aa4ad767032deff11d6d0d2e0dcaf734c082825cdf873e2364bb18ffb3a1",
+      "surfaces": {
+        "mcp": [
+          "deployment_delete"
+        ]
+      }
+    },
+    {
+      "name": "deployment.env.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ff85c8e5ee860dac8c371a46ca0ced6c2db134a4169df9baf69147e7d3eca257",
+      "surfaces": {
+        "mcp": [
+          "deployment_env_list"
+        ]
+      }
+    },
+    {
+      "name": "deployment.env.set",
+      "version": "1.0.0",
+      "fingerprint": "sha256:633032d783830aa34d5ba67696ae6f96827dbcd4a93d331c801c2aaa13392238",
+      "surfaces": {
+        "mcp": [
+          "deployment_env_set"
+        ]
+      }
+    },
+    {
+      "name": "deployment.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e98c0992bb2f73c5cdb6eec5021f93d8c2361bd61cf3261716c4938e6111f3da",
+      "surfaces": {
+        "mcp": [
+          "deployment_get"
+        ]
+      }
+    },
+    {
+      "name": "deployment.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e77718894c755a0dad2287999ae9154aece5025383cae7717f790a02410c6f2b",
+      "surfaces": {
+        "mcp": [
+          "deployment_list"
+        ]
+      }
+    },
+    {
+      "name": "deployment.logs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e883b76f482fb3a66870ce95b21258407fd26e24ca258867154e45f61685071c",
+      "surfaces": {
+        "mcp": [
+          "deployment_logs"
+        ]
+      }
+    },
+    {
+      "name": "deployment.publish",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a3058fd690c53e5172a65e5dfdaddd72acce20355ea1e21dc620b075bb7f261d",
+      "surfaces": {
+        "mcp": [
+          "deployment_publish"
+        ]
+      }
+    },
+    {
+      "name": "deployment.rollback",
+      "version": "1.0.0",
+      "fingerprint": "sha256:da09f089738848280d2eca9f9b0ec48d6ecc87a87bfdc3bd52c70dd0f7f951ed",
+      "surfaces": {
+        "mcp": [
+          "deployment_rollback"
+        ]
+      }
+    },
+    {
+      "name": "deployment.version.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:fa32db014b9602952287cb577ff06f5de7461d3b85ab7d93bbae46028c3642d2",
+      "surfaces": {
+        "mcp": [
+          "deployment_version_list"
+        ]
+      }
+    },
+    {
+      "name": "deployment.version.promote",
+      "version": "1.0.0",
+      "fingerprint": "sha256:2f5da972635464fb9ee37437dcf30c45e237fe597de4006e80e7a7310293797f",
+      "surfaces": {
+        "mcp": [
+          "deployment_version_promote"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:654bb31b753aab9f5d671e6b92eff74dc053ff51662d96cb82e32ef25d90f5b7",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_create"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.doctor",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7a40f88208a1e067e7389f679591fa9eba9bd076122884d4c0900037257e677a",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_doctor"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.host.ensure",
+      "version": "1.0.0",
+      "fingerprint": "sha256:aedf5778ad7a2336ba550f9444bc7a14938d6cbec758d1bc5b9bbf2000e295c4",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_host_ensure"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.host.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:740a40b8bf149c17ed1b50d8dec824049ac39f3dc3a9b6deee0f7a5bff030632",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_host_get"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.host.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:01ee743d216cd83e1927c9ffa91e55310ea92f9e85beedeb449d112336dc80c6",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_host_list"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.template.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e70fa468200d1cb147703d89657b6f6fb74eb019298e8ed023c047391fdd8ceb",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_template_get"
+        ]
+      }
+    },
+    {
+      "name": "docker.deploy.template.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4888088c0f6f8f0fa38694740b1d32e763b023f6c37a09c33250176f909143c0",
+      "surfaces": {
+        "mcp": [
+          "docker_deploy_template_list"
+        ]
+      }
+    },
+    {
+      "name": "egress.audit.count.by.host",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b6762dc4dcaae724ccba1106d52f65d62fb6d5c0ed7b7022c88b3ce3a0e12ea9",
+      "surfaces": {
+        "mcp": [
+          "miosa_audit_count_by_host"
+        ]
+      }
+    },
+    {
+      "name": "egress.audit.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5eee66fbce6a6c6572d77c4a52990cc4c6e1e2ea00717b56b714eb88fb53443d",
+      "surfaces": {
+        "mcp": [
+          "miosa_audit_get"
+        ]
+      }
+    },
+    {
+      "name": "egress.audit.query",
+      "version": "1.0.0",
+      "fingerprint": "sha256:281a387213cde8f894aa53654d1e87c540d4455c6881e0f0c027ee287b233e28",
+      "surfaces": {
+        "mcp": [
+          "miosa_audit_query"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.allow",
+      "version": "1.0.0",
+      "fingerprint": "sha256:cac718b6a80f635635ef53f3970593106120c29aa202201adf75c55e28375f78",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_allow"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.deny",
+      "version": "1.0.0",
+      "fingerprint": "sha256:535b73ff1f3e4fc4ec0772f1db239f6673dd6d0031136fb05125e08bc85a0727",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_deny"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.list.policies",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7b3e7bdcea539f36121b44b94b2b400b3c60999d529b881cac2d87ca1222f246",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_list_policies"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.list.rules",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4d86a993c163d2017001464ad8a965ebff4a0c5e0767af0f35736b81da22a4a1",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_list_rules"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.lockdown",
+      "version": "1.0.0",
+      "fingerprint": "sha256:81bdc98ddb2631506a8b8550b90b2dc8939dea5c7e5521136a7cf0c652169365",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_lockdown"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.observe",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f3fbec6af5cd082c62322200667e3691b9a9aa5b9c5bfa87b76792e212cda1db",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_observe"
+        ]
+      }
+    },
+    {
+      "name": "egress.network.suggestions",
+      "version": "1.0.0",
+      "fingerprint": "sha256:17e86f8ac7b07a349dc8667b604305f8f770c30d03537dcea16347a45d5641a9",
+      "surfaces": {
+        "mcp": [
+          "miosa_network_suggestions"
+        ]
+      }
+    },
+    {
+      "name": "egress.oauth.providers.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:151ffa1939190b558fbdb75d9ed696ae7daa2c68120f98be648e7687434cbcc7",
+      "surfaces": {
+        "mcp": [
+          "miosa_oauth_providers_list"
+        ]
+      }
+    },
+    {
+      "name": "egress.secret.read",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ada9629130808d27e889efa232b9a816617d96a41cc43c422c950fbc4d32ead6",
+      "surfaces": {
+        "mcp": []
+      }
+    },
+    {
+      "name": "egress.secrets.connect.oauth",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a95326fe0ccf2de1a4d660f0c718db44f7fdfab5d9475392cd388708c9db5b57",
+      "surfaces": {
+        "mcp": [
+          "miosa_secrets_connect_oauth"
+        ]
+      }
+    },
+    {
+      "name": "egress.secrets.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:afddeade6dc1fc2dac1284a447a6987b8613a90e483413fd0ae927588eef0e0e",
+      "surfaces": {
+        "mcp": [
+          "miosa_secrets_delete"
+        ]
+      }
+    },
+    {
+      "name": "egress.secrets.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a35198d5e2dde4ce3fc5ff0aa5b9e3d6495df1b13bb828b233c289b7bc581d8f",
+      "surfaces": {
+        "mcp": [
+          "miosa_secrets_list"
+        ]
+      }
+    },
+    {
+      "name": "egress.secrets.rotate",
+      "version": "1.0.0",
+      "fingerprint": "sha256:86779993f2b7631e614d7a95a8d5f63242b0ea22e2af562042133ad3380db8c3",
+      "surfaces": {
+        "mcp": [
+          "miosa_secrets_rotate"
+        ]
+      }
+    },
+    {
+      "name": "egress.secrets.set",
+      "version": "1.0.0",
+      "fingerprint": "sha256:28368e0fdec4848edbf33c4c574055669f375861951707dd5440fb0c6c24d4d5",
+      "surfaces": {
+        "mcp": [
+          "miosa_secrets_set"
+        ]
+      }
+    },
+    {
+      "name": "function.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:bad1a47bbbb9a7400e2daa02612b8584c9f78596e255e3684812c7c81bcea496",
+      "surfaces": {
+        "mcp": [
+          "function_create"
+        ]
+      }
+    },
+    {
+      "name": "function.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ef2139faa728c900b102db8248f988d5f0909d7f8ac30df34494f7142be0604c",
+      "surfaces": {
+        "mcp": [
+          "function_delete"
+        ]
+      }
+    },
+    {
+      "name": "function.invoke",
+      "version": "1.0.0",
+      "fingerprint": "sha256:72e54e7ddbd618ac5622be43a4355359b9aaccf8308707bc287656ed1c590514",
+      "surfaces": {
+        "mcp": [
+          "function_invoke"
+        ]
+      }
+    },
+    {
+      "name": "function.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:534a3af315d8d7bb3d660d6442cd77bbdbbfc2afe6b162857d59ad4a6700a069",
+      "surfaces": {
+        "mcp": [
+          "function_list"
+        ]
+      }
+    },
+    {
+      "name": "organization.current",
+      "version": "1.0.0",
+      "fingerprint": "sha256:0c3365da241a5614c3689abb9008f8cfd0235978b4fb2c7511757f8298735c4c",
+      "surfaces": {
+        "mcp": [
+          "organization_current"
+        ]
+      }
+    },
+    {
+      "name": "organization.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:6cd18a0c16550bbab111198329cc325324235abd8b6ce674320ca3ea0f342015",
+      "surfaces": {
+        "mcp": [
+          "organization_list"
+        ]
+      }
+    },
+    {
+      "name": "organization.switch",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4dd4a8d1955a2c0dd69a8c8aeafc4c423e97d3948f7680ba9b0d8f82bf90e3d7",
+      "surfaces": {
+        "mcp": [
+          "organization_switch"
+        ]
+      }
+    },
+    {
+      "name": "product.template.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:062f869318a3b2494d8b143ca114e85be4101b1337b6ce53561e9ae0e964a182",
+      "surfaces": {
+        "mcp": [
+          "product_template_get"
+        ]
+      }
+    },
+    {
+      "name": "product.template.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5c3e8e0a84b0e02b391cb4df08c434401c2fcdf7565879b0916a43882373f356",
+      "surfaces": {
+        "mcp": [
+          "product_template_list"
+        ]
+      }
+    },
+    {
+      "name": "product.template.readiness",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a24b4c4506d49bbde48cc3f8d28c0ba6f4a1e5f3622684a71f40a4d2567c1037",
+      "surfaces": {
+        "mcp": [
+          "product_template_readiness"
+        ]
+      }
+    },
+    {
+      "name": "region.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7dd3491b38bcd1e0c2ba7a91ebc6dc2f3bad923c238c6b9be5af68064e08f53b",
+      "surfaces": {
+        "mcp": [
+          "region_list"
+        ]
+      }
+    },
+    {
+      "name": "run.cancel",
+      "version": "1.0.0",
+      "fingerprint": "sha256:04105b0c07fe39ab31b22934aceeb2b266130c0b4c7294ba8115ac2b8411b6bf",
+      "surfaces": {
+        "mcp": [
+          "run_cancel"
+        ]
+      }
+    },
+    {
+      "name": "run.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a700e4f266a246a8b7f3f3802eb187851dc5935d7dc75fe09a6b511e9c336dd7",
+      "surfaces": {
+        "mcp": [
+          "run_create"
+        ]
+      }
+    },
+    {
+      "name": "run.files",
+      "version": "1.0.0",
+      "fingerprint": "sha256:756da709ba1b0d44ac0a6b28eb707085a0111ea1e8202c095544397eed9ffc7f",
+      "surfaces": {
+        "mcp": [
+          "run_files"
+        ]
+      }
+    },
+    {
+      "name": "run.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e6dd1339c8b0cc223b7b7937b40802557ba3f2a59496664167812c9fd3e0d194",
+      "surfaces": {
+        "mcp": [
+          "run_get"
+        ]
+      }
+    },
+    {
+      "name": "run.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:8069f4d958d23df9927b0b5ab900b8774283a674fbe3508ab8c0e99e0fa251c5",
+      "surfaces": {
+        "mcp": [
+          "run_list"
+        ]
+      }
+    },
+    {
+      "name": "run.messages",
+      "version": "1.0.0",
+      "fingerprint": "sha256:bd280e664ec17df01cd210d363a4734dd79bef019f9e9283abcb2f165669fa60",
+      "surfaces": {
+        "mcp": [
+          "run_messages"
+        ]
+      }
+    },
+    {
+      "name": "run.outputs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:3e18942418d7c96b85cec1ebea5bef18c10bd414883df87434b5c58164730dee",
+      "surfaces": {
+        "mcp": [
+          "run_outputs"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:046bb80036c127c330cb5eb6370efed6da18d8b4d31df7e726f490ef45aea3a6",
+      "surfaces": {
+        "mcp": [
+          "sandbox_create"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.deploy",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ce89c37ee14ad3449c19cade22ef7b17c12e27f314ec3ad6b56985bda2a36f9b",
+      "surfaces": {
+        "mcp": [
+          "sandbox_deploy"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.deploy.docker",
+      "version": "1.0.0",
+      "fingerprint": "sha256:35b893f883124c09214db90bc820a9fe7c47dfc8bcc42d76311007d77a5e1b59",
+      "surfaces": {
+        "mcp": [
+          "sandbox_deploy_docker"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.destroy",
+      "version": "1.0.0",
+      "fingerprint": "sha256:5c643ad34cc2af7fae39f3a37c4eb73038d0179f5e30bf2f0ed91433d991a0d5",
+      "surfaces": {
+        "mcp": [
+          "sandbox_destroy"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.exec",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a100553bf763ef47155b1ec0c4c338bec337d630cbe2dad60e839ec60f1e1c48",
+      "surfaces": {
+        "mcp": [
+          "sandbox_exec"
+        ],
+        "osa": [
+          "shell_execute:miosa"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.expose",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1e964080d9d6663b35f5b40939551038f675dabcb9fcbe7795ba99ca5e8d09a1",
+      "surfaces": {
+        "mcp": [
+          "sandbox_expose"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:fae9014398f23e2227286b6e058c73d11fd4d9d0aac531bebe4ebac28f4cb80b",
+      "surfaces": {
+        "mcp": [
+          "sandbox_get"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:6a9e402a5be47c5b7a2c76e25c3e73c435c254a0a788f928cb102f5d2f936424",
+      "surfaces": {
+        "mcp": [
+          "sandbox_list"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.list.files",
+      "version": "1.0.0",
+      "fingerprint": "sha256:037f1ea73fd6661adc9d4b84c481f8b055c86ef4b3300bf36f5b838db880a35b",
+      "surfaces": {
+        "mcp": [
+          "sandbox_list_files"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.logs",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1b086f127e0588a14813c2a6785a4fda398636cc1cb48a165b1ab1eca736cedb",
+      "surfaces": {
+        "mcp": [
+          "sandbox_logs"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.pause",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d80dd5ae0207dd1024863d44a90e8ce6ab8b63aea86198b6a4b2f18c311fc3ae",
+      "surfaces": {
+        "mcp": [
+          "sandbox_pause"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.python",
+      "version": "1.0.0",
+      "fingerprint": "sha256:08cfe10b6d8a6985c2e44dd378fb45a6ac57b803e4f243bb96b4c6c652503ca7",
+      "surfaces": {
+        "mcp": [
+          "sandbox_python"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.read.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:a1da57750ebe4d9f8edc8ee4ffdc54734b34fb040b2b2b82dbd558ede5d37422",
+      "surfaces": {
+        "mcp": [
+          "sandbox_read_file"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.resume",
+      "version": "1.0.0",
+      "fingerprint": "sha256:779150e954d751a61ec7e52169aab0bb191045bae53a84ebdf0d2ee249eb2ee2",
+      "surfaces": {
+        "mcp": [
+          "sandbox_resume"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.snapshot.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:6264c614396d495a9aff0fc2c9ebedd1888968f3625aae96b482f128d29877d8",
+      "surfaces": {
+        "mcp": [
+          "sandbox_snapshot_create"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.snapshot.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:06d8b180c3026b071b2b3036a50ee0fbfbfcaa74548bff71aeafef7588f30ad5",
+      "surfaces": {
+        "mcp": [
+          "sandbox_snapshot_list"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.snapshot.restore",
+      "version": "1.0.0",
+      "fingerprint": "sha256:31a36bba819b05ae778596ca0013e7139e5062fc7be70387261f1e9d5a57e52f",
+      "surfaces": {
+        "mcp": [
+          "sandbox_snapshot_restore"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.template.builds",
+      "version": "1.0.0",
+      "fingerprint": "sha256:ab51d3d0b481e55358072ca943261bb7967ea948268c1444bb801a732a8a0e6d",
+      "surfaces": {
+        "mcp": [
+          "sandbox_template_builds"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.template.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:d65b0daaf20810f23c1eafe3e5766a354ad946ec81d633b21b44ce35f3dab473",
+      "surfaces": {
+        "mcp": [
+          "sandbox_template_create"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.template.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f2415664924b2cd7e8a5b711fd3bd49662a83bd0c5cdfcac6bb2d6334ea378f3",
+      "surfaces": {
+        "mcp": [
+          "sandbox_template_get"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.template.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:37b19cd2b521fca1a60290f53b38bbc35754f391a876fd6271a0ca7073986de9",
+      "surfaces": {
+        "mcp": [
+          "sandbox_template_list"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.upload",
+      "version": "1.0.0",
+      "fingerprint": "sha256:2a87ed0e056c5374d6581cf9ee8d7511e565065e703e0773ccc4322880d8df97",
+      "surfaces": {
+        "mcp": [
+          "sandbox_upload"
+        ]
+      }
+    },
+    {
+      "name": "sandbox.write.file",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4b08336dcf00daed9c508e5925e2676160ca19450cee6a6f5f053e699b74bf78",
+      "surfaces": {
+        "mcp": [
+          "sandbox_write_file"
+        ]
+      }
+    },
+    {
+      "name": "settings.compute.pricing",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4d317857823edcf8bd6fe4e7e53566ae54f5f01afc60e2cba7eb8872872fb35f",
+      "surfaces": {
+        "mcp": [
+          "settings_compute_pricing"
+        ]
+      }
+    },
+    {
+      "name": "settings.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7924620b2512557904dc21fae91da0c7d6660bbe572d884f1a654763a62abcca",
+      "surfaces": {
+        "mcp": [
+          "settings_get"
+        ]
+      }
+    },
+    {
+      "name": "settings.get.branding",
+      "version": "1.0.0",
+      "fingerprint": "sha256:bf697612fcc646177814744438a5ef5e3cc38b830cdbeb47d475d8cc71ee833a",
+      "surfaces": {
+        "mcp": [
+          "settings_get_branding"
+        ]
+      }
+    },
+    {
+      "name": "settings.update.branding",
+      "version": "1.0.0",
+      "fingerprint": "sha256:28521e3fbf8b87644dfd6152be43773c03661343e44dbee9948cfbf1cf34c1f2",
+      "surfaces": {
+        "mcp": [
+          "settings_update_branding"
+        ]
+      }
+    },
+    {
+      "name": "storage.bucket.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f3e6039be612b5b27ada1b5b544d1e81b753d2d168f4e366493a3718ad772a7b",
+      "surfaces": {
+        "mcp": [
+          "storage_bucket_create"
+        ]
+      }
+    },
+    {
+      "name": "storage.bucket.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:10cebcd19de7fa066273f8323fe2377b4d84bee5869d9c663ac8c13913fcb482",
+      "surfaces": {
+        "mcp": [
+          "storage_bucket_delete"
+        ]
+      }
+    },
+    {
+      "name": "storage.bucket.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:53100e5f71dc578d9ca901414b4363b64840200dfe793a47cd6ecf9dfbeaf640",
+      "surfaces": {
+        "mcp": [
+          "storage_bucket_list"
+        ]
+      }
+    },
+    {
+      "name": "storage.object.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:7b4a60f731d5f95959dda56803dd7a3f25d92f7e0a3cc40b712141013ccb4ef5",
+      "surfaces": {
+        "mcp": [
+          "storage_object_delete"
+        ]
+      }
+    },
+    {
+      "name": "storage.object.download",
+      "version": "1.0.0",
+      "fingerprint": "sha256:26bcdf0193417b2f8a2a1da332fdf6d0cc8e4ac516a423b7211ff50939667c44",
+      "surfaces": {
+        "mcp": [
+          "storage_object_download"
+        ]
+      }
+    },
+    {
+      "name": "storage.object.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:edc8dfd7ccc8e6e4cab8074cdbe884d84e367fc483f18b51fe80a63c717b385f",
+      "surfaces": {
+        "mcp": [
+          "storage_object_list"
+        ]
+      }
+    },
+    {
+      "name": "storage.object.upload",
+      "version": "1.0.0",
+      "fingerprint": "sha256:e262a2f6b8a9bc5a53e9c9abb470eb1d534098657a36454846f7f6c3efdbd963",
+      "surfaces": {
+        "mcp": [
+          "storage_object_upload"
+        ]
+      }
+    },
+    {
+      "name": "storage.presign",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f06985c1fb1c86edd3c84f010109e51506f22b539da9d6735f115f0b40609105",
+      "surfaces": {
+        "mcp": [
+          "storage_presign"
+        ]
+      }
+    },
+    {
+      "name": "volume.attach",
+      "version": "1.0.0",
+      "fingerprint": "sha256:76562a52d4a52d7443ee4baa40179e577d841e451c8f4fb280f9f8434fa4bcf7",
+      "surfaces": {
+        "mcp": [
+          "volume_attach"
+        ]
+      }
+    },
+    {
+      "name": "volume.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:4b4fd5e0afdde3b604b1d666fb77042cb5ab6eaf868ba681a1af7406d673ced7",
+      "surfaces": {
+        "mcp": [
+          "volume_create"
+        ]
+      }
+    },
+    {
+      "name": "volume.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:93894ecdf6db1b84f4c7f95e816a11a88103d3dae02ba533d189d5e5b903c2e7",
+      "surfaces": {
+        "mcp": [
+          "volume_delete"
+        ]
+      }
+    },
+    {
+      "name": "volume.detach",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f2338e56629503faf687d0c2b4275b6d746dd415429d7ba1d52b1b06f177d469",
+      "surfaces": {
+        "mcp": [
+          "volume_detach"
+        ]
+      }
+    },
+    {
+      "name": "volume.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:1cbd08a354a90533884a0ca69190ac760f1e1ded6d9f62183b0292a6b97dc960",
+      "surfaces": {
+        "mcp": [
+          "volume_get"
+        ]
+      }
+    },
+    {
+      "name": "volume.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:81ec0d3276c12f6a04472e8ff6fc22f479bb78cd1f667f3bce62768bdc9528ce",
+      "surfaces": {
+        "mcp": [
+          "volume_list"
+        ]
+      }
+    },
+    {
+      "name": "webhook.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:aeecc02f5df55791ecd801c98449d8fb3be12ad6c0a450783bb6bc14bee9aa2f",
+      "surfaces": {
+        "mcp": [
+          "webhook_create"
+        ]
+      }
+    },
+    {
+      "name": "webhook.delete",
+      "version": "1.0.0",
+      "fingerprint": "sha256:f3884b7bdc29a2638fc11c5c9ac219c60a840a90cad03129fabefef9a5f8f2b1",
+      "surfaces": {
+        "mcp": [
+          "webhook_delete"
+        ]
+      }
+    },
+    {
+      "name": "webhook.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:fecb68a188aae050de308bdbe9253d961227047ca55cdb21e25e3a0e880d630f",
+      "surfaces": {
+        "mcp": [
+          "webhook_list"
+        ]
+      }
+    },
+    {
+      "name": "webhook.test",
+      "version": "1.0.0",
+      "fingerprint": "sha256:de2441a80ac01116724c2b0f2999ba9f147b833def901246b31e03c52758a636",
+      "surfaces": {
+        "mcp": [
+          "webhook_test"
+        ]
+      }
+    },
+    {
+      "name": "workspace.create",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b9787d792c2f7e59da6835260868b044491ee4dee35f1bd80751a13031783f91",
+      "surfaces": {
+        "mcp": [
+          "workspace_create"
+        ]
+      }
+    },
+    {
+      "name": "workspace.get",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b60b6c45758e2a4b76a816505d0b2d6a42eac86245b461afb319790faf8a1100",
+      "surfaces": {
+        "mcp": [
+          "workspace_get"
+        ]
+      }
+    },
+    {
+      "name": "workspace.list",
+      "version": "1.0.0",
+      "fingerprint": "sha256:612bbef2c7cc7c9897b41bf1ff3a5018cc23ff56ec821752211f2a14605ad84d",
+      "surfaces": {
+        "mcp": [
+          "workspace_list"
+        ]
+      }
+    },
+    {
+      "name": "workspace.member.invite",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c80d71cd397595b4ff2a49334d77e39bbd255b9524e5eaa3e5ba40c28d5bfdb8",
+      "surfaces": {
+        "mcp": []
+      }
+    },
+    {
+      "name": "workspace.stats",
+      "version": "1.0.0",
+      "fingerprint": "sha256:c73ec9025c325b8781a656d17f9972e5629cf4e2fb680fd51d07890ca6755d3b",
+      "surfaces": {
+        "mcp": [
+          "workspace_stats"
+        ]
+      }
+    },
+    {
+      "name": "workspace.update",
+      "version": "1.0.0",
+      "fingerprint": "sha256:94fc603b4abe2d79ee3c0308c08f70e3a664eb211e89141cbc4d70046e46f8b3",
+      "surfaces": {
+        "mcp": [
+          "workspace_update"
+        ]
+      }
+    },
+    {
+      "name": "workspace.usage",
+      "version": "1.0.0",
+      "fingerprint": "sha256:b48a5c2edb2e07df893847e428841847fb6a66fc35ed330d68eccda8ddd9a639",
+      "surfaces": {
+        "mcp": [
+          "workspace_usage"
+        ]
+      }
+    }
+  ]
+}
