@@ -64,7 +64,14 @@ sequenceDiagram
                     ToolEx-->>Loop: "Tool 'name' not found"
                 end
             else tool found
-                ToolsReg->>Tool: execute(enriched_args)
+                Note over ToolsReg: schema validation, then central action authority<br/>ActionAuthority.authorize_tool — governed platform actions only<br/>fail closed; local/ungoverned tools pass through with no network call
+
+                alt central authority blocks (governed action, not allowed)
+                    ToolsReg-->>ToolEx: {:error, "Blocked: #{message}"}
+                    ToolEx-->>Loop: "Error executing tool: Blocked: #{message}"
+                else allowed or not governed
+                    ToolsReg->>Tool: execute(enriched_args)
+                end
 
                 alt tool returns {:ok, {:image, %{media_type, data, path}}}
                     Tool-->>ToolsReg: {:ok, {:image, ...}}
