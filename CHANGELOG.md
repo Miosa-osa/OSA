@@ -9,6 +9,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.36] — displays as `v1.0.036`
+
+### Fixed — resize wipe was firing on every height change (regression)
+
+- **The screen no longer wipes/stacks on notices, typing, or scrolling.** The DSR-free
+  full-screen `ClearType::All` from the resize fix lived in the shared commit block, which
+  fires on **any** inline-height change — not just terminal resizes. So a transient notice
+  ("New session", "Coordinator mode off"), the composer growing, or scrolling all wiped the
+  whole screen and re-anchored, stacking composers and clearing the transcript on every
+  keystroke. Now the full-screen wipe runs **only on an actual terminal resize** (where reflow
+  makes surgical clearing impossible); a pure height change clears surgically from the tracked
+  region top, preserving the transcript above.
+
 ## [1.0.35] — displays as `v1.0.035`
 
 ### Fixed — update check hit a dead endpoint
