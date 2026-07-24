@@ -522,8 +522,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
                   :allow
 
                 _ ->
-                  {:ask, PermissionBroker.new_request_id(),
-                   permission_summary(tool_call, reason)}
+                  {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
               end
           end
       end
@@ -666,8 +665,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       |> Enum.filter(&is_binary/1)
 
     case paths do
-      [] -> nil
-      _ -> "edit #{length(paths)} file#{if length(paths) == 1, do: "", else: "s"}: " <> clip(Enum.join(paths, ", "))
+      [] ->
+        nil
+
+      _ ->
+        "edit #{length(paths)} file#{if length(paths) == 1, do: "", else: "s"}: " <>
+          clip(Enum.join(paths, ", "))
     end
   end
 
@@ -715,7 +718,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # multi_file_edit: no single old/new pair — concatenate each file's
   # old_string/new_string, headed by its path, so the dialog shows what
   # changes in EVERY file instead of the previous {nil, nil} (no diff at all).
-  defp permission_diff(name, %{"edits" => edits}) when name == "multi_file_edit" and is_list(edits) do
+  defp permission_diff(name, %{"edits" => edits})
+       when name == "multi_file_edit" and is_list(edits) do
     {olds, news} =
       edits
       |> Enum.filter(fn
@@ -1066,7 +1070,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       }
       |> Map.merge(tool_metadata)
 
-    Bus.emit(:tool_result, tool_result_event, Observability.annotate(state, source: "agent.tool_executor"))
+    Bus.emit(
+      :tool_result,
+      tool_result_event,
+      Observability.annotate(state, source: "agent.tool_executor")
+    )
 
     Phoenix.PubSub.broadcast(
       OptimalSystemAgent.PubSub,
