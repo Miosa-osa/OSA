@@ -35,9 +35,9 @@ defmodule OptimalSystemAgent.CLI.Update do
       {:ok, :up_to_date} ->
         IO.puts("Latest version:   #{current} (up to date)")
 
-      {:ok, {:staged, version}} ->
+      {:ok, {:available, version}} ->
         IO.puts("Latest version:   #{version}")
-        IO.puts("Status:           STAGED — restart OSA to apply update")
+        IO.puts("Status:           UPDATE AVAILABLE — run `osa update` to install")
 
       {:error, reason} ->
         IO.puts("Check failed: #{inspect(reason)}")
@@ -57,9 +57,9 @@ defmodule OptimalSystemAgent.CLI.Update do
       {:ok, :up_to_date} ->
         IO.puts("Already up to date (#{current})")
 
-      {:ok, {:staged, version}} ->
-        IO.puts("Update #{version} staged at ~/.osa/bin/osa.new")
-        IO.puts("Restart OSA to apply.")
+      {:ok, {:available, version}} ->
+        IO.puts("Update available: #{version}")
+        IO.puts("Run `osa update` (the launcher) to download and install it.")
 
       {:error, reason} ->
         IO.puts("Update failed: #{inspect(reason)}")

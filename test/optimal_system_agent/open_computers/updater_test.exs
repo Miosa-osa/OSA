@@ -65,56 +65,42 @@ defmodule OptimalSystemAgent.OpenComputers.UpdaterTest do
       end)
     end
 
-    test "triggers download when manifest version is newer" do
-      # We can't easily test the actual download without a real server,
-      # so we just verify the check returns an update-available signal
-      # by using an HTTP error (download attempt fails gracefully).
-      manifest = build_manifest("0.4.0", sha256: "invalid")
+    test "reports {:available, version} when the latest release is newer" do
+      manifest = build_manifest("0.4.0")
 
       with_mock_http(manifest, fn ->
         {:ok, pid} = start_updater(current_version: "0.3.0")
-
-        # The download will fail (mock doesn't serve the binary), but the
-        # check_now path should attempt it and return an error (not :up_to_date).
         result = GenServer.call(pid, :check_now, 5_000)
-        assert match?({:error, _}, result) or match?({:ok, {:staged, _}}, result)
+        # Check-only: reports availability, does NOT stage (the launcher applies).
+        assert result == {:ok, {:available, "0.4.0"}}
         GenServer.stop(pid)
       end)
     end
-  end
 
-  # ── SHA256 verification ──────────────────────────────────────────────────────
+    test "handles the zero-padded display tag (v1.0.034 vs current 1.0.34) as up_to_date" do
+      # GitHub tags are padded ("v1.0.034"); Version.parse rejects the leading zero
+      # unless normalize_version strips it. Same numeric version must NOT be flagged
+      # as an available update.
+      manifest = build_manifest("1.0.034")
 
-  describe "SHA256 verification" do
-    test "aborts when SHA256 does not match and leaves bin untouched", %{bin_dir: bin_dir} do
-      # Write a fake current binary
-      osa_path = Path.join(bin_dir, "osa")
-      File.write!(osa_path, "current-binary-content")
-
-      # Provide a valid-looking download but wrong sha
-      assert {:error, {:sha256_mismatch, _}} =
-               call_download_and_verify(
-                 "correct-binary-content",
-                 "0000000000000000000000000000000000000000000000000000000000000000",
-                 bin_dir
-               )
-
-      # osa.new should NOT exist
-      refute File.exists?(Path.join(bin_dir, "osa.new"))
-
-      # Original osa unchanged
-      assert File.read!(osa_path) == "current-binary-content"
+      with_mock_http(manifest, fn ->
+        {:ok, pid} = start_updater(current_version: "1.0.34")
+        result = GenServer.call(pid, :check_now, 5_000)
+        assert result == {:ok, :up_to_date}
+        GenServer.stop(pid)
+      end)
     end
 
-    test "succeeds when SHA256 matches", %{bin_dir: bin_dir} do
-      content = "valid-binary-content"
-      expected_sha = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+    test "reports available across the padding boundary (v1.0.035 > 1.0.34)" do
+      manifest = build_manifest("1.0.035")
 
-      assert {:ok, staged_path} =
-               call_download_and_verify(content, expected_sha, bin_dir)
-
-      assert File.exists?(staged_path)
-      assert File.read!(staged_path) == content
+      with_mock_http(manifest, fn ->
+        {:ok, pid} = start_updater(current_version: "1.0.34")
+        result = GenServer.call(pid, :check_now, 5_000)
+        # Reports the actual release tag (OSA's padded display convention).
+        assert result == {:ok, {:available, "1.0.035"}}
+        GenServer.stop(pid)
+      end)
     end
   end
 
@@ -162,20 +148,14 @@ defmodule OptimalSystemAgent.OpenComputers.UpdaterTest do
 
   # ── Helpers ──────────────────────────────────────────────────────────────────
 
-  defp build_manifest(version, opts \\ []) do
-    sha = Keyword.get(opts, :sha256, String.duplicate("a", 64))
-    platform = detect_platform()
-
+  # Mimics the GitHub Releases `/releases/latest` payload the updater now reads.
+  # `version` is a bare semver (e.g. "0.4.0" or padded "1.0.034"); GitHub tags it
+  # with a leading "v", which the updater strips.
+  defp build_manifest(version) do
     %{
-      "version" => version,
-      "released_at" => "2026-04-19T00:00:00Z",
-      "changelog_url" => "https://example.com/releases/v#{version}",
-      "platforms" => %{
-        platform => %{
-          "url" => "https://example.com/osa-#{version}-#{platform}",
-          "sha256" => sha
-        }
-      }
+      "tag_name" => "v#{version}",
+      "name" => "OSA v#{version}",
+      "published_at" => "2026-04-19T00:00:00Z"
     }
   end
 
@@ -226,51 +206,4 @@ defmodule OptimalSystemAgent.OpenComputers.UpdaterTest do
     result
   end
 
-  # Test the download_and_verify logic directly by writing a temp file
-  # and calling the private function via a test helper shim.
-  defp call_download_and_verify(content, expected_sha, bin_dir) do
-    # Write content to a temp file to simulate download
-    src = Path.join(bin_dir, "download_test.bin")
-    File.write!(src, content)
-
-    actual = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
-
-    if String.downcase(actual) == String.downcase(expected_sha) do
-      new_path = Path.join(bin_dir, "osa.new")
-      File.cp!(src, new_path)
-      File.chmod!(new_path, 0o755)
-      File.rm(src)
-      {:ok, new_path}
-    else
-      File.rm(src)
-      {:error, {:sha256_mismatch, expected: expected_sha, actual: actual}}
-    end
-  end
-
-  defp detect_platform do
-    os_family = :os.type() |> elem(0)
-
-    os =
-      case os_family do
-        :win32 ->
-          "windows"
-
-        :unix ->
-          {uname, 0} = System.cmd("uname", ["-s"])
-
-          case String.trim(uname) |> String.downcase() do
-            "darwin" -> "macos"
-            _ -> "linux"
-          end
-      end
-
-    arch = :erlang.system_info(:system_architecture) |> to_string()
-
-    machine =
-      if String.contains?(arch, "arm") or String.contains?(arch, "aarch64"),
-        do: "arm64",
-        else: "amd64"
-
-    "#{os}-#{machine}"
-  end
 end

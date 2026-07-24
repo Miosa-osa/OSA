@@ -9,6 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.35] — displays as `v1.0.035`
+
+### Fixed — update check hit a dead endpoint
+
+- **The update checker no longer fails against a dead service.** `OpenComputers.Updater`
+  (the background auto-check and `osa update check/apply`) queried
+  `https://api.miosa.ai/api/v1/opencomputers/osa/latest`, which returns **503
+  "version_not_configured"** — no release is published there — so every check failed and the
+  background loop logged repeated failures. It now checks **GitHub Releases**
+  (`/repos/Miosa-osa/OSA/releases/latest`), the same source the installer and the `osa update`
+  launcher already use.
+- The checker is now **check-only**: it detects a newer published release and reports
+  `{:available, version}` (the actual `osa update` launcher applies it via the GitHub release
+  tarball — this Elixir path only ever staged a single binary, which never matched how OSA
+  ships). Also fixes version comparison against the zero-padded display tag (`v1.0.034`), which
+  `Version.parse/1` had been rejecting as an invalid leading zero.
+
 ## [1.0.34] — displays as `v1.0.034`
 
 ### Fixed — Ollama Cloud onboarding (client-blocking)

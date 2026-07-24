@@ -50,7 +50,15 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
 
   @check_after_start_ms 60_000
   @download_timeout_ms 120_000
-  @api_url "https://api.miosa.ai/api/v1/opencomputers/osa/latest"
+  # Update availability is checked against GitHub Releases — the source the
+  # installer (`scripts/install.sh`) and the `osa update` launcher actually pull
+  # from. The previous `api.miosa.ai` endpoint returns 503 "version_not_configured"
+  # (no release published there), which made every check fail. This checker is
+  # CHECK-ONLY: it detects a newer published release and notifies; the actual
+  # download+apply is done by the launcher's `osa update` (GitHub tarballs), which
+  # this single-binary staging path never matched.
+  @github_repo "Miosa-osa/OSA"
+  @api_url "https://api.github.com/repos/#{@github_repo}/releases/latest"
 
   defstruct [:check_interval_ms, :enabled, :channel, :last_check, :staged_version, :req_opts]
 
@@ -63,10 +71,11 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
   end
 
   @doc """
-  Immediately check for an update and download if available.
-  Returns `{:ok, :up_to_date}`, `{:ok, :staged, version}`, or `{:error, reason}`.
+  Immediately check GitHub Releases for a newer version.
+  Returns `{:ok, :up_to_date}`, `{:ok, {:available, version}}`, or `{:error, reason}`.
+  (Check-only — the launcher's `osa update` applies the update.)
   """
-  @spec check_now() :: {:ok, :up_to_date | {:staged, String.t()}} | {:error, term()}
+  @spec check_now() :: {:ok, :up_to_date | {:available, String.t()}} | {:error, term()}
   def check_now do
     GenServer.call(__MODULE__, :check_now, @download_timeout_ms + 5_000)
   catch
@@ -163,8 +172,9 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
         latest = manifest["version"]
 
         if is_binary(latest) and version_newer?(latest, current) do
-          Logger.info("[OC.Updater] update available #{current} -> #{latest}")
-          attempt_download(state, current, latest, manifest)
+          Logger.info("[OC.Updater] update available #{current} -> #{latest} (run `osa update` to apply)")
+          notify_control_plane(current, latest, detect_platform())
+          {{:ok, {:available, latest}}, %{state | last_check: DateTime.utc_now()}}
         else
           Logger.debug("[OC.Updater] up to date (#{current})")
           {{:ok, :up_to_date}, %{state | last_check: DateTime.utc_now()}}
@@ -172,65 +182,35 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
 
       {:error, reason} ->
         :telemetry.execute([:osa, :updater, :check_failed], %{count: 1}, %{reason: reason})
-        Logger.warning("[OC.Updater] manifest fetch failed: #{inspect(reason)}")
-        {{:error, reason}, state}
-    end
-  end
-
-  defp attempt_download(state, current, latest, manifest) do
-    platform = detect_platform()
-    platforms = manifest["platforms"] || %{}
-
-    case Map.get(platforms, platform) do
-      nil ->
-        reason = "no binary for platform #{platform}"
-        Logger.warning("[OC.Updater] #{reason}")
-        {{:error, reason}, state}
-
-      %{"url" => url, "sha256" => expected_sha} when is_binary(url) ->
-        case download_and_verify(url, expected_sha) do
-          {:ok, staged_path} ->
-            :telemetry.execute(
-              [:osa, :updater, :downloaded],
-              %{count: 1},
-              %{from_version: current, to_version: latest}
-            )
-
-            Logger.info("[OC.Updater] #{latest} staged at #{staged_path}")
-
-            notify_control_plane(current, latest, platform)
-
-            new_state = %{state | last_check: DateTime.utc_now(), staged_version: latest}
-
-            {{:ok, {:staged, latest}}, new_state}
-
-          {:error, reason} ->
-            Logger.error("[OC.Updater] download/verify failed: #{inspect(reason)}")
-            {{:error, reason}, %{state | last_check: DateTime.utc_now()}}
-        end
-
-      entry ->
-        reason = "invalid manifest entry for #{platform}: #{inspect(entry)}"
-        Logger.warning("[OC.Updater] #{reason}")
+        Logger.warning("[OC.Updater] update check failed: #{inspect(reason)}")
         {{:error, reason}, state}
     end
   end
 
   # ---------------------------------------------------------------------------
-  # Private — HTTP
+  # Private — HTTP (GitHub Releases, check-only)
   # ---------------------------------------------------------------------------
 
+  # Fetch the latest published GitHub release and reduce it to `%{"version" => v}`
+  # (the tag with any leading "v" stripped). GitHub requires a User-Agent header
+  # or it answers 403.
   defp fetch_manifest(extra_req_opts) do
-    opts = [url: @api_url, receive_timeout: 10_000, retry: false] ++ extra_req_opts
+    opts =
+      [
+        url: @api_url,
+        receive_timeout: 10_000,
+        retry: false,
+        headers: [
+          {"user-agent", "osa-updater"},
+          {"accept", "application/vnd.github+json"}
+        ]
+      ] ++ extra_req_opts
 
     case Req.get(opts) do
-      {:ok, %{status: 200, body: body}} when is_map(body) ->
-        {:ok, body}
-
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        case Jason.decode(body) do
-          {:ok, manifest} -> {:ok, manifest}
-          {:error, _} -> {:error, :invalid_json}
+      {:ok, %{status: 200, body: body}} ->
+        case release_version(body) do
+          nil -> {:error, :no_release}
+          version -> {:ok, %{"version" => version}}
         end
 
       {:ok, %{status: status}} ->
@@ -243,69 +223,23 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
     e -> {:error, {:exception, Exception.message(e)}}
   end
 
-  # ---------------------------------------------------------------------------
-  # Private — download + verify
-  # ---------------------------------------------------------------------------
-
-  defp download_and_verify(url, expected_sha256) do
-    home = System.user_home!()
-    bin_dir = Path.join([home, ".osa", "bin"])
-    File.mkdir_p!(bin_dir)
-
-    tmp_path = Path.join(bin_dir, "osa.download.#{:erlang.unique_integer([:positive])}")
-    new_path = Path.join(bin_dir, "osa.new")
-    bak_path = Path.join(bin_dir, "osa.bak")
-
-    try do
-      # Stream download to temp file
-      case Req.get(url, receive_timeout: @download_timeout_ms, into: File.stream!(tmp_path)) do
-        {:ok, %{status: 200}} ->
-          :ok
-
-        {:ok, %{status: status}} ->
-          File.rm(tmp_path)
-          throw({:error, {:http_download_failed, status}})
-
-        {:error, reason} ->
-          File.rm(tmp_path)
-          throw({:error, reason})
-      end
-
-      # Verify SHA256
-      actual_sha = file_sha256(tmp_path)
-
-      if String.downcase(actual_sha) != String.downcase(expected_sha256) do
-        File.rm(tmp_path)
-        throw({:error, {:sha256_mismatch, expected: expected_sha256, actual: actual_sha}})
-      end
-
-      # Keep backup of previous osa.new if it exists
-      if File.exists?(new_path), do: File.copy(new_path, bak_path)
-
-      # Atomically move tmp → osa.new
-      File.rename!(tmp_path, new_path)
-      File.chmod!(new_path, 0o755)
-
-      {:ok, new_path}
-    rescue
-      e ->
-        File.rm(tmp_path)
-        {:error, {:exception, Exception.message(e)}}
-    catch
-      {:error, reason} ->
-        {:error, reason}
+  # Extract the release tag (minus a leading "v") from a GitHub release payload,
+  # whether Req decoded it to a map or handed back raw JSON.
+  defp release_version(body) when is_map(body) do
+    case body["tag_name"] do
+      tag when is_binary(tag) and tag != "" -> String.trim_leading(tag, "v")
+      _ -> nil
     end
   end
 
-  defp file_sha256(path) do
-    path
-    |> File.stream!([], 65_536)
-    |> Enum.reduce(:crypto.hash_init(:sha256), fn chunk, acc ->
-      :crypto.hash_update(acc, chunk)
-    end)
-    |> :crypto.hash_final()
-    |> Base.encode16(case: :lower)
+  defp release_version(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, map} -> release_version(map)
+      _ -> nil
+    end
   end
+
+  defp release_version(_), do: nil
 
   # ---------------------------------------------------------------------------
   # Private — wire protocol notification
@@ -407,14 +341,29 @@ defmodule OptimalSystemAgent.OpenComputers.Updater do
   end
 
   defp normalize_version(v) do
-    v = v |> to_string() |> String.trim() |> String.trim_leading("v")
-    parts = String.split(v, ".")
+    parts =
+      v |> to_string() |> String.trim() |> String.trim_leading("v") |> String.split(".")
 
-    case length(parts) do
-      1 -> v <> ".0.0"
-      2 -> v <> ".0"
-      _ -> v
-    end
+    padded =
+      case length(parts) do
+        1 -> parts ++ ["0", "0"]
+        2 -> parts ++ ["0"]
+        _ -> parts
+      end
+
+    # Strip leading zeros from purely-numeric components. The human-facing display
+    # pads the patch to three digits (e.g. "1.0.034"), which `Version.parse/1`
+    # rejects as an invalid SemVer leading zero — so "034" -> "34". Non-numeric
+    # parts (pre-release tags) are left untouched.
+    padded
+    |> Enum.map(fn part ->
+      if part != "" and String.match?(part, ~r/^\d+$/) do
+        Integer.to_string(String.to_integer(part))
+      else
+        part
+      end
+    end)
+    |> Enum.join(".")
   end
 
   # ---------------------------------------------------------------------------
