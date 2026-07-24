@@ -210,6 +210,17 @@ defmodule OptimalSystemAgent.Application do
     # and /resume. Replaces the unsafe :sys.suspend pause that hung status reads.
     :ets.new(:osa_agent_pause_flags, [:named_table, :public, :set])
 
+    # Short-lived cache of the control plane's versioned action catalog.
+    # The application process owns this table so entries survive the transient
+    # agent, workflow, HTTP, and MCP processes that authorize individual calls.
+    :ets.new(:osa_action_authority_catalog_cache, [
+      :named_table,
+      :public,
+      :set,
+      read_concurrency: true,
+      write_concurrency: true
+    ])
+
     # Rehydrate the subagent RunStore index from ~/.osa/agent-runs so /runs and
     # task_resume survive a node restart (CC sidechain rehydrate parity). The ETS
     # table is created here (owned by the long-lived app master process) so it is
@@ -415,9 +426,15 @@ defmodule OptimalSystemAgent.Application do
     e = effort |> String.trim() |> String.downcase()
 
     cond do
-      e in ~w(fast medium high xhigh ultra) -> String.to_atom(e)
-      e == "low" -> :fast
-      e == "max" -> :xhigh
+      e in ~w(fast medium high xhigh ultra) ->
+        String.to_atom(e)
+
+      e == "low" ->
+        :fast
+
+      e == "max" ->
+        :xhigh
+
       true ->
         Logger.warning("[ConfigFile] ignoring unknown [model].effort #{inspect(effort)}")
         nil
