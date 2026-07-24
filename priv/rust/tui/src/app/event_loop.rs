@@ -287,42 +287,48 @@ impl App {
                 };
                 if commit {
                     shrink_streak = 0;
-                    // Erase the OLD inline chrome before rebuilding fresh at the
-                    // new size — this is what kills the duplicated banners /
-                    // status lines and the misaligned post-split rows. Pause the
-                    // reader FIRST (shared stdin) so the DSR cursor query below
-                    // isn't eaten by it, exactly as the full→inline switch does.
+                    // Erase the OLD inline chrome before rebuilding fresh. Pause the
+                    // reader FIRST (shared stdin) so the DSR cursor query below isn't
+                    // eaten by it, exactly as the full→inline switch does.
                     term_handle.abort();
                     let _ = term_handle.await;
-                    // Erasing ONLY the old chrome (so the transcript scrollback above
-                    // it survives) requires knowing where the chrome ended up after
-                    // the terminal reflowed the resize — and that is exactly a DSR
-                    // cursor-position query. Every prior revision that tried to be
-                    // surgical (query the cursor; anchor to `term_rows - inline_h`;
-                    // anchor to the tracked `last_inline_top`) failed on terminals
-                    // that DROP the DSR response during a resize: a widen unwraps
-                    // scrollback and floats the old chrome UP an unknown number of
-                    // rows, so no fixed anchor finds it — the chrome stacks into the
-                    // "N% context used + divider" staircase. Worse, letting ratatui's
-                    // own autoresize handle it makes the failed DSR query bubble up as
-                    // the "cursor position could not be read" CRASH.
-                    //
-                    // On such a terminal, surgical clearing is impossible. So don't:
-                    // wipe the WHOLE screen with a DSR-free `ClearType::All` and
-                    // rebuild fresh. Exactly one copy of the chrome can exist and the
-                    // reflow position never matters. Validated against a DSR-dropping
-                    // pane across widen / narrow / rapid-resize bursts: no duplicate,
-                    // no crash. Trade-off: the on-screen transcript is cleared on
-                    // resize (resizing mid-session repaints from the live region
-                    // down). The finalized conversation still lives in the terminal's
-                    // scrollback history and the in-app transcript viewer, so nothing
-                    // is lost — only the on-screen copy is redrawn.
-                    let _ = last_inline_top;
-                    let _ = execute!(
-                        std::io::stdout(),
-                        crossterm::cursor::MoveTo(0, 0),
-                        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    );
+
+                    if resized {
+                        // ACTUAL terminal resize. The emulator reflowed the whole
+                        // screen, so the old chrome floated to an unknown row — and on
+                        // terminals that DROP the DSR cursor query mid-resize, no
+                        // surgical anchor can find it (the "N% context used" staircase)
+                        // and deferring to ratatui's autoresize surfaces the failed
+                        // query as the "cursor position could not be read" CRASH. The
+                        // only reflow-proof, DSR-free option is to wipe the whole
+                        // screen and rebuild. Cost: the on-screen transcript is cleared
+                        // on resize (still in scrollback history + the transcript
+                        // viewer). This ONLY runs on a real resize.
+                        let _ = execute!(
+                            std::io::stdout(),
+                            crossterm::cursor::MoveTo(0, 0),
+                            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+                        );
+                    } else if let Some(top) = last_inline_top {
+                        // Pure HEIGHT change (composer grew/shrank, a transient notice
+                        // appeared) — NOT a resize. The terminal did NOT reflow, so the
+                        // region's tracked top is still valid and the transcript above
+                        // it must be preserved. Clear ONLY from that row down. Wiping
+                        // the whole screen here (the earlier bug) repainted on every
+                        // notice / keystroke / scroll and stacked chrome. Clamp into
+                        // the current screen in case a shrink left the row past bottom.
+                        let max_row = crossterm::terminal::size()
+                            .map(|(_, r)| r.saturating_sub(1))
+                            .unwrap_or(top);
+                        let _ = execute!(
+                            std::io::stdout(),
+                            crossterm::cursor::MoveTo(0, top.min(max_row)),
+                            crossterm::terminal::Clear(
+                                crossterm::terminal::ClearType::FromCursorDown
+                            ),
+                        );
+                    }
+
                     // Rebuild fresh to bypass ratatui's in-place inline-resize
                     // (which can misplace the viewport on a shrink).
                     rebuild_inline(&mut terminal, desired_inline_h)?;
