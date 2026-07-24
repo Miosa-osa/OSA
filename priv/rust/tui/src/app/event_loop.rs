@@ -424,6 +424,19 @@ impl App {
                 }
             }
 
+            // `insert_before` (the welcome banner + every finalized-message flush
+            // above) moves the inline viewport's REAL top DOWN by the inserted
+            // height (ratatui `set_viewport_area`). `last_inline_top` is otherwise
+            // refreshed only at rebuild points, so without this it goes stale the
+            // moment a message flushes to scrollback — and the next surgical
+            // height-change clear then anchors `FromCursorDown` at that stale,
+            // higher row and WIPES the just-flushed transcript rows. Re-read the
+            // real top here so the tracked value always matches where the region
+            // actually is. Cheap: `get_frame().area()` is a cached Rect.
+            if !was_full {
+                last_inline_top = Some(terminal.get_frame().area().top());
+            }
+
             // 2b. Hard repaint (Ctrl+L / return from a Ctrl+Z suspend): drop
             // the terminal's diff state so the next draw repaints every cell,
             // recovering the live region from any stray output corruption.
@@ -849,9 +862,18 @@ impl App {
     /// native scrollback as before.
     pub fn desired_inline_height(&self, term_rows: u16) -> u16 {
         let input_needed = self.input.needed_height();
-        // Grow the viewport to fit the inline agents panel (multi-agent activity /
-        // background-terminals summary) so it isn't clipped by the fixed chrome.
-        let agents_h = self.agents.height().min(AGENTS_INLINE_CAP);
+        // FIXED-height agents slot — the same fixed-slot cure as the streaming
+        // preview and the activity feed. The multi-agent roster grows one row per
+        // spawned fleet node; sizing the viewport to the LIVE roster count grew it
+        // mid-turn, and every growth rebuilt the viewport (a DSR cursor re-anchor) →
+        // stacked composer + status bar down the screen, exactly like the per-tool
+        // feed did. Reserve the constant cap whenever the roster is shown so the
+        // height stays stable for the whole fleet turn; the roster draws into it.
+        let agents_h = if self.agents.height() > 0 {
+            AGENTS_INLINE_CAP
+        } else {
+            0
+        };
         let hi0 = term_rows.saturating_sub(1).max(1);
         // Reserve rows for an open slash-completions popup so the upward-growing
         // menu always has room above the input (same mechanism as the agents

@@ -9,6 +9,30 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.38] — displays as `v1.0.038`
+
+### Fixed — TUI live-region stability (systematic pass, not one-off)
+
+Following a full audit of every inline-viewport height contributor (cross-checked against
+ratatui's `insert_before` source), three more instances of the same bug class were fixed so
+the composer can no longer stack or the screen wipe during a turn:
+
+- **Agents roster is now a fixed slot.** Like the activity feed and streaming preview, the
+  multi-agent roster grew one row per spawned fleet node mid-turn, rebuilding the viewport and
+  stacking chrome. It now reserves a constant slot whenever shown.
+- **Thinking box is now a fixed slot when expanded.** Expanded reasoning grew the box
+  line-by-line as it streamed (1→12 rows), rebuilding the viewport on every line. It now
+  reserves its constant max; the header + last ≤10 lines render into it.
+- **No more transcript wipe after a message flush.** `last_inline_top` (the anchor for the
+  surgical height-change clear) was only refreshed at rebuild points, but `insert_before`
+  (flushing finalized messages to scrollback) moves the viewport top down every time. The
+  stale anchor made the next clear wipe the just-flushed transcript. It's now refreshed after
+  every flush.
+
+Known remaining edge (tracked): on terminals that *reliably* drop the cursor-position query,
+a rebuild degrades to full-screen and finalized messages can be silently dropped rather than
+shown — a separate fix.
+
 ## [1.0.37] — displays as `v1.0.037`
 
 ### Fixed — composer no longer stacks down the screen during an agent turn

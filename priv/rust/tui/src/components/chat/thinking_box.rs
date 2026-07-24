@@ -124,19 +124,25 @@ impl ThinkingBox {
     ///
     /// - Collapsed: always 1 line.
     /// - Expanded:  1 header line + body lines (max 10) + optional overflow line.
-    pub fn height(&self, width: u16) -> u16 {
+    /// Max rows an expanded box reserves: 1 header + up to 10 body lines + 1
+    /// overflow indicator. Held CONSTANT so it can be a fixed inline-viewport slot.
+    pub const EXPANDED_ROWS: u16 = 12;
+
+    pub fn height(&self, _width: u16) -> u16 {
         if !self.expanded || self.content.is_empty() {
             return 1;
         }
 
-        // Body is indented 2 columns under the header (CC paddingLeft=2).
-        let inner_w = (width as usize).saturating_sub(2).max(1);
-        let body = self.body_lines(inner_w);
-        let visible = body.len().min(10);
-        let overflow_line = if body.len() > 10 { 1 } else { 0 };
-
-        // 1 header line + visible body + optional overflow indicator
-        1 + visible as u16 + overflow_line as u16
+        // FIXED-height slot when expanded — the same fixed-slot cure applied to the
+        // streaming preview, the activity feed, and the agents roster. Sizing to the
+        // LIVE body length grew the box 1→12 rows line-by-line as reasoning streamed
+        // in, and that mid-turn growth feeds `desired_inline_height`, rebuilding the
+        // inline viewport on every line (a DSR cursor re-anchor) → stacked composer
+        // + status bar down the screen. Reserving the constant max means the height
+        // never varies while expanded; `draw` renders the header + last ≤10 body
+        // lines (with an overflow indicator) into this slot, blank rows below when
+        // there is less content.
+        Self::EXPANDED_ROWS
     }
 
     // ─── Draw ──────────────────────────────────────────────────────────────
