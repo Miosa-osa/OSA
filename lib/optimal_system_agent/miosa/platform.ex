@@ -60,11 +60,45 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
   """
   @spec config_api_key() :: String.t() | nil
   def config_api_key do
-    with {:ok, raw} <- File.read(config_path()),
-         {:ok, %{"api_key" => key}} when is_binary(key) and key != "" <- Jason.decode(raw) do
+    with %{"api_key" => key} when is_binary(key) and key != "" <- config() do
       key
     else
       _ -> nil
+    end
+  end
+
+  @doc """
+  Read the MIOSA CLI configuration as a map.
+
+  The CLI owns platform account, tenant, workspace, and endpoint selection.
+  OSA reads that same file so platform integrations cannot silently act in a
+  different context from the user's active CLI context.
+  """
+  @spec config() :: map()
+  def config do
+    with {:ok, raw} <- File.read(config_path()),
+         {:ok, config} when is_map(config) <- Jason.decode(raw) do
+      config
+    else
+      _ -> %{}
+    end
+  end
+
+  @doc "The workspace selected by the MIOSA CLI, if one is active."
+  @spec workspace_id() :: String.t() | nil
+  def workspace_id do
+    case config()["workspace"] do
+      value when is_binary(value) and value != "" -> value
+      _ -> nil
+    end
+  end
+
+  @doc "The MIOSA platform endpoint selected by the CLI."
+  @spec endpoint() :: String.t()
+  def endpoint do
+    case config()["endpoint"] do
+      value when is_binary(value) and value != "" -> String.trim_trailing(value, "/")
+      _ -> "https://api.miosa.ai"
     end
   end
 

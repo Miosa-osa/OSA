@@ -391,7 +391,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
 
   post "/:name/execute" do
     tool_name = conn.params["name"]
-    arguments = conn.body_params["arguments"] || %{}
+    arguments = (conn.body_params["arguments"] || %{}) |> Map.put("__surface__", "osa_http")
 
     case Tools.execute(tool_name, arguments) do
       {:ok, result} ->

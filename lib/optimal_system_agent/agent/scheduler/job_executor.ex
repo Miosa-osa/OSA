@@ -10,8 +10,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.JobExecutor do
   require Logger
 
   alias OptimalSystemAgent.Runtime.SessionManager
-  alias OptimalSystemAgent.Tools.Builtins.ShellExecute
-  alias OptimalSystemAgent.Tools.UseContext
+  alias OptimalSystemAgent.Tools.Registry
 
   @max_output_bytes 102_400
   @webhook_timeout_ms 10_000
@@ -112,16 +111,16 @@ defmodule OptimalSystemAgent.Agent.Scheduler.JobExecutor do
   # ── Shell Command Execution ───────────────────────────────────────────
 
   def run_shell_command(command) when is_binary(command) do
-    ctx = UseContext.new(%{channel: :scheduler, permission_tier: :full})
-
-    with {:ok, input} <- ShellExecute.Handler.validate(%{"command" => command}, ctx),
-         {:allow, input} <- ShellExecute.Handler.check_permissions(input, ctx),
-         {:ok, output} <- ShellExecute.Handler.execute(input, ctx) do
-      {:ok, truncate_shell_output(output)}
-    else
-      {:error, message, _code} -> {:error, message}
-      {:deny, reason} -> {:error, reason}
-      {:ask, _prompt} -> {:error, "Permission ask flow is not available for scheduled commands"}
+    # Scheduled commands must enter the same registry as interactive, MCP,
+    # HTTP, and sub-agent calls. The registry is the shared enforcement seam
+    # for hard safety, schema validation, central authority, and tool dispatch.
+    case Registry.execute("shell_execute", %{
+           "command" => command,
+           "__session_id__" => "scheduler",
+           "__surface__" => "schedule"
+         }) do
+      {:ok, output} -> {:ok, truncate_shell_output(output)}
+      {:ok, output, _metadata} -> {:ok, truncate_shell_output(output)}
       {:error, reason} -> {:error, reason}
       other -> {:error, "Unexpected shell execution result: #{inspect(other)}"}
     end

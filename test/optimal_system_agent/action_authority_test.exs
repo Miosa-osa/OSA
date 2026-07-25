@@ -1,0 +1,210 @@
+defmodule OptimalSystemAgent.ActionAuthorityTest do
+  use ExUnit.Case, async: false
+
+  alias OptimalSystemAgent.ActionAuthority
+  alias OptimalSystemAgent.Agent.Scheduler.JobExecutor
+  alias OptimalSystemAgent.MIOSA.Platform
+  alias OptimalSystemAgent.Tools.Registry
+
+  setup do
+    config_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "osa-authority-test-#{System.unique_integer([:positive])}"
+      )
+
+    previous = %{
+      action_authority: Application.get_env(:optimal_system_agent, :action_authority),
+      cli_config_dir: Application.get_env(:optimal_system_agent, :miosa_cli_config_dir),
+      sandbox_backend: Application.get_env(:optimal_system_agent, :sandbox_backend)
+    }
+
+    Application.put_env(:optimal_system_agent, :miosa_cli_config_dir, config_dir)
+    Application.put_env(:optimal_system_agent, :sandbox_backend, :miosa)
+
+    :ok = File.mkdir_p(config_dir)
+
+    File.write!(
+      Platform.config_path(),
+      Jason.encode!(%{
+        "api_key" => "msk_test_authority",
+        "workspace" => "workspace-123",
+        "endpoint" => "https://api.example.test"
+      })
+    )
+
+    on_exit(fn ->
+      File.rm_rf(config_dir)
+      restore_env(:action_authority, previous.action_authority)
+      restore_env(:miosa_cli_config_dir, previous.cli_config_dir)
+      restore_env(:sandbox_backend, previous.sandbox_backend)
+    end)
+
+    :ok
+  end
+
+  test "canonical fingerprints match the CLI contract independent of map key order" do
+    left = %{"b" => [%{"z" => true, "a" => nil}], "a" => 1}
+    right = %{"a" => 1, "b" => [%{"a" => nil, "z" => true}]}
+
+    assert ActionAuthority.canonical_json(left) ==
+             ~s({"a":1,"b":[{"a":null,"z":true}]})
+
+    assert ActionAuthority.fingerprint(left) == ActionAuthority.fingerprint(right)
+  end
+
+  test "MIOSA sandbox execution uses the server catalog and allows an approved call" do
+    test_pid = self()
+    plug_name = unique_plug_name()
+
+    Req.Test.stub(plug_name, fn conn ->
+      case conn.request_path do
+        "/api/v1/actions/catalog" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "name" => "sandbox.exec",
+                "version" => "1.0.0",
+                "fingerprint" => capability_fingerprint("sandbox.exec")
+              }
+            ]
+          })
+
+        "/api/v1/actions/authorize" ->
+          {:ok, raw, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:authority_request, Jason.decode!(raw), conn.req_headers})
+
+          Req.Test.json(conn, %{
+            "decision" => "allow",
+            "receipt_id" => "receipt-1"
+          })
+      end
+    end)
+
+    configure_plug(plug_name)
+
+    assert {:allow, %{"receipt_id" => "receipt-1"}} =
+             ActionAuthority.authorize_tool("shell_execute", %{
+               "command" => "echo safe",
+               "__session_id__" => "session-secret",
+               "__surface__" => "mcp"
+             })
+
+    assert_receive {:authority_request, request, headers}
+    assert request["capability"]["name"] == "sandbox.exec"
+    assert request["workspace_id"] == "workspace-123"
+    assert request["surface"] == "mcp"
+
+    assert request["params_fingerprint"] ==
+             ActionAuthority.fingerprint(%{"command" => "echo safe"})
+
+    assert {"authorization", "Bearer msk_test_authority"} in headers
+    refute inspect(request) =~ "session-secret"
+  end
+
+  test "pending central approval blocks the registry before the tool dispatches" do
+    plug_name = unique_plug_name()
+
+    Req.Test.stub(plug_name, fn conn ->
+      case conn.request_path do
+        "/api/v1/actions/catalog" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "name" => "sandbox.exec",
+                "version" => "1.0.0",
+                "fingerprint" => capability_fingerprint("sandbox.exec")
+              }
+            ]
+          })
+
+        "/api/v1/actions/authorize" ->
+          conn
+          |> Plug.Conn.put_status(202)
+          |> Req.Test.json(%{
+            "decision" => "pending_approval",
+            "approval_request_id" => "approval-42",
+            "receipt_id" => "receipt-42"
+          })
+      end
+    end)
+
+    configure_plug(plug_name, %{"file_read" => "sandbox.exec"})
+    missing_path = Path.join(System.tmp_dir!(), "must-not-be-read-#{System.unique_integer()}")
+
+    assert {:error, message} = Registry.execute("file_read", %{"path" => missing_path})
+    assert message =~ "central approval required"
+    assert message =~ "approval-42"
+    refute message =~ "File not found"
+  end
+
+  test "a governed action fails closed when platform authentication is absent" do
+    File.rm!(Platform.config_path())
+
+    assert {:blocked, message} =
+             ActionAuthority.authorize_tool("shell_execute", %{"command" => "echo nope"})
+
+    assert message =~ "platform authentication is missing"
+  end
+
+  test "local tools remain ungoverned" do
+    assert :not_governed =
+             ActionAuthority.authorize_tool("file_read", %{"path" => "/tmp/example"})
+  end
+
+  test "scheduled commands use the shared authority seam with a schedule surface" do
+    test_pid = self()
+    plug_name = unique_plug_name()
+
+    Req.Test.stub(plug_name, fn conn ->
+      case conn.request_path do
+        "/api/v1/actions/catalog" ->
+          Req.Test.json(conn, %{
+            "data" => [
+              %{
+                "name" => "sandbox.exec",
+                "version" => "1.0.0",
+                "fingerprint" => capability_fingerprint("sandbox.exec")
+              }
+            ]
+          })
+
+        "/api/v1/actions/authorize" ->
+          {:ok, raw, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:scheduled_authority_request, Jason.decode!(raw)})
+          Req.Test.json(conn, %{"decision" => "allow", "receipt_id" => "schedule-receipt"})
+      end
+    end)
+
+    Application.put_env(:optimal_system_agent, :sandbox_backend, :host)
+    configure_plug(plug_name, %{"shell_execute" => "sandbox.exec"})
+
+    assert {:ok, "scheduled-ok"} = JobExecutor.run_shell_command("printf scheduled-ok")
+    assert_receive {:scheduled_authority_request, %{"surface" => "schedule"}}
+  end
+
+  defp configure_plug(plug_name, capability_map \\ %{}) do
+    Application.put_env(
+      :optimal_system_agent,
+      :action_authority,
+      plug: {Req.Test, plug_name},
+      base_url: "https://api.example.test",
+      capability_map: capability_map
+    )
+  end
+
+  defp capability_fingerprint(name) do
+    digest =
+      :crypto.hash(:sha256, "miosa-capability/#{name}@1.0.0")
+      |> Base.encode16(case: :lower)
+
+    "sha256:" <> digest
+  end
+
+  defp unique_plug_name do
+    :"authority_test_#{System.unique_integer([:positive])}"
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:optimal_system_agent, key)
+  defp restore_env(key, value), do: Application.put_env(:optimal_system_agent, key, value)
+end
