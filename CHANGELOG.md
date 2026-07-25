@@ -9,6 +9,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.39] — displays as `v1.0.039`
+
+### Added — action authority + OpenComputers remote client
+
+- **Unified action authority (#93 + #94).** Governed tool execution now routes through one
+  fail-closed control-plane authority: HTTP, MCP, scheduled/away-mode jobs, interactive
+  agents, deferred tools, and sub-agents share exact capability identifiers and
+  server-published versioned fingerprints, with one-time approvals bound to the exact
+  parameters and execution surface. Purely local tools stay offline and ungoverned; OSA's
+  local non-bypassable machine safety remains a separate earlier layer. Ships the canonical
+  MIOSA capability contract (206 capabilities, SHA-pinned) plus the routing that enforces it.
+  *(This is an evolving cross-repository feature; behaviour is fail-closed and gated.)*
+- **OpenComputers account remote client (#92).** New `osa opencomputers remote hosts` /
+  `remote exec --host <id> -- <command>` / `remote agent --host <id> --prompt <prompt>` — a
+  versioned, TLS-only remote-client envelope that keeps the MIOSA account credential in memory
+  (resolved from `miosa login` or `MIOSA_PLATFORM_API_KEY`, never persisted in host config).
+  v1 supports one-shot exec/agent operations; no interactive PTY routing yet.
+
 ## [1.0.38] — displays as `v1.0.038`
 
 ### Fixed — TUI live-region stability (systematic pass, not one-off)
