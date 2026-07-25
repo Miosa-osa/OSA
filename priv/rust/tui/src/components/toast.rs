@@ -190,17 +190,9 @@ impl Component for Toasts {
 /// Clip a string to at most `max` display columns, appending an ellipsis when it
 /// would overflow.
 fn fit_to_width(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    if max == 1 {
-        return "\u{2026}".to_string();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('\u{2026}');
-    out
+    // Delegates to the canonical column-fitter. This previously measured with
+    // `chars().count()`, which under-counts wide glyphs — and because toasts are
+    // RIGHT-aligned, an over-wide string lost its BEGINNING (the first words),
+    // not its tail.
+    crate::util::fit_cols(s, max)
 }

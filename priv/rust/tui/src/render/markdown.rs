@@ -271,16 +271,22 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 _ => "▪ ",
             };
             let prefix = format!("{}{}", indent_str, bullet);
-            let prefix_len = prefix.len();
-            let wrap_width = (width as usize).saturating_sub(prefix_len);
+            // DISPLAY COLUMNS, not bytes. The bullet glyphs are multi-byte but
+            // single-column ("• " is 4 bytes / 2 columns), so `.len()` here indented
+            // every continuation line 2 columns further than its own first line — a
+            // visible stagger on every wrapped bullet in every reply — and narrowed
+            // `wrap_width` by the same amount, wrapping early. The checkbox branch
+            // above already measures correctly with `UnicodeWidthStr`.
+            let prefix_cols = UnicodeWidthStr::width(prefix.as_str());
+            let wrap_width = (width as usize).saturating_sub(prefix_cols);
             let wrapped = wrap_text(text, wrap_width);
             for (i, wline) in wrapped.iter().enumerate() {
                 let mut spans = vec![];
                 if i == 0 {
                     spans.push(Span::styled(prefix.clone(), Style::default().fg(theme.colors.muted)));
                 } else {
-                    // Continuation lines get same indent
-                    spans.push(Span::styled(" ".repeat(prefix_len), Style::default()));
+                    // Continuation lines align under the first line's text.
+                    spans.push(Span::styled(" ".repeat(prefix_cols), Style::default()));
                 }
                 spans.extend(parse_inline(wline, &theme));
                 lines.push(Line::from(spans));
@@ -561,9 +567,15 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     }
 
     // Cap total width to available width
-    let total = col_widths.iter().sum::<usize>() + (num_cols + 1) + (num_cols.saturating_sub(1)) * 3;
+    // Chrome = the `num_cols + 1` border columns PLUS the 3-column `" │ "` between
+    // each pair of columns. `total` accounted for both, but the re-cap below only
+    // subtracted the borders — leaving the capped table 3*(num_cols-1) columns too
+    // wide, so the trailing `│` and the tail of the last column were clipped off.
+    let separators = num_cols.saturating_sub(1) * 3;
+    let chrome = (num_cols + 1) + separators;
+    let total = col_widths.iter().sum::<usize>() + chrome;
     if total > width as usize && width > 10 {
-        let max_per_col = (width as usize).saturating_sub(num_cols + 1) / num_cols.max(1);
+        let max_per_col = (width as usize).saturating_sub(chrome) / num_cols.max(1);
         for w in col_widths.iter_mut() {
             *w = (*w).min(max_per_col).max(3);
         }
@@ -802,7 +814,7 @@ fn detect_checkbox(line: &str) -> Option<(bool, &str)> {
 /// Word-wrap a string to fit within `max_width` columns.
 /// Breaks on word boundaries (spaces), preserving words intact when possible.
 /// Lines longer than `max_width` with no spaces are force-broken.
-fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
+pub(crate) fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || UnicodeWidthStr::width(input) <= max_width {
         return vec![input.to_string()];
     }

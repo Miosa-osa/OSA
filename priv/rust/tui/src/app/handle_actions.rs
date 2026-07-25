@@ -290,6 +290,23 @@ impl App {
         self.status.set_active(false);
         self.cancelled = false;
 
+        // Flush any still-pending plan snapshot to scrollback, then retire the live
+        // checklist for this turn.
+        //
+        // Two bugs this closes: (1) the snapshot is emitted from a ~400ms tick
+        // debounce, so a plan updated near the end of a turn could land in history
+        // AFTER the "Worked for Ns" recap — flushing synchronously here makes the
+        // ordering deterministic; (2) the checklist was never cleared at turn end,
+        // and since it draws into the streaming band (which collapses to 0 rows when
+        // idle) it silently reappeared and painted over the NEXT turn's reply the
+        // moment that band reopened.
+        let snap_w = self.width.saturating_sub(2).max(20);
+        if let Some((body, plain)) = self.task_checklist.snapshot_if_changed(snap_w) {
+            self.chat.add_plan_snapshot(body, plain);
+        }
+        self.task_checklist.clear();
+        self.plan_snapshot_debounce = 0;
+
         // Transition back to idle
         if self.state.is_processing() {
             self.transition(AppState::Idle);

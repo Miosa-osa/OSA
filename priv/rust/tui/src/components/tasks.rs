@@ -76,9 +76,19 @@ impl Component for Tasks {
                 "failed" => ("\u{2718}", theme.task_failed()),
                 _ => ("\u{25fb}", theme.task_pending()),
             };
+            // The subject is model-written backend text rendered as a plain span:
+            // strip inline markdown so `**bold**` doesn't show literally, and fit it
+            // to the COLUMNS left after the "  {icon} " prefix. Previously it was
+            // rendered raw with no width clamp and no wrap, so a long subject was
+            // hard-clipped at the pane edge with no ellipsis. Height stays 1 row per
+            // item, which is what `height()` reserves.
+            let prefix = format!("  {} ", icon);
+            let avail = (area.width as usize).saturating_sub(crate::util::cols(&prefix));
+            let subject =
+                crate::util::fit_cols(&crate::util::strip_inline_markdown(&task.subject), avail);
             let line = Line::from(vec![
-                Span::styled(format!("  {} ", icon), style),
-                Span::styled(&task.subject, style),
+                Span::styled(prefix, style),
+                Span::styled(subject, style),
             ]);
             frame.render_widget(Paragraph::new(line), row);
         }

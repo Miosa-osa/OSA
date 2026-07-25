@@ -955,15 +955,15 @@ fn roster_row_line(
     Line::from(spans)
 }
 
-/// UTF-8 safe truncation with ellipsis.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    }
+/// Fit to display COLUMNS with an ellipsis.
+///
+/// Every caller here passes a column budget (`area.width`, a 48-col summary field,
+/// an 18-col session id), so this must measure columns. It previously counted
+/// CHARS, which under-counts wide glyphs — a CJK/emoji agent summary then overran
+/// its span and was hard-clipped, shoving the right-aligned `elapsed · tokens`
+/// meta column off the pane edge.
+fn truncate_str(s: &str, max_cols: usize) -> String {
+    crate::util::fit_cols(s, max_cols)
 }
 
 #[cfg(test)]

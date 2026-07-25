@@ -153,19 +153,18 @@ impl TaskChecklist {
         max_width: Option<usize>,
     ) -> Line<'static> {
         let (glyph, style) = Self::glyph_style(&item.status, theme);
+        // Backend subjects are model-written and routinely contain markdown, but
+        // this is rendered as a plain styled span (no markdown pass) — strip the
+        // markers so `**Add a new page**` doesn't show up literally.
+        let raw = crate::util::strip_inline_markdown(&item.subject);
         let subject = match max_width {
-            Some(w) => {
-                let avail = w.saturating_sub(2); // "{glyph} " prefix
-                if item.subject.len() > avail {
-                    format!(
-                        "{}\u{2026}",
-                        crate::util::truncate_str(&item.subject, avail.saturating_sub(1))
-                    )
-                } else {
-                    item.subject.clone()
-                }
-            }
-            None => item.subject.clone(),
+            // Fit to COLUMNS. This compared byte length against a column budget and
+            // then cut by BYTES, so any non-ASCII subject was truncated to roughly a
+            // third of its space. `fit_cols` also guarantees the item occupies
+            // exactly one row, which is what the 1-row-per-item height contract
+            // assumes — the mismatch is what clipped subjects mid-word.
+            Some(w) => crate::util::fit_cols(&raw, w.saturating_sub(2)), // "{glyph} " prefix
+            None => raw,
         };
         Line::from(vec![
             Span::styled(format!("{} ", glyph), style),
@@ -175,11 +174,13 @@ impl TaskChecklist {
 
     /// A frozen, full-width snapshot of the current checklist as styled text,
     /// used for the `Updated plan` scrollback cell.
-    fn snapshot_text(&self, theme: &crate::style::Theme) -> Text<'static> {
+    fn snapshot_text(&self, theme: &crate::style::Theme, width: u16) -> Text<'static> {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.items.len() + 1);
         lines.push(self.header_line(theme));
         for item in &self.items {
-            lines.push(Self::item_line(item, theme, None));
+            // Fitted to `width`: the cell reserves 1 row per item, so each item
+            // must fit one row (clean ellipsis) rather than be clipped mid-word.
+            lines.push(Self::item_line(item, theme, Some(width as usize)));
         }
         Text::from(lines)
     }
@@ -221,7 +222,11 @@ impl TaskChecklist {
     /// scrollback, return the styled snapshot text and its plain-text form and
     /// remember the new state. Returns `None` when nothing meaningful changed
     /// (identical status, spinner ticks) or when there are no items.
-    pub fn snapshot_if_changed(&mut self) -> Option<(Text<'static>, String)> {
+    /// `width` is the column width the snapshot will be rendered at. It is
+    /// REQUIRED: the scrollback cell reserves exactly one row per item, so each
+    /// item must be fitted to one row here. Passing no width produced full-length
+    /// subjects that the un-wrapped `Paragraph` then hard-clipped mid-word.
+    pub fn snapshot_if_changed(&mut self, width: u16) -> Option<(Text<'static>, String)> {
         if self.items.is_empty() {
             return None;
         }
@@ -231,7 +236,7 @@ impl TaskChecklist {
         }
         self.last_snapshot_key = Some(key);
         let theme = crate::style::theme();
-        Some((self.snapshot_text(&theme), self.snapshot_plain()))
+        Some((self.snapshot_text(&theme, width), self.snapshot_plain()))
     }
 
     /// Draw the live checklist inline, left-aligned, at the bottom of `area`.
@@ -365,7 +370,7 @@ mod tests {
             item("1", "first", ChecklistStatus::Completed),
             item("2", "second", ChecklistStatus::InProgress),
         ]);
-        let lines = flat(&c.snapshot_text(&theme));
+        let lines = flat(&c.snapshot_text(&theme, 80));
         assert_eq!(lines.len(), 3); // header + 2 items
         assert!(lines[0].starts_with("Updated plan"));
         assert!(lines[1].contains("first"));
@@ -376,29 +381,29 @@ mod tests {
     fn snapshot_dedupes_identical_states() {
         let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
         // First call snapshots.
-        assert!(c.snapshot_if_changed().is_some());
+        assert!(c.snapshot_if_changed(80).is_some());
         // Identical state -> no new snapshot (simulates a no-op TaskUpdated).
-        assert!(c.snapshot_if_changed().is_none());
-        assert!(c.snapshot_if_changed().is_none());
+        assert!(c.snapshot_if_changed(80).is_none());
+        assert!(c.snapshot_if_changed(80).is_none());
     }
 
     #[test]
     fn snapshot_fires_again_on_real_status_change() {
         let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
-        assert!(c.snapshot_if_changed().is_some());
-        assert!(c.snapshot_if_changed().is_none());
+        assert!(c.snapshot_if_changed(80).is_some());
+        assert!(c.snapshot_if_changed(80).is_none());
         // A real transition changes the key -> new snapshot.
         c.update("1", ChecklistStatus::InProgress);
-        assert!(c.snapshot_if_changed().is_some());
+        assert!(c.snapshot_if_changed(80).is_some());
         // And adding an item also changes the set.
         c.add("2".into(), "b".into(), None);
-        assert!(c.snapshot_if_changed().is_some());
+        assert!(c.snapshot_if_changed(80).is_some());
     }
 
     #[test]
     fn empty_checklist_never_snapshots() {
         let mut c = checklist(vec![]);
-        assert!(c.snapshot_if_changed().is_none());
+        assert!(c.snapshot_if_changed(80).is_none());
     }
 
     #[test]

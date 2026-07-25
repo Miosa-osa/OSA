@@ -44,12 +44,28 @@ pub fn clamp_to_frame(frame: &Frame, rect: Rect) -> Rect {
 /// returns 0 when there's nothing to show, so the row collapses when idle.
 pub(crate) const AGENTS_INLINE_CAP: u16 = 8;
 
-/// Fixed row count reserved for the live tool-use / activity feed whenever a turn
-/// is active. Held CONSTANT for the whole turn (a fixed slot, like the streaming
-/// preview) so the feed growing one row per tool can never grow the inline
-/// viewport mid-turn — which rebuilt the viewport and stacked composers down the
-/// screen. Matches the previous `.min(6)` cap. The feed draws top-down into it.
-pub(crate) const ACTIVITY_SLOT_ROWS: u16 = 6;
+/// Shrink `slot` to its bottom `content` rows.
+///
+/// The live region reserves STABLE per-turn slots (so the inline viewport never
+/// rebuilds mid-turn — a rebuild re-anchors via a DSR cursor query and stacks
+/// chrome). A component whose content is shorter than its slot must therefore be
+/// handed only the rows it actually fills: components paint decoration (accent
+/// rails, backgrounds) across the whole rect they are given, so passing the full
+/// slot trails bare decoration down the empty rows. Anchoring to the BOTTOM keeps
+/// the live content tight against the composer and leaves the slack above it,
+/// where it reads as padding rather than a gap.
+///
+/// `content` is clamped to the slot; a zero result is safe (components early-out
+/// on `area.height == 0`).
+pub(crate) fn bottom_anchored(slot: Rect, content: u16) -> Rect {
+    let h = content.min(slot.height);
+    Rect {
+        y: slot.y + slot.height.saturating_sub(h),
+        height: h,
+        ..slot
+    }
+}
+
 
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     const OVERHEAD: u16 = 3;
@@ -201,7 +217,23 @@ impl App {
             let popup_h_now = self.input.completions_popup_height();
             let popup_changed = popup_h_now != prev_popup_h;
             prev_popup_h = popup_h_now;
-            let resized = std::mem::take(&mut self.resize_dirty) || popup_changed;
+            // A REAL terminal resize (pane drag / window change). ONLY this may take
+            // the destructive full-screen clear in the rebuild block below: the
+            // emulator reflowed the whole screen, so the old chrome's position is
+            // genuinely unknowable and a surgical clear cannot find it.
+            let terminal_resized = std::mem::take(&mut self.resize_dirty);
+            // Commit immediately (bypassing the shrink debounce) for a real resize
+            // AND for a slash-popup open/close, so a command that closes the popup
+            // never leaves stacked chrome behind mid-debounce.
+            //
+            // These two were previously ONE flag, and that was a real bug: the
+            // completions popup recomputes its height on EVERY keystroke of a `/`
+            // command (`/` → 10 rows, `/c` → 7, `/co` → 4 …), so aliasing it to
+            // "resized" made every keypress take the full-screen `ClearType::All`
+            // path — wiping the transcript and re-anchoring the viewport at row 0 on
+            // each character typed. A popup change is a LOCAL height change: it must
+            // commit promptly, but clear surgically.
+            let force_commit = terminal_resized || popup_changed;
             // /clear was run: the in-memory transcript is already wiped
             // (commands.rs), but in inline mode the finalized messages were
             // flushed into the terminal's REAL scrollback via `insert_before`,
@@ -255,10 +287,10 @@ impl App {
                 // ratatui's autoresize reflows the alt-screen buffer on the next
                 // draw, but a resize can leave stale diff state — clear so every
                 // cell repaints at the new size.
-                if resized {
+                if terminal_resized {
                     let _ = terminal.clear();
                 }
-            } else if resized || desired_inline_h != cur_inline_h {
+            } else if force_commit || desired_inline_h != cur_inline_h {
                 // Staying inline, and either a real resize landed or the wanted
                 // height changed. Rebuilding the inline viewport issues a DSR
                 // cursor query that tmux can drop, so every rebuild risks leaving
@@ -282,7 +314,7 @@ impl App {
                 // rebuilt fresh and the old-width rows are cleared. This is what
                 // makes the transcript / composer / status bar reflow cleanly to
                 // the new width instead of leaving stale, misaligned rows.
-                let commit = if resized {
+                let commit = if force_commit {
                     shrink_streak = 0;
                     true
                 } else if desired_inline_h > cur_inline_h {
@@ -300,7 +332,7 @@ impl App {
                     term_handle.abort();
                     let _ = term_handle.await;
 
-                    if resized {
+                    if terminal_resized {
                         // ACTUAL terminal resize. The emulator reflowed the whole
                         // screen, so the old chrome floated to an unknown row — and on
                         // terminals that DROP the DSR cursor query mid-resize, no
@@ -956,23 +988,30 @@ impl App {
     /// stacks a ghost second Thinking box + composer (see the agents_h note in
     /// `desired_inline_height`).
     fn think_row_height(&self) -> u16 {
-        if !self.thinking_box.is_empty() {
+        // NOTE the `a11y` predicate: `draw_inline` picks the thinking box ONLY when
+        // `!thinking_box.is_empty() && !activity.a11y()` — in screen-reader mode it
+        // draws the activity's 1-row plain-text line instead. Sizing must use the
+        // SAME predicate or it reserves the expanded box's 12 rows and draws 1,
+        // leaving 11 dead rows above the composer for screen-reader users.
+        if !self.thinking_box.is_empty() && !self.activity.a11y() {
             // Collapsed → 1 row; expanded (ctrl+t) → the box's measured height.
             self.thinking_box.height(self.width)
         } else if self.activity.height() > 0 {
             // FIXED-height activity slot — the same fixed-slot cure the streaming
             // preview uses. The live tool-use feed grows 0→N rows as tools run
             // (spinner, then one row per running/finished tool). Sizing this to the
-            // LIVE count (`activity.height().min(6)`) grew the inline viewport
-            // mid-turn, and EVERY growth rebuilt the viewport (a DSR cursor
-            // re-anchor) — which, tick after tick as tools ran, stacked a fresh
-            // composer + status bar down the whole screen (the staircase seen
-            // during an agent turn). Reserving the constant cap for the whole turn
-            // keeps the viewport height STABLE: the feed draws top-down into the
-            // slot, so no per-tool rebuild happens and nothing stacks. `Activity::
-            // draw` needs ≥2 rows or it draws only the spinner, so the cap must
-            // stay well above that.
-            ACTIVITY_SLOT_ROWS
+            // LIVE count grew the inline viewport mid-turn, and EVERY growth rebuilt
+            // the viewport (a DSR cursor re-anchor) — which, tick after tick as tools
+            // ran, stacked a fresh composer + status bar down the whole screen.
+            //
+            // The ceiling is derived from the CURRENT VERBOSITY rather than a flat
+            // constant. It is equally stable (verbosity changes only on explicit user
+            // action, never mid-turn) but exact: a flat 6 over-reserved the common
+            // modes (Off=1, New=2 → up to 5 dead rows) AND under-reserved `Verbose`
+            // (wants 9 → the 3 oldest feed rows were silently clipped). `draw_inline`
+            // bottom-anchors the content inside this slot, so any slack sits above
+            // the spinner as padding instead of railed dead rows below it.
+            self.activity.max_height()
         } else {
             0
         }
@@ -985,10 +1024,18 @@ impl App {
         // Inline agents panel: multi-agent tree + "N background terminals" summary.
         // Height 0 when idle (row collapses); capped so it never swallows the
         // compact live region, and bounded by what's left after the fixed chrome.
+        // Must MATCH `desired_inline_height`'s reservation expression exactly. When
+        // sizing reserved the constant cap but this used the LIVE roster count, the
+        // difference leaked into the `Min(0)` stream band as blank rows. The trailing
+        // `.min(...)` is only a tiny-terminal safety clamp (a no-op at normal sizes).
         let agents_h = {
-            let want = self.agents.height().min(super::event_loop::AGENTS_INLINE_CAP);
+            let slot = if self.agents.height() > 0 {
+                super::event_loop::AGENTS_INLINE_CAP
+            } else {
+                0
+            };
             let reserved = think_h + 1 + 2 + 2; // hint + status + stream/input floor
-            want.min(area.height.saturating_sub(reserved))
+            slot.min(area.height.saturating_sub(reserved))
         };
         // Chrome overhead below the streaming preview: activity + agents + ctx-hint(1)
         // + status(2). The input takes whatever is left, clamped to what it needs.
@@ -1044,10 +1091,19 @@ impl App {
         if !self.thinking_box.is_empty() && !self.activity.a11y() {
             self.thinking_box.draw(frame, a_think);
         } else {
-            self.activity.draw(frame, a_think);
+            // Bottom-anchor the activity INSIDE its reserved slot. The slot is sized
+            // to the verbosity ceiling (stable, so the viewport never rebuilds
+            // mid-turn), but the live feed is usually shorter — and `Activity::draw`
+            // paints its accent rail across the FULL rect it is handed. Passing the
+            // whole slot therefore trailed bare `┃` rail glyphs down every empty row
+            // between the spinner and the composer. Handing it exactly the content
+            // rows, anchored to the bottom, keeps the spinner tight above the
+            // composer and leaves any slack above it as plain padding.
+            self.activity.draw(frame, bottom_anchored(a_think, self.activity.height()));
         }
         // Multi-agent activity + background-terminals summary (no-ops when empty).
-        self.agents.draw(frame, a_agents);
+        // Same treatment: the slot is a stable cap, the roster paints only its rows.
+        self.agents.draw(frame, bottom_anchored(a_agents, self.agents.height()));
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
         self.status.draw(frame, a_status);

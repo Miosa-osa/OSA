@@ -3,8 +3,70 @@
 
 pub mod fuzzy;
 
+/// Fit `s` into at most `max_cols` DISPLAY COLUMNS, appending `…` (1 column) when
+/// it does not fit.
+///
+/// **This is the canonical column-fitter — prefer it for anything laid out against
+/// a terminal width.** The two tempting alternatives are both wrong for non-ASCII:
+///
+///   * [`truncate_str`] takes **bytes**. Comparing `s.len()` to a column budget
+///     cuts CJK/emoji text to roughly a third of the space it was given, leaving a
+///     large empty gutter (this is why session titles and filenames looked broken).
+///   * `.chars().count()` treats every char as 1 column, so wide glyphs OVERFLOW
+///     the reserved span and get hard-clipped by the renderer, shoving neighbouring
+///     columns off-screen.
+///
+/// Wide chars are counted at their true 2-column advance, so the result never
+/// overflows `max_cols`.
+pub fn fit_cols(s: &str, max_cols: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if UnicodeWidthStr::width(s) <= max_cols {
+        return s.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+    let budget = max_cols - 1; // reserve 1 column for the ellipsis
+    let mut out = String::new();
+    let mut acc = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + cw > budget {
+            break;
+        }
+        out.push(ch);
+        acc += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// Display width of `s` in terminal columns (wide glyphs count as 2).
+pub fn cols(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Strip the inline-markdown emphasis markers the model routinely writes into
+/// short backend-supplied strings (todo subjects, task titles) that are rendered
+/// as PLAIN styled spans rather than through the markdown renderer — otherwise a
+/// literal `**Add a new page**` shows up on screen.
+///
+/// Deliberately conservative: only paired `**`, `__` and backticks are removed.
+/// Single `*` / `_` are left alone because they legitimately appear in globs and
+/// filenames (`*.tsx`, `snake_case`), where stripping would corrupt the text.
+pub fn strip_inline_markdown(s: &str) -> String {
+    let mut out = s.replace("**", "").replace("__", "");
+    if out.contains('`') {
+        out = out.replace('`', "");
+    }
+    out
+}
+
 /// Truncate a UTF-8 string to at most `max_bytes` bytes, ensuring the cut falls
 /// on a char boundary so the result is always valid UTF-8.
+///
+/// **Byte-oriented — do not use for terminal layout.** Use [`fit_cols`] when the
+/// budget is a column count.
 pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;

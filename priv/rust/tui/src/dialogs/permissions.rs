@@ -4,6 +4,8 @@
 
 use std::cell::Cell;
 
+use unicode_width::UnicodeWidthStr;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -15,6 +17,24 @@ use super::DialogAction;
 const MIN_W: u16 = 50;
 const MAX_W: u16 = 90;
 const MIN_H: u16 = 10;
+
+/// Lead-in for the warning / reason metadata rows. Shared by `content_height` and
+/// `draw_inline` so the reserved row count and the rendered rows can never drift.
+const WARN_PREFIX: &str = "  ⚠ ";
+const REASON_PREFIX: &str = "  Why:   ";
+
+/// Wrap `text` into the columns left after `prefix` at `width`.
+///
+/// Height and draw MUST both go through this. Reserving exactly one row per field
+/// while rendering an unwrapped `Paragraph` silently CLIPPED the backend-supplied
+/// warning and reason — i.e. the text the user is being asked to make a security
+/// decision about could be cut off mid-sentence with no indication.
+fn wrapped_rows(prefix: &str, text: &str, width: u16) -> Vec<String> {
+    let avail = (width as usize)
+        .saturating_sub(UnicodeWidthStr::width(prefix))
+        .max(1);
+    crate::render::markdown::wrap_text(text, avail)
+}
 
 /// Tool permission approval dialog.
 ///
@@ -250,11 +270,12 @@ impl Permissions {
     pub fn content_height(&self, width: u16) -> u16 {
         const BODY_CAP: u16 = 8;
         let mut h: u16 = 1; // header (tool) line
-        if self.warning.is_some() {
-            h += 1;
+        // Width-AWARE: these wrap, so reserve the rows they will actually occupy.
+        if let Some(warning) = &self.warning {
+            h += wrapped_rows(WARN_PREFIX, warning, width).len().max(1) as u16;
         }
-        if self.reason.is_some() {
-            h += 1;
+        if let Some(reason) = &self.reason {
+            h += wrapped_rows(REASON_PREFIX, reason, width).len().max(1) as u16;
         }
         h += 1; // separator
         let body: u16 = match (&self.diff_old, &self.diff_new) {
@@ -330,11 +351,21 @@ impl Permissions {
         }
 
         // ── Warning / reason lines (enriched permission event) ───────────────
+        // Both fields WRAP (see `wrapped_rows`): continuation rows are indented to
+        // the prefix width so the text stays aligned under its first line.
         if let Some(warning) = &self.warning {
-            if cursor_y < inner.y + inner.height {
+            let pad = " ".repeat(UnicodeWidthStr::width(WARN_PREFIX));
+            for (i, row) in wrapped_rows(WARN_PREFIX, warning, inner.width)
+                .iter()
+                .enumerate()
+            {
+                if cursor_y >= inner.y + inner.height {
+                    break;
+                }
+                let lead = if i == 0 { WARN_PREFIX } else { pad.as_str() };
                 let line = Line::from(vec![
-                    Span::styled("  ⚠ ", Style::default().fg(theme.colors.warning)),
-                    Span::styled(warning.clone(), Style::default().fg(theme.colors.warning)),
+                    Span::styled(lead.to_string(), Style::default().fg(theme.colors.warning)),
+                    Span::styled(row.clone(), Style::default().fg(theme.colors.warning)),
                 ]);
                 frame.render_widget(
                     Paragraph::new(line),
@@ -344,10 +375,18 @@ impl Permissions {
             }
         }
         if let Some(reason) = &self.reason {
-            if cursor_y < inner.y + inner.height {
+            let pad = " ".repeat(UnicodeWidthStr::width(REASON_PREFIX));
+            for (i, row) in wrapped_rows(REASON_PREFIX, reason, inner.width)
+                .iter()
+                .enumerate()
+            {
+                if cursor_y >= inner.y + inner.height {
+                    break;
+                }
+                let lead = if i == 0 { REASON_PREFIX } else { pad.as_str() };
                 let line = Line::from(vec![
-                    Span::styled("  Why:   ", Style::default().fg(theme.colors.muted)),
-                    Span::styled(reason.clone(), Style::default().fg(theme.colors.dim)),
+                    Span::styled(lead.to_string(), Style::default().fg(theme.colors.muted)),
+                    Span::styled(row.clone(), Style::default().fg(theme.colors.dim)),
                 ]);
                 frame.render_widget(
                     Paragraph::new(line),

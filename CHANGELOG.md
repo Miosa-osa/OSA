@@ -9,6 +9,73 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.40] — displays as `v1.0.040`
+
+### Fixed — TUI audit: 14 rendering defects across 3 root causes
+
+A full audit of the TUI (live-region geometry, text rendering, turn lifecycle)
+found that most visible glitches traced to three structural gaps rather than
+independent bugs. All three are now closed.
+
+**Root cause 1 — the live region's height was computed twice, and some components
+drew without being in the budget at all.**
+
+- **Typing a `/` command no longer wipes the screen.** The completions popup
+  recomputes its height on every keystroke, and that was aliased onto the "terminal
+  resized" flag — so each character took the destructive full-screen clear path and
+  re-anchored the viewport at row 0. Popup changes now commit promptly but clear
+  *surgically*; only a real terminal resize takes the full wipe.
+- **No more dead rows under the spinner.** The activity slot reserved a flat 6 rows
+  and drew its accent rail across all of them, trailing bare rail glyphs down the
+  empty rows. The slot is now sized exactly to the current verbosity and the content
+  is bottom-anchored, so the spinner sits tight above the composer.
+- **Verbose mode no longer silently drops tool rows** — it needs 9 rows and the flat
+  cap gave it 6, clipping the three oldest feed entries.
+- **Screen-reader mode no longer leaves 11 blank rows** above the composer (sizing
+  reserved the expanded thinking box while drawing the 1-row plain-text line).
+- The agents roster's reserved and drawn heights agree again, and it is
+  bottom-anchored like the activity feed.
+
+**Root cause 2 — no column-width primitive, so eight near-duplicate "fit to width"
+helpers existed at three different correctness levels.**
+
+- Added `util::fit_cols` / `util::cols` as the canonical column-aware fitters and
+  routed session titles, file-picker names, toasts, and the agents roster through
+  them. Previously these compared **byte** length (or char count) against a **column**
+  budget, so any CJK/emoji text was cut to roughly a third of its space — and because
+  toasts are right-aligned, they lost their *beginning*.
+- **Every wrapped bullet in every reply was mis-indented.** The list renderer measured
+  its `"• "` prefix in bytes (4) rather than columns (2), so continuation lines sat two
+  columns right of their own first line and wrapped early.
+- The welcome banner centred by byte length, so any non-ASCII name or path made the
+  first screen lopsided.
+
+**Root cause 3 — width-blind heights + unwrapped prose.**
+
+- **Permission prompts no longer clip the backend's warning and reason.** These
+  reserved exactly one row each and rendered unwrapped, so safety text the user is
+  being asked to approve could be cut off mid-sentence. Both now wrap, and the
+  reserved height is computed from the same wrap.
+- Plan/checklist items no longer clip mid-word or show raw `**bold**`: subjects are
+  markdown-stripped and fitted to the real render width (threaded through instead of
+  guessed), so each occupies exactly the one row the cell reserves. The same three
+  fixes were applied to the separate task panel.
+- Markdown tables keep their right border — the width cap subtracted the borders but
+  forgot the `" │ "` separators, leaving the capped table too wide to fit.
+
+**Turn lifecycle**
+
+- The plan snapshot is now flushed synchronously at turn end and the live checklist
+  retired, fixing both the recap/plan ordering race (a ~400ms debounce could land the
+  plan *after* "Worked for Ns") and a stale plan redrawing over the **next** turn's
+  reply.
+
+**Tests**
+
+- Added the live-region slot invariant (reserved rows ≥ drawn rows, and exactly equal
+  when saturated) across every verbosity and screen-reader mode. No test previously
+  compared reservation against layout — which is why these regressions shipped green.
+
 ## [1.0.39] — displays as `v1.0.039`
 
 ### Added — action authority + OpenComputers remote client

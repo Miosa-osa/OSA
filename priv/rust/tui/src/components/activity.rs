@@ -1022,6 +1022,32 @@ impl Activity {
         }
     }
 
+    /// The MAXIMUM rows [`Self::height`] can return for the CURRENT mode, independent
+    /// of how many tools are currently in the feed.
+    ///
+    /// The inline viewport reserves THIS so the slot height stays constant for the
+    /// whole turn: a slot that tracks the live feed grows one row per tool, and every
+    /// growth rebuilds the viewport (a DSR cursor re-anchor) — which stacks a fresh
+    /// composer + status bar down the screen. Reserving a mode-derived ceiling is
+    /// stable (verbosity only changes on explicit user action, never mid-turn) while
+    /// never UNDER-reserving: the previous flat 6-row cap clipped `Verbose` (which
+    /// wants 9), silently dropping the three oldest feed rows.
+    pub fn max_height(&self) -> u16 {
+        if !self.active {
+            return 0;
+        }
+        if self.a11y {
+            return 1;
+        }
+        match self.verbosity {
+            Verbosity::Off => 1,
+            Verbosity::New => 2,
+            // spinner + the per-verbosity feed cap used by `height()` above.
+            Verbosity::All => 1 + 4,
+            Verbosity::Verbose => 1 + 8,
+        }
+    }
+
     fn visible_feed_count(&self) -> usize {
         match self.verbosity {
             Verbosity::Off => 0,
@@ -1874,5 +1900,80 @@ mod activity_tests {
             })
             .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod slot_invariant_tests {
+    use super::*;
+
+    /// Build an activity with a feed saturated well past every per-verbosity cap.
+    fn saturated(verbosity: Verbosity, a11y: bool) -> Activity {
+        let mut act = Activity::new();
+        act.start();
+        act.verbosity = verbosity;
+        act.set_a11y(a11y);
+        for i in 0..20 {
+            act.tool_start(&format!("tool{i}"), "{}");
+        }
+        act
+    }
+
+    const ALL_VERBOSITIES: [Verbosity; 4] = [
+        Verbosity::Off,
+        Verbosity::New,
+        Verbosity::All,
+        Verbosity::Verbose,
+    ];
+
+    /// THE LIVE-REGION INVARIANT: the rows the inline viewport RESERVES for the
+    /// activity slot (`max_height`) must always be >= the rows actually DRAWN
+    /// (`height`).
+    ///
+    /// This is the test that was missing while every layout regression shipped
+    /// green. Reserving less than is drawn silently clips the feed — a flat 6-row
+    /// cap did exactly that to `Verbose` (which wants 9), dropping the three
+    /// oldest tool rows with no indication.
+    #[test]
+    fn reserved_slot_is_never_smaller_than_what_is_drawn() {
+        for verbosity in ALL_VERBOSITIES {
+            for a11y in [false, true] {
+                let act = saturated(verbosity, a11y);
+                assert!(
+                    act.height() <= act.max_height(),
+                    "{verbosity:?} (a11y={a11y}): draws {} rows into a {}-row slot — the feed is clipped",
+                    act.height(),
+                    act.max_height(),
+                );
+            }
+        }
+    }
+
+    /// The other half of the invariant: with the feed saturated the reservation
+    /// must be EXACTLY what is drawn. Any slack is dead space — it renders as
+    /// blank rows between the spinner and the composer (and, when the component
+    /// paints decoration across its whole rect, as bare accent-rail glyphs).
+    #[test]
+    fn reserved_slot_is_tight_when_the_feed_is_saturated() {
+        for verbosity in ALL_VERBOSITIES {
+            for a11y in [false, true] {
+                let act = saturated(verbosity, a11y);
+                assert_eq!(
+                    act.height(),
+                    act.max_height(),
+                    "{verbosity:?} (a11y={a11y}): reserved {} rows but a saturated feed only fills {} — the difference is dead space",
+                    act.max_height(),
+                    act.height(),
+                );
+            }
+        }
+    }
+
+    /// An inactive activity must reserve nothing, so the slot collapses when idle.
+    #[test]
+    fn idle_activity_reserves_no_rows() {
+        let act = Activity::new();
+        assert_eq!(act.height(), 0);
+        assert_eq!(act.max_height(), 0);
     }
 }

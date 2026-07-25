@@ -1295,7 +1295,10 @@ impl App {
         // history cell instead of N. snapshot_if_changed dedups, so a settled
         // state identical to the last snapshot flushes to nothing.
         if tick_plan_snapshot_debounce(&mut self.plan_snapshot_debounce) {
-            if let Some((body, plain)) = self.task_checklist.snapshot_if_changed() {
+            // Snapshot at the width it will be rendered at (less the plan cell's
+            // own inset) so every item fits exactly one row.
+            let snap_w = self.width.saturating_sub(2).max(20);
+            if let Some((body, plain)) = self.task_checklist.snapshot_if_changed(snap_w) {
                 self.chat.add_plan_snapshot(body, plain);
             }
         }

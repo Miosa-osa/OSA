@@ -111,7 +111,7 @@ pub fn welcome_lines(
     lines.push(make_bordered("", Style::default()));
 
     // Greeting (centered, bold white)
-    let greeting_pad = (box_width.saturating_sub(greeting.len())) / 2;
+    let greeting_pad = (box_width.saturating_sub(crate::util::cols(&greeting))) / 2;
     let greeting_centered = format!("{}{}", " ".repeat(greeting_pad), greeting);
     lines.push(make_bordered(
         &greeting_centered,
@@ -120,7 +120,7 @@ pub fn welcome_lines(
 
     // Version subtitle (centered, faint) — single build-time source, never stale.
     let version_label = format!("OSA v{}", crate::config::osa_version_display());
-    let version_pad = (box_width.saturating_sub(version_label.len())) / 2;
+    let version_pad = (box_width.saturating_sub(crate::util::cols(&version_label))) / 2;
     let version_centered = format!("{}{}", " ".repeat(version_pad), version_label);
     lines.push(make_bordered(&version_centered, theme.faint()));
 
@@ -169,12 +169,12 @@ pub fn welcome_lines(
         "{} / {}  \u{00b7}  {} tools",
         prov_display, model_display, tool_count
     );
-    let model_pad = (box_width.saturating_sub(model_line.len())) / 2;
+    let model_pad = (box_width.saturating_sub(crate::util::cols(&model_line))) / 2;
     let model_centered = format!("{}{}", " ".repeat(model_pad), model_line);
     lines.push(make_bordered(&model_centered, theme.faint()));
 
     // Working directory (centered, themed)
-    let cwd_pad = (box_width.saturating_sub(cwd.len())) / 2;
+    let cwd_pad = (box_width.saturating_sub(crate::util::cols(&cwd))) / 2;
     let cwd_centered = format!("{}{}", " ".repeat(cwd_pad), cwd);
     lines.push(make_bordered(&cwd_centered, theme.welcome_cwd()));
 

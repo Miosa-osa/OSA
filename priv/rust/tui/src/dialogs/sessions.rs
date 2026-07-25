@@ -365,13 +365,10 @@ impl SessionBrowser {
                 s.title.clone()
             };
 
-            // Truncate title
+            // Fit the title to the COLUMNS available (was comparing byte length to a
+            // column budget, which cut CJK/emoji titles to ~a third of their space).
             let max_title = inner.width.saturating_sub(30) as usize;
-            let title_display = if title_str.len() > max_title {
-                format!("{}…", crate::util::truncate_str(&title_str, max_title.saturating_sub(1)))
-            } else {
-                title_str
-            };
+            let title_display = crate::util::fit_cols(&title_str, max_title);
 
             // Date — prefer last-active time (from /recent listings) when
             // present, otherwise fall back to the creation date. Just the date

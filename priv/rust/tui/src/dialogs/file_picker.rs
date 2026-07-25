@@ -355,13 +355,10 @@ impl FilePicker {
                 format_size(entry.size)
             };
 
-            // Truncate name
+            // Fit the name to the COLUMNS available (was byte-vs-column, which
+            // over-truncated any non-ASCII filename).
             let max_name = inner.width.saturating_sub(16) as usize;
-            let name_display = if entry.name.len() > max_name {
-                format!("{}…", crate::util::truncate_str(&entry.name, max_name.saturating_sub(1)))
-            } else {
-                entry.name.clone()
-            };
+            let name_display = crate::util::fit_cols(&entry.name, max_name);
 
             let spans = vec![
                 Span::styled(format!("{} {} ", cursor_char, icon), name_style),
