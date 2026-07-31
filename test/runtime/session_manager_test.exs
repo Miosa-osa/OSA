@@ -41,6 +41,27 @@ defmodule OptimalSystemAgent.Runtime.SessionManagerTest do
     refute SessionManager.live_session?(session_id)
   end
 
+  describe "swap_provider/3" do
+    test "materialises the loop instead of 404ing when the session has not started one" do
+      # Session Loops start lazily on the first message, but users switch models
+      # BEFORE sending anything (open OSA → pick a model → talk). This path used to
+      # only LOOK UP a loop, so a pre-first-turn switch returned {:error, :not_found}
+      # → HTTP 404 session_not_found → a "switch failed" toast every time.
+      session_id = unique_session_id()
+      refute SessionManager.live_session?(session_id)
+
+      result = SessionManager.swap_provider(session_id, "ollama", "glm-5.2:cloud")
+
+      refute match?({:error, :not_found}, result),
+             "a model switch must not 404 just because the session's loop hasn't started yet"
+
+      assert SessionManager.live_session?(session_id),
+             "swap_provider must materialise the loop the first turn will use"
+
+      SessionManager.untrack_session(session_id)
+    end
+  end
+
   defp unique_session_id do
     "session-manager-test-#{System.unique_integer([:positive, :monotonic])}"
   end

@@ -9,6 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.41] — displays as `v1.0.041`
+
+### Fixed — switching the model failed before the first message
+
+- **Switching provider/model no longer errors on a fresh session.** Session Loops are
+  started **lazily** — the message path calls `ensure_loop` when the first turn
+  arrives — but the provider-swap path only *looked up* a Loop and never started one.
+  So the extremely common flow of *open OSA → pick a model → then start talking*
+  returned `{:error, :not_found}` → HTTP **404 `session_not_found`** → a "switch
+  failed" toast, every time. Swapping now materialises the Loop the same way every
+  other session-scoped entry point does, so the choice lands on the Loop the first
+  turn will use.
+  - Verified against a live backend on a session with no Loop: **404
+    `session_not_found` → 200 `ok`** (provider, model and context window returned).
+  - Added a regression test asserting a switch on a not-yet-started session neither
+    404s nor leaves the session unmaterialised.
+
 ## [1.0.40] — displays as `v1.0.040`
 
 ### Fixed — TUI audit: 14 rendering defects across 3 root causes

@@ -282,6 +282,19 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   @spec swap_provider(session_id(), String.t(), String.t() | nil) ::
           {:ok, map()} | {:error, :not_found} | {:error, term()}
   def swap_provider(session_id, provider, model) do
+    # Materialise the Loop if it is not running yet.
+    #
+    # Session Loops start LAZILY — `Channels.Signal` calls `ensure_loop/3` when the
+    # first message arrives. Switching the model, however, is something users do
+    # BEFORE sending anything (open OSA, pick a model, then start talking), and this
+    # path used `lookup_loop/1`, which only *finds* a Loop and never starts one. So a
+    # pre-first-turn switch returned `{:error, :not_found}` → HTTP 404
+    # `session_not_found` → a "switch failed" toast in the TUI, every time.
+    #
+    # Materialising here makes this consistent with every other session-scoped entry
+    # point, and means the choice is applied to the Loop the first turn will use.
+    _ = ensure_loop(session_id)
+
     case lookup_loop(session_id) do
       {:ok, pid, _owner} -> GenServer.call(pid, {:swap_provider, provider, model})
       :error -> {:error, :not_found}
