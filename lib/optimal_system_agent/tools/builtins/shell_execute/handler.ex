@@ -530,10 +530,80 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms)
     after
       remaining ->
+        # YIELD — do not kill. "Bound the wait, not the work."
+        #
+        # This used to SIGKILL the process and fail the tool call, which meant a
+        # legitimately long command (a build, a test suite, `du` over a terabyte)
+        # destroyed its own work at the deadline and took the turn down with it.
+        # The deadline is really a bound on how long the AGENT should sit and
+        # wait — not on how long the WORK may take.
+        #
+        # So on expiry the still-running process is adopted into the background
+        # (the exact machinery Ctrl+B already uses), and the model gets a result
+        # describing how to poll it. The command keeps running, its completion is
+        # injected back into the loop by BackgroundNotifier, and the turn moves on.
+        auto_detach_on_timeout(port, os_pid, acc, detach, timeout_ms)
+    end
+  end
+
+  # Adopt a still-running foreground command into the background because the
+  # wait window elapsed. Mirrors `handle_detach/8` (the interactive Ctrl+B path)
+  # but is driven by the deadline rather than a user keystroke, so there is no
+  # caller to reply to.
+  defp auto_detach_on_timeout(port, os_pid, acc, detach, timeout_ms) do
+    session_id = detach.session_id
+    output_so_far = collected_output(acc)
+    waited = div(timeout_ms, 1000)
+
+    if is_binary(session_id) do
+      OptimalSystemAgent.Agent.BackgroundNotifier.ensure_started(session_id)
+    end
+
+    case BackgroundManager.adopt(
+           command: detach.command,
+           cwd: detach.cwd,
+           session_id: session_id,
+           port: port,
+           os_pid: os_pid,
+           initial: output_so_far
+         ) do
+      {:ok, id, child_pid} ->
+        Port.connect(port, child_pid)
+        safe_unlink(port)
+        forward_pending_port_messages(port, child_pid)
+        broadcast_command_started(session_id, id, detach.command)
+
+        {:ok,
+         "Still running after #{waited}s — moved to the background (NOT killed).\n" <>
+           "- background_id: #{id}\n" <>
+           "- cwd: #{detach.cwd}\n\n" <>
+           partial_output_section(output_so_far) <>
+           "The command is STILL RUNNING and its work is not lost. You will be " <>
+           "notified automatically when it completes (with its exit code). Poll it " <>
+           "with the bash_output tool using background_id \"#{id}\", or stop it with " <>
+           "kill=true. Continue with other work in the meantime."}
+
+      {:error, reason} ->
+        # Adoption failed — fall back to the old destructive behaviour so a wedged
+        # process can never leak, but still hand back the partial output so the
+        # model can act on what was collected instead of losing it entirely.
+        Logger.warning("[shell_execute] background adopt failed on timeout: #{inspect(reason)}")
         kill_os_process(os_pid)
         safe_close_port(port)
-        {:error, "Command timed out after #{div(timeout_ms, 1000)}s"}
+
+        {:error,
+         "Command timed out after #{waited}s and could not be moved to the background.\n" <>
+           partial_output_section(output_so_far)}
     end
+  end
+
+  # Render whatever the command printed before the wait window elapsed. Codex does
+  # the same on its (rarer) hard-timeout path: returning partial output lets the
+  # model act on it or retry with a larger budget instead of getting nothing.
+  defp partial_output_section(""), do: ""
+
+  defp partial_output_section(output) do
+    "Output so far:\n" <> maybe_truncate(output) <> "\n\n"
   end
 
   # Hand the live OS process off to a supervised BackgroundTask, then return a

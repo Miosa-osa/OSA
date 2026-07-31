@@ -883,18 +883,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   defp normalize_tool_name(name), do: name
 
-  # How long a single Ollama request may take before Req gives up.
+  # IDLE timeout: the longest gap allowed BETWEEN streamed chunks.
   #
-  # This was hardcoded to 600_000 (10 min), which is the wrong shape of limit for a
-  # long-running agent: a turn that legitimately works for a long time (slow cloud
-  # model, big generation, thinking models that emit nothing for minutes) hit it and
-  # the whole turn died with "request timed out" — then the retry ladder stacked on
-  # top, surfacing as ~15 minutes of nothing followed by a broken turn.
+  # Finch defines `:receive_timeout` as "the maximum time to wait for each chunk to
+  # be received" — it is reset by every chunk, and is NOT a cap on total request
+  # duration (that would be `:request_timeout`, which OSA deliberately does not
+  # set). So a turn that keeps producing output can stream for hours; only genuine
+  # silence trips this.
   #
-  # Default is now 4 hours: high enough that a genuinely working turn is never
-  # killed, still bounded so a truly wedged socket eventually surfaces. Override
-  # with OLLAMA_TIMEOUT_MS (falls back to the default on anything unparseable).
-  @default_receive_timeout_ms 14_400_000
+  # That makes the correct value SMALL, not large. It was briefly set to 4 h here
+  # while being mistaken for a total-duration cap — which would have meant waiting
+  # four hours to notice a dead socket. 5 minutes matches Codex's
+  # `stream_idle_timeout_ms = 300_000` and is the same reasoning: long healthy
+  # turns are never killed, wedged connections surface promptly.
+  #
+  # Override with OLLAMA_TIMEOUT_MS (falls back to the default if unparseable).
+  @default_receive_timeout_ms 300_000
   defp receive_timeout_ms do
     case System.get_env("OLLAMA_TIMEOUT_MS") do
       v when is_binary(v) ->

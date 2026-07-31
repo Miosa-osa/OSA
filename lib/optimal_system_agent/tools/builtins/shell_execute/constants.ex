@@ -32,17 +32,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   @max_output_bytes 102_400
   def max_output_bytes, do: @max_output_bytes
 
-  # Hard wall-clock cap for a single foreground command.
+  # How long the AGENT waits inline for a foreground command — a YIELD window,
+  # not a kill deadline.
   #
-  # Was 2 min, which is the wrong limit for an agent expected to work for hours:
-  # legitimate work (`du` over a terabyte, a full build, a long test suite) blew
-  # through it and the command was killed mid-flight. OSA already has better,
-  # non-destructive answers for a slow command — Esc interrupts it and Ctrl+B
-  # detaches it to the background — so this only needs to be a backstop against a
-  # genuinely wedged process, not a productivity limit.
+  # This value only decides when a still-running command is moved to the
+  # background (see `auto_detach_on_timeout/5`); the process itself keeps running
+  # and its completion is injected back into the loop. Because expiry is no longer
+  # destructive, a SHORT window is correct and desirable: the agent stops blocking
+  # on slow work and can carry on, exactly as Codex does (its `shell` default is
+  # 10 s, after which the process becomes a background session the model polls).
   #
-  # 4 hours. Override with OSA_SHELL_TIMEOUT_MS or `[shell].timeout_ms`.
-  @default_timeout_ms 14_400_000
+  # It was briefly raised to 4 h while expiry still meant SIGKILL — the right fix
+  # for "long work gets destroyed", but the wrong shape: it made the agent sit and
+  # block for hours instead. Bound the wait, not the work.
+  #
+  # 2 minutes. Override with OSA_SHELL_TIMEOUT_MS or `[shell].timeout_ms`.
+  @default_timeout_ms 120_000
   def default_timeout_ms, do: @default_timeout_ms
 
   # ── Tier 1: CATASTROPHIC — always hard-denied (unrecoverable) ──────────
