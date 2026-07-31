@@ -32,11 +32,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   @max_output_bytes 102_400
   def max_output_bytes, do: @max_output_bytes
 
-  # Hard wall-clock cap for a single foreground command. Kept intentionally
-  # conservative (2 min) so a hung / input-blocked command can never run for
-  # minutes silently — the run_command timeout path kills the OS process when
-  # this elapses. Override per-call via OSA_SHELL_TIMEOUT_MS.
-  @default_timeout_ms 120_000
+  # Hard wall-clock cap for a single foreground command.
+  #
+  # Was 2 min, which is the wrong limit for an agent expected to work for hours:
+  # legitimate work (`du` over a terabyte, a full build, a long test suite) blew
+  # through it and the command was killed mid-flight. OSA already has better,
+  # non-destructive answers for a slow command — Esc interrupts it and Ctrl+B
+  # detaches it to the background — so this only needs to be a backstop against a
+  # genuinely wedged process, not a productivity limit.
+  #
+  # 4 hours. Override with OSA_SHELL_TIMEOUT_MS or `[shell].timeout_ms`.
+  @default_timeout_ms 14_400_000
   def default_timeout_ms, do: @default_timeout_ms
 
   # ── Tier 1: CATASTROPHIC — always hard-denied (unrecoverable) ──────────

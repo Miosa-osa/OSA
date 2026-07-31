@@ -157,12 +157,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       |> maybe_add_tools(model, opts)
       |> maybe_add_think(model, opts)
 
-    # 600 s — thinking models (kimi-k2.5) need up to ~300 s before producing
-    # any output; 120 s was too short and caused Cortex synthesis timeouts.
     req_opts =
       [
         json: body,
-        receive_timeout: 600_000,
+        receive_timeout: receive_timeout_ms(),
         pool_timeout: 60_000,
         retry: false
       ] ++ auth_headers()
@@ -428,7 +426,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     req_opts =
       [
         json: body,
-        receive_timeout: 600_000,
+        receive_timeout: receive_timeout_ms(),
         into: fn {:data, data}, {req, resp} ->
           acc = Process.get(stream_key)
           acc = handle_stream_chunk(data, callback, acc)
@@ -884,6 +882,31 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp normalize_tool_name(name), do: name
+
+  # How long a single Ollama request may take before Req gives up.
+  #
+  # This was hardcoded to 600_000 (10 min), which is the wrong shape of limit for a
+  # long-running agent: a turn that legitimately works for a long time (slow cloud
+  # model, big generation, thinking models that emit nothing for minutes) hit it and
+  # the whole turn died with "request timed out" — then the retry ladder stacked on
+  # top, surfacing as ~15 minutes of nothing followed by a broken turn.
+  #
+  # Default is now 4 hours: high enough that a genuinely working turn is never
+  # killed, still bounded so a truly wedged socket eventually surfaces. Override
+  # with OLLAMA_TIMEOUT_MS (falls back to the default on anything unparseable).
+  @default_receive_timeout_ms 14_400_000
+  defp receive_timeout_ms do
+    case System.get_env("OLLAMA_TIMEOUT_MS") do
+      v when is_binary(v) ->
+        case Integer.parse(String.trim(v)) do
+          {ms, _} when ms > 0 -> ms
+          _ -> @default_receive_timeout_ms
+        end
+
+      _ ->
+        @default_receive_timeout_ms
+    end
+  end
 
   # Returns `[headers: [{"authorization", "Bearer <key>"}]]` when
   # OLLAMA_API_KEY is set (Ollama Cloud), empty list otherwise.
