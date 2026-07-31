@@ -1098,6 +1098,14 @@ impl App {
                 if self.esc_tracker.press(now) {
                     self.activity.arm_interrupt(false);
                     self.cancel_processing();
+                    // Cancelling moves us to Idle, where the SAME tracker drives a
+                    // different double-Esc chord (jump-to-previous-message). Leaving
+                    // the interrupt chord's state behind let the very next Esc land
+                    // as an already-armed press in Idle and open the rewind picker —
+                    // so pressing Esc to stop a turn appeared to "jump to a previous
+                    // message" instead. Clear it so the Idle chord always starts from
+                    // scratch after an interrupt.
+                    self.esc_tracker.reset();
                 } else {
                     self.activity.arm_interrupt(true);
                     self.toasts.push(

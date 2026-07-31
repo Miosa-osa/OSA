@@ -366,6 +366,30 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             }
         }
 
+        "command_output_delta" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                command: String,
+                #[serde(default)]
+                chunk: String,
+                #[serde(default)]
+                tail: String,
+                #[serde(default)]
+                seq: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("command_output_delta", e)),
+            };
+            Some(BackendEvent::CommandOutputDelta {
+                command: ev.command,
+                chunk: ev.chunk,
+                tail: ev.tail,
+                seq: ev.seq,
+            })
+        }
+
         "tool_result" => {
             #[derive(serde::Deserialize)]
             struct Ev {

@@ -162,14 +162,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   # Timeout enforcement
   # ---------------------------------------------------------------------------
 
-  describe "timeout enforcement" do
+  describe "wait window (yield, not kill)" do
     @tag timeout: 120_000
-    test "command that exceeds the cap is killed" do
-      System.put_env("OSA_SHELL_TIMEOUT_MS", "30000")
+    test "command still running when the wait window elapses is moved to the background" do
+      # The window bounds how long the AGENT waits, NOT how long the WORK may run.
+      # It used to SIGKILL the process and fail the call, so legitimately long work
+      # (a build, a test suite) destroyed itself at the deadline and took the turn
+      # with it. It is now adopted into the background instead: the process keeps
+      # running, its completion is injected back into the loop, and the model gets
+      # a background_id to poll. See `auto_detach_on_timeout/5`.
+      System.put_env("OSA_SHELL_TIMEOUT_MS", "3000")
       on_exit(fn -> System.delete_env("OSA_SHELL_TIMEOUT_MS") end)
-      assert {:error, msg} = exec("sleep 35")
-      assert msg =~ "timed out"
-      assert msg =~ "30"
+
+      assert {:ok, msg} = exec("sleep 20")
+      assert msg =~ "moved to the background"
+      assert msg =~ "background_id"
+      # It must be explicit that the work was NOT destroyed.
+      assert msg =~ "STILL RUNNING"
     end
   end
 

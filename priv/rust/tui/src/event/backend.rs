@@ -46,6 +46,19 @@ pub enum BackendEvent {
         success: bool,
     },
 
+    /// Live stdout/stderr from a still-running foreground shell command
+    /// (`command_output_delta`). Emitted at most ~4/sec while the command runs
+    /// so a long build isn't a silent spinner. `chunk` is the incremental bytes
+    /// since the previous delta; `tail` is a rolling snapshot of the end of the
+    /// output for a client that connected late or dropped frames; `seq` is a
+    /// per-command counter so gaps are detectable.
+    CommandOutputDelta {
+        command: String,
+        chunk: String,
+        tail: String,
+        seq: u64,
+    },
+
     // === LLM ===
     LlmRequest { iteration: u32, max_iterations: Option<u32> },
     LlmResponse {

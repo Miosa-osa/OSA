@@ -312,11 +312,41 @@ impl App {
                 self.recompute_layout();
                 debug!("Tool call start: {}", name);
             }
+            BackendEvent::CommandOutputDelta {
+                command,
+                chunk,
+                tail,
+                seq,
+            } => {
+                // A still-running foreground shell command is talking. Append to
+                // the bounded live preview so the activity feed shows a tail
+                // instead of a silent spinner.
+                //
+                // `chunk` is the incremental delta and is what the ring buffer
+                // wants. On the FIRST delta we have no prior state, so an event
+                // with seq > 0 arriving first (late SSE attach, dropped frames)
+                // seeds from `tail` — the rolling snapshot — instead of showing
+                // a preview that starts mid-stream with no context.
+                let seeding = seq > 0 && self.activity.live_output_lines().is_empty();
+                let text = if seeding { &tail } else { &chunk };
+                if !text.is_empty() {
+                    self.activity.push_command_output(&command, text);
+                }
+                // No redraw request needed: the event loop repaints the live
+                // region every tick (the spinner cadence), so the appended tail
+                // shows up on the next frame. The activity slot height is
+                // unchanged by design, so no `recompute_layout` either.
+            }
             BackendEvent::ToolCallEnd {
                 name,
                 duration_ms,
                 success,
             } => {
+                // The command is done — its full output goes to scrollback via
+                // the tool summary below, so drop the live preview.
+                if is_shell_tool(&name) {
+                    self.activity.clear_command_output();
+                }
                 self.activity.tool_end(&name, duration_ms, success);
                 self.activity.set_phase(ProcessingPhase::Waiting);
                 // Item 3 — after a tool completes we're blocked on the model to

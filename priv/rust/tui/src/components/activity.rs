@@ -8,6 +8,18 @@ use crate::event::Event;
 
 use super::{Component, ComponentAction};
 
+// The bounded live-output ring buffer lives in its own file but is mounted here
+// (rather than in `components/mod.rs`) so the streaming feature is self-contained.
+#[path = "live_output.rs"]
+pub mod live_output;
+
+use live_output::LiveCommandOutput;
+
+/// Rows of live command output rendered under the tool feed. Kept small: the
+/// live region is a status strip, not a pager — the full output still lands in
+/// scrollback when the tool completes.
+pub const LIVE_OUTPUT_PREVIEW_LINES: usize = 5;
+
 /// Processing phase — drives the activity display with real backend state
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessingPhase {
@@ -125,6 +137,31 @@ fn gate_parts(parts: &[String], budget: usize) -> Vec<String> {
         }
     }
     kept
+}
+
+/// Fit `s` into `max_cols` display columns, ALWAYS ending in `…`.
+///
+/// Distinct from [`crate::util::fit_cols`], which returns the string untouched
+/// when it already fits: the details block calls this only on a row it has
+/// decided to cut, so the ellipsis is the signal that content was dropped and
+/// must appear even when the kept text happens to fit.
+fn ellipsize_cols(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let budget = max_cols - 1; // reserve one column for the ellipsis
+    let mut out = String::new();
+    let mut acc = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + cw > budget {
+            break;
+        }
+        out.push(ch);
+        acc += cw;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 /// Format large counts compactly (e.g. 1234 → "1.2k")
@@ -388,7 +425,49 @@ pub struct Activity {
     /// plain-language status line (no spinner, braille bars, or boxed chrome)
     /// instead of the rich animated activity panel.
     a11y: bool,
+
+    // ── Codex-style details block (`status_indicator_widget.rs`) ──────────
+    /// Optional secondary context rendered under the status line as wrapped
+    /// `  └ ` rows (e.g. the concrete command being run, or the live reasoning
+    /// summary). `None` ⇒ the block occupies no rows at all.
+    details: Option<String>,
+    /// Hard cap on rendered detail rows; the last kept row is ellipsized when
+    /// the text overflows. Defaults to [`ACTIVITY_DETAILS_DEFAULT_MAX_LINES`].
+    details_max_lines: usize,
+    /// Content width seen by the most recent `draw`, so `height()`/`max_height()`
+    /// can report the SAME row count the renderer will actually paint. `0` (no
+    /// draw yet) falls back to the maximum, which over-reserves rather than
+    /// clipping. Interior-mutable because `draw` takes `&self` (same pattern as
+    /// `dialogs::permissions::viewport_height`).
+    details_width: std::cell::Cell<u16>,
+
+    // ── Pausable turn clock (Codex `pause_timer_at` / `resume_timer`) ─────
+    /// Time already banked from previous (unpaused) stretches of this turn.
+    elapsed_running: std::time::Duration,
+    /// When the current unpaused stretch began. `None` while inactive.
+    last_resume_at: Option<std::time::Instant>,
+    /// Whether the clock is currently stopped (an approval modal owns the
+    /// screen). While paused, `elapsed` does not advance.
+    timer_paused: bool,
+
+    // ── Live shell-command output ────────────────────────────────────────
+    /// Bounded preview of the output streamed by the currently running shell
+    /// command (`command_output_delta` events). Empty when nothing is
+    /// streaming, in which case the feed renders exactly as it always did.
+    live_output: LiveCommandOutput,
+    /// The command the live output belongs to, so a NEW command resets the
+    /// buffer instead of appending to the previous one's tail.
+    live_command: Option<String>,
 }
+
+/// Default cap on the number of `  └ ` detail rows shown under the status line
+/// (Codex `STATUS_DETAILS_DEFAULT_MAX_LINES`).
+pub const ACTIVITY_DETAILS_DEFAULT_MAX_LINES: usize = 3;
+
+/// The hanging-indent prefix for the details block. Its DISPLAY WIDTH (4 cols)
+/// is what continuation rows are indented by, so the wrapped text sits in one
+/// clean column under the `└`.
+const DETAILS_PREFIX: &str = "  \u{2514} ";
 
 /// Rotating counter so consecutive requests pick different starting verbs.
 static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -472,6 +551,14 @@ impl Activity {
             reduced_motion: false,
             verbosity: Verbosity::All,
             a11y: false,
+            details: None,
+            details_max_lines: ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
+            details_width: std::cell::Cell::new(0),
+            elapsed_running: std::time::Duration::ZERO,
+            last_resume_at: None,
+            timer_paused: false,
+            live_output: LiveCommandOutput::new(),
+            live_command: None,
         }
     }
 
@@ -574,10 +661,39 @@ impl Activity {
         crate::a11y::phase_label(self.phase).to_string()
     }
 
+    /// Append a `command_output_delta` chunk for `command` to the live preview.
+    /// A different command than the one currently previewed resets the buffer so
+    /// the tail never mixes two commands' output.
+    pub fn push_command_output(&mut self, command: &str, chunk: &str) {
+        if self.live_command.as_deref() != Some(command) {
+            self.live_output.clear();
+            self.live_command = Some(command.to_string());
+        }
+        self.live_output.push_str(chunk);
+        // Output flowed — reset the stall bleed exactly like streaming text does.
+        self.last_output_at = Some(std::time::Instant::now());
+    }
+
+    /// Drop the live preview (the command finished, or the turn ended).
+    pub fn clear_command_output(&mut self) {
+        self.live_output.clear();
+        self.live_command = None;
+    }
+
+    /// The rows the live preview currently wants to render (0 when idle).
+    pub fn live_output_lines(&self) -> Vec<String> {
+        if self.live_output.is_empty() {
+            Vec::new()
+        } else {
+            self.live_output.tail_lines(LIVE_OUTPUT_PREVIEW_LINES)
+        }
+    }
+
     pub fn start(&mut self) {
         self.active = true;
         self.phase = ProcessingPhase::Waiting;
         self.tool_feed.clear();
+        self.clear_command_output();
         self.last_tool_name.clear();
         self.input_tokens = 0;
         self.output_tokens = 0;
@@ -597,6 +713,12 @@ impl Activity {
         self.start_time = Some(now);
         self.phase_since = Some(now);
         self.last_output_at = Some(now);
+        // Fresh turn ⇒ fresh (running) clock.
+        self.elapsed_running = std::time::Duration::ZERO;
+        self.last_resume_at = Some(now);
+        self.timer_paused = false;
+        self.details = None;
+        self.details_max_lines = ACTIVITY_DETAILS_DEFAULT_MAX_LINES;
         self.displayed_tokens = 0;
         self.cancelling = false;
         self.thinking_since = None;
@@ -611,7 +733,13 @@ impl Activity {
     pub fn stop(&mut self) {
         self.active = false;
         self.phase = ProcessingPhase::Waiting;
+        self.clear_command_output();
         self.start_time = None;
+        self.elapsed_running = std::time::Duration::ZERO;
+        self.last_resume_at = None;
+        self.timer_paused = false;
+        self.details = None;
+        self.details_max_lines = ACTIVITY_DETAILS_DEFAULT_MAX_LINES;
         self.phase_since = None;
         self.last_output_at = None;
         self.displayed_tokens = 0;
@@ -654,11 +782,147 @@ impl Activity {
         self.queued = n;
     }
 
-    /// Seconds since the spinner clock started (`start()`), if running. This is
-    /// the exact clock `draw` renders (floored the same way), exposed so the
-    /// turn recap can print the same number the live spinner last showed.
+    /// Seconds of AGENT time since the spinner clock started (`start()`), if
+    /// running. This is the exact clock `draw` renders (floored the same way),
+    /// exposed so the turn recap can print the same number the live spinner last
+    /// showed.
+    ///
+    /// Note this is NOT wall-clock: stretches where the clock was paused
+    /// ([`Self::pause_timer`], while an approval modal owns the screen) are
+    /// excluded, so the reported duration is time the AGENT spent working, not
+    /// time the human spent reading a prompt.
     pub fn elapsed_secs(&self) -> Option<u64> {
-        self.start_time.map(|t| t.elapsed().as_secs())
+        self.start_time
+            .map(|_| self.elapsed_duration_at(std::time::Instant::now()).as_secs())
+    }
+
+    /// Accumulated agent time at `now`: everything banked from earlier stretches
+    /// plus the currently-running one (Codex `elapsed_duration_at`).
+    fn elapsed_duration_at(&self, now: std::time::Instant) -> std::time::Duration {
+        let mut elapsed = self.elapsed_running;
+        if !self.timer_paused {
+            if let Some(resumed) = self.last_resume_at {
+                elapsed += now.saturating_duration_since(resumed);
+            }
+        }
+        elapsed
+    }
+
+    #[cfg(test)]
+    fn elapsed_secs_at(&self, now: std::time::Instant) -> u64 {
+        self.elapsed_duration_at(now).as_secs()
+    }
+
+    /// Stop the turn clock — call when an approval/permission modal takes over
+    /// the screen. Idempotent: a second pause is a no-op, so overlapping modals
+    /// cannot double-bank the same stretch.
+    pub fn pause_timer(&mut self) {
+        self.pause_timer_at(std::time::Instant::now());
+    }
+
+    /// Restart the turn clock after a modal is dismissed. Idempotent.
+    pub fn resume_timer(&mut self) {
+        self.resume_timer_at(std::time::Instant::now());
+    }
+
+    fn pause_timer_at(&mut self, now: std::time::Instant) {
+        if self.timer_paused {
+            return;
+        }
+        if let Some(resumed) = self.last_resume_at {
+            self.elapsed_running += now.saturating_duration_since(resumed);
+        }
+        self.timer_paused = true;
+    }
+
+    fn resume_timer_at(&mut self, now: std::time::Instant) {
+        if !self.timer_paused {
+            return;
+        }
+        self.last_resume_at = Some(now);
+        self.timer_paused = false;
+    }
+
+    /// Whether the turn clock is currently stopped.
+    pub fn is_timer_paused(&self) -> bool {
+        self.timer_paused
+    }
+
+    /// Set (or clear with `None`) the `  └ ` details block shown under the status
+    /// line — the concrete thing behind the verb (a command, a path, the live
+    /// reasoning summary). `max_lines` caps the rendered rows (clamped to >= 1;
+    /// pass [`ACTIVITY_DETAILS_DEFAULT_MAX_LINES`] for the Codex default).
+    ///
+    /// Blank/whitespace-only text clears the block rather than reserving an
+    /// empty row.
+    pub fn set_details(&mut self, details: Option<String>, max_lines: usize) {
+        self.details_max_lines = max_lines.max(1);
+        self.details = details
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+    }
+
+    /// The details text currently held, if any.
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
+    }
+
+    /// Wrap the details text to `width` columns with a hanging indent aligned
+    /// under [`DETAILS_PREFIX`], truncating to `details_max_lines` and
+    /// ellipsizing the last kept row when it overflows (Codex
+    /// `wrapped_details_lines`).
+    fn wrapped_details_lines(&self, width: u16) -> Vec<String> {
+        let Some(details) = self.details.as_deref() else {
+            return Vec::new();
+        };
+        let prefix_cols = crate::util::cols(DETAILS_PREFIX);
+        if width == 0 || (width as usize) <= prefix_cols {
+            return Vec::new();
+        }
+        let content_cols = (width as usize).saturating_sub(prefix_cols).max(1);
+        let indent = " ".repeat(prefix_cols);
+
+        let mut out: Vec<String> = Vec::new();
+        let mut overflowed = false;
+        'outer: for logical in details.lines() {
+            for piece in crate::render::markdown::wrap_text(logical, content_cols) {
+                if out.len() == self.details_max_lines {
+                    // One more row than we can show ⇒ the last kept row gets `…`.
+                    overflowed = true;
+                    break 'outer;
+                }
+                let prefix = if out.is_empty() { DETAILS_PREFIX } else { &indent };
+                out.push(format!("{}{}", prefix, piece));
+            }
+        }
+
+        if overflowed {
+            // Both prefixes are the same char/column count, so stripping the
+            // first `prefix_chars` chars leaves exactly the wrapped body.
+            let prefix_chars = DETAILS_PREFIX.chars().count();
+            let on_first_row = out.len() == 1;
+            if let Some(last) = out.last_mut() {
+                let body: String = last.chars().skip(prefix_chars).collect();
+                let prefix = if on_first_row { DETAILS_PREFIX } else { indent.as_str() };
+                *last = format!("{}{}", prefix, ellipsize_cols(&body, content_cols));
+            }
+        }
+        out
+    }
+
+    /// Rows the details block contributes to BOTH [`Self::height`] and
+    /// [`Self::max_height`] — they must agree or the inline viewport either
+    /// clips the block or leaves dead rows under it.
+    fn details_rows(&self) -> u16 {
+        if self.details.is_none() || self.a11y {
+            return 0;
+        }
+        let width = self.details_width.get();
+        if width == 0 {
+            // Not drawn yet: reserve the ceiling rather than under-reserve.
+            return self.details_max_lines as u16;
+        }
+        self.wrapped_details_lines(width).len() as u16
     }
 
     /// Override the spinner verb with the currently-active task's present-
@@ -715,7 +979,13 @@ impl Activity {
         }
         if !self.active {
             self.active = true;
-            self.start_time = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.start_time = Some(now);
+            // Keep the pausable clock in step with `start_time` on this
+            // implicit-activation path, or `elapsed` would read 0 forever.
+            self.elapsed_running = std::time::Duration::ZERO;
+            self.last_resume_at = Some(now);
+            self.timer_paused = false;
         }
     }
 
@@ -1008,16 +1278,20 @@ impl Activity {
         if self.a11y {
             return 1;
         }
+        // The `└ ` details block sits between the status line and the feed, so it
+        // adds rows in EVERY verbosity (including `Off`, which is "status line
+        // only" — the details are part of that status row, not the tool feed).
+        let details = self.details_rows();
         match self.verbosity {
-            Verbosity::Off => 1,
-            Verbosity::New => 2,
+            Verbosity::Off => 1 + details,
+            Verbosity::New => 2 + details,
             Verbosity::All => {
                 let feed_lines = self.visible_feed_count().min(4) as u16;
-                1 + feed_lines // spinner + feed
+                1 + details + feed_lines // spinner + details + feed
             }
             Verbosity::Verbose => {
                 let feed_lines = self.visible_feed_count().min(8) as u16;
-                1 + feed_lines
+                1 + details + feed_lines
             }
         }
     }
@@ -1039,12 +1313,16 @@ impl Activity {
         if self.a11y {
             return 1;
         }
+        // Must use the SAME `details_rows()` as `height()` — a details block that
+        // is drawn but not reserved gets clipped; one reserved but not drawn
+        // leaves dead rows (bare accent-rail glyphs) above the composer.
+        let details = self.details_rows();
         match self.verbosity {
-            Verbosity::Off => 1,
-            Verbosity::New => 2,
-            // spinner + the per-verbosity feed cap used by `height()` above.
-            Verbosity::All => 1 + 4,
-            Verbosity::Verbose => 1 + 8,
+            Verbosity::Off => 1 + details,
+            Verbosity::New => 2 + details,
+            // spinner + details + the per-verbosity feed cap used by `height()`.
+            Verbosity::All => 1 + details + 4,
+            Verbosity::Verbose => 1 + details + 8,
         }
     }
 
@@ -1074,10 +1352,10 @@ impl Component for Activity {
         if !self.active || area.height == 0 {
             return;
         }
-        let elapsed = self
-            .start_time
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        // AGENT time, not wall-clock: paused stretches (an approval modal owning
+        // the screen) are excluded, so a turn the user sat on for two minutes
+        // still reports the seconds the agent actually worked.
+        let elapsed = self.elapsed_secs().unwrap_or(0);
 
         // Screen-reader / plain-text mode: one static, unstyled status line. No
         // spinner glyph, no braille feed, no color — just plain language a screen
@@ -1108,6 +1386,13 @@ impl Component for Activity {
         // Never drawn in a11y (plain-text) mode — that path returned above.
         const RAIL_W: u16 = 2;
         let rail_on = area.width > RAIL_W + 8;
+        // Record the width the details block will be wrapped at, so the NEXT
+        // `height()`/`max_height()` reserves exactly what is painted here.
+        self.details_width.set(if rail_on {
+            area.width.saturating_sub(RAIL_W)
+        } else {
+            area.width
+        });
         let content = if rail_on {
             Rect::new(area.x + RAIL_W, area.y, area.width - RAIL_W, area.height)
         } else {
@@ -1368,12 +1653,56 @@ impl Component for Activity {
             Rect::new(content.x, content.y, content.width, 1),
         );
 
-        if self.verbosity == Verbosity::Off || content.height < 2 {
+        // ── `└ ` details block (Codex status_indicator_widget) ───────────
+        // The concrete thing behind the verb, wrapped with a hanging indent and
+        // ellipsized on the last kept row. Rendered whenever the slot has spare
+        // height, ABOVE the tool feed and regardless of verbosity (it is part of
+        // the status row, not the feed).
+        let mut next_y = content.y + 1;
+        if content.height > 1 {
+            let room = (content.height - 1) as usize;
+            for (i, row) in self
+                .wrapped_details_lines(content.width)
+                .into_iter()
+                .take(room)
+                .enumerate()
+            {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(row, theme.faint()))),
+                    Rect::new(content.x, next_y + i as u16, content.width, 1),
+                );
+                next_y = content.y + 1 + i as u16 + 1;
+            }
+        }
+
+        if self.verbosity == Verbosity::Off || next_y >= content.y + content.height {
             return;
         }
 
+        // Live command output claims the BOTTOM rows of the remaining budget.
+        //
+        // It deliberately does NOT add rows: `height()`/`max_height()` reserve a
+        // fixed slot for the whole turn, and growing that slot mid-turn rebuilds
+        // the inline viewport (a DSR cursor re-anchor that stacks a fresh
+        // composer down the screen — see `max_height`'s note). So the live tail
+        // SHARES the feed budget rather than extending it.
+        let budget = (content.y + content.height - next_y) as usize;
+        let live_lines = if self.verbosity == Verbosity::New {
+            // "New" mode is a single summary row — no room for a tail.
+            Vec::new()
+        } else {
+            let mut lines = self.live_output_lines();
+            // Never let the tail swallow the feed: keep one row for the running
+            // tool itself when there is one.
+            let cap = budget.saturating_sub(usize::from(!self.tool_feed.is_empty()));
+            if lines.len() > cap {
+                lines.drain(..lines.len() - cap);
+            }
+            lines
+        };
+
         // Tool feed lines (Hermes-style: ┊ emoji verb  detail  duration)
-        let max_lines = (content.height - 1) as usize;
+        let max_lines = budget - live_lines.len();
         let feed_start = if self.tool_feed.len() > max_lines {
             self.tool_feed.len() - max_lines
         } else {
@@ -1384,7 +1713,7 @@ impl Component for Activity {
             if i >= max_lines {
                 break;
             }
-            let y = content.y + 1 + i as u16;
+            let y = next_y + i as u16;
             if y >= content.y + content.height {
                 break;
             }
@@ -1430,7 +1759,65 @@ impl Component for Activity {
                 Rect::new(content.x, y, content.width, 1),
             );
         }
+
+        // ── Live command output tail ─────────────────────────────────────
+        // Rendered under the feed, faint and dim, so the eye reads it as the
+        // machine's voice rather than OSA's. Each row is clipped to the pane
+        // width (never wrapped) so one long line can never displace the rows
+        // below it.
+        let live_y0 = next_y + max_lines.min(self.tool_feed.len().saturating_sub(feed_start)) as u16;
+        for (i, text) in live_lines.iter().enumerate() {
+            let y = live_y0 + i as u16;
+            if y >= content.y + content.height {
+                break;
+            }
+            let avail = content.width.saturating_sub(2) as usize;
+            let body = sanitize_live_line(text, avail);
+            let line = Line::from(vec![
+                Span::styled("\u{2506} ", theme.faint()),
+                Span::styled(body, theme.faint()),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(content.x, y, content.width, 1),
+            );
+        }
     }
+}
+
+/// Make one line of raw command output safe to paint on a single row: strip
+/// control characters (a stray `\r`/`\t`/ANSI escape would corrupt the cursor
+/// position of the whole live region) and clip to `max_cols` display columns.
+fn sanitize_live_line(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut acc = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // Drop CSI/OSC escape sequences wholesale rather than rendering their
+        // payload as literal text.
+        if ch == '\u{1b}' {
+            for esc in chars.by_ref() {
+                if esc.is_ascii_alphabetic() || esc == '\u{7}' {
+                    break;
+                }
+            }
+            continue;
+        }
+        let ch = if ch == '\t' { ' ' } else { ch };
+        if ch.is_control() {
+            continue;
+        }
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + cw > max_cols {
+            break;
+        }
+        out.push(ch);
+        acc += cw;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1906,6 +2293,163 @@ mod activity_tests {
     }
 
     #[test]
+    fn elapsed_does_not_advance_while_paused() {
+        // Codex parity: the reported duration is AGENT time. A modal owning the
+        // screen pauses the clock, so the seconds the human spent reading an
+        // approval prompt are never billed to the turn.
+        use std::time::{Duration, Instant};
+        let mut act = Activity::new();
+        act.start();
+        let base = Instant::now();
+        act.last_resume_at = Some(base);
+        act.elapsed_running = Duration::ZERO;
+
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(5)), 5);
+
+        // Pause at t=5: the clock freezes at 5s no matter how long the modal sits.
+        act.pause_timer_at(base + Duration::from_secs(5));
+        assert!(act.is_timer_paused());
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(10)), 5);
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(300)), 5);
+
+        // A second pause must not double-bank the stretch.
+        act.pause_timer_at(base + Duration::from_secs(300));
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(300)), 5);
+
+        // Resume at t=300: only agent time accrues again.
+        act.resume_timer_at(base + Duration::from_secs(300));
+        assert!(!act.is_timer_paused());
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(303)), 8);
+        // Redundant resume is a no-op (does not restart the stretch).
+        act.resume_timer_at(base + Duration::from_secs(303));
+        assert_eq!(act.elapsed_secs_at(base + Duration::from_secs(303)), 8);
+
+        // A fresh turn resets the accumulator and unpauses.
+        act.pause_timer();
+        act.start();
+        assert!(!act.is_timer_paused());
+        assert_eq!(act.elapsed_running, Duration::ZERO);
+        assert!(act.elapsed_secs().is_some_and(|s| s < 2));
+        // Idle activity has no clock at all.
+        act.stop();
+        assert_eq!(act.elapsed_secs(), None);
+    }
+
+    #[test]
+    fn details_wrap_with_hanging_indent_and_ellipsize() {
+        let mut act = Activity::new();
+        act.start();
+        assert!(act.details().is_none());
+        assert_eq!(act.wrapped_details_lines(40).len(), 0, "no details ⇒ no rows");
+
+        // Blank text clears rather than reserving an empty row.
+        act.set_details(Some("   ".into()), ACTIVITY_DETAILS_DEFAULT_MAX_LINES);
+        assert!(act.details().is_none());
+
+        // Fits on one row: just the prefix, no wrapping, no ellipsis.
+        act.set_details(Some("cargo test".into()), ACTIVITY_DETAILS_DEFAULT_MAX_LINES);
+        let rows = act.wrapped_details_lines(40);
+        assert_eq!(rows, vec!["  \u{2514} cargo test".to_string()]);
+
+        // Wraps with a hanging indent aligned under the `└ ` prefix (4 cols).
+        act.set_details(
+            Some("A man a plan a canal panama".into()),
+            ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
+        );
+        let rows = act.wrapped_details_lines(30);
+        assert_eq!(rows.len(), 2, "one wrap at width 30, got {rows:?}");
+        assert!(rows[0].starts_with("  \u{2514} "));
+        assert!(rows[1].starts_with("    "), "continuation is indented: {rows:?}");
+        assert!(!rows[1].starts_with("  \u{2514}"), "prefix only on the first row");
+        for r in &rows {
+            assert!(crate::util::cols(r) <= 30, "row overflows width: {r:?}");
+        }
+
+        // Narrow width: truncated to max_lines with `…` on the last kept row.
+        act.set_details(
+            Some("abcd abcd abcd abcd".into()),
+            ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
+        );
+        let rows = act.wrapped_details_lines(10);
+        assert_eq!(rows.len(), ACTIVITY_DETAILS_DEFAULT_MAX_LINES);
+        assert!(
+            rows.last().unwrap().ends_with('\u{2026}'),
+            "overflowing details ellipsize the last row: {rows:?}"
+        );
+        for r in &rows {
+            assert!(crate::util::cols(r) <= 10, "row overflows width: {r:?}");
+        }
+
+        // max_lines = 1 collapses the whole block onto one ellipsized row.
+        act.set_details(Some("abcd abcd abcd abcd".into()), 1);
+        let rows = act.wrapped_details_lines(12);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with("  \u{2514} ") && rows[0].ends_with('\u{2026}'));
+        // max_lines is clamped to at least one row.
+        act.set_details(Some("x".into()), 0);
+        assert_eq!(act.wrapped_details_lines(20).len(), 1);
+
+        // Degenerate widths never panic and never emit a prefix-only row.
+        for w in [0u16, 1, 3, 4, 5] {
+            let rows = act.wrapped_details_lines(w);
+            assert!(rows.iter().all(|r| crate::util::cols(r) <= w as usize));
+        }
+    }
+
+    #[test]
+    fn details_rows_are_reserved_and_drawn_together() {
+        // The slot invariant with a details block: whatever `height()` claims
+        // must equal `max_height()` once the feed is saturated, in every mode.
+        for verbosity in [
+            Verbosity::Off,
+            Verbosity::New,
+            Verbosity::All,
+            Verbosity::Verbose,
+        ] {
+            let mut act = Activity::new();
+            act.start();
+            act.verbosity = verbosity;
+            for i in 0..20 {
+                act.tool_start(&format!("tool{i}"), "{}");
+            }
+            let bare = act.height();
+            act.set_details(
+                Some("a fairly long details string that wraps a few times over".into()),
+                ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
+            );
+            // Before any draw the width is unknown ⇒ reserve the ceiling.
+            assert_eq!(act.height(), bare + ACTIVITY_DETAILS_DEFAULT_MAX_LINES as u16);
+            assert!(act.height() <= act.max_height());
+            assert_eq!(act.height(), act.max_height());
+
+            // After a draw the reservation tightens to the rows actually painted.
+            let text = render_activity_text_sized(&act, 120, act.height());
+            assert!(text.contains('\u{2514}'), "details row must render: {text:?}");
+            assert_eq!(act.details_rows(), 1, "wide pane ⇒ a single details row");
+            assert_eq!(act.height(), bare + 1);
+            assert_eq!(act.height(), act.max_height());
+
+            // a11y (plain-text) mode stays one flat line regardless of details.
+            act.set_a11y(true);
+            assert_eq!(act.height(), 1);
+            assert_eq!(act.max_height(), 1);
+        }
+    }
+
+    /// Like `render_activity_text` but with an explicit viewport size.
+    fn render_activity_text_sized(act: &Activity, w: u16, h: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(w, h.max(1))).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
     fn rail_never_panics_at_tiny_sizes() {
         // Height 0/1 and widths too narrow for the gutter must not panic.
         use ratatui::{backend::TestBackend, Terminal};
@@ -1995,5 +2539,111 @@ mod slot_invariant_tests {
         let act = Activity::new();
         assert_eq!(act.height(), 0);
         assert_eq!(act.max_height(), 0);
+    }
+
+    // ── Live command output ──────────────────────────────────────────────
+
+    /// Render the activity into a `w`x`h` test terminal and return its cells as
+    /// one flat string (same trick as `render_activity_text`, but sized).
+    fn render_live(act: &Activity, w: u16, h: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(w, h.max(1))).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn live_output_shows_the_last_lines_of_the_running_command() {
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("Bash", r#"{"command":"make"}"#);
+        for i in 0..40 {
+            act.push_command_output("make", &format!("compiling unit {i}\n"));
+        }
+        let lines = act.live_output_lines();
+        assert_eq!(lines.len(), LIVE_OUTPUT_PREVIEW_LINES);
+        assert_eq!(lines[lines.len() - 1], "compiling unit 39");
+    }
+
+    #[test]
+    fn a_different_command_resets_the_live_tail() {
+        let mut act = Activity::new();
+        act.start();
+        act.push_command_output("first", "from first\n");
+        act.push_command_output("second", "from second\n");
+        assert_eq!(act.live_output_lines(), vec!["from second"]);
+    }
+
+    #[test]
+    fn live_output_never_grows_the_reserved_slot() {
+        // The live tail SHARES the feed budget — it must not change the number
+        // of rows the inline viewport reserves, or every delta would re-anchor
+        // the viewport mid-turn.
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("Bash", r#"{"command":"make"}"#);
+        let (h, max) = (act.height(), act.max_height());
+        for i in 0..200 {
+            act.push_command_output("make", &format!("line {i}\n"));
+        }
+        assert_eq!(act.height(), h);
+        assert_eq!(act.max_height(), max);
+    }
+
+    #[test]
+    fn live_output_renders_into_the_feed_area() {
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("Bash", r#"{"command":"make"}"#);
+        act.push_command_output("make", "linking target\n");
+        let text = render_live(&act, 100, act.max_height().max(1));
+        assert!(
+            text.contains("linking target"),
+            "live tail must be painted: {text:?}"
+        );
+    }
+
+    #[test]
+    fn clearing_live_output_removes_it_from_the_feed() {
+        let mut act = Activity::new();
+        act.start();
+        act.push_command_output("make", "linking target\n");
+        act.clear_command_output();
+        assert!(act.live_output_lines().is_empty());
+        let text = render_live(&act, 100, act.max_height().max(1));
+        assert!(!text.contains("linking target"));
+    }
+
+    #[test]
+    fn sanitize_live_line_strips_control_bytes_and_ansi() {
+        assert_eq!(sanitize_live_line("plain", 40), "plain");
+        assert_eq!(sanitize_live_line("a\u{1b}[31mred\u{1b}[0m", 40), "ared");
+        assert_eq!(sanitize_live_line("tab\there", 40), "tab here");
+        assert_eq!(sanitize_live_line("cr\rrewrite", 40), "crrewrite");
+        // Clipped to the column budget, never wrapped.
+        assert_eq!(sanitize_live_line("abcdefghij", 4), "abcd");
+        assert_eq!(sanitize_live_line("anything", 0), "");
+        // Wide chars are measured in COLUMNS, not bytes.
+        assert_eq!(sanitize_live_line("\u{4f60}\u{597d}", 3), "\u{4f60}");
+    }
+
+    #[test]
+    fn newline_free_flood_never_breaks_the_render() {
+        // The pathological `\r` progress-bar case: one enormous line, no
+        // newline. Must stay one bounded row and must not panic.
+        let mut act = Activity::new();
+        act.start();
+        act.tool_start("Bash", r#"{"command":"dd"}"#);
+        let blob = "z".repeat(64 * 1024);
+        for _ in 0..64 {
+            act.push_command_output("dd", &blob);
+        }
+        assert_eq!(act.live_output_lines().len(), 1);
+        let _ = render_live(&act, 80, act.max_height().max(1));
     }
 }

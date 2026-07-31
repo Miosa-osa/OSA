@@ -514,11 +514,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   defp register_foreground(_), do: false
 
   defp collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach) do
+    collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach, new_output_stream())
+  end
+
+  defp collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach, stream) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
-        collect_command_output(port, os_pid, deadline, timeout_ms, [data | acc], detach)
+        # LIVE OUTPUT STREAMING — purely additive. The chunk is still appended to
+        # `acc` verbatim (the final result is byte-for-byte what it always was);
+        # `stream` only carries the throttling/preview bookkeeping used to emit
+        # `command_output_delta` events so the TUI can show a live tail instead of
+        # a silent spinner. Emission is best-effort and can never fail the call.
+        stream = accumulate_and_maybe_emit(stream, data, detach)
+
+        collect_command_output(port, os_pid, deadline, timeout_ms, [data | acc], detach, stream)
 
       {^port, {:exit_status, 0}} ->
         {:ok, maybe_truncate(collected_output(acc))}
@@ -527,7 +538,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
         {:error, "Exit #{code}:\n#{maybe_truncate(collected_output(acc))}"}
 
       {:detach, reply_to, ref} ->
-        handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms)
+        handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms, stream)
     after
       remaining ->
         # YIELD — do not kill. "Bound the wait, not the work."
@@ -610,7 +621,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   # "moved to background" result so the current turn completes. The worker takes
   # over the port (via Port.connect) and later broadcasts a
   # background_command_completed event just like any other background command.
-  defp handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms) do
+  defp handle_detach(port, os_pid, acc, detach, reply_to, ref, deadline, timeout_ms, stream) do
     session_id = detach.session_id
     output_so_far = collected_output(acc)
 
@@ -649,7 +660,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
       {:error, reason} ->
         # Adoption failed — keep running in the foreground as if nothing happened.
         send(reply_to, {:detach_failed, ref, reason})
-        collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach)
+        collect_command_output(port, os_pid, deadline, timeout_ms, acc, detach, stream)
     end
   end
 
@@ -693,6 +704,130 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
   end
 
   defp broadcast_command_started(_, _, _), do: :ok
+
+  # ── Live command output streaming ─────────────────────────────────────
+  #
+  # A long foreground command used to show the user nothing but a spinner for
+  # its entire run. Codex solves this by emitting an output delta per pipe read
+  # (`core/src/exec.rs`: READ_CHUNK_SIZE chunks, capped at
+  # MAX_EXEC_OUTPUT_DELTAS_PER_CALL = 10_000 events, but the pipe KEEPS being
+  # drained after the cap so a chatty command never blocks on a full pipe).
+  #
+  # We do the same, with one addition: the BEAM delivers port data as fast as
+  # the OS produces it, so raw per-chunk emission would flood PubSub/SSE. Deltas
+  # are therefore coalesced and emitted at most once per
+  # `@output_delta_interval_ms` (~4/sec). Draining is unaffected — after the cap
+  # (or between emit windows) chunks are still received and appended to `acc`,
+  # exactly as before.
+  #
+  # This path is strictly additive: it never touches `acc`, never changes a
+  # return value, and every emit is wrapped so a PubSub failure is swallowed.
+
+  # Max emitted events per call (Codex MAX_EXEC_OUTPUT_DELTAS_PER_CALL).
+  @max_output_deltas_per_call 10_000
+  # Throttle window: at most ~4 events/second.
+  @output_delta_interval_ms 250
+  # Rolling snapshot of the end of the output carried on every event, so a TUI
+  # that connected late (or dropped frames) can resync without replay.
+  @output_delta_tail_bytes 2_048
+  # Hard cap on a single coalesced delta so one burst can't produce a huge frame.
+  @output_delta_max_chunk_bytes 8_192
+
+  defp new_output_stream do
+    %{last_emit_ms: nil, emitted: 0, pending: [], pending_bytes: 0, tail: "", seq: 0}
+  end
+
+  # Fold a freshly-received port chunk into the streaming state, emitting a
+  # `command_output_delta` when the throttle window has elapsed and the per-call
+  # event cap has not been reached. Returns the new state; never raises.
+  defp accumulate_and_maybe_emit(stream, data, %{session_id: session_id} = detach)
+       when is_binary(session_id) do
+    tail = clip_tail(stream.tail <> data)
+    now = System.monotonic_time(:millisecond)
+
+    stream = %{
+      stream
+      | tail: tail,
+        pending: [data | stream.pending],
+        pending_bytes: stream.pending_bytes + byte_size(data)
+    }
+
+    cond do
+      # Cap reached — stop emitting but KEEP draining (the caller still appends
+      # to `acc`). Drop the pending buffer so a chatty command can't grow memory
+      # with deltas that will never be sent.
+      stream.emitted >= @max_output_deltas_per_call ->
+        %{stream | pending: [], pending_bytes: 0}
+
+      # Inside the throttle window — coalesce, emit on a later chunk.
+      is_integer(stream.last_emit_ms) and now - stream.last_emit_ms < @output_delta_interval_ms ->
+        stream
+
+      true ->
+        chunk = stream.pending |> Enum.reverse() |> IO.iodata_to_binary() |> clip_chunk()
+        broadcast_output_delta(session_id, detach.command, chunk, tail, stream.seq)
+
+        %{
+          stream
+          | pending: [],
+            pending_bytes: 0,
+            last_emit_ms: now,
+            emitted: stream.emitted + 1,
+            seq: stream.seq + 1
+        }
+    end
+  rescue
+    _ -> stream
+  catch
+    _, _ -> stream
+  end
+
+  # No session to stream to (background worker, unit test, headless call) — do
+  # no bookkeeping at all so the hot loop stays exactly as cheap as before.
+  defp accumulate_and_maybe_emit(stream, _data, _detach), do: stream
+
+  defp clip_tail(bin) when byte_size(bin) <= @output_delta_tail_bytes, do: bin
+
+  defp clip_tail(bin),
+    do: binary_part(bin, byte_size(bin) - @output_delta_tail_bytes, @output_delta_tail_bytes)
+
+  defp clip_chunk(bin) when byte_size(bin) <= @output_delta_max_chunk_bytes, do: bin
+
+  defp clip_chunk(bin) do
+    kept =
+      binary_part(bin, byte_size(bin) - @output_delta_max_chunk_bytes, @output_delta_max_chunk_bytes)
+
+    "…\n" <> kept
+  end
+
+  # Same transport as `broadcast_command_started/3`: a direct broadcast on the
+  # per-session PubSub topic the SSE loop streams. Because it is broadcast
+  # directly (not via `Events.Bus`), no `Events.TuiForwarder` allowlist entry is
+  # needed — the forwarder only bridges Bus-only sub-events, and adding it there
+  # would double-emit.
+  defp broadcast_output_delta(session_id, command, chunk, tail, seq) when is_binary(session_id) do
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event,
+       %{
+         type: :command_output_delta,
+         session_id: session_id,
+         command: command,
+         chunk: ensure_utf8(chunk),
+         tail: ensure_utf8(tail),
+         seq: seq
+       }}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp broadcast_output_delta(_, _, _, _, _), do: :ok
 
   defp collected_output(acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
