@@ -1023,7 +1023,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     hash =
       try do
-        case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+        case OptimalSystemAgent.Git.cmd(["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
           {h, 0} -> " (#{String.trim(h)})"
           _ -> ""
         end

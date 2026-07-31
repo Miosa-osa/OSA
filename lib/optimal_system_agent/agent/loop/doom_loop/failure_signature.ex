@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
 
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Escalation
+  alias OptimalSystemAgent.Agent.Loop.ToolError
 
   @window_size 20
 
@@ -94,7 +95,13 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
       is_error =
         Enum.any?(@error_indicators, fn indicator ->
           String.contains?(result_str, indicator)
-        end)
+        end) and
+          # An OPERATOR decision (permission denial, cancelled/timed-out
+          # approval, reject-with-steer) is a model-readable answer, not a stuck
+          # tool. Counting it as a failure signature let three declines of the
+          # same tool hard-halt the turn — the exact "it won't let me finish"
+          # symptom the non-fatal tool error contract exists to remove.
+          not ToolError.user_decision?(result_str)
 
       if is_error do
         error_prefix =

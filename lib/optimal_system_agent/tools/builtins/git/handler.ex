@@ -185,7 +185,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Handler do
   end
 
   defp run_git(args, cwd) do
-    case System.cmd("git", args, cd: cwd, stderr_to_stdout: true) do
+    # `hooks: :enabled` on purpose: this is the OPERATOR/model-facing git tool
+    # and the safety protocol above explicitly blocks `commit --no-verify`
+    # because skipping hooks is not permitted. Silently disabling hooks here
+    # would contradict that. The repo-config code-execution vectors that are
+    # NOT part of git's documented contract (core.fsmonitor, filter.*.clean /
+    # .smudge / .process, diff.external, diff.*.textconv) are still neutralized.
+    case OptimalSystemAgent.Git.cmd(args, cd: cwd, stderr_to_stdout: true, hooks: :enabled) do
       {output, 0} ->
         {:ok, maybe_truncate(output)}
 

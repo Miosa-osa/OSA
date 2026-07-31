@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Prompt do
     - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
     - The edit will FAIL if `old_string` is not unique in the file. Provide a larger string with more surrounding context to make it unique, or use `replace_all` to change every instance.
     - Use `replace_all` for renaming strings across the file (e.g., renaming a variable).
+    - Do NOT re-read the file to verify an edit that succeeded. This tool errors when the edit does not apply (`old_string` not found, or ambiguous), so a successful result already means the file changed.
     - Only use emojis if the user explicitly requests it.
     """
   end

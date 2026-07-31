@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
+  alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Safety.DestructiveWarning
   alias OptimalSystemAgent.Permissions
   alias OptimalSystemAgent.Permissions.AutoClassifier
@@ -92,8 +93,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   The start-of-call telemetry/events fire here (orchestration boundary); the
   end/result events fire inside `finalize_result/5`.
+
+  ## NON-FATAL TOOL ERROR contract (Codex `FunctionCallError` parity)
+
+  The whole call is wrapped in `ToolError.run/1`, so NOTHING that happens inside
+  — a raising tool, a `throw`, a GenServer-call `:exit`, a broken hook, a
+  permission denial, a crash in the durable log — can take the turn down. Every
+  failure except an explicit fatal signal is synthesized into a normal,
+  model-readable tool result (`"Error: …"`) and the turn CONTINUES.
+
+  Returns `{tool_msg, result_str}`, or `{tool_msg, result_str, {:fatal, msg}}`
+  when the failure was fatal (see `ToolError`) and the turn must abort.
   """
   def execute_tool_call(tool_call, state) do
+    case ToolError.run(fn -> durable_execute_tool_call(tool_call, state) end) do
+      {:ok, result} ->
+        result
+
+      # FATAL — the only class that still kills the turn.
+      {:fatal, message} ->
+        Logger.error(
+          "[loop] FATAL tool error in #{tool_call.name}: #{message} (session: #{Map.get(state, :session_id)})"
+        )
+
+        ToolError.fatal_result(tool_call, message)
+
+      # RESPOND-TO-MODEL (the default): hand the model the failure text as an
+      # ordinary tool result instead of dying.
+      {:error, message} ->
+        Logger.warning(
+          "[loop] Recovered tool failure in #{tool_call.name}: #{message} (session: #{Map.get(state, :session_id)})"
+        )
+
+        recovered_result(tool_call, state, message)
+    end
+  end
+
+  defp durable_execute_tool_call(tool_call, state) do
     # Idempotency + per-step durable write record (primitive #27). On a mid-turn
     # crash+resume, a step whose {session, turn, iteration, tool, args} key was
     # already recorded as completed returns the recorded result WITHOUT
@@ -106,29 +142,67 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
       start_time_tool = System.monotonic_time(:millisecond)
 
+      # Approval + execution run under the two-class contract. A non-fatal
+      # failure becomes the tool result text (so finalize_result/5 still emits
+      # the :end / :tool_result events, records telemetry and feeds the TUI);
+      # a FATAL unwinds past DurableLog.run_once WITHOUT recording the step.
       tool_result =
-        case approve_tool_call(tool_call, state) do
-          {:blocked, message} ->
-            message
-
-          :allow ->
-            run_tool(tool_call, state)
-
-          {:ask, request_id, summary} ->
-            # DEFAULT 'ask' mode: park the executing process, emit a
-            # permission_required event, and resume once the TUI dialog POSTs a
-            # decision to /api/v1/permissions/respond (or the wait aborts).
-            case await_permission(tool_call, state, request_id, summary) do
-              :allow -> run_tool(tool_call, state)
-              {:blocked, message} -> message
-              # Reject-with-steer: the user's clarify text becomes the tool
-              # result verbatim, feeding their correction back into the turn.
-              {:steer, text} -> text
-            end
+        case ToolError.run(fn -> approve_and_run(tool_call, state) end) do
+          {:ok, result} -> result
+          {:error, message} -> ToolError.model_text(message)
+          {:fatal, message} -> ToolError.throw_fatal(message)
         end
 
       finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool)
     end)
+  end
+
+  # Approval policy + execution — the part of a tool call that is allowed to
+  # fail. Returns the raw tool result term.
+  defp approve_and_run(tool_call, state) do
+    case approve_tool_call(tool_call, state) do
+      {:blocked, message} ->
+        message
+
+      :allow ->
+        run_tool(tool_call, state)
+
+      {:ask, request_id, summary} ->
+        # DEFAULT 'ask' mode: park the executing process, emit a
+        # permission_required event, and resume once the TUI dialog POSTs a
+        # decision to /api/v1/permissions/respond (or the wait aborts).
+        #
+        # EVERY outcome here is a model-readable string: a denial's reason, a
+        # timeout/cancel notice, or the user's reject-with-steer text. None of
+        # them ends the turn — the model reads the reason and picks another
+        # route (Codex funnels approval rejections through the same
+        # RespondToModel channel).
+        case await_permission(tool_call, state, request_id, summary) do
+          :allow -> run_tool(tool_call, state)
+          {:blocked, message} -> message
+          {:steer, text} -> text
+        end
+    end
+  end
+
+  # RESPOND-TO-MODEL recovery: the call blew up somewhere outside the normal
+  # result path (durable log, start events, arg hinting, finalize_result). Try
+  # to run the real finalization pipeline with the error text so the TUI/SSE
+  # still see a :tool_result; if THAT is what is broken, fall back to a bare
+  # tool message. Either way the model gets a readable failure and the turn
+  # continues.
+  defp recovered_result(tool_call, state, message) do
+    body = ToolError.model_text(message)
+
+    case ToolError.run(fn ->
+           finalize_result(tool_call, body, state, "", System.monotonic_time(:millisecond))
+         end) do
+      {:ok, result} ->
+        result
+
+      _ ->
+        {%{role: "tool", tool_call_id: tool_call.id, name: tool_call.name, content: body}, body}
+    end
   end
 
   @doc """
@@ -1290,6 +1364,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp handle_execute_result(result, tool_name, enriched_args) do
     case result do
+      # FATAL class — a tool (or the dispatch layer) declaring that the turn
+      # cannot continue. The ONLY non-recoverable tool outcome.
+      {:fatal, reason} ->
+        ToolError.fatal!(to_text(reason))
+
+      {:error, {:fatal, reason}} ->
+        ToolError.fatal!(to_text(reason))
+
       {:ok, {:image, %{media_type: mt, data: b64, path: p}}} ->
         {:image, mt, b64, p}
 
@@ -1307,7 +1389,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         # tool with the same args is wasted work and risks running a different
         # tool on mismatched args. Return the real error instead.
         if semantic_tool_error?(reason) do
-          "Error: #{reason}"
+          "Error: " <> to_text(reason)
         else
           case Tools.suggest_fallback_tool(tool_name) do
             {:ok, alt_tool} ->
@@ -1322,16 +1404,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
                 {:ok, alt_content} ->
                   "[used #{alt_tool} as fallback for #{tool_name}]\n#{alt_content}"
 
-                {:error, _alt_reason} ->
-                  "Error: #{reason}"
+                _ ->
+                  "Error: " <> to_text(reason)
               end
 
             :no_alternative ->
-              "Error: #{reason}"
+              "Error: " <> to_text(reason)
           end
         end
+
+      # RESPOND-TO-MODEL: an unexpected return shape is a bug in the tool, not
+      # a reason to end the user's turn. Hand the model something readable.
+      other ->
+        "Error: " <>
+          "#{tool_name} returned an unexpected result shape: #{inspect(other, limit: 20)}"
     end
   end
+
+  defp to_text(reason) when is_binary(reason), do: reason
+  defp to_text(reason), do: inspect(reason, limit: 20)
 
   # A semantic/domain tool error (the tool ran and rejected the args) vs. a
   # tool-availability/dispatch failure (unknown tool / tool crashed). We only

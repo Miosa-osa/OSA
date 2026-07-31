@@ -13,10 +13,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Busy-glyph animation period — matches CC's terminal-title cadence.
 const BUSY_ANIM_MS: u128 = 960;
 
-/// Strip control characters so directory names can never smuggle escape
-/// sequences into the OSC payload.
+use crate::terminal_title::{
+    SetTerminalTitleResult, clear_title_sequence, prepare_title_sequence, sanitize_terminal_title,
+};
+
+/// Strip control characters, bidi/invisible codepoints and redundant
+/// whitespace so directory / workspace names (which can be backend- or
+/// model-supplied) can never smuggle escape sequences into the OSC payload or
+/// visually reorder the title. See `crate::terminal_title`.
 fn sanitize(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
+    sanitize_terminal_title(s)
 }
 
 /// Pure title composition, driven by an explicit clock for testability.
@@ -43,9 +49,11 @@ pub fn compose(busy: bool, cwd_basename: &str) -> String {
     compose_at(busy, cwd_basename, now_ms)
 }
 
-/// Build the raw OSC 0 (icon + window title) sequence.
+/// Build the raw OSC 0 (icon + window title) sequence for an already sanitized
+/// payload. Framing lives in `crate::terminal_title`.
+#[cfg(test)]
 fn build_sequence(title: &str) -> String {
-    format!("\x1b]0;{}\x07", title)
+    crate::terminal_title::build_osc_title_sequence(title)
 }
 
 /// Deduping terminal-title writer: emits the OSC 0 sequence only when the
@@ -66,12 +74,25 @@ impl TitleState {
 
     /// Set the terminal title (no-op when unchanged or disabled). The control
     /// sequence is consumed by the terminal, so emitting mid-frame is safe.
-    pub fn update(&mut self, title: &str) {
-        if !self.enabled || title == self.last {
-            return;
+    ///
+    /// Every write goes through `terminal_title::prepare_title_sequence`, which
+    /// sanitizes the untrusted payload. When sanitization leaves nothing
+    /// visible we report `NoVisibleContent` and write nothing: an
+    /// all-invisible title must not be able to clear the operator's tab title
+    /// (clearing is an explicit policy, see `reset`).
+    pub fn update(&mut self, title: &str) -> SetTerminalTitleResult {
+        let (result, seq) = prepare_title_sequence(title);
+        // NoVisibleContent → nothing to emit; the previously written title
+        // stays put. Caller policy decides whether to fall back.
+        let Some(seq) = seq else { return result };
+        // Dedup on the *sanitized* payload so distinct hostile inputs that
+        // sanitize to the same title cost at most one write.
+        if !self.enabled || seq == self.last {
+            return result;
         }
-        self.last = title.to_string();
-        Self::write(build_sequence(title));
+        self.last = seq.clone();
+        Self::write(seq);
+        result
     }
 
     /// Restore an empty title on exit so the shell's own title logic takes over.
@@ -80,7 +101,7 @@ impl TitleState {
             return;
         }
         self.last.clear();
-        Self::write(build_sequence(""));
+        Self::write(clear_title_sequence());
     }
 
     fn write(seq: String) {
@@ -116,5 +137,65 @@ mod tests {
     #[test]
     fn osc0_sequence_shape() {
         assert_eq!(build_sequence("hi"), "\x1b]0;hi\x07");
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_reordering_controls() {
+        // A backend/model-supplied workspace name using RLO to disguise itself.
+        assert_eq!(
+            compose_at(false, "sa\u{202E}fe\u{200B}\u{FEFF}", 0),
+            "OSA \u{2014} safe"
+        );
+    }
+
+    #[test]
+    fn sanitize_caps_title_length() {
+        let huge = "z".repeat(1000);
+        // The basename is bounded on compose, and the whole title is bounded
+        // again at the write boundary.
+        let title = compose_at(false, &huge, 0);
+        assert!(title.chars().count() <= crate::terminal_title::MAX_TERMINAL_TITLE_CHARS + 6);
+        let emitted = crate::terminal_title::sanitize_terminal_title(&title);
+        assert_eq!(
+            emitted.chars().count(),
+            crate::terminal_title::MAX_TERMINAL_TITLE_CHARS
+        );
+    }
+
+    #[test]
+    fn update_reports_no_visible_content_and_writes_nothing() {
+        // `enabled: false` keeps the test off the real pty; the tri-state is
+        // decided before the enabled check, so the security contract still
+        // holds here.
+        let mut st = TitleState {
+            enabled: false,
+            last: String::new(),
+        };
+        assert_eq!(
+            st.update("\u{200B}\u{202E}\x1b\x07"),
+            SetTerminalTitleResult::NoVisibleContent
+        );
+        assert_eq!(st.last, "");
+        assert_eq!(st.update("OSA \u{2014} osa"), SetTerminalTitleResult::Applied);
+    }
+
+    #[test]
+    fn update_never_emits_raw_control_chars() {
+        let mut st = TitleState {
+            enabled: false,
+            last: String::new(),
+        };
+        // Do not actually write: assert on the prepared sequence instead.
+        let (_res, seq) = crate::terminal_title::prepare_title_sequence(&compose_at(
+            false,
+            "a\x07\x1b]2;pwn\x1b\\b",
+            0,
+        ));
+        let seq = seq.expect("visible content");
+        assert_eq!(seq.matches('\x1b').count(), 1, "only the OSC introducer");
+        assert_eq!(seq.matches('\x07').count(), 1, "only the BEL terminator");
+        assert!(seq.starts_with("\x1b]0;") && seq.ends_with('\x07'));
+        // Keep `st` used so the writer type stays exercised in this test.
+        st.reset();
     }
 }

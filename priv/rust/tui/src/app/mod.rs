@@ -824,7 +824,10 @@ impl App {
             });
         let busy = self.state == AppState::Processing;
         let title = crate::components::title::compose(busy, &basename);
-        self.chrome_title.update(&title);
+        // Sanitization happens inside the writer. If the (backend-supplied)
+        // workspace name sanitizes away entirely we keep whatever title is
+        // already on the tab rather than clearing it — caller policy.
+        let _ = self.chrome_title.update(&title);
 
         // U-T24 — keep the spinner's "N queued" hint in sync with the live WS5
         // message queue every frame (cheap; the writer only re-renders on change).

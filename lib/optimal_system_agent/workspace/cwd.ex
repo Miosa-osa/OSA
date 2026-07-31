@@ -155,7 +155,7 @@ defmodule OptimalSystemAgent.Workspace.Cwd do
   @doc "Absolute git top-level for `dir`, or nil when not inside a git repo."
   @spec git_root(String.t()) :: String.t() | nil
   def git_root(dir) do
-    case System.cmd("git", ["-C", dir, "rev-parse", "--show-toplevel"],
+    case OptimalSystemAgent.Git.cmd(["-C", dir, "rev-parse", "--show-toplevel"],
            stderr_to_stdout: true
          ) do
       {out, 0} ->

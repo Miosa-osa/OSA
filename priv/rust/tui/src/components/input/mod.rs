@@ -4,8 +4,11 @@
 pub mod completions;
 pub mod history;
 pub mod mentions;
+pub mod paste_burst;
 pub mod textarea;
 pub mod vim;
+
+use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -151,6 +154,16 @@ pub struct InputComponent {
     /// back down past the newest entry restores it instead of wiping it
     /// (readline/fish keep the working line in a virtual newest slot).
     history_draft: Option<String>,
+    /// Paste-burst classifier for terminals that never deliver bracketed paste
+    /// (see [`paste_burst`]). OSA enables bracketed paste at startup, so this is
+    /// the FALLBACK path: it only ever sees `Key(Char)` events, which a
+    /// bracketed paste does not produce, and [`InputComponent::insert_paste`]
+    /// resets it — so the two paths can never double-handle the same text.
+    paste_burst: paste_burst::PasteBurst,
+    /// Test-only clock override. `None` in production (real `Instant::now()`);
+    /// set by the paste-burst tests so timing-dependent behaviour is exercised
+    /// deterministically without sleeping.
+    clock_override: Option<Instant>,
 }
 
 /// The kind of the previous composer command — drives kill-ring accumulation
@@ -220,6 +233,127 @@ impl InputComponent {
             shell_history: history::History::shell_persistent(),
             file_frecency: Frecency::new(),
             history_draft: None,
+            // `OSA_TUI_NO_PASTE_BURST=1` is the `disable_paste_burst` escape
+            // hatch (Codex config key). `OSA_TUI_PASTE_BURST_BUFFER=1` opts into
+            // the buffering contract, which needs a fast composer flush tick —
+            // see the module docs. Default: enabled, direct-insert.
+            paste_burst: paste_burst::PasteBurst::new(!env_flag("OSA_TUI_NO_PASTE_BURST"))
+                .with_buffering(env_flag("OSA_TUI_PASTE_BURST_BUFFER")),
+            clock_override: None,
+        }
+    }
+
+    /// Current time, or the test clock when one is installed.
+    fn now(&self) -> Instant {
+        self.clock_override.unwrap_or_else(Instant::now)
+    }
+
+    /// Test hook: pin the composer's clock so paste-burst timing is
+    /// deterministic. Production code never calls this.
+    #[cfg(test)]
+    pub(crate) fn set_test_clock(&mut self, at: Option<Instant>) {
+        self.clock_override = at;
+    }
+
+    /// Whether the paste-burst fallback is enabled for this composer.
+    pub fn paste_burst_enabled(&self) -> bool {
+        self.paste_burst.is_enabled()
+    }
+
+    /// Test hook: install a specific paste-burst configuration (the production
+    /// one is chosen from the environment in [`InputComponent::new`]).
+    #[cfg(test)]
+    pub(crate) fn set_paste_burst(&mut self, pb: paste_burst::PasteBurst) {
+        self.paste_burst = pb;
+    }
+
+    /// Periodic flush for the paste-burst BUFFERING contract. Returns true when
+    /// something was applied to the composer.
+    ///
+    /// The app loop does not currently forward ticks to the composer, so this is
+    /// a no-op in the default (direct-insert) mode — nothing is ever buffered
+    /// there, so no text can get stuck. Wire this to a tick faster than
+    /// [`paste_burst::PASTE_BURST_ACTIVE_IDLE_TIMEOUT`] before enabling
+    /// `OSA_TUI_PASTE_BURST_BUFFER`.
+    pub fn paste_burst_tick(&mut self, now: Instant) -> bool {
+        match self.paste_burst.flush_if_due(now) {
+            paste_burst::FlushResult::Paste(text) => {
+                // Deliberately NOT `insert_paste`: that resets the burst state,
+                // and the Enter-suppression window must outlive this flush so a
+                // slightly-late trailing newline is still a newline.
+                self.insert_paste_inner(&text);
+                true
+            }
+            paste_burst::FlushResult::Typed(ch) => {
+                self.insert_char(ch);
+                true
+            }
+            paste_burst::FlushResult::None => false,
+        }
+    }
+
+    /// One plain (unmodified) character from the keyboard, routed through the
+    /// paste-burst classifier. `now` is passed in so the whole path is
+    /// deterministic under test.
+    fn handle_plain_char(&mut self, ch: char, now: Instant) {
+        if !self.paste_burst.is_enabled() {
+            self.insert_char(ch);
+            return;
+        }
+
+        if !self.paste_burst.buffering_enabled() {
+            // Direct-insert contract: the char is rendered immediately and the
+            // classifier only keeps the Enter-suppression window alive. Nothing
+            // is buffered, so no flush tick is required.
+            if self.paste_burst.on_plain_char_no_hold(now).is_some() {
+                self.paste_burst.extend_window(now);
+            }
+            self.insert_char(ch);
+            return;
+        }
+
+        // Buffering contract: hold / buffer / retro-capture.
+        let decision = if ch.is_ascii() {
+            self.paste_burst.on_plain_char(ch, now)
+        } else {
+            // Never hold non-ASCII (IME) chars — that reads as dropped input.
+            self.paste_burst.on_plain_char_no_hold(now)
+        };
+        match decision {
+            // Held for flicker suppression: do NOT render it yet.
+            Some(paste_burst::CharDecision::RetainFirstChar) => {}
+            Some(paste_burst::CharDecision::BeginBufferFromPending)
+            | Some(paste_burst::CharDecision::BufferAppend) => {
+                self.paste_burst.append_char_to_buffer(ch, now);
+            }
+            Some(paste_burst::CharDecision::BeginBuffer { retro_chars }) => {
+                // Retro-capture: chars we already inserted as ordinary typing
+                // are pulled back out of the buffer and into the burst, so the
+                // eventual paste sees one contiguous string. `retro_chars` is a
+                // CHARACTER count; `decide_begin_buffer` converts it to a UTF-8
+                // byte offset, which is what makes this correct for multibyte
+                // and emoji input.
+                let cursor = floor_char_boundary(&self.content, self.cursor);
+                let before = self.content[..cursor].to_string();
+                match self
+                    .paste_burst
+                    .decide_begin_buffer(now, &before, retro_chars as usize)
+                {
+                    Some(grab) => {
+                        self.snapshot();
+                        self.content.replace_range(grab.start_byte..cursor, "");
+                        self.cursor = grab.start_byte;
+                        self.undo_insert_run = None;
+                        self.completions.hide();
+                        self.file_search_active = false;
+                        self.file_matches.clear();
+                        self.paste_burst.append_char_to_buffer(ch, now);
+                    }
+                    // Not paste-like after all: ordinary typing.
+                    None => self.insert_char(ch),
+                }
+            }
+            None => self.insert_char(ch),
         }
     }
 
@@ -578,6 +712,17 @@ impl InputComponent {
     /// CC's getPastedTextRefNumLines quirk of counting newline CHARS, not
     /// lines ("a\nb\nc" is "+2 lines").
     pub fn insert_paste(&mut self, text: &str) {
+        // An explicit paste (bracketed paste or Ctrl+V) supersedes any in-flight
+        // burst detection: drop the transient state so the fallback path can
+        // never re-apply or interleave with text that already arrived whole.
+        self.paste_burst.clear_after_explicit_paste();
+        self.insert_paste_inner(text);
+    }
+
+    /// The paste insertion itself, WITHOUT resetting paste-burst state. Used by
+    /// [`InputComponent::paste_burst_tick`], where the Enter-suppression window
+    /// must survive the flush.
+    fn insert_paste_inner(&mut self, text: &str) {
         let num_lines = text.matches('\n').count();
         if text.len() > PASTE_THRESHOLD || num_lines > 2 {
             let id = self.next_paste_id;
@@ -1966,8 +2111,15 @@ impl Component for InputComponent {
                     return self.handle_reverse_search_key(*key);
                 }
 
+                // The instant a paste burst is detected the composer's transient
+                // popups must stop reacting: a pasted '/' or '@' would otherwise
+                // open a menu that then swallows the rest of the paste (Enter
+                // selecting a command instead of inserting the paste's newline).
+                let burst_now = self.now();
+                let in_burst = self.paste_burst.in_burst_context(burst_now);
+
                 // Route to completions popup first when visible
-                if self.completions.is_visible() {
+                if self.completions.is_visible() && !in_burst {
                     if let Some(action) = self.completions.handle_key(*key) {
                         match action {
                             CompletionAction::Select(name) => {
@@ -1999,6 +2151,22 @@ impl Component for InputComponent {
                 let prev_edit = self.last_edit;
                 self.last_edit = LastEdit::Other;
 
+                // Paste-burst bookkeeping for everything that is neither a plain
+                // character nor Enter (arrows, Ctrl/Alt chords, Backspace, ...).
+                // Such a key can never be part of a paste, so any buffered burst
+                // is applied through the normal paste path first and the
+                // classification window is dropped so the NEXT keystroke is not
+                // grouped into the burst that just ended.
+                let plain_char = matches!(key.code, KeyCode::Char(_))
+                    && (key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT);
+                if !plain_char && key.code != KeyCode::Enter {
+                    if let Some(text) = self.paste_burst.flush_before_modified_input() {
+                        self.insert_paste(&text);
+                    }
+                    self.paste_burst.clear_window_after_non_char();
+                }
+
                 match (key.code, key.modifiers) {
                     // Insert a newline (enters multiline mode) rather than submit.
                     // Shift+Enter / Alt+Enter / Ctrl+J all mean "newline, don't
@@ -2010,6 +2178,30 @@ impl Component for InputComponent {
                     _ if crate::app::key_normalize::is_insert_newline(key) => {
                         self.multiline = true;
                         self.insert_char('\n');
+                        return ComponentAction::Consumed;
+                    }
+                    // PASTE BURST — Enter arriving inside a burst window is a
+                    // newline in the pasted text, not "submit". This is the
+                    // whole point of the fallback: on a terminal without
+                    // bracketed paste a multi-line paste arrives as chars +
+                    // Enters, and without this the composer submits the first
+                    // line and drops the rest. Checked BEFORE the
+                    // backslash-continuation and submit arms so a pasted literal
+                    // `\` at end of line survives verbatim.
+                    _ if key.code == KeyCode::Enter
+                        && self
+                            .paste_burst
+                            .direct_insert_newline_should_insert(burst_now) =>
+                    {
+                        // In buffering mode the newline joins the burst buffer
+                        // (nothing to render); otherwise it goes straight in.
+                        if !self.paste_burst.append_newline_if_active(burst_now) {
+                            self.multiline = true;
+                            self.insert_char('\n');
+                        }
+                        self.paste_burst.extend_window(burst_now);
+                        self.tab_matches.clear();
+                        self.completions.hide();
                         return ComponentAction::Consumed;
                     }
                     // Escape cancels file search if active
@@ -2323,11 +2515,13 @@ impl Component for InputComponent {
                         }
                         return ComponentAction::Consumed;
                     }
-                    // Regular character input
+                    // Regular character input — routed through the paste-burst
+                    // classifier, which in the default direct-insert mode still
+                    // inserts every char immediately and only tracks timing.
                     (KeyCode::Char(ch), m)
                         if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT =>
                     {
-                        self.insert_char(ch);
+                        self.handle_plain_char(ch, burst_now);
                         return ComponentAction::Consumed;
                     }
                     _ => {}
@@ -2783,6 +2977,24 @@ impl Component for InputComponent {
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
     }
+}
+
+/// True when `name` is set to a truthy value (`1` / `true`, case-insensitive).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The largest char boundary `<= idx` (clamped to the string length). Retro-
+/// capture slices `content[..cursor]`, and a raw slice at a mid-codepoint index
+/// aborts the whole TUI.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Panic-proof substring by byte range. Clamps both ends to `[0, len]`, treats
@@ -4248,5 +4460,305 @@ mod composer_layers_tests {
         // Seed two synthetic candidates and re-run only the ranking by hand:
         // rebuild scans the cwd, so assert the frecency boost is what tips ties.
         assert!(input.file_frecency.boost("z_beta.rs") > input.file_frecency.boost("z_alpha.rs"));
+    }
+}
+
+/// Composer-level wiring for the paste-burst fallback
+/// ([`super::paste_burst`]): the state machine itself is unit-tested in that
+/// module; these drive `InputComponent` end-to-end with a pinned clock, so
+/// "paste arrives as fast key events" is exercised without a terminal.
+#[cfg(test)]
+mod paste_burst_composer_tests {
+    use super::paste_burst::{PasteBurst, PASTE_BURST_CHAR_INTERVAL};
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::Duration;
+
+    fn ev(code: KeyCode) -> Event {
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(
+            code,
+            KeyModifiers::NONE,
+        )))
+    }
+
+    /// Feed `text` as raw key events at `step` apart, starting at `t`, exactly
+    /// as a terminal without bracketed paste delivers a paste. Returns the
+    /// (clock, action-of-the-last-key) pair.
+    fn feed(
+        input: &mut InputComponent,
+        text: &str,
+        t: &mut Instant,
+        step: Duration,
+    ) -> ComponentAction {
+        let mut last = ComponentAction::Ignored;
+        for ch in text.chars() {
+            input.set_test_clock(Some(*t));
+            let code = if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            };
+            last = input.handle_event(&ev(code));
+            *t += step;
+        }
+        last
+    }
+
+    fn fast() -> Duration {
+        Duration::from_millis(1)
+    }
+
+    fn slow() -> Duration {
+        Duration::from_millis(200)
+    }
+
+    // ── the bug this fixes ─────────────────────────────────────────────────
+
+    #[test]
+    fn multiline_paste_as_fast_keys_does_not_submit_halfway() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        let action = feed(&mut input, "line one\nline two\nline three", &mut t, fast());
+
+        assert!(
+            matches!(action, ComponentAction::Consumed),
+            "no keystroke in the burst may emit Submit"
+        );
+        assert_eq!(input.value(), "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn enter_after_a_burst_but_outside_the_window_still_submits() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        feed(&mut input, "pasted text", &mut t, fast());
+        // Wait out the 120ms suppression window before pressing Enter.
+        t += Duration::from_millis(500);
+        input.set_test_clock(Some(t));
+        let action = input.handle_event(&ev(KeyCode::Enter));
+
+        match action {
+            ComponentAction::Emit(AppAction::Submit(text)) => assert_eq!(text, "pasted text"),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slow_typing_then_enter_submits() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        let action = feed(&mut input, "hello\n", &mut t, slow());
+
+        match action {
+            ComponentAction::Emit(AppAction::Submit(text)) => assert_eq!(text, "hello"),
+            other => panic!("slow typing must submit on Enter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slow_typing_never_enters_a_burst_window() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        feed(&mut input, "abcdef", &mut t, slow());
+        assert!(!input.paste_burst.in_burst_context(t));
+    }
+
+    #[test]
+    fn a_non_char_key_ends_the_burst_window() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        feed(&mut input, "abcdef", &mut t, fast());
+        assert!(input.paste_burst.in_burst_context(t));
+
+        // An arrow key can never be part of a paste: the window drops, so the
+        // very next Enter submits again.
+        input.set_test_clock(Some(t));
+        input.handle_event(&ev(KeyCode::Left));
+        assert!(!input.paste_burst.in_burst_context(t));
+
+        input.set_test_clock(Some(t));
+        assert!(matches!(
+            input.handle_event(&ev(KeyCode::Enter)),
+            ComponentAction::Emit(AppAction::Submit(_))
+        ));
+    }
+
+    #[test]
+    fn burst_suppresses_the_slash_completions_popup_stealing_enter() {
+        let mut input = InputComponent::new();
+        input.set_commands(vec!["help".into(), "clear".into()]);
+        let mut t = Instant::now();
+        // A pasted line that happens to start with '/' must not have its
+        // newline eaten by the command palette.
+        let action = feed(&mut input, "/usr/local/bin\nnext line", &mut t, fast());
+        assert!(matches!(action, ComponentAction::Consumed));
+        assert_eq!(input.value(), "/usr/local/bin\nnext line");
+    }
+
+    #[test]
+    fn two_char_prefix_before_a_newline_is_still_a_paste() {
+        // Below the 3-char burst threshold: only the wider direct-insert Enter
+        // rule saves this from submitting "ab".
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        let action = feed(&mut input, "ab\ncd", &mut t, fast());
+        assert!(matches!(action, ComponentAction::Consumed));
+        assert_eq!(input.value(), "ab\ncd");
+    }
+
+    #[test]
+    fn multibyte_burst_survives_intact() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        feed(&mut input, "日本語 🎉 done\nsecond", &mut t, fast());
+        assert_eq!(input.value(), "日本語 🎉 done\nsecond");
+    }
+
+    // ── disable switch ─────────────────────────────────────────────────────
+
+    #[test]
+    fn disabled_burst_lets_enter_submit_mid_paste() {
+        let mut input = InputComponent::new();
+        input.set_paste_burst(PasteBurst::disabled());
+        let mut t = Instant::now();
+        feed(&mut input, "line one\nline two", &mut t, fast());
+        // Legacy behaviour, deliberately: the embedded newline submits "line
+        // one" and only the tail is left in the composer. This is the exact bug
+        // the fallback exists to fix, so the escape hatch must reproduce it.
+        assert_eq!(input.value(), "line two");
+        assert!(!input.paste_burst_enabled());
+    }
+
+    // ── explicit paste must not double-handle ──────────────────────────────
+
+    #[test]
+    fn explicit_paste_resets_burst_state() {
+        let mut input = InputComponent::new();
+        let mut t = Instant::now();
+        feed(&mut input, "abcdef", &mut t, fast());
+        assert!(input.paste_burst.in_burst_context(t));
+
+        // A bracketed paste arriving right after clears the fallback's state so
+        // the two paths can never interleave.
+        input.insert_paste("X");
+        assert!(!input.paste_burst.in_burst_context(t));
+        input.set_test_clock(Some(t));
+        assert!(matches!(
+            input.handle_event(&ev(KeyCode::Enter)),
+            ComponentAction::Emit(AppAction::Submit(_))
+        ));
+    }
+
+    // ── buffering contract (opt-in) ────────────────────────────────────────
+
+    #[test]
+    fn buffering_mode_coalesces_a_burst_into_one_paste() {
+        let mut input = InputComponent::new();
+        input.set_paste_burst(PasteBurst::new(true).with_buffering(true));
+        let mut t = Instant::now();
+        feed(&mut input, "hello world", &mut t, fast());
+
+        // Nothing rendered yet: the whole burst is held in the buffer.
+        assert_eq!(input.value(), "");
+        t += PasteBurst::recommended_active_flush_delay();
+        assert!(input.paste_burst_tick(t));
+        assert_eq!(input.value(), "hello world");
+    }
+
+    #[test]
+    fn buffering_mode_flushes_a_lone_held_char_as_typing() {
+        let mut input = InputComponent::new();
+        input.set_paste_burst(PasteBurst::new(true).with_buffering(true));
+        let mut t = Instant::now();
+        input.set_test_clock(Some(t));
+        input.handle_event(&ev(KeyCode::Char('a')));
+        // Flicker suppression: not rendered yet.
+        assert_eq!(input.value(), "");
+
+        t += PasteBurst::recommended_flush_delay();
+        assert!(input.paste_burst_tick(t));
+        assert_eq!(input.value(), "a");
+    }
+
+    #[test]
+    fn buffering_mode_retro_captures_the_exact_byte_range() {
+        let mut input = InputComponent::new();
+        // Pre-fill the composer as if the chars had already been typed in, then
+        // hand the machine a stream it classifies as paste-like.
+        input.set_paste_burst(PasteBurst::new(true).with_buffering(true));
+        input.set_content("keep 日本 語🎉");
+        let cursor = input.cursor();
+        // Three fast chars put the machine in the state that yields BeginBuffer
+        // (and give `flush_if_due` a timestamp to measure idleness from).
+        let mut now = Instant::now();
+        for _ in 0..3 {
+            input.paste_burst.on_plain_char_no_hold(now);
+            now += Duration::from_millis(1);
+        }
+
+        let grab = input
+            .paste_burst
+            .decide_begin_buffer(now, &input.content[..cursor], 4)
+            .expect("whitespace makes the prefix paste-like");
+        assert_eq!(grab.grabbed, "本 語🎉");
+        assert!(input.content.is_char_boundary(grab.start_byte));
+
+        // Apply exactly what the composer applies: remove the grabbed BYTE
+        // range, so the multibyte chars are cut whole.
+        input.content.replace_range(grab.start_byte..cursor, "");
+        input.cursor = grab.start_byte;
+        assert_eq!(input.value(), "keep 日");
+
+        // ...and the removed text comes back as one contiguous paste.
+        input.set_test_clock(Some(now));
+        let t = now + PasteBurst::recommended_active_flush_delay();
+        assert!(input.paste_burst_tick(t));
+        assert_eq!(input.value(), "keep 日本 語🎉");
+    }
+
+    #[test]
+    fn buffering_mode_retro_capture_runs_through_the_key_path() {
+        let mut input = InputComponent::new();
+        input.set_paste_burst(PasteBurst::new(true).with_buffering(true));
+        let mut t = Instant::now();
+
+        // A slow char lands normally (held, then flushed as typing)...
+        input.set_test_clock(Some(t));
+        input.handle_event(&ev(KeyCode::Char('x')));
+        t += PasteBurst::recommended_flush_delay();
+        input.paste_burst_tick(t);
+        assert_eq!(input.value(), "x");
+
+        // ...then a fast burst arrives. The held/buffered chars coalesce, and
+        // the already-visible 'x' is left alone (it is not part of the burst).
+        t += Duration::from_millis(300);
+        feed(&mut input, "a b c d", &mut t, fast());
+        t += PasteBurst::recommended_active_flush_delay();
+        input.paste_burst_tick(t);
+        assert_eq!(input.value(), "xa b c d");
+    }
+
+    #[test]
+    fn buffering_mode_flushes_before_an_unrelated_key() {
+        let mut input = InputComponent::new();
+        input.set_paste_burst(PasteBurst::new(true).with_buffering(true));
+        let mut t = Instant::now();
+        feed(&mut input, "abcdef", &mut t, fast());
+        assert_eq!(input.value(), "");
+
+        // Ctrl+A is not part of any paste: the buffer must be applied, never
+        // left stuck.
+        input.set_test_clock(Some(t));
+        input.handle_event(&Event::Terminal(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert_eq!(input.value(), "abcdef");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn char_interval_constant_matches_codex() {
+        assert_eq!(PASTE_BURST_CHAR_INTERVAL, Duration::from_millis(8));
     }
 }

@@ -583,7 +583,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   defp changed_files(_), do: []
 
   defp changed_files_git(path) do
-    case System.cmd("git", ["status", "--porcelain", "-z"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain", "-z"], cd: path, stderr_to_stdout: true) do
       {out, 0} -> parse_porcelain_z(out)
       _ -> []
     end

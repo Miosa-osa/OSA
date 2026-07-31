@@ -101,13 +101,19 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       is_nil(model) ->
         0
 
+      # 0 means "unknown" to consumers, which render tokens without a percentage.
+      # Never fall back to the lossy default here: this feeds the LIVE context bar,
+      # and a percentage against a fabricated denominator is worse than none.
       is_nil(provider) ->
-        Registry.context_window(model)
+        case Registry.context_window_info(model) do
+          {:ok, cw} when is_integer(cw) and cw > 0 -> cw
+          _ -> 0
+        end
 
       true ->
-        case Registry.effective_context_window(model, provider) do
-          cw when is_integer(cw) and cw > 0 -> cw
-          _ -> Registry.context_window(model)
+        case Registry.effective_context_window_info(model, provider) do
+          {:ok, cw} when is_integer(cw) and cw > 0 -> cw
+          _ -> 0
         end
     end
   rescue

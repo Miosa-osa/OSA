@@ -24,9 +24,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Prompt do
     4. Offer choices to the user about what direction to take.
 
     Usage notes:
-    - Users will always be able to provide free-text input.
-    - Use the optional `options` list to present multiple-choice answers.
-    - If you recommend a specific option, make that the first option.
+    - Ask ONE question per call, phrased as a single short sentence. Keep it concrete —
+      the user is mid-task and should be able to answer at a glance.
+    - Use the optional `options` list to present multiple-choice answers. Provide 2-3
+      mutually exclusive choices — not more.
+    - Put the option you recommend FIRST and suffix its label with "(Recommended)".
+    - Give each option a short label followed by one sentence explaining the tradeoff of
+      choosing it, e.g. "Rewrite the parser (Recommended) — slower to build but removes
+      the whole class of escaping bugs."
+    - Do NOT add an "Other", "Something else" or "None of these" option. Users can always
+      type free-text input, so a catch-all option only wastes a slot.
 
     Plan mode note: In plan mode, use this tool to clarify requirements or choose between
     approaches BEFORE finalising your plan. Do NOT use this tool to ask "Is my plan ready?"

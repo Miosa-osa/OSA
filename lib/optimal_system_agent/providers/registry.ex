@@ -346,9 +346,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # serves the turn. Idempotent, so re-entry through the fallback chain is safe.
   defp sanitize_tool_schemas(opts) do
     case Keyword.get(opts, :tools) do
-      nil -> opts
-      [] -> opts
-      tools -> Keyword.put(opts, :tools, OptimalSystemAgent.Tools.SchemaNormalizer.normalize_tools(tools))
+      nil ->
+        opts
+
+      [] ->
+        opts
+
+      tools ->
+        Keyword.put(
+          opts,
+          :tools,
+          OptimalSystemAgent.Tools.SchemaNormalizer.normalize_tools(tools)
+        )
     end
   end
 
@@ -730,10 +739,22 @@ defmodule OptimalSystemAgent.Providers.Registry do
   Return the context window size (in tokens) for a given model.
 
   Resolution order:
-    1. `Providers.Catalog` (models.dev-style, refreshable source of truth)
-    2. Static `@fallback_context_windows` table (offline safety net)
-    3. Ollama `/api/show` `num_ctx` (for local models)
-    4. `:max_context_tokens` app env, then 128_000
+    1. Ollama `/api/show` `model_info["<arch>.context_length"]` — FIRST for
+       Ollama Cloud (`:cloud`) tags, because the daemon/ollama.com reports the
+       model's REAL trained window and the static table below is only ever a
+       hand-maintained guess (see `lookup_context_window/1`).
+    2. `Providers.Catalog` (models.dev-style, refreshable source of truth)
+    3. Static `@fallback_context_windows` table (offline safety net), exact key
+       then family prefix
+    4. Ollama `/api/show` (for everything else — local tags and unknown models)
+    5. `:max_context_tokens` app env, then 128_000
+
+  Step 5 is a FABRICATED number: it is not this model's window, it is a config
+  default. Callers that render a percentage must not use it — use
+  `context_window_info/1` / `effective_context_window_info/2`, which return
+  `:unknown` instead of inventing a denominator (a wrong "% ctx" is worse than
+  none). `context_window/1` keeps the lossy contract for existing callers that
+  need a number (token budgeting, `num_ctx` sizing).
 
   The static table is retained only as a fallback for when the Catalog is
   unavailable (e.g. GenServer not started) or does not yet know a model.
@@ -804,36 +825,90 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
-    model
-    |> resolve_context_window()
-    |> maybe_cap_1m_context(model)
-  end
-
-  defp resolve_context_window(model) do
-    case catalog_context_window(model) || Map.get(@fallback_context_windows, model) do
-      nil ->
-        # Try prefix match for Ollama models and variants
-        matched =
-          Enum.find(@fallback_context_windows, fn {key, _v} ->
-            String.starts_with?(model, key)
-          end)
-
-        case matched do
-          {_key, size} ->
-            size
-
-          nil ->
-            # Check Ollama model info for num_ctx
-            case get_ollama_context(model) do
-              {:ok, ctx} -> ctx
-              _ -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-            end
-        end
-
-      size ->
-        size
+    case context_window_info(model) do
+      {:ok, size} -> size
+      :unknown -> default_context_window()
     end
   end
+
+  def context_window(_), do: default_context_window()
+
+  @doc """
+  Like `context_window/1`, but HONEST: `{:ok, tokens}` only when the window is
+  actually known (probed from Ollama, or listed by the Catalog / static table),
+  and `:unknown` when it is not.
+
+  `context_window/1` can never say "I don't know" — it returns the
+  `:max_context_tokens` config default (128k) for any model nobody has heard of.
+  For a token budget that is a survivable guess; for the TUI's "N% ctx" meter it
+  is a lie: usage gets divided by a denominator that has nothing to do with the
+  model, and the bar reads anywhere from wildly optimistic to wildly alarming.
+  HTTP surfaces that feed the meter use this function and report tokens-used
+  with NO percentage when it returns `:unknown`.
+  """
+  @spec context_window_info(String.t() | nil) :: {:ok, pos_integer()} | :unknown
+  def context_window_info(model) when is_binary(model) do
+    case lookup_context_window(model) do
+      {:ok, size} -> {:ok, maybe_cap_1m_context(size, model)}
+      :unknown -> :unknown
+    end
+  end
+
+  def context_window_info(_), do: :unknown
+
+  # Resolve the trained window WITHOUT ever inventing a number.
+  #
+  # Ollama Cloud (":cloud") models are probed FIRST. They are the case the
+  # static table serves worst: they are not in models.dev, so they fall through
+  # to a hand-maintained map or — worse — a family PREFIX guess
+  # ("deepseek-v4-flash:cloud" matching the "deepseek-v4-flash" row), and any
+  # model added by Ollama after the last edit of that map silently inherits the
+  # 128k config default. Meanwhile /api/show reports the real
+  # `<arch>.context_length` for cloud tags too: the local signed-in daemon
+  # proxies the query, and when OLLAMA_URL points at https://ollama.com the
+  # request goes there directly (with the API key). The probe is cached and
+  # negative-cached, so this costs at most one short request per model per boot
+  # and NEVER blocks a request path on a slow or failing probe — a miss simply
+  # falls through to the previous static behaviour.
+  defp lookup_context_window(model) do
+    if ollama_cloud_model?(model) do
+      case probe_context_window(model) do
+        {:ok, _} = ok -> ok
+        :unknown -> static_context_window(model)
+      end
+    else
+      case static_context_window(model) do
+        {:ok, _} = ok -> ok
+        :unknown -> probe_context_window(model)
+      end
+    end
+  end
+
+  # Catalog → exact static entry → static family prefix. No probing, no default.
+  defp static_context_window(model) do
+    case catalog_context_window(model) || Map.get(@fallback_context_windows, model) do
+      size when is_integer(size) and size > 0 ->
+        {:ok, size}
+
+      _ ->
+        case Enum.find(@fallback_context_windows, fn {key, _v} ->
+               String.starts_with?(model, key)
+             end) do
+          {_key, size} -> {:ok, size}
+          nil -> :unknown
+        end
+    end
+  end
+
+  defp probe_context_window(model) do
+    case get_ollama_context(model) do
+      {:ok, ctx} when is_integer(ctx) and ctx > 0 -> {:ok, ctx}
+      _ -> :unknown
+    end
+  end
+
+  defp default_context_window,
+    do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
   # Keep the advertised window in lockstep with the actually-sent request beta:
   # OSA only advertises Claude's 1M window when the context-1m beta will be sent
@@ -851,9 +926,6 @@ defmodule OptimalSystemAgent.Providers.Registry do
       size
     end
   end
-
-  def context_window(_),
-    do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
 
   @doc """
   The context window OSA will actually operate within for `model` on `provider`.
@@ -880,8 +952,63 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec effective_context_window(String.t() | nil, atom()) :: pos_integer()
   def effective_context_window(model, provider) do
-    trained = context_window(model)
+    model
+    |> context_window()
+    |> apply_local_ceiling(model, provider)
+  end
 
+  @doc """
+  Honest variant of `effective_context_window/2`: `{:ok, tokens}` when the
+  model's window is genuinely known, `:unknown` otherwise.
+
+  Same provider-aware capping as `effective_context_window/2` — see
+  `context_window_info/1` for why the "unknown" case exists at all.
+  """
+  @spec effective_context_window_info(String.t() | nil, atom() | nil) ::
+          {:ok, pos_integer()} | :unknown
+  def effective_context_window_info(model, provider) do
+    case context_window_info(model) do
+      {:ok, trained} -> {:ok, apply_local_ceiling(trained, model, provider)}
+      :unknown -> :unknown
+    end
+  end
+
+  @doc """
+  `true` when the window used to render a context percentage is real (probed or
+  catalogued) rather than the config fallback.
+
+  With no provider it answers for the trained window; with a provider it answers
+  for the effective (locally-capped) window.
+  """
+  @spec context_window_known?(String.t() | nil, atom() | nil) :: boolean()
+  def context_window_known?(model, provider \\ nil)
+  def context_window_known?(model, nil), do: match?({:ok, _}, context_window_info(model))
+
+  def context_window_known?(model, provider),
+    do: match?({:ok, _}, effective_context_window_info(model, provider))
+
+  @doc """
+  Drop any cached `/api/show` probe result for `model` so the next resolution
+  re-probes.
+
+  Called when the user SWITCHES model: the window must be re-resolved for the
+  new tag, and a stale negative-cache entry (the daemon was down / not signed in
+  the first time the model was seen) must not pin that model to the fabricated
+  default for the rest of the session.
+  """
+  @spec forget_context_window(String.t() | nil) :: :ok
+  def forget_context_window(model) when is_binary(model) do
+    case :ets.whereis(:osa_context_cache) do
+      :undefined -> :ok
+      _ -> :ets.delete(:osa_context_cache, model)
+    end
+
+    :ok
+  end
+
+  def forget_context_window(_), do: :ok
+
+  defp apply_local_ceiling(trained, model, provider) do
     if provider in [:ollama, :lmstudio, :llamacpp] and not ollama_cloud_model?(model) do
       ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
 
@@ -957,9 +1084,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # models.dev provider ids mostly match OSA atoms; map the few that differ.
   defp provider_id_to_atom(pid) do
     case pid do
-      "x-ai" -> :xai
-      "google-vertex" -> :google
-      "azure" -> :openai
+      "x-ai" ->
+        :xai
+
+      "google-vertex" ->
+        :google
+
+      "azure" ->
+        :openai
+
       _ ->
         try do
           String.to_existing_atom(pid)
@@ -973,21 +1106,48 @@ defmodule OptimalSystemAgent.Providers.Registry do
     m = String.downcase(model)
 
     cond do
-      String.contains?(m, ":cloud") -> :ollama_cloud
-      String.starts_with?(m, "claude") -> :anthropic
-      String.starts_with?(m, "gpt") -> :openai
+      String.contains?(m, ":cloud") ->
+        :ollama_cloud
+
+      String.starts_with?(m, "claude") ->
+        :anthropic
+
+      String.starts_with?(m, "gpt") ->
+        :openai
+
       String.starts_with?(m, "o1") or String.starts_with?(m, "o3") or
-          String.starts_with?(m, "o4") -> :openai
-      String.starts_with?(m, "gemini") -> :google
-      String.starts_with?(m, "deepseek") -> :deepseek
-      String.starts_with?(m, "grok") -> :xai
-      String.starts_with?(m, "command") -> :cohere
-      String.starts_with?(m, "mistral") or String.starts_with?(m, "mixtral") -> :mistral
-      String.starts_with?(m, "glm") -> :zhipu
-      String.starts_with?(m, "qwen") -> :qwen
-      String.starts_with?(m, "moonshot") or String.starts_with?(m, "kimi") -> :moonshot
-      String.starts_with?(m, "llama") -> :groq
-      true -> nil
+          String.starts_with?(m, "o4") ->
+        :openai
+
+      String.starts_with?(m, "gemini") ->
+        :google
+
+      String.starts_with?(m, "deepseek") ->
+        :deepseek
+
+      String.starts_with?(m, "grok") ->
+        :xai
+
+      String.starts_with?(m, "command") ->
+        :cohere
+
+      String.starts_with?(m, "mistral") or String.starts_with?(m, "mixtral") ->
+        :mistral
+
+      String.starts_with?(m, "glm") ->
+        :zhipu
+
+      String.starts_with?(m, "qwen") ->
+        :qwen
+
+      String.starts_with?(m, "moonshot") or String.starts_with?(m, "kimi") ->
+        :moonshot
+
+      String.starts_with?(m, "llama") ->
+        :groq
+
+      true ->
+        nil
     end
   end
 
@@ -1094,10 +1254,20 @@ defmodule OptimalSystemAgent.Providers.Registry do
     end
   end
 
+  # Best-effort probe. Short timeout, no retries, every failure mode
+  # (unreachable, non-200, malformed, raised) collapses to :error + a negative
+  # cache entry, so a slow or broken Ollama can never stall a request path — the
+  # caller just falls back to the static table / config default.
+  @probe_timeout_ms 3_000
+
   defp fetch_ollama_context(model) do
     url = Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
 
-    case Req.post("#{url}/api/show", json: %{name: model}, receive_timeout: 3_000, retry: false) do
+    opts =
+      [json: %{name: model}, receive_timeout: @probe_timeout_ms, retry: false] ++
+        probe_auth_headers()
+
+    case Req.post("#{url}/api/show", opts) do
       {:ok, %{status: 200, body: %{"model_info" => info}}} ->
         # Ollama returns context length in model_info under various keys
         ctx =
@@ -1126,6 +1296,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
     _ ->
       cache_put(model, @no_ctx_sentinel)
       :error
+  end
+
+  # Ollama Cloud's own host (OLLAMA_URL=https://ollama.com) requires the API key
+  # on /api/show; a local daemon ignores the header. Harmless either way.
+  defp probe_auth_headers do
+    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+      key when is_binary(key) and key != "" ->
+        [headers: [{"authorization", "Bearer #{key}"}]]
+
+      _ ->
+        []
+    end
   end
 
   @doc """

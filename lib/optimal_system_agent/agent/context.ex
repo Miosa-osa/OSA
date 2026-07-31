@@ -217,7 +217,19 @@ defmodule OptimalSystemAgent.Agent.Context do
         label in @essential_labels
       end)
 
-    {essential_parts, essential_used} = fit_blocks(essential, budget)
+    # Fit essentials by PRIORITY, not by listing order. `fit_blocks/3` spends the
+    # budget in the order it is handed the blocks, so with a tight dynamic budget
+    # (a small local window plus a large static base) the first long block in the
+    # list — tool_process — could swallow everything and silently drop every
+    # essential after it, including the active operating mode (plan_mode). A
+    # dropped mode directive is a capability regression, not a truncation: the
+    # model stops being told it is planning at all. Priority 0 blocks therefore
+    # get the budget first; sort_by is stable, so blocks of equal priority keep
+    # their listed order and the assembled text stays otherwise unchanged.
+    {essential_parts, essential_used} =
+      essential
+      |> Enum.sort_by(fn {_content, priority, _label} -> priority end)
+      |> fit_blocks(budget)
 
     # RECALL group: capped to ~dynamic_recall_budget_frac of the REAL window
     # (with a small floor), never the full leftover slack.
@@ -275,7 +287,10 @@ defmodule OptimalSystemAgent.Agent.Context do
       {commands_block(state), 2, "commands"},
       {project_context_block(state), 1, "project_context"},
       {project_instructions_block(state), 1, "project_instructions"},
-      {plan_mode_block(state), 1, "plan_mode"},
+      # Priority 0: the active operating mode outranks general guidance. Plan mode
+      # changes what the turn is allowed to DO, so it must never lose the budget
+      # race to a longer advisory block.
+      {plan_mode_block(state), 0, "plan_mode"},
       {memory_block_relevant(state), 1, "memory"},
       {episodic_block(state), 1, "episodic"},
       {task_state_block(state), 1, "task_state"},
@@ -1069,13 +1084,13 @@ defmodule OptimalSystemAgent.Agent.Context do
     parts = []
 
     parts =
-      case System.cmd("git", ["branch", "--show-current"], stderr_to_stdout: true) do
+      case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], stderr_to_stdout: true) do
         {b, 0} -> ["- Git branch: #{String.trim(b)}" | parts]
         _ -> parts
       end
 
     parts =
-      case System.cmd("git", ["status", "--short"], stderr_to_stdout: true) do
+      case OptimalSystemAgent.Git.cmd(["status", "--short"], stderr_to_stdout: true) do
         {s, 0} when s != "" ->
           trimmed = String.trim(s)
           if trimmed != "", do: ["- Modified files:\n#{trimmed}" | parts], else: parts
@@ -1085,7 +1100,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       end
 
     parts =
-      case System.cmd("git", ["log", "--oneline", "-3"], stderr_to_stdout: true) do
+      case OptimalSystemAgent.Git.cmd(["log", "--oneline", "-3"], stderr_to_stdout: true) do
         {l, 0} -> ["- Recent commits:\n#{String.trim(l)}" | parts]
         _ -> parts
       end

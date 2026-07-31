@@ -86,7 +86,7 @@ defmodule OptimalSystemAgent.CLI do
     # Git pull
     safe_puts("  Pulling latest...")
 
-    case System.cmd("git", ["pull", "--ff-only", "origin", "main"],
+    case OptimalSystemAgent.Git.cmd(["pull", "--ff-only", "origin", "main"],
            cd: root,
            stderr_to_stdout: true
          ) do

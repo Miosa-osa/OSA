@@ -173,7 +173,7 @@ defmodule OptimalSystemAgent.Agent.FastPath do
   end
 
   defp git(cwd, args) do
-    case System.cmd("git", args, cd: cwd, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(args, cd: cwd, stderr_to_stdout: true) do
       {output, 0} -> output |> String.trim() |> truncate(2_000)
       _ -> nil
     end

@@ -54,13 +54,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
     States: `pending` → `in_progress` → `completed` (or `failed`)
 
     Rules:
-    - Exactly ONE task `in_progress` at a time (not less, not more)
+    - At most ONE task can be `in_progress` at a time — start the next one only
+      after the current one is `completed` or `failed`
+    - Exactly ONE task `in_progress` while work is underway (not less, not more)
     - Mark `in_progress` BEFORE starting — never after
     - Mark `completed` ONLY when fully accomplished with evidence
     - If blocked or erroring, keep as `in_progress` and create a new task
       describing the blocker
     - NEVER mark `completed` if tests are failing, the implementation is
       partial, or errors are unresolved
+
+    ## After Updating the Board
+
+    The task board is rendered for the user automatically. After a `add`,
+    `add_multiple`, `start`, `complete`, `fail` or `update` call, do NOT restate the
+    plan, list the tasks, or narrate the status change in prose — it is already on
+    screen. Just continue with the work.
 
     ## Task Management
 

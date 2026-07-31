@@ -350,7 +350,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
   # ── Private Helpers ─────────────────────────────────────────────────
 
   defp git_short_hash do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
       {hash, 0} -> String.trim(hash)
       _ -> "dev"
     end

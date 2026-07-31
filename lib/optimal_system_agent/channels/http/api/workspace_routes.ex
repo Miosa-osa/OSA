@@ -229,7 +229,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
 
   # Get git status for a single file (M, A, D, or nil)
   defp git_file_status(cwd, relative_path) do
-    case System.cmd("git", ["status", "--porcelain", relative_path],
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain", relative_path],
            cd: cwd,
            stderr_to_stdout: true
          ) do
@@ -269,7 +269,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.WorkspaceRoutes do
   end
 
   defp run_git(cwd, args) do
-    case System.cmd("git", args, cd: cwd, stderr_to_stdout: false) do
+    case OptimalSystemAgent.Git.cmd(args, cd: cwd, stderr_to_stdout: false) do
       {output, 0} ->
         output
         |> String.split("\n", trim: true)

@@ -146,10 +146,10 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree.Populate do
   # doesn't re-hash unchanged files (it exits non-zero when dirty files differ —
   # expected, so we ignore it).
   defp finalize_index(worktree_path) do
-    _ = System.cmd("git", ["read-tree", "HEAD"], cd: worktree_path, stderr_to_stdout: true)
+    _ = OptimalSystemAgent.Git.cmd(["read-tree", "HEAD"], cd: worktree_path, stderr_to_stdout: true)
 
     _ =
-      System.cmd("git", ["update-index", "-q", "--refresh"],
+      OptimalSystemAgent.Git.cmd(["update-index", "-q", "--refresh"],
         cd: worktree_path,
         stderr_to_stdout: true
       )
@@ -206,7 +206,7 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree.Populate do
   # ── helpers ────────────────────────────────────────────────────────────
 
   defp git_paths(repo_dir, args) do
-    case System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(args, cd: repo_dir, stderr_to_stdout: true) do
       {out, 0} -> {:ok, String.split(out, <<0>>, trim: true)}
       {out, code} -> {:error, {:git, code, String.trim(out)}}
     end

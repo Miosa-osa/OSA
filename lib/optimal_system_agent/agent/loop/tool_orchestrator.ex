@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   the loop is now encapsulated here.
   """
 
+  alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Tools.{LegacyAdapter, Registry, UseContext}
 
@@ -50,7 +51,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
           optional(any()) => any()
         }
 
-  @type result :: {tool_message :: map(), result_str :: String.t()}
+  # A fatal result carries a third element (`{:fatal, message}`) — see
+  # `ToolError`. `ReactLoop` strips it via `ToolError.normalize_results/1`.
+  @type result ::
+          {tool_message :: map(), result_str :: String.t()}
+          | {tool_message :: map(), result_str :: String.t(), {:fatal, String.t()}}
 
   @doc """
   Dispatch a list of tool calls.
@@ -211,9 +216,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
         {still_pending, newly_done} =
           Enum.reduce(pending, {[], done}, fn {tc, task}, {p, d} ->
             case Map.get(results, task.ref) do
-              nil -> {[{tc, task} | p], d}
-              {:ok, result} -> {p, [{tc, result} | d]}
-              {:exit, _} -> {p, [{tc, error_result(tc, "Tool execution failed")} | d]}
+              nil ->
+                {[{tc, task} | p], d}
+
+              {:ok, result} ->
+                {p, [{tc, result} | d]}
+
+              # RESPOND-TO-MODEL: the tool task died. `execute_tool_call/2`
+              # already recovers everything it can see, so reaching here means
+              # the process itself went down — surface the REASON to the model
+              # (it used to be a contentless "Tool execution failed") and keep
+              # the turn alive.
+              {:exit, reason} ->
+                {p, [{tc, error_result(tc, ToolError.exit_text(reason))} | d]}
             end
           end)
 

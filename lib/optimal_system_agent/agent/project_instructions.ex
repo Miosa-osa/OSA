@@ -289,7 +289,7 @@ defmodule OptimalSystemAgent.Agent.ProjectInstructions do
   defp git_root(nil), do: nil
 
   defp git_root(dir) do
-    case System.cmd("git", ["rev-parse", "--show-toplevel"], cd: dir, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "--show-toplevel"], cd: dir, stderr_to_stdout: true) do
       {root, 0} -> String.trim(root)
       _ -> nil
     end

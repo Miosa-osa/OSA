@@ -28,6 +28,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
+  alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
@@ -1019,7 +1020,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         collected = StreamingToolExecutor.collect_results(streaming_ctx)
 
         results_by_id =
-          Map.new(collected, fn {tool_msg, _str} = result ->
+          Map.new(collected, fn result ->
+            # `result` is {tool_msg, str} or the fatal {tool_msg, str, {:fatal, _}}
+            tool_msg = elem(result, 0)
             {tool_msg[:tool_call_id] || tool_msg["tool_call_id"], result}
           end)
 
@@ -1056,8 +1059,53 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Clean up streaming context
     Process.delete(:osa_streaming_tool_ctx)
 
+    # NON-FATAL TOOL ERROR contract (Codex parity). Every ordinary tool failure
+    # — a raise, a crash, a timeout, a denial, an {:error, _} — has already been
+    # synthesized into a readable tool result by ToolExecutor, so the turn just
+    # continues below. Only an explicit FATAL result carries the third tuple
+    # element; strip it here, keep its tool message (so the assistant's
+    # tool_calls are never orphaned in history), and end the turn.
+    {results, fatal_message} = ToolError.normalize_results(results)
+
     tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
     state = %{state | messages: state.messages ++ tool_messages}
+
+    if is_binary(fatal_message) do
+      handle_fatal_tool_error(fatal_message, state)
+    else
+      continue_after_tools(results, tool_calls, state, resample_snapshot)
+    end
+  end
+
+  # FATAL class — the one tool outcome that still aborts the turn.
+  defp handle_fatal_tool_error(message, state) do
+    Logger.error(
+      "[loop] Fatal tool error — aborting turn at iteration #{state.iteration}: #{message}"
+    )
+
+    Bus.emit(:system_event, %{
+      event: :fatal_tool_error,
+      session_id: state.session_id,
+      iteration: state.iteration,
+      reason: message
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{state.session_id}",
+      {:osa_event,
+       %{
+         type: :system_event,
+         event: :fatal_tool_error,
+         session_id: state.session_id,
+         reason: message
+       }}
+    )
+
+    {"The turn stopped on a fatal tool error: #{message}", state}
+  end
+
+  defp continue_after_tools(results, tool_calls, state, resample_snapshot) do
 
     # Per-iteration context-pressure emit (mid-turn meter fix): previously
     # Telemetry.emit_context_pressure/1 only fired at turn boundaries (loop.ex),

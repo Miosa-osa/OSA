@@ -112,7 +112,7 @@ defmodule OptimalSystemAgent.Agent.ContextDiscovery do
   end
 
   defp find_git_root(dir) do
-    case System.cmd("git", ["rev-parse", "--show-toplevel"],
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "--show-toplevel"],
            cd: dir,
            stderr_to_stdout: true
          ) do

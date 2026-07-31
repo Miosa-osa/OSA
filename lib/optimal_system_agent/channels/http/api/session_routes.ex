@@ -305,9 +305,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
         {:ok, state} ->
           # Ceiling is the model's REAL usable window (provider-aware), not a
           # hardcoded 128k config default, so the breakdown agrees with the
-          # status-bar meter. Prefer the window resolved on the live state
-          # (`effective_context_window`); fall back to a Registry lookup, then
-          # the legacy config default only if both are unavailable.
+          # status-bar meter. When the window is genuinely unknown this is 0 and
+          # the TUI renders tokens-used with no percentage (see context_ceiling/1).
           max_tokens = context_ceiling(state)
           total_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
           static_tokens = OptimalSystemAgent.Soul.static_token_count()
@@ -319,7 +318,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
               conversation_tokens: conversation_tokens,
               tool_result_tokens: 0,
               max_tokens: max_tokens,
-              used_tokens: total_tokens
+              used_tokens: total_tokens,
+              # Explicit signal for clients that would otherwise read the 0 as
+              # "empty window" rather than "window not known".
+              context_window_known: max_tokens > 0
             })
 
           conn |> put_resp_content_type("application/json") |> send_resp(200, body)
@@ -338,27 +340,43 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
-  # Usable context window for the /context breakdown ceiling. Prefers the window
-  # already resolved on the live session, then a provider-aware Registry lookup,
-  # then the legacy config default — never crashes on a lookup miss.
+  # Usable context window for the /context breakdown ceiling.
+  #
+  # Resolved from the CURRENT model first (a switch must re-resolve; the live
+  # session's `effective_context_window` is only a fallback for the window the
+  # loop already computed). Returns 0 — NOT the 128k config default — when the
+  # window is genuinely unknown: the config default is a fabricated denominator,
+  # and every consumer of this endpoint divides by it, so an unknown model would
+  # render a confidently wrong "N% ctx". The TUI already treats max_tokens == 0
+  # as "unknown window" and shows token counts without a percentage.
   defp context_ceiling(state) do
     alias OptimalSystemAgent.Providers.Registry
 
     cond do
-      is_integer(state[:effective_context_window]) and state[:effective_context_window] > 0 ->
-        state[:effective_context_window]
-
       is_binary(state[:model]) ->
-        case Registry.effective_context_window(state[:model], state[:provider]) do
-          cw when is_integer(cw) and cw > 0 -> cw
-          _ -> Registry.context_window(state[:model])
+        case Registry.effective_context_window_info(state[:model], state[:provider]) do
+          {:ok, cw} when is_integer(cw) and cw > 0 ->
+            cw
+
+          # Unknown for THIS model: the loop's stored window is the same
+          # fabricated default, so don't launder it back in — report unknown.
+          _ ->
+            0
         end
 
       true ->
-        Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+        live_state_window(state)
     end
   rescue
-    _ -> Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+    _ -> 0
+  end
+
+  defp live_state_window(state) do
+    if is_integer(state[:effective_context_window]) and state[:effective_context_window] > 0 do
+      state[:effective_context_window]
+    else
+      0
+    end
   end
 
   # ── GET /sessions/:id/messages ─────────────────────────────────────
@@ -819,57 +837,81 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     provider = body["provider"]
     model = body["model"]
 
-    if not (is_binary(provider) and provider != "") do
-      conn
-      |> send_resp(400, Jason.encode!(%{error: "provider is required"}))
-      |> halt()
-    else
-      case SessionManager.swap_provider(session_id, provider, model) do
-        {:ok, info} ->
-          resp =
-            Jason.encode!(%{
-              status: "ok",
-              session_id: session_id,
-              provider: to_string(info.provider),
-              model: info.model,
-              context_window: info.context_window
-            })
+    cond do
+      not (is_binary(provider) and provider != "") ->
+        conn
+        |> send_resp(400, Jason.encode!(%{error: "provider is required"}))
+        |> halt()
 
-          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+      # Resolve the SESSION before touching the model. `SessionManager.swap_provider/3`
+      # deliberately materialises a loop for a known-but-not-yet-started session
+      # (pre-first-turn model switches), which means an unknown session id would
+      # otherwise get a fresh loop, fail model resolution, and surface as
+      # 400 invalid_model — a missing session misreported as a malformed request.
+      not SessionManager.session_exists?(session_id) ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
 
-        :ok ->
-          # Backward-compatible path (older loop returning bare :ok): compute the
-          # window here so the TUI context bar can still resize on switch.
-          provider_atom =
-            Enum.find(
-              OptimalSystemAgent.Providers.Registry.list_providers(),
-              &(Atom.to_string(&1) == provider)
-            )
+      true ->
+        # A model switch must RE-RESOLVE the window rather than reuse whatever was
+        # cached the first time this tag was seen — in particular a negative-cache
+        # entry left by a probe that failed while the daemon was down would
+        # otherwise pin the new model to the fabricated default for the rest of
+        # the session, which is exactly how the meter ends up wrong after a switch.
+        OptimalSystemAgent.Providers.Registry.forget_context_window(model)
 
-          ctx =
-            provider_atom &&
-              OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider_atom)
+        case SessionManager.swap_provider(session_id, provider, model) do
+          {:ok, info} ->
+            resp =
+              Jason.encode!(%{
+                status: "ok",
+                session_id: session_id,
+                provider: to_string(info.provider),
+                model: info.model,
+                context_window: info.context_window
+              })
 
-          resp =
-            Jason.encode!(%{
-              status: "ok",
-              session_id: session_id,
-              provider: provider,
-              model: model,
-              context_window: ctx
-            })
+            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
 
-          conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+          :ok ->
+            # Backward-compatible path (older loop returning bare :ok): compute the
+            # window here so the TUI context bar can still resize on switch.
+            provider_atom =
+              Enum.find(
+                OptimalSystemAgent.Providers.Registry.list_providers(),
+                &(Atom.to_string(&1) == provider)
+              )
 
-        {:error, :not_found} ->
-          json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+            # nil when the window is unknown — the TUI skips set_context on a null
+            # and keeps the meter honest instead of seeding a fabricated ceiling.
+            ctx =
+              case OptimalSystemAgent.Providers.Registry.effective_context_window_info(
+                     model,
+                     provider_atom
+                   ) do
+                {:ok, cw} -> cw
+                :unknown -> nil
+              end
 
-        {:error, reason} when is_binary(reason) ->
-          json_error(conn, 400, "invalid_model", reason)
+            resp =
+              Jason.encode!(%{
+                status: "ok",
+                session_id: session_id,
+                provider: provider,
+                model: model,
+                context_window: ctx
+              })
 
-        {:error, reason} ->
-          json_error(conn, 500, "swap_failed", inspect(reason))
-      end
+            conn |> put_resp_content_type("application/json") |> send_resp(200, resp)
+
+          {:error, :not_found} ->
+            json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+
+          {:error, reason} when is_binary(reason) ->
+            json_error(conn, 400, "invalid_model", reason)
+
+          {:error, reason} ->
+            json_error(conn, 500, "swap_failed", inspect(reason))
+        end
     end
   end
 
@@ -947,7 +989,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
       |> Enum.reject(fn t -> t.role == "system" end)
 
     if turns == [] do
-      json(conn, 200, %{session_id: session_id, recap: "No conversation yet to summarize.", turns: 0})
+      json(conn, 200, %{
+        session_id: session_id,
+        recap: "No conversation yet to summarize.",
+        turns: 0
+      })
     else
       formatted =
         turns

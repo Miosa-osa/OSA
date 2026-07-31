@@ -182,7 +182,7 @@ defmodule OptimalSystemAgent.Agent.CompactRestore do
   end
 
   defp git_branch do
-    case System.cmd("git", ["branch", "--show-current"], stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], stderr_to_stdout: true) do
       {branch, 0} -> String.trim(branch)
       _ -> nil
     end

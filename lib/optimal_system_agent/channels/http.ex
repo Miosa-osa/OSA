@@ -126,9 +126,25 @@ defmodule OptimalSystemAgent.Channels.HTTP do
           Application.get_env(:optimal_system_agent, :start_time, System.system_time(:second))
       )
 
+    # Seed value for the TUI's "N% ctx" meter (handle_actions.rs only calls
+    # set_context when this field is present). It MUST be the model's real
+    # usable window or nothing at all: `Registry.context_window/1` would happily
+    # return the 128k config default for a model nobody knows, and the meter
+    # would then divide real usage by a fabricated denominator and show a
+    # confidently wrong percentage. `effective_context_window_info/2` says
+    # `:unknown` instead, and a null here leaves context_max at 0, where the TUI
+    # already degrades to tokens-only with no percentage.
+    provider_atom = provider_atom_for_health(provider)
+
     context_window =
       try do
-        OptimalSystemAgent.Providers.Registry.context_window(model_name)
+        case OptimalSystemAgent.Providers.Registry.effective_context_window_info(
+               model_name,
+               provider_atom
+             ) do
+          {:ok, cw} -> cw
+          :unknown -> nil
+        end
       rescue
         _ -> nil
       catch
@@ -211,7 +227,10 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     # dead-end for a newcomer (the picker never opens at all, with nothing
     # to retry against).
     needs_onboarding = safe_call(fn -> Onboarding.first_run?() end, true)
-    bootstrap_exists = safe_call(fn -> File.exists?(Path.expand("~/.osa/BOOTSTRAP.md")) end, false)
+
+    bootstrap_exists =
+      safe_call(fn -> File.exists?(Path.expand("~/.osa/BOOTSTRAP.md")) end, false)
+
     system_info = safe_call(fn -> Onboarding.detect_system() end, %{})
     # providers_list/0 is static data (no I/O), but still isolated: a future
     # change to it must never be able to blank the whole picker.
@@ -770,6 +789,22 @@ defmodule OptimalSystemAgent.Channels.HTTP do
 
       default
   end
+
+  # Provider atom for the /health context-window lookup. Only ever returns an
+  # atom the Registry already knows (never String.to_atom on request-adjacent
+  # data), and nil when it can't — nil simply means "no local num_ctx capping".
+  defp provider_atom_for_health(provider) when is_binary(provider) do
+    Enum.find(
+      OptimalSystemAgent.Providers.Registry.list_providers(),
+      &(Atom.to_string(&1) == provider)
+    )
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp provider_atom_for_health(_), do: nil
 
   # ── Health billing snapshot ─────────────────────────────────────────
   # Projects the Budget GenServer status into the /health `billing` object.

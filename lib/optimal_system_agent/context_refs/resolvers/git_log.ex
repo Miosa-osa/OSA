@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.ContextRefs.Resolvers.GitLog do
 
   @spec resolve(pos_integer(), pos_integer()) :: {:ok, map()} | {:error, map()}
   def resolve(n, budget) do
-    case System.cmd("git", ["log", "--oneline", "-#{n}"], stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["log", "--oneline", "-#{n}"], stderr_to_stdout: true) do
       {output, 0} ->
         truncated = String.slice(output, 0, budget)
         {:ok, %{type: :git, source: "@git:#{n}", content: "```\n#{truncated}\n```"}}

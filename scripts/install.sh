@@ -233,9 +233,15 @@ ok "Release installed"
 # Install the Rust TUI binary
 # ---------------------------------------------------------------------------
 mkdir -p "$BIN_DIR"
-cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN"
-chmod +x "$TUI_BIN"
-ok "TUI installed to ${TUI_BIN}"
+cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN" || fail "Could not write ${TUI_BIN}." 3
+chmod +x "$TUI_BIN" || fail "Could not make ${TUI_BIN} executable." 3
+[ -s "$TUI_BIN" ] && [ -x "$TUI_BIN" ] \
+  || fail "${TUI_BIN} is empty or not executable after install." 3
+# The TUI is exec'd directly by the launcher, so prove it actually runs here
+# rather than discovering it at first launch.
+TUI_REPORTED="$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+[ -n "$TUI_REPORTED" ] || fail "${TUI_BIN} did not run (--version produced no output)." 3
+ok "TUI installed to ${TUI_BIN} (reports ${TUI_REPORTED})"
 
 # macOS: best-effort clear of the com.apple.quarantine attribute. A curl/wget
 # download does NOT set quarantine (only Finder/browser downloads do), so this
@@ -468,8 +474,42 @@ print_help() {
   printf '\n'
 }
 
+# ── Version helpers ──────────────────────────────────────────────
+# Normalize a version for comparison: drop a leading "v", drop any
+# pre-release/build suffix, and strip the display zero-padding from the patch
+# component so the release tag (v1.0.045), the backend (1.0.45) and the TUI's
+# padded `--version` output (1.0.045) all compare equal.
+_norm_version() {
+  printf '%s' "${1#v}" | awk -F'[-+]' '{print $1}' \
+    | awk -F. '{ if (NF == 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/)
+                   printf "%d.%d.%d", $1, $2, $3
+                 else printf "%s", $0 }'
+}
+
+# The version actually baked into the INSTALLED TUI binary. This is the
+# diagnostic that separates "backend updated but the TUI didn't" from a mere
+# display bug — the stamp in ~/.osa/version only records what we *intended* to
+# install. Empty output means the binary is missing/unrunnable.
+_installed_tui_version() {
+  [ -x "$TUI_BIN" ] || return 1
+  "$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}'
+}
+
+# True when the installed TUI binary really reports version $1.
+_tui_is_version() {
+  _want="$(_norm_version "$1")"
+  _got="$(_norm_version "$(_installed_tui_version || true)")"
+  [ -n "$_got" ] && [ "$_want" = "$_got" ]
+}
+
 # ── Real in-place update: download prebuilt release + TUI, verify sha256,
 # atomically swap under ~/.osa, print the delta + what's new, then launch. ──
+#
+# NOTE: this function is invoked as `do_update || exit $?`, which SUPPRESSES
+# `set -e` for its entire body. Every mutating command below must therefore
+# check its own exit status explicitly — an unchecked failure here is exactly
+# how a half-applied update (new backend, old TUI) used to be reported as
+# success.
 do_update() {
   os=""; arch=""
   case "$(uname -s)" in
@@ -513,10 +553,21 @@ do_update() {
     return 2
   fi
   if [ "$latest" = "$cur" ]; then
-    printf "  ${GREEN}✓${RESET} Already up to date ${DIM}(%s)${RESET}\n" "$cur"
-    return 0
+    # The version stamp only records what we INTENDED to install. If a previous
+    # update half-applied (backend swapped, TUI binary not), the stamp says we
+    # are current while the TUI still runs old code — and every later
+    # `osa update` would no-op forever. Verify against the real binary and
+    # self-heal by re-installing instead of lying.
+    if _tui_is_version "$latest"; then
+      printf "  ${GREEN}✓${RESET} Already up to date ${DIM}(%s)${RESET}\n" "$cur"
+      return 0
+    fi
+    tui_now="$(_installed_tui_version || true)"
+    printf "  ${YELLOW}!${RESET} Version stamp says %s but the TUI binary reports %s — repairing.\n" \
+      "$cur" "${tui_now:-<unreadable>}" >&2
+  else
+    printf "  ${CYAN}→${RESET} New version available: ${BOLD}%s${RESET}\n" "$latest"
   fi
-  printf "  ${CYAN}→${RESET} New version available: ${BOLD}%s${RESET}\n" "$latest"
 
   base="https://github.com/${GITHUB_REPO}/releases/download/${latest}"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/osa-update.XXXXXX")"
@@ -585,21 +636,78 @@ do_update() {
   [ -f "$new_rel/bin/osagent" ] || { rm -rf "$tmp" "$new_rel"; printf "  ${RED}✗${RESET} Bad release archive — aborting.\n" >&2; return 3; }
   chmod +x "$new_rel/bin/osagent" 2>/dev/null || true
 
+  # Stage the new TUI binary BEFORE touching the live release dir, so a failure
+  # to write it aborts while the install is still fully consistent.
+  mkdir -p "$(dirname "$TUI_BIN")" || {
+    rm -rf "$tmp" "$new_rel"
+    printf "  ${RED}✗${RESET} Could not create %s — aborting update.\n" "$(dirname "$TUI_BIN")" >&2
+    return 3
+  }
+  if ! cp "${tmp}/${tui_asset}" "${TUI_BIN}.new" || ! chmod +x "${TUI_BIN}.new"; then
+    rm -f "${TUI_BIN}.new"; rm -rf "$tmp" "$new_rel"
+    printf "  ${RED}✗${RESET} Could not stage the new TUI binary at %s.new — aborting update.\n" "$TUI_BIN" >&2
+    printf "  ${DIM}  Your existing install is untouched. Check disk space and permissions.${RESET}\n" >&2
+    return 3
+  fi
+
   # Atomic swap of the release dir.
   rm -rf "$OSA_HOME/release.old"
   mv "$OSA_HOME/release" "$OSA_HOME/release.old" 2>/dev/null || true
-  mv "$new_rel" "$OSA_HOME/release"
+  if ! mv "$new_rel" "$OSA_HOME/release"; then
+    # Put the old release back so the install is not left headless.
+    mv "$OSA_HOME/release.old" "$OSA_HOME/release" 2>/dev/null || true
+    rm -f "${TUI_BIN}.new"; rm -rf "$tmp" "$new_rel"
+    printf "  ${RED}✗${RESET} Could not install the new backend release — aborting update.\n" >&2
+    return 3
+  fi
   rm -rf "$OSA_HOME/release.old"
 
-  # Atomic swap of the TUI binary.
-  cp "${tmp}/${tui_asset}" "${TUI_BIN}.new"
-  chmod +x "${TUI_BIN}.new"
-  mv "${TUI_BIN}.new" "$TUI_BIN"
+  # Atomic swap of the TUI binary. This is the step that previously ran
+  # unchecked: when it failed the launcher kept exec'ing the OLD TUI while the
+  # version stamp was rewritten to the new tag, so `osa update` printed success
+  # and the TUI kept showing the old version forever.
+  if ! mv "${TUI_BIN}.new" "$TUI_BIN"; then
+    rm -f "${TUI_BIN}.new"; rm -rf "$tmp"
+    printf "  ${RED}✗${RESET} Could not replace the TUI binary at %s.\n" "$TUI_BIN" >&2
+    printf "  ${DIM}  The backend was updated but the TUI was NOT — the install is INCONSISTENT.${RESET}\n" >&2
+    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+    return 3
+  fi
 
   # macOS: best-effort quarantine strip on the freshly swapped-in binaries.
   case "$(uname -s)" in
     Darwin) command -v xattr >/dev/null 2>&1 && xattr -dr com.apple.quarantine "$OSA_HOME/release" "$TUI_BIN" 2>/dev/null || true ;;
   esac
+
+  # Post-swap verification. Only stamp the new version once BOTH halves are
+  # actually on disk, executable, non-empty, and the TUI really reports the
+  # version we just installed. Failing loudly here is the whole point: a stamp
+  # written over a half-applied update makes every later `osa update` a no-op.
+  if [ ! -s "$OSA_HOME/release/bin/osagent" ] || [ ! -x "$OSA_HOME/release/bin/osagent" ]; then
+    rm -rf "$tmp"
+    printf "  ${RED}✗${RESET} Backend binary missing or not executable after update (%s).\n" \
+      "$OSA_HOME/release/bin/osagent" >&2
+    return 3
+  fi
+  if [ ! -s "$TUI_BIN" ] || [ ! -x "$TUI_BIN" ]; then
+    rm -rf "$tmp"
+    printf "  ${RED}✗${RESET} TUI binary missing, empty, or not executable after update (%s).\n" "$TUI_BIN" >&2
+    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+    return 3
+  fi
+  if ! _tui_is_version "$latest"; then
+    tui_now="$(_installed_tui_version || true)"
+    rm -rf "$tmp"
+    printf "  ${RED}✗${RESET} TUI still reports %s after updating to %s — the update did not take.\n" \
+      "${tui_now:-<unreadable>}" "$latest" >&2
+    printf "  ${DIM}  Not stamping the new version, so ${RESET}${CYAN}osa update${RESET}${DIM} will retry.${RESET}\n" >&2
+    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+    return 3
+  fi
+  printf "  ${GREEN}✓${RESET} TUI binary verified ${DIM}(reports %s)${RESET}\n" "$(_installed_tui_version)"
 
   printf "%s\n" "$OSA_HOME/release" > "$OSA_HOME/release_root"
   printf "%s\n" "$latest" > "$OSA_HOME/version"
@@ -649,7 +757,24 @@ done
 
 # ── Subcommand dispatch ───────────────────────────────────────────
 case "${1:-}" in
-  version|--version|-v) exec "$RELEASE_BIN" version ;;
+  version|--version|-v)
+    # Report BOTH halves. `osa update` swaps a backend release and a separate
+    # TUI binary; printing only the backend hides a half-applied update, which
+    # is precisely how "I updated but the TUI shows the old version" happens.
+    "$RELEASE_BIN" version || true
+    if [ -x "$TUI_BIN" ]; then
+      tui_v="$(_installed_tui_version || true)"
+      printf "osagent-tui %s\n" "${tui_v:-<unreadable>}"
+    else
+      printf "osagent-tui <not installed at %s>\n" "$TUI_BIN" >&2
+    fi
+    stamp="$(cat "$OSA_HOME/version" 2>/dev/null || echo unknown)"
+    printf "installed release stamp %s\n" "$stamp"
+    if [ "$stamp" != "unknown" ] && ! _tui_is_version "$stamp"; then
+      printf "  ${YELLOW}!${RESET} TUI does not match the installed release stamp — run ${CYAN}osa update${RESET} to repair.\n" >&2
+    fi
+    exit 0
+    ;;
   setup)                exec "$RELEASE_BIN" setup ;;
   serve)                exec "$RELEASE_BIN" serve ;;
   doctor)               exec "$RELEASE_BIN" doctor ;;

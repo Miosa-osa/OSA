@@ -13,13 +13,25 @@ use crate::config::cli::Cli;
 
 /// Single source of truth for the OSA version, resolved at compile time.
 ///
-/// Prefers `OSA_VERSION` (stamped by the release CI from the git tag) and falls
-/// back to the crate's `Cargo.toml` version so a plain `cargo build` still shows
-/// a correct, non-empty semver. Never hardcode a version string anywhere else —
-/// call this so the status bar, banner, `/version`, and `--version` can never
-/// drift apart or go stale.
+/// `build.rs` resolves this from, in order: `$OSA_VERSION` (stamped by the
+/// release CI from the git tag), the repo-root `VERSION` file, and only then the
+/// crate's `Cargo.toml` literal. It is therefore always defined — the
+/// `unwrap_or` is a belt-and-braces fallback for a build with no build script.
+///
+/// This used to fall straight through to `CARGO_PKG_VERSION`, a hand-maintained
+/// literal that drifted (1.0.27 vs a shipped 1.0.45), so every non-CI build
+/// displayed a confidently wrong version. Never hardcode a version string
+/// anywhere else — call this so the status bar, banner, `/version`, and
+/// `--version` can never drift apart or go stale.
 pub fn osa_version() -> &'static str {
     option_env!("OSA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// Where [`osa_version`] came from: `"env"` (release CI), `"file"` (repo
+/// `VERSION`), or `"cargo"` (Cargo.toml fallback). Useful when diagnosing a
+/// version mismatch between the TUI binary and the backend.
+pub fn osa_version_source() -> &'static str {
+    option_env!("OSA_VERSION_SOURCE").unwrap_or("cargo")
 }
 
 /// Runtime version reported by the backend `GET /health` response. Once set it
@@ -250,5 +262,70 @@ impl Config {
 
     pub fn config_path(&self) -> PathBuf {
         self.profile_dir.join("tui.json")
+    }
+}
+
+/// Regression guard for the version-drift bug: the TUI once shipped a
+/// hand-maintained `Cargo.toml` literal (1.0.27) while the repo `VERSION` file
+/// said 1.0.45, so any non-CI build displayed a confidently wrong version.
+/// `build.rs` now resolves the version from `$OSA_VERSION` → repo `VERSION` →
+/// `CARGO_PKG_VERSION`; these tests make sure the sources can never silently
+/// diverge again.
+#[cfg(test)]
+mod version_source_tests {
+    use super::{osa_version, osa_version_source};
+
+    /// Contents of the repo-root `VERSION` file as captured by `build.rs`, or
+    /// `None` when the crate was built detached from the repo.
+    fn version_file() -> Option<&'static str> {
+        option_env!("OSA_VERSION_FILE")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    #[test]
+    fn cargo_toml_literal_matches_the_version_file() {
+        let Some(file) = version_file() else {
+            return; // built without the repo checkout — nothing to compare
+        };
+        assert_eq!(
+            env!("CARGO_PKG_VERSION"),
+            file,
+            "priv/rust/tui/Cargo.toml `version` has drifted from the repo VERSION \
+             file. Update the Cargo.toml literal to {file}."
+        );
+    }
+
+    #[test]
+    fn compile_time_version_matches_the_version_file() {
+        let Some(file) = version_file() else {
+            return;
+        };
+        match osa_version_source() {
+            // No CI override in play: the VERSION file IS the version.
+            "file" | "cargo" => assert_eq!(
+                osa_version(),
+                file,
+                "osa_version() must equal the repo VERSION file when no \
+                 $OSA_VERSION override is set"
+            ),
+            // Release CI stamped a tag-derived version; it legitimately wins.
+            // It must still be a non-empty semver-ish string.
+            "env" => assert!(
+                !osa_version().is_empty(),
+                "$OSA_VERSION override resolved to an empty version"
+            ),
+            other => panic!("unexpected OSA_VERSION_SOURCE {other:?}"),
+        }
+    }
+
+    #[test]
+    fn version_is_never_empty_or_placeholder() {
+        let v = osa_version();
+        assert!(!v.is_empty(), "osa_version() must never be empty");
+        assert!(
+            v.split('.').count() >= 3,
+            "osa_version() must look like a semver, got {v:?}"
+        );
     }
 }

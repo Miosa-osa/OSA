@@ -37,7 +37,7 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     File.mkdir_p!(worktrees_dir())
 
     # Create the worktree with a new branch from HEAD
-    case System.cmd("git", ["worktree", "add", "-b", branch_name, worktree_path],
+    case OptimalSystemAgent.Git.cmd(["worktree", "add", "-b", branch_name, worktree_path],
            cd: base_dir,
            stderr_to_stdout: true
          ) do
@@ -137,7 +137,7 @@ defmodule OptimalSystemAgent.Agent.Worktree do
   # ── Private ──────────────────────────────────────────────────────────
 
   defp worktree_has_changes?(path) do
-    case System.cmd("git", ["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
       {output, 0} -> String.trim(output) != ""
       _ -> false
     end
@@ -151,15 +151,15 @@ defmodule OptimalSystemAgent.Agent.Worktree do
 
     if branch do
       # Commit any uncommitted changes in the worktree
-      System.cmd("git", ["add", "-A"], cd: worktree_path, stderr_to_stdout: true)
+      OptimalSystemAgent.Git.cmd(["add", "-A"], cd: worktree_path, stderr_to_stdout: true)
 
-      System.cmd("git", ["commit", "-m", "Agent worktree changes"],
+      OptimalSystemAgent.Git.cmd(["commit", "-m", "Agent worktree changes"],
         cd: worktree_path,
         stderr_to_stdout: true
       )
 
       # Merge the branch back
-      case System.cmd("git", ["merge", "--no-ff", branch, "-m", "Merge agent worktree #{branch}"],
+      case OptimalSystemAgent.Git.cmd(["merge", "--no-ff", branch, "-m", "Merge agent worktree #{branch}"],
              cd: base_dir,
              stderr_to_stdout: true
            ) do
@@ -182,14 +182,14 @@ defmodule OptimalSystemAgent.Agent.Worktree do
     branch = get_worktree_branch(worktree_path)
 
     # Remove the worktree
-    System.cmd("git", ["worktree", "remove", "--force", worktree_path],
+    OptimalSystemAgent.Git.cmd(["worktree", "remove", "--force", worktree_path],
       cd: base_dir,
       stderr_to_stdout: true
     )
 
     # Delete the branch (if it exists and wasn't merged)
     if branch do
-      System.cmd("git", ["branch", "-D", branch], cd: base_dir, stderr_to_stdout: true)
+      OptimalSystemAgent.Git.cmd(["branch", "-D", branch], cd: base_dir, stderr_to_stdout: true)
     end
 
     # Clean up the directory if it still exists
@@ -209,7 +209,7 @@ defmodule OptimalSystemAgent.Agent.Worktree do
   end
 
   defp get_worktree_branch(path) do
-    case System.cmd("git", ["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
       {branch, 0} -> String.trim(branch)
       _ -> nil
     end

@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Prompt do
     - Relative paths resolve to ~/.osa/workspace/.
     - ALWAYS use `#{file_read_name}` to read each file before editing.
     - For single-file edits prefer `#{file_edit_name}`.
+    - Do NOT re-read the files to verify edits that succeeded. This tool errors when any edit does not apply, and nothing is written in that case.
     """
   end
 

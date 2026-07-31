@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.ContextRefs.Resolvers.Staged do
 
   @spec resolve(pos_integer()) :: {:ok, map()} | {:error, map()}
   def resolve(budget) do
-    case System.cmd("git", ["diff", "--cached"], stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["diff", "--cached"], stderr_to_stdout: true) do
       {output, 0} ->
         truncated = String.slice(output, 0, budget)
         content = if truncated == "", do: "[No staged changes]", else: "```diff\n#{truncated}\n```"

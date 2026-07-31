@@ -1232,7 +1232,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   defp changed_files(nil), do: []
 
   defp changed_files(%{path: path}) do
-    case System.cmd("git", ["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["status", "--porcelain"], cd: path, stderr_to_stdout: true) do
       {output, 0} ->
         output
         |> String.split("\n", trim: true)

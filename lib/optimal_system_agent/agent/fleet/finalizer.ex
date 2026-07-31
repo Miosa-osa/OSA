@@ -319,7 +319,7 @@ defmodule OptimalSystemAgent.Agent.Fleet.Finalizer do
   # ── Default (real) IO seams ──────────────────────────────────────────
 
   defp default_git_fun(args, cwd) do
-    System.cmd("git", args, cd: cwd, stderr_to_stdout: true)
+    OptimalSystemAgent.Git.cmd(args, cd: cwd, stderr_to_stdout: true)
   end
 
   defp default_cmd_fun(command, cwd) do

@@ -87,7 +87,7 @@ defmodule OptimalSystemAgent.ReleaseNotes do
 
   # Newest semver git tag (e.g. "v0.4.6" -> "0.4.6"). nil when git/tags absent.
   defp latest_release_tag do
-    case System.cmd("git", ["tag", "--list", "v*", "--sort=-v:refname"],
+    case OptimalSystemAgent.Git.cmd(["tag", "--list", "v*", "--sort=-v:refname"],
            stderr_to_stdout: true
          ) do
       {out, 0} ->

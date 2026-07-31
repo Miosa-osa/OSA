@@ -41,7 +41,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
         "cwd" => %{
           "type" => "string",
           "description" =>
-            "Working directory for the command. Optional; defaults to ~/.osa/workspace."
+            "Working directory for the command. ALWAYS set this instead of prefixing " <>
+              "the command with `cd`. Defaults to the session's current working directory."
         },
         "run_in_background" => %{
           "type" => "boolean",
@@ -49,7 +50,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
             "Optional. When true, run the command as a supervised background " <>
               "process and return a background_id immediately instead of " <>
               "blocking. Poll its output/status with the bash_output tool. " <>
-              "Defaults to false (foreground)."
+              "Defaults to false (foreground). A foreground command that outlives " <>
+              "the wait window is moved to the background automatically rather " <>
+              "than being killed."
         }
       },
       "required" => ["command"]

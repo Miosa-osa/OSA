@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   """
   require Logger
 
+  alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
 
   @doc """
@@ -68,23 +69,16 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
           try do
             Task.await(task, 600_000)
           catch
+            # RESPOND-TO-MODEL (non-fatal tool error contract): a timeout or a
+            # crashed tool task is a readable tool result, not a dead turn. The
+            # "Error:" prefix is the convention finalize_result/Reminders/
+            # DoomLoop key on — the old "[timeout]"/"[crash]" bodies were
+            # invisible to every one of those checks.
             :exit, {:timeout, _} ->
-              error_msg = %{
-                role: "tool",
-                tool_call_id: tool_id,
-                content: "[Tool timed out after 10 minutes]"
-              }
-
-              {error_msg, "[timeout]"}
+              failure(tool_id, "tool timed out after 10 minutes")
 
             :exit, reason ->
-              error_msg = %{
-                role: "tool",
-                tool_call_id: tool_id,
-                content: "[Tool crashed: #{inspect(reason)}]"
-              }
-
-              {error_msg, "[crash]"}
+              failure(tool_id, ToolError.exit_text(reason))
           end
 
         Map.put(acc, tool_id, result)
@@ -94,6 +88,11 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
     ctx.order
     |> Enum.map(fn tool_id -> Map.get(results, tool_id) end)
     |> Enum.reject(&is_nil/1)
+  end
+
+  defp failure(tool_id, reason) do
+    body = ToolError.model_text(reason)
+    {%{role: "tool", tool_call_id: tool_id, content: body}, body}
   end
 
   @doc """

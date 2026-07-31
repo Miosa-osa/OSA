@@ -26,6 +26,43 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Prompt do
 
     Reserve shell_execute for system commands: git, mix, npm, cargo, docker, make, pip, etc.
     Always quote file paths with spaces. Try to use absolute paths.
+
+    Working directory:
+    - ALWAYS set the `cwd` param. Do not use `cd` unless absolutely necessary.
+    - `cwd` defaults to the session's current working directory.
+
+    How the permission check reads your command:
+    - The command string is split into segments at the shell control operators `|`, `&&`, \
+    `||`, `;` and `&`. Operators inside quotes, `$(...)`, `${...}` or backticks do not split.
+    - Each segment's first word is classified on its own, and the command runs unprompted \
+    only when EVERY segment is approvable. One risky segment (rm, sudo, chmod, chown, kill, \
+    mount, systemctl, nc, shutdown, …) sends the WHOLE line to the approval prompt.
+    - Some rules match the whole command string rather than one segment: piping into a shell \
+    (`curl … | sh`), redirecting into system directories (/etc, /usr/bin, …), and \
+    `git reset --hard` / `git clean -f` / force-push all require approval. A small set of \
+    unrecoverable operations (wiping `/` or `$HOME`, mkfs, dd to a block device, fork bombs) \
+    is denied outright and cannot be approved.
+    - A file-mutating command (rm, cp, mv, mkdir, touch, chmod, chown, ln, tee, rsync, install) \
+    that touches a path outside the working directory also requires approval. Path arguments \
+    that are globs or contain `$VAR`, `$(...)` or backticks cannot be resolved statically, so \
+    the checker cannot see what they touch — prefer literal paths.
+    - Prefer several simple, individually approvable commands over one long compound line: a \
+    compound line is approved or refused as a whole, and approving yields a reusable scoped \
+    rule (e.g. `git checkout *`, `npm run dev *`) only for the segments it could parse.
+    - A trailing `&` is stripped and the command runs in the foreground. A command ending in a \
+    dangling `&&`, `||`, `|` or `\\` is rejected — send a complete command.
+
+    Long-running commands (IMPORTANT):
+    - The tool waits a bounded window (2 minutes by default, configurable) for a foreground \
+    command. This is a YIELD window, NOT a kill deadline.
+    - If the command is still running when the window elapses it is MOVED TO THE BACKGROUND, \
+    not killed. The result says "Still running … moved to the background (NOT killed)" and \
+    carries a `background_id`. The command is STILL RUNNING and its work is not lost.
+    - When that happens do NOT re-run the command. Continue with other work and poll it later \
+    with the bash_output tool using that `background_id` (or stop it with `kill: true`). You are \
+    also notified automatically when it completes, with its exit code.
+    - If you already expect the command to be long (builds, full test suites, servers), pass \
+    `run_in_background: true` up front to get a `background_id` immediately.
     """
   end
 end

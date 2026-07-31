@@ -9,6 +9,80 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.46] — displays as `v1.0.046`
+
+### Security — a cloned repo could execute code just by having OSA run git in it
+
+- **Every git invocation is now hardened against hostile repository config.** Git
+  reads configuration *from the repository it is operating on*, and several of
+  those settings name a program that git then executes. A repo you merely cloned
+  could therefore set `core.hooksPath` (pointing at attacker-controlled hooks),
+  `core.fsmonitor` (an arbitrary binary run on nearly every command), or clean/
+  smudge filters (run on checkout and diff) and get **code execution the moment
+  OSA ran any git command inside it** — including read-only ones like `git
+  status` or `git diff`, which OSA runs routinely as part of context discovery.
+  - Introduced `OptimalSystemAgent.Git`, a single choke point that neutralises
+    these vectors, and routed **all 56 git call sites** through it — context refs
+    (`diff`, `git_log`, `staged`), the worktree and fast-worktree machinery, the
+    filesystem checkpoint server, the `git` tool handler, and the CLI.
+  - No call site now shells out to `git` directly, so the hardening cannot be
+    bypassed by a future caller forgetting to opt in.
+
+- **Terminal titles are sanitised.** The TUI sets the terminal window title from
+  session-derived text, which could carry **OSC escape sequences** (an escape
+  injection that can drive the host terminal, and on some terminals can be echoed
+  back into the input stream) or **Trojan-Source bidirectional control
+  characters** (which reorder displayed text so what you read differs from what is
+  actually there). Both classes are now stripped before the title is emitted.
+
+### Fixed — `osa update` failed silently, then locked itself in permanently
+
+- **The worst-behaved bug in the updater is gone.** `osa update` swapped the TUI
+  binary **unchecked** and stamped the new version **regardless of whether any
+  step had succeeded**. The result was a failure mode that hid itself and then
+  became permanent: an update that had actually failed reported *success*, left
+  the old binary in place, and — because the stamp now claimed the new version —
+  every subsequent `osa update` answered **"Already up to date"** forever. The
+  user was pinned to a stale build with no error and no way to notice.
+  - Every step of the update is now verified before the next one runs.
+  - The freshly installed TUI **must report the installed version** before the
+    version stamp is written; if it cannot, the stamp is not written and the
+    update fails loudly.
+  - A stamp/binary mismatch is now **self-healing**: an installation that already
+    lost this race detects the disagreement and re-runs the update rather than
+    reporting it is current.
+  - The identical defect in the **PowerShell installer** (`scripts/install.ps1`)
+    was fixed the same way, so Windows is not left on the old behaviour.
+
+### Fixed
+
+- **The context bar no longer shows a percentage against a made-up window size.**
+  Cloud models were never probed for their real context length, so the bar
+  measured usage against a hardcoded default — a 1,000,000-token model was
+  reported as a fraction of **128k**, making a nearly empty context look nearly
+  full. Real context windows are now resolved from the provider; when a window
+  genuinely cannot be determined, the bar renders the **token count with no
+  percentage** rather than a confident wrong one.
+- **Plan mode is no longer silently dropped on small-context models.** The context
+  budget fitter evicted blocks in plain list order with no error, so on a tight
+  budget the plan-mode instructions could simply vanish from the prompt — the
+  model stopped behaving as if it were in plan mode, with nothing reported.
+  Essential blocks are now **priority-ordered**, so they survive eviction.
+- **Fixed a TUI crash** in the activity details block, which wrote outside the
+  frame buffer.
+- **`POST /:id/provider` returns 404, not 400, for an unknown session.** An
+  unrecognised session id was reported as a malformed request.
+
+### Changed
+
+- **Tool errors are non-fatal where recovery is possible.** A failing tool call
+  used to halt the turn; the model now receives the error and can correct course
+  and continue, instead of the whole turn dying on a recoverable mistake.
+- **Paste handling reworked** in the TUI for more reliable handling of large and
+  bracketed pastes.
+- **Agent instructions substantially expanded**, covering tool usage and
+  workflow guidance in materially more detail.
+
 ## [1.0.41] — displays as `v1.0.041`
 
 ### Fixed — switching the model failed before the first message

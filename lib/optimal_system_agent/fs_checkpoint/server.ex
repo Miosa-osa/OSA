@@ -167,7 +167,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
     git_dir = Path.join(repo_path, ".git")
 
     unless File.dir?(git_dir) do
-      {_, 0} = System.cmd("git", ["init"], cd: repo_path, stderr_to_stdout: true)
+      {_, 0} = OptimalSystemAgent.Git.cmd(["init"], cd: repo_path, stderr_to_stdout: true)
 
       {_, 0} =
         System.cmd(
@@ -212,7 +212,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
       end)
 
     if copied != [] do
-      {_, 0} = System.cmd("git", ["add", "-A"], cd: repo_path, stderr_to_stdout: true)
+      {_, 0} = OptimalSystemAgent.Git.cmd(["add", "-A"], cd: repo_path, stderr_to_stdout: true)
 
       commit_msg = "#{tool_name} | #{session_id} | #{Enum.join(copied, ", ")}"
 
@@ -240,7 +240,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   # ── Private: list ─────────────────────────────────────────────────────
 
   defp do_list(repo_path, limit) do
-    case System.cmd("git", ["log", "--format=%H|%s|%ci", "-#{limit}"],
+    case OptimalSystemAgent.Git.cmd(["log", "--format=%H|%s|%ci", "-#{limit}"],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
@@ -287,7 +287,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   # ── Private: restore ──────────────────────────────────────────────────
 
   defp do_restore(repo_path, checkpoint_id) do
-    case System.cmd("git", ["rev-parse", checkpoint_id],
+    case OptimalSystemAgent.Git.cmd(["rev-parse", checkpoint_id],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
@@ -335,7 +335,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   # ── Private: head / restore_to (whole-tree, for /rewind) ─────────────
 
   defp do_head(repo_path) do
-    case System.cmd("git", ["rev-parse", "HEAD"], cd: repo_path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "HEAD"], cd: repo_path, stderr_to_stdout: true) do
       {hash, 0} -> String.trim(hash)
       _ -> nil
     end
@@ -344,7 +344,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   end
 
   defp do_restore_to(repo_path, commit) do
-    case System.cmd("git", ["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
       {full_hash, 0} ->
         full_hash = String.trim(full_hash)
         restore_tree_from_commit(repo_path, full_hash)
@@ -355,7 +355,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   end
 
   defp restore_tree_from_commit(repo_path, full_hash) do
-    case System.cmd("git", ["ls-tree", "-r", "--name-only", full_hash],
+    case OptimalSystemAgent.Git.cmd(["ls-tree", "-r", "--name-only", full_hash],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
@@ -367,7 +367,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
           |> Enum.map(fn file_in_repo ->
             target = "/" <> file_in_repo
 
-            case System.cmd("git", ["show", "#{full_hash}:#{file_in_repo}"],
+            case OptimalSystemAgent.Git.cmd(["show", "#{full_hash}:#{file_in_repo}"],
                    cd: repo_path,
                    stderr_to_stdout: true
                  ) do
@@ -392,7 +392,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   # ── Private: diff ─────────────────────────────────────────────────────
 
   defp do_diff(repo_path, checkpoint_id) do
-    case System.cmd("git", ["show", "--stat", "--patch", checkpoint_id],
+    case OptimalSystemAgent.Git.cmd(["show", "--stat", "--patch", checkpoint_id],
            cd: repo_path,
            stderr_to_stdout: true
          ) do
@@ -406,7 +406,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   defp do_diff_stat(repo_path, from_commit, to_commit) do
     with {:ok, from_hash} <- rev_parse(repo_path, from_commit),
          {:ok, to_hash} <- rev_parse(repo_path, to_commit) do
-      case System.cmd("git", ["diff", "--numstat", from_hash, to_hash],
+      case OptimalSystemAgent.Git.cmd(["diff", "--numstat", from_hash, to_hash],
              cd: repo_path,
              stderr_to_stdout: true
            ) do
@@ -435,7 +435,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   end
 
   defp rev_parse(repo_path, commit) do
-    case System.cmd("git", ["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["rev-parse", commit], cd: repo_path, stderr_to_stdout: true) do
       {hash, 0} -> {:ok, String.trim(hash)}
       {_, _} -> {:error, "Commit '#{commit}' not found in shadow repo"}
     end
@@ -456,7 +456,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
   defp maybe_prune(repo_path) do
     max = Config.max_checkpoints()
 
-    case System.cmd("git", ["rev-list", "--count", "HEAD"],
+    case OptimalSystemAgent.Git.cmd(["rev-list", "--count", "HEAD"],
            cd: repo_path,
            stderr_to_stdout: true
          ) do

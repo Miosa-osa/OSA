@@ -1667,11 +1667,15 @@ impl Component for Activity {
                 .take(room)
                 .enumerate()
             {
+                // Row i goes at content.y + 1 + i. Derive the rect from `i` alone --
+                // advancing `next_y` AND offsetting by `i` double-counts, which skips
+                // every other row and walks off the end of the frame buffer.
+                let y = content.y + 1 + i as u16;
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(row, theme.faint()))),
-                    Rect::new(content.x, next_y + i as u16, content.width, 1),
+                    Rect::new(content.x, y, content.width, 1),
                 );
-                next_y = content.y + 1 + i as u16 + 1;
+                next_y = y + 1;
             }
         }
 

@@ -1,6 +1,10 @@
 [package]
 name = "osa-tui"
-version = "1.0.27"
+# Keep in sync with the repo-root VERSION file — build.rs warns on drift and
+# `config::version_source_tests` fails the build if they diverge. This literal is
+# only ever a last-resort fallback: build.rs prefers $OSA_VERSION (release CI),
+# then the VERSION file.
+version = "1.0.46"
 edition = "2021"
 
 [[bin]]
@@ -47,3 +51,6 @@ opt-level = "z"
 # Ctrl+Z suspend (SIGTSTP job control) — unix only
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+vt100 = "0.15"

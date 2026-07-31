@@ -116,13 +116,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
 
   defp maybe_merge(true, path, branch, repo_dir) when is_binary(branch) do
     # Stage and commit outstanding changes in the worktree first.
-    System.cmd("git", ["add", "-A"], cd: path, stderr_to_stdout: true)
+    OptimalSystemAgent.Git.cmd(["add", "-A"], cd: path, stderr_to_stdout: true)
 
     {status_out, _} =
-      System.cmd("git", ["status", "--porcelain"], cd: path, stderr_to_stdout: true)
+      OptimalSystemAgent.Git.cmd(["status", "--porcelain"], cd: path, stderr_to_stdout: true)
 
     if String.trim(status_out) != "" do
-      System.cmd("git", ["commit", "-m", "exit_worktree: commit before merge"],
+      OptimalSystemAgent.Git.cmd(["commit", "-m", "exit_worktree: commit before merge"],
         cd: path,
         stderr_to_stdout: true
       )
@@ -172,7 +172,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
         do: ["worktree", "remove", "--force", path],
         else: ["worktree", "remove", path]
 
-    case System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(args, cd: repo_dir, stderr_to_stdout: true) do
       {_out, 0} ->
         # git already removed the directory; ensure it is gone.
         File.rm_rf(path)
@@ -205,13 +205,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
             else: ["worktree", "remove", path]
 
         # The original path is gone — git will either succeed or prune it.
-        case System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true) do
+        case OptimalSystemAgent.Git.cmd(args, cd: repo_dir, stderr_to_stdout: true) do
           {_out, 0} ->
             :ok
 
           {output, _code} ->
             # Directory is already moved; prune stale bookkeeping.
-            System.cmd("git", ["worktree", "prune"], cd: repo_dir, stderr_to_stdout: true)
+            OptimalSystemAgent.Git.cmd(["worktree", "prune"], cd: repo_dir, stderr_to_stdout: true)
             Logger.debug("[exit_worktree] prune after keep: #{String.trim(output)}")
         end
 
@@ -228,7 +228,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
 
   defp delete_branch_if_needed(_merged = true, branch, repo_dir) when is_binary(branch) do
     # Branch was merged — safe to delete.
-    System.cmd("git", ["branch", "-d", branch], cd: repo_dir, stderr_to_stdout: true)
+    OptimalSystemAgent.Git.cmd(["branch", "-d", branch], cd: repo_dir, stderr_to_stdout: true)
   end
 
   defp delete_branch_if_needed(false, branch, repo_dir) when is_binary(branch) do
@@ -240,7 +240,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
   defp delete_branch_if_needed(_merged, _branch, _repo_dir), do: :ok
 
   defp get_worktree_branch(path) do
-    case System.cmd("git", ["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
+    case OptimalSystemAgent.Git.cmd(["branch", "--show-current"], cd: path, stderr_to_stdout: true) do
       {branch, 0} -> String.trim(branch)
       _ -> nil
     end
@@ -257,7 +257,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitWorktree.Handler do
     under_osa = String.starts_with?(path, osa_dir)
 
     listed =
-      case System.cmd("git", ["worktree", "list", "--porcelain"],
+      case OptimalSystemAgent.Git.cmd(["worktree", "list", "--porcelain"],
              cd: repo_dir,
              stderr_to_stdout: true
            ) do

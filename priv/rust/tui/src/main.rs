@@ -26,8 +26,16 @@ mod style;
 mod view;
 mod dialogs;
 mod util;
+mod terminal_title;
 mod tools;
 mod voice;
+
+/// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
+#[cfg(test)]
+mod test_backend;
+/// Reserved-vs-drawn layout invariants for the live-region components.
+#[cfg(test)]
+mod layout_invariants;
 
 fn main() -> Result<()> {
     // Parse CLI args

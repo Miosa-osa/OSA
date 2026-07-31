@@ -131,7 +131,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterWorktree.Handler do
   end
 
   defp inside_git_repo?(dir) do
-    case System.cmd("git", ["rev-parse", "--git-dir"],
+    case OptimalSystemAgent.Git.cmd(["rev-parse", "--git-dir"],
            cd: dir,
            stderr_to_stdout: true
          ) do

@@ -445,7 +445,7 @@ defmodule OptimalSystemAgent.Workspace.FastWorktree do
   end
 
   defp git(args, cd) do
-    System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+    OptimalSystemAgent.Git.cmd(args, cd: cd, stderr_to_stdout: true)
   rescue
     e -> {Exception.message(e), 1}
   end

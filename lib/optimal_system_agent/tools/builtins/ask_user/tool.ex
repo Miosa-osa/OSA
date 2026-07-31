@@ -39,12 +39,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Tool do
       "properties" => %{
         "question" => %{
           "type" => "string",
-          "description" => "The question to ask the user"
+          "description" => "The question to ask the user, as a single short sentence"
         },
         "options" => %{
           "type" => "array",
           "items" => %{"type" => "string"},
-          "description" => "Optional multiple-choice answers to present"
+          "description" =>
+            "Optional multiple-choice answers. Provide 2-3 mutually exclusive choices, " <>
+              "the recommended one FIRST with a \"(Recommended)\" suffix, each a short " <>
+              "label plus one sentence on the tradeoff. Do not include an \"Other\" " <>
+              "option — free-text input is always available."
         }
       },
       "required" => ["question"]

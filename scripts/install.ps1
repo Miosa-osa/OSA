@@ -214,7 +214,19 @@ Write-Ok 'Release installed'
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 $TuiBin = Join-Path $BinDir 'osagent-tui.exe'
 Copy-Item -LiteralPath $tuiPath -Destination $TuiBin -Force
-Write-Ok "TUI installed to $TuiBin"
+if (-not (Test-Path $TuiBin) -or (Get-Item -LiteralPath $TuiBin).Length -eq 0) {
+  Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+  Write-Fail "TUI binary missing or empty after install ($TuiBin)." 3
+}
+# The TUI is launched directly, so prove it actually runs here rather than
+# discovering it at first launch.
+$tuiReported = ''
+try { $tuiReported = ((& $TuiBin --version 2>$null) | Select-Object -First 1) } catch { $tuiReported = '' }
+if (-not $tuiReported) {
+  Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+  Write-Fail "$TuiBin did not run (--version produced no output)." 3
+}
+Write-Ok "TUI installed to $TuiBin ($tuiReported)"
 
 # Record install layout so tooling can locate the release, and stamp the
 # installed version so `osa update` can compare against the latest release.
@@ -402,9 +414,46 @@ function Show-Help {
   Write-Host ""
 }
 
+# Normalize a version for comparison: drop a leading "v", drop any
+# pre-release/build suffix, and strip the display zero-padding from the patch
+# component, so the release tag (v1.0.045), the backend (1.0.45) and the TUI's
+# padded --version output (1.0.045) all compare equal.
+function ConvertTo-NormalizedVersion([string]$v) {
+  if (-not $v) { return '' }
+  $s = $v.Trim()
+  if ($s.StartsWith('v')) { $s = $s.Substring(1) }
+  $s = ($s -split '[-+]')[0]
+  $p = $s -split '\.'
+  if ($p.Count -eq 3 -and ($p | ForEach-Object { $_ -match '^\d+$' }) -notcontains $false) {
+    return ('{0}.{1}.{2}' -f [int]$p[0], [int]$p[1], [int]$p[2])
+  }
+  return $s
+}
+
+# The version actually baked into the INSTALLED TUI binary. This is the
+# diagnostic that separates "backend updated but the TUI didn't" from a mere
+# display bug - the stamp in ~\.osa\version only records what we *intended*.
+function Get-InstalledTuiVersion {
+  if (-not (Test-Path $TuiBin)) { return '' }
+  try {
+    $line = (& $TuiBin --version 2>$null) | Select-Object -First 1
+    if (-not $line) { return '' }
+    return ($line -split '\s+')[-1]
+  } catch { return '' }
+}
+
+function Test-TuiIsVersion([string]$want) {
+  $got = ConvertTo-NormalizedVersion (Get-InstalledTuiVersion)
+  if (-not $got) { return $false }
+  return ($got -eq (ConvertTo-NormalizedVersion $want))
+}
+
 function Update-Osa {
   # Real in-place update: download the prebuilt release + TUI, verify sha256,
   # atomically swap under ~/.osa, print the delta + what's new, then return.
+  #
+  # Every mutating step below is checked explicitly: an unchecked failure here
+  # is how a half-applied update (new backend, old TUI) got reported as success.
   $platform = 'windows-x64'
   $zip = "osa-$platform.zip"
   $tuiAsset = "osagent-tui-$platform.exe"
@@ -423,8 +472,21 @@ function Update-Osa {
   $latest = $meta.tag_name
   $notes  = $meta.body
   if (-not $latest) { Write-Host "  [x] Could not determine the latest release." -ForegroundColor Red; return 2 }
-  if ($latest -eq $cur) { Write-Host "  [ok] Already up to date ($cur)" -ForegroundColor Green; return 0 }
-  Write-Host "  -> New version available: $latest" -ForegroundColor Cyan
+  if ($latest -eq $cur) {
+    # The stamp only records what we INTENDED to install. If a previous update
+    # half-applied (backend swapped, TUI not), the stamp says we are current
+    # while the TUI still runs old code - and every later `osa update` would
+    # no-op forever. Verify against the real binary and self-heal instead.
+    if (Test-TuiIsVersion $latest) {
+      Write-Host "  [ok] Already up to date ($cur)" -ForegroundColor Green
+      return 0
+    }
+    $tuiNow = Get-InstalledTuiVersion
+    if (-not $tuiNow) { $tuiNow = '<unreadable>' }
+    Write-Host "  [!] Version stamp says $cur but the TUI binary reports $tuiNow - repairing." -ForegroundColor Yellow
+  } else {
+    Write-Host "  -> New version available: $latest" -ForegroundColor Cyan
+  }
 
   $base = "https://github.com/$Repo/releases/download/$latest"
   $tmp = Join-Path $env:TEMP ("osa-update-" + [Guid]::NewGuid().ToString('N'))
@@ -496,15 +558,77 @@ function Update-Osa {
     return 3
   }
 
+  # Stage the new TUI binary BEFORE touching the live release dir, so a failure
+  # to write it aborts while the install is still fully consistent. (On Windows
+  # this is the step most likely to fail - the .exe can be locked by a running
+  # or antivirus-scanned process.)
+  try {
+    Copy-Item -LiteralPath $tuiPath -Destination "$TuiBin.new" -Force
+  } catch {
+    Remove-Item -Force "$TuiBin.new" -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $tmp, $newRel -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not stage the new TUI binary at $TuiBin.new - aborting update." -ForegroundColor Red
+    Write-Host "      Your existing install is untouched. Check disk space and permissions." -ForegroundColor DarkGray
+    return 3
+  }
+
   $relDir = Join-Path $OsaHome 'release'
   $relOld = Join-Path $OsaHome 'release.old'
   if (Test-Path $relOld) { Remove-Item -Recurse -Force $relOld }
   if (Test-Path $relDir) { Move-Item -LiteralPath $relDir -Destination $relOld }
-  Move-Item -LiteralPath $newRel -Destination $relDir
+  try {
+    Move-Item -LiteralPath $newRel -Destination $relDir
+  } catch {
+    # Put the old release back so the install is not left headless.
+    if ((Test-Path $relOld) -and -not (Test-Path $relDir)) {
+      Move-Item -LiteralPath $relOld -Destination $relDir -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Force "$TuiBin.new" -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $tmp, $newRel -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not install the new backend release - aborting update." -ForegroundColor Red
+    return 3
+  }
   if (Test-Path $relOld) { Remove-Item -Recurse -Force $relOld -ErrorAction SilentlyContinue }
 
-  Copy-Item -LiteralPath $tuiPath -Destination "$TuiBin.new" -Force
-  Move-Item -LiteralPath "$TuiBin.new" -Destination $TuiBin -Force
+  # Swap the TUI binary. This step previously ran unchecked: when it failed the
+  # launcher kept starting the OLD TUI while the version stamp was rewritten to
+  # the new tag, so `osa update` printed success and the TUI kept showing the
+  # old version forever.
+  try {
+    Move-Item -LiteralPath "$TuiBin.new" -Destination $TuiBin -Force
+  } catch {
+    Remove-Item -Force "$TuiBin.new" -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Could not replace the TUI binary at $TuiBin." -ForegroundColor Red
+    Write-Host "      The backend was updated but the TUI was NOT - the install is INCONSISTENT." -ForegroundColor DarkGray
+    Write-Host "      Repair with: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 3
+  }
+
+  # Post-swap verification. Only stamp the new version once BOTH halves are on
+  # disk and the TUI really reports the version we just installed - a stamp
+  # written over a half-applied update makes every later `osa update` a no-op.
+  if (-not (Test-Path $ReleaseBat)) {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] Backend boot script missing after update ($ReleaseBat)." -ForegroundColor Red
+    return 3
+  }
+  if (-not (Test-Path $TuiBin) -or (Get-Item -LiteralPath $TuiBin).Length -eq 0) {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] TUI binary missing or empty after update ($TuiBin)." -ForegroundColor Red
+    Write-Host "      Repair with: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 3
+  }
+  if (-not (Test-TuiIsVersion $latest)) {
+    $tuiNow = Get-InstalledTuiVersion
+    if (-not $tuiNow) { $tuiNow = '<unreadable>' }
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    Write-Host "  [x] TUI still reports $tuiNow after updating to $latest - the update did not take." -ForegroundColor Red
+    Write-Host "      Not stamping the new version, so 'osa update' will retry." -ForegroundColor DarkGray
+    Write-Host "      Repair with: irm https://raw.githubusercontent.com/$Repo/main/scripts/install.ps1 | iex" -ForegroundColor Cyan
+    return 3
+  }
+  Write-Host "  [ok] TUI binary verified (reports $(Get-InstalledTuiVersion))" -ForegroundColor Green
 
   Set-Content -LiteralPath (Join-Path $OsaHome 'release_root') -Value $relDir -Encoding ASCII
   Set-Content -LiteralPath $VersionFile -Value $latest -Encoding ASCII
@@ -555,7 +679,21 @@ $cmd  = if ($argList.Count -ge 1) { [string]$argList[0] } else { '' }
 $rest = Drop-First $argList
 
 switch -Exact ($cmd) {
-  { $_ -in @('version', '--version', '-v') } { & $ReleaseBat version; exit $LASTEXITCODE }
+  { $_ -in @('version', '--version', '-v') } {
+    # Report BOTH halves. `osa update` swaps a backend release and a separate
+    # TUI binary; printing only the backend hides a half-applied update, which
+    # is precisely how "I updated but the TUI shows the old version" happens.
+    & $ReleaseBat version
+    $tuiV = Get-InstalledTuiVersion
+    if ($tuiV) { Write-Host "osagent-tui $tuiV" }
+    else { Write-Host "osagent-tui <not installed at $TuiBin>" -ForegroundColor Red }
+    $stamp = if (Test-Path $VersionFile) { (Get-Content -Raw -LiteralPath $VersionFile).Trim() } else { 'unknown' }
+    Write-Host "installed release stamp $stamp"
+    if ($stamp -ne 'unknown' -and -not (Test-TuiIsVersion $stamp)) {
+      Write-Host "  [!] TUI does not match the installed release stamp - run 'osa update' to repair." -ForegroundColor Yellow
+    }
+    exit 0
+  }
   'setup'  { & $ReleaseBat setup;  exit $LASTEXITCODE }
   'serve'  { & $ReleaseBat serve;  exit $LASTEXITCODE }
   'doctor' { & $ReleaseBat doctor; exit $LASTEXITCODE }
