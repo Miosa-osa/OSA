@@ -1145,18 +1145,43 @@ impl Component for Activity {
         let show_tokens = self.displayed_tokens > 0
             && (elapsed >= 30 || self.verbosity == Verbosity::Verbose);
 
-        // Dual live timers (grok turn_status): phase-elapsed (time in the current
-        // activity) and turn-elapsed, both spaceless-compact ("1m20s").
+        // ONE timer, measured from turn start.
+        //
+        // This used to push a SECOND raw value (phase-elapsed) alongside the turn
+        // timer, rendering as "2m31s · 2m35s" — two bare numbers that read as a
+        // duplicated or broken clock. Both reference implementations show exactly
+        // one elapsed value and express "what it is doing right now" through the
+        // VERB instead (Codex swaps the header word: Working / the live reasoning
+        // topic / "Waiting for background terminal"; Claude Code uses the todo's
+        // activeForm). OSA already varies its verb the same way via
+        // `thinking_phrase`, so the phase number was pure redundancy.
+        //
+        // If a second duration is ever wanted here, it must be a LABELLED PHRASE
+        // ("thought for 8s") and transient — never a second bare number, which is
+        // precisely what makes it unreadable.
+        //
+        // `phase_elapsed` is still computed — but it now only drives the VERB
+        // (`thinking_phrase`), never a rendered number. That is the whole point:
+        // the phase is communicated by the word, the duration by the single timer.
         let phase_elapsed = self
             .phase_since
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(elapsed);
         let turn_timer = fmt_compact_tight(elapsed);
 
-        // CC Byline status parts, priority-ordered high→low so `gate_parts`
-        // (keeps leading, drops trailing) sheds them in the CC order as the pane
-        // narrows: thinking → timer → tokens. The interrupt hint is always first.
-        let mut parts: Vec<String> = vec![interrupt_affordance(self.interrupt_armed).to_string()];
+        // Status parts, priority-ordered high→low: `gate_parts` keeps leading and
+        // drops trailing as the pane narrows.
+        //
+        // Elapsed is bound to the interrupt hint in the SAME leading part so the two
+        // things the user actually needs — how long it has been going, and how to
+        // stop it — are the last to be shed. Codex states the rule directly: "Keep
+        // optional context after elapsed/interrupt text so that core interrupt
+        // affordances stay in a fixed visual location."
+        let mut parts: Vec<String> = vec![format!(
+            "{} · {}",
+            turn_timer,
+            interrupt_affordance(self.interrupt_armed)
+        )];
 
         // Item 1 — live retry countdown (a stall notice), just under the hint.
         if let Some(r) = self.retry.as_ref() {
@@ -1182,12 +1207,7 @@ impl Component for Activity {
             ));
         }
 
-        // Dual timers: phase (only when it is a distinct sub-span, to avoid a
-        // duplicate "8s · 8s" at turn start) then the turn timer.
-        if elapsed.saturating_sub(phase_elapsed) >= 1 {
-            parts.push(fmt_compact_tight(phase_elapsed));
-        }
-        parts.push(turn_timer);
+        // (The turn timer is already the leading part, bound to the interrupt hint.)
 
         // Item 4 — input + cache breakdown, so the count reflects the true
         // context-window number, not output-only.
